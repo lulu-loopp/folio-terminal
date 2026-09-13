@@ -67,6 +67,34 @@
 //! `bt_app::menubar`, which is where that rule lives, because the scope is its
 //! table's and not this module's.
 //!
+//! # The floor under the responder chain (T-MAC-EDIT-CLIPBOARD)
+//!
+//! A [`MenuAction::Standard`] row is sent with **no target**, so AppKit walks
+//! the responder chain for something that answers the selector. That is right
+//! for every row on the Edit menu and it has one consequence nobody wrote down
+//! until it was reported: over a **terminal pane** the walk finds nothing.
+//! Folio's grid is drawn by this process on a winit view, it is not an
+//! `NSTextView`, and no responder under it implements `copy:` — so `Edit ▸ Copy`
+//! on a selection put nothing on the pasteboard and `Edit ▸ Paste` typed
+//! nothing.
+//!
+//! The answer is not to take the rows off the chain — a page in a web pane and
+//! a field in a sheet must go on winning, and they win by being *earlier* in the
+//! walk. The answer is to put a **floor** at the end of it: AppKit's last
+//! resort for a nil-target action is the application delegate, and
+//! `macos_app` now adds `copy:` and `paste:` there. Reaching that floor
+//! means precisely one thing — no text responder wanted this — and it is
+//! reported as [`AppMenuAction::CopySelection`] / [`AppMenuAction::PasteIntoFocus`]
+//! on **this module's own sender**, so a press that came off the Edit menu is
+//! parked in the inbox every other menu press is parked in, in the order it was
+//! pressed. What the application does with it is `bt_app::menubar`'s
+//! `clipboard_seat`, which is the only place that knows what has the keyboard.
+//!
+//! **Neither row grows a key equivalent out of this**, and that is the load
+//! bearing half: `Cmd+C` and `Cmd+V` go on reaching `keyDown:` and
+//! `input::should_copy_selection`, because a key equivalent is answered before
+//! `keyDown:` and would take the chord off the terminal M1-7 gave it to.
+//!
 //! # The second surface: the Dock tile's own menu (T-MAC-DOCKMENU)
 //!
 //! Right-clicking an application's Dock tile opens a menu AppKit builds — the
@@ -104,9 +132,17 @@
 /// * [`Self::Application`] — something the application answers that has no row
 ///   in that table at all.
 /// * [`Self::Standard`] — one of AppKit's own selectors, with no target, so the
-///   responder chain decides. Folio neither hears these nor answers them, which
+///   responder chain decides. Folio does not hear these *from the row*, which
 ///   is the point: a text field in a sheet keeps its own Copy, and the window
 ///   keeps its own Minimize.
+///
+///   **Two of them have a floor under the chain** (T-MAC-EDIT-CLIPBOARD):
+///   `copy:` and `paste:` are answered by the application delegate when nobody
+///   above it would, and arrive as
+///   [`AppMenuAction::CopySelection`] / [`AppMenuAction::PasteIntoFocus`]. That
+///   does not change what the row is — it is still the chain that decides, and
+///   a real text responder still wins — it only stops the chain ending in
+///   nothing over a surface AppKit has never heard of.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MenuAction {
     Verb(&'static str),
@@ -120,6 +156,38 @@ pub enum AppMenuAction {
     /// Open the page a reader is sent to for help — through the process door,
     /// which is the only way anything leaves this window.
     Help,
+    /// **Edit ▸ Copy, after the responder chain declined it**
+    /// (T-MAC-EDIT-CLIPBOARD, `docs/DESIGN.md` §13.26 ⑨).
+    ///
+    /// Not a row of any menu, and that is the whole of how it works. The Edit
+    /// menu's Copy stays [`MenuAction::Standard`] — `copy:` with no target — so
+    /// that a real text responder answers it first: the page in a web pane, a
+    /// field in a sheet, an open panel's search box. This variant is what
+    /// arrives when **nothing in that chain answered**, because the last
+    /// responder AppKit tries is the application delegate and this crate now
+    /// puts one there. It therefore means exactly one thing: *the reader chose
+    /// Copy and no text responder wanted it*, which is the state a terminal
+    /// pane and Folio's own preview editor are always in.
+    ///
+    /// It is on this enum rather than in the shortcut table because the
+    /// clipboard pair genuinely has no row there — `Cmd+C` is `input.rs`'
+    /// `should_copy_selection` and never `Shortcuts::lookup` — which is what
+    /// [`Self::Help`]'s own sentence says about the one other verb here.
+    CopySelection,
+    /// **Edit ▸ Paste, after the responder chain declined it.** See
+    /// [`Self::CopySelection`]; the two are one decision and arrive by one
+    /// route.
+    PasteIntoFocus,
+}
+
+impl AppMenuAction {
+    /// **The two verbs that reach the application through AppKit's responder
+    /// chain rather than off a row of a menu** (T-MAC-EDIT-CLIPBOARD).
+    ///
+    /// Written out so that both halves of the crossing can be held to one list:
+    /// the platform adds a delegate method per entry, and `bt_app::menubar`
+    /// refuses to put any of them on the bar as a row of its own.
+    pub const THROUGH_THE_RESPONDER_CHAIN: &[Self] = &[Self::CopySelection, Self::PasteIntoFocus];
 }
 
 /// The AppKit selectors this bar sends with **no target**, so that whatever
@@ -141,7 +209,12 @@ pub enum StandardMenuAction {
     Undo,
     Redo,
     Cut,
+    /// `copy:` — and the one selector here whose chain **ends somewhere**: the
+    /// application delegate answers it when no text responder did, which is
+    /// [`AppMenuAction::CopySelection`] (T-MAC-EDIT-CLIPBOARD).
     Copy,
+    /// `paste:`, with [`Self::Copy`]'s floor under it —
+    /// [`AppMenuAction::PasteIntoFocus`].
     Paste,
     SelectAll,
     /// `performClose:` — which reaches the window delegate and therefore
@@ -374,8 +447,14 @@ impl MenuPlan {
 /// next turn of the event loop.
 ///
 /// [`MenuAction::Standard`] has no variant here, and that is the whole of what
-/// "standard" means: those rows are answered by the responder chain and this
-/// process never hears about them.
+/// "standard" means: those rows are answered by the responder chain, and a row
+/// this process hears about is a row it answered itself.
+///
+/// **A `Copy` the chain declined is therefore not a standard row arriving
+/// late** (T-MAC-EDIT-CLIPBOARD): it arrives as
+/// [`Self::Application`], because by the time the application delegate is asked
+/// the question is no longer "who answers this selector" but "what does Folio
+/// do about it", and that is one of this product's own verbs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MenuChoice {
     Verb(&'static str),
@@ -563,6 +642,28 @@ mod tests {
         assert_eq!(MenuNamedKey::Escape.key_equivalent(), Some('\u{1b}'));
         assert_eq!(MenuNamedKey::Function(0).key_equivalent(), None);
         assert_eq!(MenuNamedKey::Function(13).key_equivalent(), None);
+    }
+
+    /// PIN (T-MAC-EDIT-CLIPBOARD) — **the two verbs that come up the responder
+    /// chain are the two clipboard ones, and Help is not among them.**
+    ///
+    /// The list the platform adds a delegate method per entry for. Help is the
+    /// counter-example that gives it its meaning: it is this application's verb
+    /// just as much, and it reaches the application off a **row** of the bar
+    /// with a target of Folio's own — so a Help that drifted onto this list
+    /// would be a row asking AppKit's responder chain about a web page.
+    ///
+    /// MUTATION: add `Help` to the constant and this goes red.
+    #[test]
+    fn only_the_clipboard_verbs_come_up_the_responder_chain() {
+        assert_eq!(
+            AppMenuAction::THROUGH_THE_RESPONDER_CHAIN.to_vec(),
+            vec![AppMenuAction::CopySelection, AppMenuAction::PasteIntoFocus]
+        );
+        assert!(
+            !AppMenuAction::THROUGH_THE_RESPONDER_CHAIN.contains(&AppMenuAction::Help),
+            "Help is a row of the bar with a target of its own, not a selector the chain declined"
+        );
     }
 
     /// PIN — `rows` walks items only, in reading order, and skips the two

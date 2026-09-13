@@ -164,6 +164,14 @@ const BAR: &[Bar] = &[
             // that `Cmd+C` and `Cmd+V` are `input.rs` predicates rather than
             // rows of the table, and a key equivalent here would take them off
             // the terminal that M1-7 gave them to.
+            //
+            // **Two of the six now have a floor under the chain, and they are
+            // still these rows** (T-MAC-EDIT-CLIPBOARD): `copy:` and `paste:`
+            // reach the application delegate when nothing above it answered,
+            // and [`clipboard_seat`] decides what they act on. Nothing here
+            // changes, and that is the design rather than an omission — a
+            // `Row::Verb` would claim the chord and a target of our own would
+            // take the verb off the page in a web pane that ought to win.
             Row::Standard(Text::MenuUndo, StandardMenuAction::Undo),
             Row::Standard(Text::MenuRedo, StandardMenuAction::Redo),
             Row::Rule,
@@ -344,12 +352,24 @@ const NOT_ON_THE_BAR: &[(&str, &str)] = &[
 /// chord, and the two table rows keep answering their own chord through
 /// `keyDown:` exactly as they do today.
 ///
-/// What that costs, written down rather than hidden: **Edit ▸ Copy with the
-/// keyboard on a terminal does nothing**, because nothing in the responder chain
-/// under winit's view implements `copy:`. The seat for Folio's own answer is a
-/// responder at the end of that chain — the application delegate's — which is
-/// the application delegate's object, and `docs/DESIGN.md` §13.26 ④ carries it
-/// forward as this ticket's one undelivered half.
+/// What that cost, written down rather than hidden, was: **Edit ▸ Copy with the
+/// keyboard on a terminal did nothing**, because nothing in the responder chain
+/// under winit's view implements `copy:`. That half is delivered
+/// (T-MAC-EDIT-CLIPBOARD, `docs/DESIGN.md` §13.26 ⑨) and **none of it is on this
+/// constant**: the seat for Folio's answer is a responder at the *end* of that
+/// chain — the application delegate's object — so the rows are unchanged, the
+/// chord is still unclaimed, and a real text responder still answers first by
+/// standing earlier in the walk. What decides what a declined `copy:` acts on is
+/// [`clipboard_seat`], below.
+///
+/// **Cut, Select All, Undo and Redo keep no floor**, and that is a ruling rather
+/// than four verbs left for later. Cutting is an edit and a terminal's
+/// scrollback is not editable; `Select All` over a grid would have to mean the
+/// whole of a scrollback this product has no verb for; and Undo is the paragraph
+/// above — the Edit menu's Undo is whatever holds the keyboard, and the two
+/// table rows that could answer it are a *document's*, which is why they are in
+/// `NOT_ON_THE_BAR`. A floor under a verb this product does not have would be a
+/// row that looks like an offer and is not one.
 #[cfg(test)]
 const EDIT_ROWS_APPKIT_ANSWERS: &[StandardMenuAction] = &[
     StandardMenuAction::Undo,
@@ -527,6 +547,74 @@ fn verb_entry(
             .and_then(menu_chord),
         enabled: focus.is_some_and(|focus| binding.is_some_and(|row| row.scope.holds(focus))),
     })
+}
+
+// ── Edit ▸ Copy and Paste, once the responder chain has declined them ───────
+
+/// **What the window looks like to the Edit menu's two clipboard rows**
+/// (T-MAC-EDIT-CLIPBOARD, `docs/DESIGN.md` §13.26 ⑨).
+///
+/// Two facts and no more, because the question is narrow: the press has already
+/// been through AppKit's responder chain and nothing there wanted it, so
+/// everything that is a real text responder — a page in a web pane, a field in a
+/// sheet, an open panel's search box — has already answered and this decision
+/// was never reached. What is left to decide is which of **Folio's own**
+/// surfaces the verb belongs to, and that is the same question
+/// `Runtime::keyboard_input` answers for a `Cmd+C` at the rung where it asks it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ClipboardFocus {
+    /// **Something is holding the keyboard outright**: a card, the dirty gate,
+    /// the settings dialog, the name editor, or one of the five popups that
+    /// answer their own keys and let nothing past — the palette among them.
+    ///
+    /// Every one of those stands **above** the clipboard rung in
+    /// `keyboard_input`, so a `Cmd+V` typed now would not reach a shell either.
+    pub swallowing: bool,
+    /// The preview document has the keyboard and is editable, which is the one
+    /// condition the clipboard rung itself forks on (`editing`).
+    pub preview_edit: bool,
+}
+
+/// **Who answers Edit ▸ Copy and Edit ▸ Paste.**
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ClipboardSeat {
+    /// **Nobody**, and it is an answer rather than a gap. With the palette up,
+    /// a menu row that pasted would paste into the shell *behind* the box the
+    /// reader is typing in — which is the leak
+    /// `nothing_leaks_past_the_palette_to_the_shell` exists to refuse, arriving
+    /// by a second door. A verb that has nowhere right to go does nothing.
+    Nobody,
+    /// **The preview document being edited** — its selection out, the
+    /// pasteboard in with the file's own line breaks, through the same two
+    /// functions the editor's own `Cmd+C` and `Cmd+V` reach.
+    PreviewDocument,
+    /// **The focused terminal pane** — the view selection onto the pasteboard,
+    /// and the pasteboard into the child through `paste_from_clipboard`, which
+    /// is the path a `Cmd+V` keystroke takes today: one sanitiser, one
+    /// bracketing rule, one writer.
+    Terminal,
+}
+
+/// **The routing decision, and it is the keyboard's own ladder read for one
+/// press** (T-MAC-EDIT-CLIPBOARD).
+///
+/// Deliberately a function of two booleans rather than of the window: what it
+/// has to agree with is `Runtime::keyboard_input`, where the same two questions
+/// are asked in the same order — everything that swallows a key swallows this
+/// one, then the preview's edit focus forks the rung, and below that is the
+/// terminal. A decision written against the window would be a second reading of
+/// that ladder; written against its answers, it can be checked here and pinned
+/// against the ladder's own source text by
+/// `every_surface_the_menu_defers_to_stands_above_the_clipboard_rung`.
+#[must_use]
+pub(crate) const fn clipboard_seat(focus: ClipboardFocus) -> ClipboardSeat {
+    if focus.swallowing {
+        ClipboardSeat::Nobody
+    } else if focus.preview_edit {
+        ClipboardSeat::PreviewDocument
+    } else {
+        ClipboardSeat::Terminal
+    }
 }
 
 #[cfg(test)]
@@ -955,6 +1043,97 @@ mod tests {
             }
         }
         assert_eq!(found.len(), EDIT_ROWS_APPKIT_ANSWERS.len());
+    }
+
+    /// PIN (T-MAC-EDIT-CLIPBOARD) — **the routing decision, all four states of
+    /// it.**
+    ///
+    /// The whole table, because it is four lines long and because each line is
+    /// a separate ruling: a swallowed keyboard answers nobody *even when the
+    /// preview is the thing being edited underneath the palette*, the preview
+    /// wins over the terminal, and the terminal is what is left.
+    ///
+    /// MUTATIONS:
+    /// (1) drop the `swallowing` arm — the first two lines go red, and a Paste
+    ///     chosen with the command palette up lands in the shell behind it;
+    /// (2) swap the last two arms — the third goes red, and a Copy in a file
+    ///     being edited takes the terminal's selection instead of the
+    ///     paragraph the caret is on.
+    #[test]
+    fn the_clipboard_seat_is_the_keyboards_own_ladder() {
+        let seat = |swallowing, preview_edit| {
+            clipboard_seat(ClipboardFocus {
+                swallowing,
+                preview_edit,
+            })
+        };
+        assert_eq!(seat(true, false), ClipboardSeat::Nobody);
+        assert_eq!(seat(true, true), ClipboardSeat::Nobody);
+        assert_eq!(seat(false, true), ClipboardSeat::PreviewDocument);
+        assert_eq!(seat(false, false), ClipboardSeat::Terminal);
+        // And the default focus — no card, no popup, nothing being edited — is
+        // the pane a reader is looking at, which is the state this ticket was
+        // reported from.
+        assert_eq!(
+            clipboard_seat(ClipboardFocus::default()),
+            ClipboardSeat::Terminal
+        );
+    }
+
+    /// PIN (T-MAC-EDIT-CLIPBOARD) — **the two verbs that come up the responder
+    /// chain are not rows of this bar, and their rows are still AppKit's.**
+    ///
+    /// The verb table read from both ends. A `Row::Own` for either of them
+    /// would put a second Copy on the Edit menu; a `Row::Verb` would need a row
+    /// in `BINDINGS` and would claim `Cmd+C` off the terminal the day it landed.
+    /// What must be on the menu is exactly what is on it today — `copy:` and
+    /// `paste:` with no target — because that is what lets a page in a web pane
+    /// answer first.
+    ///
+    /// MUTATION: give either verb a row of its own on the bar and this goes red.
+    #[test]
+    fn the_clipboard_verbs_come_up_the_chain_and_are_not_rows_of_the_bar() {
+        assert_eq!(
+            AppMenuAction::THROUGH_THE_RESPONDER_CHAIN.to_vec(),
+            vec![AppMenuAction::CopySelection, AppMenuAction::PasteIntoFocus],
+            "the two verbs the platform adds a delegate method for"
+        );
+        for bar in BAR {
+            for row in bar.rows {
+                if let Row::Own(_, what) = row {
+                    assert!(
+                        !AppMenuAction::THROUGH_THE_RESPONDER_CHAIN.contains(what),
+                        "{what:?} is on the bar as a row of its own, and it is answered by the \
+                         responder chain instead"
+                    );
+                }
+            }
+        }
+        let table = mac_table();
+        let plan = plan(&table, Some(every_focus()));
+        for (what, action) in [
+            (StandardMenuAction::Copy, AppMenuAction::CopySelection),
+            (StandardMenuAction::Paste, AppMenuAction::PasteIntoFocus),
+        ] {
+            let row = plan
+                .rows()
+                .find(|item| item.action == MenuAction::Standard(what))
+                .unwrap_or_else(|| panic!("{what:?} is a row of the Edit menu"));
+            assert_eq!(
+                row.chord, None,
+                "{what:?} prints a key, and a key equivalent is answered before keyDown:"
+            );
+            assert!(
+                row.enabled,
+                "{what:?} is greyed, and a greyed row swallows its press"
+            );
+            assert!(
+                !plan
+                    .rows()
+                    .any(|item| item.action == MenuAction::Application(action)),
+                "{action:?} is on the bar twice — once as AppKit's row and once as its own"
+            );
+        }
     }
 
     /// Every `Text` entry the bar reads: the five menu names and every row the

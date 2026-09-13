@@ -63,6 +63,14 @@ All notable changes to Folio are recorded here. The format follows
 ### Fixed
 
 - **A table on a focus card lines up again.** A card showing a box-drawing table whose cells hold Chinese text drew its borders in a different place on every row, while the same table in the pane beside it was square. A card's rows are now laid out column by column, as the pane's own grid is, so a wide character takes exactly two columns and a border stands in the same place on every row.
+- **On a Mac, `Edit ▸ Copy` and `Edit ▸ Paste` now act on the pane you are
+  looking at.** Over a terminal they did nothing at all — the selection never
+  reached the clipboard and the menu's Paste typed nothing — because macOS had
+  nothing to hand those rows to. They now copy the terminal's selection, or the
+  text you have selected in a file you are editing in a preview, and paste into
+  whichever of the two has the keyboard. A page in a web pane and a text field
+  in a dialog keep answering for themselves as before, and `⌘C` and `⌘V` are
+  unchanged.
 
 - Keep focus cards on the same content when resizing, and make Alt+wheel respond immediately when reversing at the oldest content.
 - **On a Mac, tabs now take the whole width of the title bar.** The tab strip was setting aside room for four window buttons on a window that carries one — macOS draws minimise, zoom and close at the other end of the bar — so the tabs were squeezed to their profile marks, their names hidden, with a wide empty band before the settings gear. Seven tabs in a 934-point window now stand 91 points wide with their names showing instead of 72 without.
