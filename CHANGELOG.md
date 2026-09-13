@@ -13,6 +13,15 @@ All notable changes to Folio are recorded here. The format follows
   the rows macOS puts there for every app. They work from another app and from
   an empty desk: with every window closed, either one opens a window.
 
+### Changed
+
+- **The card that appears when you rest on a file now fades in.** It used to
+  arrive solid in a single frame; it now takes the same ninety milliseconds the
+  small labels elsewhere in the window take, and arrives without moving or
+  growing. The wait before it appears is unchanged, it still leaves the instant
+  you move away, and if you have asked your system for reduced motion it appears
+  and leaves instantly as before.
+
 ### Fixed
 
 - **On a Mac, a pane started from the Dock or Finder can read what you type in
