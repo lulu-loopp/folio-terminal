@@ -2206,7 +2206,7 @@ else                           { Flash }    // 被压住了,但任务栏还在,�
 
 - **`StartingDir::WindowsHome` 改名 `AccountHome`,读 `$HOME`;盘上那个词 `windows_home` 不动**。这个变体从来的意思就是「这台机器叫做家的那个地方,作为工作目录交出去」,变量由 `home_variable` 按平台选(`USERPROFILE` / `HOME`),而一个叫 `WindowsHome` 的变体去解析 `$HOME`,是名字跟自己的身子唱反调。盘上不改是因为每一台 Windows 上的 `profiles.json` 都已经写着那个词,`starting_dir_to_file` 把 `AccountHome` 照旧写成 `NamedStartingDirV1::WindowsHome`——为一个同义词升一版 schema,等于让所有存量文件走一次什么都不改的迁移。这件事有产品后果:从 Finder 启动的 app 继承的是 `launchd` 的环境——`HOME`/`USER`/`SHELL`/`TMPDIR` 和一条光秃秃的 `PATH`,没有继承任何目录——所以第一个 pane 站在哪里,全靠这一条。实机录到的就是这一条在起作用:一份干净数据目录下开出来的第一个 pane,`folio.zsh` 的 `OSC 7` 报的是 `file:///Users/<owner>`,提示符停在 `~`。
 
-- **`LANG` 只发给本来一个都没有的 pane,值是系统自己的设置,且必须是这台机器真有的 locale**(`shell_integration::locale_declaration`)。`launchd` 不设 `LC_*`,于是 Finder 启动的 app 里起的 shell 跑在 `C` locale 下,一个 UTF-8 文件名 `ls` 出来是一排问号。值取自 `defaults read -g AppleLocale`,那是 CLDR 的拼法(`zh-Hans_CN`)不是 POSIX 的,于是 `posix_locale_candidates` 按两个候选翻译——原样加 `.UTF-8`,以及去掉 script 子标签后加 `.UTF-8`——每一个都拿去跟 `locale -a` 对(`choose_posix_locale`),对不上就**什么都不发**。`en_US.UTF-8` 不是这个产品替人做的决定:本机实测 `AppleLocale` 是 `zh-Hans_US`(中文界面、美国区),`zh-Hans_US.UTF-8` 与 `zh_US.UTF-8` 都不在这台机器的 288 个 locale 里,于是这个 pane 的 `LANG` 就是不设——而不是被塞一个别人的国家。`LC_ALL`/`LC_CTYPE`/`LANG` 任何一个已经有值——继承来的,或档案自己那一行写的——这里就不出声:那个问题已经被答过了,再叠一条只会让记录里多一条不管事的变量。`bt_platform::system_posix_locale()` 在 Windows 上答 `None`,于是 Windows 的 spawn 一个字节没变。
+- **locale 只发给本来一个都没有的 pane,值是系统自己的设置,且必须是这台机器真有的 locale**(`shell_integration::locale_declaration`)。`launchd` 不设 `LC_*`,于是 Finder 启动的 app 里起的 shell 跑在 `C` locale 下,一个 UTF-8 文件名 `ls` 出来是一排问号。值取自 `defaults read -g AppleLocale`,那是 CLDR 的拼法(`zh-Hans_CN`)不是 POSIX 的,于是 `posix_locale_candidates` 按两个候选翻译——原样加 `.UTF-8`,以及去掉 script 子标签后加 `.UTF-8`——每一个都拿去跟 `locale -a` 对(`choose_locale_declaration`),对不上就**不编一个国家出来**。`en_US.UTF-8` 不是这个产品替人做的决定:本机实测 `AppleLocale` 是 `zh-Hans_US`(中文界面、美国区),`zh-Hans_US.UTF-8` 与 `zh_US.UTF-8` 都不在这台机器的 288 个 locale 里,于是语言和地区一个字不说——**但编码要说**,发的是 Apple 自己在同一台机器上发的那一对:`LANG=C.UTF-8` 加 `LC_CTYPE=UTF-8`,两半各自还要这台机器真有(见 §13.49;从前这里什么都不发,于是 Finder 起的 pane 留在 `C` locale 里,`天下为公` 回显成 `天` 加一串 `<008b>`)。`LC_ALL`/`LC_CTYPE`/`LANG` 任何一个已经有值——继承来的,或档案自己那一行写的——这里就不出声:那个问题已经被答过了,再叠一条只会让记录里多一条不管事的变量——那一对也一样,要发就整对发,要不出声就整对不出声。`bt_platform::system_locale_declaration()` 在 Windows 上答 `None`,于是 Windows 的 spawn 一个字节没变。
 
 - **`PATH` 不替读者修,`TERM`/`COLORTERM`/`TERM_PROGRAM`/`TERM_PROGRAM_VERSION` 是平台无关的**。非 login 的交互 zsh 读 `.zshrc`,而一个 macOS 读者的 `PATH` 就是从那儿来的——在 pane **里面**一层。反过来的做法是起 login shell,替一个已经登录过的人再跑一遍 `.zprofile`,计划 §8 Q8 否决了它:代价写下来,不偷偷付;真想要 Terminal.app 那套的人,把 `--login` 写进这一行自己的参数里。四个 `TERM` 声明本来就是 `bt_pty::PtyCommand::resolved_environment` 里一条 `cfg` 都没有的一段代码,`the_term_variables_a_pane_is_given_are_the_same_on_every_platform` 加了一枚钉子让它保持如此——钉的同样是 `source_pin`,把那个函数取出来断言里面既有这四个名字、又没有 `cfg` 字样。一个 Mac 上的 zsh 读到的 `TERM=xterm-256color` 和 `TERM_PROGRAM=Folio` 与一个 Windows 上的 PowerShell 读到的逐字节相同,因为查询它们的那些程序——`less`、`vim`、`git`——在两边是同一个程序。
 
@@ -10071,5 +10071,104 @@ as `main` has it; when M5-6's `feature/macos-docs` lands, it belongs between
 *What must be seen before the tag is published* — which ends on the clean-user
 pass — and *What is kept beside the artifact*, and a comment above it in the file
 says so.
+
+*(本节英文,待中文文案改写。)*
+
+### 13.49 T-MAC-LOCALE: 系统没有的 locale 不编,但编码要说——Finder 起的 pane 不能留在 C 里(`crates/bt-platform/src/lib.rs`、`crates/bt-app/src/shell_integration.rs`)
+
+**取 13.49。** §13.47 是 T-MAC-FILEURI、§13.48 是 T-MAC-STRIP-ENDS,两节都已经合进
+main;本节取下一个还没被认领的号。
+
+**① The report, and what the screen was really showing.**
+The owner typed `天下为公` into a pane of a release build on the Mac and the line
+editor showed `天`, then highlighted `<008b>` where the rest of the phrase should
+have been. Nothing about the input path was wrong: the same four characters
+arrive at the pty as the same twelve bytes they always did. What was wrong was
+the shell that read them.
+
+The pane's `zsh` was running in the `C` locale, and `C` on Darwin is not a
+neutral setting — it is a statement that a byte *is* a character. Every one of
+the twelve bytes becomes a wide character of its own value, bytes `A0`–`FF` are
+printable there and go back out raw, and bytes `80`–`9F` are C1 controls, which
+`zle` draws as `<00xx>` in reverse video. Measured through Folio's own pty layer
+on the reported machine, with no `LANG`, `LC_ALL` or `LC_CTYPE` in the
+environment, writing the twelve bytes of the phrase and reading the echo:
+
+```text
+in    e5 a4 a9  e4 b8 8b  e4 b8 ba  e5 85 ac
+echo  e5 08 e5 a4 a9 e4 b8 [1b 5b 37 6d] 3c 30 30 38 62 3e [1b 5b 32 37 6d]
+      e4 b8 ba e5 [1b 5b 37 6d] 3c 30 30 38 35 3e [1b 5b 32 37 6d] ac
+```
+
+The `<008b>` is the third byte of `下` handed back as a C1 control with the
+reverse-video pair around it, and `e5 a4 a9` and `e4 b8 ba` survive because a
+byte-for-byte echo of a UTF-8 sequence still decodes as that character when the
+*terminal* reads it back. So the screen shows a character, then a token, then
+another character — which is the shape of the report, and the count of tokens is
+just the count of bytes the phrase has in `80`–`9F`.
+
+**② Why that pane had no locale, and why M1-5 left it that way.**
+`launchd` sets no `LC_*` and no `LANG`, so an app launched from Finder has none
+to pass on — `launchctl getenv LANG` on this machine answers nothing — while the
+same build launched from Terminal.app inherits one and is fine. That is what
+M1-5 (§11 Q8) is for. Its rule was, and remains: read `AppleLocale`, turn CLDR's
+spelling into POSIX's, and use a candidate **only if `locale -a` names it**, so
+that no region is invented for somebody. On the reported machine `AppleLocale`
+is `zh-Hans_US` — a Chinese interface in the United States — and neither
+`zh-Hans_US.UTF-8` nor `zh_US.UTF-8` is among that machine's 288 installed
+locales. M1-5 therefore declared nothing, and nothing is what put the pane in
+`C`.
+
+The refusal to guess a country was right. Answering *nothing* was not: a pane
+decodes UTF-8 and only UTF-8, and that is a fact about this terminal, not a guess
+about the reader.
+
+**③ What a miss is answered with, and why it is two variables.**
+Apple's own terminal, on this same machine and this same `AppleLocale`, starts
+its shells with `LANG=C.UTF-8` **and** `LC_CTYPE=UTF-8`, with `LC_ALL` empty.
+That pair is now what `choose_locale_declaration` mirrors when no candidate is
+installed, and neither half is redundant:
+
+- `LC_CTYPE` is the category a terminal cares about and it outranks `LANG`;
+  `UTF-8` is the only locale that says *encoding and nothing else*, and it is the
+  variable that can carry it. Measured: `LANG=UTF-8 locale charmap` answers
+  `US-ASCII`, because Darwin's `UTF-8` defines one category
+  (`/usr/share/locale/UTF-8` holds a single file, `LC_CTYPE`) and `setlocale`
+  refuses it for the rest, while `LC_CTYPE=UTF-8 locale charmap` answers `UTF-8`.
+- `LANG` is what every other category falls back to, and `C.UTF-8` is a whole
+  locale that says the same thing about the encoding without naming a language or
+  a region. `LANG=C.UTF-8 locale charmap` answers `UTF-8`.
+
+**Both halves are still checked against the machine**, which is the whole of the
+old rule, and each in the way it can be found: `C.UTF-8` is a locale and
+`locale -a` lists it; `UTF-8` is not a locale and that list names it on no macOS,
+so what is checked for it is the file the C library reads,
+`/usr/share/locale/UTF-8/LC_CTYPE`. A machine with neither is told nothing, as
+before. What is deliberately still not here is a third candidate that supplies a
+missing region — `zh-Hans` alone does not say China rather than Singapore — and
+`en_US.UTF-8` is still not a default.
+
+**④ The shape, and the one rule that did not move.**
+`system_posix_locale` is now `system_locale_declaration` and answers a
+`LocaleDeclaration` — one or two `(name, value)` pairs — rather than a locale
+name, because *which variable* is part of what the machine said and not something
+the caller may decide. `shell_integration::locale_declaration` writes whichever
+pairs it is handed, in order, and its rule is unchanged: if `LC_ALL`, `LC_CTYPE`
+or `LANG` is already answered — inherited, or written as a row of the profile's
+own — this declares nothing at all, pair included. Half a pair under an inherited
+`LC_CTYPE` would be the worst of both, a `LANG` that the inherited variable
+outranks for exactly the category that matters. Windows answers `None` as it
+always did, and its spawn is byte for byte what it was.
+
+**⑤ The proof.**
+The same shell, in the same pty, told what this code now declares
+(`LANG=C.UTF-8`, `LC_CTYPE=UTF-8` — the real answer of
+`system_locale_declaration()` on the reported machine), echoes the twelve bytes
+back unchanged:
+
+```text
+in    e5 a4 a9 e4 b8 8b e4 b8 ba e5 85 ac
+echo  e5 a4 a9 e4 b8 8b e4 b8 ba e5 85 ac
+```
 
 *(本节英文,待中文文案改写。)*
