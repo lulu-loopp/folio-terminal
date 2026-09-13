@@ -411,6 +411,13 @@ mod mac {
                         .say(&format!("EVENT {}", event.origin.selector()));
                     self.tally.last_window_closed += 1;
                 }
+                // M3-2's, and this probe builds no menu bar: the arm is here so
+                // that the kind's arrival is recorded rather than swallowed by a
+                // wildcard, which is what would have hidden it from this script.
+                AppDelegateEventKind::MenuChosen(choice) => {
+                    self.report
+                        .say(&format!("EVENT {} {choice:?}", event.origin.selector()));
+                }
             }
         }
 

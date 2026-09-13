@@ -2513,6 +2513,62 @@ pub enum Text {
     /// here, so a row left on when the card was answered is a row waiting for a
     /// shell to name its own file.
     ShellIntegrationPending,
+
+    // ── the application menu bar (M3-2, macOS) ─────────────────────────────
+    //
+    // **Only what the bar adds.** Every row that is a verb of the shortcut
+    // table takes that row's own `title` — one name per verb, which is the rule
+    // `Shortcuts::accelerator` was written to serve: the menu and the hint card
+    // introduce the reader to the same thing twice, and two names would make
+    // them two things. What is here is the five menus' own names, the rows
+    // AppKit answers by itself, and the two rows that are Folio's and have no
+    // chord.
+    //
+    // The Chinese column of every one of them is the English string, filed in
+    // `CHINESE_PENDING` with the copy ruling of 2026-09-07 behind it: the words
+    // are a Mac's menu bar and the person who writes them writes Chinese.
+    /// The bar's second menu.
+    MenuBarFile,
+    /// The bar's third.
+    MenuBarEdit,
+    /// The bar's fourth.
+    MenuBarView,
+    /// The bar's fifth — the one AppKit fills the bottom of with the open
+    /// windows.
+    MenuBarWindow,
+    /// The bar's last.
+    MenuBarHelp,
+    /// The application menu's first row. The panel behind it is AppKit's own,
+    /// built out of the bundle's `Info.plist`.
+    MenuAboutFolio,
+    /// The submenu the system fills; Folio's own entry in it is M4-9's.
+    MenuServices,
+    MenuHideFolio,
+    MenuHideOthers,
+    MenuShowAll,
+    /// The row that runs **this product's** quit and not `terminate:` — see
+    /// `docs/DESIGN.md` §13.13 ⑤.
+    MenuQuitFolio,
+    /// File's last row. A second entry and not [`Self::CloseWindow`], which is
+    /// the word on a title-bar button: the button says what it does to the thing
+    /// under the pointer and a menu row has to name its object.
+    MenuCloseWindow,
+    /// The four rows of Edit that AppKit answers through the responder chain,
+    /// and the two above them. They carry no chord — see `docs/DESIGN.md`
+    /// §13.26 ④ for why the clipboard pair may not have one yet.
+    MenuUndo,
+    MenuRedo,
+    MenuCut,
+    MenuCopy,
+    MenuPaste,
+    MenuSelectAll,
+    /// The green button's verb, on the Window menu. A second entry and not the
+    /// pane zoom's: one puts a window on the screen's work area and the other
+    /// puts a pane on the tab's stage.
+    MenuZoomWindow,
+    MenuBringAllToFront,
+    /// Help's one row, which opens the page a reader is sent to.
+    MenuFolioHelp,
 }
 
 impl Text {
@@ -4482,6 +4538,34 @@ impl Text {
                 "Takes effect in the next PowerShell session",
                 "下次启动 PowerShell 时生效",
             ),
+
+            // ── the application menu bar (M3-2, macOS) ─────────────────────
+            //
+            // The English is the platform's own vocabulary, title case, because
+            // a menu bar is read beside every other application's and a row
+            // spelled Folio's way would be the one row a reader has to stop at.
+            // zh: pending opus46 — all twenty-one, filed in `CHINESE_PENDING`.
+            Self::MenuBarFile => pick(lang, "File", "File"),
+            Self::MenuBarEdit => pick(lang, "Edit", "Edit"),
+            Self::MenuBarView => pick(lang, "View", "View"),
+            Self::MenuBarWindow => pick(lang, "Window", "Window"),
+            Self::MenuBarHelp => pick(lang, "Help", "Help"),
+            Self::MenuAboutFolio => pick(lang, "About Folio", "About Folio"),
+            Self::MenuServices => pick(lang, "Services", "Services"),
+            Self::MenuHideFolio => pick(lang, "Hide Folio", "Hide Folio"),
+            Self::MenuHideOthers => pick(lang, "Hide Others", "Hide Others"),
+            Self::MenuShowAll => pick(lang, "Show All", "Show All"),
+            Self::MenuQuitFolio => pick(lang, "Quit Folio", "Quit Folio"),
+            Self::MenuCloseWindow => pick(lang, "Close Window", "Close Window"),
+            Self::MenuUndo => pick(lang, "Undo", "Undo"),
+            Self::MenuRedo => pick(lang, "Redo", "Redo"),
+            Self::MenuCut => pick(lang, "Cut", "Cut"),
+            Self::MenuCopy => pick(lang, "Copy", "Copy"),
+            Self::MenuPaste => pick(lang, "Paste", "Paste"),
+            Self::MenuSelectAll => pick(lang, "Select All", "Select All"),
+            Self::MenuZoomWindow => pick(lang, "Zoom", "Zoom"),
+            Self::MenuBringAllToFront => pick(lang, "Bring All to Front", "Bring All to Front"),
+            Self::MenuFolioHelp => pick(lang, "Folio Help", "Folio Help"),
         }
     }
 
@@ -4497,7 +4581,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 617] = [
+    pub const ALL: [Self; 638] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -5115,6 +5199,27 @@ impl Text {
         Self::FirstRunTipExplorer,
         Self::FirstRunTipPowerShell,
         Self::ShellIntegrationPending,
+        Self::MenuBarFile,
+        Self::MenuBarEdit,
+        Self::MenuBarView,
+        Self::MenuBarWindow,
+        Self::MenuBarHelp,
+        Self::MenuAboutFolio,
+        Self::MenuServices,
+        Self::MenuHideFolio,
+        Self::MenuHideOthers,
+        Self::MenuShowAll,
+        Self::MenuQuitFolio,
+        Self::MenuCloseWindow,
+        Self::MenuUndo,
+        Self::MenuRedo,
+        Self::MenuCut,
+        Self::MenuCopy,
+        Self::MenuPaste,
+        Self::MenuSelectAll,
+        Self::MenuZoomWindow,
+        Self::MenuBringAllToFront,
+        Self::MenuFolioHelp,
     ];
 
     /// The entries whose two columns are allowed to be the same string.
@@ -5159,7 +5264,7 @@ impl Text {
     /// read and named for exactly what it is. `docs/DESIGN.md` §7.59 names the ruling that
     /// created it.
     #[cfg(test)]
-    const CHINESE_PENDING: [Self; 2] = [
+    const CHINESE_PENDING: [Self; 23] = [
         // zh: pending — the two refusals a picture file raises on its own size,
         // and the word that joins a reduced picture's two sizes (owner's ruling
         // 2026-09-12).
@@ -5170,6 +5275,34 @@ impl Text {
         // 2026-09-07 says who writes the Chinese.
         Self::RowOptionSendsAlt,
         Self::DescOptionSendsAlt,
+        // zh: pending opus46 — the twenty-one words the macOS menu bar adds
+        // (M3-2, 2026-09-12). Every other row on that bar is a verb of the
+        // shortcut table and wears that row's own title, which is translated
+        // already; these are the five menus' names, the rows AppKit answers by
+        // itself, and Help's one row. They are a Mac's menu bar read beside
+        // every other application's, which is a register the copy ruling of
+        // 2026-09-07 hands to the person who writes Chinese.
+        Self::MenuBarFile,
+        Self::MenuBarEdit,
+        Self::MenuBarView,
+        Self::MenuBarWindow,
+        Self::MenuBarHelp,
+        Self::MenuAboutFolio,
+        Self::MenuServices,
+        Self::MenuHideFolio,
+        Self::MenuHideOthers,
+        Self::MenuShowAll,
+        Self::MenuQuitFolio,
+        Self::MenuCloseWindow,
+        Self::MenuUndo,
+        Self::MenuRedo,
+        Self::MenuCut,
+        Self::MenuCopy,
+        Self::MenuPaste,
+        Self::MenuSelectAll,
+        Self::MenuZoomWindow,
+        Self::MenuBringAllToFront,
+        Self::MenuFolioHelp,
     ];
 }
 

@@ -2692,6 +2692,21 @@ pub mod hang;
 /// rules apply to a target, so it is one place.
 pub mod handoff;
 
+/// **The application menu bar** — what is on it, and the one door that installs
+/// it (M3-2).
+///
+/// A module of its own and unconditional, for [`handoff`]'s reason rather than
+/// for a platform's: what a menu bar *is* — the rows, the verbs behind them, the
+/// chords printed beside them — is a fact about this product, and it is built by
+/// `bt-app` out of the one shortcut table. What is platform-specific is only
+/// whether anything hangs it on a screen, and that is `macos_menu`'s half.
+///
+/// See the module's own header for why a press crosses on M3-1's channel rather
+/// than one of its own, and for what the enabled flag on a row is load-bearing
+/// for — AppKit answers a key equivalent **before** `keyDown:`, and a disabled
+/// row is how a chord is handed back to the window that has the keyboard.
+pub mod menu;
+
 /// WebView2 in composition hosting — the web preview block's engine (slice ①).
 ///
 /// A file of its own rather than another region of [`windows_impl`], because it
@@ -10374,6 +10389,17 @@ mod macos_fonts;
 
 #[cfg(target_os = "macos")]
 pub use macos_fonts::monospace_font_families;
+
+/// **The application menu bar, over `NSMenu`** (M3-2).
+///
+/// A boundary of its own in this crate, and the first whose subject is neither
+/// a window nor a gesture but the **application**: the bar outlives every
+/// window, it is built once and edited in place, and it installs an Objective-C
+/// target that AppKit may message at any moment. It has no portable twin and
+/// needs none — [`menu`] is the door, its functions answer `Ok(())` off macOS,
+/// and `bt-app` therefore names them with no gate at all.
+#[cfg(target_os = "macos")]
+mod macos_menu;
 
 /// **The application's own lifecycle**, on every platform (M3-1).
 ///
