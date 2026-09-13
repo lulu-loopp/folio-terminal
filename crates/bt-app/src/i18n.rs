@@ -4318,10 +4318,24 @@ impl Text {
                 pick(lang, "The web engine did not start.", "网页引擎没有启动。")
             }
             Self::WebFailEngineVerb => pick(lang, "Retry", "重试"),
-            Self::WebFailGuardsSay => pick(
+            // **Two engines, two reasons, one promise** (M4-3, §13.38 ②). The
+            // promise is the half that must not move: a local file is not opened
+            // on an engine that could not be given this window's rules, and the
+            // card says so on both machines. What differs is *why* a gate can be
+            // missing. On Windows it is an older build of the Evergreen runtime
+            // that does not carry the event, so the version is the fact a reader
+            // can act on. On a Mac the engine is the system's and has no version
+            // to be behind: the gate that can fail is the compiled rule list,
+            // which the machine refused rather than lacked, and a line blaming
+            // "this version of the web engine" would send a reader looking for an
+            // update that does not exist and is not the problem.
+            Self::WebFailGuardsSay => pick_platform(
                 lang,
+                platform,
                 "This version of the web engine cannot enforce this window's rules for a page, so the file was not opened.",
                 "当前网页引擎无法执行这个窗口对页面设定的规则，文件没有打开。",
+                "The web engine would not take this window's rules for a page, so the file was not opened.",
+                "The web engine would not take this window's rules for a page, so the file was not opened.", // zh: pending opus46
             ),
             Self::WebDialogDismissed => pick(
                 lang,
@@ -5486,10 +5500,25 @@ impl Text {
         //   the update check.
         Self::FirstRunRowPowerShell,
         Self::FirstRunTipExplorer,
+        // — the card that says the web engine is not installed (M4-3). It names
+        //   a Microsoft product because on Windows that is the thing to install;
+        //   off Windows the engine ships with the operating system and
+        //   `bt_platform::webview2_runtime_version` answers `Ok` there always,
+        //   so `WebFault::RuntimeMissing` is a card no Mac can raise. Both
+        //   halves, because a card is a surface and not a sentence.
+        Self::WebFailRuntimeSay,
+        Self::WebFailRuntimeVerb,
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 0] = [];
+    const CHINESE_PENDING: [(Self, HostPlatform); 1] = [
+        // zh: pending opus46 — the macOS column of the card a local file raises
+        // when the engine would not take this window's rules (M4-3, §13.38 ②).
+        // The Windows column beside it has had its Chinese since W2; what is
+        // owed is the same sentence about an engine that has no version to be
+        // behind.
+        (Self::WebFailGuardsSay, HostPlatform::MacOs),
+    ];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
@@ -8152,7 +8181,7 @@ mod tests {
     /// moved, or take one name off the exemption list, and this names it.
     #[test]
     fn no_string_a_mac_reader_meets_names_a_windows_program() {
-        const WINDOWS_WORDS: [&str; 10] = [
+        const WINDOWS_WORDS: [&str; 11] = [
             "Explorer",
             "资源管理器",
             "taskbar",
@@ -8163,6 +8192,10 @@ mod tests {
             "PSReadLine",
             "PowerShell",
             "Windows",
+            // The web engine one machine has to be given and the other is born
+            // with (M4-3). The one card that names it is a card no Mac can
+            // raise, and it is on the exemption list above saying so.
+            "WebView2",
         ];
         let mut wrong: Vec<String> = Vec::new();
         for entry in Text::ALL {
@@ -9061,5 +9094,67 @@ mod tests {
             );
             seen.push(english);
         }
+    }
+
+    /// RED (M4-3) — **the card over a refused local file keeps its promise on
+    /// both engines and drops the reason only one of them can give.**
+    ///
+    /// [`Text::WebFailGuardsSay`] is the one string in this table that states a
+    /// guarantee about the web preview: a local file is not opened on an engine
+    /// that could not be given this window's rules. The guarantee is the same on
+    /// both machines and both columns say it. What the Windows column adds is a
+    /// *version* — the fact a reader of that machine can act on, because an
+    /// Evergreen runtime too old to carry an event is a runtime that can be
+    /// updated. A Mac's engine is the system's and has no version to be behind,
+    /// so the Mac column says what happened and stops.
+    ///
+    /// **Asked of [`Text::on`] and not of [`Text::text`]**, because the point is
+    /// the column this machine does *not* show: a Windows runner has to be able
+    /// to read what a Mac reader is told, or the sentence is written once and
+    /// never looked at again.
+    ///
+    /// MUTATION: ① give the Mac column the Windows sentence and the first pair
+    /// of assertions collapses; ② let either column drop the second half and the
+    /// promise assertion goes red; ③ name a runtime version in the Mac column and
+    /// the last one does.
+    #[test]
+    fn the_web_engine_card_states_one_promise_and_names_one_engine() {
+        let windows = Text::WebFailGuardsSay.on(Lang::English, HostPlatform::Windows);
+        let mac = Text::WebFailGuardsSay.on(Lang::English, HostPlatform::MacOs);
+        assert_ne!(
+            windows, mac,
+            "a platform entry whose two columns are the same string is a `pick`"
+        );
+        for column in [windows, mac] {
+            assert!(
+                column.contains("rules for a page") && column.contains("was not opened"),
+                "the promise is the half that does not move: {column}"
+            );
+        }
+        assert!(
+            windows.starts_with("This version of"),
+            "the Windows column names the thing a reader of that machine can update"
+        );
+        assert!(
+            !mac.contains("version"),
+            "a Mac's engine is the system's; there is no version to be behind: {mac}"
+        );
+        // `OtherUnix` has no third engine and no third vocabulary, which is the
+        // same choice `pick_platform` documents for every other entry.
+        assert_eq!(
+            Text::WebFailGuardsSay.on(Lang::English, HostPlatform::OtherUnix),
+            mac
+        );
+        // And the Chinese slot really is the English one, which is what files it
+        // in `CHINESE_PENDING` rather than leaving it to be discovered.
+        assert_eq!(
+            Text::WebFailGuardsSay.on(Lang::Chinese, HostPlatform::MacOs),
+            mac
+        );
+        assert_ne!(
+            Text::WebFailGuardsSay.on(Lang::Chinese, HostPlatform::Windows),
+            windows,
+            "the Windows column's Chinese was written long ago and stays written"
+        );
     }
 }

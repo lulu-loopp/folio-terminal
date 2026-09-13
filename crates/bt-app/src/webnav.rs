@@ -185,7 +185,7 @@ impl Mint {
     /// added to it** (W2 slice 5).
     ///
     /// [`Self::file`] read backwards, and deliberately no further: it undoes the
-    /// four percent escapes that encoder writes and turns `/` back into `\`.
+    /// four percent escapes that encoder writes and puts the separators back.
     /// It is **not** a `file:` URL parser and must never become one. Its whole
     /// job is to let a row in the switcher, a line in `session.json` and a pin
     /// be taken back to the *disk* — where the path is canonicalised and minted
@@ -196,6 +196,27 @@ impl Mint {
     /// The tail is the `?query` and `#fragment` the *page* is answerable for
     /// ([`Self::admits`]): a local report's table of contents is `report.html#ch3`,
     /// and a row that dropped the fragment would reopen the report at the top.
+    ///
+    /// # Two roots, because [`Self::file`] mints from two (M4-3)
+    ///
+    /// M4-2 taught the *encoder* that an absolute path spells its root in one of
+    /// two ways — `D:\report.html` carries none and `/Users/somebody/report.html`
+    /// is nothing but one — and left the **reader** assuming the first. So a Mac
+    /// minted a URL this function then refused: `file:///Users/somebody/report.html`
+    /// came back as `\Users\somebody\report.html`, which is not an absolute path
+    /// on either machine, and [`local_path_form`] therefore answered `None` for
+    /// every local page a Mac ever opened.
+    ///
+    /// The fix reads the root off the **string**, which is where both spellings
+    /// of it already are, so this function still names no platform: a body
+    /// beginning `X:` is the drive-rooted form and its separators are `\`; a body
+    /// beginning with anything else is the slash-rooted form, whose one leading
+    /// separator was eaten by the `file:///` prefix and whose separators are
+    /// already what they will stay. Reading the *host's* rules instead — asking
+    /// [`Path::is_absolute`] — is what was wrong before: it answers about the
+    /// machine doing the reading rather than about the machine the path is for,
+    /// and a session written on one and read on the other is exactly the case
+    /// that has to come back with the same answer on both.
     #[must_use]
     pub fn path_and_tail_of_file_url(url: &str) -> Option<(PathBuf, String)> {
         let rest = url
@@ -204,11 +225,27 @@ impl Mint {
             .map(|_| &url[8..])?;
         let cut = rest.find(['?', '#']).unwrap_or(rest.len());
         let (body, tail) = rest.split_at(cut);
-        let mut path = String::with_capacity(body.len());
+        // **The root, read off the string.** A drive letter, a colon and a
+        // separator — the one shape `Self::file` leaves a path that carried no
+        // leading separator of its own. Everything else is the other root, and
+        // it is the one the prefix above already consumed. The separator is
+        // part of the shape rather than optional: `D:` alone is a *drive
+        // relative* path on the machine that spells paths that way, which is
+        // the one kind of absolute-looking string this door must not hand back.
+        let mut head = body.chars();
+        let drive_rooted = matches!(
+            (head.next(), head.next(), head.next()),
+            (Some(letter), Some(':'), Some('/')) if letter.is_ascii_alphabetic()
+        );
+        let separator = if drive_rooted { '\\' } else { '/' };
+        let mut path = String::with_capacity(body.len() + 1);
+        if !drive_rooted {
+            path.push(separator);
+        }
         let mut bytes = body.chars();
         while let Some(character) = bytes.next() {
             match character {
-                '/' => path.push('\\'),
+                '/' => path.push(separator),
                 '%' => {
                     let escape: String = [bytes.next()?, bytes.next()?].into_iter().collect();
                     // Only the four this door writes. Anything else is a URL
@@ -225,15 +262,23 @@ impl Mint {
                 other => path.push(other),
             }
         }
-        // A drive-absolute path and nothing else: the mint was made from a
-        // canonicalised path, so anything relative, anything with a `..` in it
-        // and anything spelled as a share is a string that did not come from
-        // here. The disk is asked again by the caller either way.
-        let path = PathBuf::from(path);
-        if !path.is_absolute() || path.components().any(|part| part.as_os_str() == "..") {
+        // An absolute path with something in it, and nothing else: the mint was
+        // made from a canonicalised path, so an empty body, anything with a `..`
+        // in it and anything spelled as a share is a string that did not come
+        // from here. The disk is asked again by the caller either way.
+        //
+        // The segments are split here rather than walked as `Path::components`
+        // for the reason the root was read off the string: on Windows that walk
+        // reads `/Users/x/..` as three plain names, and a `..` it did not
+        // recognise is a `..` this door let through.
+        if body.is_empty()
+            || path
+                .split(['/', '\\'])
+                .any(|segment| segment == ".." || segment == ".")
+        {
             return None;
         }
-        Some((path, tail.to_owned()))
+        Some((PathBuf::from(path), tail.to_owned()))
     }
 
     /// The URL this mint stands for, which is what the host navigates to.
@@ -281,11 +326,20 @@ impl Mint {
 ///
 /// [`Mint::path_and_tail_of_file_url`] read for display, which is why it is here
 /// and not spelled again at each surface: this is that reader's own strictness —
-/// only the four escapes this product writes, only a drive-absolute path — so a
-/// URL that did not come out of [`Mint::file`] answers `None` and is shown
-/// exactly as it arrived. A `file:` URL from somewhere else is somebody else's
-/// string, and guessing at it is how a path comes out of something that never
-/// named one.
+/// only the four escapes this product writes, only a path rooted the way that
+/// door roots one — so a URL that did not come out of [`Mint::file`] answers
+/// `None` and is shown exactly as it arrived. A `file:` URL from somewhere else
+/// is somebody else's string, and guessing at it is how a path comes out of
+/// something that never named one.
+///
+/// **The root is the machine's, and so is the spelling** (M4-3): `D:\Developer\notes.html`
+/// where a drive rooted the path and `/Users/somebody/notes.html` where a slash
+/// did. It is the *absolute* path in both cases and not the `~`-relative crumb
+/// form §13.32 ③ gives the files column's breadcrumb row, because this string is
+/// not only shown: it seeds the address field, and what that field hands back
+/// goes through [`file_url_of_local_path`], which takes an absolute path and
+/// nothing else. A row that displayed `~/notes.html` would be a field whose own
+/// content it refuses.
 ///
 /// The tail rides along: `report.html#ch3` is a place in a report, and a
 /// displayed path that dropped the fragment would name the top of it.
@@ -1678,9 +1732,17 @@ mod tests {
             "http://localhost:5173/app",
             "file://server/share/page.html",
             "file:///C:/site/../secret.html",
-            "file:///relative/path.html",
+            "file:///Users/somebody/../secret.html",
             "file:///C:/site/%C3%A9.html",
             "file:///C:/site/%2",
+            // `file:///C:` is **not** on this list, and that is the two-root
+            // reading being honest rather than a gap in it: a body of `C:` with
+            // no separator after it is not a drive-absolute path, and what it
+            // *is* is a slash-rooted path to a file called `C:` — which is a
+            // legal name on the machine that spells paths that way, and which
+            // `Mint::file` would have minted exactly this string from. The
+            // reader is the inverse of the encoder, and the disk is asked again
+            // either way.
             "file:///",
             "",
         ] {
@@ -1690,6 +1752,63 @@ mod tests {
                 "not a string this door minted: {foreign}"
             );
         }
+    }
+
+    /// RED (M4-3) — **the reader roots a path the way the minter rooted it**,
+    /// and neither of them asks which machine is doing the reading.
+    ///
+    /// M4-2 fixed the encoder for a path that is nothing but a root
+    /// (`a_minted_file_url_has_one_root_however_the_path_spelled_it`) and left
+    /// the decoder assuming a drive letter, so
+    /// [`Mint::path_and_tail_of_file_url`] answered `None` for every URL a Mac
+    /// ever minted and [`local_path_form`] therefore showed the URI where the
+    /// ruling of 2026-08-25 says a path goes — the carry-forward §13.29 ⑬ wrote
+    /// down.
+    ///
+    /// **Both spellings are asked of both, on one machine**, which is the whole
+    /// point: these are string questions, a session file travels, and a test that
+    /// only asked about the host it happens to be running on would go green on
+    /// Windows for a function that was still broken on a Mac.
+    ///
+    /// MUTATION: ① root the slash-rooted arm with `\` and the second assertion
+    /// reads `\Users\…`; ② read `Path::is_absolute` again and every slash-rooted
+    /// row answers `None` on Windows; ③ drop the `..` split and the two
+    /// traversals come back as paths.
+    #[test]
+    fn a_file_url_reads_back_rooted_the_way_it_was_minted() {
+        // Drive-rooted: unchanged, to the character.
+        assert_eq!(
+            local_path_form("file:///D:/Developer/notes%20and%20more.html#ch3").as_deref(),
+            Some(r"D:\Developer\notes and more.html#ch3")
+        );
+        // Slash-rooted: the same sentence about the other kind of machine.
+        assert_eq!(
+            local_path_form("file:///Users/somebody/notes%20and%20more.html#ch3").as_deref(),
+            Some("/Users/somebody/notes and more.html#ch3")
+        );
+        assert_eq!(
+            Mint::path_and_tail_of_file_url("file:///Users/somebody/report.html?page=2#top"),
+            Some((
+                PathBuf::from("/Users/somebody/report.html"),
+                "?page=2#top".to_owned()
+            ))
+        );
+        // A slash-rooted path at the top of its tree still has a name in it.
+        assert_eq!(
+            local_path_form("file:///Applications").as_deref(),
+            Some("/Applications")
+        );
+        // And the mint of a slash-rooted path reads back as the path it was
+        // made from — the round trip the drive-rooted arm has always had.
+        let original = "/Users/somebody/a b/p#1.html";
+        let Mint::File(url) = Mint::file(Path::new(original)).expect("a local path mints") else {
+            panic!("`Mint::file` makes a file mint");
+        };
+        assert_eq!(url, "file:///Users/somebody/a%20b/p%231.html");
+        assert_eq!(
+            Mint::path_and_tail_of_file_url(&url),
+            Some((PathBuf::from(original), String::new()))
+        );
     }
 
     // ---- the twelve carried over from the W0′ probe (w0-evidence.md) ----

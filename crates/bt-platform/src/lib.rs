@@ -3918,6 +3918,29 @@ mod windows_impl {
             })
         }
 
+        /// **Which parts of this page's rectangle are Folio's own** — the
+        /// window saying where its chrome stands over the page (M4-3).
+        ///
+        /// Dropped here, and the reason is what the two engines *are*. A
+        /// `WKWebView` is a real view in the window's own hierarchy and AppKit
+        /// routes presses to it directly, so a menu Folio drops across a page is
+        /// a menu the reader cannot press unless the page's slot is told to let
+        /// that rectangle through. A WebView2 composed into a visual is not in
+        /// any hit-test order at all: **every** press in this window arrives at
+        /// Folio, which decides what it was over and forwards to the page the
+        /// ones that were the page's (`WebHost::send_mouse`). The question this
+        /// door asks is already answered, on this platform, by the mechanism
+        /// that delivers the press in the first place.
+        ///
+        /// A door on every arm rather than a `cfg` at the call site, for the
+        /// reason every other one is: `bt-app` names no platform, and a window
+        /// that had to know which engine it was talking to would be a window
+        /// with two placement passes.
+        pub fn set_page_cover(&self, page: PageVisual, rects: &[[f32; 4]]) -> Result<(), String> {
+            let _ = (page, rects);
+            Ok(())
+        }
+
         /// Take the web preview's visual back out of the tree.
         ///
         /// Called when the last page in this window goes away. Leaving an empty
@@ -10106,6 +10129,12 @@ mod compositor_arms_tests {
                 "set_gpu_offset",
                 "attach_web_visual",
                 "set_page_ground_color",
+                // M4-3. A door on both arms and dropped on this one: a WebView2
+                // composed into a visual is in no hit-test order, so every press
+                // in the window is already Folio's. `bt-app` names no platform,
+                // so it says where its chrome stands whichever engine is under
+                // the pane.
+                "set_page_cover",
                 "detach_web_visual",
                 "place_web_visual",
                 "hide_web_visual",

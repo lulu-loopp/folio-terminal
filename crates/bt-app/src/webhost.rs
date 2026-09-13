@@ -1694,6 +1694,17 @@ pub(crate) struct WebSeat {
     /// What the engine has actually been told, so a frame that changed nothing
     /// issues no calls.
     presence: Option<WebPresence>,
+    /// **Where the window's own chrome stands over this page** - the rectangles
+    /// the compositor is told about, in window pixels (M4-3, DESIGN §13.38 ④).
+    ///
+    /// Empty is the ordinary case: a page with nothing drawn across it. The
+    /// arm that reads it is macOS's, where the page is a real view in the
+    /// window's hit-test order; the Windows arm drops it, because every press
+    /// there arrives at Folio first.
+    wanted_cover: Vec<[f32; 4]>,
+    /// What the compositor has been told, so a frame that changed nothing issues
+    /// no call - [`Self::placed`]'s discipline, for the other rectangle.
+    told_cover: Option<Vec<[f32; 4]>>,
     /// **Where this seat's rectangle is and how big it is**, whether or not the
     /// page is on the glass — see [`WebSeat::apply_presence`] for why presence
     /// and rectangle are separate questions since W2 slice ③.
@@ -1950,6 +1961,8 @@ impl WebSeat {
             waiting: None,
             engine_owes_an_answer: None,
             wanted: WebPresence::Hidden,
+            wanted_cover: Vec::new(),
+            told_cover: None,
             presence: None,
             wanted_bounds: None,
             bounded: None,
@@ -2891,8 +2904,16 @@ impl WebSeat {
         compositor: &bt_platform::Compositor,
         presence: WebPresence,
         bounds: Option<WebBounds>,
+        cover: &[[f32; 4]],
     ) -> Result<bool, String> {
         self.wanted = presence;
+        // **And where the window is standing on top of it** (M4-3). A third
+        // fact about the same rectangle, cached beside the other two for the
+        // same reason: this is read every frame and changes on almost none of
+        // them.
+        if self.wanted_cover != cover {
+            self.wanted_cover = cover.to_vec();
+        }
         // **The rectangle is not the presence** (W2 slice ③). A seat's rectangle
         // exists whenever its pane does; whether the page is *on the glass* is a
         // second question, answered by a modal and by which tab is in front. They
@@ -2950,6 +2971,15 @@ impl WebSeat {
             // Only once the call has returned: the cache says "the compositor
             // was told this", and a refusal told it nothing.
             self.placed = Some(placement);
+        }
+        // **What the window is standing over, on the same clock** (M4-3).
+        // Outside the placement's own gate because the two move separately: a
+        // menu opens across a page that has not moved a pixel, and a page moves
+        // under chrome that has not. Told only when it changes, which is the
+        // discipline every other door in this method keeps.
+        if self.told_cover.as_deref() != Some(self.wanted_cover.as_slice()) {
+            compositor.set_page_cover(self.address.page, &self.wanted_cover)?;
+            self.told_cover = Some(self.wanted_cover.clone());
         }
         self.apply_presence()?;
         Ok(matches!(self.wanted, WebPresence::Shown(_)))
@@ -4557,6 +4587,8 @@ mod rehost_address_tests {
             waiting: None,
             engine_owes_an_answer: None,
             wanted: WebPresence::Hidden,
+            wanted_cover: Vec::new(),
+            told_cover: None,
             presence: None,
             wanted_bounds: None,
             bounded: None,

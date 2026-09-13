@@ -12475,6 +12475,21 @@ struct WindowRuntime {
     /// this is a function of the *rectangle*, and the rectangle belongs to the
     /// solve. It is `None` whenever the capsule is down or its pane has gone.
     search_layout: Option<search::Capsule>,
+    /// **The box each overlay layer stood in when this window last published
+    /// one** - in the order the stack was built, so that an index into it is the
+    /// index [`bt_render::WebHole::above`] is written in (M4-3).
+    ///
+    /// Kept for one question and no other: on macOS a page is a real view in the
+    /// window and AppKit routes presses to it directly, so Folio has to say
+    /// which parts of a page's rectangle its own chrome is standing over or a
+    /// menu dropped across a page is a menu nothing can press. A layer *over* a
+    /// page - every layer for a docked page, the layers above its own float for
+    /// a floated one - is a rectangle the page does not answer for.
+    ///
+    /// **One frame behind, and that is the honest reading of it**: this says
+    /// where the window last *drew*, which is what a reader is pressing on. A
+    /// menu that opened on this frame is a menu nobody has aimed at yet.
+    overlay_bounds: Vec<Option<[f32; 4]>>,
     /// Which of the capsule's controls the pointer is on.
     search_hover: Option<search::SearchElement>,
     /// **Where each host's notice strip was drawn last frame** — what a press is
@@ -31132,6 +31147,37 @@ struct WebPlacement {
     /// pane is a seat, which is under the whole stack; the float's own layer for
     /// a page whose pane is a floating window.
     above: Option<usize>,
+    /// **The boxes of this window's own chrome that stand over this page** -
+    /// every overlay layer drawn after the hole was punched, in window pixels
+    /// (M4-3). Empty is the ordinary case and means the page has the whole of
+    /// its rectangle. See [`Runtime::chrome_over`].
+    cover: Vec<[f32; 4]>,
+}
+
+/// [`Runtime::chrome_over`] with the stack as a value — the whole of the rule,
+/// where a test can read it.
+///
+/// A free function for [`a_page_is_off_the_glass`]' reason: what it answers is a
+/// question about five numbers and a list, and a method would need a window to
+/// ask it.
+fn chrome_over(
+    layers: &[Option<[f32; 4]>],
+    above: Option<usize>,
+    body: Option<[f32; 4]>,
+) -> Vec<[f32; 4]> {
+    let Some(body) = body else {
+        return Vec::new();
+    };
+    let first = above.map_or(0, |level| level.saturating_add(1));
+    layers
+        .iter()
+        .skip(first)
+        .flatten()
+        .filter(|rect| {
+            rect[0] < body[2] && rect[2] > body[0] && rect[1] < body[3] && rect[3] > body[1]
+        })
+        .copied()
+        .collect()
 }
 
 /// **A page a modal has taken off the glass, and the box its last frame stands
@@ -35567,6 +35613,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         command_flash: None,
         search: search::SearchState::default(),
         search_layout: None,
+        overlay_bounds: Vec::new(),
         notice_layouts: std::collections::BTreeMap::new(),
         notice_hover: None,
         notice_states: std::collections::BTreeMap::new(),
@@ -44137,6 +44184,14 @@ impl Runtime<'_> {
         let flattened = stack.flattened();
         dump_overlay_frame(&flattened);
         let layers = self.window.settings_marks.resolve_overlay(flattened);
+        // **Where each layer stands, kept for the pages under them** (M4-3).
+        // Read here because this is the one place the stack's order is settled,
+        // which is the order `WebHole::above` is an index into - the same
+        // sentence `below_the_floats` is read for a few lines up.
+        self.window.overlay_bounds = layers
+            .iter()
+            .map(bt_render::OverlayLayer::opaque_bounds)
+            .collect();
         self.window.renderer.set_modal_overlay(layers)
     }
 
@@ -94982,6 +95037,8 @@ impl Runtime<'_> {
                     presence: webhost::WebPresence::Hidden,
                     rect: None,
                     above: None,
+                    // A page with no rectangle has nothing standing over it.
+                    cover: Vec::new(),
                 });
                 continue;
             };
@@ -95001,6 +95058,8 @@ impl Runtime<'_> {
                     presence: webhost::WebPresence::Hidden,
                     rect: None,
                     above: None,
+                    // A page with no rectangle has nothing standing over it.
+                    cover: Vec::new(),
                 });
                 continue;
             }
@@ -95118,11 +95177,13 @@ impl Runtime<'_> {
                     )
                 });
             }
+            let cover = self.chrome_over(above, body);
             placements.push(WebPlacement {
                 leaf,
                 presence,
                 rect,
                 above,
+                cover,
             });
         }
         // **A page holds the keyboard only while it is what typing goes into**
@@ -95142,7 +95203,12 @@ impl Runtime<'_> {
             // whole slice is about.
             let floored = match window.web.get_mut(&placement.leaf) {
                 Some(web) => {
-                    match web.place(&window.compositor, placement.presence, placement.rect) {
+                    match web.place(
+                        &window.compositor,
+                        placement.presence,
+                        placement.rect,
+                        &placement.cover,
+                    ) {
                         Ok(floored) => floored,
                         Err(error) => {
                             eprintln!("BT_WEB place failed: {error}");
@@ -95302,6 +95368,34 @@ impl Runtime<'_> {
     /// layer *after* the hole and therefore covers it correctly on its own
     /// rectangle; a scrim covers every rectangle, and a hole punched through one
     /// would be a page read clearly through a dimmed window.
+    /// **The boxes of this window's own chrome standing over a page** (M4-3) -
+    /// what `bt_platform::Compositor::set_page_cover` is told, and nothing but a
+    /// reading of two things this frame already decided.
+    ///
+    /// `above` is where the page's hole is punched ([`bt_render::WebHole::above`]):
+    /// the layers at and below it are drawn *under* the page and the ones after
+    /// it are drawn *over* it, which is the same sentence the renderer paints by.
+    /// `None` is a docked page, whose hole stands under the whole stack, so every
+    /// layer is over it; `Some(level)` is a floated page, whose hole is punched
+    /// above its own float's face precisely so that the page is not covered by
+    /// the pane it is in.
+    ///
+    /// **Why this exists at all.** On Windows the question never arises: a
+    /// WebView2 composed into a visual is in no hit-test order, every press in
+    /// the window is Folio's, and Folio forwards to the page the ones over it. A
+    /// `WKWebView` is a real view in the window's own hierarchy and AppKit routes
+    /// presses to it directly, so a search capsule, a `⌄` menu or a tooltip drawn
+    /// across a page would be chrome nothing could press. The macOS compositor
+    /// hands these to the page's slot; the Windows one drops them with a line
+    /// saying why.
+    ///
+    /// Only the layers that actually **overlap** the page are sent: a menu on the
+    /// other side of the window is not a hole in this page, and a list of every
+    /// layer in the stack would be a per-frame allocation for nothing.
+    fn chrome_over(&self, above: Option<usize>, body: Option<[f32; 4]>) -> Vec<[f32; 4]> {
+        chrome_over(&self.window.overlay_bounds, above, body)
+    }
+
     fn a_modal_covers_the_window(&self) -> bool {
         self.app.quit.as_ref().is_some_and(quit::Quit::is_asking)
             || self.window.dirty_gate.is_open()
@@ -108728,6 +108822,62 @@ mod floated_page_tests {
             !a_page_still_has_a_pane(false, false, false),
             "a page with neither a float nor a seat has run out of surface"
         );
+    }
+
+    /// RED (M4-3) — **a page answers for the part of its rectangle nothing of
+    /// Folio's is standing on, and for no other part of it.**
+    ///
+    /// The rule `bt_platform::Compositor::set_page_cover` is fed, and it is one
+    /// reading of a fact this frame already settled: `above` is where the page's
+    /// hole is punched in the overlay stack, so the layers at and below it are
+    /// drawn *under* the page and the ones after it are drawn *over* it. A
+    /// docked page's hole stands under the whole stack (`None`), so every layer
+    /// covers it; a floated page's is punched above its own float's face
+    /// precisely so that the pane it lives in does not.
+    ///
+    /// It exists because on macOS a `WKWebView` is a real view in the window's
+    /// own hit-test order: without this the in-pane search capsule, a `⌄` menu
+    /// dropped over a page and a floated pane's own head would all be chrome
+    /// nothing could press.
+    ///
+    /// MUTATION: ① drop the `skip` and a float's own head covers the page inside
+    /// it — the second assertion; ② drop the overlap filter and a menu on the
+    /// other side of the window becomes a hole in this page — the third; ③ take
+    /// the `saturating_add` off and the float's own layer covers it — the second
+    /// again.
+    #[test]
+    fn a_page_answers_for_every_part_of_itself_nothing_is_standing_on() {
+        use super::chrome_over;
+        let body = [100.0_f32, 100.0, 500.0, 400.0];
+        // Three layers: one over the page, one beside it, one that drew nothing.
+        let over = [200.0_f32, 150.0, 300.0, 200.0];
+        let beside = [600.0_f32, 150.0, 700.0, 200.0];
+        let stack = [Some(over), None, Some(beside)];
+
+        assert_eq!(
+            chrome_over(&stack, None, Some(body)),
+            vec![over],
+            "a docked page's hole stands under the whole stack, so a layer over              it covers it and a layer beside it does not"
+        );
+        let nothing: Vec<[f32; 4]> = Vec::new();
+        assert_eq!(
+            chrome_over(&stack, Some(0), Some(body)),
+            nothing,
+            "a float's page is drawn over its own float's face, so that layer is              not something standing on it"
+        );
+        assert_eq!(
+            chrome_over(&[Some(beside)], None, Some(body)),
+            nothing,
+            "a menu on the other side of the window is not a hole in this page"
+        );
+        assert_eq!(
+            chrome_over(&stack, None, None),
+            nothing,
+            "a page with no rectangle has nothing standing over it"
+        );
+        // A layer naming a level past the end of the stack takes nothing with
+        // it, which is `WebHole::above`'s own answer to the same case.
+        assert_eq!(chrome_over(&stack, Some(99), Some(body)), nothing);
     }
 
     /// RED — **a float is on the glass whichever tab is in front** (§7.1.2), so

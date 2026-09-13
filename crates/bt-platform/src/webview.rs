@@ -400,17 +400,56 @@ impl WebGuards {
 
     /// The ones that do not, named as the engine names them, for the line of
     /// fact under the card.
+    ///
+    /// **The engine whose name is printed is the one the reader is running**
+    /// (M4-3). The card over it says only that this window's rules could not be
+    /// enforced; this line is what a reader takes to a search box or to an issue,
+    /// and three WebView2 event names under a `WKWebView` would send them looking
+    /// for an API their machine has never had. It is the same ruling M4-2 made one
+    /// line down for the switches a build would not take — the detail names the
+    /// *thing*, and the thing has two names.
+    ///
+    /// Read from [`crate::host_platform`] rather than written behind a `cfg`, so
+    /// that a Windows runner can ask what the other column says — which is what
+    /// `the_missing_gates_are_named_as_the_reader_s_own_engine_names_them` does.
     #[must_use]
     pub fn missing(self) -> Vec<&'static str> {
+        self.missing_on(crate::host_platform())
+    }
+
+    /// [`Self::missing`] with the platform as a value — the whole table, and the
+    /// entry point for a test that has to read both columns of it at once.
+    #[must_use]
+    pub fn missing_on(self, platform: crate::HostPlatform) -> Vec<&'static str> {
+        let windows = platform == crate::HostPlatform::Windows;
         let mut missing = Vec::new();
         if !self.script_dialogs {
-            missing.push("ScriptDialogOpening");
+            missing.push(if windows {
+                "ScriptDialogOpening"
+            } else {
+                // The three panel methods are one gate here: WebKit shows its own
+                // window for any of them that is not implemented, so the answer
+                // to "is this gate standing" is about the delegate rather than
+                // about a switch, and the protocol is what to name.
+                "WKUIDelegate runJavaScript…Panel"
+            });
         }
         if !self.frame_navigation {
-            missing.push("FrameNavigationStarting");
+            missing.push(if windows {
+                "FrameNavigationStarting"
+            } else {
+                "decidePolicyForNavigationAction:"
+            });
         }
         if !self.resource_requests {
-            missing.push("WebResourceRequested");
+            missing.push(if windows {
+                "WebResourceRequested"
+            } else {
+                // Not a callback at all on this engine — the third door is a
+                // compiled list, and a list that would not compile is what this
+                // half of the card is reporting.
+                "WKContentRuleList"
+            });
         }
         missing
     }
@@ -4029,3 +4068,83 @@ mod portable;
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
 pub use portable::{WebHost, forget_web_environment, webview2_runtime_version};
+
+/// **The names under the card, on both engines** (M4-3).
+#[cfg(test)]
+mod guard_naming_tests {
+    use super::*;
+    use crate::HostPlatform;
+
+    /// RED — **a card raised on a Mac names doors a Mac has.**
+    ///
+    /// [`WebGuards::missing`] is the detail line of `WebFault::GuardsUnavailable`
+    /// — the card a local file raises when this host could not be given the
+    /// gates that make a previewed document a document. The sentence over it is
+    /// one the copy table already writes for both machines; this line was three
+    /// WebView2 event names on either, which sends a Mac reader to a search
+    /// engine for an API their machine has never had.
+    ///
+    /// The three doors are the *same three questions* on both engines and that is
+    /// why one struct carries them: whether a page's own modal windows are
+    /// answered, whether a frame's navigation is asked about, and whether the
+    /// document's subresources are policed. What differs is only what the engine
+    /// calls the thing that answers.
+    ///
+    /// MUTATION: name one column on both platforms and the other platform's
+    /// assertion goes red; leave a gate out of a column and the length does.
+    #[test]
+    fn the_missing_gates_are_named_as_the_readers_own_engine_names_them() {
+        let none = WebGuards::none();
+        assert_eq!(
+            none.missing_on(HostPlatform::Windows),
+            [
+                "ScriptDialogOpening",
+                "FrameNavigationStarting",
+                "WebResourceRequested"
+            ]
+        );
+        assert_eq!(
+            none.missing_on(HostPlatform::MacOs),
+            [
+                "WKUIDelegate runJavaScript…Panel",
+                "decidePolicyForNavigationAction:",
+                "WKContentRuleList"
+            ]
+        );
+        // A machine with neither engine reads the column written for the one
+        // whose vocabulary is not Windows', which is `pick_platform`'s own
+        // choice for the same reason: there is no third set of names.
+        assert_eq!(
+            none.missing_on(HostPlatform::OtherUnix),
+            none.missing_on(HostPlatform::MacOs)
+        );
+        // Every gate standing is an empty line on both, and one gate down names
+        // exactly one door.
+        for platform in [HostPlatform::Windows, HostPlatform::MacOs] {
+            assert!(
+                WebGuards {
+                    script_dialogs: true,
+                    frame_navigation: true,
+                    resource_requests: true,
+                }
+                .missing_on(platform)
+                .is_empty()
+            );
+            assert_eq!(
+                WebGuards {
+                    script_dialogs: true,
+                    frame_navigation: true,
+                    resource_requests: false,
+                }
+                .missing_on(platform)
+                .len(),
+                1
+            );
+        }
+        // And nothing in either column is the other's: a name that appeared on
+        // both would be the drift this test exists to keep out.
+        for name in none.missing_on(HostPlatform::Windows) {
+            assert!(!none.missing_on(HostPlatform::MacOs).contains(&name));
+        }
+    }
+}

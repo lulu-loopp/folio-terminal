@@ -8,8 +8,9 @@ vulnerability privately.
 ## English
 
 Folio has no telemetry, no analytics and no crash reporting. Two things reach
-the network: a page you open in the web preview, fetched by the WebView2 engine
-that Windows provides, and the update check below.
+the network: a page you open in the web preview, fetched by the web engine your
+operating system provides — WebView2 on Windows, WebKit on macOS — and the
+update check below.
 
 Everything Folio remembers is on your machine, in two directories.
 
@@ -57,20 +58,31 @@ Remove-Item -Recurse -Force "$env:APPDATA\Folio"
 Remove-Item -Force "$env:APPDATA\Folio\diagnostics*.log", "$env:APPDATA\Folio\hang-reports" -Recurse -ErrorAction SilentlyContinue
 ```
 
-### `%LOCALAPPDATA%\Folio\WebView2` — the web preview's profile
+### The web preview's profile
 
-A separate directory, and not the one above. It is the WebView2 engine's own
-profile for the preview: cookies, local storage, the disk cache, and the profile
-directory autofill would use. It is local rather than roaming so that a cache and
-a cookie jar do not travel between machines. Folio does not delete it.
+A separate place from the directory above, and where it is depends on the
+engine. The preview keeps what any browser keeps — cookies, local storage and
+the disk cache — and Folio does not delete it.
 
-Autofill and password saving are switched **off** in this profile — not left at
-the engine's defaults — so a form you fill in a previewed page is not saved into
-it. Cookies and cache still are, as they are in any browser.
+| | |
+| --- | --- |
+| **Windows** | `%LOCALAPPDATA%\Folio\WebView2`: the WebView2 engine's own profile directory for the preview, including the one autofill would use. It is local rather than roaming so that a cache and a cookie jar do not travel between machines. |
+| **macOS** | `~/Library/WebKit/<Folio's bundle identifier>` and `~/Library/Caches/<Folio's bundle identifier>`: the application's own website data, which is where WebKit puts it for every application. Folio's compiled page rules live separately, in `~/Library/Application Support/Folio/WebKit`, and are not browsing data. |
+
+A form you fill in a previewed page is **not** saved. On Windows the engine's
+autofill and password saving are switched off rather than left at their
+defaults; on macOS the engine has neither feature to switch off — form autofill
+and the keychain belong to Safari and not to the view Folio hosts. Cookies and
+cache still are kept, as they are in any browser.
 
 ```powershell
-# Clear the preview's cookies, storage and cache. Close Folio first.
+# Windows: clear the preview's cookies, storage and cache. Close Folio first.
 Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Folio\WebView2"
+```
+
+```sh
+# macOS: the same. Quit Folio first.
+rm -rf ~/Library/WebKit/<Folio's bundle identifier> ~/Library/Caches/<Folio's bundle identifier>
 ```
 
 ### What is in `session.json` and `pins.json`
@@ -132,8 +144,9 @@ profile. Do not put a secret in one.
 ## 中文
 
 Folio 不向任何地方发送与你有关的数据。没有遥测、没有统计、没有崩溃上报。联网的只有两
-件事：你在网页预览里打开的那个页面，由 Windows 自带的 WebView2 引擎抓取；以及下面这个
-更新检查。
+件事：你在网页预览里打开的那个页面，由操作系统自带的网页引擎抓取——Windows 上是
+WebView2，macOS 上是 WebKit；以及下面这个更新检查。
+<!-- zh pending opus46: M4-3 只改了「哪个引擎抓的」这半句,措辞待审 -->
 
 Folio 记住的一切都在本机，分在两个目录里。
 
@@ -179,18 +192,30 @@ Remove-Item -Recurse -Force "$env:APPDATA\Folio"
 Remove-Item -Force "$env:APPDATA\Folio\diagnostics*.log", "$env:APPDATA\Folio\hang-reports" -Recurse -ErrorAction SilentlyContinue
 ```
 
-### `%LOCALAPPDATA%\Folio\WebView2` —— 网页预览的 profile
+### 网页预览的 profile
 
-这是另一个目录，不是上面那个。它是 WebView2 引擎给预览用的 profile：cookie、本地存储、
-磁盘缓存，以及自动填充会用的 profile 目录。放在 local 而不是 roaming，是为了让缓存和
-cookie 不跟着账户在机器之间跑。Folio 不会删它。
+<!-- zh pending opus46: M4-3 重写了这一节(加了 macOS 那一路),措辞与句读待审 -->
 
-这个 profile 里的自动填充与密码保存是**关**的——不是留给引擎的默认值——所以你在预览页面
-里填的表单不会存进去。cookie 和缓存照常存，和任何浏览器一样。
+跟上面那个目录不是一处，具体在哪里取决于引擎。预览保存的东西和任何浏览器一样——cookie、
+本地存储、磁盘缓存——Folio 不会删它。
+
+| | |
+| --- | --- |
+| **Windows** | `%LOCALAPPDATA%\Folio\WebView2`：WebView2 引擎给预览用的 profile 目录，也包括自动填充会用的那个。放在 local 而不是 roaming，是为了让缓存和 cookie 不跟着账户在机器之间跑。 |
+| **macOS** | `~/Library/WebKit/<Folio 的 bundle identifier>` 与 `~/Library/Caches/<Folio 的 bundle identifier>`：这个应用自己的网站数据，WebKit 给每个应用都放在这里。Folio 编译出来的页面规则另放在 `~/Library/Application Support/Folio/WebKit`，那不是浏览数据。 |
+
+你在预览页面里填的表单**不会**被保存。Windows 上是把引擎的自动填充与密码保存关掉，而不
+是留给它们的默认值；macOS 上引擎根本没有这两样东西可关——表单自动填充和钥匙串是 Safari
+的，不属于 Folio 承载的这个视图。cookie 和缓存照常存，和任何浏览器一样。
 
 ```powershell
-# 清掉预览的 cookie、存储与缓存。先关掉 Folio。
+# Windows：清掉预览的 cookie、存储与缓存。先关掉 Folio。
 Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Folio\WebView2"
+```
+
+```sh
+# macOS：同样一件事。先退出 Folio。
+rm -rf ~/Library/WebKit/<Folio 的 bundle identifier> ~/Library/Caches/<Folio 的 bundle identifier>
 ```
 
 ### `session.json` 与 `pins.json` 里有什么

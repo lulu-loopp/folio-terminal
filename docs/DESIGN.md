@@ -11948,3 +11948,258 @@ hook, which nothing behind an unbound name could have done. Both pids were writt
 those two were ever ended.
 
 *(本节英文,待中文文案改写。)*
+
+### 13.38 M4-3: 网页策略对齐 X-2 的矩阵——每一行都在真机上驱动过,给不了的保证写进产品(`crates/bt-app/src/{webnav,webhost,i18n,main}.rs`、`crates/bt-platform/src/{webview,macos_compose,lib,portable_impl}.rs`、`crates/bt-platform/tests/macos_webview.rs`、`crates/bt-render/src/lib.rs`、`docs/PRIVACY.md`)
+
+**① Forty rows, on the machine, and none of them left as a reading.** X-2's matrix
+was twenty requirements measured against a *probe*; M4-2 drove the ten of them a
+local seat can be asked without a socket, against the product's own host. This
+ticket drives **everything else**, in the same `harness = false` bundle (§13.17,
+§13.29 ⑫), against two HTTP origins the test serves out of its own process on
+`127.0.0.1` — because a document and its subresources have to be two origins for
+a cross-origin row to mean anything, and because **the far socket is the only
+witness a request nobody was told about has**.
+
+| Row | What was asked | Verdict, measured |
+|---|---|---|
+| ⑪ | a browsing seat is built and its three gates stand | PASS — `script_dialogs`, `frame_navigation`, `resource_requests` all true |
+| ⑫ | a picture, a stylesheet, a script and a `fetch()` to a second origin | PASS — **all four reach the far socket; the delegate is told about one thing on the page, and it is the iframe** |
+| ⑬ | the same document with the second origin in the compiled rule list | PASS — nothing reaches the socket, the page sees `blocked`, and **Folio is told about 0 of them** |
+| ⑭ | a 302 → 302 → page chain | PASS — the gate is asked about `/redirect1`, `/redirect2` and `/doc2.html` |
+| ⑮ | an iframe to the other origin | PASS — one `decidePolicyForNavigationAction:` with `isMainFrame == false`, routed to the request gate |
+| ⑯ | a `data:` iframe | PASS — what the document already holds, and it loads |
+| ⑰ | `401` with `WWW-Authenticate: Basic` | PASS — no box, the 401 body drawn, the seat still on the address |
+| ⑱ | permissions, one capability at a time | PASS — see ⑥ below |
+| ⑲ | a `download=` link | PASS — `shouldPerformDownload`, cancelled, `DownloadStarting` queued |
+| ⑳ | `target=_blank`, and `window.open` with no gesture behind it | PASS — nothing opens, the seat does not move, the page is answered `null` |
+| ㉑ | a form `POST` | PASS — a navigation the gate is asked about, `Origin` and body arriving at the server |
+| ㉒ | a `blob:` location | PASS — offered to the gate with its whole URL and cancelled |
+| ㉓ | a `file:` URL **inside the other seat's mint**, named from an `http` page | PASS — refused, and the report names which door: **the engine's, before any callback** |
+| ㉔ | a `Worker`'s own `fetch`, and a `ServiceWorker` registration | PASS — see ⑤ below |
+| ㉕ | the pointer | PASS — see ④ below |
+
+Every row prints its own verdict, its own evidence and, where the answer is a
+*finding* rather than a claim, the finding. `failures=0` over the whole
+matrix — the ten M4-2 rows and these fifteen — on macOS 26.6.2, ad-hoc signed,
+started with `open`, ended by the pid it printed as its first line.
+
+**② What the product says it cannot do.** X-2's "what Q5's reduced set gives up"
+is seven sentences (§13.29 ⑩) and the ticket's question was which of them a
+*string* promises. The honest answer is: **almost none of them, because the
+product never promised the mechanism** — there is no settings row, no first-run
+line and no notice about how a page's contents are policed. Two places did
+promise something the other machine cannot give, and both are fixed here.
+
+* **`Text::WebFailGuardsSay`** — the card a local file raises when this host could
+  not be given the gates. Its English read *"This version of the web engine
+  cannot enforce this window's rules for a page"*, and on Windows that is the
+  fact a reader can act on: an Evergreen runtime too old to carry an event is a
+  runtime that can be updated. A Mac's engine is the system's and has no version
+  to be behind — what can fail there is the rule list refusing to compile — so a
+  line blaming *this version* would send a reader after an update that does not
+  exist. It takes a platform column through `pick_platform` (§13.32 ②), and the
+  promise, which is the half that must not move, is identical in both:
+  `the_web_engine_card_states_one_promise_and_names_one_engine`.
+* **`WebGuards::missing()`** — the *detail line* under that card, which was three
+  WebView2 event names on both machines. It is the same three questions on both
+  engines, which is why one struct carries them, and only the name of the thing
+  that answers differs: `ScriptDialogOpening` / `WKUIDelegate runJavaScript…Panel`,
+  `FrameNavigationStarting` / `decidePolicyForNavigationAction:`,
+  `WebResourceRequested` / `WKContentRuleList`. Read from
+  `host_platform()` rather than behind a `cfg`, so a Windows runner can read the
+  other column — which is what
+  `the_missing_gates_are_named_as_the_readers_own_engine_names_them` does. It is
+  M4-2's own ruling about `WebSetting::api` applied one line up.
+
+And one card that is **correct and unreachable**: `WebFailRuntimeSay` names a
+Microsoft product because on Windows that is the thing to install, and
+`webview2_runtime_version` answers `Ok` off Windows always, so `RuntimeMissing`
+is a card no Mac can raise. It goes on `WINDOWS_ONLY_SURFACES` with its verb, and
+`WebView2` joins the words
+`no_string_a_mac_reader_meets_names_a_windows_program` refuses — a gate that was
+not there to catch it.
+
+`docs/PRIVACY.md` said two things that are now false on a Mac and one of them is
+this ticket's: the page in the web preview is *"fetched by the WebView2 engine
+that Windows provides"*. It is fetched by the engine the operating system
+provides, and which one that is is named. The profile section stops being a
+Windows path with a paragraph under it and becomes a two-row table — where the
+browsing data is on each machine, and, on the Mac row, that the compiled page
+rules under `~/Library/Application Support/Folio/WebKit` are **not** browsing
+data. The autofill sentence is one sentence for both and two reasons: on Windows
+the engine's autofill and password saving are switched off rather than left at
+their defaults; on macOS the engine has neither feature to switch off, because
+form autofill and the keychain belong to Safari and not to the view Folio hosts
+(`WEB_SETTINGS`' two autofill rows stand on this arm for exactly that reason —
+§13.29's `configure`). **The update-check half of that file is M5-6's and is
+untouched here**; the two tickets meet at the sentence boundary.
+
+**③ A local page is shown as a path again, on both machines** — §13.29 ⑬'s
+carry-forward, and it was two roots rather than one bug. M4-2 taught the
+*encoder* that an absolute path spells its root in one of two ways —
+`D:\report.html` carries none and `/Users/somebody/report.html` is nothing but
+one — and left the **reader** assuming the first.
+`Mint::path_and_tail_of_file_url` turned every `/` into `\` and then asked
+`Path::is_absolute`, so a Mac's own mint read back as `\Users\somebody\…`, which
+is absolute nowhere, and `local_path_form` answered `None` for every local page a
+Mac ever opened.
+
+The root is now read **off the string**, where both spellings of it already are:
+a body beginning `X:/` is the drive-rooted form and its separators are `\`; a
+body beginning with anything else is the slash-rooted form, whose one leading
+separator the `file:///` prefix already ate. Asking the *host's* rules was the
+mistake — `Path::is_absolute` answers about the machine doing the reading rather
+than about the machine the path is for, and a session file written on one and
+read on the other is exactly the case that has to come back with the same answer
+on both. `a_file_url_reads_back_rooted_the_way_it_was_minted` asks both spellings
+of both machines on one machine, for that reason.
+
+**It is the absolute path and not the `~`-relative crumb** §13.32 ③ gives the
+files column's breadcrumb row, and that is a ruling rather than an omission: this
+string is not only shown, it *seeds the address field*, and what that field hands
+back goes through `file_url_of_local_path`, which takes an absolute path and
+nothing else. A row that displayed `~/notes.html` would be a field whose own
+content it refuses. The breadcrumb row is not reached from here at all — a page's
+rail is its address and never crumbs (「网页不长面包屑」, §7.7) — so the two
+surfaces do not disagree; they are answering about different objects.
+
+One corner left standing and written down rather than smuggled: `Mint::file`
+turns every `\` into `/`, which is right for a separator and wrong for a
+filename, so a file whose *name* contains a backslash — legal on the machine with
+slash-rooted paths and impossible on the other — does not round-trip. Fixing it
+means the encoder asking which machine it is on, which is the one thing this
+module does not do.
+
+**④ The pointer, decided and implemented** — §13.29 ⑩'s last sentence, and the
+one thing M4-1 and M4-2 both left open.
+
+The measurement first. A press inside a page's rectangle **is** routed to the
+`WKWebView` and the page answers it: AppKit hands the point to the frontmost view
+whose `hitTest:` claims it, Folio's own surface view answers nil by design
+(§13.24, `macos_impl`), the page's slot answers its subviews' answer, and the
+page claims its own presses. So far so right. The other half is wrong, and the
+window already knew it: **Folio goes on drawing its own surfaces across that
+rectangle**. The in-pane search capsule stands inside the pane below its head
+(`search_capsule_host` measures it against the seat's *whole* rectangle, not its
+body), a `⌄` menu drops down over the body it was opened from, and a floated
+pane's own face is painted straight back over the hole its page is seen through —
+`a_floated_pages_hole_is_punched_above_the_float_that_carries_it` says so in
+as many words. Every one of those would be chrome nothing could press.
+
+None of it is a question on Windows, and the reason is what the two engines
+*are*: a WebView2 composed into a visual is in no hit-test order at all, so every
+press in the window arrives at Folio and Folio forwards to the page the ones that
+were the page's (`WebHost::send_mouse`). The question this platform asks is
+already answered there by the mechanism that delivers the press.
+
+So the window says where it is standing, and the slot lets those rectangles
+through: `Compositor::set_page_cover(page, rects)` is a door on **every** arm —
+`bt-app` names no platform — which the macOS arm stores on the slot and the
+Windows and portable arms drop in one line that says why. The slot's `hitTest:`
+answers nil inside a cover, and the containment test is `NSPointInRect`'s own
+half-open rule so that two adjacent covers cannot both claim the seam.
+
+**The window is the only thing that can say it**, and what it says is one reading
+of a fact the frame already settled. `WebHole::above` is where a page's hole is
+punched in the overlay stack: the layers at and below it are drawn *under* the
+page and the ones after it are drawn *over* it. `None` is a docked page, whose
+hole stands under the whole stack — every layer covers it; `Some(level)` is a
+floated page, whose hole is punched above its own float's face precisely so that
+the pane it lives in does not. `chrome_over` skips to `level + 1` and keeps the
+layers that overlap the page's own rectangle, and
+`OverlayLayer::opaque_bounds` is where a layer's box comes from — grounds, fills
+with alpha, and a preview body, and not the words on them, because every surface
+in this window that a press can land on is drawn as a ground or a fill first and
+lettered afterwards. A layer faded to nothing is not a surface and does not
+cover.
+
+**One frame behind, and that is the honest reading of it.** `overlay_bounds` is
+recorded where the stack is published, which is the one place its order is
+settled, and read by the next placement pass: it says where the window last
+*drew*, which is what a reader is pressing on. A menu that opened on this frame
+is a menu nobody has aimed at yet.
+
+Pinned twice. `a_page_answers_for_every_part_of_itself_nothing_is_standing_on`
+holds the rule over five cases on Windows; row ㉕ of the `.app` matrix holds the
+delivery on the machine — a press inside the page reaches
+`NSKVONotifying_WKWebView` and the page's own `onclick` reports it, a window that
+page asks for **on that real gesture** is still refused, a press where a cover
+stands routes to the window instead and the page never hears it, and the same
+point is the page's again the moment the cover comes down. The press is delivered
+through `-[NSWindow sendEvent:]`, which is the method the application's own event
+loop calls for a real click, rather than through `CGEventPost`: posting into the
+session's event tap is gated by the Accessibility permission on a current macOS,
+and a run that raised a TCC prompt on somebody's desk would have broken a harder
+rule than it kept.
+
+**⑤ X-2's row 20, answered.** Requests a worker makes on a page's behalf were
+"unknown rather than covered" — the Windows arm filters them on purpose
+(`SOURCE_KINDS_ALL`) and nobody had measured this engine. Measured now, both
+ways round: a `Worker` fetching the second origin **reaches that socket**, with
+`Sec-Fetch-Mode: cors` and the page's own `Origin`, and **no delegate is told
+anything at all** — the same silence as the document's own subresources. With the
+compiled rule list standing, the socket is **not reached** and the worker reports
+`blocked`. So the third door does reach inside a worker: the reduced mechanism
+covers the case, and what was unknown is now one of the things a pattern can say.
+
+A `ServiceWorker` **registers** on this seat — `127.0.0.1` is a potentially
+trustworthy origin, the script is fetched, and `register()` resolves. That is
+worth knowing for what it implies rather than for itself: a registration is
+persisted against the website data store, which on this platform is the
+*application's* (§13.29 ⑥), so a page a reader previews can leave a worker behind
+in Folio's own store exactly as it can leave a cookie. Nothing here changes that
+— it is the persistent-profile cost `PRIVACY.md` already records on both machines
+— but it is a fact that was not written down before. The interception path (a
+`fetch` served *by* a registered worker) is not driven here and is not claimed.
+
+**⑥ Permissions: the ones this host refuses by name, and the one it does not.**
+Apple's rule is that an unimplemented permission method is **not** a denial — the
+capability then arrives with WebKit's own default, which for capture is a panel
+on somebody's screen — so "which capabilities does Folio refuse" is a question
+about the delegate's *method list*, and the runtime answers it exactly. Asked
+with `respondsToSelector:` on the object standing as the page's UI delegate:
+
+* `webView:requestMediaCapturePermissionForOrigin:initiatedByFrame:type:decisionHandler:` — **yes**, the camera and the microphone;
+* `webView:requestDeviceOrientationAndMotionPermissionForOrigin:initiatedByFrame:decisionHandler:` — **yes**;
+* `webView:requestGeolocationPermissionForOrigin:initiatedByFrame:decisionHandler:` — **no, and there is no such method to implement**;
+* `_webView:requestGeolocationPermissionForOrigin:initiatedByFrame:decisionHandler:` — **no**, not even under WebKit's private spelling on this build.
+
+**Geolocation is therefore not a capability this host can refuse at all**, and
+what stands between a previewed page and CoreLocation is the *bundle*: an
+application with no `NSLocation…UsageDescription` cannot be authorised, so the
+request cannot be granted and no prompt can be raised. That is a packaging fact
+rather than a policy one, and it is the reason M5 must never add one of those
+keys to Folio's `Info.plist` for some unrelated feature without coming back to
+this paragraph. The matrix's own bundle carries no usage description of any kind
+and its launcher greps for that before it signs.
+
+The page's own attempt says something else worth recording: on a plain-`http`
+origin WebKit does not expose `navigator.mediaDevices` at all (`camera=noapi`,
+`microphone=noapi`) and `getCurrentPosition` reports nothing back, so a fixture
+without TLS cannot reach the delegate through the *page*. The delegate row above
+is the measurement that does not depend on the origin, which is why it is the one
+the proof asserts and the page's attempt is reported as a finding beside it.
+
+**⑦ Three defects in the instrument, none of them in the host** — worth the
+paragraph because the first run failed ten rows and every one of them was the
+proof and not the product.
+
+* **`settle` turns the run loop; it does not drain the host.** Six rows ran a
+  script, settled, and then read a slice of an event list nothing had appended
+  to. `catch_up` is `until` with nothing wanted: it turns the loop *and* reads.
+* **A wait that was satisfied by history.** `go` waited for "a
+  `NavigationCompleted` in the list", which every list has from the second
+  navigation onwards, so every row after the first read a page that had not
+  loaded. It takes a mark before the call and reads only past it — the same
+  discipline the rows themselves keep with `before = net.len()`.
+* **Points and pixels.** `place_web_visual` is given *physical* pixels and a
+  document's coordinates are points, so a clip of 700×520 on a 2× display is a
+  viewport 350×260 CSS pixels tall and the buttons the pointer rows aim at, at
+  260 and 340, were outside the page. Every press fell through to the window and
+  the rows read as a routing defect that was not there. The clip is points times
+  the backing scale now, and the conversion from a document point to a window
+  point is asked of AppKit — `convertPoint:toView:` twice and `isFlipped` once —
+  rather than assumed, because a test window's content view is not winit's and
+  does not share its origin.
+
+*(本节英文,待中文文案改写。)*
