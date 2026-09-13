@@ -26,6 +26,15 @@ All notable changes to Folio are recorded here. The format follows
 
 - Reuse unchanged Markdown prose measurements across caret moves and edits, and reset block scroll offsets after reparsing.
 
+- **While you type pinyin, the caret stands at the end of what you have typed.**
+  Composing over the terminal, the upright caret sometimes stood one character
+  short of the end — `hai'you` drew it between `o` and `u`, `bin` between `i`
+  and `n` — although the underline covered the whole composition. It happened
+  where the composition was typed over a Chinese character already on screen:
+  half of that character stayed behind, and the caret read it as a wide
+  character it was standing in the middle of. A composition now takes the whole
+  character it covers half of with it, and a caret trusts such a half only when
+  the character it belongs to is still there.
 - **On a Mac, a pane started from the Dock or Finder can read what you type in
   your own language.** A shell started that way is handed no language setting at
   all by macOS, and one without it treats every byte as a character: `天下为公`
