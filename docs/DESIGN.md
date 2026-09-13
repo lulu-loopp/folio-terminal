@@ -10235,7 +10235,7 @@ link until the aim had been proved.
 
 | # | posted at the link's cell | what the window wrote down |
 |---|---|---|
-| 1 | the pointer resting on the folder link | the status tag reads `file:///…/pages/sub · ⌘+click shows it in Finder`, and the folder's glance card stands under it — `SUB`, `inside.txt`, `~/pages/sub` |
+| 1 | the pointer resting on the folder link | the status tag reads `file:///…/pages/sub · ⌘+点击在访达中显示`, and the folder's glance card stands under it — `SUB`, `inside.txt`, `~/pages/sub` |
 | 2 | a bare left press on it | `activate_hyperlink control=0 … arm=FilesColumn("/…/pages/sub") path=/…/pages/sub exists=1 dir=1`, then `show_folder_in_files_column leave=seated SeatId(2)` |
 | 3 | the same press with `⌘` held | `activate_hyperlink control=1 … arm=Reveal("/…/pages/sub") path=… exists=1 dir=1`, and **one** Finder window, named `sub`, at `962,144 920x464` (§13.33 D) — closed again by this trip, and the desk ends with the one Finder window it began with |
 | 4 | the pointer resting on the file link | the file's glance card, headed `my notes 中文.txt`, carrying the file's own first line and `46 B` |
@@ -10274,17 +10274,17 @@ whole document including the rectangle came back identical.
 * **§13.45's own clause reached the glass here, and only here.** That section
   wrote ` · ⌘+click shows it in Finder` into the macOS column and recorded that
   it *could not be photographed*, because the arm it is derived from was `None`
-  on a Mac — which is this ticket's defect, one surface up. Row 1 above is that
-  clause on the glass. It is the English string on a Chinese desk because both
-  macOS columns are in `Text::CHINESE_PENDING` (§13.45 ③), so what the copy pass
-  still owes is the same two clauses with `⌘` in them and 访达 in the second.
-  **The trip was driven twice for this reason.** `feature/macos-command-click`
-  merged into `main` in the middle of this ticket, so the first pass measured
-  `Ctrl`+click against the older pointer rule and every row above was then
-  re-measured on this branch **after** the merge, with `maskCommand`. Nothing in
-  this section moved between the two beyond the name of the key: everything here
-  is downstream of the modifier and reads whatever `hyperlink_activation` is
-  handed, which is exactly the shape §13.45 ① built.
+  on a Mac — which is this ticket's defect, one surface up. Row 1 is that clause
+  on the glass, in the Chinese `copy/option-row` gave it. **`main` moved twice
+  under this ticket and the trip was driven again each time**: the first pass
+  measured `Ctrl`+click, because §13.45's *section* was on `main` and its code
+  was not; `feature/macos-command-click` then merged and every row was
+  re-measured with `maskCommand`; `copy/option-row` then took both clauses out
+  of `Text::CHINESE_PENDING`, and row 1 was photographed a third time. **Nothing
+  in this section moved across any of that** beyond the name of a key and the
+  language of a clause, and that is §13.45 ①'s shape doing its work: everything
+  here is downstream of the modifier and reads whatever `hyperlink_activation`
+  is handed. There is nothing owed to the copy pass by this section's subject.
 * **A restored window's x drifts by a few points while its y and its size do
   not.** Asked for `40,40 1180×740`, the process's own instrument reports
   `BT_DPI stage=create … rect=80,80,2440,1560` — logical `40,40 1180×740`, exact
