@@ -42,6 +42,7 @@ use std::{
     sync::OnceLock,
 };
 
+use bt_platform::LocaleDeclaration;
 use bt_pty::ShellEnvironment;
 
 use crate::{
@@ -454,7 +455,7 @@ pub fn shell_command(
         mine,
     ));
     command.environment.extend(locale_declaration(
-        bt_platform::system_posix_locale(),
+        bt_platform::system_locale_declaration(),
         environment,
         mine,
     ));
@@ -818,21 +819,34 @@ fn hyperlink_declaration(
 /// category a terminal cares about, and `LANG` is the answer itself.
 const LOCALE_VARIABLES: [&str; 3] = ["LC_ALL", "LC_CTYPE", "LANG"];
 
-/// `LANG=<the system's locale>`, **for a pane that would otherwise have none**
-/// (M1-5, plan §8 Q8).
+/// **The system's locale, for a pane that would otherwise have none** (M1-5,
+/// plan §8 Q8; T-MAC-LOCALE).
 ///
 /// # Why this exists on one platform and not on the other
 ///
 /// A Windows pane inherits a full environment from a logon session, and `LANG`
 /// is not part of how that platform tells a child its encoding, so
-/// [`bt_platform::system_posix_locale`] answers `None` there and this declares
-/// nothing — the Windows spawn is byte for byte what it was. An app launched from
-/// Finder inherits `launchd`'s environment instead, which sets `HOME`, `USER`,
-/// `SHELL`, `TMPDIR` and a bare `PATH` and **no `LC_*` at all**: a shell started
-/// in it runs in the `C` locale, where a UTF-8 filename lists as question marks.
-/// So the declaration is the platform's fact rather than a preference, and the
-/// value is the system's own setting rather than one this product picked — see
-/// that function for what it refuses to invent.
+/// [`bt_platform::system_locale_declaration`] answers `None` there and this
+/// declares nothing — the Windows spawn is byte for byte what it was. An app
+/// launched from Finder inherits `launchd`'s environment instead, which sets
+/// `HOME`, `USER`, `SHELL`, `TMPDIR` and a bare `PATH` and **no `LC_*` at all**:
+/// a shell started in it runs in the `C` locale, where a UTF-8 filename lists as
+/// question marks and the three bytes of a Chinese character come back out of
+/// the line editor as three separate characters. So the declaration is the
+/// platform's fact rather than a preference, and the value is the system's own
+/// setting rather than one this product picked — see that function for what it
+/// refuses to invent, and for why a machine whose region names no installed
+/// locale is told the encoding alone.
+///
+/// # The variables are the platform's to choose, not this function's
+///
+/// One or two of them, named and filled in by
+/// [`bt_platform::LocaleDeclaration`]: `LANG` for the system's own locale, and
+/// `LANG=C.UTF-8` with `LC_CTYPE=UTF-8` — Apple's own pair, which Terminal.app
+/// declares in exactly this case — where no installed locale names the system's
+/// language and region. Which fact was found and which variables say it are one
+/// decision, made where the machine was read; this function's whole share of it
+/// is *whether anyone is listening*.
 ///
 /// # The one rule
 ///
@@ -852,21 +866,30 @@ const LOCALE_VARIABLES: [&str; 3] = ["LC_ALL", "LC_CTYPE", "LANG"];
 /// **The Profiles page's ghost rows do not list this yet** — see
 /// [`declared_environment`], which answers from an integration alone and has no
 /// machine to ask. That page is drawn by a settings surface whose own port is a
-/// later ticket, and a ghost row that claimed a `LANG` for a window that had
-/// inherited one would be the page saying something the spawn does not.
+/// later ticket, and a ghost row that claimed a locale variable for a window
+/// that had inherited one would be the page saying something the spawn does not.
 fn locale_declaration(
-    system: Option<&str>,
+    system: Option<&LocaleDeclaration>,
     environment: &dyn ShellEnvironment,
     mine: &[(String, String)],
-) -> Option<(OsString, OsString)> {
-    let locale = system?;
+) -> Vec<(OsString, OsString)> {
+    let Some(declaration) = system else {
+        return Vec::new();
+    };
     let answered = LOCALE_VARIABLES.iter().any(|name| {
         environment
             .var_os(name)
             .is_some_and(|value| !value.is_empty())
             || mine.iter().any(|(mine, _)| mine.eq_ignore_ascii_case(name))
     });
-    (!answered).then(|| (OsString::from("LANG"), OsString::from(locale)))
+    if answered {
+        return Vec::new();
+    }
+    declaration
+        .variables()
+        .iter()
+        .map(|(name, value)| (OsString::from(*name), OsString::from(value)))
+        .collect()
 }
 
 /// **Whether a session of this profile is told this terminal renders links** —
@@ -1842,66 +1865,96 @@ mod tests {
         }
     }
 
-    /// PIN — **`LANG` is declared for a pane that would otherwise have none, and
-    /// only then** (M1-5, plan §8 Q8).
+    /// PIN — **the system's locale is declared for a pane that would otherwise
+    /// have none, and only then** (M1-5, plan §8 Q8; T-MAC-LOCALE).
     ///
     /// A Finder-launched app inherits `launchd`'s environment, which sets no
     /// `LC_*`, and a shell started in it runs in the `C` locale where a UTF-8
-    /// filename lists as question marks. Off macOS
-    /// `bt_platform::system_posix_locale` answers `None` and this declares
+    /// filename lists as question marks and `天下为公` comes back out of the line
+    /// editor a character at a time. Off macOS
+    /// `bt_platform::system_locale_declaration` answers `None` and this declares
     /// nothing at all, which is what keeps the Windows spawn byte for byte what
     /// it was.
     ///
-    /// RED GATE: declare it unconditionally and the second case puts a `LANG`
-    /// under an `LC_ALL` that outranks it — a variable in the record that
-    /// changes nothing — while the third overrules a reader who answered the
+    /// **Both shapes are here**, because the suppression rule is about the
+    /// question rather than about the variable: a machine whose own locale is
+    /// installed is declared in `LANG`, one whose is not gets Apple's pair
+    /// (`LANG=C.UTF-8`, `LC_CTYPE=UTF-8`), and *any* of the three locale
+    /// variables already answered silences either of them whole. Declaring half
+    /// of a pair under an inherited `LC_CTYPE` would be the worst of both: a
+    /// `LANG` that the inherited variable outranks for the one category a pane
+    /// cares about.
+    ///
+    /// RED GATE: declare it unconditionally and the `LC_ALL` case puts a `LANG`
+    /// under a variable that outranks it — one in the record that changes
+    /// nothing — while the profile-row case overrules a reader who answered the
     /// question themselves.
     #[test]
     fn a_pane_with_no_locale_at_all_is_told_the_systems_one() {
         let none: &[(String, String)] = &[];
+        let system = LocaleDeclaration::lang("ja_JP.UTF-8");
+        let fallback = LocaleDeclaration::apple_fallback(true, true)
+            .expect("a machine with both halves declares both");
+        let said = |declaration: Vec<(OsString, OsString)>| {
+            declaration
+                .into_iter()
+                .map(|(name, value)| {
+                    (
+                        name.to_string_lossy().into_owned(),
+                        value.to_string_lossy().into_owned(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
         assert_eq!(
-            locale_declaration(Some("ja_JP.UTF-8"), &bare(), none),
-            Some((OsString::from("LANG"), OsString::from("ja_JP.UTF-8"))),
+            said(locale_declaration(Some(&system), &bare(), none)),
+            [("LANG".to_owned(), "ja_JP.UTF-8".to_owned())],
             "nothing had answered, so the system's own setting does"
         );
         assert_eq!(
-            locale_declaration(None, &bare(), none),
-            None,
+            said(locale_declaration(Some(&fallback), &bare(), none)),
+            [
+                ("LANG".to_owned(), "C.UTF-8".to_owned()),
+                ("LC_CTYPE".to_owned(), "UTF-8".to_owned())
+            ],
+            "and where the system names no installed locale, Apple's own pair"
+        );
+        assert!(
+            locale_declaration(None, &bare(), none).is_empty(),
             "a platform with no such setting declares nothing rather than a guess"
         );
-        for answered in ["LANG", "LC_ALL", "LC_CTYPE"] {
-            assert_eq!(
-                locale_declaration(
-                    Some("ja_JP.UTF-8"),
-                    &Env(vec![(
-                        match answered {
-                            "LANG" => "LANG",
-                            "LC_ALL" => "LC_ALL",
-                            _ => "LC_CTYPE",
-                        },
-                        "de_DE.UTF-8"
-                    )]),
-                    none
-                ),
-                None,
-                "{answered} had answered the question already"
-            );
+        for declaration in [&system, &fallback] {
+            for answered in ["LANG", "LC_ALL", "LC_CTYPE"] {
+                assert!(
+                    locale_declaration(
+                        Some(declaration),
+                        &Env(vec![(answered, "de_DE.UTF-8")]),
+                        none
+                    )
+                    .is_empty(),
+                    "{answered} had answered the question already"
+                );
+                assert!(
+                    locale_declaration(
+                        Some(declaration),
+                        &bare(),
+                        &[(answered.to_owned(), "de_DE.UTF-8".to_owned())]
+                    )
+                    .is_empty(),
+                    "and a {answered} row of the reader's own is them answering outright"
+                );
+            }
         }
-        assert_eq!(
-            locale_declaration(
-                Some("ja_JP.UTF-8"),
-                &bare(),
-                &[("LANG".to_owned(), "de_DE.UTF-8".to_owned())]
-            ),
-            None,
-            "and a row of the reader's own is them answering outright"
-        );
         // An inherited name with an empty value is the platform taking the
         // variable away rather than setting it — see `layer_profile_environment`
         // on what an empty value does to a child's block.
         assert_eq!(
-            locale_declaration(Some("ja_JP.UTF-8"), &Env(vec![("LANG", "")]), none),
-            Some((OsString::from("LANG"), OsString::from("ja_JP.UTF-8")))
+            said(locale_declaration(
+                Some(&system),
+                &Env(vec![("LANG", "")]),
+                none
+            )),
+            [("LANG".to_owned(), "ja_JP.UTF-8".to_owned())]
         );
     }
 

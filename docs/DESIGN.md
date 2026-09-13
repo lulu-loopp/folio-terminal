@@ -2206,7 +2206,7 @@ else                           { Flash }    // 被压住了,但任务栏还在,�
 
 - **`StartingDir::WindowsHome` 改名 `AccountHome`,读 `$HOME`;盘上那个词 `windows_home` 不动**。这个变体从来的意思就是「这台机器叫做家的那个地方,作为工作目录交出去」,变量由 `home_variable` 按平台选(`USERPROFILE` / `HOME`),而一个叫 `WindowsHome` 的变体去解析 `$HOME`,是名字跟自己的身子唱反调。盘上不改是因为每一台 Windows 上的 `profiles.json` 都已经写着那个词,`starting_dir_to_file` 把 `AccountHome` 照旧写成 `NamedStartingDirV1::WindowsHome`——为一个同义词升一版 schema,等于让所有存量文件走一次什么都不改的迁移。这件事有产品后果:从 Finder 启动的 app 继承的是 `launchd` 的环境——`HOME`/`USER`/`SHELL`/`TMPDIR` 和一条光秃秃的 `PATH`,没有继承任何目录——所以第一个 pane 站在哪里,全靠这一条。实机录到的就是这一条在起作用:一份干净数据目录下开出来的第一个 pane,`folio.zsh` 的 `OSC 7` 报的是 `file:///Users/<owner>`,提示符停在 `~`。
 
-- **`LANG` 只发给本来一个都没有的 pane,值是系统自己的设置,且必须是这台机器真有的 locale**(`shell_integration::locale_declaration`)。`launchd` 不设 `LC_*`,于是 Finder 启动的 app 里起的 shell 跑在 `C` locale 下,一个 UTF-8 文件名 `ls` 出来是一排问号。值取自 `defaults read -g AppleLocale`,那是 CLDR 的拼法(`zh-Hans_CN`)不是 POSIX 的,于是 `posix_locale_candidates` 按两个候选翻译——原样加 `.UTF-8`,以及去掉 script 子标签后加 `.UTF-8`——每一个都拿去跟 `locale -a` 对(`choose_posix_locale`),对不上就**什么都不发**。`en_US.UTF-8` 不是这个产品替人做的决定:本机实测 `AppleLocale` 是 `zh-Hans_US`(中文界面、美国区),`zh-Hans_US.UTF-8` 与 `zh_US.UTF-8` 都不在这台机器的 288 个 locale 里,于是这个 pane 的 `LANG` 就是不设——而不是被塞一个别人的国家。`LC_ALL`/`LC_CTYPE`/`LANG` 任何一个已经有值——继承来的,或档案自己那一行写的——这里就不出声:那个问题已经被答过了,再叠一条只会让记录里多一条不管事的变量。`bt_platform::system_posix_locale()` 在 Windows 上答 `None`,于是 Windows 的 spawn 一个字节没变。
+- **locale 只发给本来一个都没有的 pane,值是系统自己的设置,且必须是这台机器真有的 locale**(`shell_integration::locale_declaration`)。`launchd` 不设 `LC_*`,于是 Finder 启动的 app 里起的 shell 跑在 `C` locale 下,一个 UTF-8 文件名 `ls` 出来是一排问号。值取自 `defaults read -g AppleLocale`,那是 CLDR 的拼法(`zh-Hans_CN`)不是 POSIX 的,于是 `posix_locale_candidates` 按两个候选翻译——原样加 `.UTF-8`,以及去掉 script 子标签后加 `.UTF-8`——每一个都拿去跟 `locale -a` 对(`choose_locale_declaration`),对不上就**不编一个国家出来**。`en_US.UTF-8` 不是这个产品替人做的决定:本机实测 `AppleLocale` 是 `zh-Hans_US`(中文界面、美国区),`zh-Hans_US.UTF-8` 与 `zh_US.UTF-8` 都不在这台机器的 288 个 locale 里,于是语言和地区一个字不说——**但编码要说**,发的是 Apple 自己在同一台机器上发的那一对:`LANG=C.UTF-8` 加 `LC_CTYPE=UTF-8`,两半各自还要这台机器真有(见 §13.49;从前这里什么都不发,于是 Finder 起的 pane 留在 `C` locale 里,`天下为公` 回显成 `天` 加一串 `<008b>`)。`LC_ALL`/`LC_CTYPE`/`LANG` 任何一个已经有值——继承来的,或档案自己那一行写的——这里就不出声:那个问题已经被答过了,再叠一条只会让记录里多一条不管事的变量——那一对也一样,要发就整对发,要不出声就整对不出声。`bt_platform::system_locale_declaration()` 在 Windows 上答 `None`,于是 Windows 的 spawn 一个字节没变。
 
 - **`PATH` 不替读者修,`TERM`/`COLORTERM`/`TERM_PROGRAM`/`TERM_PROGRAM_VERSION` 是平台无关的**。非 login 的交互 zsh 读 `.zshrc`,而一个 macOS 读者的 `PATH` 就是从那儿来的——在 pane **里面**一层。反过来的做法是起 login shell,替一个已经登录过的人再跑一遍 `.zprofile`,计划 §8 Q8 否决了它:代价写下来,不偷偷付;真想要 Terminal.app 那套的人,把 `--login` 写进这一行自己的参数里。四个 `TERM` 声明本来就是 `bt_pty::PtyCommand::resolved_environment` 里一条 `cfg` 都没有的一段代码,`the_term_variables_a_pane_is_given_are_the_same_on_every_platform` 加了一枚钉子让它保持如此——钉的同样是 `source_pin`,把那个函数取出来断言里面既有这四个名字、又没有 `cfg` 字样。一个 Mac 上的 zsh 读到的 `TERM=xterm-256color` 和 `TERM_PROGRAM=Folio` 与一个 Windows 上的 PowerShell 读到的逐字节相同,因为查询它们的那些程序——`less`、`vim`、`git`——在两边是同一个程序。
 
@@ -9838,113 +9838,48 @@ macOS 26.6.2,Apple M4,背衬缩放 2;本分支的 debug 构建装在一个一次
 
 ### 13.47 T-MAC-FILEURI: 窗格里的 file: 引用在 POSIX 上也活了;那份分屏会话文档在第一个字段上就被拒了(`crates/bt-platform/src/lib.rs`)
 
-**This is 13.47 and not 13.46.** 13.45 (T-MAC-CMDCLICK) and 13.46 (M6-2) are
-both on `main`. This section takes the next number no branch has claimed.
+**取 13.47。** 13.45(T-MAC-CMDCLICK)和 13.46(M6-2)都在 `main` 上。本节取下一个没有分支认领过的号。
 
-**① One platform's path grammar was answering for both.** `file_uri_to_path`
-turns the target of an OSC 8 hyperlink into something the rest of this window
-can open, and until this ticket it was a **Windows path parser on every host** —
-it said so in its own comment, admitted a drive-rooted path or a UNC share, and
-refused everything else. A Mac prints `file:///Users/…`, so it refused every
-`file:` reference a pane could carry. §13.45 ⑥ caught it on the machine, on a
-real OSC 8 link at a real folder:
+**① 一个平台的路径文法在替两个平台作答。** `file_uri_to_path` 把 OSC 8 超链接的目标变成本窗其余部分能打开的东西,而在这张票之前它**在每台宿主上都是 Windows 路径解析器**——函数自己的注释也这么说,只接受带盘符的路径和 UNC 共享,其余一律拒掉。Mac 打印的是 `file:///Users/…`,所以窗格里能出现的每个 `file:` 引用都被拒了。§13.45 ⑥ 在那台机器上、一个真实的 OSC 8 链接和一个真实的文件夹上发现了它:
 
 ```text
 activate_hyperlink control=0 uri="file:///…/pages/sub" arm=None    path=unparsed
 activate_hyperlink control=1 uri="file:///…/pages/sub" arm=Blocked path=unparsed
 ```
 
-`path=unparsed` is this function answering `None`. Both halves of §7.1.5g's
-table were reached and both came up empty: a plain click opened nothing, the
-modified click handed nothing over, and the hovered tag drew the URI with no
-clause after it, because the clause is derived from the arm
-(`ControlClickHint::of`) and there was no arm.
+`path=unparsed` 就是这个函数回答 `None`。§7.1.5g 的表的两半都被走到了,两半都空手而回:裸点什么都没打开,带修饰键的点什么都没交出去,悬停标签画的是 URI、后面没有从句,因为从句从 arm 派生(`ControlClickHint::of`),而 arm 不存在。
 
-**The repair is not the same grammar pointed the other way.** The reading now
-takes the platform as a value — `file_uri_to_path_on(uri, platform)`, with the
-bare door asking `host_platform()` — for the reason `home_variable_for` and
-`an_application_outlives_its_last_window` take one: the whole function is a
-*string* question, so a workstation on either platform can pin both answers, and
-the table that would otherwise exist twice, each half only ever run on its own
-machine, is one table run everywhere. **`bt-app` names no platform**; it goes on
-calling the bare door.
+**修复不是把同一套文法调转方向。** 读法现在把平台当作值——`file_uri_to_path_on(uri, platform)`,裸门调 `host_platform()`——理由与 `home_variable_for` 和 `an_application_outlives_its_last_window` 相同:整个函数是一个*字符串*问题,任一平台的工作站都能钉住两个答案,原本需要存在两遍、每半张只在自己机器上跑的表,变成一张在所有机器上跑的表。**`bt-app` 不点名任何平台**;它继续调裸门。
 
-**② What both halves read the same way, and where they part.** The scheme, the
-fragment, the query, the strict percent-decoder, the refusal of a control
-character before or after decoding, and the trailing separator that is the
-emitter saying "directory" are one shared prelude and unchanged. What is the
-platform's:
+**② 两半读法相同的部分,以及它们分开的地方。** scheme、fragment、query、严格百分号解码器、解码前后对控制字符的拒绝、以及表示「目录」的尾部分隔符——这些是共用的序曲,没有变。属于平台的部分:
 
-| | Windows | macOS and every other Unix |
+| | Windows | macOS 及其他 Unix |
 |---|---|---|
-| what ends the authority | `/` or `\` | `/` only — a backslash is a byte of a name here |
-| a host that is not this machine | the UNC share `\\<host>\…` it plainly means (RFC 8089 §2) | **refused** |
-| separators in the body | every `/` becomes `\` | nothing is translated |
-| a drive letter | `/C:/x` becomes `C:\x` | `/C:/x`, an ordinary absolute path |
-| what is admitted | drive-rooted, or a share | opens with `/` |
-| `file:///` | nothing — a root with no name | `/`, the root directory |
+| authority 在哪里结束 | `/` 或 `\` | 只有 `/`——反斜杠在这里是名字的一个字节 |
+| 不是本机的 host | 它直白表示的 UNC 共享 `\\<host>\…`(RFC 8089 §2) | **拒绝** |
+| 路径体内的分隔符 | 每个 `/` 变成 `\` | 不做翻译 |
+| 盘符 | `/C:/x` 变成 `C:\x` | `/C:/x`,普通的绝对路径 |
+| 接受条件 | 盘符根路径,或共享 | 以 `/` 开头 |
+| `file:///` | 无——有根无名 | `/`,根目录 |
 
-**A host that is not this machine names nothing on a Unix filesystem**, and that
-is a refusal rather than an omission: what Windows writes `\\server\share` a Mac
-reaches through a mount point with a name of its own that no URI carries. Read
-as the local `/share/notes.md` it would name a *different, existing* file, which
-is the more dangerous of the two wrong answers because that file is usually
-there.
+**不是本机的 host 在 Unix 文件系统上不对应任何东西**,这是拒绝而不是遗漏:Windows 写成 `\\server\share` 的路径,Mac 通过挂载点访问,而挂载点有自己的名字,URI 里没有。如果当作本地的 `/share/notes.md` 来读,指向的会是一个*不同的、真实存在的*文件——两种错误答案里更危险的那一种,因为那个文件通常在那里。
 
-**A drive letter is not special off Windows**, for ①'s own reason: stripping the
-slash in front of one would be this function guessing at another platform's
-grammar. So a Windows-printed link opened on a Mac names something that is not
-there, and the window says so rather than pretending.
+**盘符在 Windows 以外不是特殊的**,理由与 ① 相同:去掉前面的斜杠就是这个函数在猜另一个平台的文法。所以一个 Windows 打印的链接在 Mac 上打开时指向的是一个不存在的路径,窗口如实告知而不是假装找到了。
 
-**③ An escaped separator is a separator, on both machines.**
-`file:///C:%5Ctmp%5Cx.md` is `C:\tmp\x.md` and `file:///Users/a%2Fb` is
-`/Users/a/b` — the lenient of the two readings RFC 3986 allows, since read
-strictly a percent-encoded octet is never a delimiter and those would name a
-file whose *name* holds a separator.
+**③ 转义后的分隔符就是分隔符,两台机器都是。** `file:///C:%5Ctmp%5Cx.md` 是 `C:\tmp\x.md`,`file:///Users/a%2Fb` 是 `/Users/a/b`——RFC 3986 允许的两种读法中宽松的那一种,因为严格来说百分号编码的字节永远不是定界符,那些 URI 指向的将是一个*名字里包含分隔符*的文件。
 
-It is lenient deliberately and the argument is that **no filesystem this product
-reaches can hold a separator inside a name**, so the strict reading refuses a
-spelling without ever reaching a file the lenient one would open wrongly. The
-two differ about how a path may be written, never about which file is named.
-`..` is not the difference and never was: it survives decoding under either
-reading, on either platform, exactly as an unescaped `..` does, and what may be
-done with a path carrying one is settled downstream by `reveal_argument_form`
-and `bt_transcript::paths::may_read_unasked`.
+宽松是有意的,论据是:**这个产品能访问的文件系统都不允许名字里包含分隔符**,所以严格读法拒绝的只是一种拼写方式,永远不会拒掉一个宽松读法会错误打开的文件。两种读法对路径的写法有分歧,对指向哪个文件没有。`..` 不是分歧点,从来不是:它在两种读法下、两个平台上都原样通过解码,和未转义的 `..` 完全一样;一条包含 `..` 的路径能做什么,由下游的 `reveal_argument_form` 和 `bt_transcript::paths::may_read_unasked` 裁定。
 
-**`bt_transcript::paths::decode_file_uri` rules the other way and that is not a
-disagreement.** That decoder splits the URI into segments *first* and decodes
-each one after, so an escape that yields a separator contradicts a boundary it
-has already drawn — a statement about its own algorithm. This one decodes the
-whole path in a single pass and reads a path off the result, so there is no
-earlier split for an escape to contradict.
+**`bt_transcript::paths::decode_file_uri` 选了另一种读法,但这不是分歧。** 那个解码器*先*把 URI 拆成段,再逐段解码,所以一个解码出分隔符的转义字符会与它已经画好的边界矛盾——这是关于它自己算法的陈述。本函数在一趟里解码整条路径,再从结果中读路径,所以没有更早的拆分可供转义字符去矛盾。
 
-**④ Nothing downstream changed, and that is the finding rather than the work.**
-The ticket asked for every consumer to be made to answer the way it does on
-Windows. Every one of them already did, and the sweep is worth writing down
-because it is the argument that this defect was one line deep:
+**④ 下游没有任何改动,而这恰恰是发现而不是工作。** 票要求每个消费者都像它在 Windows 上那样作答。每个消费者本来就是,而逐一写下是值得的,因为这正是「这个缺陷只有一行深」的论据:
 
-* `hyperlink_activation` is a pure table over the URI's scheme and the path this
-  function returns, and `ControlClickHint::of` is *derived from it* rather than
-  written beside it — so the hovered clause came back the moment the arm did.
-* `bt_transcript::paths::may_read_unasked` has had a `#[cfg(not(windows))]` arm
-  since it was written: one root, one machine, `is_local_absolute_path`.
-  `bt_app::preview::is_readable_unasked` is its name inside the preview and asks
-  it rather than spelling a second reading.
-* `validate_openable_path` is **not** on this path off Windows and does not need
-  a POSIX arm: it is `handoff`'s Win32 gate, reached only by `windows_handoff`'s
-  own doors, while the macOS arm keeps `openable_unix_path` beside
-  `opening_it_would_run_it` (`macos_handoff`). The ticket asked for it to accept
-  a POSIX path that exists; the honest answer is that it is never asked one.
-* `PrintedPathLocation::from_uri` reads a `#L12C4` fragment and knows nothing
-  about paths at all.
+* `hyperlink_activation` 是一张纯粹的表,只看 URI 的 scheme 和本函数返回的路径,而 `ControlClickHint::of` 从它*派生*而不是在旁边另写——所以 arm 回来的那一刻,悬停从句也回来了。
+* `bt_transcript::paths::may_read_unasked` 从写下那天起就有一个 `#[cfg(not(windows))]` 分支:一个根,一台机器,`is_local_absolute_path`。`bt_app::preview::is_readable_unasked` 是它在预览里的名字,调它而不是另写一份。
+* `validate_openable_path` 在 Windows 以外**不在**这条路径上,也不需要 POSIX 分支:它是 `handoff` 的 Win32 闸门,只有 `windows_handoff` 自己的门能走到;macOS 一侧在 `macos_handoff` 里放着 `openable_unix_path` 和 `opening_it_would_run_it`。票要求它接受一个存在的 POSIX 路径;实话是它从来没被问过。
+* `PrintedPathLocation::from_uri` 读的是 `#L12C4` fragment,完全不涉及路径。
 
-**⑤ The split session was never a restore defect. The document was refused at
-its first field.** §13.45 ⑥'s second finding was that a seeded two-pane
-`session.json` — a `col` split with a preview pane — came back as one pane at the
-default rectangle, while a single-leaf document restored. That is not a partial
-restore; it is **`SessionV1` falling back to its defaults**, which is what a
-window at `960×600` holding one `term` leaf *is*. The launch says so out loud and
-keeps the bytes:
+**⑤ 那份分屏会话不是恢复缺陷。文档在第一个字段上就被拒了。** §13.45 ⑥ 的第二个发现是:一份播种的双窗格 `session.json`——一个 `col` 分割加一个预览窗格——回来时是一个窗格、默认矩形;而单叶文档恢复正常。这不是部分恢复;这是 **`SessionV1` 回退到默认值**,而一个在 `960×600` 位置上只有一片 `term` 叶的窗口*就是*默认值。启动时的日志明确说了,并保留了原始字节:
 
 ```text
 BT_PERSIST session.json fell back to defaults: ParseError("unknown variant `Url`,
@@ -9952,208 +9887,206 @@ BT_PERSIST session.json fell back to defaults: ParseError("unknown variant `Url`
   kept=Some(".../session.json.rejected-20260913-082526")
 ```
 
-Line 25 column 150 is `"cur_source": "Url"`. `PreviewSourceV1` carries
-`#[serde(rename_all = "lowercase")]`, so the wire spelling is `url`, and **no
-writer in this product has ever produced `Url`** — the seed was written by hand.
-Measured as an A/B over two isolated homes differing in that one letter, same
-bundle, same minute:
+第 25 行第 150 列是 `"cur_source": "Url"`。`PreviewSourceV1` 带着 `#[serde(rename_all = "lowercase")]`,所以线上拼法是 `url`,而**这个产品里没有任何写入者产出过 `Url`**——那份播种文档是手写的。在两个隔离的 home 上做了 A/B 对比,只差那一个字母,同一个应用包,同一分钟:
 
-| the seed | the window that came up |
+| 播种内容 | 出现的窗口 |
 |---|---|
-| `"cur_source": "Url"` | `515,167 960×600` — the default rectangle, one `term` leaf, and `session.json.rejected-…` beside the document |
-| `"cur_source": "url"` | `65,40 1180×740` — the seeded rectangle, the `col` split, the preview pane |
+| `"cur_source": "Url"` | `515,167 960×600`——默认矩形,一片 `term` 叶,`session.json.rejected-…` 出现在文档旁边 |
+| `"cur_source": "url"` | `65,40 1180×740`——播种的矩形,`col` 分割,预览窗格 |
 
-**So there was nothing to fix, and the product's own document is the proof**
-(⑥). What this section owes is the shape, written down, so that the next hand
-that seeds one does not have to discover it: a preview row is
-`{ "leaf": "leaf-N", "cur": <path or URL> }` and `cur_source` is **omitted** for
-a file, because `File` is the default and is `skip_serializing_if`. A document
-that names a page writes `"cur_source": "url"`, lowercase. Nothing else in that
-seed was wrong.
+**所以没有什么需要修的,而产品自己的文档就是证明**(⑥)。本节欠的是把格式写下来,好让下一个手写播种文档的人不用自己发现:预览行是 `{ "leaf": "leaf-N", "cur": <path or URL> }`,`cur_source` 对文件**省略**,因为 `File` 是默认值且标着 `skip_serializing_if`。命名一个页面的文档写 `"cur_source": "url"`,小写。播种文档里的其余内容没有错。
 
-**⑥ The trip.** macOS 26.6.2, Apple M4, a backing-scale-2 display; a debug build
-of this branch inside a throwaway bundle with an identifier of its own
-(`io.github.lulu-loopp.folio.fileuri`) and an isolated `HOME` exported by a
-`CFBundleExecutable` wrapper script, because `LSEnvironment` cannot set `HOME`
-(§13.31 ⑧(d)). **Pointer only** — no key was posted and nothing was written to
-the pasteboard — and the fixture was written to the pane's own tty by the
-shell's rc file for the same reason: six rows carrying an OSC 8 target at a
-folder, then six carrying one at `my notes 中文.txt`, a name with a space and CJK
-in it whose URI is therefore
-`file:///…/my%20notes%20%E4%B8%AD%E6%96%87.txt`. The window stood at
-`65,40 1180×740` through a seeded single-leaf session, away from §13.39's
-panels, and the desk was asked what covered each cell before anything was posted
-at it — `OVER … owner=FolioFU … rect=65,40 1180x740`, and the Dock's own
-full-screen backing window, which stands under everything.
+**⑥ 那趟运行。** macOS 26.6.2,Apple M4,背衬缩放 2;本分支的 debug 构建装在一个一次性应用包里,标识符是它自己的(`io.github.lulu-loopp.folio.fileuri`),`HOME` 由 `CFBundleExecutable` 包装脚本导出、做了隔离,因为 `LSEnvironment` 设不了 `HOME`(§13.31 ⑧(d))。**只用指针**——没有投键、也没有写剪贴板——夹具由 shell 的 rc 文件写进窗格自己的 tty,原因相同:六行带着一个 OSC 8 目标指向一个文件夹,再六行指向 `my notes 中文.txt`,一个名字里带空格和 CJK 的文件,URI 因此是 `file:///…/my%20notes%20%E4%B8%AD%E6%96%87.txt`。窗口通过播种的单叶会话停在 `65,40 1180×740`,避开 §13.39 的面板,投出任何东西之前先问桌面那个点上盖着什么:`OVER … owner=FolioFU … rect=65,40 1180x740`,以及 Dock 自己的全屏背衬窗口(它站在所有东西下面)。
 
-**The cell is solved by the window and not guessed at.** Two calibration presses
-in the empty columns to the right of every link run gave `origin=3,69` and
-`origin=26,99` — the trace spells a cell `ROW,COLUMN` — which is a cell of
-`10 × 21.74` points with cell (0,0) centred at `70,83.9`. The row is then
-**closed-looped**: a press in those same empty columns on the row that is wanted
-says which row it actually hit, and the aim is corrected until the window says
-the row that was asked for. Two corrections each time, and no press landed on a
-link until the aim had been proved.
+**单元格由窗口解出,不是猜的。** 两次校准按下落在每条链接右侧的空列上,得到 `origin=3,69` 和 `origin=26,99`——追踪里的拼法是 `ROW,COLUMN`——由此算出一个 `10 × 21.74` 点的单元格,cell (0,0) 的中心在 `70,83.9`。然后对行做**闭环**:在想要的行的同一批空列上按下,看窗口说落在哪一行,修正瞄准直到窗口报告的就是要求的行。每次修正两遍,在瞄准得到证实之前没有任何按下落在链接上。
 
-| # | posted at the link's cell | what the window wrote down |
+| # | 投在链接单元格上的 | 窗口记下的 |
 |---|---|---|
-| 1 | the pointer resting on the folder link | the status tag reads `file:///…/pages/sub · ⌘+点击在访达中显示`, and the folder's glance card stands under it — `SUB`, `inside.txt`, `~/pages/sub` |
-| 2 | a bare left press on it | `activate_hyperlink control=0 … arm=FilesColumn("/…/pages/sub") path=/…/pages/sub exists=1 dir=1`, then `show_folder_in_files_column leave=seated SeatId(2)` |
-| 3 | the same press with `⌘` held | `activate_hyperlink control=1 … arm=Reveal("/…/pages/sub") path=… exists=1 dir=1`, and **one** Finder window, named `sub`, at `962,144 920x464` (§13.33 D) — closed again by this trip, and the desk ends with the one Finder window it began with |
-| 4 | the pointer resting on the file link | the file's glance card, headed `my notes 中文.txt`, carrying the file's own first line and `46 B` |
-| 5 | a bare left press on it | `activate_hyperlink control=0 uri="file:///…/my%20notes%20%E4%B8%AD%E6%96%87.txt" arm=Preview("/…/my notes 中文.txt", None) path=/…/my notes 中文.txt exists=1 dir=0`, then `open_preview_file leave=opened surface=Seat(… SeatId(2))` |
+| 1 | 指针停在文件夹链接上 | 状态标签写着 `file:///…/pages/sub · ⌘+点击在访达中显示`,文件夹的速览卡片出现在下方——`SUB`、`inside.txt`、`~/pages/sub` |
+| 2 | 一次裸左键按下 | `activate_hyperlink control=0 … arm=FilesColumn("/…/pages/sub") path=/…/pages/sub exists=1 dir=1`,然后 `show_folder_in_files_column leave=seated SeatId(2)` |
+| 3 | 同一次按下,按住 `⌘` | `activate_hyperlink control=1 … arm=Reveal("/…/pages/sub") path=… exists=1 dir=1`,以及**一个**访达窗口,名为 `sub`,在 `962,144 920x464`(§13.33 D)——由这趟运行关闭,桌面结束时访达窗口数与开始时相同 |
+| 4 | 指针停在文件链接上 | 文件的速览卡片,标题 `my notes 中文.txt`,带着文件自己的第一行和 `46 B` |
+| 5 | 一次裸左键按下 | `activate_hyperlink control=0 uri="file:///…/my%20notes%20%E4%B8%AD%E6%96%87.txt" arm=Preview("/…/my notes 中文.txt", None) path=/…/my notes 中文.txt exists=1 dir=0`,然后 `open_preview_file leave=opened surface=Seat(… SeatId(2))` |
 
-**Every one of those lines carries a `path=`**, which is the whole of what
-changed: before this ticket all of them read `path=unparsed`.
+**这些行里每一条都带着 `path=`**,变化的全部就在这里:在这张票之前它们写的都是 `path=unparsed`。
 
-**Row 4 is the percent-decoder answering in bytes rather than in characters**,
-and it is proved by a card rather than by an assertion: the card is headed with
-the decoded name and filled with the file's own first line, which means the path
-reached a disk, and it rose at all only because
-`bt_transcript::paths::may_read_unasked` admitted a POSIX path (④).
+**第 4 行是百分号解码器在按字节回答而不是按字符**,证明它的是一张卡片而不是一条断言:卡片的标题是解码后的名字,内容是文件自己的第一行,说明路径走到了磁盘;它能出现只因为 `bt_transcript::paths::may_read_unasked` 接受了一条 POSIX 路径(④)。
 
-**Row 4 draws no clause and row 1 does**, and that is `status_text_in`'s own rule
-rather than a gap: the aside is printed only when the whole address is already on
-the line. The grid is 118 columns, the folder's URI is 73 of them and its clause
-27; the file's URI is 105, so the clause that would cost the address its head is
-dropped whole. Both halves of that rule are on the glass in one trip.
+**第 4 行没有从句而第 1 行有**,这是 `status_text_in` 自己的规矩而不是缺口:附注只在整个地址已经在行上时才打印。网格是 118 列,文件夹的 URI 占 73 列、从句 27 列;文件的 URI 占 105 列,如果加上从句地址就会丢头,所以从句被整条丢弃。同一趟运行里这条规矩的两半都出现在玻璃上。
 
-**Then the same run answered ⑤ from the other side.** Row 5 left the window a
-`row` split with a `term` leaf and a `preview` leaf — the very shape §13.45's
-seed was reaching for, written by the product rather than by hand. Quit through
-`osascript` on this bundle's own identifier, relaunched, and the document the
-second quit wrote is **byte for byte** the document the first one wrote — the
-tree, the ratio, the leaves, the preview row, the pool and the size — with the
-rectangle's `x` the only field that ever differed between two quits, which is
-⑦'s own finding and not this one's. The photograph of the restored window is two
-panes with `my notes 中文.txt` open in the right one and a `2` on the tab. A
-second run of the same shape through the plain click of row 2 — a `row` split
-with a `files` leaf — round-tripped the same way, and on one pair of quits the
-whole document including the rectangle came back identical.
+**然后同一趟运行从另一侧回答了 ⑤。** 第 5 行让窗口变成了一个 `row` 分割,一片 `term` 叶和一片 `preview` 叶——恰恰是 §13.45 的播种文档想达到的形状,由产品写出而不是手写。通过 `osascript` 按这个应用包自己的标识符退出,重新启动,第二次退出写下的文档与第一次写下的**逐字节相同**——树、比例、叶、预览行、池和尺寸——矩形的 `x` 是两次退出之间唯一变过的字段,这是 ⑦ 自己的发现而不是本节的。恢复后窗口的照片是两个窗格,右边打开着 `my notes 中文.txt`,标签页上有一个 `2`。第二趟通过第 2 行的裸点——一个 `row` 分割带一片 `files` 叶——做了同样的往返,其中一对退出里整份文档包括矩形完全一致。
 
-**⑦ Two things this trip is entitled to say and one it is not.**
+**⑦ 这趟运行有资格说的两件事,和没有资格说的一件事。**
 
-* **§13.45's own clause reached the glass here, and only here.** That section
-  wrote ` · ⌘+click shows it in Finder` into the macOS column and recorded that
-  it *could not be photographed*, because the arm it is derived from was `None`
-  on a Mac — which is this ticket's defect, one surface up. Row 1 is that clause
-  on the glass, in the Chinese `copy/option-row` gave it. **`main` moved twice
-  under this ticket and the trip was driven again each time**: the first pass
-  measured `Ctrl`+click, because §13.45's *section* was on `main` and its code
-  was not; `feature/macos-command-click` then merged and every row was
-  re-measured with `maskCommand`; `copy/option-row` then took both clauses out
-  of `Text::CHINESE_PENDING`, and row 1 was photographed a third time. **Nothing
-  in this section moved across any of that** beyond the name of a key and the
-  language of a clause, and that is §13.45 ①'s shape doing its work: everything
-  here is downstream of the modifier and reads whatever `hyperlink_activation`
-  is handed. There is nothing owed to the copy pass by this section's subject.
-* **A restored window's x drifts by a few points while its y and its size do
-  not.** Asked for `40,40 1180×740`, the process's own instrument reports
-  `BT_DPI stage=create … rect=80,80,2440,1560` — logical `40,40 1180×740`, exact
-  at scale 2 — while `CGWindowBounds` reads `65,40` on one launch and `71,40` on
-  another. The size, the y and the whole tree are exact, and the next quit writes
-  back whatever the desk reported, so a document restored twice settles rather
-  than drifting further. It is a placement question and not a persistence one; it
-  belongs to a ticket of its own with `NSWindow`'s own frame in hand, and it is
-  named here because two Mac tickets have now measured a restored rectangle.
-* **What this trip cannot say is anything about a second backing scale**, which
-  is §13.34 ⑦(a)'s standing debt: this desk still has one.
+* **§13.45 自己的从句在这里、也只在这里到达了玻璃。** 那一节把 ` · ⌘+click shows it in Finder` 写进了 macOS 列,并记下它*拍不到*,因为它派生的那个 arm 在 Mac 上是 `None`——这就是本票的缺陷,高一层表面。第 1 行就是那条从句出现在玻璃上,用的是 `copy/option-row` 给它的中文。**`main` 在这张票下面动了两次,每次都重新驱动了这趟运行**:第一趟量的是 `Ctrl`+click,因为 §13.45 的*节*在 `main` 上而代码还没有;`feature/macos-command-click` 合入后每一行用 `maskCommand` 重新量过;`copy/option-row` 然后把两条从句从 `Text::CHINESE_PENDING` 里取走,第 1 行被第三次拍照。**这一节里没有任何东西因此移动过**,只有键名和从句的语言,而这正是 §13.45 ① 的结构在起作用:这里的一切都在修饰键的下游,读的是 `hyperlink_activation` 收到的东西。本节的主题对文案批次没有欠项。
+* **恢复后窗口的 x 会漂移几个点,而 y 和尺寸不变。** 要求 `40,40 1180×740`,进程自己的仪表报告 `BT_DPI stage=create … rect=80,80,2440,1560`——逻辑 `40,40 1180×740`,在缩放 2 下精确——而 `CGWindowBounds` 一次启动读到 `65,40`,另一次读到 `71,40`。尺寸、y 和整棵树精确,下一次退出把桌面报告的值写回去,所以恢复两次的文档趋于收敛而不是越漂越远。这是放置问题而不是持久化问题;它属于一张自己的票,手里拿着 `NSWindow` 自己的 frame,在这里点名是因为两张 Mac 票都量过恢复后的矩形。
+* **这趟运行没有资格说的是任何关于第二种背衬缩放的事**,这是 §13.34 ⑦(a) 的未偿项:这台桌面仍然只有一种。
 
-**⑧ The red gates, and which machine each runs on.** All of them run on Windows,
-which is `host_platform()`'s whole argument for being a value.
+**⑧ 红门,以及每扇门在哪台机器上跑。** 全部在 Windows 上跑,这正是 `host_platform()` 有资格是一个值的全部论据。
 
-* `a_file_uri_decodes_to_the_windows_path_it_names`,
-  `an_empty_host_and_localhost_are_this_machine_and_anything_else_is_a_share`,
-  `a_uri_that_names_no_windows_path_is_refused_rather_than_guessed`,
-  `a_fragment_and_a_query_are_cut_and_a_trailing_separator_is_kept` and
-  `a_device_or_verbatim_uri_names_no_path` — the Windows table, unchanged except
-  that it now names its platform instead of asking for "this machine".
-* `a_file_uri_decodes_to_the_posix_path_it_names` — the new table: a space, a
-  name in Chinese, the three authority readings, a backslash raw and escaped, the
-  root, a trailing separator, a fragment and a query. Mutations: drop the
-  leading-`/` check and `file:helpers/x` resolves against the process's working
-  directory; translate separators and a backslash stops being a byte of a name;
-  admit a foreign host and `file://server/share/notes.md` silently becomes the
-  local `/share/notes.md`.
-* `a_uri_that_names_no_posix_path_is_refused_rather_than_guessed` — relative, a
-  bare host, a host with a backslash after it, another scheme, a bare path, and
-  the four malformed decodes.
-* `an_escaped_separator_is_a_separator_on_both_platforms` — ③, with the Windows
-  line restated beside its twin so that a later ticket cannot move one of them
-  alone.
-* `a_drive_letter_is_an_ordinary_name_on_a_unix_filesystem` — the spelling each
-  platform refuses of the other.
-* `the_two_unix_platforms_read_a_file_uri_identically` — seven URIs asked of
-  `MacOs` and of `OtherUnix`. Mutation: match `MacOs` alone in either arm and a
-  Linux build answers with the Windows grammar again, which is this ticket's
-  defect wearing a different `cfg`.
-* `the_bare_door_answers_for_this_build` — `file_uri_to_path` against
-  `file_uri_to_path_on(uri, host_platform())`. Mutation: pin the bare door to
-  `Windows` and every other assertion in the module still passes while the
-  product goes back to ① — which is why this one test stands beside the tables.
+* `a_file_uri_decodes_to_the_windows_path_it_names`、`an_empty_host_and_localhost_are_this_machine_and_anything_else_is_a_share`、`a_uri_that_names_no_windows_path_is_refused_rather_than_guessed`、`a_fragment_and_a_query_are_cut_and_a_trailing_separator_is_kept` 和 `a_device_or_verbatim_uri_names_no_path`——Windows 的表,除了现在点名自己的平台而不是问「本机」之外没有变化。
+* `a_file_uri_decodes_to_the_posix_path_it_names`——新表:一个空格,一个中文名,三种 authority 读法,原始和转义的反斜杠,根,尾部分隔符,fragment 和 query。变异:去掉前导 `/` 检查,`file:helpers/x` 就会相对于进程的工作目录解析;翻译分隔符,反斜杠就不再是名字的一个字节;接受外部 host,`file://server/share/notes.md` 就会悄悄变成本地的 `/share/notes.md`。
+* `a_uri_that_names_no_posix_path_is_refused_rather_than_guessed`——相对路径、裸 host、host 后面跟反斜杠、另一个 scheme、裸路径,以及四种畸形解码。
+* `an_escaped_separator_is_a_separator_on_both_platforms`——③,Windows 那行与它的孪生放在一起重述,好让以后的票没法只动其中一个。
+* `a_drive_letter_is_an_ordinary_name_on_a_unix_filesystem`——每个平台拒绝对方的那种拼写。
+* `the_two_unix_platforms_read_a_file_uri_identically`——七个 URI,分别问 `MacOs` 和 `OtherUnix`。变异:在任一分支里只匹配 `MacOs`,Linux 构建就会重新用 Windows 文法回答,这就是本票的缺陷穿着另一件 `cfg`。
+* `the_bare_door_answers_for_this_build`——`file_uri_to_path` 对 `file_uri_to_path_on(uri, host_platform())`。变异:把裸门钉死在 `Windows` 上,模块里其余每条断言仍然通过而产品回到 ①——这就是这条测试站在那些表旁边的原因。
 
-**There is no CHANGELOG line**, and that is the pin: the Windows arm is the old
-body moved into a function of its own, byte for byte, and nothing a reader on
-that platform can press behaves differently.
-
-*(本节英文,待中文文案改写。)*
+**没有 CHANGELOG 条目**,这本身就是钉:Windows 分支是旧函数体原封不动搬进一个独立函数里的,那个平台上读者按得出的任何东西,行为都没有变。
 
 ### 13.48 T-MAC-STRIP-ENDS: 红灯站到圆角的对角线上,齿轮镜像它,全屏时灯走了留白也走,头带一律 40,`+` 与 `˅` 上药丸的轴(`crates/bt-app/src/{seats,main}.rs`、`crates/bt-render/src/theme.rs`、`crates/bt-platform/src/{lib,macos_impl,portable_impl}.rs`)
 
-**① The number is claimed, not counted.** §13.47 is T-MAC-FILEURI's and was in flight while this was written, so this section takes **13.48** rather than the next free-looking one. The five rulings below are the owner's of 2026-09-13, all five made from the running build: two about the two ends of the header, two — arriving while the first two were being built — about the header itself and about the pair of buttons at the end of the tab run, and a last one that moved the three traffic lights sideways and took the first with it.
+**① 这个号是认领的,不是数出来的。** §13.47 属于 T-MAC-FILEURI,本节书写时那张票还在飞,所以本节取 **13.48** 而不是下一个看着空闲的号。下面五条裁决是所有者 2026-09-13 作出的,五条都从运行中的构建得来:两条关于头带的两端,两条——在前两条正在被实现的过程中到达——关于头带本身和标签页末尾的按钮对,最后一条把三个红绿灯横向移动并带走了第一条。
 
-**One more ruling was made that day and then withdrawn, and it is worth a paragraph because of what withdrew it.** R-MAC-CORNERS (`docs/plans/port/corners-2026-09-13.md`) measured this window's rounded corner at 16.2 points and found one glyph standing too close to the arc — the files column's foot mark, in the window's bottom-left corner, 8.32 from the curve where the close button has 9.00 — and the owner ruled its padding from 12 to 16. The memo's own correction then measured the **shipping** window rather than the probe's: **12.1 points**, at which the mark already clears the curve. The ruling came out again and the foot is untouched; what is left is the method, which is in the memo, and one number to be careful with — the radius of a macOS window varies with the window's *style*, so a figure measured on one window is not a figure about this product.
+**那天还做了一条裁决,随后撤回了,值得一段,因为撤回它的是什么。** R-MAC-CORNERS(`docs/plans/port/corners-2026-09-13.md`)量了这个窗口的圆角半径为 16.2 点,发现一个字符站得离弧线太近——文件列的脚标,在窗口左下角,离弧线 8.32 而关闭按钮有 9.00——所有者把它的内距从 12 裁到 16。备忘录自己的修正随后量的是**发布**窗口而不是探针的:**12.1 点**,脚标在这个半径下已经清出了弧线。裁决被收回,脚标没有被碰;留下来的是方法(在备忘录里)和一个需要小心的数字——macOS 窗口的圆角半径随窗口的*样式*变化,在一个窗口上量到的数字不是关于这个产品的数字。
 
-**② The red light's centre goes onto the window corner's 45° diagonal, and the run is 13 / 36 / 59.** The shipping window's corner is rounded at **12.1 points** (R-MAC-CORNERS' corrected measurement), so the corner circle's centre is near `(12, 12)` and the corner's own 45° line is `x = y`. T-MAC-PILL had already put the three buttons on the 40-point strip's axis — centre y 20 — so the light is *on* that line exactly when its centre is 20 across as well. **Its centre is `(20, 20)`: thirteen points of air above it and thirteen to its left.**
+**② 红灯的中心站到窗口圆角的 45° 对角线上,序列是 13 / 36 / 59。** 发布窗口的圆角半径是 **12.1 点**(R-MAC-CORNERS 修正后的测量值),所以圆角圆心在 `(12, 12)` 附近,圆角自己的 45° 线是 `x = y`。T-MAC-PILL 已经把三个按钮放在 40 点头带的轴上——中心 y 20——所以灯**恰好在**那条线上当且仅当它的中心 x 也是 20。**它的中心是 `(20, 20)`:上方 13 点空气,左侧 13 点。**
 
-That identity is the whole rule and it is why the code has one number and not two — `button_air(bar, height)` is computed once and used on both axes. On Folio's 40-point strip it is 13; on a 32-point band it is 9, which is where macOS itself puts them, so a window wearing that band needs no exception and no second arm. **The other two keep macOS's own pitch**, read off the window *before* anything moved (`read_button_pitch`) and carried from there — 23 points on this release, so miniaturize lands at 36 and zoom at 59, and the run ends at **73**. The pitch is read once rather than re-read, because the placement is re-stated on six notifications and a pitch taken off buttons this product has already moved is a pitch that walks.
+这个等式就是整条规矩,也是代码里只有一个数而不是两个的原因——`button_air(bar, height)` 算一次,两个轴上都用。在 Folio 的 40 点头带上它是 13;在 32 点头带上它是 9,恰好是 macOS 自己放灯的位置,所以一个穿 32 点头带的窗口不需要例外也不需要第二个分支。**另外两个灯保持 macOS 自己的间距**,在任何东西移动*之前*从窗口上读下来(`read_button_pitch`)——这个版本上是 23 点,所以最小化按钮落在 36,缩放按钮落在 59,序列在 **73** 处结束。间距读一次而不是重读,因为放置在六个通知上被重述,而从本产品已经移动过的按钮上取下的间距是一个会走路的间距。
 
-**And the order of the two readings reversed.** `strip_left_px` used to be measured before the placement, on the argument that the inset is an `x` and only `y` moved; now `x` moves, so `adopt_window_chrome` places first and measures second, and so does the full-screen handler. The pitch is still read before — the two readings now pull in opposite directions and each is taken from the window it is a fact about.
+**两次读取的顺序反了。** `strip_left_px` 以前在放置之前量,理由是内缩是一个 `x` 而只有 `y` 动了;现在 `x` 也动了,所以 `adopt_window_chrome` 先放置再测量,全屏处理程序也一样。间距仍然在前面读——两次读取现在朝相反方向拉,各自从自己所关于的那个窗口上取值。
 
-**③ The gear mirrors the red light.** M3-3 left Folio drawing one thing in the caption run on a macOS window — the gear — standing in the 46×40 slot the Windows run cuts for it, hard against the window's trailing edge. That slot is the shape of *a run of buttons*; it is what makes four abutting boxes read as one run. On this window there is no run: the other three boxes are the platform's own lights at the far end of the same band. So the gear is placed by its **centre**, and the centre it is given is the light's own, said at the other end: **20 in from the trailing edge**, on the band's centre line. (The first ruling of the day said 16 — macOS's own inset for a light it had not yet moved; the diagonal ruling moved the light to 20 and the mirror with it.) `WINDOW_CAPTION_GEAR_INSET_LOGICAL_PX` is that 20, and the box around it is a **28 square** — `WINDOW_CAPTION_GEAR_BOX_LOGICAL_PX`, which is literally `WINDOW_NEW_TAB_BOX_LOGICAL_PX`, the box every other control inset in this bar already has. Nothing else about it changes: the same Material glyph at the same 14, the same ink, the same verb, the same update dot on its top-right corner.
+**③ 齿轮镜像红灯。** M3-3 让 Folio 在 macOS 窗口的标题栏区域画一样东西——齿轮——站在 Windows 那排按钮切出的 46×40 的槽里,紧贴窗口的尾端边缘。那个槽是*一排按钮*的形状;它使四个相邻的盒子读起来像一排。在这个窗口上没有排:另外三个盒子是平台自己的红绿灯,在同一条头带的另一端。所以齿轮按**中心**放置,给它的中心就是红灯的中心在另一端的镜像:**距尾端边缘 20 点**,在头带的中轴上。(当天的第一条裁决说的是 16——macOS 尚未被移动时自己的灯内缩;对角线裁决把灯移到 20,镜像跟着走。)`WINDOW_CAPTION_GEAR_INSET_LOGICAL_PX` 就是那个 20,它周围的盒子是一个 **28 方块**——`WINDOW_CAPTION_GEAR_BOX_LOGICAL_PX`,字面上等于 `WINDOW_NEW_TAB_BOX_LOGICAL_PX`,这条头带上其余每个控件内缩时用的盒子。齿轮的其他部分没有变:同一个 Material 字形、同一个 14、同一种墨色、同一个动词、右上角同一个更新小点。
 
-**And the corner does not object.** R-MAC-CORNERS checked this move against the arc. The gear's ink is round-shouldered and it stands 20 down, past the arc's centre line, so its nearest boundary is the straight top edge either way. Apple makes the same mirror in Finder: its last toolbar control's ink centre sits 25.0 from the right against the first light's 26.0 from the left.
+**圆角没有异议。** R-MAC-CORNERS 按弧线检查了这次移动。齿轮的墨迹是圆肩的,它站在 20 以下、过了弧线的中心线,所以它最近的边界不论如何都是顶部直边。Apple 在访达里做了同样的镜像:最后一个工具栏控件的墨迹中心距右侧 25.0,第一个红绿灯距左侧 26.0。
 
-**16 is a constant and not a measurement, and that is the honest way round.** What `PlatformChrome::strip_left_px` measures off the live window is the *trailing* edge of the last button (69); what this mirrors is the *centre of the first* (16), and no door asks AppKit for that. So it is a number of this product's, carrying the note `PlatformChrome`'s own 69 carries: the day macOS moves its window buttons, this is the one constant that moves. It also makes the gear a fact about the window's trailing edge alone, which is why ③ does not touch it.
+**16 是一个常量而不是一个测量值,这个方向才是诚实的。** `PlatformChrome::strip_left_px` 从活窗口上量的是最后一个按钮的*尾端*边缘(69);这里镜像的是*第一个按钮的中心*(16),没有任何门向 AppKit 问过这个值。所以它是本产品的数字,带着 `PlatformChrome` 自己的 69 带的那个注释:macOS 挪窗口按钮的那天,要跟着动的常量就是这一个。它同时让齿轮只与窗口的尾端边缘有关,这就是 ③ 不碰它的原因。
 
-**The 28 square lives inside the 46 the strip still reserves.** `caption_run_left` and `tab_strip_geometry`'s four-slot reserve are untouched — the strip's right edge, the drag band and `title_bar_app_run_right_px` answer exactly what they answered before this section existed. The gear moved *within* its slot. That is what "nothing else about it changes" is worth in geometry.
+**28 方块在头带仍然保留的 46 里面。** `caption_run_left` 和 `tab_strip_geometry` 的四槽保留区没有变——头带的右端边缘、拖拽带和 `title_bar_app_run_right_px` 回答的跟这一节不存在之前完全一样。齿轮在自己的槽*里面*移动了。这就是「齿轮的其他部分没有变」在几何上的含义。
 
-**What that leaves is eighteen points of band that answer nothing, and this is a naming rather than a patch.** The drag region is `[title_bar_app_run_right_px, caption_run_left)` — a rule inherited from the window whose caption run is wall-to-wall buttons — so the 16 points between the reserved slot's left edge and the gear's box, and the 2 to the gear's right, are now neither the gear's nor the window's handle. §13.19 ⑤ met the same thing on the other axis (the five points of strip above and below a pill) and did the same thing with it: *「这里是点名,不是动手」*. Widening the handle to "every pixel of the bar that is not one of Folio's boxes and not the platform's run" is a better rule than the one this product has, and it is a ruling rather than a repair — it changes what a press does on a Windows window too.
+**剩下的是 18 点头带什么都不回答,这是点名而不是修补。** 拖拽区域是 `[title_bar_app_run_right_px, caption_run_left)`——从标题栏按钮排是满宽的那个窗口继承下来的规矩——所以保留槽左端到齿轮盒子之间的 16 点和齿轮右侧的 2 点,现在既不属于齿轮也不属于窗口的拖拽把手。§13.19 ⑤ 在另一个轴上遇到过同样的事(药丸上下各 5 点的头带),做法也一样:*「这里是点名,不是动手」*。把拖拽把手扩展到「头带上不是 Folio 的盒子也不是平台的按钮排的每一个像素」是比现有规矩更好的规矩,而它是裁决而不是修复——它改变的是 Windows 窗口上一次按下做什么。
 
-**And the paint now walks the boxes instead of restating them.** `window_chrome`'s caption loop used to recompute `caption_left + index * button`; it reads `window_caption_boxes` directly. The two were the same arithmetic until this ruling, and a gear drawn in a slot while it is clicked in a square is precisely the failure the old comment claimed was impossible.
+**绘制现在遍历盒子而不是重述它们。** `window_chrome` 的标题栏循环以前重新算 `caption_left + index * button`;现在直接读 `window_caption_boxes`。在这条裁决之前两者是同一套算术,而一个在槽里画、在方块里响应点击的齿轮恰恰是旧注释声称不可能的那种失败。
 
-**The hover wash follows the box, and the box says which wash.** A caption box as tall as the bar is a slot in a run and keeps the run's square wash; a box inset in the bar is a control standing in it, and every control inset in this bar — the panel toggle, the `+`, the `˅` — wears the same rounded pill. So the paint reads `rect[3] - rect[1] < title` rather than asking the window a second time which one it is. This is the one thing in ② that is not in the ruling's letter: a 28 square of hard-cornered wash would have made the gear the only square-washed control in a bar full of pills, which is §13.32 ④'s own argument turned on a different control. It is named here so the owner can overrule it in one line.
+**悬停底色跟着盒子走,而盒子决定哪种底色。** 一个和头带一样高的标题栏盒子是一排里的一个槽,保持那排的方角底色;一个在头带里内缩的盒子是站在里面的控件,而这条头带上每一个内缩的控件——面板切换、`+`、`˅`——穿的都是同一种圆角药丸。所以绘制读 `rect[3] - rect[1] < title` 而不是再问窗口一次它是哪种。这是 ② 里唯一不在裁决文字里的一件事:一个 28 方块的方角底色会让齿轮成为一条满是药丸的头带上唯一方角底色的控件,这是 §13.32 ④ 自己的论据转向了另一个控件。在这里点名,以便所有者可以一行推翻。
 
-**④ Full screen withdraws the lights, so the lead-in goes with them.** The owner's screenshots: in full screen macOS takes the three traffic lights off the window, and Folio went on starting its first tab at `strip_left_px + 12` — a dozen points of air after a run that was not there, and the sidebar header's toggle and the app's name at the same stale inset. (With the lights on the window that sum is now **85**: the run ends at 73 since ②, and nothing anywhere writes 81 or 85 down — `strip_left_px` is measured off wherever the buttons actually are.)
+**④ 全屏撤走红绿灯,所以前导留白跟着走。** 所有者的截屏:全屏时 macOS 把三个红绿灯从窗口上拿走,而 Folio 继续从 `strip_left_px + 12` 开始放第一个标签页——在一排不存在的按钮后面留 12 点空气,侧边栏头部的切换按钮和应用名字在同一个过期的内缩上。(灯在窗口上时那个总和现在是 **85**:自 ② 起按钮排在 73 结束,而没有任何地方写着 81 或 85——`strip_left_px` 从按钮实际在的位置量。)
 
-**The mock's name for that 12 is `--after-lights`, and that is the whole of what it means.** It is the distance the first pill keeps from the run the platform's buttons took, not a property of the pill. So the lead-in is asked of the run and not of the silhouette: `tab_strip_geometry` reads `chrome.strip_left_px > 0` where it read `floating`. A window with a platform run at its head leads in by 12 after it; a window with none leads in by `WINDOW_TAB_RADIUS_LOGICAL_PX`, which is what a Windows window has always done. **The tabs are still pills** — `TabStripGeometry::floating` is unchanged — because it is the lights that left, not the shape.
+**模型里那个 12 的名字叫 `--after-lights`,这就是它的全部含义。** 它是第一个药丸与平台按钮占据的那排之间的距离,不是药丸的属性。所以前导留白问的是按钮排而不是轮廓:`tab_strip_geometry` 读 `chrome.strip_left_px > 0`,以前读的是 `floating`。有平台按钮排的窗口在排后留 12 点;没有的窗口用 `WINDOW_TAB_RADIUS_LOGICAL_PX`,这就是 Windows 窗口一直以来用的值。**标签页仍然是药丸**——`TabStripGeometry::floating` 没有变——因为走掉的是灯,不是形状。
 
-**The other layout needed no line at all.** `panel_toggle_box` and `app_title_left_px` were already written as `strip_left_px + 12`: the bar's own 12-point inset *after whatever the bar begins after*. With `strip_left_px` at 0 they answer 12, which is exactly the inset a window whose whole bar is Folio's has always given them. The ruling asked for "the ordinary one"; they were already written to give it.
+**另一种布局不需要写任何一行。** `panel_toggle_box` 和 `app_title_left_px` 本来就写成 `strip_left_px + 12`:头带自己的 12 点内缩,*在头带在什么之后开始的后面*。`strip_left_px` 为 0 时它们回答 12,恰好是一个整条头带都属于 Folio 的窗口一直给它们的内缩。裁决要求的是「普通的那个」;它们本来就是这么写的。
 
-**What makes `strip_left_px` 0 is a measurement.** `measure_window_chrome` asks for the three standard buttons as before, and a window that answers `nil` three times is still `FOLIO_DRAWS_THE_WHOLE_BAR` — that has not changed and is what keeps the whole thing a capability rather than a platform name. What is new is the middle case: a window that **has** the buttons but is not standing them at its own leading edge. `button_stands_in_this_window` answers that, in three terms because AppKit does three different things and not one thing three ways — `superview` is `nil`; `isHiddenOrHasHiddenAncestor`, which is AppKit's own name for the pair and catches a hidden title-bar container holding three buttons that each carry no flag themselves; and **the button is in a different window**, which is what going full screen actually does — the title bar is moved into a window of AppKit's own above the screen's top edge, and a button that has gone there is not at this window's leading edge however visible it is in that one. A button failing any of the three contributes nothing to the fold. The answer is a run with a **height and no width**, and it is deliberately not `FOLIO_DRAWS_THE_WHOLE_BAR`: that would take the band with it and stand the panes above the header. `PlatformChrome`'s two field notes say so, and `a_window_whose_buttons_are_withdrawn_keeps_its_band` pins it.
+**让 `strip_left_px` 变成 0 的是一次测量。** `measure_window_chrome` 像以前一样问三个标准按钮,一个三次都回答 `nil` 的窗口仍然是 `FOLIO_DRAWS_THE_WHOLE_BAR`——这没有变,也是让整件事成为能力而不是平台名的原因。新增的是中间状态:一个**有**按钮但按钮不站在自己的前端边缘上的窗口。`button_stands_in_this_window` 回答这个问题,三个条件因为 AppKit 做的是三件不同的事而不是一件事的三种方式——`superview` 是 `nil`;`isHiddenOrHasHiddenAncestor`,AppKit 自己对这一对的叫法,能捕捉到一个隐藏的标题栏容器里持有三个各自没有标记的按钮;以及**按钮在另一个窗口里**,这就是进入全屏实际发生的事——标题栏被移进 AppKit 自己的一个窗口里、在屏幕顶部边缘上方,一个去了那里的按钮不在这个窗口的前端边缘上,不论它在那个窗口里多么可见。一个不满足任何一项的按钮不对折叠贡献宽度。答案是一个**有高度无宽度**的按钮排,而它有意不是 `FOLIO_DRAWS_THE_WHOLE_BAR`:那会把头带也带走、让窗格站到头部上面去。`PlatformChrome` 的两条字段注释这么说了,`a_window_whose_buttons_are_withdrawn_keeps_its_band` 钉住它。
 
-**And `band_px` does not change in full screen, because macOS does not take the header.** It takes the buttons. The style-mask arithmetic `title_bar_height` does is unaffected by which views are on the screen, so the same 32 comes back; Folio's header is 40 either way (④), and the panes begin where they began.
+**`band_px` 在全屏时不变,因为 macOS 拿走的不是头部。** 它拿走的是按钮。`title_bar_height` 做的样式掩码算术不受屏幕上有哪些视图的影响,同一个 32 回来;Folio 的头部不论如何都是 40(④),窗格从原来的位置开始。
 
-**⑤ One header, and it is Folio's 40 — §13.20's "the platform's own 32 in every vertical layout" is now history.** The owner looked at the vertical layouts on the running build and ruled that a header shorter than the strip it replaces is two different windows: the top of the window must not jump four points for changing where the tab list lives. So `window_band_px` has one answer and not a table — `WINDOW_TITLE_BAR_LOGICAL_PX`, on every window and every layout.
+**⑤ 一条头带,就是 Folio 的 40——§13.20 那句「每种纵向布局都用平台自己的 32」现在是历史。** 所有者看了运行中构建上的纵向布局,裁定一条比它替代的标签页条短的头带是两个窗口:窗口顶部不能因为标签页列表换了位置就跳四个点。所以 `window_band_px` 只有一个答案而不是一张表——`WINDOW_TITLE_BAR_LOGICAL_PX`,每个窗口、每种布局都是。
 
-`chrome` is still read and is not decoration: the platform's own band is a **floor**, because a header shorter than the run its window buttons stand in would be Folio drawing under buttons it does not own. On macOS that floor is 32 and Folio's 40 clears it, which is why the answer reads as a constant on both hosts this product ships to and is not written as one.
+`chrome` 仍然被读取,不是装饰:平台自己的头带是一个**下限**,因为一条比自己窗口按钮所站的那排还短的头带意味着 Folio 画到了它不拥有的按钮下面。macOS 上那个下限是 32,Folio 的 40 清出了它,这就是为什么答案在这个产品发布的两台宿主上读起来像常量但没有被写成常量。
 
-**The layout stopped being a parameter of it, and three signatures say so.** `window_band_px(scale, chrome)`, `chrome_band_device_px(scale_ppm, chrome)` and `window_caption_boxes(width, scale, chrome, summoned)` no longer take a `RailState`; `RailState::strip_stands_in_the_bar`, which existed to answer "would a 32-point band be cropping a 40px strip", is gone, and the one place that still wanted the question it was really asking — is there a strip on the glass at all — asks it in the two terms it is made of. `CustomWindowFrame::set_window_band` and `Runtime::follow_the_window_band` **stay**: the band is now the same number at every one of their call sites, but they are the door through which whoever decides what this window is wearing says so, and a placement that is already right writes nothing. The lights are therefore centred at top **13** in every layout, which is the `(40 - 14) / 2` §13.19 struck, and the 9 §13.20 ⑧ put them back to in the vertical ones is gone with the 32.
+**布局不再是它的参数,三个签名这么说。** `window_band_px(scale, chrome)`、`chrome_band_device_px(scale_ppm, chrome)` 和 `window_caption_boxes(width, scale, chrome, summoned)` 不再接受 `RailState`;`RailState::strip_stands_in_the_bar` 不再存在,它存在是为了回答「一条 32 点头带会不会裁掉一条 40px 的标签页条」;唯一还想问它原来问的那个问题的地方——玻璃上到底有没有标签页条——用组成它的两个项来问。`CustomWindowFrame::set_window_band` 和 `Runtime::follow_the_window_band` **留着**:头带现在在它们的每一个调用点上都是同一个数字,但它们是决定这个窗口穿什么的人用来发言的门,而一个已经对的放置不写任何东西。红绿灯因此在每种布局里都居中在顶部 **13** 处,就是 §13.19 推出的 `(40 - 14) / 2`,§13.20 ⑧ 在纵向布局里把它们放回的 9 随着 32 一起消失了。
 
-**And one sentence this product had been repeating stopped being true, which is what raised ② in the first place.** §13.20 ⑧ justified the vertical layouts' 9 as *"where macOS had it"*. On macOS 26 **Finder's own lights stand at 19 / 42 / 65**, first centre (26, 25) — not at 9 / 32 / 55; R-MAC-CORNERS caught it while measuring something else. The owner's answer was not to copy Finder's 19 but to place the light by a rule this window can state: its centre on its own corner's diagonal, which lands it at 13 (②). So the horizontal rhythm is a decision of this product's now and is written down as one, and what is still the platform's — the 23 points between the three — is read off the platform rather than restated.
+**这个产品一直在重复的一句话不再成立,而这正是 ② 被提出的起因。** §13.20 ⑧ 用*「macOS 自己放的位置」*为纵向布局的 9 作论据。在 macOS 26 上**访达自己的灯站在 19 / 42 / 65**,第一个中心 (26, 25)——不在 9 / 32 / 55;R-MAC-CORNERS 在量别的东西时发现了这一点。所有者的回答不是照抄访达的 19,而是用一条本窗口能自己陈述的规矩来放灯:中心在自己圆角的对角线上,落在 13(②)。所以水平节奏现在是本产品自己的决定,作为决定被记下;而仍然属于平台的——三个灯之间的 23 点——从平台上读而不是重述。
 
-**⑥ The `+` and the `˅` ride the axis their tabs ride.** The pair beside the last tab was anchored to the bar's foot — `WINDOW_NEW_TAB_MARGIN_BOTTOM_LOGICAL_PX`, three points up from it — which puts its 28 box's centre at 23. That is not an arbitrary 23: it is exactly where an attached tab's centre is (`40 - 34 / 2`), so on a Windows window the anchor and the tabs agree by construction. A pill is centred on the band at 20, and the pair went on sitting three points low — a difference a reader sees and cannot name. So the anchor follows the **silhouette**: centred on the band where the tabs float, three points off the foot where they are attached. Both buttons, because they are one control in two boxes. Windows is pinned at `9..37` in `the_windows_tab_strip_is_unchanged_by_the_pill`.
+**⑥ `+` 和 `˅` 骑在标签页骑的那条轴上。** 最后一个标签页旁边的这一对锚在头带的底部——`WINDOW_NEW_TAB_MARGIN_BOTTOM_LOGICAL_PX`,距底部 3 点——把 28 方块的中心放在 23。那不是一个随意的 23:它恰好是一个贴合标签页的中心所在(`40 - 34 / 2`),所以在 Windows 窗口上锚与标签页因构造一致。药丸的中心在头带中轴上,即 20,而这一对继续低 3 点——读者看得到、说不出名字的差异。所以锚跟着**轮廓**走:标签页浮动时居中在头带上,贴合时距底部 3 点。两个按钮都是,因为它们是一个控件分两个盒子。Windows 被 `the_windows_tab_strip_is_unchanged_by_the_pill` 钉在 `9..37`。
 
-**⑦ "One capability read" becomes "one read per window state", and the fourth site is the state change.** M3-3 measured a window's chrome once, at `install`; T-MAC-LIGHTS widened that to three *reaches* — the accessor and the two window constructors, which solve a stage before there is a `Runtime` to ask. Those are still three, and `the_caption_run_is_decided_by_one_capability_read` still counts three. What moved is that the measurement is no longer settled for the window's life.
+**⑦ 「一次能力读取」变成「每种窗口状态一次读取」,第四个站点就是状态变化。** M3-3 在 `install` 时量一次窗口的 chrome;T-MAC-LIGHTS 把它扩展到三*次接触*——访问器和两个窗口构造器,在还没有 `Runtime` 可问的阶段解题。那三次仍然是三次,`the_caption_run_is_decided_by_one_capability_read` 仍然数出三次。变化的是:测量不再在窗口的生命周期里一锤定音。
 
-The chain: `WindowButtonsWatch` already subscribed to `NSWindowDidEnterFullScreen` and `DidExitFullScreen` to re-state the buttons' placement. Those two names now carry a **different selector**, which re-measures the window, writes the answer into the `Cell` the watch holds, re-states the placement, and calls a wake — one `EventLoopProxy::send_event`, which is all an AppKit callback may do (X-4). `CustomWindowFrame::platform_chrome` asks the watch where there is one, so there is still exactly one copy of the number. `AppEvent::WindowChromeChanged` is answered in one place, `App::adopt_platform_chrome`, which asks `Runtime::platform_chrome` like every other reader and rebuilds the bar — `refresh_chrome` then `present_chrome_change`, the favicon slice's own pair. It is a re-draw and not a re-solve, because ③ and ④ together mean only the bar's leading edge moved.
+这条链:`WindowButtonsWatch` 已经订阅了 `NSWindowDidEnterFullScreen` 和 `DidExitFullScreen` 来重述按钮的放置。这两个名字现在带着一个**不同的选择器**,重新测量窗口,把答案写进 watch 持有的 `Cell`,重述放置,然后发一次唤醒——一次 `EventLoopProxy::send_event`,这是 AppKit 回调能做的全部(X-4)。`CustomWindowFrame::platform_chrome` 在有 watch 的地方问 watch,所以数字仍然只有一份。`AppEvent::WindowChromeChanged` 在一个地方回答,`App::adopt_platform_chrome`,它像其他每个读者一样问 `Runtime::platform_chrome`,然后重建头带——`refresh_chrome` 然后 `present_chrome_change`,图标条切片自己的那一对。这是重绘而不是重新解题,因为 ③ 和 ④ 合在一起意味着只有头带的前端移动了。
 
-**The wake is a parameter of `install` on both platforms, and a Windows frame drops it.** `SystemSettingsWatch::install`'s shape, for its reason. A window whose bar the platform draws nothing in has nothing that could be taken away and given back, so there is nothing that host would ever ask a turn for.
+**唤醒是 `install` 在两个平台上的一个参数,而 Windows 的 frame 把它丢弃。** `SystemSettingsWatch::install` 的形状,为了它的原因。一个平台什么都不画在上面的头带,没有什么能被拿走再放回来,所以那台宿主永远不会为此需要一个 turn。
 
-**And `seats.rs` now branches on the capability in three functions rather than two**: `caption_targets` (which boxes), `tab_strip_geometry` (whether the tabs float) and `window_caption_boxes` (whether the one box left is a slot or a centre). None of the three follows from the others, which is the test's own standard for being on the list. The module still names no platform and `FILES_THAT_MAY_NAME_A_PLATFORM` is unchanged.
+**`seats.rs` 现在在三个函数里按能力分支而不是两个**:`caption_targets`(哪些盒子)、`tab_strip_geometry`(标签页是否浮动)和 `window_caption_boxes`(剩下的那一个盒子是槽还是中心)。三者没有一个从其他两个推出,这是测试自己的入表标准。模块仍然不点名任何平台,`FILES_THAT_MAY_NAME_A_PLATFORM` 没有变。
 
-**⑧ Windows is byte for byte the window it was.** `nothing_here_touches_the_window_whose_whole_bar_is_folios` walks all four layouts and `the_windows_tab_strip_is_unchanged_by_the_pill` strikes the numbers: the 40px bar across the whole width, the four-slot run of 46×40 boxes ending at the window's own edge, the 7-point lead-in, the tab at `6..40`, the `×`, the mark, and now the `+`/`˅` pair at `9..37`. `caption_run_left`, `title_bar_app_run_right_px`, the drag reserve and every seat number below them are untouched, on every host.
+**⑧ Windows 逐字节就是原来的那个窗口。** `nothing_here_touches_the_window_whose_whole_bar_is_folios` 走遍四种布局,`the_windows_tab_strip_is_unchanged_by_the_pill` 钉住数字:40px 头带通宽,四个 46×40 的槽排到窗口自己的边缘,7 点前导留白,标签页在 `6..40`,`×`,标记,现在还有 `+`/`˅` 对在 `9..37`。`caption_run_left`、`title_bar_app_run_right_px`、拖拽保留区和它们下面的每个座位号都没有变,在每台宿主上。
 
-**⑨ The strict mock is the owner's reference and was not touched.** `mock-mac-strict.html` — the owner's file, not this repository's; it is quoted by number in `theme.rs` and lives outside the tree — still draws the gear in a 46-wide caption slot at the corner, still stands the three lights at macOS's own 9 / 32 / 55, still gives every vertical layout a 32-point header, and still bottom-anchors the `+`/`˅` pair. All four are things the owner ruled against **after** looking at the built window, which is what a reference is for: it is the owner's statement of what was asked for, not a record of what was decided next, and it is not this section's to rewrite. **The build differs from it in exactly those four places and in no others**, and this paragraph is the list.
+**⑨ 严格模型是所有者的参照,没有被碰。** `mock-mac-strict.html`——所有者的文件,不是本仓库的;`theme.rs` 里按编号引用它,它在树外面——仍然把齿轮画在角落的 46 宽标题栏槽里,仍然把三个红绿灯放在 macOS 自己的 9 / 32 / 55,仍然给每种纵向布局 32 点头部,仍然把 `+`/`˅` 对底部锚定。四处都是所有者在**看完构建好的窗口之后**裁掉的东西,而参照就是干这个的:它是所有者对被要求的东西的陈述,不是对后来决定了什么的记录,不归本节改写。**构建恰好在那四处、且仅在那四处与它不同**,本段就是那份清单。
+
+### 13.49 T-MAC-LOCALE: 系统没有的 locale 不编,但编码要说——Finder 起的 pane 不能留在 C 里(`crates/bt-platform/src/lib.rs`、`crates/bt-app/src/shell_integration.rs`)
+
+**取 13.49。** §13.47 是 T-MAC-FILEURI、§13.48 是 T-MAC-STRIP-ENDS,两节都已经合进
+main;本节取下一个还没被认领的号。
+
+**① The report, and what the screen was really showing.**
+The owner typed `天下为公` into a pane of a release build on the Mac and the line
+editor showed `天`, then highlighted `<008b>` where the rest of the phrase should
+have been. Nothing about the input path was wrong: the same four characters
+arrive at the pty as the same twelve bytes they always did. What was wrong was
+the shell that read them.
+
+The pane's `zsh` was running in the `C` locale, and `C` on Darwin is not a
+neutral setting — it is a statement that a byte *is* a character. Every one of
+the twelve bytes becomes a wide character of its own value, bytes `A0`–`FF` are
+printable there and go back out raw, and bytes `80`–`9F` are C1 controls, which
+`zle` draws as `<00xx>` in reverse video. Measured through Folio's own pty layer
+on the reported machine, with no `LANG`, `LC_ALL` or `LC_CTYPE` in the
+environment, writing the twelve bytes of the phrase and reading the echo:
+
+```text
+in    e5 a4 a9  e4 b8 8b  e4 b8 ba  e5 85 ac
+echo  e5 08 e5 a4 a9 e4 b8 [1b 5b 37 6d] 3c 30 30 38 62 3e [1b 5b 32 37 6d]
+      e4 b8 ba e5 [1b 5b 37 6d] 3c 30 30 38 35 3e [1b 5b 32 37 6d] ac
+```
+
+The `<008b>` is the third byte of `下` handed back as a C1 control with the
+reverse-video pair around it, and `e5 a4 a9` and `e4 b8 ba` survive because a
+byte-for-byte echo of a UTF-8 sequence still decodes as that character when the
+*terminal* reads it back. So the screen shows a character, then a token, then
+another character — which is the shape of the report, and the count of tokens is
+just the count of bytes the phrase has in `80`–`9F`.
+
+**② Why that pane had no locale, and why M1-5 left it that way.**
+`launchd` sets no `LC_*` and no `LANG`, so an app launched from Finder has none
+to pass on — `launchctl getenv LANG` on this machine answers nothing — while the
+same build launched from Terminal.app inherits one and is fine. That is what
+M1-5 (§11 Q8) is for. Its rule was, and remains: read `AppleLocale`, turn CLDR's
+spelling into POSIX's, and use a candidate **only if `locale -a` names it**, so
+that no region is invented for somebody. On the reported machine `AppleLocale`
+is `zh-Hans_US` — a Chinese interface in the United States — and neither
+`zh-Hans_US.UTF-8` nor `zh_US.UTF-8` is among that machine's 288 installed
+locales. M1-5 therefore declared nothing, and nothing is what put the pane in
+`C`.
+
+The refusal to guess a country was right. Answering *nothing* was not: a pane
+decodes UTF-8 and only UTF-8, and that is a fact about this terminal, not a guess
+about the reader.
+
+**③ What a miss is answered with, and why it is two variables.**
+Apple's own terminal, on this same machine and this same `AppleLocale`, starts
+its shells with `LANG=C.UTF-8` **and** `LC_CTYPE=UTF-8`, with `LC_ALL` empty.
+That pair is now what `choose_locale_declaration` mirrors when no candidate is
+installed, and neither half is redundant:
+
+- `LC_CTYPE` is the category a terminal cares about and it outranks `LANG`;
+  `UTF-8` is the only locale that says *encoding and nothing else*, and it is the
+  variable that can carry it. Measured: `LANG=UTF-8 locale charmap` answers
+  `US-ASCII`, because Darwin's `UTF-8` defines one category
+  (`/usr/share/locale/UTF-8` holds a single file, `LC_CTYPE`) and `setlocale`
+  refuses it for the rest, while `LC_CTYPE=UTF-8 locale charmap` answers `UTF-8`.
+- `LANG` is what every other category falls back to, and `C.UTF-8` is a whole
+  locale that says the same thing about the encoding without naming a language or
+  a region. `LANG=C.UTF-8 locale charmap` answers `UTF-8`.
+
+**Both halves are still checked against the machine**, which is the whole of the
+old rule, and each in the way it can be found: `C.UTF-8` is a locale and
+`locale -a` lists it; `UTF-8` is not a locale and that list names it on no macOS,
+so what is checked for it is the file the C library reads,
+`/usr/share/locale/UTF-8/LC_CTYPE`. A machine with neither is told nothing, as
+before. What is deliberately still not here is a third candidate that supplies a
+missing region — `zh-Hans` alone does not say China rather than Singapore — and
+`en_US.UTF-8` is still not a default.
+
+**④ The shape, and the one rule that did not move.**
+`system_posix_locale` is now `system_locale_declaration` and answers a
+`LocaleDeclaration` — one or two `(name, value)` pairs — rather than a locale
+name, because *which variable* is part of what the machine said and not something
+the caller may decide. `shell_integration::locale_declaration` writes whichever
+pairs it is handed, in order, and its rule is unchanged: if `LC_ALL`, `LC_CTYPE`
+or `LANG` is already answered — inherited, or written as a row of the profile's
+own — this declares nothing at all, pair included. Half a pair under an inherited
+`LC_CTYPE` would be the worst of both, a `LANG` that the inherited variable
+outranks for exactly the category that matters. Windows answers `None` as it
+always did, and its spawn is byte for byte what it was.
+
+**⑤ The proof.**
+The same shell, in the same pty, told what this code now declares
+(`LANG=C.UTF-8`, `LC_CTYPE=UTF-8` — the real answer of
+`system_locale_declaration()` on the reported machine), echoes the twelve bytes
+back unchanged:
+
+```text
+in    e5 a4 a9 e4 b8 8b e4 b8 ba e5 85 ac
+echo  e5 a4 a9 e4 b8 8b e4 b8 ba e5 85 ac
+```
 
 *(本节英文,待中文文案改写。)*
