@@ -125,6 +125,22 @@ name = "macos_notifications"
 path = "tests/macos_notifications.rs"
 harness = false
 
+# **The fourth target that owns the process's main thread** (M4-2), and it needs
+# one thing none of the three above does: a **bundle identifier**.
+# `+[WKWebsiteDataStore defaultDataStore]` is the application's own store and the
+# identifier is what makes it the application's (plan §4.5), so a proof taken out
+# of `target/debug/deps` would be a proof about a different store than the one the
+# product uses. `harness = false` for `macos_sheet`'s reason — libtest does not
+# hand a case the main thread — and the gate is `macos_app_delegate`'s rather than
+# `BT_MAC_GUI`: `open` passes none of the shell's environment, so the thing that
+# is already true of the run that wants this is that the binary is inside a
+# `.app`. An ordinary `cargo test -p bt-platform` prints one line and exits, on
+# every platform.
+[[test]]
+name = "macos_webview"
+path = "tests/macos_webview.rs"
+harness = false
+
 # **The fifth target that owns the process's main thread** (M3-4), on
 # `macos_sheet`'s gate rather than the notification centre's: what it needs is a
 # window server and a desk to put a window on, not a bundle identifier. It is a
@@ -387,6 +403,75 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
     "CFCGTypes",
     "std",
 ] }
+# **M4-2 adds one package, and it is the web engine** — `objc2-web-kit` 0.3.2,
+# the same family and the same release as the seven crates above: generated from
+# the same headers, in the same repository, against the same `objc2` 0.6.4. It is
+# the one this port could not avoid. A `WKWebView` and its two delegate protocols
+# are forty-odd selectors across a dozen classes, three of them taking completion
+# blocks and two taking `NS_ENUM` return values; hand-declaring that against
+# classes this crate does not own is forty unchecked selectors and four
+# hand-written struct layouts, which is the case `docs/DESIGN.md` §8 puts a
+# dependency on the other side of.
+#
+# **`Cargo.lock` gains exactly one package and no other line moves** — measured,
+# not assumed: every crate the features below pull in (`bitflags`, `block2`,
+# `objc2`, `objc2-app-kit`, `objc2-core-foundation`, `objc2-foundation`) was
+# already resolved for this target. `objc2-javascript-core` is an *optional*
+# dependency of this crate and no feature named here turns it on, so it does not
+# resolve at all.
+#
+# Every class is a feature of its own name, as in every other row of this table:
+# a missing one is an unresolved import rather than a silent absence.
+objc2-web-kit = { version = "0.3", default-features = false, features = [
+    # The three completion handlers this crate is handed — the two policy
+    # decisions and the rule list compiler — and the three it passes. **Not a
+    # package**: `block2` is already a dependency above.
+    "block2",
+    # macOS's half of the two delegate protocols: `createWebViewWithConfiguration:`,
+    # the three JavaScript panels and the two permission methods are all
+    # `#[cfg(target_os = "macos")]` inside this crate, and without this feature
+    # the protocols compile with those methods left out. **Not a package** —
+    # `objc2-app-kit` is the row below.
+    "objc2-app-kit",
+    # The page itself, its configuration, and the two preference objects the
+    # `WEB_SETTINGS` walk reads and writes.
+    "WKWebView",
+    "WKWebViewConfiguration",
+    "WKPreferences",
+    "WKWebpagePreferences",
+    # The third door: the compiled rule list, the store it is cached in, and the
+    # controller it is attached to and swapped on.
+    "WKContentRuleList",
+    "WKContentRuleListStore",
+    "WKUserContentController",
+    # The first and second doors: the navigation delegate, the action and
+    # response it is asked about, the frame that says whether an action is the
+    # main one, and the navigation object every completion callback carries.
+    "WKNavigationDelegate",
+    "WKNavigationAction",
+    "WKNavigationResponse",
+    "WKFrameInfo",
+    "WKNavigation",
+    # The refusing half of the UI delegate: the window a page may not open, the
+    # features it asked for, and the origin a permission is refused to.
+    "WKUIDelegate",
+    "WKWindowFeatures",
+    "WKSecurityOrigin",
+    # The cookie jar and the cache, keyed on the bundle identifier — §4.5's
+    # question, and the reason the bundle is built from M1.
+    "WKWebsiteDataStore",
+    # Find in page: the one call, its two switches, and the result it answers
+    # with — which says whether there was a match and never how many.
+    "WKFindConfiguration",
+    "WKFindResult",
+    # `CGRect` and `CGFloat` — the frame a page's view is made at and the zoom it
+    # is set to. Without this the initialiser and both zoom accessors are not
+    # generated at all, which is an unresolved method rather than a silent
+    # absence. **Not a package**: `objc2-core-foundation` 0.3.2 is a direct
+    # dependency of this crate already.
+    "objc2-core-foundation",
+    "std",
+] }
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     # M2-3: the last-resort fault report, when there is a running application to
     # raise it on and no window to draw it in (`message_box`).
@@ -551,6 +636,19 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     # M4-10: the two completion handlers the session delegate is handed. **Not a
     # package** — `block2` is already a dependency above.
     "block2",
+    # M4-2: the authentication challenge a page's server raises, the credential
+    # the answer would carry, and — the one that matters —
+    # `NSURLAuthenticationMethodServerTrust`, which is how a certificate
+    # evaluation is told apart from a password box. All three arrive by union
+    # through `objc2-web-kit`'s `WKNavigationDelegate`; named here because this
+    # crate's own code writes all three, and a feature that arrives by union is
+    # a feature nobody declared.
+    "NSURLAuthenticationChallenge",
+    "NSURLCredential",
+    "NSURLProtectionSpace",
+    # M4-2: `NSRect::ZERO`, which is the frame a page's view is born at before
+    # the slot sizes it. Already on by union several times over; same rule.
+    "NSGeometry",
     # M4-6 names three of the features above and adds none: `NSBundle` for the
     # identifier the notification centre files every message under,
     # `NSUserDefaults` for the Dock's own `autohide` preference — read as a

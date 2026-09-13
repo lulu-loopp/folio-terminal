@@ -93,17 +93,16 @@ use bt_render::{
     WINDOW_TAB_BADGE_FONT_LOGICAL_PX, WINDOW_TAB_BADGE_HEIGHT_LOGICAL_PX,
     WINDOW_TAB_BADGE_MIN_WIDTH_LOGICAL_PX, WINDOW_TAB_BADGE_PADDING_X_LOGICAL_PX,
     WINDOW_TAB_BADGE_RADIUS_LOGICAL_PX, WINDOW_TAB_CLOSE_BOX_LOGICAL_PX,
-    WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX, WINDOW_TAB_FLOAT_EDGE_LOGICAL_PX,
-    WINDOW_TAB_FLOAT_HEIGHT_LOGICAL_PX, WINDOW_TAB_FLOAT_LEAD_IN_LOGICAL_PX,
-    WINDOW_TAB_FONT_LOGICAL_PX, WINDOW_TAB_GAP_BETWEEN_LOGICAL_PX, WINDOW_TAB_GAP_LOGICAL_PX,
-    WINDOW_TAB_HEIGHT_LOGICAL_PX, WINDOW_TAB_MARK_LOGICAL_PX, WINDOW_TAB_MAX_WIDTH_LOGICAL_PX,
-    WINDOW_TAB_MIN_WIDTH_LOGICAL_PX, WINDOW_TAB_PADDING_LEFT_LOGICAL_PX,
-    WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX, WINDOW_TAB_RADIUS_LOGICAL_PX,
-    WINDOW_TAB_RING_STROKE_LOGICAL_PX, WINDOW_TAB_SQUEEZED_LOGICAL_PX,
-    WINDOW_TAB_SQUEEZED_PADDING_LOGICAL_PX, WINDOW_TAB_STATUS_DOT_LOGICAL_PX,
-    WINDOW_TAB_STATUS_DOT_RIGHT_LOGICAL_PX, WINDOW_TAB_STATUS_DOT_TOP_LOGICAL_PX,
-    WINDOW_TAB_TIGHT_LOGICAL_PX, WINDOW_TITLE_BAR_DRAG_RESERVE_LOGICAL_PX,
-    WINDOW_TITLE_BAR_LOGICAL_PX, chrome_palette,
+    WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX, WINDOW_TAB_FLOAT_HEIGHT_LOGICAL_PX,
+    WINDOW_TAB_FLOAT_LEAD_IN_LOGICAL_PX, WINDOW_TAB_FONT_LOGICAL_PX,
+    WINDOW_TAB_GAP_BETWEEN_LOGICAL_PX, WINDOW_TAB_GAP_LOGICAL_PX, WINDOW_TAB_HEIGHT_LOGICAL_PX,
+    WINDOW_TAB_MARK_LOGICAL_PX, WINDOW_TAB_MAX_WIDTH_LOGICAL_PX, WINDOW_TAB_MIN_WIDTH_LOGICAL_PX,
+    WINDOW_TAB_PADDING_LEFT_LOGICAL_PX, WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX,
+    WINDOW_TAB_RADIUS_LOGICAL_PX, WINDOW_TAB_RING_STROKE_LOGICAL_PX,
+    WINDOW_TAB_SQUEEZED_LOGICAL_PX, WINDOW_TAB_SQUEEZED_PADDING_LOGICAL_PX,
+    WINDOW_TAB_STATUS_DOT_LOGICAL_PX, WINDOW_TAB_STATUS_DOT_RIGHT_LOGICAL_PX,
+    WINDOW_TAB_STATUS_DOT_TOP_LOGICAL_PX, WINDOW_TAB_TIGHT_LOGICAL_PX,
+    WINDOW_TITLE_BAR_DRAG_RESERVE_LOGICAL_PX, WINDOW_TITLE_BAR_LOGICAL_PX, chrome_palette,
 };
 
 use crate::focus_thumb::MiniMetrics;
@@ -11332,8 +11331,17 @@ fn window_tab_strip(
             // into the content plane, filled with the pane's own surface so the
             // two are one plane. Floating: a closed pill on the tab's own box,
             // round on all four corners, standing on a strip whose floor runs
-            // unbroken under it — plus the hairline that is the only thing
-            // separating `#FFFFFF` from the `#F7F7F5` it floats on.
+            // unbroken under it.
+            //
+            // **And nothing around it** (owner ruling 2026-09-12, §13.32 ④).
+            // The pill arrived with a half-point ring, on the argument that
+            // `#FFFFFF` on `#F7F7F5` is a smudge without one. The owner looked
+            // at the built window and asked whether the tab needed the edging;
+            // the answer is that Folio already fills this exact silhouette
+            // without a ring everywhere else it draws one — the vertical rail's
+            // rows are the same pill at the same radius on the same strip, on
+            // both canvases — so a ring here would make the horizontal tab the
+            // one pill in the window that is outlined.
             let outline = if floating { tab.body } else { skirted };
             if activation > 0.0
                 && tab_right - tab_left >= 2.0 * radius
@@ -11355,30 +11363,6 @@ fn window_tab_strip(
                     )
                     .with_opacity(activation),
                 );
-                if floating {
-                    // `box-shadow: 0 0 0 .5px var(--pill-edge)`, drawn *inside*
-                    // the pill's own edge rather than spread outside it: the
-                    // ruling gives the pill 30 points and a top at 5, and an
-                    // outset ring would make the ink 31 tall and start it at
-                    // 4.5. Half a logical pixel is one device pixel at the
-                    // backing scale this window is drawn at, so the line the
-                    // reader sees is the line the design asks for either way,
-                    // and the box stays the box.
-                    let mut edge = ChromeSprite::new(
-                        ChromeMark::ControlPillRing {
-                            radius_px: radius as u32,
-                            stroke_px: (WINDOW_TAB_FLOAT_EDGE_LOGICAL_PX * scale).round().max(1.0)
-                                as u32,
-                        },
-                        tab.body,
-                        palette.tab_pill_edge,
-                    );
-                    // It fades in with the fill it edges: a hairline at full
-                    // strength around a silhouette that is half there is an
-                    // outline of a tab that is not yet the active one.
-                    edge.opacity = f32::from(palette.tab_pill_edge_alpha) / 255.0 * activation;
-                    sprites.push(edge);
-                }
             }
             // `@keyframes tab-land` — the wash and the ring the landing tab
             // arrives wearing, on their way to nothing. Both are the accent at a
@@ -15586,6 +15570,17 @@ pub const PREVIEW_CRUMB_SEPARATOR: &str = "\u{203a}";
 
 /// `…` — what the folded middle of a long path is drawn as.
 pub const PREVIEW_CRUMB_FOLD: &str = "\u{2026}";
+/// `~` — **the first crumb of a path that lies under the reader's own home**,
+/// on the platforms whose paths are rooted at a slash (owner ruling 2026-09-12,
+/// §13.32 ③).
+///
+/// Not a translated string and not a glyph: it is the character the shell in the
+/// pane below prints for the same folder, in either language, and it is what
+/// Finder's own path bar stands in for the three or four levels above a home
+/// directory. A Windows path keeps its drive crumb (`C: › Users › …`), because
+/// on that platform the drive is a place the reader navigates to and `~` is not
+/// a word Explorer uses.
+pub const PREVIEW_CRUMB_HOME: &str = "~";
 /// The `Open ⌄` pill's inset, each side of its caption.
 pub const PREVIEW_OPEN_PAD_X_LOGICAL_PX: f32 = 8.0;
 /// The gap between that caption and its chevron.
@@ -24442,6 +24437,47 @@ mod tests {
         assert_eq!(news_pill_box([0.0, 0.0, 8.0, 400.0], 1.0), None);
     }
 
+    /// **The pill's width is the body's, at every scale and for every
+    /// sentence** (T-MAC-LIVE §13.33 ③, owner's report 2026-09-12 from the Mac:
+    /// "saving shows a popup").
+    ///
+    /// What that report saw is this rectangle, and it is the same rectangle on
+    /// both machines: the door takes a body and a scale and **nothing else** —
+    /// no string, no font, no measurement that could answer differently where a
+    /// different font list is installed. So `Saved` gets the width of a pane
+    /// rather than the width of the word, and the reason is written above the
+    /// door: this pill carries verbs at its right hand, and a box that grew and
+    /// shrank around a sentence would move the button under the pointer.
+    ///
+    /// The scale is the part worth pinning, because scale 2 is where a mistake
+    /// would show first and the port's Mac runs at it: every number doubles and
+    /// the relation does not. One machine cannot photograph the other, so this
+    /// is how a Windows workstation holds what a Mac draws.
+    ///
+    /// RED GATE: give the door a `text_width` and use it, the way
+    /// [`page_hover_tag_box`] legitimately does, and the second half goes red.
+    #[test]
+    fn the_news_pill_takes_the_bodys_width_and_not_the_sentences() {
+        let body = [100.0, 60.0, 900.0, 700.0];
+        let one = news_pill_box(body, 1.0).expect("a pane this size holds a pill");
+        assert_eq!(one[2] - one[0], (body[2] - body[0]) - 24.0);
+
+        // The same body measured on a scale-2 machine: the insets, the lift and
+        // the line all double, and the pill still spans what is left of the body.
+        let doubled = [200.0, 120.0, 1800.0, 1400.0];
+        let two = news_pill_box(doubled, 2.0).expect("a pane this size holds a pill");
+        assert_eq!(two[0], doubled[0] + 24.0, "12 logical px, at scale 2");
+        assert_eq!(two[2], doubled[2] - 24.0, "and 12 logical px on the right");
+        assert_eq!(two[3], doubled[3] - 20.0, "10 logical px off the floor");
+        assert_eq!(two[3] - two[1], 56.0, "one 28 logical px line");
+        assert_eq!(
+            two[2] - two[0],
+            (doubled[2] - doubled[0]) - 48.0,
+            "the pill is as wide as the body it floats over, less its two insets \
+             — which is what `Saved` is drawn in, and why it reads as a bar"
+        );
+    }
+
     /// RED — **a read-only page wears a lock in the path row and no band**
     /// (owner's ruling 2026-09-12; §7.1.3x ③; mock §一).
     ///
@@ -26687,8 +26723,9 @@ mod tests {",
         }
     }
 
-    /// RED — **the active pill wears a hairline and no skirt; the attached tab
-    /// wears a skirt and no hairline** (owner ruling 2026-09-12).
+    /// RED — **the active pill is a closed fill and nothing else; the attached
+    /// tab is a skirt and nothing else** (owner rulings 2026-09-12, §13.19 and
+    /// §13.32 ④).
     ///
     /// The fill is the easy half. The hard half is that *every* ground a tab
     /// can wear has to be the same silhouette — the hover fill included —
@@ -26696,11 +26733,17 @@ mod tests {",
     /// other window's outline for exactly as long as the state lasts, which is
     /// the shape of the bug §7.1.6b″ records against paint order.
     ///
+    /// **The ring is the half this test was rewritten for.** It used to assert
+    /// exactly one `ControlPillRing` on the pill; the second ruling took the
+    /// ring off, so the same assertion now runs the other way and on *both*
+    /// windows — no pill in either bar is outlined, which is the sentence the
+    /// vertical rail's rows already made.
+    ///
     /// MUTATION: keep `ChromeMark::ActiveTab` on the floating arm and the first
-    /// assertion names it; drop the hairline and the second does; leave the
-    /// hover fill on `TabBody` and the last does.
+    /// assertion names it; put the hairline back on the floating arm and the
+    /// second does; leave the hover fill on `TabBody` and the last does.
     #[test]
-    fn the_active_pill_is_closed_and_hairlined_and_the_attached_tab_is_not() {
+    fn the_active_pill_is_a_closed_fill_with_no_ring_and_the_attached_tab_is_a_skirt() {
         let palette = chrome_palette();
         for scale in [1.0_f32, 2.0] {
             let titles = strip_titles(3);
@@ -26734,31 +26777,12 @@ mod tests {",
                 "the pill is not drawn on the box the geometry measured at scale {scale}"
             );
 
-            let edges = sprites
-                .iter()
-                .filter(|sprite| {
-                    matches!(sprite.mark, ChromeMark::ControlPillRing { .. })
-                        && sprite.color == palette.tab_pill_edge
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(
-                edges.len(),
-                1,
-                "the hairline is on the active pill and on nothing else at scale {scale}"
-            );
-            assert_eq!(
-                edges[0].mark,
-                ChromeMark::ControlPillRing {
-                    radius_px: radius,
-                    stroke_px: (WINDOW_TAB_FLOAT_EDGE_LOGICAL_PX * scale).round().max(1.0) as u32,
-                },
-                "the hairline is not half a point on the pill's own round at scale {scale}"
-            );
-            assert_eq!(edges[0].rect, body, "the hairline is not on the pill's box");
             assert!(
-                (edges[0].opacity - f32::from(palette.tab_pill_edge_alpha) / 255.0).abs() < 1e-3,
-                "the hairline is not drawn at its own alpha at scale {scale}: {}",
-                edges[0].opacity
+                !sprites.iter().any(|sprite| matches!(
+                    sprite.mark,
+                    ChromeMark::ControlPillRing { .. }
+                ) && sprite.rect == body),
+                "the floating pill is outlined at scale {scale}"
             );
 
             // The other window, untouched: the skirted silhouette, one radius
@@ -26783,7 +26807,7 @@ mod tests {",
                 !attached.iter().any(|sprite| matches!(
                     sprite.mark,
                     ChromeMark::ControlPillRing { .. }
-                ) && sprite.color == palette.tab_pill_edge),
+                ) && sprite.rect == flat.tabs[0].body),
                 "the attached tab grew a hairline at scale {scale}"
             );
             assert!(

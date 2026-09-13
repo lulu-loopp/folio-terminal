@@ -1,16 +1,23 @@
-//! **The page host, where there is no engine yet** — see the note on the
+//! **The page host, on a machine with neither engine** — see the note on the
 //! `portable` module declaration at the end of `webview.rs`.
 //!
 //! The twelve data types the window and the engine speak in live in
-//! `webview.rs` and are compiled on every platform; this is the thirteenth,
-//! and it is the only one that has anything to do with WebView2. M4-2 replaces
-//! it with `WKWebView` and the two delegates X-2 measured.
+//! `webview.rs` and are compiled on every platform; this is the thirteenth. It
+//! stood in for macOS too until M4-2 wrote `macos_webview.rs`, and what is left
+//! for it to say is the honest answer on a Linux server: there is no web
+//! preview here.
+//!
+//! **Every door this file has, the other two arms have, spelled the same way**
+//! — `web_host_contract_tests` in `lib.rs` reads the three as text and holds
+//! them to one set, because `bt-app` names `WebHost` with no `cfg` and no
+//! compiler on one machine can check more than one of them.
 
 use std::path::Path;
 
 use super::{
-    PageVisual, RehostCompensation, RehostOutcome, RehostSide, RehostStep, WebChord, WebEvent,
-    WebGuards, WebInstallReport, WebMouseEvent, WebNavigationVerdict, WebRequestVerdict,
+    NativeWindow, PageVisual, RehostCompensation, RehostOutcome, RehostSide, RehostStep, WebChord,
+    WebDpiOwnership, WebEvent, WebInstallReport, WebMouseEvent, WebNavigationVerdict,
+    WebRequestVerdict,
 };
 use crate::Compositor;
 
@@ -30,15 +37,18 @@ fn no_engine(what: &str) -> String {
 pub struct WebHost {
     #[expect(
         dead_code,
-        reason = "M4-2 calls it from -webView:decidePolicyForNavigationAction:"
+        reason = "the macOS arm calls it from -webView:decidePolicyForNavigationAction:"
     )]
     gate: Box<dyn Fn(&str) -> WebNavigationVerdict>,
     #[expect(
         dead_code,
-        reason = "M4-2 compiles it into a WKContentRuleList — see probe X-2"
+        reason = "the macOS arm asks it about a subframe; the rest is a compiled rule list"
     )]
     request_gate: Box<dyn Fn(&str) -> WebRequestVerdict>,
-    #[expect(dead_code, reason = "M4-2 wakes the loop when a delegate answers")]
+    #[expect(
+        dead_code,
+        reason = "the macOS arm wakes the loop when a delegate answers"
+    )]
     wake: Box<dyn Fn()>,
 }
 
@@ -72,6 +82,12 @@ impl WebHost {
         let _ = chords;
     }
 
+    /// The caller's resource rule, compiled. Nothing to compile it for.
+    pub fn set_request_rules(&self, rules: &str) -> Result<(), String> {
+        let _ = rules;
+        Ok(())
+    }
+
     /// Whether a controller is in service. Never.
     #[must_use]
     pub fn has_controller(&self) -> bool {
@@ -91,7 +107,7 @@ impl WebHost {
     /// Ask for a controller on this window. Unreachable: no environment.
     pub fn request_controller(
         &mut self,
-        window: crate::NativeWindow,
+        window: NativeWindow,
         generation: u64,
     ) -> Result<(), String> {
         let _ = (window, generation);
@@ -246,19 +262,25 @@ impl WebHost {
     /// the way out of a seat and on the way out of the process.
     pub fn close(&mut self) {}
 
-    /// What this seat may still promise about a page. Nothing stands, because
-    /// nothing was installed — which is what `WebGuards::none` means, and it is
-    /// the same value the Windows arm reports for a controller that never came.
+    /// The page's own process. There is none, and the number a host with no page
+    /// answers on the other platforms is this one.
     #[must_use]
-    pub fn guards(&self) -> WebGuards {
-        WebGuards::none()
+    pub fn browser_process_id(&self) -> u32 {
+        0
+    }
+
+    /// Who owns this page's device scale. Nobody: there is no page.
+    #[must_use]
+    pub fn dpi_ownership(&self) -> Option<WebDpiOwnership> {
+        None
     }
 }
 
 /// Drop the process-wide environment. There is none to drop.
 ///
 /// `WKWebsiteDataStore`'s lifecycle is a different question with a different
-/// answer and is M2-6's and M4-2's, not this door's — see §4.5 of the plan.
+/// answer, and M4-2 answered it in the macOS arm — see §4.5 of the plan and
+/// `docs/DESIGN.md` §13.29.
 pub fn forget_web_environment() {}
 
 /// **Which engine is installed.**
@@ -267,7 +289,7 @@ pub fn forget_web_environment() {}
 /// answer on a platform whose web engine ships with the operating system would
 /// be `Ok`. It is an `Err` today because the question a caller asks with it is
 /// not really "is WebKit present" but "can this build show a page", and this
-/// build cannot. M4-2 makes it `Ok` and takes the pages with it.
+/// build cannot. The macOS arm answers `Ok` and has the pages to go with it.
 pub fn webview2_runtime_version() -> Result<String, String> {
     Err(no_engine("the web preview"))
 }

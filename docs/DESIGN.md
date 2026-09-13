@@ -8378,36 +8378,29 @@ silhouette the row it lands in actually wears, and the rail's rows are closed
 boxes. A pill is the strip's row wearing the rail's silhouette, so the mark that
 was made for the rail is the mark for this.
 
-**④ The hairline is the only thing separating `#FFFFFF` from `#F7F7F5`.** An
-attached tab needs no edge — it is the pane's surface, and the join is the whole
-silhouette. A pill floats, and on the light canvas its fill and the strip under
-it are three levels apart. The owner struck the line: `rgba(0,0,0,.14)`, half a
-point. It is a named palette entry (`tab_pill_edge` / `tab_pill_edge_alpha`)
-derived exactly the way `menu_border` is — the canvas's own hairline *shade*
-(black on paper, white on night) at the canvas's own alpha for this mark — and
-carried as colour *and* alpha rather than pre-composited, which is `menu_border`'s
-reason said about a different surface: the ring is drawn over a fill that is
-still fading in (`TAB_ACTIVATION`), so the ground under it is a mix rather than a
-known colour, and the honest hairline is the one the renderer blends at draw
-time. It fades in with the fill it edges, because an outline at full strength
-around a silhouette that is half there is the outline of a tab that is not yet
-the active one.
+**④ The hairline this section struck is gone, and §13.32 ④ is where that was
+ruled.** It went in on one argument — an attached tab needs no edge because it is
+the pane's surface, while a pill floats, and on the light canvas its fill and the
+strip under it are three levels apart, so without a line the active tab is a
+smudge rather than a shape. The owner struck the value (`rgba(0,0,0,.14)`, half a
+point), night's was derived from it (`94 × 140 / 88`), it was carried as colour
+*and* alpha rather than pre-composited so the renderer could blend it over a fill
+still fading in, and it was drawn inside the pill's box rather than spread outside
+it so that the ink stayed 30 points tall.
 
-**The dark value is derived and the derivation is written down.** The owner set
-`.14` on the light canvas and said nothing about the dark one. Night takes the
-same multiple of *its own* hairline alpha that paper's does of its —
-`94 × 140 / 88 = 149.5`, so `pill_edge` is 150 on night against 140 on paper —
-which is the relation the two canvases already carry on both existing hairlines
-(`border` 94 against 88, `border_soft` 60 against 55). The reason those two run
-that way is `thumb`'s own: a white line laid on night covers less ground per unit
-of alpha than a black one laid on paper.
-
-**And it is drawn *inside* the pill's edge, not spread outside it.** CSS's
-`box-shadow: 0 0 0 .5px` is an outset ring, which would make the ink 31 points
-tall and start it at 4.5. The ruling gives the pill 30 points and a top at 5.
-Half a logical pixel is one device pixel at the backing scale this window is
-drawn at, so the line the reader sees is the same line either way and the box
-stays the box.
+Then the window was built and the owner looked at it, and asked whether the tab
+needed the edging at all. **It does not, and the reason is one this product had
+already written down elsewhere**: the vertical rail's rows are this same pill, at
+this same radius, on a strip of the same panel shade, and they carry no ring on
+either canvas. A ring here would have made the horizontal tab the one pill in the
+window that is outlined — which is a difference a reader notices without being
+able to name, and none of it was ever about the platform. So the sprite, the
+palette pair (`tab_pill_edge` / `tab_pill_edge_alpha`), the `Canvas::pill_edge`
+thousandths both canvases carried and `WINDOW_TAB_FLOAT_EDGE_LOGICAL_PX` are all
+out; nothing else read any of them. The fill and the silhouette are untouched,
+and the pin that held the ring now holds its absence —
+`the_active_pill_is_a_closed_fill_with_no_ring_and_the_attached_tab_is_a_skirt`,
+which asserts it of both windows rather than of one.
 
 **⑤ The five points of strip above and below a pill are not the tab.** The hit
 test reads `tab.body` and the geometry moved, so this needed no code at all — but
@@ -9652,6 +9645,273 @@ exercised by a real request. The cost is stated rather than hidden: `cargo test
 -p bt-platform` on a macOS machine with no network has three red cases, and they
 are red for the reason a reader would guess.
 
+### 13.28 M3-5: 一个数据目录一个写者——在 mac 上是建出来的:flock 锁、私有运行目录、对端校验、锁下清理(`crates/bt-platform/src/instance.rs`、`crates/bt-platform/src/launch_pipe_unix.rs`(新)、`crates/bt-platform/src/{launch_pipe_portable,lib}.rs`)
+
+**① What was there was not a weaker guarantee, it was the opposite of one.** `instance::claim_data_directory` off Windows returned **`Some`** — always, to everybody — with a comment saying so: "a machine with no kernel to ask always answers 'you are the one writer'". So the sentence `bt_app::persist` reads off it, *am I the process that writes this directory*, was answered **yes** to every copy of Folio on a Mac, and two of them over one `$HOME` were the whole of review row R4-5's data loss with nothing in the way of it. The plan's §4.4 ④ is the finding and it corrects both the first draft of the plan and the adversarial review, which each said this arm returned `None`; the consequence runs the other way, and it is why this ticket is `L` rather than `S`. Nothing here was ported. It was built.
+
+**② Identity is the filesystem's answer, and the one property it must have is that it does not move when the directory is made.** `directory_tag` lowercased a lossy path string, which is what NTFS means by one path and is wrong twice over off Windows: a case-sensitive APFS or ext4 volume has two directories where a folded name sees one, and no amount of case folding says anything at all about a symlink or a `..` (§R5). The Unix arm asks the filesystem instead — `canonical_path`, which is `realpath` for the part of the path that exists with the remaining components appended as written — and hashes that. The appending is not tidiness. **An identity taken from the directory's own inode would have answered one thing before `mkdir` and another after**, and the ask happens on both sides of that line: `persist::is_writer_of` keys its claim table by `claim_name(directory)` *before* the claim is taken, and `storage_dir()` does not create anything, so a first run asks who the writer is before a byte has been written. Two answers to one question would be two claims on one directory, held by one process, the second of which the kernel refuses — a Folio that refuses itself. Canonicalising the longest existing prefix has the property the inode does not: `/a/b` does not move when `/a/b/Folio` is created, so the answer before and the answer after are the same string.
+
+What survives from Windows is that there is exactly **one** folding and two names are built out of it, which is the promise a run under an isolated data directory rests on: it must miss the reader's everyday Folio at *both* doors, and two spellings of one directory must find each other at both. `one_directory_is_one_claim_and_one_endpoint_however_it_is_spelled` asserts the equality of the two names rather than describing it.
+
+**③ A private runtime directory, three refusals and one repair.** The lock and the socket both live in `$TMPDIR/folio-<uid>/`, and everything either of them promises rests on what is standing there. It is created with `mkdir(0700)` rather than created and then `chmod`-ed, so there is no instant in which it exists and is reachable by anybody else. It is then read with **`lstat` and not `stat`**: a symlink is refused outright, because following one would be this process putting its lock and its front door wherever somebody else pointed. A directory owned by another user is refused and never adopted. The mode is the one thing **repaired** rather than refused, and only after the owner check has passed — a directory this user owns is one this user may set the mode of, and refusing instead would be refusing the *claim*, which is a Folio that hands over to nobody and then opens a window that writes. The `<uid>` in the name matters only for the `/tmp` fallback: macOS's own `$TMPDIR` is already per-user, and a machine where it is not must not let the user who got there first decide what the second one finds.
+
+**④ The claim is `flock` on a descriptor, and that is the whole of crash recovery for it.** `LOCK_EX | LOCK_NB`, so it asks rather than waits — a blocking `flock` would turn a second launch into a process that hangs until the first one quits, which is the opposite of the answer the caller needs. The lock attaches to the **open file description** and not to the file, so nothing in the lock file is ever read and the file being there means nothing at all: the staleness question a lock file usually drags behind it is not asked, because nobody is reading the file. `DataDirectoryClaim`'s Unix body is that descriptor and nothing else, which is §4.4 ①'s rule kept — the platform type stays inside the gated body — and there is deliberately **no hand-written `Drop`**: `File`'s own drop closes it, the kernel closes it when the process ends however it ends, and a `Drop` that also unlinked the lock file would be a claim that destroys the thing the next process is waiting on.
+
+**⑤ The endpoint is a path, so it has a length, and the frames are this module's own.** Three things Win32 was answering along the way had to be answered again, and only three:
+
+* **A name.** `\\.\pipe\…` lives in a kernel namespace; a Unix socket lives in the filesystem. `claim_name` is therefore the socket's path, and a path has a limit a name does not: `sun_path` is 104 bytes on macOS and 108 on Linux, and `SOCKET_PATH_LIMIT` is written down as the smaller of the two, because a limit that is right on one platform and generous on the other fails on the one this port is for. Nothing is at risk of reaching it — the name is a sixteen character digest and a five character suffix under `$TMPDIR/folio-<uid>/`, **whatever the data directory's own path length is**, which is the other half of why the name is a digest. That is a claim a Windows runner can check and `the_launch_socket_fits_a_sockaddr_un_however_long_the_data_directory_is` checks it against a three-thousand-character data directory.
+* **A framing.** `PIPE_TYPE_MESSAGE` made "one frame" a kernel fact; a `SOCK_STREAM` socket has none. So this module writes four bytes of big-endian length and then that many bytes, bounded by `attention_pipe::MAX_MESSAGE_BYTES` on the way in *and* on the way out, and reads with `read_exact` — a stream socket is allowed to hand over a prefix, and a parser given a prefix of a JSON object answers the wrong question rather than no question.
+* **A wake-up.** `WaitForMultipleObjects` on a pipe handle and a stop event becomes `poll` on the listener and the read end of a self-pipe. A byte already sitting in a pipe is read whenever the listener next looks, which a flag would not be.
+
+Everything above that is the product's and does not move: `Decision<T>` decided once and carried, the reply written back, the client's `CONFIRM` as the commit point, a line the grammar refuses dropped without a word and without effect, `HANDOVER_BUDGET` bounding the whole handover and `STEP_DEADLINE` bounding one step of it. §7.59b's five rulings are about a launch and not about a transport, and each of them has a case here in the same shape it has on Windows.
+
+**⑥ Peer verification replaces the image check, and it is asked from both ends — but the boundary it draws is a user and not a logon session.** On Windows the client asks the kernel who is serving the pipe and refuses to write a command line to an image that is not this program (§7.59b, C-7), and the server's half of the boundary is a DACL naming the **logon session**, deliberately, "so a second session of the same user is outside it". A socket has file permissions, and file permissions name a **user**. `0600` inside a `0700` directory is therefore a *wider* principal than the Windows door — a second `ssh` login, a launch agent, a second console of this user are all inside it — and that is stated rather than substituted (§R6). It is also the right boundary for this particular door: what is behind it is one `$HOME`'s data directory, which every session of that user shares anyway. The sentence the Windows module ends on is unchanged and is the one that matters: **this is not a defence against a hostile process running as you.**
+
+What replaces the DACL is that both ends ask, because on this platform both ends can:
+
+* **The server** takes the peer's credentials off the connected socket — `getpeereid` for the uid, `LOCAL_PEERPID` for the pid — and refuses a peer whose uid is not its own or whose executable (`proc_pidpath` on that pid) is not the same file as its own. A pid out of a frame would be a number the peer chose; these come from the kernel.
+* **The client** reads the endpoint's own file before it connects — a socket, not a link, this user's, mode `0600` — and then asks the same two questions of the connected peer, **before a byte of the command line is written**. A folder somebody is standing in is not told to a process that is not this program.
+
+"The same file" is **device and inode**, which is stricter than the Windows arm's comparison of image *names*, and the difference is deliberate rather than an oversight: there the running Folio may be a newer build in another folder and the wire's own version check answers that difference; here the peer's path comes from the kernel and an application on this platform lives at one path inside one bundle, so the stronger question is the one that can be asked. The cost of the difference is benign — two Folios that really are two files refuse each other and the second opens its own window, which is the fallback every failure path here already takes.
+
+**⑦ The socket is the one thing a crash leaves behind, and it is cleaned up under the ownership lock.** The kernel releases the `flock` and closes the listener of a process that died; the **name** stays in the filesystem, and a client that connects to it is refused rather than told there is nobody home. Unlinking it is safe on exactly one condition — that nobody is listening on it — and the only thing that makes that condition true is holding the claim, because the endpoint is only ever opened by the process that holds it. So the unlink is in `claim_data_directory`, on the line after `flock` succeeded, and nowhere else (§R5): before the lock, or without it, it would be one Folio deleting a running Folio's front door. `a_stale_endpoint_is_removed_by_the_next_holder_and_only_under_the_lock` asserts both directions of that, and the mutation that turns it red is moving the `remove_file` one statement earlier. `LaunchPipe`'s own drop unlinks the name too, and that is **not** the general answer and is not written as though it were: `bt-app` parks the endpoint in a `OnceLock` static, a static is never dropped, and so a real Folio leaves its name behind on an orderly quit exactly as it does on a crash. The drop serves a scope that owns one — every case below — and the cleanup under the lock is what the product actually runs.
+
+**⑧ `bt-app` does not change shape, and that is the result rather than the absence of one.** `persist::is_writer_of`, `launch_wire::open`, `launch_wire::hand_over` and `main`'s "if I am not the writer, hand this over and leave" are the same lines they were, with no `cfg` anywhere among them. The module is a third arm beside the Windows one on `http`'s footing (§13.27) — two real transports and one honest refusal for a platform that has neither — and every name `bt-app` reaches for exists in all three. `hotkey::allow_foreground_for` answers `false` off Windows, which is the truthful answer (there is no foreground lock to ask permission from) and is already what §4.4's class-N arm says; the landing itself is M3-1's `settle_launch_requests` and is untouched.
+
+**⑨ What a Windows runner holds, what only a Mac can, and the one thing neither does.** Four pins run on the workstation: the socket-path length above, and a source pin that reads this file's own text — that the Unix arm exists, that `DataDirectoryClaim`'s Unix body holds an owned descriptor rather than being a unit struct again, that the runtime directory is created `0700` and refuses a link and another user's directory, and that the `flock` is `LOCK_EX | LOCK_NB` and precedes the unlink. `update_check_transport_tests` is the precedent: a claim about a platform arm is a claim about the source when no runner can hold it, and the way an arm rots is that somebody simplifies one of those four lines with no compiler anywhere that would notice.
+
+Eight cases run on the Mac and cannot run anywhere else: two claims on one canonical directory with the second `None`; one directory reached through a symlink and through a `..` being one claim; case folded where the volume folds it **and nowhere else**, asked of the volume the test is standing on rather than assumed from the platform; the runtime directory's mode, owner and link-freedom; the stale socket cleaned only under the lock; the endpoint `0600` inside a `0700` directory and gone when its listener is; a door that is not a private socket of this user's refused before it is connected to; and the round trip — `Decision` → reply → `CONFIRM` → `Admission` — over a real socket with the peer id the kernel reported.
+
+**The one thing neither holds is a connection from a peer that is a different executable.** The rule is tested at the predicate (`vet_executable` says yes to this process's own image and no to `/bin/sh`), and the connected half is tested only in the direction that passes — every case above is a peer whose executable *is* this test binary, and each is served. A refusal end to end would need a second program built for the purpose that speaks this wire, and that is a cost this ticket did not pay. It is written down here rather than left as a gap in a list.
+
+**⑩ The acceptance sentence, on the real binary.** `docs/plans/port/m3-5/` carries the two launchers and the transcript. Two isolated `$HOME`s and one of them entered twice, on the Mac mini, `debug/folio` built from this branch. A first `folio` under data directory **A** comes up (`A1=24175`) and that directory lists `settings.json` and, once the first session write falls due, `session.json`. A second `folio` under **A** exits **0 in under a second**, prints nothing, and leaves **one** folio process alive — the first one; a handover that had failed would have opened a window and never returned, because that invocation was in the foreground. A `folio` under **B** (`B1=24248`) runs beside it, two processes and two data directories. The runtime directory is `drwx------`, this user's, with one `srw-------` socket and one `-rw-------` lock per data directory. **The `.sock` files are still there after both processes ended**, which is ⑦'s point made by the product rather than by a case: a static is never dropped, so the cleanup under the lock is the answer and the drop is not. Both pids were written down when they were started and only those two were ever ended.
+
+### 13.29 M4-2: WKWebView 宿主——一个委托类走 navigation_gate,子资源靠编译好的规则表,数据仓按 bundle id 存(`crates/bt-platform/src/macos_webview.rs`(新)、`crates/bt-platform/src/{webview,webview_portable,lib}.rs`、`crates/bt-platform/tests/macos_webview.rs`(新)、`crates/bt-platform/Cargo.toml`、`crates/bt-app/src/{webnav,webhost}.rs`)
+
+**① One host, three arms, and `bt-app` still names no platform.** `webview.rs`
+declares twelve plain data types and compiles them everywhere; under them sit
+three `WebHost`s — the WebView2 one behind `#[cfg(windows)]`, the new
+`macos_webview.rs`, and `webview_portable.rs` for the machine that has neither.
+`web_host_contract_tests` in `lib.rs` reads all three as text and holds them to
+**one set of doors, spelled the same way**, because no compiler on one machine
+can check more than one of them — the same instrument, and the same argument, as
+M4-10's `update_check_transport_tests`. Two doors moved to make that true: the
+portable arm gained `browser_process_id` and `dpi_ownership`, which the Windows
+arm has, and lost `guards`, which the Windows arm never had and no caller in
+`bt-app` ever asked for.
+
+**② `WKWebView` is handed to the composition, not made by it.** The two engines
+are hosted the opposite way round. WebView2 renders into a visual the host makes
+and takes it through `put_RootVisualTarget`; WebKit makes its **own** `NSView`
+and the host has to take *that*. M4-1 built the door for it —
+`Compositor::attach_page_view(page, NativeWindow)` (§13.24) — and `install`'s
+fifth step is the one call through it. The slot is what sizes the page, so
+`set_bounds`, `set_rasterization_scale` and `notify_parent_window_moved` are
+honestly empty here: a second writer of one rectangle is how two clocks come to
+disagree.
+
+**③ Creation is two steps here too, and the second one really is asynchronous.**
+`request_environment` establishes the only thing that is shared and does live in
+a folder — the `WKContentRuleListStore` — and queues `WebEvent::Environment` on
+the spot. `request_controller` makes the view, and then *waits*: the seat's rule
+list is compiled in a completion block, and a page whose third door is not yet on
+it is not a page this host will let anybody navigate, so `WebEvent::Controller`
+is queued from that block. A navigation that arrives ahead of its rules is
+**parked** and the same block performs it. That is the whole of the ordering, and
+it is what makes `WebGuards::resource_requests` true rather than hopeful at
+install time.
+
+**④ One Objective-C class is the entire policy**, conforming to both
+`WKNavigationDelegate` and `WKUIDelegate` — X-2 measured one object serving the
+whole matrix. `decidePolicyForNavigationAction:` is asked about the main frame,
+every subframe, every redirect hop, a script setting `location`, a `data:` link
+and a `mailto:`, so it is the one callback that has to tell the first door from
+the third: `targetFrame.isMainFrame` picks `navigation_gate` or `request_gate`,
+which is the split `NavigationStarting` and `FrameNavigationStarting` make on the
+other platform. `Decision::Navigate(target)` where the target differs becomes
+cancel-then-load, and the substitute is started **after** the decision handler has
+been called rather than inside it. `decidePolicyForNavigationResponse:` is the
+download refusal (`canShowMIMEType == false`), `shouldPerformDownload` is its
+other half on the action, `createWebViewWithConfiguration:` returns nil after
+routing the address through the gate, and the three JavaScript panel methods are
+implemented and answer immediately — being there and returning at once is what
+`AreDefaultScriptDialogsEnabled(false)` plus `ScriptDialogOpening` buys on
+Windows.
+
+**⑤ The third door is a compiled rule list, and it is generated rather than
+written twice.** WKWebView has no per-request callback at all: X-2 measured a
+picture, a stylesheet, a script and a `fetch` each reaching a second origin's
+socket with no delegate ever naming them. So `webnav.rs` grows one function and
+**no new policy** — `content_rules(&Mint) -> String`, emitting Safari
+content-blocker JSON out of the same four scheme tables `resource_request` now
+reads (`DOCUMENTS_OWN_BYTES`, `ENGINE_INTERNAL`, `DISK`, `NETWORK`). A browsing
+seat blocks `^file:`, the host's blank page blocks that and both network
+schemes, and a local seat blocks the network only — because the *folder* half is
+not a pattern at all.
+
+**One rule per scheme, and that is a measured requirement rather than a style.**
+The first spelling of this was `^(http|https)://`, one rule carrying the
+alternation, and `WKContentRuleListStore` refused to compile it — found on the
+machine by the `.app` proof below, because a content blocker's `url-filter` is a
+*subset* of regular expressions and a group is not in it. One rule per entry of
+the table is what compiles, and it is still generated rather than written: a
+scheme added to `NETWORK` becomes another rule rather than another branch
+somebody has to remember. `the_patterns_name_the_schemes_the_tables_do` refuses
+a pattern carrying `(` or `|` so that the finding cannot be lost again, and a
+compile that does fail now carries **WebKit's own sentence** into the seat's
+fault line: the first run of the proof spent a whole cycle establishing a fact
+the framework had already said out loud. It is `-[WKWebView loadFileURL:allowingReadAccessToURL:]` with
+the minted file's own folder, which X-2 measured enforcing it with no rule list
+in the room. `the_two_spellings_of_the_resource_rule_agree` asks every row of
+X-2's fixture set of **both** spellings and requires the pair — patterns plus
+read access — to refuse exactly what `resource_request` refuses. No mint compiles
+to an empty list, because `WKContentRuleListStore` refuses one and a seat whose
+compilation failed would have no third door at all.
+
+The rule moves when the mint does, so the seat says it again before every
+navigation. `WebHost::set_request_rules` is therefore a door on **every** arm —
+`bt-app` names no platform — and the two arms whose engine asks per request drop
+what they are handed in one line that says so. The identifier a list is compiled
+under is a hash of its own contents, because `WKContentRuleListStore` caches by
+identifier on disk and a name that meant "the file seat's" would go on answering
+with last week's compilation.
+
+**⑥ The website data store is the default, persistent one, keyed on the bundle
+identifier.** That is the same promise `%LOCALAPPDATA%\Folio\WebView2` makes on
+the other platform — a page a reader signed into is a page still signed in
+tomorrow — and it is why the plan builds the bundle from M1 rather than from M5
+(§4.5). X-2 recommended the non-persistent store; that would be a change to what
+the *product* promises rather than a question about how this platform is spelled,
+so the port keeps the behaviour and `SECURITY.md`'s web-preview paragraph records
+the cost on both machines. **There is no "clear web data" verb on either arm** to
+give an arm of: the Windows user data folder is a profile and is deliberately not
+deleted, and the macOS store is cleared the way any application's container is —
+`removeDataOfTypes:modifiedSince:completionHandler:` is where a later ticket would
+put one. What the folder `bt-app` still hands the host *is* used, and it is not
+the profile: `web_engine_folder` answers
+`~/Library/Application Support/Folio/WebKit` on a Mac, and what lives there is the
+compiled rule lists. It is asked of `bt_platform::host_platform` rather than of a
+`cfg`, which is what keeps `webhost.rs` off
+`only_the_named_files_decide_what_platform_this_is`' list.
+
+**⑦ A panic in a delegate callback is a refusal, not an abort.** X-2's second
+carry-forward: a panic unwinding out of a `#[unsafe(method(…))]` body crosses into
+Objective-C and ends the process, and a bundle started by `open` has no terminal
+to say so. Every entry point is wrapped, and the value a wrap falls back to is
+always the refusing one — cancel the navigation, deny the permission, open no
+window. A door that failed to decide has not decided.
+
+**⑧ X-2's first carry-forward did not need the hammer it was found with.** objc2
+verifies every selector against the receiver's **class** while debug assertions
+are on, and WebKit hands the authentication challenge over as
+`WKNSURLAuthenticationChallenge`, a forwarding wrapper whose `protectionSpace` is
+not a method on that class; the send works and only the verification refuses it.
+The probe turned the verification off, which a crate cannot do locally — objc2's
+`disable-encoding-assertions` is a Cargo feature and Cargo features unify across a
+build, so it would switch the checking off for every `msg_send!` in this
+workspace. The local answer is `performSelector:`, which *is* a method on every
+class descended from `NSObject`: the verification passes on it and the forwarding
+happens inside Objective-C, where it belongs. The challenge is read because it has
+to be — the same callback carries TLS server-trust challenges, and answering
+`RejectProtectionSpace` to those would break every `https` page. Server trust gets
+the system's own evaluation; every password box gets the refusal.
+
+**⑨ A page's process dying is the renderer's kind, not the browser's.**
+`webViewWebContentProcessDidTerminate:` is WebKit's only process notification and
+it names the one that draws. The `WKWebView` is still a live object with its
+delegates on it, and Apple's documented recovery is a reload — which is exactly
+what `WebMachine::on_render_process_failed` already answers a renderer death with.
+The browser-process kind would start a rebuild from an environment this platform
+does not have. There is likewise no `BrowserProcessExited`: a closing seat goes
+through `BROWSER_EXIT_DEADLINE`, which is the graceful path the Windows arm
+already measured — one shutdown in eight never said anything either.
+
+**⑩ What the port gives up, in plain words.** Seven sentences, and M4-3 is what
+says them in the product.
+
+* There is **no per-request door** for a document's own contents. A refusal is a
+  pattern that matched, not a question this program answered, so a rule that
+  cannot be written as a pattern cannot be enforced.
+* A request stopped that way is **dropped by the engine rather than answered**
+  with the empty 403 the Windows host mints, and Folio never learns it happened —
+  no `RequestRefused` line for the trace and no reason for a card to show.
+* Requests a **service worker or a shared worker** makes were not measured. The
+  Windows arm filters them on purpose; here they are unknown rather than covered.
+* **Permissions are refused one capability at a time**, so a capability a later
+  WebKit adds arrives with Apple's default rather than with Folio's refusal
+  already standing.
+* **A `javascript:` link is never offered to the gate.** X-2's matrix put it
+  beside `data:` and `blob:` in row 13 and it does not belong there: measured by
+  the `.app` proof, WebKit evaluates the URL in the page's own context and
+  raises no navigation action at all, where WebView2 raises `NavigationStarting`
+  and `webnav` refuses it as `ScriptOrInlineScheme`. What the claim reduces to
+  is what the *address* does, and the address does nothing — the seat does not
+  move, and a page can already run its own script with a `<script>` tag, so
+  nothing reaches an origin or a disk that could not before.
+* **The engine's own context menu stays.** `AreDefaultContextMenusEnabled` has no
+  counterpart in WKWebView's public API, so that row of `WEB_SETTINGS` is reported
+  unapplied rather than quietly assumed — one line on the diagnostics stream, and
+  nothing refuses a page over it.
+* **A page's icon and its match count never arrive.** WebKit announces neither in
+  any public form, so the seat wears the product's own mark and the search capsule
+  shows no number rather than a wrong one. The address also stands still for a
+  single-page application, because the history API moves it through key-value
+  observation rather than through a delegate.
+* **Nothing forwards the pointer, and nothing yet decides whether it arrives.** A
+  `WKWebView` is a real `NSView` in the window's own hierarchy, so AppKit delivers
+  to it directly and `send_mouse` has nothing to send — but the page's slot stands
+  *under* Folio's surface view (§13.24), and whether an event reaches the page at
+  all is a question about that view's hit testing. Neither M4-1 nor M4-2 settles
+  it; it is written down here and carried forward.
+
+**⑪ One package, and it is the web engine.** `objc2-web-kit` 0.3.2 — the same
+repository, the same release and the same `objc2` 0.6.4 as the seven crates
+already named. A `WKWebView` and its two delegate protocols are forty-odd
+selectors across a dozen classes, three of them taking completion blocks and two
+taking `NS_ENUM` returns; hand-declaring that is forty unchecked selectors and
+four hand-written struct layouts, which is the case §8 puts a dependency on the
+other side of. **`Cargo.lock` gains exactly one package and no other line moves**:
+every crate `objc2-web-kit` pulls in under the features named — `bitflags`,
+`block2`, `objc2`, `objc2-app-kit`, `objc2-core-foundation`, `objc2-foundation` —
+was already resolved, and `objc2-javascript-core` is an optional dependency no
+feature named here turns on.
+
+**⑫ The proof needs a bundle, and that is the finding worth carrying.**
+`tests/macos_webview.rs` is a fourth `harness = false` target, and its gate is not
+`BT_MAC_GUI` but *being inside a `.app`*: `defaultDataStore` is the application's
+store and the identifier is what makes it the application's, so a run out of
+`target/debug/deps` would prove something about a different store. It builds a
+window, a `Compositor`, a `WebHost` with the `Mint::File` policy written out, and
+drives every row of X-2's matrix that needs no network — the folder read and the
+folder refused, a `data:` link, a `javascript:` link, `window.open`, a download,
+`alert()`, a `file:` location outside the mint, and the view leaving the window
+when the seat closes. Two of those rows report a door rather than assert one,
+because that is what the run found: the `javascript:` link above, and the
+`file:` location outside the mint, which **the engine refuses before any
+callback** — `loadFileURL:allowingReadAccessToURL:`'s scope is X-2's row 9
+arriving one door earlier than the gate. The proof names which door refused
+instead of insisting on the one that did not have to. It reads `document.title` back off the page, which is the
+only channel a seat with no bridge has and is the one X-2 used; it photographs
+**its own** window with `CGWindowListCreateImage`, which needs no Screen Recording
+grant; and it drives nothing through System Events, so no privacy prompt can land
+on anybody's desk.
+
+**⑬ One defect the ticket did not name, found by writing the fixture down.**
+`Mint::file` composed `file:///` and then appended the path — which is right for
+`D:eport.html` and wrong for `/Users/somebody/report.html`, because the second
+already carries its own root. A Mac therefore minted `file:////Users/…`, four
+slashes, which every engine normalises back to three: the string the seat minted
+then matched neither the address the engine committed (`Mint::admits`) nor any
+candidate the folder rule was asked about, and **a local page refused itself**.
+The fix is two lines and it is a question about the string rather than about the
+machine, so `webnav.rs` still names no platform;
+`a_minted_file_url_has_one_root_however_the_path_spelled_it` pins both spellings
+and both doors. What is still owed is the *display* half —
+`Mint::path_and_tail_of_file_url` reads a URL back as a drive-absolute Windows
+path, so `local_path_form` answers `None` on a Mac and the surfaces that show a
+local file show its URL instead of its path. That is a ticket of its own and is
+carried forward here rather than smuggled in.
+
 ### 13.30 M4-6: 通知走 UNUserNotificationCenter,Dock 图标的注意标记(`crates/bt-platform/src/macos_notify.rs`(新)、`crates/bt-platform/src/{lib,portable_impl}.rs`、`crates/bt-platform/tests/macos_notifications.rs`(新)、`crates/bt-platform/Cargo.toml`)
 
 **① Four doors, one file, and the reason is that on this platform they are one
@@ -10121,6 +10381,436 @@ image has, which is the name the crash report is filed under. **And the same pas
 showed what §M4-7 is for**: two Folios on one data directory did not hand over to
 each other, because the attention endpoint that arranges that on Windows has no
 macOS arm yet.
+
+### 13.32 T-MAC-FIT: 说这台机器的话——设置行按能力隐、字符串按平台挑、路径从 ~ 起、药丸不描边(`crates/bt-app/src/{settings,i18n,first_run,main,seats}.rs`、`crates/bt-render/src/{theme,scheme,lib}.rs`)
+
+**Taken as 13.32.** 13.19–13.25 and 13.27 are merged; 13.26 and 13.28–13.31 are
+in flight on other branches of this port. This section takes the next number
+nothing has claimed.
+
+This is the first acceptance pass the owner ran on a built Mac (2026-09-12), read
+as one ticket. Four things came out of it, and only the last is about paint: a
+settings page offering rows about mechanisms macOS has not got, a window saying
+`Explorer` and `taskbar` and `folio.exe` to a reader who has none of those, a
+breadcrumb beginning at a folder called `/`, and a tab wearing an outline the rest
+of the window does not wear. What they have in common is that each one was
+*correct on Windows* and nobody had ever asked it the other question.
+
+**① A row is not a row where the platform has not got the mechanism.** The
+General page offered `Explorer context menu`, and the Terminal page offered
+`PSReadLine patch` and `Offer PowerShell integration`. All three are switches over
+a Windows shell extension, a Windows PowerShell module and a Windows startup
+file; none of them is a question a Mac could answer, and the reader who presses
+one has been taught a word for nothing. They are dropped by the rule M3-6 already
+wrote for the first-run card (§7.56 ⑬): each row says what facility it is about
+(`SettingsRow::needs() -> Option<first_run::Capability>`), the facility says which
+platforms have it (`Capability::on(platform)`), and `visible_rows_for(platform,
+tab_layout)` filters the list once at the end.
+
+**The same `Capability` and not a second table.** Two of the four facilities
+these rows name are ones that card already asks about, and a second table would
+be a second place to remember which platforms have them. What each surface still
+owns is what it *does* with the answer — the card drops the question, the page
+drops the row. `Capability` grew two values for
+this: `PsReadLineModule`, which the card never had a row for because the card asks
+about writes Folio would make on its own and that one is only ever made by a
+reader pressing the row; and `OptionKey`, which is the one entry in that table
+pointing at macOS rather than at Windows and is the reason it is a table of
+*facilities* and not a `windows` flag. `Option key sends Alt` was M1-7's `if
+bt_platform::host_platform() == MacOs` at the one call site, and it is now the
+fourth row under the one rule — a rule with an exception in it is a rule the next
+reader skips.
+
+**The list is built whole and filtered once**, rather than each push being
+conditional, because the order of that list is itself a ruling and every comment
+in it is part of that ruling; a row that came and went inside the run would make
+the order unreadable. `visible_rows` is the ambient reader and
+`visible_rows_for` takes the platform as a value, for `rows_for`'s own reason: a
+Windows workstation has to be able to read out what a Mac's General page contains,
+or "a Mac is not offered a PSReadLine row" stays a claim nobody can check until
+somebody opens the window on a Mac — which is exactly how these three rows got
+onto that page.
+
+**No page is left with a heading and nothing under it.** General keeps six
+unconditional rows and Terminal keeps four, so the heading derivation that walks
+the list never meets an empty run and the advanced disclosure is untouched. That
+is asserted rather than reasoned: `no_page_is_left_with_a_heading_and_no_rows`.
+
+**And a row the *machine* cannot honour is still a different thing.** `Acrylic`
+on a machine with no backdrop, a built-in profile's colour, an unavailable
+PSReadLine — those are greyed *with the reason in the sentence*, because the
+reason is what the reader came for. A facility the platform has not got leaves
+nothing to explain, and a sentence explaining it would be this page teaching a
+reader a Windows word on a Mac.
+
+**② A string that names a program names the one on this machine.** The rows above
+are the half that disappears; this is the half that stays and has to be true.
+`Reveal in Explorer` over a folder, `Revealed in File Explorer` in a toast,
+`· Ctrl+click shows it in Explorer` under a link, `from the taskbar, a shortcut or
+folio.exe`, `Flashes the taskbar`, `Windows would not take it`, `Windows keeps
+some combinations for itself`, `A desktop-wide key needs Ctrl, Alt or Win`,
+`git.exe was not found. Install Git for Windows`, `This version of Windows does
+not offer the blur`, and the Chinese half of the summon key's sentence, which says
+the key is registered with Windows where the English never said so. Eleven
+entries, and each one is a sentence a Mac reader can reach.
+
+**One mechanism, in the table, beside the words.** `pick_platform(lang, platform,
+en_win, zh_win, en_mac, zh_mac)` is `pick` with the platform choosing the pair
+before the language chooses the string, and `Text::on(lang, platform)` is the
+whole table with both axes exposed. `Text::in_lang` asks `host_platform()` once
+and every surface in the window keeps the signature it had. The alternative — an
+`if` wherever somebody noticed — would give this window as many answers to "what
+platform am I on" as it has sentences, and the ones nobody noticed would keep the
+Windows word forever.
+
+**What the Mac column says, and what it does not.** Finder where the program is
+Finder; the Dock where the taskbar was, because the platform's own way of calling
+a reader back to an application is a Dock icon bouncing (the call itself is
+`bt_platform::flash_window`, whose macOS arm is M4-6); `macOS` where the refusal
+named the system; `Control, Option or Command` where three keycaps were named,
+because `Win` is not a key on that keyboard; the Xcode command line tools where
+`Git for Windows` was. Two entries are deliberately *not* translations. The launch
+row's second sentence named Explorer's verb and `folio-here.cmd` — two Windows
+shell extensions with no Mac counterpart — so it is dropped rather than invented,
+and the Mac reader is told the three ways they actually start this program. And
+the greyed `Acrylic` row reads `Folio does not draw this blur on macOS`, because
+that system *has* the blur and this product has not drawn it: a line saying `this
+version of macOS does not offer the blur` would be the window blaming the machine
+for its own omission.
+
+**`Ctrl` stays `Ctrl` in the link hint**, and only the program's name moves. The
+press that hint promises is read off `window.modifiers.control_key()`, which is
+the same key on either keyboard; a hint that said `⌘` would describe a press this
+window does not answer. That the chord *should* be Command on a Mac is M1-7's
+question about routing and not this ticket's about wording — noted, not taken.
+
+**Windows is byte for byte what it was**, and the strings that belong to a Windows
+surface are untouched: the Explorer registration's own toasts, the PSReadLine
+repair, the `$PROFILE` offer (whose probe answers `None` off Windows, so the strip
+never rises there), the first-run rows that card does not list. Those are named in
+`Text::WINDOWS_ONLY_SURFACES`, which is the exemption list of a red gate rather
+than a comment: `no_string_a_mac_reader_meets_names_a_windows_program` reads every
+entry of the table, in both languages, on the Mac column, against the vocabulary
+of the other machine. A string that leaves one of those surfaces and lands
+somewhere a Mac reader can see it has to come off the list, and taking it off is
+what makes the gate ask about it.
+
+**The Chinese is owed and the debt is per column.** `CHINESE_PENDING` was a list
+of entries; it is now a list of `(entry, column)` pairs, because `Reveal in
+Explorer` has had its Chinese since the file tree was written and `Reveal in
+Finder` has not. A list that named the entry would have taken the Windows half out
+of every completeness check in order to excuse the Mac half — which is how a
+translated sentence quietly stops being checked. The two completeness pins
+(`no_entry_ships_the_english_word_as_its_own_translation`,
+`every_chinese_entry_carries_at_least_one_han_character`) now walk the platform
+axis too, so the Mac column is checked the way the Windows one always was. The
+source marker on each pending literal is `// zh: pending opus46`; the copywriter
+greps for it, and this list is how the build refuses to forget. Fifteen pairs
+stand there: the eleven above, and `Option key sends Alt` and its sentence —
+M1-7's, English in both languages — listed on both platform columns, because the
+table answers for a platform that never draws that row.
+
+**`OtherUnix` reads the Mac column.** There is no third build and no third
+vocabulary, and of the two columns the one written for a machine with `$HOME`, no
+drive letters and no Explorer is the one that is less wrong there — the same
+choice `profiles::home_variable` already makes for the same reason. That the table
+really has two columns and not three is itself asserted
+(`the_platform_table_has_exactly_two_columns`), because everything else walks
+`Text::PLATFORM_COLUMNS`, which is two values where `HostPlatform` has three.
+
+**③ A path starts where the reader's machine says a path starts.** The owner's
+preview rail read `/ › Users › alice › .zcompdump`: four crumbs, the first a
+folder called `/` that no Mac shows anybody, and two more that every path on that
+machine repeats. The ruling is Finder's path bar with the volume dropped, and it
+is two shapes:
+
+* a path **under the reader's home** starts at one `~` crumb standing for the
+  whole run above it — `~ › .zcompdump`, `~ › folio-port › repo › …`;
+* a path **outside it** starts at its own first component, with no root crumb in
+  front — `Applications › Utilities › …`.
+
+Windows is the row it was: `C: › Users › …`, drive first, because a drive is a
+place a reader of that machine navigates to and `%USERPROFILE%` is not a word
+Explorer says.
+
+**`~` is a crumb like every other crumb.** The place it points at is the home
+directory itself, so a press on it stands the files column there and the tip under
+it prints the path in full; nothing downstream learns a special case, because the
+fold, the tips, the double-click and the width measurement all read the same
+`(name, target)` pairs they always did. It is not a translated string — it is the
+character the shell in the pane below prints for the same folder, in either
+language.
+
+**The platform and the home directory are both arguments.** `crumb_segments` is
+the ambient reader and `crumb_segments_on(path, platform, home)` is the rule, for
+`rows_for`'s reason one more time: `a_mac_breadcrumb_starts_at_the_home_crumb_or_
+at_a_name` asserts what a Mac draws and runs on a Windows workstation, and it can,
+because `Path::components` reads `/` as a separator on either host. `home` is
+ignored unless it is **rooted** — an empty `HOME` is a prefix of every path, and a
+row answering `~ › / › Applications` to it would be worse than the row this
+ruling replaced. Rooted is asked of the first component rather than through
+`Path::is_absolute`, which answers by the *running* host's rules: `/Users/…` is
+absolute on a Mac and not absolute on Windows, so that method would have made the
+Mac shape unreadable from the machine this was written on — the platform is a
+value in the signature and then a `cfg` in the body, which is the fault the
+signature exists to prevent.
+
+**④ The active pill has no edging.** The owner asked whether the tab needed it;
+it does not. §13.19 ④ gave the floating pill a half-point ring on the argument
+that `#FFFFFF` on `#F7F7F5` is a smudge without one, and what that argument left
+out is that this window already fills this exact silhouette without a ring
+everywhere else: the vertical rail's rows are the same pill, at the same radius,
+on the same panel shade, ringless on both canvases. A ring on the horizontal tab
+would have made it the one pill in the window that is outlined — a difference a
+reader notices without being able to name.
+
+So the sprite goes, and with it the two palette entries (`tab_pill_edge`,
+`tab_pill_edge_alpha`), the `Canvas::pill_edge` thousandths both canvases carried,
+and `WINDOW_TAB_FLOAT_EDGE_LOGICAL_PX`. Nothing else read any of them, which is
+the test for whether a palette entry was a colour or a decision. The fill, the
+silhouette, the hover ground and the attached tab's skirt are untouched.
+`the_active_pill_is_closed_and_hairlined_and_the_attached_tab_is_not` is renamed
+to `the_active_pill_is_a_closed_fill_with_no_ring_and_the_attached_tab_is_a_skirt`
+and its middle assertion runs the other way, on both windows rather than one.
+
+**⑤ What this ticket found and did not fix.** Four things, each its own ticket
+and each named here so that the next acceptance pass is not the first to hear of
+them.
+
+**`no_profile_title_has_been_pulled_into_the_language_table` reads almost
+nothing**, and it was found by moving a `#[cfg(test)]` constant around `i18n.rs`.
+That gate reads the file's own source *as far as the first `#[cfg(test)]`* and
+hunts the five profile titles in it; the first `#[cfg(test)]` in the file is
+`Lang::ALL`'s, a hundred lines in, so the half it has always scanned is the
+module header and none of the table. Widening the cut to where its own comment
+says it is (`mod tests`) is two lines, and it goes red on two strings that are
+arguably fine: `ProfilesIntegrationCmd` says `Command Prompt` as the name of an
+*integration* rather than as a profile title, and a `CliText` fixture spells
+`WSL` as a sample value. Whether the needles or those two strings are the wrong
+ones is a ruling about that gate's subject and not a port ticket's to take, so
+what this ticket changed is the comment, which now says what the code does. The agent installer rows (`Claude Code hooks` and its two neighbours) read
+`attention_hooks::config_dir`, which asks `%USERPROFILE%` and nothing else, so on
+a Mac they report a file they cannot find — those rows are *not* hidden, because
+their subject is `~/.claude/settings.json`, which that machine has; the discovery
+is what is missing, and `Capability::AgentDiscovery` already says whose ticket
+that is. `Ctrl+click` hands a link to the system on either platform, where a Mac
+reader's `⌘` is the chord M1-7 gave every other application verb. And the
+summoned terminal is M4-8's: `hotkey::register`'s non-Windows arm refuses with
+`the global summon key is not on this platform yet`, so that whole page describes
+a window a Mac cannot call up. Its Chinese no longer names Windows, which is all
+this ticket owed it.
+
+### 13.33 T-MAC-LIVE: 第一次真机验收的四桩——⌥+滚轮、标记栏刷新、保存后的弹窗、访达只带一扇窗出来(`crates/bt-app/src/{main,input,seats}.rs`、`crates/bt-platform/src/{handoff,lib}.rs`)
+
+The owner's first acceptance pass on a Mac build of `main` (2026-09-12,
+`~/folio-port/Folio-next.app` at `a9a1b3ca`) came back with four sentences. Two
+of them are defects and are fixed here. One is this repository drawing exactly
+what the owner ruled the same morning, held against a Windows build that
+predates the ruling. One did not reproduce at all, and the measurement that says
+so is worth as much as the two that did.
+
+**① `⌥`+wheel was dead on every Mac, because one door was answering a question
+nobody had asked it.** The gesture is `column_notch` (user ruling 2026-08-21,
+§7.1.6b′): a bare notch over the card column scrolls the column, a notch with
+`Alt` held aims the seat under the pointer. It was handed
+`WindowRuntime::modifiers`, and on a Mac that field has had `Alt` taken out of
+it — M1-7 ruled that `Option` is text, so `input::effective_modifiers` removes
+the bit at the one door every modifier state in this process comes through
+(§13.13 ③). The aim was therefore unreachable on that machine from the day the
+port landed, and no setting the reader could find would have revealed it: the
+setting they would have had to change is `Option key sends Alt`, which is about
+what `⌥a` **types**.
+
+Measured on the Mac (Apple M4, macOS 26.6.2, a debug build in an isolated
+`HOME`, one Option-flagged `CGEvent` scroll notch posted at this ticket's own
+window, the two states printed side by side at the door that writes them):
+
+```
+modifiers reported=ModifiersState(ALT) effective=ModifiersState(0x0) option_sends_alt=false
+```
+
+Both halves of that line are correct, and that is the whole of the defect: the
+first is winit's answer about the hand, the second is Folio's policy about text.
+winit 0.30.13's `event_mods` sets `ModifiersState::ALT` from
+`NSEventModifierFlagOption` **unconditionally** (`macos/event.rs:323`) and never
+consults `OptionAsAlt`, which is read in exactly one place — `replace_event`, on
+the `keyDown:`/`insertText:` path (`macos/view.rs:458`, `:504`, `:1109`). So the
+setting cannot be what a gesture reads, however it is set.
+
+The other half of the question is settled in the same file.
+`WindowEvent::MouseWheel` carries `device_id`, `delta` and `phase` and **no
+modifiers** (`macos/view.rs:695`), so a wheel handler has nothing to read but
+the last `ModifiersChanged` — while `scrollWheel:` itself calls
+`update_modifiers(event, false)` one line earlier (`:693`), which queues a
+`ModifiersChanged` off the scroll event's own flags whenever they differ. The
+pointer event's modifiers and the key event's are the same value arriving
+through the same door; there is no second reading to be had, on this platform or
+the other one.
+
+**The repair is a second field, not a second policy.** `window.modifiers` keeps
+its meaning exactly — what the keyboard means, with M1-7's ruling applied — and
+`window.modifiers_held` is what the platform reported, written at the same one
+door, one statement earlier. `column_notch` reads the held state and nothing
+else does; `one_door_writes_both_readings_of_the_modifiers` is what keeps it one
+door, and `the_column_reads_what_the_hand_is_holding` is the red gate — put
+`modifiers` back in that call and it goes red while every keyboard test in the
+file stays green, which is the exact shape of a defect no key test could have
+caught. **Windows is byte for byte unchanged**: `effective_modifiers` is the
+identity there, so the two fields are one value.
+
+One thing the repair settles on the way past. `adopt_option_as_alt` struck the
+effective state against itself, which is a one-way street: the `Alt` taken out
+while the setting was off could not come back when it was switched on under a
+hand still holding `Option`. It now recomputes from the reported state, which is
+the only value in the pair that is not already a consequence of the setting.
+
+**What this ticket was told and what turned out to be true**: there is no
+`⌥`+wheel row in `BINDINGS` or `docs/shortcuts.md` to correct. That table is
+keys — generated from `BINDINGS`, gated by `scripts/check-shortcuts-table.ps1` —
+and a wheel notch is a gesture, which this product deliberately keeps out of it:
+§7.21 ruled that the gesture's one discoverable sentence is `Appearance ▸ Focus
+card height`'s third clause, and that sentence says `Alt+wheel` in a string both
+dialects share. Nothing was added there.
+
+**② The command-marks rail stood still for as long as the reader did, and the
+platform had nothing to do with it.** The rail is an overlay layer. Overlay
+layers are built by `refresh_overlay`, which is called by event handlers and by
+animation clocks — and, until this ticket, **by nothing that knew the ledger had
+moved**. A frame published for pty output presents the *retained* overlay, so a
+tick that appeared, or turned red, was drawn whenever something else next
+happened to ask.
+
+Measured on the Mac, with the `OSC 133` bytes written onto the pane's own tty so
+that the marks land at instants this ticket chose and nothing at all is typed:
+
+| | the mark landed | the rail was rebuilt | late by |
+|---|---|---|---|
+| before | `1789260048.561` | `1789260061.502` | **12.94 s**, and only because the pointer was then moved |
+| after | `1789260234.822` | `1789260234.824` | **2 ms** |
+
+On the glass, from captures of this ticket's own window: before the fix the rail
+at `+2.0 s`, `+4.1 s` … `+12.6 s` after the marks landed was one red dash at
+y 638–641 — the tick belonging to the *previous* command — and the new one
+appeared only in the capture taken after the pointer moved, by which time the
+red dash had shifted up to 629–632 with a grey dash at 647–650 beside it. After
+the fix the capture at `+2.0 s` already carries both.
+
+**Why it reads as intermittent, and why the first attempt to reproduce it
+failed.** An `OSC 133;C` starts the tab mark's breath, and while that runs the
+overlay is rebuilt every twenty milliseconds. A `D` that arrives while the
+command is still visibly running is therefore drawn at once — the first
+measurement here caught one at 25 ms and proved nothing. The marks that are late
+are the ones that land when nothing is animating, which is every `A` and `B` a
+prompt writes *after* the breath has stopped: the newest tick on the rail, every
+time, for as long as the reader keeps still.
+
+**The repair is two `u64`s.** `command_marks_watermark` sums
+`DualPlaneSession::command_marks_revision` over the seats of the tab on screen —
+the seats `command_rail_layers` lays a rail out for — and `drain_pty` compares
+it across the drain, beside the name change that already asks for the chrome on
+the same terms. A revision bumps on ledger changes and on nothing else and never
+falls, so a sum over one set of seats moves if and only if one of its terms did;
+there is no allocation and no list. **This is visible on Windows too**, and
+CHANGELOG carries a line for it: the defect was never platform-specific, it was
+only ever found by somebody watching a rail on a machine where they were not
+also typing.
+
+**③ The "popup" after `⌘S` is this window's own news pill, at the size this
+repository draws it, and the build it was compared against predates the size.**
+The screenshot is the pill: 12 px inside each edge of the preview's body, 28
+tall, `r6`, the menu surface let down to `.92`, with the one-pixel ring a menu
+wears. Every one of those numbers is a constant declared beside
+`seats::news_pill_box`, and that function takes a body and a scale and **nothing
+else** — no string, no font, no measurement that could come back differently on
+a machine with a different font list. The full width is the decision, and it is
+written over the door in the owner's own words of 2026-09-12: *it differs in
+spanning the body's width rather than hugging its words, because this one
+carries verbs at its right hand and a pill that grew and shrank around a
+sentence would move the button under the pointer.* The ring is the same
+paragraph: `notice::lay_out` draws it as the outer of two rounded fills, "exactly
+as a `border: 1px solid` border-box is", off `palette.menu_border`, with no
+platform arm anywhere on the path.
+
+What makes it read as new is the calendar. `news_pill_box` arrived in `297cd631`
+("the preview's bottom line appears only when it has something to say",
+2026-09-12 13:15 -0400). `v0.3.0-preview` is `9acd482`, 2026-09-12 06:47Z, and
+`git show 9acd482:crates/bt-app/src/seats.rs` does not contain the name at all.
+So the Mac build is showing T-PREVIEW-FOOT's pill and the Windows build it was
+being held against is still showing what came before it.
+
+**Nothing was changed for this**, because changing it would be reversing a
+ruling seven hours old that is Windows-visible as well. What was added is
+`the_news_pill_takes_the_bodys_width_and_not_the_sentences`, which measures the
+box for `Saved` at scale 2 — the scale the port runs at, and the one where a
+unit mistake would show first — and states in one place that the width is the
+body's and not the sentence's. The next reader who arrives here surprised finds
+the decision instead of a search. Whether a confirmation carrying no verbs
+should after all be allowed to hug its word is a ruling, and it is the owner's
+to make.
+
+**④ "Reveal in Finder brings every open Finder window forward" did not
+reproduce — and the call this ticket named is not the one that button makes.**
+The folder button at the foot of the files column reveals a *root*, which is a
+directory, and §13.18's door sends a directory to `openURL:`: *a folder is
+opened, not selected in its parent*. `activateFileViewerSelectingURLs:` is the
+other branch, the one a file takes.
+
+Measured on the Mac with nine Finder windows already on the desk, a reference
+window of this ticket's own genuinely frontmost before each trial, and the
+front-to-back order read out of `CGWindowListCopyWindowInfo` before and after
+(each row run twice, same answer both times):
+
+| the door | Finder windows above the reference, before → after | which rose |
+|---|---|---|
+| `openURL:` on the folder — as it shipped | 0 → **2** | the folder's own window, **and** the window Finder had been holding |
+| `openURLs:withApplicationAtURL:configuration:` with `activates = false`, then `activate` with the default option set | 0 → **1** | the folder's own window |
+| `activateFileViewerSelectingURLs:` on a file — as it shipped | 0 → **1** | the file's own window |
+| the same, followed by an explicit `activate` with the default option set | 0 → **1** | the file's own window |
+
+So **no branch of this door brings every Finder window forward** on macOS
+26.6.2: the eight windows standing behind the reference stayed behind it in
+every trial. The premise that "activation with all windows is macOS's default
+for that call" is not true on this machine, and the file branch — the one the
+ticket named — was already raising exactly one.
+
+There was still one window rising that nobody asked for, and it is the folder
+branch's. `openURL:` does two things in one call: it opens the folder's window
+*and* it activates Finder, and activating an application brings its **key**
+window forward with it. A reader who asks a terminal to show them a folder did
+not ask for the other one. So the two halves are separated:
+`NSWorkspaceOpenConfiguration` with `activates = false` opens the window and
+leaves the front where it was, and `NSRunningApplication::activate` with **no
+options** then brings Finder forward — Apple documents the default option set as
+main-and-key only, and `NSApplicationActivateAllWindows` is the flag that would
+do what the single call was doing. The same measurement then reads one.
+
+**The `Result` is still answered before the call, which is this module's habit
+rather than a new rule** (§13.18 ①: the disk is asked first because
+`activateFileViewerSelectingURLs:` cannot answer). The configuration form
+answers in a block, and a door that returned `Ok` and discovered otherwise
+afterwards would be lying to a caller that has already drawn a foot — so the
+question asked synchronously here is the one the call actually depends on, *is
+there a Finder on this machine*, through
+`URLForApplicationWithBundleIdentifier:`, exactly as `open_system_fonts_page`
+asks it about Font Book. The completion handler is then nothing this door needs
+for its answer, and the activation rides in it because that is where the running
+application is handed over; `NSRunningApplication` is documented thread-safe in
+the same paragraph of Apple's *Thread Safety Summary* that §13.18 quotes for
+`NSWorkspace`. The shape is held by
+`a_revealed_folder_brings_up_its_own_window_and_no_other`, a source pin for
+`macos_process_door_tests`' reason: the claim is about what another application
+does with an activation, which no assertion on a Windows workstation can run.
+
+**What the probes were allowed to do, and what they left behind.** Everything
+ran under an isolated `HOME` against a bundle carrying an identifier of this
+ticket's own (`io.github.lulu-loopp.folioprobe`) so that LaunchServices could
+never answer with the owner's running Folio; every process was ended by a pid
+this ticket wrote down. The marks were written onto the pane's own tty rather
+than typed, the one keyboard-free way to put `OSC 133` on a screen at a chosen
+instant. Nothing was put on the pasteboard. The Finder trials leave their
+windows open, which is `a_reveal_asks_the_disk_before_it_asks_finder`'s own
+standing note — closing them would mean driving Finder, and driving another
+application is a consent prompt this venue does not spend.
 
 *(本节英文,待中文文案改写。)*
 

@@ -578,8 +578,13 @@ mod macos_handoff {
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
 
-    use objc2_app_kit::NSWorkspace;
-    use objc2_foundation::{NSArray, NSString, NSURL, ns_string};
+    use block2::RcBlock;
+    use objc2::rc::Retained;
+    use objc2_app_kit::{
+        NSApplicationActivationOptions, NSRunningApplication, NSWorkspace,
+        NSWorkspaceOpenConfiguration,
+    };
+    use objc2_foundation::{NSArray, NSError, NSString, NSURL, ns_string};
 
     use super::PROGRAM_REFUSED;
     use crate::NativeWindow;
@@ -784,12 +789,73 @@ mod macos_handoff {
         let url = file_url(&real, directory)?;
         let workspace = NSWorkspace::sharedWorkspace();
         if directory {
-            // A folder is *opened*, not selected in its parent. `openURL:` on a
-            // folder is what Finder does with a double click, and it answers
-            // whether it took it — which is more than the viewer call can say.
-            return hand_over(&url, &real.to_string_lossy());
+            // A folder is *opened*, not selected in its parent, and it is
+            // opened **with Finder and without Finder taking the front**
+            // (T-MAC-LIVE, §13.33 ④). See [`open_folder_in_finder`] for the
+            // window that used to come up beside it.
+            return open_folder_in_finder(url, &real.to_string_lossy());
         }
         workspace.activateFileViewerSelectingURLs(&NSArray::from_retained_slice(&[url]));
+        Ok(())
+    }
+
+    /// **Open one folder in Finder and bring up that window, not the one Finder
+    /// happened to be holding** (T-MAC-LIVE, §13.33 ④).
+    ///
+    /// `openURL:` on a directory does two things at once: it opens the folder's
+    /// window, and it activates Finder — and activating an application brings
+    /// its *key* window forward along with it. Measured on macOS 26.6.2 with
+    /// nine Finder windows on the desk and a reference window of the ticket's
+    /// own in front of all of them: `openURL:` put **two** Finder windows above
+    /// that reference, reproducibly — the folder the reader asked for, and
+    /// whichever window Finder had been holding before. A reader who asks a
+    /// terminal "show me this folder" did not ask for the other one.
+    ///
+    /// So the two halves are separated. `NSWorkspaceOpenConfiguration` with
+    /// `activates = false` opens the window and leaves the front where it was;
+    /// `NSRunningApplication::activate` with **no options** then brings Finder
+    /// forward, and Apple documents the default option set as main-and-key only
+    /// — `NSApplicationActivateAllWindows` is the flag that would do what the
+    /// single call was doing. The same measurement then reads **one**.
+    ///
+    /// **The `Result` is still answered before the call, which is this module's
+    /// habit and not a new one** (see [`reveal_in_explorer`] on why the disk is
+    /// asked first). The configuration form answers in a block, and a door that
+    /// returned `Ok` and then discovered otherwise would be lying to a caller
+    /// that has already drawn a foot; so the question asked here is the one this
+    /// call actually depends on — *is there a Finder on this machine* —
+    /// answered synchronously by `URLForApplicationWithBundleIdentifier:`,
+    /// exactly as [`open_system_fonts_page`] asks it about Font Book. The
+    /// completion handler is then genuinely nothing this door needs, and the
+    /// activation rides in it because that is where the running application is
+    /// handed over; `NSRunningApplication` is documented thread-safe, which is
+    /// the same paragraph of Apple's *Thread Safety Summary* §13.18 quotes for
+    /// `NSWorkspace`.
+    fn open_folder_in_finder(url: Retained<NSURL>, what: &str) -> Result<(), String> {
+        let workspace = NSWorkspace::sharedWorkspace();
+        let finder = workspace
+            .URLForApplicationWithBundleIdentifier(ns_string!("com.apple.finder"))
+            .ok_or_else(|| format!("this machine has no Finder to open {what} in"))?;
+        let configuration = NSWorkspaceOpenConfiguration::configuration();
+        configuration.setActivates(false);
+        let handler = RcBlock::new(
+            move |running: *mut NSRunningApplication, _error: *mut NSError| {
+                // The default option set, which is the whole ruling: main and
+                // key, never `NSApplicationActivateAllWindows`.
+                // SAFETY: the block is AppKit's to call and the pointer is
+                // AppKit's to hand over — non-null when the open succeeded,
+                // null when it did not, which is the whole of what is read here.
+                if let Some(running) = unsafe { running.as_ref() } {
+                    running.activateWithOptions(NSApplicationActivationOptions::empty());
+                }
+            },
+        );
+        workspace.openURLs_withApplicationAtURL_configuration_completionHandler(
+            &NSArray::from_retained_slice(&[url]),
+            &finder,
+            &configuration,
+            Some(&handler),
+        );
         Ok(())
     }
 
