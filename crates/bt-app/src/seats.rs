@@ -53,7 +53,7 @@ pub(crate) const FOLIO_BAR: PlatformChrome = PlatformChrome::FOLIO_DRAWS_THE_WHO
 /// measured window's chrome, which is what makes them visible.
 #[cfg(test)]
 pub(crate) fn folio_band_device_px(scale_ppm: u32) -> u32 {
-    chrome_band_device_px(scale_ppm, FOLIO_BAR, RailState::default())
+    chrome_band_device_px(scale_ppm, FOLIO_BAR)
 }
 use bt_render::{
     ChromeLabel, ChromeLabelWeight, ChromePalette, ChromeQuad,
@@ -86,7 +86,8 @@ use bt_render::{
     SEAT_TITLE_BAR_LOGICAL_PX, SEAT_TITLE_EDGE_LOGICAL_PX, SEAT_TITLE_FONT_LOGICAL_PX,
     SEAT_TITLE_GAP_LOGICAL_PX, SEAT_TITLE_PADDING_LOGICAL_PX,
     SEAT_TITLE_TRAILING_PADDING_LOGICAL_PX, SeatViewport, WINDOW_CAPTION_BUTTON_LOGICAL_PX,
-    WINDOW_CAPTION_GEAR_GLYPH_LOGICAL_PX, WINDOW_NEW_TAB_BOX_LOGICAL_PX,
+    WINDOW_CAPTION_GEAR_BOX_LOGICAL_PX, WINDOW_CAPTION_GEAR_GLYPH_LOGICAL_PX,
+    WINDOW_CAPTION_GEAR_INSET_LOGICAL_PX, WINDOW_NEW_TAB_BOX_LOGICAL_PX,
     WINDOW_NEW_TAB_CHEVRON_HEIGHT_LOGICAL_PX, WINDOW_NEW_TAB_CHEVRON_WIDTH_LOGICAL_PX,
     WINDOW_NEW_TAB_GLYPH_LOGICAL_PX, WINDOW_NEW_TAB_MARGIN_BOTTOM_LOGICAL_PX,
     WINDOW_NEW_TAB_MARGIN_LEFT_LOGICAL_PX, WINDOW_NEW_TAB_RADIUS_LOGICAL_PX,
@@ -2284,8 +2285,8 @@ pub fn rail_inset_device_px(state: RailState, scale_ppm: u32) -> u32 {
 /// multiplication [`logical_to_device`] makes, so a Folio bar lands on exactly
 /// the pixel it always did.
 #[must_use]
-pub fn chrome_band_device_px(scale_ppm: u32, chrome: PlatformChrome, rail: RailState) -> u32 {
-    window_band_px(scale_ppm as f32 / 1_000_000.0, chrome, rail)
+pub fn chrome_band_device_px(scale_ppm: u32, chrome: PlatformChrome) -> u32 {
+    window_band_px(scale_ppm as f32 / 1_000_000.0, chrome)
         .round()
         .max(0.0) as u32
 }
@@ -3269,22 +3270,12 @@ pub fn tab_strip_geometry(
     // unless the height comes from the same place every other box in this window
     // reads it from.
     //
-    // **The posture is stated rather than taken as a parameter**, because it is
-    // not a variable here: this solver exists only for the layout whose tab list
-    // runs along the top, which is exactly the posture
-    // [`RailState::strip_stands_in_the_bar`] answers `true` for — and that is
-    // the only thing [`window_band_px`] reads off it. The two fields it is read
-    // from are named in full for that reason, rather than left to a default that
-    // could quietly stop meaning this.
-    let title = window_band_px(
-        scale,
-        chrome,
-        RailState {
-            layout: TabLayoutMode::Horizontal,
-            focus: false,
-            ..RailState::default()
-        },
-    );
+    // **And the posture is not a parameter of it any more** (§13.48): the
+    // header is one height on every layout of every window, so this solver — the
+    // one that exists only for the layout whose tab list runs along the top —
+    // asks for it with nothing but the window's own chrome, exactly as every
+    // other reader of it does.
+    let title = window_band_px(scale, chrome);
     let radius = (WINDOW_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0);
     let caption = WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale;
     let run_left = (width - 4.0 * caption).max(0.0);
@@ -3325,7 +3316,20 @@ pub fn tab_strip_geometry(
     // outward skirt has somewhere to land, which is what puts the silhouette on
     // the window's own edge. A pill has no skirt, so its lead-in is air and is
     // struck as air (`--after-lights`, 12).
-    let lead_in = if floating {
+    //
+    // **And air after the lights is air the lights left** (owner ruling
+    // 2026-09-13, §13.48). The mock's name for this twelve is `--after-lights`,
+    // and that is the whole of what it means: it is the distance the first pill
+    // keeps from the run the platform's buttons took. In full screen macOS takes
+    // those buttons off the window — `strip_left_px` is then `0`, measured and
+    // not assumed — and twelve points of air after a run that is not there is an
+    // empty stretch at the head of the strip with nothing on the other side of
+    // it. So the lead-in is asked of the run and not of the silhouette: a strip
+    // with no platform run at its head leads in the way every strip with no
+    // platform run at its head leads in, which is the attached tab's `--tabr`
+    // and is also what a Windows window has always had. The tabs are still
+    // pills; it is the lights that left, not the shape.
+    let lead_in = if chrome.strip_left_px > 0 {
         WINDOW_TAB_FLOAT_LEAD_IN_LOGICAL_PX * scale
     } else {
         radius
@@ -3549,7 +3553,26 @@ pub fn tab_strip_geometry(
         .collect::<Vec<_>>();
     let tabs_right = tabs.last().map_or(origin, |tab| tab.body[2]);
     let new_left = tabs_right + new_margin;
-    let new_bottom = title - WINDOW_NEW_TAB_MARGIN_BOTTOM_LOGICAL_PX * scale;
+    // **Which axis the `+` and the `˅` stand on is the one the tabs stand on**
+    // (owner ruling 2026-09-13, §13.48). An attached tab is anchored to the
+    // bar's foot — `height: 34` under a 40px bar puts its centre at 23 — and the
+    // pair beside it is anchored the same way, three points up from that foot,
+    // which lands their 28 box on the very same centre. A pill is not anchored
+    // to the foot: it is centred on the band. So the anchor follows the
+    // silhouette rather than being restated as a margin that only happens to
+    // agree with one of them, and on the window that wears pills the two
+    // buttons ride the pills' own axis instead of sitting three points low.
+    //
+    // **Read off the tab's own box and not recomputed from the band**, which is
+    // the same discipline every other box inside a tab is measured by: a pill of
+    // odd height on a fractional scale has already had its top rounded, and a
+    // second derivation from `title` would put the pair half a pixel off the
+    // very axis this is about.
+    let new_bottom = if floating {
+        (tab_top + tab_height / 2.0) + new_box / 2.0
+    } else {
+        title - WINDOW_NEW_TAB_MARGIN_BOTTOM_LOGICAL_PX * scale
+    };
     let menu_left = new_left + new_box;
     // Neither button is clamped to the run's end any more. They used to be,
     // because a strip that could not scroll had to stop *somewhere* and the
@@ -4255,20 +4278,6 @@ impl RailState {
         self.focus
     }
 
-    /// **Whether the tab strip is one of the things standing in the bar across
-    /// the top** (T-MAC-LIGHTS).
-    ///
-    /// The horizontal layout's own sentence, and the two exclusions are the ones
-    /// [`window_chrome`] already makes in its own branch: the vertical layout put
-    /// the tab list down the side, and focus mode takes the strip away in
-    /// *either* layout because the card column is the tab list. Asked by
-    /// [`window_band_px`], which has to know whether a 32-point band would be
-    /// cropping a 40px strip.
-    #[must_use]
-    pub fn strip_stands_in_the_bar(self) -> bool {
-        !self.draws_focus_rail() && self.layout == TabLayoutMode::Horizontal
-    }
-
     /// **Which way the `+`'s profile picker hangs off the `˅` beside it**, or
     /// `None` when this window has no such button on screen at all.
     ///
@@ -4547,12 +4556,12 @@ pub fn rail_geometry(
     if width <= 0.0 {
         return None;
     }
-    // **Beneath this window's header, whatever that header is** (T-MAC-LIGHTS):
-    // Folio's own 40px bar where the whole bar is Folio's, the platform's
-    // 32-point one where it is not. The panel's own right edge starts here too
-    // (`edge`, at the end), so the line never runs up into the header this panel
-    // shares a colour with — the two are one surface.
-    let top = window_band_px(scale, chrome, state);
+    // **Beneath this window's header** (T-MAC-LIGHTS, amended §13.48): one
+    // header on every window and every layout, asked of the window rather than
+    // written down here. The panel's own right edge starts here too (`edge`, at
+    // the end), so the line never runs up into the header this panel shares a
+    // colour with — the two are one surface.
+    let top = window_band_px(scale, chrome);
     let bottom = height.max(top);
     let parked = state.draws_icon_rail();
     // The border is inside the rail's width, not added to it: the mock-up is
@@ -5214,7 +5223,7 @@ pub fn focus_rail_geometry(
     let width = state.width_logical_px() * scale;
     // Beneath this window's header, exactly as the rail's own column is — see
     // [`rail_geometry`].
-    let top = window_band_px(scale, chrome, state);
+    let top = window_band_px(scale, chrome);
     let bottom = height.max(top);
     // The rail's own border-box arithmetic, unchanged: the hairline comes out of
     // the panel's width rather than being added to it, so a card's run is 263
@@ -6236,42 +6245,41 @@ pub fn hit_pane_ghost(
 
 // ══ T-MAC-LIGHTS: the header a window wears across its top ══
 //
-// The owner's ruling of 2026-09-12, in its final form: **in every vertical
-// layout there is one 32-point header running the whole width of the window**.
-// The platform's own buttons stay exactly where the platform puts them, the gear
-// stands at the header's right in its 46-wide box, the header is what the window
-// is dragged by, and the column begins beneath it — one surface in one colour,
-// with nothing drawn between the two. The horizontal layout is M3-3's and is
-// untouched: its strip *is* the header. All of that is one number, and this is
-// where it is answered.
+// The owner's ruling of 2026-09-12, as amended on 2026-09-13 (§13.48): **there
+// is one header running the whole width of the window, and it is Folio's own
+// 40 in every layout**. The platform's own buttons stay exactly where the
+// platform puts them, the gear stands 16 in from the trailing edge on its centre
+// line, the header is what the window is dragged by, and the column begins
+// beneath it — one surface in one colour, with nothing drawn between the two.
+// The vertical layouts wore the platform's own 32 for a day; the owner looked at
+// the window and ruled that a header shorter than the strip it replaces is two
+// different windows. All of that is one number, and this is where it is
+// answered.
 
 /// **How tall the header across the top of this window is** — Folio's own title
-/// bar, or the platform's (T-MAC-LIGHTS, owner ruling 2026-09-12).
+/// bar (T-MAC-LIGHTS, owner ruling 2026-09-12, amended 2026-09-13).
 ///
 /// The one number the seats, the rail, the caption run and the drag handle are
-/// all measured from. Two answers:
+/// all measured from, and it is one answer and not a table: **Folio's own bar,
+/// on every window**. A Windows window reaches it because nobody else draws in
+/// that bar at all; a window whose title bar is the platform's reaches it
+/// because the header Folio draws there is the same header — the strip stands in
+/// it in one layout and the app's own name in the others, and a band that
+/// changed height between them would be the reader watching the top of their
+/// window jump four points for changing where the tab list lives.
 ///
-/// * **Folio's whole bar**, on every window whose whole bar is Folio's. That is
-///   the only arm a Windows window can reach, which is what makes its picture
-///   byte for byte the one it was.
-/// * **The platform's own band**, on a window whose platform draws in this bar —
-///   *unless Folio's tab strip is one of the things standing in it*, because a
-///   32-point header would crop a 40px strip. So the two arms are one sentence
-///   about what stands in the bar rather than a table of layouts, and the three
-///   vertical layouts, which put their tab list down the side, all come out at
-///   the platform's own 32.
+/// **`chrome` is still read, and it is not decoration.** The platform's own band
+/// is a floor: it is the run its window buttons stand in, and a header shorter
+/// than that run would be Folio drawing under buttons it does not own. On macOS
+/// that floor is 32 and Folio's 40 clears it, which is why the answer reads as a
+/// constant on both hosts this product ships to and is not written as one.
 #[must_use]
-pub fn window_band_px(scale: f32, chrome: PlatformChrome, rail: RailState) -> f32 {
+pub fn window_band_px(scale: f32, chrome: PlatformChrome) -> f32 {
     let folios_own = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
     if chrome.band_px <= 0 {
         return folios_own;
     }
-    let platforms_own = chrome.band_px as f32;
-    if rail.strip_stands_in_the_bar() {
-        folios_own.max(platforms_own)
-    } else {
-        platforms_own
-    }
+    folios_own.max(chrome.band_px as f32)
 }
 
 /// Hit-test the application-owned boxes of the title bar. The remaining title
@@ -6340,7 +6348,7 @@ pub fn title_bar_drag_point(
     y: f64,
 ) -> bool {
     let (x, y) = (x as f32, y as f32);
-    if y < 0.0 || y >= window_band_px(scale, chrome, rail) {
+    if y < 0.0 || y >= window_band_px(scale, chrome) {
         return false;
     }
     if x < chrome.strip_left_px as f32 {
@@ -6384,7 +6392,7 @@ pub fn window_chrome_boxes(
     if let Some(rect) = panel_toggle_box(scale, chrome, rail) {
         boxes.push((ChromeTarget::PanelToggle, rect));
     }
-    boxes.extend(window_caption_boxes(width, scale, chrome, rail, summoned));
+    boxes.extend(window_caption_boxes(width, scale, chrome, summoned));
     boxes
 }
 
@@ -6457,21 +6465,61 @@ pub fn caption_run_left(width: f32, scale: f32, chrome: PlatformChrome, summoned
 
 /// The caption run alone — the boxes anchored to the window's right edge,
 /// which stand in the same place whatever the tabs are doing.
+///
+/// **And on a window whose buttons are the platform's there is no run: there is
+/// one gear, and it mirrors the leading light** (owner ruling 2026-09-13,
+/// §13.48). [`caption_targets`] has already said that window carries one box;
+/// this says where it stands. A slot in a run is placed by the run's edge and is
+/// as tall as the bar, because what makes a run read as a run is that its boxes
+/// abut; a single control standing alone in a band is placed by its own centre,
+/// and the centre the ruling gives it is the one the platform's first button
+/// has at the other end — `9 + 14 / 2`, which is
+/// [`WINDOW_CAPTION_GEAR_INSET_LOGICAL_PX`]. Nothing else about the gear moves:
+/// the glyph, its size, its ink and its verb are the ones it had.
+///
+/// This is the third of this module's reads of the capability, and the third
+/// question: `caption_targets` answers *which* boxes, `tab_strip_geometry`
+/// answers whether the tabs float, and this answers where the one box left
+/// stands. None of the three follows from either of the others, which is what
+/// `the_caption_run_is_decided_by_one_capability_read` holds them to.
 #[must_use]
 pub fn window_caption_boxes(
     width: f32,
     scale: f32,
     chrome: PlatformChrome,
-    rail: RailState,
     summoned: bool,
 ) -> Vec<(ChromeTarget, [f32; 4])> {
-    // The run is as tall as the bar it stands in, which is not 40 on every
-    // window any more (T-MAC-LIGHTS): under an icon rail the platform's own
-    // 32-point band is the whole of the bar, and a 40px button in it would hang
-    // eight points over the rail beneath.
-    let title = window_band_px(scale, chrome, rail);
+    // The run is as tall as the bar it stands in, and the bar is the one bar
+    // this window has: the layout was a parameter of this while the vertical
+    // ones wore the platform's shorter band, and §13.48 took it back out.
+    let title = window_band_px(scale, chrome);
     let button = WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale;
     let targets = caption_targets(chrome, summoned);
+    if chrome.buttons_are_the_platforms {
+        // Centred on the band for the same reason the panel toggle and the `+`
+        // are: it is shorter than the bar and rides its middle. Read off the
+        // band rather than off a constant, so the gear stands on the axis of
+        // whatever is beside it on a window whose header is not Folio's own 40.
+        let side = (WINDOW_CAPTION_GEAR_BOX_LOGICAL_PX * scale).round();
+        let top = ((title - side) / 2.0).round().max(0.0);
+        // The ruling is about a *centre*, so the run is hung off one: the last
+        // box's centre stands `WINDOW_CAPTION_GEAR_INSET_LOGICAL_PX` in from the
+        // trailing edge and the boxes abut leftward from there. On this window
+        // `caption_targets` answers one box, which is the ruling read literally;
+        // written as a run anyway so that a window given a second box here gets
+        // a row rather than two boxes in the same place.
+        let run_right = width - WINDOW_CAPTION_GEAR_INSET_LOGICAL_PX * scale + side / 2.0;
+        let last = targets.len() as f32;
+        return targets
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, target)| {
+                let left = (run_right - (last - index as f32) * side).round().max(0.0);
+                (target, [left, top, left + side, top + side])
+            })
+            .collect();
+    }
     let last = targets.len() as f32;
     let run_left = caption_run_left(width, scale, chrome, summoned);
     // The last button ends at the window's own edge rather than at
@@ -10900,7 +10948,7 @@ fn window_chrome(
     // platform's buttons. Every box below is placed against these two numbers
     // rather than against the constant, so a window with a shorter bar is one
     // shorter bar rather than a row of boxes that each had to be told.
-    let title = window_band_px(scale, chrome, rail);
+    let title = window_band_px(scale, chrome);
     // `.titlebar` in the mock-up carries a background and nothing else — no
     // border, no rule, no hairline. What separates it from the content below is
     // the tonal step from `--panel` to `--termbg`, and in the tab's own span
@@ -11016,16 +11064,14 @@ fn window_chrome(
     // which the user's 2026-08-26 ruling keeps as it is), so it keeps the box
     // the mock-up measured it at rather than taking a slot cut for the house's
     // own line marks.
-    // **The run is `caption_targets`' and so is its left edge** (§7.54e ②), which
-    // is what keeps the paint and the hit test one derivation: `window_caption_boxes`
-    // walks the same list from the same origin, so a window that draws two buttons
-    // cannot be a window that answers presses on four.
-    let caption_left = caption_run_left(width, scale, chrome, summoned);
-    for (index, target) in caption_targets(chrome, summoned)
-        .iter()
-        .copied()
-        .enumerate()
-    {
+    // **The run is `caption_targets`' and so are its boxes** (§7.54e ②), which
+    // is what keeps the paint and the hit test one derivation: the paint walks
+    // the very rectangles [`window_caption_boxes`] answers presses on, so a
+    // window that draws two buttons cannot be a window that answers presses on
+    // four — and, since §13.48, a gear drawn in a slot cannot be a gear clicked
+    // in a square. It was a restated sum until the two windows stopped agreeing
+    // about what shape a caption box is.
+    for (target, rect) in window_caption_boxes(width, scale, chrome, summoned) {
         let (mark, glyph_logical_px) = match target {
             ChromeTarget::Settings => (
                 crate::icons::ActionIcon::OpenSettings.mark(),
@@ -11044,22 +11090,37 @@ fn window_chrome(
                 caption_glyph_logical_px(crate::icons::ActionIcon::CloseWindow.mark()),
             ),
         };
-        let left = caption_left + index as f32 * button;
-        let rect = [left, 0.0, (left + button).min(width), title];
         let hovered = hover == Some(target);
         if hovered {
-            quads.push(ChromeQuad::ink(
-                rect,
-                if target == ChromeTarget::CloseWindow {
-                    palette.caption_close_hover
-                } else {
-                    palette.caption_hover
-                },
-            ));
+            let wash = if target == ChromeTarget::CloseWindow {
+                palette.caption_close_hover
+            } else {
+                palette.caption_hover
+            };
+            // **The wash is the shape of the box, and the box says which shape
+            // that is.** A caption box as tall as the bar is a slot in a run and
+            // wears the run's own square wash — abutting slots are what makes a
+            // run read as a run. A box that is inset in the bar is a control
+            // standing in it, and every control inset in this bar wears the same
+            // rounded pill: the panel toggle's own note says why, and the `+` is
+            // the other one. So this is read off the rectangle rather than asked
+            // of the window a second time.
+            if rect[3] - rect[1] < title {
+                sprites.push(ChromeSprite::new(
+                    ChromeMark::ControlPill {
+                        radius_px: (WINDOW_NEW_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0)
+                            as u32,
+                    },
+                    pixel_snapped(rect),
+                    wash,
+                ));
+            } else {
+                quads.push(ChromeQuad::ink(rect, wash));
+            }
         }
         let glyph = (glyph_logical_px * scale).round().max(1.0);
         let glyph_left = ((rect[0] + rect[2]) / 2.0 - glyph / 2.0).round();
-        let glyph_top = (title / 2.0 - glyph / 2.0).round();
+        let glyph_top = ((rect[1] + rect[3]) / 2.0 - glyph / 2.0).round();
         sprites.push(ChromeSprite::new(
             mark,
             [glyph_left, glyph_top, glyph_left + glyph, glyph_top + glyph],
@@ -12035,7 +12096,7 @@ pub fn panel_toggle_box(scale: f32, chrome: PlatformChrome, rail: RailState) -> 
     if rail.layout != TabLayoutMode::Vertical || rail.mode == RailMode::Icons {
         return None;
     }
-    let title = window_band_px(scale, chrome, rail);
+    let title = window_band_px(scale, chrome);
     // `.titlebar .drag { padding-left: 12px }` — the same inset the app name
     // takes in this layout, and the toggle is the first thing in that box.
     // **After whatever the bar begins after** (M3-3, amended by T-MAC-LIGHTS):
@@ -26523,7 +26584,7 @@ mod tests {",
         // The gear leads the caption run, and the strip reserves that run's four
         // slots on every window (see `caption_run_left`), so this is the edge the
         // band is measured back from.
-        let gear_left = window_caption_boxes(width, scale, FOLIO_BAR, rail, false)[0].1[0];
+        let gear_left = window_caption_boxes(width, scale, FOLIO_BAR, false)[0].1[0];
 
         // The dozen the report was made with — a strip pressed flat against the
         // gear without yet scrolling — and two counts past the floor, where it
@@ -26642,17 +26703,23 @@ mod tests {",
     /// **What macOS leaves standing in a title bar Folio has taken over.**
     ///
     /// Measured on macOS 26.6 on 2026-09-12: the close button's frame is
-    /// `(9, 9, 14, 14)`, miniaturize's begins at 32 and zoom's at 55, so the
-    /// rightmost edge is 69 points. The inset is that edge times the window's
-    /// backing scale, which is why this is one logical number read at two
-    /// scales rather than two numbers — 69 physical pixels on a plain desk, 138
-    /// on a Retina one.
+    /// `(9, 9, 14, 14)`, miniaturize's begins at 32 and zoom's at 55 — a pitch
+    /// of 23 — so as macOS lays them out the rightmost edge is 69 points.
+    ///
+    /// **Since the owner's ruling of 2026-09-13 (§13.48) it is 73**, because
+    /// this product moves them: the red light's centre goes onto the corner's
+    /// 45° diagonal, which on the 40-point strip is `(20, 20)` and puts the
+    /// close button's frame at x 13, miniaturize at 36 and zoom at 59 — macOS's
+    /// own pitch, carried from its own leading inset to this one. `13 + 46 + 14
+    /// = 73`. The inset is that edge times the window's backing scale, which is
+    /// why this is one logical number read at two scales rather than two.
     ///
     /// **The number is not what the tests below assert**; every one of them
     /// asserts a relation to it, so a macOS that moves its own buttons moves
     /// this constant and nothing else. `bt_platform::adopt_window_chrome` never
-    /// reads it: it asks the window. §13.11 records the measurement.
-    const MAC_TRAFFIC_LIGHTS_LOGICAL_PX: f32 = 69.0;
+    /// reads it: it asks the window, *after* placing them. §13.11 records the
+    /// measurement macOS makes and §13.48 the placement this product makes.
+    const MAC_TRAFFIC_LIGHTS_LOGICAL_PX: f32 = 73.0;
 
     /// **How tall the bar those buttons stand in is** — macOS 26.6's other
     /// measured number (§13.11 ①: a 960×632 frame around a 960×600 content
@@ -27099,6 +27166,79 @@ mod tests {",
         }
     }
 
+    /// RED — **the `+` and the `˅` stand on the axis the tabs stand on** (owner
+    /// ruling 2026-09-13, §13.48).
+    ///
+    /// The pair beside the last tab was anchored to the bar's foot — three points
+    /// up from it, which put its 28 box's centre at 23, exactly where an attached
+    /// tab's centre is. On a window wearing pills the tabs are centred on the
+    /// band at 20 and the pair went on sitting three points low, which is a
+    /// difference a reader sees and cannot name. So the anchor follows the
+    /// silhouette: centred on the band where the tabs float, on the bar's foot
+    /// where they are attached.
+    ///
+    /// Both buttons, because they are one control in two boxes: a `˅` that kept
+    /// the old anchor while the `+` moved would be worse than neither moving.
+    ///
+    /// MUTATION: anchor the pair to the foot on a floating strip and the first
+    /// pair of assertions names it; centre it on the band on an attached one and
+    /// the Windows half does.
+    #[test]
+    fn the_new_tab_pair_rides_the_axis_its_tabs_ride() {
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let width = 960.0 * scale;
+            let trailers = resting(3);
+            let band = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
+
+            let pills = tab_strip_geometry(width, scale, mac_bar(scale), &trailers, 0, 0.0);
+            let pill = pills.tabs[0].body;
+            for (box_, what) in [(pills.new_tab, "the +"), (pills.new_tab_menu, "the ˅")] {
+                assert_eq!(
+                    (box_[1] + box_[3]) / 2.0,
+                    (pill[1] + pill[3]) / 2.0,
+                    "{what} rides the pills' own axis ({scale}x)"
+                );
+                // And that axis is the band's own centre line wherever the
+                // pill's height lands on a whole pixel — which is every scale
+                // this product's own 30 is drawn at except the fractional one,
+                // where the pill was rounded down half a pixel before the pair
+                // was ever asked about.
+                if (band - (WINDOW_TAB_FLOAT_HEIGHT_LOGICAL_PX * scale).round()) % 2.0 == 0.0 {
+                    assert_eq!(
+                        (box_[1] + box_[3]) / 2.0,
+                        band / 2.0,
+                        "which is the band's centre line ({scale}x)"
+                    );
+                }
+                assert_eq!(
+                    box_[3] - box_[1],
+                    WINDOW_NEW_TAB_BOX_LOGICAL_PX * scale,
+                    "and nothing about the box itself moved ({scale}x)"
+                );
+            }
+
+            // And the window whose tabs are attached keeps the anchor it had:
+            // three points up from the bar's foot, which is that tab's centre.
+            let attached = tab_strip_geometry(width, scale, FOLIO_BAR, &trailers, 0, 0.0);
+            let tab = attached.tabs[0].body;
+            for (box_, what) in [
+                (attached.new_tab, "the +"),
+                (attached.new_tab_menu, "the ˅"),
+            ] {
+                assert_eq!(
+                    box_[3],
+                    band - WINDOW_NEW_TAB_MARGIN_BOTTOM_LOGICAL_PX * scale,
+                    "{what} is still three points off the foot ({scale}x)"
+                );
+                assert_eq!(
+                    (box_[1] + box_[3]) / 2.0,
+                    (tab[1] + tab[3]) / 2.0,
+                    "which is the attached tab's own centre ({scale}x)"
+                );
+            }
+        }
+    }
+
     /// RED — **the window that draws its own whole bar is byte-for-byte what it
     /// was** (owner ruling 2026-09-12: the pill is the *other* window's tab).
     ///
@@ -27138,6 +27278,15 @@ mod tests {",
             [19.0, 16.0, 34.0, 31.0],
             "the mark moved"
         );
+        // And the pair beside the last tab, which §13.48 moved on the *other*
+        // window: 3 off the foot of a 40 bar, a 28 box, centred at 23 — the
+        // attached tab's own centre.
+        for (box_, what) in [
+            (geometry.new_tab, "the +"),
+            (geometry.new_tab_menu, "the ˅"),
+        ] {
+            assert_eq!([box_[1], box_[3]], [9.0, 37.0], "{what} moved");
+        }
     }
 
     /// RED — **Folio draws no button where the platform draws its own** (M3-3,
@@ -27170,12 +27319,13 @@ mod tests {",
                     &[ChromeTarget::Settings],
                     "the gear stays and nothing else does (summoned={summoned})"
                 );
-                let boxes = window_caption_boxes(width, scale, mac, RailState::default(), summoned);
+                let boxes = window_caption_boxes(width, scale, mac, summoned);
                 assert_eq!(boxes.len(), 1);
                 assert_eq!(
-                    boxes[0].1[2], width,
-                    "the run still ends at the window's own edge, so no seam of unclaimed \
-                     pixels is left in the corner"
+                    (boxes[0].1[0] + boxes[0].1[2]) / 2.0,
+                    width - WINDOW_CAPTION_GEAR_INSET_LOGICAL_PX * scale,
+                    "and it stands on the centre the ruling gives it rather than in a \
+                     slot cut from the corner (§13.48)"
                 );
                 for (target, _) in
                     window_chrome_boxes(width, scale, mac, RailState::default(), summoned)
@@ -27244,12 +27394,13 @@ mod tests {",
 
     // ── T-MAC-LIGHTS: the header a window wears across its top ──
     //
-    // The owner's ruling of 2026-09-12 in its final form: one 32-point header
-    // across the whole width in every vertical layout, the platform's buttons
-    // where the platform puts them, the gear at the header's right, the header
-    // as the drag region, and the column beneath it — one surface, one colour,
-    // nothing drawn between the two. The horizontal layout is M3-3's, unchanged.
-    // The last test is the one that says Windows is untouched.
+    // The owner's ruling of 2026-09-12, as amended on 2026-09-13 (§13.48): one
+    // header across the whole width in every layout and it is Folio's own 40,
+    // the platform's buttons where the platform puts them, the gear 16 in from
+    // the trailing edge on the header's centre line, the header as the drag
+    // region, and the column beneath it — one surface, one colour, nothing drawn
+    // between the two. The last test is the one that says Windows is
+    // untouched.
 
     /// The postures a window can be in, as this block names them.
     fn vertical(mode: RailMode) -> RailState {
@@ -27267,43 +27418,46 @@ mod tests {",
         }
     }
 
-    /// RED — **every vertical layout wears the platform's own header, and the
-    /// gear stands at its right** (T-MAC-LIGHTS, owner ruling 2026-09-12).
+    /// RED — **every layout wears Folio's own header, and the gear mirrors the
+    /// leading light in it** (T-MAC-LIGHTS as amended by the owner's ruling of
+    /// 2026-09-13, §13.48).
     ///
-    /// One header, three vertical layouts, and the same 32 points in each: the
-    /// expanded sidebar, the parked icon rail and the card column differ in what
-    /// stands *under* the header and in nothing about the header itself. The
-    /// horizontal layout keeps Folio's 40, because its strip is what stands in
-    /// the bar and a 32-point header would crop it.
+    /// One header, four layouts, and the same 40 points in each. The three
+    /// vertical layouts wore the platform's own 32 for a day; the owner looked at
+    /// that window and ruled that the header must be as tall as the strip it
+    /// replaces, so the expanded sidebar, the parked icon rail and the card
+    /// column now differ in what stands *under* the header and in nothing at all
+    /// about the header itself.
     ///
-    /// The gear is asserted beside the height because the two are one box: it is
-    /// as tall as the header it stands in and ends at the window's own edge, so
-    /// a header that changed height without taking the run with it would leave a
-    /// 40px button hanging eight points over the panel below.
+    /// The gear is asserted beside the height because the two are one box. It is
+    /// no longer a slot in a run — there is no run on this window — but a square
+    /// centred 16 points in from the trailing edge, mirroring the centre macOS
+    /// gives the close button at the leading one, and on the header's own centre
+    /// line. It stays inside the 46 the strip goes on reserving, which is what
+    /// keeps the drag band and the strip's own right edge where they were.
     ///
-    /// MUTATION: give a vertical layout Folio's 40 and the first assertion names
-    /// it; let the horizontal one take the platform's 32 and the strip is
-    /// cropped; leave the caption run at `WINDOW_TITLE_BAR_LOGICAL_PX` and the
-    /// gear's own box goes red at every scale.
+    /// MUTATION: give a vertical layout the platform's 32 and the first
+    /// assertion names it; hang the gear off the run's left edge again and its
+    /// centre goes red at every scale; centre it on the window instead of on the
+    /// band and the next one does.
     #[test]
-    fn every_vertical_layout_wears_the_platforms_own_header() {
+    fn every_layout_wears_folios_own_header_and_the_gear_mirrors_the_leading_light() {
         let width = 1600.0_f32;
         for scale in [1.0_f32, 1.5, 2.0] {
             let mac = mac_bar(scale);
-            let platforms = mac.band_px as f32;
             let folios = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
             for (rail, what) in [
+                (RailState::default(), "the horizontal strip"),
                 (vertical(RailMode::Expanded), "the expanded sidebar"),
                 (vertical(RailMode::Icons), "the parked icon rail"),
                 (cards(), "the card column"),
             ] {
                 assert_eq!(
-                    window_band_px(scale, mac, rail),
-                    platforms,
-                    "{what} stands under the platform's own 32 ({scale}x)"
+                    window_band_px(scale, mac),
+                    folios,
+                    "{what} stands under Folio's own 40 ({scale}x)"
                 );
-                // The gear, at the header's right and as tall as the header.
-                let caption = window_caption_boxes(width, scale, mac, rail, false);
+                let caption = window_caption_boxes(width, scale, mac, false);
                 assert_eq!(
                     caption
                         .iter()
@@ -27313,20 +27467,109 @@ mod tests {",
                     "the platform's three are the platform's; the gear is Folio's"
                 );
                 let gear = caption[0].1;
-                assert_eq!(gear[2], width, "it ends at the window's own edge");
                 assert_eq!(
-                    gear[2] - gear[0],
-                    WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale,
-                    "and it is the run's own 46 wide"
+                    (gear[0] + gear[2]) / 2.0,
+                    width - WINDOW_CAPTION_GEAR_INSET_LOGICAL_PX * scale,
+                    "the gear's centre mirrors the red light's, {what} ({scale}x)"
                 );
-                assert_eq!((gear[1], gear[3]), (0.0, platforms), "{what} ({scale}x)");
+                assert_eq!(
+                    (gear[1] + gear[3]) / 2.0,
+                    folios / 2.0,
+                    "and stands on the header's own centre line ({scale}x)"
+                );
+                let side = (WINDOW_CAPTION_GEAR_BOX_LOGICAL_PX * scale).round();
+                assert_eq!(
+                    (gear[2] - gear[0], gear[3] - gear[1]),
+                    (side, side),
+                    "in a square, not a caption slot ({scale}x)"
+                );
+                assert!(
+                    gear[0] >= width - WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale && gear[2] <= width,
+                    "and inside the slot the strip goes on reserving ({scale}x)"
+                );
+                // Asked again through the list that *does* take the layout — the
+                // whole bar's boxes, toggle included — because "the same header
+                // in every layout" is a claim about what the pointer finds, not
+                // only about what one helper computes.
+                assert_eq!(
+                    window_chrome_boxes(width, scale, mac, rail, false)
+                        .into_iter()
+                        .find(|(target, _)| *target == ChromeTarget::Settings)
+                        .expect("the gear is in this bar")
+                        .1,
+                    gear,
+                    "the gear stands in the same box whatever the layout is \
+                     ({what}, {scale}x)"
+                );
             }
-            // The strip's own layout is M3-3's and keeps Folio's bar.
-            let strip = RailState::default();
+        }
+    }
+
+    /// RED — **when the platform takes its own buttons off the window, the
+    /// lead-in goes with them** (owner ruling 2026-09-13, §13.48).
+    ///
+    /// In full screen macOS withdraws the three traffic lights and leaves the
+    /// header, so `strip_left_px` is `0` on a window whose buttons are still the
+    /// platform's. Twelve points of air after a run that is not there is an empty
+    /// stretch at the head of the strip with nothing on the other side of it, and
+    /// the sidebar's toggle and the app's own name stand at the same stale inset.
+    /// So everything Folio puts at the head of that bar leads in exactly the way
+    /// it does on a window that never had any platform buttons — and the tabs are
+    /// still pills, because it is the lights that left and not the shape.
+    ///
+    /// MUTATION: lead the strip in by `--after-lights` whenever the tabs float
+    /// and the first tab stands 12 points into an empty bar; write the toggle's
+    /// inset off anything but the measured run and the second pair names it.
+    #[test]
+    fn a_window_whose_lights_are_withdrawn_leads_in_like_a_window_with_none() {
+        let width = 1200.0_f32;
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let lit = mac_bar(scale);
+            // The very same window in full screen: the band it wears is
+            // untouched, and there is nothing at its leading edge.
+            let dark = PlatformChrome {
+                strip_left_px: 0,
+                ..lit
+            };
+            let trailers = resting(3);
+            let first = |chrome| {
+                tab_strip_geometry(width, scale, chrome, &trailers, 0, 0.0).tabs[0].body[0]
+            };
             assert_eq!(
-                window_band_px(scale, mac, strip),
-                folios,
-                "a 32-point header would crop a 40px strip ({scale}x)"
+                first(dark),
+                first(FOLIO_BAR),
+                "a strip with no platform run at its head leads in the way every \
+                 strip with no platform run at its head leads in ({scale}x)"
+            );
+            assert_eq!(
+                first(lit),
+                (lit.strip_left_px as f32) + WINDOW_TAB_FLOAT_LEAD_IN_LOGICAL_PX * scale,
+                "and with the lights on the window it is still the run plus twelve                  ({scale}x)"
+            );
+            assert!(
+                tab_strip_geometry(width, scale, dark, &trailers, 0, 0.0).floating,
+                "the lights left; the pills did not ({scale}x)"
+            );
+
+            // The other layout's first two things, said about the same window.
+            let expanded = vertical(RailMode::Expanded);
+            assert_eq!(
+                panel_toggle_box(scale, dark, expanded),
+                panel_toggle_box(scale, FOLIO_BAR, expanded),
+                "the sidebar's toggle takes the bar's own padding ({scale}x)"
+            );
+            assert_eq!(
+                app_title_left_px(scale, dark, expanded),
+                app_title_left_px(scale, FOLIO_BAR, expanded),
+                "and the name follows it ({scale}x)"
+            );
+
+            // And the gear is not a thing full screen moves: it is measured from
+            // the trailing edge, which is where it was.
+            assert_eq!(
+                window_caption_boxes(width, scale, dark, false),
+                window_caption_boxes(width, scale, lit, false),
+                "the gear mirrors an edge, not a button ({scale}x)"
             );
         }
     }
@@ -27348,7 +27591,9 @@ mod tests {",
         let height = 900.0_f32;
         for scale in [1.0_f32, 1.5, 2.0] {
             let mac = mac_bar(scale);
-            let header = mac.band_px as f32;
+            // Folio's own 40 on every layout since §13.48 — the header stopped
+            // being the platform's band and became the one bar this window has.
+            let header = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
             let pad = RAIL_PADDING_TOP_LOGICAL_PX * scale;
 
             let sidebar = rail_geometry(
@@ -27393,7 +27638,8 @@ mod tests {",
             assert_eq!(
                 column.cards[0].body[1],
                 header + pad,
-                "the first card begins at 32 + 6 ({scale}x)"
+                "the first card begins at the header's foot plus its own \
+                 padding ({scale}x)"
             );
             assert_eq!(column.edge[1], header);
         }
@@ -27417,22 +27663,22 @@ mod tests {",
         for scale in [1.0_f32, 1.5, 2.0] {
             let mac = mac_bar(scale);
             let ppm = scale_ppm((scale * 1_000.0) as u32);
-            let header = mac.band_px as f32;
+            let header = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
             for rail in [
                 vertical(RailMode::Expanded),
                 vertical(RailMode::Icons),
                 cards(),
             ] {
                 assert_eq!(
-                    chrome_band_device_px(ppm, mac, rail),
+                    chrome_band_device_px(ppm, mac),
                     header as u32,
-                    "the seats begin under the platform's own header ({scale}x)"
+                    "the seats begin under this window's own header ({scale}x)"
                 );
                 let seats = device_viewport(
                     width as u32,
                     height as u32,
                     rail_inset_device_px(rail, ppm),
-                    chrome_band_device_px(ppm, mac, rail),
+                    chrome_band_device_px(ppm, mac),
                 );
                 assert_eq!(
                     seats[1],
@@ -27495,20 +27741,20 @@ mod tests {",
                 vertical(RailMode::Icons),
                 cards(),
             ] {
-                assert_eq!(window_band_px(scale, FOLIO_BAR, rail), folios);
-                assert_eq!(chrome_band_device_px(ppm, FOLIO_BAR, rail), folios as u32);
+                assert_eq!(window_band_px(scale, FOLIO_BAR), folios);
+                assert_eq!(chrome_band_device_px(ppm, FOLIO_BAR), folios as u32);
                 assert_eq!(
                     device_viewport(
                         width as u32,
                         height as u32,
                         rail_inset_device_px(rail, ppm),
-                        chrome_band_device_px(ppm, FOLIO_BAR, rail),
+                        chrome_band_device_px(ppm, FOLIO_BAR),
                     )[1],
                     f64::from(folios)
                 );
                 // Every box in the bar is as tall as the bar, and the caption run
                 // is still the four a Windows window carries.
-                for (_, rect) in window_caption_boxes(width, scale, FOLIO_BAR, rail, false) {
+                for (_, rect) in window_caption_boxes(width, scale, FOLIO_BAR, false) {
                     assert_eq!(rect[3], folios);
                 }
                 assert_eq!(caption_targets(FOLIO_BAR, false).len(), 4);
@@ -27579,7 +27825,7 @@ mod tests {",
                         // where it is not. Both sides of the comparison are given
                         // the same number, which is what keeps this a test about
                         // one rule rather than about two heights.
-                        let title = window_band_px(scale, chrome, rail);
+                        let title = window_band_px(scale, chrome);
                         // The other platform's own answer about the same bar,
                         // built from the same two numbers its frame is given:
                         // where the app's run ends, and how many slots the
@@ -27632,7 +27878,17 @@ mod tests {",
                                 // all, so a horizontal window in that mode has
                                 // tab boxes that nothing paints and the handle
                                 // rightly runs through them (T-MAC-LIGHTS).
-                                if rail.strip_stands_in_the_bar() {
+                                // **Whether a strip is on the glass at all**,
+                                // which is the one question `window_chrome`'s
+                                // own branch asks: the vertical layout put the
+                                // tab list down the side, and focus mode takes
+                                // the strip away in either layout. This was a
+                                // method on `RailState` while the header's
+                                // height turned on it; §13.48 gave every layout
+                                // the same header and left this its one reader.
+                                if !rail.draws_focus_rail()
+                                    && rail.layout == TabLayoutMode::Horizontal
+                                {
                                     assert_eq!(
                                         hit_tab_chrome(
                                             width, scale, chrome, &trailers, 0, 0.0, fx, fy,
@@ -27657,7 +27913,7 @@ mod tests {",
                 // terminal, a pane head, or the sidebar. Asked of the bar this
                 // window wears (T-MAC-LIGHTS), which is the platform's own band
                 // where the platform has one.
-                let bar = window_band_px(scale, chrome, RailState::default());
+                let bar = window_band_px(scale, chrome);
                 for y in [bar, bar + 1.0, bar * 4.0] {
                     assert!(
                         !title_bar_drag_point(
@@ -27690,7 +27946,7 @@ mod tests {",
         let rail = RailState::default();
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
             let width = 960.0 * scale;
-            let boxes = window_caption_boxes(width, scale, FOLIO_BAR, rail, false);
+            let boxes = window_caption_boxes(width, scale, FOLIO_BAR, false);
             assert_eq!(
                 window_chrome_boxes(width, scale, FOLIO_BAR, rail, false),
                 boxes.clone(),
@@ -27705,7 +27961,7 @@ mod tests {",
             // **And the summoned terminal's run is the two the ruling leaves it**
             // (§7.54e ②), measured from the same origin so the paint and this
             // hit test cannot disagree about where the `×` is.
-            let summoned = window_caption_boxes(width, scale, FOLIO_BAR, rail, true);
+            let summoned = window_caption_boxes(width, scale, FOLIO_BAR, true);
             assert_eq!(
                 summoned
                     .iter()
