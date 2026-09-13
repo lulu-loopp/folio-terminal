@@ -239,6 +239,73 @@ mod tests {
         );
     }
 
+    /// PIN — **the bundle asks the reader's permission for nothing, and that is
+    /// what stands between a previewed page and CoreLocation** (M5-1, and
+    /// `docs/DESIGN.md` §13.38).
+    ///
+    /// M4-3 measured that WebKit on this system offers **no** delegate method
+    /// for geolocation — not under the public spelling and not under the private
+    /// one — so the web host cannot refuse that capability at all. What refuses
+    /// it is the *bundle*: an application carrying no `NSLocation…
+    /// UsageDescription` cannot be authorised for location, so the request
+    /// cannot be granted and no prompt can be raised. The same is true of the
+    /// camera and the microphone, which the delegate *does* refuse, with this
+    /// file as the second lock.
+    ///
+    /// That makes a purpose string added here for some unrelated feature a
+    /// change to what a previewed page can reach, several sections away from the
+    /// paragraph that says so. This test is the noise that change makes.
+    ///
+    /// It is written as a rule about **every key**, not as a list of three: the
+    /// key a future feature would add is one nobody has typed yet, and a list
+    /// would not have it. Prose is not searched — the template's own comment
+    /// explains at length why these keys are absent, and a test that refused the
+    /// explanation as well as the key would be a test against writing it down.
+    ///
+    /// MUTATION: add `<key>NSCameraUsageDescription</key><string>…</string>` to
+    /// `Info.plist.in` and this fails naming it.
+    #[test]
+    fn the_rendered_bundle_asks_the_reader_for_nothing() {
+        let template = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../packaging/macos/Info.plist.in"
+        ))
+        .expect("the bundle template is at packaging/macos/Info.plist.in");
+        let plist = render(&template, "0.3.0").expect("the shipped template renders");
+
+        let declared: Vec<&str> = plist
+            .match_indices("<key>")
+            .filter_map(|(at, opening)| {
+                let after = &plist[at + opening.len()..];
+                after.find("</key>").map(|end| &after[..end])
+            })
+            .collect();
+        assert!(
+            declared.contains(&"CFBundleIdentifier"),
+            "the keys were not found at all, so finding none of the wrong ones proves nothing"
+        );
+
+        for key in &declared {
+            assert!(
+                !key.ends_with("UsageDescription"),
+                "the bundle declares {key}, which is a permission this product does not request"
+            );
+        }
+
+        // Named as well as ruled out, because these three are the ones the
+        // sections above argue about and a reader looking for them should find
+        // them written here.
+        for never in [
+            "NSLocationUsageDescription",
+            "NSLocationWhenInUseUsageDescription",
+            "NSLocationAlwaysAndWhenInUseUsageDescription",
+            "NSCameraUsageDescription",
+            "NSMicrophoneUsageDescription",
+        ] {
+            assert!(!declared.contains(&never), "the bundle declares {never}");
+        }
+    }
+
     /// Every `@VERSION@` is filled, and the rest of the file is handed back
     /// byte for byte — including the parts that look like versions and are not.
     #[test]
