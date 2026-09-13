@@ -108,7 +108,11 @@ const ITEM_ICON_COLUMN_LOGICAL_PX: f32 = 14.0;
 /// It answers `[width, height]` rather than one number, because a mark that is
 /// not square is now fitted at its own aspect — see the slot for why that is
 /// the other half of the pane head's problem.
-fn item_mark_box_logical_px(mark: ChromeMark) -> [f32; 2] {
+///
+/// `pub(crate)` since 2026-09-13, for the settings dialog's profile pickers:
+/// they are the same `.ticon` column holding the same mark, and the only way
+/// two surfaces can be held to one size is for them to ask one function.
+pub(crate) fn item_mark_box_logical_px(mark: ChromeMark) -> [f32; 2] {
     crate::icons::MarkSlot::Menu.mark_box_logical_px(mark)
 }
 /// `.default-hint { margin-left: auto; font-size: 11px; color: var(--ink3) }`.

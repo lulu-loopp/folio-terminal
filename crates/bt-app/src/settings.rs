@@ -862,18 +862,37 @@ fn restore_all_label() -> &'static str {
     Text::ShortcutRestoreAll.text()
 }
 
-// ── the one picker whose items carry a mark (mock-up 7647) ─────────────────
+// ── the pickers whose items carry a mark (mock-up 7647) ───────────────────
 /// `.profile-item .ticon { width: 14px }` (mock-up 1023) — the same column the
 /// `˅` menu gives a profile mark, because it is the same `.ticon` class.
 const OPTION_ICON_COLUMN_LOGICAL_PX: f32 = 14.0;
-/// `.pmark { width: 15px }` (mock-up 246). Wider than its 14px column by one
-/// pixel, exactly as in the picker: a flex box centres a child that overflows it.
-const OPTION_MARK_LOGICAL_PX: f32 = 15.0;
+/// **How big a mark is struck in that column** — the `˅` menu's own answer,
+/// asked of the same function (`profiles::item_mark_box_logical_px`, which is
+/// [`crate::icons::MarkSlot::Menu`] read off the drawing).
+///
+/// It was a `15.0` written off `.pmark { width: 15px }` (mock-up 246) with a
+/// note saying it was "the same `.ticon` holding the same `.pmark`" as the `˅`
+/// menu. **That claim was a pixel out**: the icon block later derived a menu
+/// row's mark box from where each family's ink stops — the house's 14, the
+/// edge-to-edge family's 11.2 — and the `˅` menu moved onto the derivation
+/// while this picker kept the literal, so the same profile was struck 15 here
+/// and 14 one surface over. One drawing at two sizes in two menu columns is
+/// exactly what that block exists to prevent, so the literal goes and the
+/// derivation answers for both. See DESIGN §7.1.6c-9‴.
+fn option_mark_box_logical_px(mark: ChromeMark) -> [f32; 2] {
+    crate::profiles::item_mark_box_logical_px(mark)
+}
 /// What a `.ticon` costs an item that has one: the column, and the flex gap
 /// after it. Zero for every other row, which is what keeps their popups the
 /// width they have always been.
+///
+/// **Asked of the whole option list and not of item zero.** The question is
+/// whether this row's picker *has* a mark column, and the summoned terminal's
+/// profile row is the one whose first item has no mark and whose every other
+/// item does (see [`SettingsRow::option_mark`]) — a row sized off item zero
+/// would draw eight marks in a column nothing reserved.
 fn option_icon_advance(row: SettingsRow, scale: f32) -> f32 {
-    if row.option_mark(0).is_some() {
+    if row.options_are_marked() {
         (OPTION_ICON_COLUMN_LOGICAL_PX + ITEM_GAP_LOGICAL_PX) * scale
     } else {
         0.0
@@ -4004,12 +4023,12 @@ impl SettingsRow {
         }
     }
 
-    /// The mark an item wears, for the one row whose items have one.
+    /// The mark an item wears, for the rows whose items have one.
     ///
     /// Mock-up 7647: `<span class="tick">✓</span><span class="ticon">${p.icon}</span>${p.title}`
-    /// — and it is the only combo item in the whole dialog with a `.ticon`, which
-    /// is why this returns `Option` from a row rather than being a field every
-    /// option list has to fill in with `None`.
+    /// — the `.ticon` no other kind of combo item has, which is why this returns
+    /// `Option` from a row rather than being a field every option list has to
+    /// fill in with `None`.
     ///
     /// It is the profile's own mark and not a generic shell glyph, for the reason
     /// `UI-UX.md:115` gives about every other surface: you recognise PowerShell by
@@ -4019,6 +4038,26 @@ impl SettingsRow {
     pub fn option_mark(self, index: usize) -> Option<ChromeMark> {
         match self {
             Self::DefaultProfile => (index < profiles::count()).then(|| profiles::mark(index)),
+            // **The same list one page down, so the same marks** (user report
+            // 2026-09-13: "内置的配置明明有图标"). It is the one row in the
+            // dialog whose items are profiles *and* something else, and the
+            // something else is item zero — the sentence "whatever the default
+            // profile is", which names no profile and therefore wears no mark.
+            //
+            // Borrowing the default profile's mark for it was the other
+            // candidate and it is refused twice over. The Profiles page has
+            // already ruled how default-ness is said — a `default` hint in the
+            // row's own trailing slot, beside the profile's own mark, reporting
+            // and never standing in for it (§7.1.6c-6c, ruling four) — so on
+            // this list the word is the whole of the item. And a mark here
+            // would be the one drawing in the menu that changes without anybody
+            // touching this page: it would duplicate whichever row below it is
+            // the default today, and the two would read as one profile listed
+            // twice.
+            Self::QuakeProfile => index
+                .checked_sub(1)
+                .filter(|profile| *profile < profiles::count())
+                .map(profiles::mark),
             Self::SplitDirection => SPLIT_DIRECTION_OPTIONS
                 .get(index)
                 .copied()
@@ -4035,6 +4074,44 @@ impl SettingsRow {
                 .map(|colour| ChromeMark::ProfileGeneric { colour }),
             _ => None,
         }
+    }
+
+    /// **Whether this row's picker has a mark column at all**, which is a fact
+    /// about the geometry rather than about any one item.
+    ///
+    /// Derived by asking [`option_mark`](Self::option_mark) of the row's own
+    /// options rather than kept as a second list of row names, because a second
+    /// list is how a row comes to draw a mark in a column nobody reserved — and
+    /// the row that would have found the old spelling out (item zero decides)
+    /// is the summoned terminal's, whose first item is the one unmarked entry
+    /// in a marked list.
+    #[must_use]
+    pub fn options_are_marked(self) -> bool {
+        (0..self.option_count()).any(|index| self.option_mark(index).is_some())
+    }
+
+    /// **The mark the closed control wears** — the mark of the item the tick is
+    /// on, or `None` when this row has no marks or is standing on no item.
+    ///
+    /// **The pane head's own sentence, said by a button** (`marks.rs`'s opening
+    /// line: "a tab head and a pane head wear the session's profile mark"). That
+    /// is the nearest precedent this product has for a shut surface that names
+    /// which profile is in force, and it names it the same way every time: the
+    /// mark, then the title, in the mark's own colours. A picker whose open list
+    /// shows eight marks and whose closed face shows none would be the one place
+    /// a profile is recognised by reading rather than by looking, which is the
+    /// report this row was filed on.
+    ///
+    /// One derivation and no per-row list, so a row that grows items with marks
+    /// grows a marked button on the same day. The two rows that answer with a
+    /// *sentence* instead of one of their items — a fixed starting folder's
+    /// path, a built-in's inherited colour — have no ticked item either, so they
+    /// draw no mark here, which is the truth: their value is not in the list.
+    /// See [`value_text`](Self::value_text).
+    #[must_use]
+    pub fn value_mark(self, values: &SettingsValues) -> Option<ChromeMark> {
+        self.selected_index(values)
+            .and_then(|index| self.option_mark(index))
     }
 
     /// Whether this item can be chosen on this machine.
@@ -10685,7 +10762,20 @@ fn combo_width(
         + px(COMBO_PADDING_LEFT_LOGICAL_PX)
         + px(COMBO_PADDING_RIGHT_LOGICAL_PX)
         + px(COMBO_GAP_LOGICAL_PX)
-        + px(COMBO_CHEVRON_FONT_LOGICAL_PX);
+        + px(COMBO_CHEVRON_FONT_LOGICAL_PX)
+        // **And the mark column on a marked row, reserved whether this
+        // particular value has a mark or not** — the popup's own rule one
+        // surface out (`the run of verbs is reserved in the width, revealed or
+        // not`). The summoned terminal's row is why it has to be the row's
+        // question and not the value's: its `Default profile` item wears no
+        // mark, and a button that gave the column back on that one answer would
+        // slide its own text sideways when the reader changed the value.
+        //
+        // Added to the *chrome* rather than taken out of the value box, because
+        // §7.1.6c-5's whole ruling is that a button is as wide as what it has to
+        // say. Squeezing the mark into the box the words already had would print
+        // `Windows PowerShe…` on a row that fits today.
+        + option_icon_advance(row, scale);
     let floor = px(COMBO_MIN_WIDTH_LOGICAL_PX);
     // The floor wins over the cap on a row too narrow to honour both, which is
     // the same precedence `menu_layout`'s clamp uses: a control is drawn at the
@@ -11627,11 +11717,12 @@ pub fn build(
                         })
                     };
                 push_combo(
-                    &mut content_stack.quads,
-                    &mut content_stack.labels,
+                    &mut content_stack,
                     placed.combo,
                     available && hover == Some(SettingsTarget::Combo(placed.row)),
                     value,
+                    placed.row.value_mark(values),
+                    option_icon_advance(placed.row, scale),
                     available,
                     scale,
                     border,
@@ -11918,16 +12009,22 @@ pub fn build(
             }
             let text_left = tick_right + px(ITEM_GAP_LOGICAL_PX) + icon_advance;
             if let Some(mark) = row.option_mark(index) {
-                // Centred on its own 14px column, one pixel narrower than the
-                // 15px mark in it — `profiles::push_row`'s arithmetic, because it
-                // is the same `.ticon` holding the same `.pmark`.
+                // Centred on its own 14px column and struck in the box that
+                // column gives this mark's family — `profiles::push_row`'s
+                // arithmetic to the digit, because it is the same `.ticon`
+                // holding the same `.pmark`.
                 let column_left = tick_right + px(ITEM_GAP_LOGICAL_PX);
                 let column_right = column_left + px(OPTION_ICON_COLUMN_LOGICAL_PX);
-                let side = px(OPTION_MARK_LOGICAL_PX).round();
-                let left = ((column_left + column_right - side) / 2.0).round();
-                let top = ((item[1] + item[3] - side) / 2.0).round();
-                let mut sprite =
-                    ChromeSprite::new(mark, [left, top, left + side, top + side], palette.accent);
+                let [box_width, box_height] = option_mark_box_logical_px(mark);
+                let mark_width = px(box_width).round();
+                let mark_height = px(box_height).round();
+                let left = ((column_left + column_right - mark_width) / 2.0).round();
+                let top = ((item[1] + item[3] - mark_height) / 2.0).round();
+                let mut sprite = ChromeSprite::new(
+                    mark,
+                    [left, top, left + mark_width, top + mark_height],
+                    palette.accent,
+                );
                 if !enabled {
                     sprite.opacity = UNAVAILABLE_MARK_OPACITY;
                     sprite.grayscale = true;
@@ -13553,13 +13650,22 @@ fn focus_ring(rect: [f32; 4], scale: f32, accent: [u8; 3]) -> Vec<OverlayQuad> {
     )
 }
 
+/// **The closed control** — its face, the value in force, and on a marked row
+/// the mark that value wears (user report 2026-09-13, DESIGN §7.1.6c-9‴).
+///
+/// `icon_advance` is the row's reserved `.ticon` column and is spent whether
+/// `mark` is `Some` or not; `mark` is what this particular value carries, which
+/// on the summoned terminal's row is nothing at all for its first item. The two
+/// are separate arguments for exactly that reason — see
+/// [`SettingsRow::value_mark`] and [`option_icon_advance`].
 #[allow(clippy::too_many_arguments)]
 fn push_combo(
-    quads: &mut Vec<OverlayQuad>,
-    labels: &mut Vec<ChromeLabel>,
+    stack: &mut OverlayLayer,
     rect: [f32; 4],
     hovered: bool,
     value: &str,
+    mark: Option<ChromeMark>,
+    icon_advance: f32,
     // `available`: whether this row can act. A greyed button keeps its border
     // and its face — it stays where it is, exactly as a disabled `.btn` does —
     // and only its ink steps back.
@@ -13571,13 +13677,13 @@ fn push_combo(
 ) {
     let px = |logical: f32| logical * scale;
     let radius = px(COMBO_RADIUS_LOGICAL_PX);
-    quads.extend(rounded_overlay_fill(
+    stack.quads.extend(rounded_overlay_fill(
         rect,
         radius,
         palette.menu_border,
         f32::from(palette.menu_border_alpha) / 255.0,
     ));
-    quads.extend(rounded_overlay_fill(
+    stack.quads.extend(rounded_overlay_fill(
         [
             rect[0] + border,
             rect[1] + border,
@@ -13599,14 +13705,31 @@ fn push_combo(
     // what a bare clip does and it reads as a rendering fault rather than as a
     // name too long — "Windows PowerShell 5.1" arriving as "Windows Pov" is the
     // report this exists to answer.
+    let content_left = rect[0] + border + px(COMBO_PADDING_LEFT_LOGICAL_PX);
+    if let Some(mark) = mark {
+        // Centred on the same 14px `.ticon` column the open list gives it, and
+        // struck at the same box — one drawing, one size, whichever of the two
+        // surfaces is up. See [`option_mark_box_logical_px`].
+        let column_right = content_left + px(OPTION_ICON_COLUMN_LOGICAL_PX);
+        let [box_width, box_height] = option_mark_box_logical_px(mark);
+        let mark_width = px(box_width).round();
+        let mark_height = px(box_height).round();
+        let left = ((content_left + column_right - mark_width) / 2.0).round();
+        let top = ((rect[1] + rect[3] - mark_height) / 2.0).round();
+        stack.sprites.push(ChromeSprite::new(
+            mark,
+            [left, top, left + mark_width, top + mark_height],
+            palette.accent,
+        ));
+    }
     let value_box = [
-        rect[0] + border + px(COMBO_PADDING_LEFT_LOGICAL_PX),
+        content_left + icon_advance,
         rect[1],
         rect[2] - border - px(COMBO_PADDING_RIGHT_LOGICAL_PX) - chevron_column,
         rect[3],
     ];
     let font_size_px = px(COMBO_FONT_LOGICAL_PX);
-    labels.push(ChromeLabel {
+    stack.labels.push(ChromeLabel {
         mono: false,
         text: ellipsized(value, value_box[2] - value_box[0], font_size_px, measure),
         rect: value_box,
@@ -13623,7 +13746,7 @@ fn push_combo(
         tabular_numerals: false,
         clip: None,
     });
-    labels.push(ChromeLabel {
+    stack.labels.push(ChromeLabel {
         mono: false,
         text: COMBO_CHEVRON.to_owned(),
         rect: [
@@ -14626,7 +14749,7 @@ mod tests {
         let labels = labels_of(&at_row, None, &values());
         let drawn = labels
             .iter()
-            .find(|label| label.rect == combo_value_box(split))
+            .find(|label| label.rect == combo_value_box(SettingsRow::SplitDirection, split))
             .expect("the button draws its value");
         assert!(
             !drawn.text.contains(ELLIPSIS),
@@ -17686,13 +17809,14 @@ mod tests {
     }
 
     /// The box a button's value is laid out in at 1x — the button less its two
-    /// hairlines, its padding and the chevron's reserved column.
+    /// hairlines, its padding, the chevron's reserved column and, on a marked
+    /// row, the `.ticon` column in front of the words.
     ///
-    /// [`push_combo`]'s own arithmetic, written once here so the two pins that
-    /// read a drawn value find it the same way.
-    fn combo_value_box(combo: [f32; 4]) -> [f32; 4] {
+    /// [`push_combo`]'s own arithmetic, written once here so the pins that read
+    /// a drawn value find it the same way.
+    fn combo_value_box(row: SettingsRow, combo: [f32; 4]) -> [f32; 4] {
         [
-            combo[0] + 1.0 + COMBO_PADDING_LEFT_LOGICAL_PX,
+            combo[0] + 1.0 + COMBO_PADDING_LEFT_LOGICAL_PX + option_icon_advance(row, 1.0),
             combo[1],
             combo[2]
                 - 1.0
@@ -17791,14 +17915,14 @@ mod tests {
                     }
                     continue;
                 };
-                let mut whole_quads = Vec::new();
-                let mut whole_labels = Vec::new();
+                let mut whole = OverlayLayer::default();
                 push_combo(
-                    &mut whole_quads,
-                    &mut whole_labels,
+                    &mut whole,
                     row.combo,
                     false,
                     button_value,
+                    row.row.value_mark(&values()),
+                    option_icon_advance(row.row, 1.0),
                     true,
                     1.0,
                     border,
@@ -17808,7 +17932,7 @@ mod tests {
                 if clipped(row.combo, content).is_some_and(|seen| seen != row.combo) {
                     rows_cut += 1;
                 }
-                for whole in whole_quads {
+                for whole in whole.quads {
                     let Some(rect) = clipped(whole.rect, content) else {
                         continue;
                     };
@@ -17920,7 +18044,7 @@ mod tests {
             let Some(whole) = shown_value(row.row) else {
                 continue;
             };
-            let box_of = combo_value_box(row.combo);
+            let box_of = combo_value_box(row.row, row.combo);
             let drawn = labels
                 .iter()
                 .find(|label| label.rect == box_of)
@@ -19595,11 +19719,11 @@ mod tests {
     }
 
     /// PIN — the Startup row is the picker built from the `˅` menu's own list,
-    /// and the only one in this dialog whose items wear a mark.
+    /// and every profile on it wears that menu's own mark.
     ///
     /// Mock-up 7645: "the default-profile picker is built from the same list the
     /// ⌄ menu uses" — the *same* table, so a fifth profile appears in both
-    /// surfaces or in neither, and 7647 is the one `.ticon` in any combo item.
+    /// surfaces or in neither, and 7647 is the `.ticon` a combo item carries.
     #[test]
     fn the_startup_row_offers_the_pickers_own_profiles_each_under_its_own_mark() {
         assert_eq!(
@@ -19638,18 +19762,27 @@ mod tests {
                  the table being reordered"
             );
         }
-        // **One of two**, and the second one arrived for this one's reason
-        // (user ruling, 2026-08-16): `Split direction` names two axes, and the
+        // **Three rows and no others.** `Split direction` arrived for this
+        // row's reason (user ruling, 2026-08-16): it names two axes, and the
         // difference between "beside" and "below" is a shape this build already
-        // draws. Every other picker's items are words, because every other
-        // picker's items *are* words — `Light`, `Bar`, `On` name no object.
+        // draws. The summoned terminal's profile row is the same list as this
+        // one (user report 2026-09-13). Every other picker's items are words,
+        // because every other picker's items *are* words — `Light`, `Bar`, `On`
+        // name no object.
         for row in visible_rows(TabLayoutMode::Vertical) {
             if matches!(
                 row,
-                SettingsRow::DefaultProfile | SettingsRow::SplitDirection
+                SettingsRow::DefaultProfile
+                    | SettingsRow::SplitDirection
+                    | SettingsRow::QuakeProfile
             ) {
+                assert!(row.options_are_marked(), "{row:?} reserves a mark column");
                 continue;
             }
+            assert!(
+                !row.options_are_marked(),
+                "{row:?} reserves a mark column it draws nothing in"
+            );
             for index in 0..row.option_count() {
                 assert_eq!(row.option_mark(index), None, "{row:?} draws no marks");
             }
@@ -19673,6 +19806,262 @@ mod tests {
                 .option_labels()
                 .collect::<Vec<_>>(),
             vec!["Auto (longer edge)", "Right", "Down"],
+        );
+    }
+
+    /// The page a row lives on with that row scrolled into view and no picker
+    /// open — what a claim about a *closed* control has to be read on.
+    fn open_shut_showing(row: SettingsRow) -> SettingsLayout {
+        let at_rest = open_showing(row);
+        open_page_scrolled(
+            1.0,
+            None,
+            TabLayoutMode::Vertical,
+            row.category(),
+            0.0,
+            scroll_to_row(&at_rest, row),
+        )
+    }
+
+    /// Every mark this picker draws in its open list, against the item it is
+    /// drawn on.
+    ///
+    /// By item rather than as a bare run, because a list of more than
+    /// [`MENU_MAX_VISIBLE_ITEMS`] scrolls and the items past the body's edge
+    /// draw nothing at all — a claim stated as "these marks, in this order"
+    /// would be a claim about how many profiles this build happens to ship.
+    fn item_marks(placed: &SettingsLayout, values: &SettingsValues) -> Vec<(usize, ChromeMark)> {
+        let sprites = sprites_of(placed, None, values);
+        placed
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                sprites
+                    .iter()
+                    .find(|sprite| within(sprite.rect, *item))
+                    .map(|sprite| (index, sprite.mark))
+            })
+            .collect()
+    }
+
+    /// The marks that same list *ought* to draw: every item the body shows,
+    /// under the mark its row reports.
+    fn item_marks_owed(placed: &SettingsLayout, row: SettingsRow) -> Vec<(usize, ChromeMark)> {
+        placed
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| placed.shows_item(**item))
+            .filter_map(|(index, _)| row.option_mark(index).map(|mark| (index, mark)))
+            .collect()
+    }
+
+    /// Every mark drawn inside one row's closed button.
+    fn button_marks(
+        placed: &SettingsLayout,
+        row: SettingsRow,
+        values: &SettingsValues,
+    ) -> Vec<ChromeSprite> {
+        let combo = combo_of(placed, row);
+        sprites_of(placed, None, values)
+            .into_iter()
+            .filter(|sprite| within(sprite.rect, combo))
+            .collect()
+    }
+
+    /// RED GATE — **every picker in this dialog whose options are profiles wears
+    /// the `˅` menu's own marks, open and shut** (user report 2026-09-13, on
+    /// `Settings ▸ 快捷终端 ▸ 新标签页的配置`: eight bare words, where the same
+    /// eight profiles carry their marks on the tab strip, on the pane head, in
+    /// the `˅` new-tab menu and on the Profiles page's own rows — "内置的配置明
+    /// 明有图标").
+    ///
+    /// **One derivation, asserted against `profiles::mark` itself**, which is
+    /// the mutation this pin is written for: a second table of row-to-mark
+    /// would satisfy a literal list and fail here the moment somebody's
+    /// `profiles.json` adds a ninth row, because the expectation is read out of
+    /// the same table the `˅` menu is built from. The closed control goes
+    /// through `option_mark` as well ([`SettingsRow::value_mark`]), so the
+    /// button and the item can never name two different drawings.
+    ///
+    /// The summoned terminal's first item is the one entry that names no
+    /// profile and it wears no mark — see [`SettingsRow::option_mark`] for the
+    /// two reasons, and `the_quake_rows_default_entry_is_a_word_not_a_borrowed_
+    /// mark` for the half of it a press can see.
+    #[test]
+    fn every_profile_picker_carries_the_menus_own_marks_open_and_shut() {
+        // `DefaultProfile`'s items are the table; `QuakeProfile`'s are the
+        // table one place along, behind the entry that names no profile.
+        for (row, offset) in [
+            (SettingsRow::DefaultProfile, 0_usize),
+            (SettingsRow::QuakeProfile, 1_usize),
+        ] {
+            assert!(
+                row.options_are_marked(),
+                "{row:?} reserves the `.ticon` column its items need"
+            );
+            for profile in 0..profiles::count() {
+                assert_eq!(
+                    row.option_mark(profile + offset),
+                    Some(profiles::mark(profile)),
+                    "{row:?} draws {} under the mark the ˅ menu gives it",
+                    profiles::id(profile)
+                );
+            }
+            assert_eq!(
+                row.option_mark(profiles::count() + offset),
+                None,
+                "{row:?} names nothing past the end of the table"
+            );
+
+            // **Drawn**: the sprites the open list actually pushes, read off
+            // the built stack rather than off the reader above it.
+            let open = open_rows(1.0, Some(row), TabLayoutMode::Horizontal);
+            let owed = item_marks_owed(&open, row);
+            assert!(
+                owed.len() >= 2,
+                "{row:?}: this fixture's list shows marked items, or the claim \
+                 below is about nothing"
+            );
+            assert_eq!(
+                item_marks(&open, &values()),
+                owed,
+                "{row:?}: every item the open list shows draws its own mark, and \
+                 nothing else draws one"
+            );
+        }
+
+        // **Shut.** The button under every reading of both rows, which is the
+        // half the report was about last: a control that opens onto eight marks
+        // and closes onto none is a profile named by reading rather than by
+        // looking.
+        let general_page = open_shut_showing(SettingsRow::DefaultProfile);
+        let quake_page = open_shut_showing(SettingsRow::QuakeProfile);
+        for chosen in 0..profiles::count() {
+            let general = SettingsValues {
+                default_profile: chosen,
+                ..values()
+            };
+            let drawn = button_marks(&general_page, SettingsRow::DefaultProfile, &general);
+            assert_eq!(
+                drawn.iter().map(|sprite| sprite.mark).collect::<Vec<_>>(),
+                vec![profiles::mark(chosen)],
+                "the Default profile button wears the mark of the profile it \
+                 says it will start"
+            );
+            // The `˅` menu's own box for this mark, struck in the `.ticon`
+            // column — the same two numbers the open item is given.
+            let [box_width, box_height] = option_mark_box_logical_px(profiles::mark(chosen));
+            assert_eq!(width(drawn[0].rect), box_width.round());
+            assert_eq!(height(drawn[0].rect), box_height.round());
+
+            let summoned = SettingsValues {
+                quake_profile: chosen + 1,
+                ..values()
+            };
+            assert_eq!(
+                button_marks(&quake_page, SettingsRow::QuakeProfile, &summoned)
+                    .iter()
+                    .map(|sprite| sprite.mark)
+                    .collect::<Vec<_>>(),
+                vec![profiles::mark(chosen)],
+                "and so does the summoned terminal's"
+            );
+        }
+
+        // **The marks fit the rows that already had room for them** — a 14px
+        // box in a 27.5px item and a 27.5px button. Stated here so that a mark
+        // family drawn bigger tomorrow reports itself in the test run rather
+        // than by growing a row.
+        for mark in (0..profiles::count()).map(profiles::mark) {
+            let [_, box_height] = option_mark_box_logical_px(mark);
+            assert!(
+                box_height <= ITEM_HEIGHT_LOGICAL_PX && box_height <= COMBO_HEIGHT_LOGICAL_PX,
+                "{mark:?} at {box_height} does not fit the row it stands in"
+            );
+        }
+    }
+
+    /// PIN — **the summoned terminal's `Default profile` entry is a word and
+    /// not a borrowed mark**, open or shut.
+    ///
+    /// The Profiles page has already ruled how default-ness is said: a `default`
+    /// hint in the row's own trailing slot, beside that profile's own mark,
+    /// reporting and never standing in for it (§7.1.6c-6c, ruling four). This
+    /// item is nothing *but* default-ness, so the word is the whole of it.
+    ///
+    /// The other half is what a borrowed mark would do: it would duplicate
+    /// whichever row below it is the default today — two items, one drawing, and
+    /// nothing on the list to say which of them the tick is on — and it would
+    /// change without anybody touching this page, because the row it defers to
+    /// is on another one.
+    ///
+    /// Red gate: answer item zero with `profiles::mark(values.default_profile)`
+    /// and the drawn list below comes back one mark longer, with the first two
+    /// equal.
+    #[test]
+    fn the_quake_rows_default_entry_is_a_word_not_a_borrowed_mark() {
+        assert_eq!(
+            SettingsRow::QuakeProfile.option_label(0),
+            Some(Text::OptionQuakeProfileDefault.text()),
+            "the item says so in words"
+        );
+        assert_eq!(
+            SettingsRow::QuakeProfile.option_mark(0),
+            None,
+            "and names no profile, so it wears no profile's mark"
+        );
+        assert_eq!(
+            quake_profile_requested(SettingsTarget::Choice(SettingsRow::QuakeProfile, 0)),
+            Some(None),
+            "pressing it stores the deferral and not a profile"
+        );
+
+        let open = open_rows(
+            1.0,
+            Some(SettingsRow::QuakeProfile),
+            TabLayoutMode::Horizontal,
+        );
+        let drawn = item_marks(&open, &values());
+        assert!(
+            open.shows_item(open.items[0]),
+            "the deferral is the first item and this fixture shows it, or the \
+             claim below is about an item nobody drew"
+        );
+        assert!(
+            drawn.iter().all(|(index, _)| *index > 0),
+            "the deferral draws no mark: {drawn:?}"
+        );
+
+        // Shut on that item, the button says the word and shows no mark — while
+        // still standing where a marked value stands, because the column is the
+        // row's and not the value's (`option_icon_advance`).
+        let deferring = SettingsValues {
+            quake_profile: 0,
+            ..values()
+        };
+        let placed = open_shut_showing(SettingsRow::QuakeProfile);
+        assert_eq!(
+            SettingsRow::QuakeProfile.value_mark(&deferring),
+            None,
+            "the closed control borrows nothing either"
+        );
+        assert!(
+            button_marks(&placed, SettingsRow::QuakeProfile, &deferring).is_empty(),
+            "and draws nothing in the column"
+        );
+        let box_of = combo_value_box(
+            SettingsRow::QuakeProfile,
+            combo_of(&placed, SettingsRow::QuakeProfile),
+        );
+        assert!(
+            labels_of(&placed, None, &deferring)
+                .into_iter()
+                .any(|label| label.rect == box_of),
+            "the word is laid out in the box a marked value would have used — \
+             a button whose text slid sideways when the reader changed the \
+             value would be a control that moves under the pointer"
         );
     }
 
@@ -19773,7 +20162,7 @@ mod tests {
                 .into_iter()
                 .find(|label| label.rect[1] >= combo[1] && label.rect[3] <= combo[3])
                 .expect("the closed combo shows its current value");
-            let box_of = combo_value_box(combo);
+            let box_of = combo_value_box(SettingsRow::DefaultProfile, combo);
             assert_eq!(
                 caption.text,
                 ellipsized(
@@ -21504,7 +21893,10 @@ mod tests {
             false,
             scroll_to_row(&base, SettingsRow::BackgroundImage),
         );
-        let box_of = combo_value_box(combo_of(&placed, SettingsRow::BackgroundImage));
+        let box_of = combo_value_box(
+            SettingsRow::BackgroundImage,
+            combo_of(&placed, SettingsRow::BackgroundImage),
+        );
 
         let empty = labels_of(&placed, None, &values());
         let drawn = empty
