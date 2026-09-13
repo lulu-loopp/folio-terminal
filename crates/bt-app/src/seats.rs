@@ -24442,6 +24442,47 @@ mod tests {
         assert_eq!(news_pill_box([0.0, 0.0, 8.0, 400.0], 1.0), None);
     }
 
+    /// **The pill's width is the body's, at every scale and for every
+    /// sentence** (T-MAC-LIVE §13.33 ③, owner's report 2026-09-12 from the Mac:
+    /// "saving shows a popup").
+    ///
+    /// What that report saw is this rectangle, and it is the same rectangle on
+    /// both machines: the door takes a body and a scale and **nothing else** —
+    /// no string, no font, no measurement that could answer differently where a
+    /// different font list is installed. So `Saved` gets the width of a pane
+    /// rather than the width of the word, and the reason is written above the
+    /// door: this pill carries verbs at its right hand, and a box that grew and
+    /// shrank around a sentence would move the button under the pointer.
+    ///
+    /// The scale is the part worth pinning, because scale 2 is where a mistake
+    /// would show first and the port's Mac runs at it: every number doubles and
+    /// the relation does not. One machine cannot photograph the other, so this
+    /// is how a Windows workstation holds what a Mac draws.
+    ///
+    /// RED GATE: give the door a `text_width` and use it, the way
+    /// [`page_hover_tag_box`] legitimately does, and the second half goes red.
+    #[test]
+    fn the_news_pill_takes_the_bodys_width_and_not_the_sentences() {
+        let body = [100.0, 60.0, 900.0, 700.0];
+        let one = news_pill_box(body, 1.0).expect("a pane this size holds a pill");
+        assert_eq!(one[2] - one[0], (body[2] - body[0]) - 24.0);
+
+        // The same body measured on a scale-2 machine: the insets, the lift and
+        // the line all double, and the pill still spans what is left of the body.
+        let doubled = [200.0, 120.0, 1800.0, 1400.0];
+        let two = news_pill_box(doubled, 2.0).expect("a pane this size holds a pill");
+        assert_eq!(two[0], doubled[0] + 24.0, "12 logical px, at scale 2");
+        assert_eq!(two[2], doubled[2] - 24.0, "and 12 logical px on the right");
+        assert_eq!(two[3], doubled[3] - 20.0, "10 logical px off the floor");
+        assert_eq!(two[3] - two[1], 56.0, "one 28 logical px line");
+        assert_eq!(
+            two[2] - two[0],
+            (doubled[2] - doubled[0]) - 48.0,
+            "the pill is as wide as the body it floats over, less its two insets \
+             — which is what `Saved` is drawn in, and why it reads as a bar"
+        );
+    }
+
     /// RED — **a read-only page wears a lock in the path row and no band**
     /// (owner's ruling 2026-09-12; §7.1.3x ③; mock §一).
     ///

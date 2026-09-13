@@ -12969,6 +12969,10 @@ mod macos_process_door_tests {
     /// arm.
     const NOT_MACOS: &str = "#[cfg(not(target_os = \"macos\"))]";
 
+    /// Where a function of one of these arms ends: a closing brace at the
+    /// module's own indentation, on a line of its own.
+    const END_OF_A_DOOR: &str = "\n    }\n";
+
     /// **This file, up to where these pins begin.**
     fn above_the_pins() -> &'static str {
         let at = WHOLE_FILE
@@ -13016,6 +13020,55 @@ mod macos_process_door_tests {
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ")
+    }
+
+    /// RED (T-MAC-LIVE, §13.33 ④) — **the folder branch of the reveal opens
+    /// its window without handing Finder the front, and then brings up that
+    /// window alone.**
+    ///
+    /// Measured on macOS 26.6.2 with nine Finder windows on the desk: the bare
+    /// `openURL:` this replaces put **two** of them above the window that had
+    /// been in front — the folder that was asked for, and whichever one Finder
+    /// had been holding — while the shape pinned here puts up one. A pin rather
+    /// than a behavioural test because the claim is about what another
+    /// application does with an activation, which no assertion on this
+    /// workstation can run; the Mac half is the measurement itself.
+    ///
+    /// MUTATION: put `hand_over` back on the directory branch and the first two
+    /// go red — which is the door as it shipped. Pass
+    /// `NSApplicationActivateAllWindows` instead of the empty option set and
+    /// the last goes red, which is Apple's own name for the behaviour this was
+    /// reported as.
+    #[test]
+    fn a_revealed_folder_brings_up_its_own_window_and_no_other() {
+        let at = HANDOFF
+            .find("fn open_folder_in_finder(")
+            .expect("the folder branch has a door of its own");
+        let rest = &HANDOFF[at..];
+        let door = &rest[..rest
+            .find(END_OF_A_DOOR)
+            .expect("a function of this arm ends")];
+        assert!(
+            door.contains("setActivates(false)"),
+            "the open is allowed to hand Finder the front, and that raises the \
+             window it was already holding:\n{door}"
+        );
+        assert!(
+            !door.contains("workspace.openURL("),
+            "the door is back on the one call that does both things at once:\n{door}"
+        );
+        assert!(
+            door.contains("activateWithOptions(NSApplicationActivationOptions::empty())"),
+            "Finder is activated with something other than the default option set, \
+             and the default option set is the whole ruling — main and key, \
+             never every window:\n{door}"
+        );
+        // And the file branch is untouched: it was measured raising one window
+        // already, so this ticket had nothing to do to it.
+        assert!(
+            HANDOFF.contains("workspace.activateFileViewerSelectingURLs("),
+            "the file branch stopped selecting the file in its folder"
+        );
     }
 
     /// RED — **each of the five verbs that leave this window has exactly one

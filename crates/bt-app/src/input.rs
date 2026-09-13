@@ -1233,6 +1233,36 @@ mod tests {
         }
     }
 
+    /// RED (T-MAC-LIVE, §13.33 ①) — **what this door answers is a question
+    /// about text, and it is not the only question anybody asks of a Mac's
+    /// `Option` key.**
+    ///
+    /// Measured on the Mac (2026-09-12, an Option-flagged wheel notch posted at
+    /// Folio's own window): winit reported `ModifiersState(ALT)` and this
+    /// function handed the window `ModifiersState(0x0)`. That is the right
+    /// answer for the encoder, for every chord and for every one-line field —
+    /// and the wrong one for `⌥`+wheel, which composes no character and has no
+    /// setting of its own to be switched off by. So the state this door is
+    /// *given* stays live beside the state it returns: see
+    /// `WindowRuntime::modifiers_held` and `column_notch`.
+    ///
+    /// MUTATION: hand `column_notch` the effective state and the second half of
+    /// this goes red — which is what shipped, and what no keyboard test could
+    /// have said, because on the keyboard the first half is correct.
+    #[test]
+    fn a_stripped_option_is_the_answer_for_text_and_not_for_a_wheel() {
+        let reported = ModifiersState::ALT;
+        assert!(
+            !effective_modifiers(reported, false, MAC).alt_key(),
+            "the keyboard half of the ruling is unchanged: nobody is holding Alt"
+        );
+        assert!(
+            reported.alt_key(),
+            "and the hand is still holding Option, which is the fact a gesture \
+             is entitled to read"
+        );
+    }
+
     /// RED (M1-7, X-3 §4 ③) — **a chord is never typing.**
     ///
     /// The predicate every one-line field in this window asks before it inserts a

@@ -10163,4 +10163,216 @@ showed what §M4-7 is for**: two Folios on one data directory did not hand over 
 each other, because the attention endpoint that arranges that on Windows has no
 macOS arm yet.
 
+### 13.33 T-MAC-LIVE: 第一次真机验收的四桩——⌥+滚轮、标记栏刷新、保存后的弹窗、访达只带一扇窗出来(`crates/bt-app/src/{main,input,seats}.rs`、`crates/bt-platform/src/{handoff,lib}.rs`)
+
+The owner's first acceptance pass on a Mac build of `main` (2026-09-12,
+`~/folio-port/Folio-next.app` at `a9a1b3ca`) came back with four sentences. Two
+of them are defects and are fixed here. One is this repository drawing exactly
+what the owner ruled the same morning, held against a Windows build that
+predates the ruling. One did not reproduce at all, and the measurement that says
+so is worth as much as the two that did.
+
+**① `⌥`+wheel was dead on every Mac, because one door was answering a question
+nobody had asked it.** The gesture is `column_notch` (user ruling 2026-08-21,
+§7.1.6b′): a bare notch over the card column scrolls the column, a notch with
+`Alt` held aims the seat under the pointer. It was handed
+`WindowRuntime::modifiers`, and on a Mac that field has had `Alt` taken out of
+it — M1-7 ruled that `Option` is text, so `input::effective_modifiers` removes
+the bit at the one door every modifier state in this process comes through
+(§13.13 ③). The aim was therefore unreachable on that machine from the day the
+port landed, and no setting the reader could find would have revealed it: the
+setting they would have had to change is `Option key sends Alt`, which is about
+what `⌥a` **types**.
+
+Measured on the Mac (Apple M4, macOS 26.6.2, a debug build in an isolated
+`HOME`, one Option-flagged `CGEvent` scroll notch posted at this ticket's own
+window, the two states printed side by side at the door that writes them):
+
+```
+modifiers reported=ModifiersState(ALT) effective=ModifiersState(0x0) option_sends_alt=false
+```
+
+Both halves of that line are correct, and that is the whole of the defect: the
+first is winit's answer about the hand, the second is Folio's policy about text.
+winit 0.30.13's `event_mods` sets `ModifiersState::ALT` from
+`NSEventModifierFlagOption` **unconditionally** (`macos/event.rs:323`) and never
+consults `OptionAsAlt`, which is read in exactly one place — `replace_event`, on
+the `keyDown:`/`insertText:` path (`macos/view.rs:458`, `:504`, `:1109`). So the
+setting cannot be what a gesture reads, however it is set.
+
+The other half of the question is settled in the same file.
+`WindowEvent::MouseWheel` carries `device_id`, `delta` and `phase` and **no
+modifiers** (`macos/view.rs:695`), so a wheel handler has nothing to read but
+the last `ModifiersChanged` — while `scrollWheel:` itself calls
+`update_modifiers(event, false)` one line earlier (`:693`), which queues a
+`ModifiersChanged` off the scroll event's own flags whenever they differ. The
+pointer event's modifiers and the key event's are the same value arriving
+through the same door; there is no second reading to be had, on this platform or
+the other one.
+
+**The repair is a second field, not a second policy.** `window.modifiers` keeps
+its meaning exactly — what the keyboard means, with M1-7's ruling applied — and
+`window.modifiers_held` is what the platform reported, written at the same one
+door, one statement earlier. `column_notch` reads the held state and nothing
+else does; `one_door_writes_both_readings_of_the_modifiers` is what keeps it one
+door, and `the_column_reads_what_the_hand_is_holding` is the red gate — put
+`modifiers` back in that call and it goes red while every keyboard test in the
+file stays green, which is the exact shape of a defect no key test could have
+caught. **Windows is byte for byte unchanged**: `effective_modifiers` is the
+identity there, so the two fields are one value.
+
+One thing the repair settles on the way past. `adopt_option_as_alt` struck the
+effective state against itself, which is a one-way street: the `Alt` taken out
+while the setting was off could not come back when it was switched on under a
+hand still holding `Option`. It now recomputes from the reported state, which is
+the only value in the pair that is not already a consequence of the setting.
+
+**What this ticket was told and what turned out to be true**: there is no
+`⌥`+wheel row in `BINDINGS` or `docs/shortcuts.md` to correct. That table is
+keys — generated from `BINDINGS`, gated by `scripts/check-shortcuts-table.ps1` —
+and a wheel notch is a gesture, which this product deliberately keeps out of it:
+§7.21 ruled that the gesture's one discoverable sentence is `Appearance ▸ Focus
+card height`'s third clause, and that sentence says `Alt+wheel` in a string both
+dialects share. Nothing was added there.
+
+**② The command-marks rail stood still for as long as the reader did, and the
+platform had nothing to do with it.** The rail is an overlay layer. Overlay
+layers are built by `refresh_overlay`, which is called by event handlers and by
+animation clocks — and, until this ticket, **by nothing that knew the ledger had
+moved**. A frame published for pty output presents the *retained* overlay, so a
+tick that appeared, or turned red, was drawn whenever something else next
+happened to ask.
+
+Measured on the Mac, with the `OSC 133` bytes written onto the pane's own tty so
+that the marks land at instants this ticket chose and nothing at all is typed:
+
+| | the mark landed | the rail was rebuilt | late by |
+|---|---|---|---|
+| before | `1789260048.561` | `1789260061.502` | **12.94 s**, and only because the pointer was then moved |
+| after | `1789260234.822` | `1789260234.824` | **2 ms** |
+
+On the glass, from captures of this ticket's own window: before the fix the rail
+at `+2.0 s`, `+4.1 s` … `+12.6 s` after the marks landed was one red dash at
+y 638–641 — the tick belonging to the *previous* command — and the new one
+appeared only in the capture taken after the pointer moved, by which time the
+red dash had shifted up to 629–632 with a grey dash at 647–650 beside it. After
+the fix the capture at `+2.0 s` already carries both.
+
+**Why it reads as intermittent, and why the first attempt to reproduce it
+failed.** An `OSC 133;C` starts the tab mark's breath, and while that runs the
+overlay is rebuilt every twenty milliseconds. A `D` that arrives while the
+command is still visibly running is therefore drawn at once — the first
+measurement here caught one at 25 ms and proved nothing. The marks that are late
+are the ones that land when nothing is animating, which is every `A` and `B` a
+prompt writes *after* the breath has stopped: the newest tick on the rail, every
+time, for as long as the reader keeps still.
+
+**The repair is two `u64`s.** `command_marks_watermark` sums
+`DualPlaneSession::command_marks_revision` over the seats of the tab on screen —
+the seats `command_rail_layers` lays a rail out for — and `drain_pty` compares
+it across the drain, beside the name change that already asks for the chrome on
+the same terms. A revision bumps on ledger changes and on nothing else and never
+falls, so a sum over one set of seats moves if and only if one of its terms did;
+there is no allocation and no list. **This is visible on Windows too**, and
+CHANGELOG carries a line for it: the defect was never platform-specific, it was
+only ever found by somebody watching a rail on a machine where they were not
+also typing.
+
+**③ The "popup" after `⌘S` is this window's own news pill, at the size this
+repository draws it, and the build it was compared against predates the size.**
+The screenshot is the pill: 12 px inside each edge of the preview's body, 28
+tall, `r6`, the menu surface let down to `.92`, with the one-pixel ring a menu
+wears. Every one of those numbers is a constant declared beside
+`seats::news_pill_box`, and that function takes a body and a scale and **nothing
+else** — no string, no font, no measurement that could come back differently on
+a machine with a different font list. The full width is the decision, and it is
+written over the door in the owner's own words of 2026-09-12: *it differs in
+spanning the body's width rather than hugging its words, because this one
+carries verbs at its right hand and a pill that grew and shrank around a
+sentence would move the button under the pointer.* The ring is the same
+paragraph: `notice::lay_out` draws it as the outer of two rounded fills, "exactly
+as a `border: 1px solid` border-box is", off `palette.menu_border`, with no
+platform arm anywhere on the path.
+
+What makes it read as new is the calendar. `news_pill_box` arrived in `297cd631`
+("the preview's bottom line appears only when it has something to say",
+2026-09-12 13:15 -0400). `v0.3.0-preview` is `9acd482`, 2026-09-12 06:47Z, and
+`git show 9acd482:crates/bt-app/src/seats.rs` does not contain the name at all.
+So the Mac build is showing T-PREVIEW-FOOT's pill and the Windows build it was
+being held against is still showing what came before it.
+
+**Nothing was changed for this**, because changing it would be reversing a
+ruling seven hours old that is Windows-visible as well. What was added is
+`the_news_pill_takes_the_bodys_width_and_not_the_sentences`, which measures the
+box for `Saved` at scale 2 — the scale the port runs at, and the one where a
+unit mistake would show first — and states in one place that the width is the
+body's and not the sentence's. The next reader who arrives here surprised finds
+the decision instead of a search. Whether a confirmation carrying no verbs
+should after all be allowed to hug its word is a ruling, and it is the owner's
+to make.
+
+**④ "Reveal in Finder brings every open Finder window forward" did not
+reproduce — and the call this ticket named is not the one that button makes.**
+The folder button at the foot of the files column reveals a *root*, which is a
+directory, and §13.18's door sends a directory to `openURL:`: *a folder is
+opened, not selected in its parent*. `activateFileViewerSelectingURLs:` is the
+other branch, the one a file takes.
+
+Measured on the Mac with nine Finder windows already on the desk, a reference
+window of this ticket's own genuinely frontmost before each trial, and the
+front-to-back order read out of `CGWindowListCopyWindowInfo` before and after
+(each row run twice, same answer both times):
+
+| the door | Finder windows above the reference, before → after | which rose |
+|---|---|---|
+| `openURL:` on the folder — as it shipped | 0 → **2** | the folder's own window, **and** the window Finder had been holding |
+| `openURLs:withApplicationAtURL:configuration:` with `activates = false`, then `activate` with the default option set | 0 → **1** | the folder's own window |
+| `activateFileViewerSelectingURLs:` on a file — as it shipped | 0 → **1** | the file's own window |
+| the same, followed by an explicit `activate` with the default option set | 0 → **1** | the file's own window |
+
+So **no branch of this door brings every Finder window forward** on macOS
+26.6.2: the eight windows standing behind the reference stayed behind it in
+every trial. The premise that "activation with all windows is macOS's default
+for that call" is not true on this machine, and the file branch — the one the
+ticket named — was already raising exactly one.
+
+There was still one window rising that nobody asked for, and it is the folder
+branch's. `openURL:` does two things in one call: it opens the folder's window
+*and* it activates Finder, and activating an application brings its **key**
+window forward with it. A reader who asks a terminal to show them a folder did
+not ask for the other one. So the two halves are separated:
+`NSWorkspaceOpenConfiguration` with `activates = false` opens the window and
+leaves the front where it was, and `NSRunningApplication::activate` with **no
+options** then brings Finder forward — Apple documents the default option set as
+main-and-key only, and `NSApplicationActivateAllWindows` is the flag that would
+do what the single call was doing. The same measurement then reads one.
+
+**The `Result` is still answered before the call, which is this module's habit
+rather than a new rule** (§13.18 ①: the disk is asked first because
+`activateFileViewerSelectingURLs:` cannot answer). The configuration form
+answers in a block, and a door that returned `Ok` and discovered otherwise
+afterwards would be lying to a caller that has already drawn a foot — so the
+question asked synchronously here is the one the call actually depends on, *is
+there a Finder on this machine*, through
+`URLForApplicationWithBundleIdentifier:`, exactly as `open_system_fonts_page`
+asks it about Font Book. The completion handler is then nothing this door needs
+for its answer, and the activation rides in it because that is where the running
+application is handed over; `NSRunningApplication` is documented thread-safe in
+the same paragraph of Apple's *Thread Safety Summary* that §13.18 quotes for
+`NSWorkspace`. The shape is held by
+`a_revealed_folder_brings_up_its_own_window_and_no_other`, a source pin for
+`macos_process_door_tests`' reason: the claim is about what another application
+does with an activation, which no assertion on a Windows workstation can run.
+
+**What the probes were allowed to do, and what they left behind.** Everything
+ran under an isolated `HOME` against a bundle carrying an identifier of this
+ticket's own (`io.github.lulu-loopp.folioprobe`) so that LaunchServices could
+never answer with the owner's running Folio; every process was ended by a pid
+this ticket wrote down. The marks were written onto the pane's own tty rather
+than typed, the one keyboard-free way to put `OSC 133` on a screen at a chosen
+instant. Nothing was put on the pasteboard. The Finder trials leave their
+windows open, which is `a_reveal_asks_the_disk_before_it_asks_finder`'s own
+standing note — closing them would mean driving Finder, and driving another
+application is a consent prompt this venue does not spend.
+
 *(本节英文,待中文文案改写。)*

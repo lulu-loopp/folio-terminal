@@ -11633,7 +11633,23 @@ struct WindowRuntime {
     /// "does the child need to hear this?" of our own grid answers that question with the wrong
     /// fact, and a drag that comes back to where the child already sits would then still send it a
     /// resize.
+    /// **What the keyboard means**, which on a Mac is not the same thing as what
+    /// is under the hand: `Option` is text there, so the `Alt` winit reports for
+    /// it has been taken out of this by [`input::effective_modifiers`] before
+    /// anything reads it (§13.13 ③). Every chord, every guard on whether a box
+    /// is being typed into, and every encoder reads this one.
     modifiers: ModifiersState,
+    /// **What is actually held down**, as the platform reported it and before
+    /// M1-7's reading of the `Option` key is applied to it.
+    ///
+    /// The two are the same value on Windows, where `effective_modifiers` is the
+    /// identity, and they part company on a Mac with `Option key sends Alt` off
+    /// — which is the default. The field exists because that setting answers a
+    /// question about **text**, and a gesture is not text: `⌥`+wheel over the
+    /// card column is chrome asking which of two readings a notch has, and the
+    /// column has no opinion about what `⌥a` types. See [`column_notch`], which
+    /// is the one reader, and §13.33 ① for why there is exactly one.
+    modifiers_held: ModifiersState,
     math_context_menu: bt_platform::MathContextMenu,
     /// The system folder chooser behind the root menu's `Browse…` (E55).
     folder_picker: bt_platform::FolderPicker,
@@ -21654,6 +21670,23 @@ enum ColumnNotch {
 /// wheel notch composes no character, so there is nothing for it to steal, and
 /// an exception here would only mean that a reader resting a hand on the wrong
 /// key gets a gesture that silently stops working.
+///
+/// # On a Mac it is `⌥`, and it is read off the hand
+///
+/// **What this is handed is `WindowRuntime::modifiers_held`, not
+/// `modifiers`** (T-MAC-LIVE, §13.33 ①). The two differ on exactly one machine
+/// and for exactly one key: M1-7 ruled that `Option` is text, so
+/// [`input::effective_modifiers`] takes the `Alt` winit reports for it out of
+/// the state every chord and every text box reads (§13.13 ③). Handed that
+/// state, this function answered `List` to every notch a Mac could produce —
+/// the aim was unreachable there from the day the port landed, and no setting
+/// the reader could change would have revealed it, because the setting they
+/// would have had to change is about what `⌥a` **types**.
+///
+/// A notch types nothing. So the reading here is the plain one: the aim is the
+/// notch turned with `Option` under the hand, whatever the keyboard has been
+/// told to make of that key, which is also the only reading that lets the
+/// gesture be written down once for both dialects.
 fn column_notch(modifiers: ModifiersState) -> ColumnNotch {
     if modifiers.alt_key() {
         ColumnNotch::Aim
@@ -35330,6 +35363,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         preview_opened_at: None,
         pending_frames: LatestFrameSlot::default(),
         modifiers: ModifiersState::default(),
+        modifiers_held: ModifiersState::default(),
         math_context_menu,
         folder_picker,
         folder_pick: None,
@@ -50681,8 +50715,15 @@ impl Runtime<'_> {
     fn adopt_option_as_alt(&mut self) {
         let option_sends_alt = self.app.settings_store.loaded().option_sends_alt;
         set_option_as_alt(&self.window.window, option_sends_alt);
+        // **Struck against what is held, not against what was left standing.**
+        // Reading the effective state back through the same door would be a
+        // one-way street: the `Alt` this line takes out while the setting is off
+        // is gone, so switching the setting back on under a hand that is still
+        // holding `Option` could not put it back until the next report. The
+        // reported state is the one thing here that is not a consequence of the
+        // setting, which is what makes it the right thing to recompute from.
         self.window.modifiers = input::effective_modifiers(
-            self.window.modifiers,
+            self.window.modifiers_held,
             option_sends_alt,
             bt_platform::host_platform(),
         );
@@ -80570,6 +80611,20 @@ impl Runtime<'_> {
         // and belongs to whoever is answering for those. What this reads instead
         // is winit's own answer, which is kept from `WM_SETFOCUS`/`WM_KILLFOCUS`
         // and starts out false rather than hopeful.
+        // **What the marks rail is standing on, before the bytes that can move
+        // it** (T-MAC-LIVE, §13.33 ②). The rail is the one thing on the glass
+        // whose whole subject is the ledger, and until this ticket nothing in
+        // the drain told the overlay that the ledger had moved: a frame
+        // published for output presents the *retained* overlay, so a tick that
+        // appeared — or turned red — waited for the next unrelated event.
+        //
+        // A sum rather than a list, and it costs no allocation: a revision
+        // bumps and never falls, so a sum over a fixed set of seats moves if
+        // and only if one of them moved, and the seats this reads are exactly
+        // the ones [`Self::command_rail_layers`] draws a rail for. A seat that
+        // arrives or leaves is a change to the tree, which already refreshes the
+        // overlay on its own road.
+        let marks_before = self.command_marks_watermark();
         let window_focused = self.window.window.has_focus();
         // **Asked of the window on the same turn and for the same reason** (`attention` plan §5.2):
         // it is a fact about where this window is, and a cached answer taken at the last
@@ -80702,6 +80757,24 @@ impl Runtime<'_> {
                 self.present_chrome_change()?;
             }
         }
+        // **A tick is not a cell** (§13.33 ②). Everything below this line
+        // publishes a *terminal frame*, and the rail is not in one: it is an
+        // overlay layer, retained in the renderer between frames and rebuilt
+        // only by whoever says it has changed. Said here, beside the name
+        // change above and on the same terms — the drain is the one place the
+        // bytes that move the ledger arrive, and asking on every turn whether
+        // the ledger moved is two `u64`s.
+        //
+        // Until this ticket the only thing that happened to ask was luck: an
+        // `OSC 133;C` starts the tab mark's breath, the breath turns
+        // `advance_command_rails` every twenty milliseconds, and a `D` that
+        // landed while that was still running was drawn at once. A `D` that
+        // landed after it had stopped — every command that runs longer than the
+        // breath, which is every command anybody watches a rail for — was not
+        // drawn until the reader moved the pointer or pressed a key.
+        if self.command_marks_watermark() != marks_before && self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
         if active_changed {
             let now = Instant::now();
             let cursor_revealed = self.reset_cursor_blink(now);
@@ -80712,6 +80785,27 @@ impl Runtime<'_> {
             self.publish_pty_drain_frame(now, cursor_revealed)?;
         }
         Ok(())
+    }
+
+    /// **How far every rail on screen has been told its pane's ledger got**
+    /// (§13.33 ②) — the one number the drain compares itself against.
+    ///
+    /// It is the sum of the seats' own revisions, and the arithmetic is honest
+    /// rather than clever: [`bt_term::DualPlaneSession::command_marks_revision`]
+    /// "bumps on every ledger change and on nothing else", never falls, so a sum
+    /// over one set of seats is strictly greater exactly when one of them has
+    /// moved. Wrapping because a `u64` of ledger changes is not a number this
+    /// program will reach, and a panic in the drain would be a worse answer than
+    /// one missed repaint in the year 292277026596.
+    ///
+    /// The seats are `self.sessions` — the tab on screen — because those are the
+    /// seats [`Self::command_rail_layers`] lays a rail out for. A pane in a tab
+    /// nobody is looking at owes the glass nothing, and the frame drawn when
+    /// that tab is switched to asks its own questions.
+    fn command_marks_watermark(&self) -> u64 {
+        self.sessions.values().fold(0u64, |sum, leaf| {
+            sum.wrapping_add(leaf.session.command_marks_revision())
+        })
     }
 
     /// Whether it is worth writing down which tabs spoke on this turn.
@@ -92060,7 +92154,11 @@ impl Runtime<'_> {
         // are alternatives and not a fallback: a bare notch is the column's even
         // when the column has nowhere to go, and a modified one that finds no
         // terminal seat under the pointer is the column's too.
-        let notch = column_notch(self.window.modifiers);
+        // **And it is asked of the hand rather than of the keyboard** (§13.33
+        // ①). `window.modifiers` has had `Option` taken out of it on a Mac whose
+        // reader has left `Option key sends Alt` off, because there it is text;
+        // a notch composes no text, so this reads what is actually held.
+        let notch = column_notch(self.window.modifiers_held);
         if notch == ColumnNotch::Aim && self.aim_focus_card_window(now, delta)? {
             return Ok(());
         }
@@ -100003,6 +100101,51 @@ mod focus_column_notch_tests {
         );
     }
 
+    /// **The ruling is struck against the hand and not against the keyboard**
+    /// (T-MAC-LIVE, §13.33 ①).
+    ///
+    /// `window.modifiers` has had M1-7's reading of the `Option` key applied to
+    /// it (§13.13 ③) — on a Mac with `Option key sends Alt` off, which is the
+    /// default, the `Alt` bit is simply not in it. So a column door that asked
+    /// that field answered `List` to every notch a Mac could produce, and the
+    /// aim was unreachable on that machine from the day the port landed.
+    ///
+    /// Red gate: this is the defect. Put `modifiers` back in the call and this
+    /// goes red while every keyboard test in the file stays green, which is the
+    /// exact shape of a defect no key test could ever have caught.
+    #[test]
+    fn the_column_reads_what_the_hand_is_holding() {
+        let scroll_rail = body("    fn scroll_rail(");
+        let call = scroll_rail
+            .lines()
+            .map(str::trim)
+            .find(|line| line.contains(&["column_notch", "("].concat()))
+            .expect("the column's own wheel door names the ruling");
+        assert!(
+            call.contains(&["modifiers", "_held"].concat()),
+            "the notch is read off a state the Option key has been taken out of, \
+             so ⌥+wheel is dead on every Mac: {call}"
+        );
+    }
+
+    /// **And there is exactly one door the two states are written at**, so they
+    /// cannot be a turn apart.
+    #[test]
+    fn one_door_writes_both_readings_of_the_modifiers() {
+        let needle = ["window", ".", "modifiers_held", " = "].concat();
+        let writes: Vec<&str> = SOURCE
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.contains(needle.as_str()))
+            .collect();
+        assert_eq!(
+            writes.len(),
+            1,
+            "what is held is written down in one place, beside the one place the \
+             effective state is: {writes:?}"
+        );
+    }
+
     /// **One writer moves a card's window**, so "the plain notch does not change
     /// `card_skip`" is a claim about one line rather than about a search.
     #[test]
@@ -105475,6 +105618,55 @@ mod resident_run_tests {
         );
     }
 
+    /// PIN (T-MAC-LIVE, §13.33 ②) — **the drain says when the marks ledger has
+    /// moved, and says it before the frame.**
+    ///
+    /// The rail is an overlay layer, and an overlay layer is retained between
+    /// frames: the publish below this line hands the glass a *terminal* picture
+    /// and the rail rides along in whatever state it was last built in. So a
+    /// tick that appeared, or turned red, was drawn only when something
+    /// unrelated next asked — measured on the Mac at **12.94 s** after the mark
+    /// landed, and bounded by nothing but the reader's next keystroke. The
+    /// comparison has to stand *above* the publish so that the frame the output
+    /// produces is the frame that carries the new tick, rather than a second
+    /// present chasing it.
+    ///
+    /// Red gate: this is the defect, and the way to see it is to delete the
+    /// comparison — it was never there. Move it below the publish instead and
+    /// the ordering assertion goes red while the behaviour stays *nearly*
+    /// right, which is the version that would have survived review.
+    #[test]
+    fn the_drain_says_when_the_marks_ledger_has_moved() {
+        let drain = fn_body("drain_pty");
+        let reads: Vec<&str> = drain
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.contains(&["command_marks", "_watermark("].concat()))
+            .collect();
+        assert_eq!(
+            reads.len(),
+            2,
+            "the ledger is read once before the bytes and once after, or the \
+             comparison is not a comparison: {reads:?}"
+        );
+        let asked = drain
+            .find(&["command_marks", "_watermark() != "].concat())
+            .expect("the drain compares the two readings");
+        let published = drain
+            .find("publish_pty_drain_frame")
+            .expect("the drain publishes the frame the output produced");
+        assert!(
+            asked < published,
+            "the overlay is brought level after the frame that should have \
+             carried it, so the rail is one present behind every time"
+        );
+        assert!(
+            drain[asked..published].contains("refresh_overlay()"),
+            "the ledger moving asks for the chrome and not for the overlay the \
+             rail is actually in"
+        );
+    }
+
     /// PIN (console channel, 2026-08-25) — **the front door answers on the
     /// console; everything resident answers in the log.**
     ///
@@ -106003,6 +106195,11 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 // nowhere else (M1-7). With Option ruled to be text, an Option
                 // that winit reports as `Alt` is a modifier nobody is holding —
                 // see `input::effective_modifiers`, which says the whole of it.
+                // **And the reported state is kept beside it**, because the
+                // sentence above is about text and one reader is not asking
+                // about text (§13.33 ①). Written first and from the same
+                // argument, so the two can never be a turn apart.
+                runtime.window.modifiers_held = modifiers.state();
                 runtime.window.modifiers = input::effective_modifiers(
                     modifiers.state(),
                     runtime.app.settings_store.loaded().option_sends_alt,

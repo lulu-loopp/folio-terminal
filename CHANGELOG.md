@@ -14,6 +14,12 @@ All notable changes to Folio are recorded here. The format follows
   composes outside ASCII. They are sent now, as the bytes they are. A character
   an input method is still composing is unaffected: it arrives once, when the
   method commits it, exactly as before.
+- **The command marks along a pane's right edge keep up with the shell.** A tick
+  that appeared, or turned red when a command failed, was drawn as soon as it
+  landed only while the command was visibly still running; once the pane went
+  quiet the rail waited for the next thing you did — a keystroke, a pointer
+  moved — before it caught up, and it could sit a whole minute behind if you sat
+  still. It is drawn on the turn the shell reports it now.
 - **A chord held with the Windows key no longer types its letter into a box.**
   With the caret in the command palette, the search box, a name being edited, the
   branch prompt, the commit graph's search or a document being edited, `Win+C`
