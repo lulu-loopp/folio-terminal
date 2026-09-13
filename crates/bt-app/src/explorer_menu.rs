@@ -1711,7 +1711,7 @@ mod tests {
         let no_package = description_for(true, false, false, false, false).in_lang(Lang::English);
         assert!(no_package.contains("Show more options"), "{no_package:?}");
         assert!(
-            no_package.contains("folio.msix is not in this folder"),
+            no_package.contains("folio.msix is missing from this folder"),
             "{no_package:?}"
         );
         let both = description_for(true, true, false, false, false).in_lang(Lang::English);

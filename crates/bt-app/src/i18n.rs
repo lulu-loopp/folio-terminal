@@ -4230,7 +4230,7 @@ impl Text {
             Self::DescClaudeHooks => pick(
                 lang,
                 "Marks the tab when Claude Code is waiting for you. Adds a hook to your ~/.claude/settings.json, or CLAUDE_CONFIG_DIR.",
-                "打开后，Folio 在 Claude Code 的用户级设置（~/.claude/settings.json）中写入 hook。等待你输入时标签页显示提醒标记。",
+                "向 Claude Code 用户设置写入 hook，等待输入时标签页提醒。",
             ),
             Self::ClaudeHooksAddedToast => pick(
                 lang,
@@ -4430,7 +4430,7 @@ impl Text {
             Self::DescCopilotHooks => pick(
                 lang,
                 "Marks the tab when Copilot CLI is waiting for you. Adds a hook file to your ~/.copilot/hooks/, or COPILOT_HOME.",
-                "打开后，Folio 在 Copilot CLI 的用户级目录（~/.copilot/hooks/）中写入 hook 文件。等待你输入时标签页显示提醒标记。",
+                "向 Copilot CLI 用户目录写入 hook，等待输入时标签页提醒。",
             ),
             Self::DescCopilotHooksTooOld => pick(
                 lang,
@@ -5746,7 +5746,9 @@ pub fn psreadline_row_update_in(lang: Lang, installed: &str, available: &str) ->
 pub fn update_row_available_in(lang: Lang, version: &str) -> String {
     match lang {
         Lang::English => {
-            format!("{version} is available. Open releases page shows the new version in your browser.")
+            format!(
+                "{version} is available. Open releases page shows the new version in your browser."
+            )
         }
         Lang::Chinese => format!("{version} 已发布。点击「打开发布页」可在浏览器中查看。"),
     }

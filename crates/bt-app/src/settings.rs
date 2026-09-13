@@ -228,6 +228,18 @@ const ROW_DESC_MAX_LINES: usize = 3;
 #[cfg(test)]
 const SETTINGS_DESCRIPTION_MAX_LINES: usize = 2;
 
+// The budget is a *tighter* line than the layout's, and the compiler is what
+// says so: a relation between two constants is settled where they are written,
+// not in a test run that can only re-read what the file already says. The
+// arithmetic that is *not* constant — the column, the per-line character
+// budgets — stays in
+// `tests::the_description_budget_is_the_column_this_dialog_draws`.
+#[cfg(test)]
+const _: () = assert!(
+    SETTINGS_DESCRIPTION_MAX_LINES < ROW_DESC_MAX_LINES,
+    "the copy is written to a shorter line than the layout tolerates"
+);
+
 /// **The row band at 1×**, in logical pixels — 502, and the column a *stacked*
 /// row writes its sentence in.
 ///
@@ -15319,7 +15331,11 @@ mod tests {
         use bt_platform::HostPlatform::{MacOs, Windows};
         [
             // The other end of a value the fixture had to pick one end of.
-            (SettingsRow::LineWrapping, Text::DescLineWrappingOff, Windows),
+            (
+                SettingsRow::LineWrapping,
+                Text::DescLineWrappingOff,
+                Windows,
+            ),
             // **The conditional row the fixture does not hold at all.**
             // `every_row_of_the_dialog` pushes `Sidebar` only under a vertical
             // tab strip and `flat_rows` is the horizontal window, so this
@@ -15334,8 +15350,16 @@ mod tests {
             ),
             (SettingsRow::Acrylic, Text::DescAcrylicUnavailable, Windows),
             (SettingsRow::Acrylic, Text::DescAcrylicUnavailable, MacOs),
-            (SettingsRow::QuakeHeight, Text::DescQuakeHotkeyTaken, Windows),
-            (SettingsRow::QuakeHotkey, Text::DescQuakeHotkeyTaken, Windows),
+            (
+                SettingsRow::QuakeHeight,
+                Text::DescQuakeHotkeyTaken,
+                Windows,
+            ),
+            (
+                SettingsRow::QuakeHotkey,
+                Text::DescQuakeHotkeyTaken,
+                Windows,
+            ),
             // An intent recorded on the card and not yet written to a $PROFILE.
             (
                 SettingsRow::PowerShellOffer,
@@ -15626,10 +15650,9 @@ mod tests {
             "the Chinese budget is the column over the em, which is what a CJK \
              face advances"
         );
-        assert!(
-            SETTINGS_DESCRIPTION_MAX_LINES < ROW_DESC_MAX_LINES,
-            "the copy is written to a shorter line than the layout tolerates"
-        );
+        // That the copy's cap is under the layout's is settled where the two
+        // constants are written — see the `const _: () = assert!` beside
+        // `SETTINGS_DESCRIPTION_MAX_LINES`.
 
         // **And every exemption is still earning its place.** An entry on
         // [`OWNER_RULED_EXCEPTIONS`] that would now pass the budget on its own
@@ -20470,9 +20493,10 @@ mod tests {
         );
         assert_eq!(
             SettingsRow::DefaultProfile.description(&values()),
-            "Which profile a new tab opens, and which one Folio starts with.",
-            "the copy ruling of 2026-08-26, which supersedes mock-up 2468's own \
-             wording — see docs/plans/ui-style/copy-guide.md"
+            "The profile a new tab opens, and the one Folio starts with.",
+            "the copy ruling of 2026-09-13 (裁决八), which supersedes both the \
+             2026-08-26 ruling and mock-up 2468's own wording — see \
+             docs/plans/ui-style/copy-guide.md"
         );
         assert_eq!(
             SettingsRow::DefaultProfile
@@ -20997,9 +21021,39 @@ mod tests {
     /// PIN — the marked picker makes room for its marks.
     ///
     /// `min-width: 100%` is a floor and the popup grows leftward to hold its
-    /// widest label; an item that also carries a 14px `.ticon` and its 10px gap
-    /// needs 24px more than that label, and a popup sized without them crops the
-    /// last glyph of every profile name.
+    /// widest label; an item that also carries a 14px `.ticon` and its 8px gap
+    /// ([`ITEM_GAP_LOGICAL_PX`]) needs 22px more than that label, and a popup
+    /// sized without them crops the last glyph of every profile name.
+    ///
+    /// **The plain half has to come off a page with no marked picker at all, and
+    /// that is not a detail of this fixture — it is the only way the claim can be
+    /// measured.** A popup is `max(its button, its own chrome + the widest
+    /// label)`, and the button is [`page_combo_width`]: the widest answer on the
+    /// *page*, shared so a column of controls keeps one left edge. Those two
+    /// chromes are 9.5 logical px apart and the gap does not move with the words:
+    ///
+    /// ```text
+    ///   button   2·border + 12 + 10 + 10 + 8.5            = 42.5   + label
+    ///   popup    2·border + 2·4 + 2·10 + 14 (tick) + 8     = 52.0   + label
+    /// ```
+    ///
+    /// So a popup clears its own button by 9.5 px — *unless some row on its page
+    /// is marked*, which puts `OPTION_ICON_COLUMN + ITEM_GAP` (22) into the
+    /// button and leaves the popup 12.5 px under the floor for every label width
+    /// there is. `Theme` stood here and is exactly that case: `Split direction`
+    /// is on Appearance and is marked, so at 1× Theme's popup sat on its 185px
+    /// button while `Default profile`'s was text-sized at 194 — a difference of
+    /// 9, which is the 9.5 px chrome gap and nothing to do with the mark column.
+    /// No value of `widest` could have fixed it, because both sides of that
+    /// comparison grow with the label at the same rate.
+    ///
+    /// `Scrollback` is on **Terminal**, none of whose rows is marked
+    /// ([`SettingsRow::options_are_marked`] is false for every one of them, on
+    /// either platform's reading of the page), so at 1× its button is 163 and
+    /// its popup 172 — over the floor by the structural 9.5, at every scale,
+    /// whatever `widest` is. The two `popup_width > combo` assertions below hold
+    /// that: the day a marked row lands on the Terminal page, this pin says so
+    /// instead of quietly measuring two floors against each other.
     #[test]
     fn the_marked_picker_reserves_its_icon_column_on_top_of_the_widest_label() {
         for scale in [1.0_f32, 1.5, 2.0] {
@@ -21012,16 +21066,28 @@ mod tests {
             );
             let plain = open_rows_measured(
                 scale,
-                Some(SettingsRow::Theme),
+                Some(SettingsRow::Scrollback),
                 TabLayoutMode::Horizontal,
                 widest,
             );
-            let width = |placed: &SettingsLayout| {
+            let popup_width = |placed: &SettingsLayout| {
                 let menu = placed.menu.expect("the picker is open");
                 menu[2] - menu[0]
             };
+            assert!(
+                popup_width(&marked) > width(combo_of(&marked, SettingsRow::DefaultProfile)),
+                "scale {scale}: the marked popup is on its button's floor, so \
+                 its width is not the one the marks are being read out of"
+            );
+            assert!(
+                popup_width(&plain) > width(combo_of(&plain, SettingsRow::Scrollback)),
+                "scale {scale}: the plain popup is on its button's floor — a \
+                 marked row has joined the Terminal page and put a mark column \
+                 into every button on it, so this comparison is between two \
+                 floors and not between two labels"
+            );
             assert_eq!(
-                width(&marked) - width(&plain),
+                popup_width(&marked) - popup_width(&plain),
                 ((OPTION_ICON_COLUMN_LOGICAL_PX + ITEM_GAP_LOGICAL_PX) * scale).ceil(),
                 "scale {scale}: exactly the column and its gap, and not a pixel \
                  of slack invented here"
@@ -21909,7 +21975,7 @@ mod tests {
         assert_eq!(SettingsRow::LineWrapping.selected_index(&off), Some(1));
         assert_eq!(
             SettingsRow::LineWrapping.description(&on),
-            "Lines longer than the pane fold at its edge."
+            "Lines longer than the pane fold at the pane's edge."
         );
         assert_eq!(
             SettingsRow::LineWrapping.description(&off),
