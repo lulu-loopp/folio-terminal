@@ -33,6 +33,33 @@
 //! its own choice — is forty objects whose only difference is a field, and forty
 //! chances for one of them to outlive the menu it was made for.
 //!
+//! # The Dock tile's menu, which is built and thrown away every time
+//!
+//! [`dock_menu`] is what `applicationDockMenu:` answers with (T-MAC-DOCKMENU,
+//! `docs/DESIGN.md` §13.50). It is the second surface in this file and it is
+//! arranged the other way round from the bar, because AppKit asks for it
+//! differently: the bar is installed once and edited in place for the rest of
+//! the run, and the Dock menu is **asked for on every right-click** and dropped
+//! when the reader lets go. So nothing of it is retained here — no item list, no
+//! shape to compare — and there is nothing to rebuild when the language changes,
+//! only [`MenuPlan::dock`] to keep current, which [`refresh`] already does.
+//!
+//! What it does share is everything that makes a press safe: **the same target
+//! object**, kept alive by the bar's own graph and therefore alive for as long
+//! as any Dock menu it is named on, and **the same sender**, so a Dock row and a
+//! bar row are parked in one inbox in the order they were pressed. The one thing
+//! that differs is the selector — `folioDockChosen:` beside `folioMenuChosen:` —
+//! because the two surfaces number their rows separately and the selector is the
+//! honest place to say which table a `tag` is an index into.
+//!
+//! **Ownership.** `applicationDockMenu:` is not `alloc`, `new`, `copy` or
+//! `mutableCopy`, so Cocoa's rule says the menu it answers with is **not owned
+//! by the caller**: it is handed over autoreleased, through
+//! [`Retained::autorelease_return`], and AppKit retains it for as long as the
+//! menu is on the screen. Returning a `Retained` and forgetting it would leak
+//! one menu per right-click; releasing it here instead would hand the Dock a
+//! freed object, which is a crash in the Dock rather than in Folio.
+//!
 //! **The target is retained by this module and by the items**, and it is never
 //! dropped while a menu that names it is on the screen: `install` replaces the
 //! whole graph at once, items and target together, so there is no window in
@@ -67,7 +94,7 @@ use objc2_foundation::NSString;
 use crate::macos_impl::window_thread;
 use crate::menu::{
     MenuAction, MenuChoice, MenuChord, MenuEntry, MenuKey, MenuList, MenuPlan, MenuRole,
-    MenuSender, StandardMenuAction,
+    MenuSender, MenuSurface, StandardMenuAction,
 };
 
 // ── the target AppKit sends to ─────────────────────────────────────────────
@@ -112,7 +139,44 @@ define_class!(
                 let Some(Some(choice)) = installed.choices.get(tag).copied() else {
                     return;
                 };
-                (installed.send)(choice);
+                (installed.send)(MenuSurface::Bar, choice);
+            });
+        }
+
+        /// **One press on one row of the Dock tile's menu**, parked for the
+        /// loop's next turn (T-MAC-DOCKMENU).
+        ///
+        /// A selector of its own beside `folioMenuChosen:` rather than a tag
+        /// range inside it: the two surfaces number their rows separately — the
+        /// bar's tag is an index into `choices`, this one an index into
+        /// [`MenuPlan::dock`] — and which table a number is an index into is
+        /// exactly the kind of thing a name should say rather than a comment.
+        ///
+        /// It is the same object, the same borrow and the same one statement:
+        /// hand the choice to the sender the application installed, saying which
+        /// surface it came from.
+        #[unsafe(method(folioDockChosen:))]
+        fn dock_chosen(&self, sender: Option<&NSMenuItem>) {
+            let Some(sender) = sender else {
+                return;
+            };
+            let Ok(tag) = usize::try_from(sender.tag()) else {
+                return;
+            };
+            INSTALLED.with(|cell| {
+                let Ok(borrowed) = cell.try_borrow() else {
+                    return;
+                };
+                let Some(installed) = borrowed.as_ref() else {
+                    return;
+                };
+                // A tag with no row behind it is a row of a plan that has been
+                // replaced since the reader opened the menu — the language
+                // switched under an open Dock menu. Not a fault, and not sent.
+                let Some(row) = installed.plan.dock.get(tag) else {
+                    return;
+                };
+                (installed.send)(MenuSurface::Dock, row.choice);
             });
         }
     }
@@ -141,8 +205,12 @@ struct Installed {
     /// What each of those rows asks for, indexed by the tag it carries.
     /// `None` for a row AppKit answers by itself.
     choices: Vec<Option<MenuChoice>>,
-    /// Kept alive for as long as the items that name it.
-    _target: Retained<MenuTarget>,
+    /// Kept alive for as long as the items that name it — **and for as long as
+    /// any Dock menu built out of this plan**, which is the second reason it is
+    /// held here rather than by the items. `-[NSMenuItem target]` does not own
+    /// what it points at; the Dock menu is thrown away on every right-click and
+    /// this object is not.
+    target: Retained<MenuTarget>,
     send: MenuSender,
 }
 
@@ -337,9 +405,61 @@ fn build(plan: &MenuPlan, send: MenuSender, mtm: MainThreadMarker) -> Installed 
         plan: plan.clone(),
         items,
         choices,
-        _target: target,
+        target,
         send,
     }
+}
+
+/// **The menu the Dock tile shows above AppKit's own rows**, built here and now
+/// (T-MAC-DOCKMENU).
+///
+/// Called by `applicationDockMenu:` and by nothing else. It answers a raw
+/// pointer rather than a `Retained` because that is what the Objective-C method
+/// it stands behind returns and what Cocoa's rule makes it: **autoreleased, not
+/// owned by AppKit**, which retains it while the menu is open and lets it go
+/// with the pool. See this module's header.
+///
+/// `null` — AppKit's nil, and its own menu unchanged — in four cases, none of
+/// them a fault: off the main thread, which cannot happen because AppKit asks;
+/// while the graph is borrowed, which is a right-click during an install;
+/// before the bar was installed at all, which is a right-click during launch;
+/// and for a plan whose Dock rows are empty, which is an application that offers
+/// nothing of its own.
+pub(crate) fn dock_menu() -> *mut NSMenu {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return std::ptr::null_mut();
+    };
+    INSTALLED.with(|cell| {
+        let Ok(borrowed) = cell.try_borrow() else {
+            return std::ptr::null_mut();
+        };
+        let Some(installed) = borrowed.as_ref() else {
+            return std::ptr::null_mut();
+        };
+        if installed.plan.dock.is_empty() {
+            return std::ptr::null_mut();
+        }
+        // Titled with nothing: the Dock draws no title over this menu, and the
+        // rows AppKit adds below are not in it. `menu_named` is still the door,
+        // for the flag it turns off — with automatic enabling on, AppKit would
+        // ask a responder chain that a reader in another application does not
+        // have, and grey every row of it.
+        let menu = menu_named("", mtm);
+        for (tag, row) in installed.plan.dock.iter().enumerate() {
+            let item = NSMenuItem::new(mtm);
+            item.setTag(tag as isize);
+            dress(&item, row.title, None, true);
+            // SAFETY: the selector is the one `MenuTarget` defines above, and
+            // the target is that object — retained by the installed graph this
+            // very borrow is reading, which outlives the menu being built.
+            unsafe {
+                item.setAction(Some(sel!(folioDockChosen:)));
+                item.setTarget(Some(&*installed.target as &AnyObject));
+            }
+            menu.addItem(&item);
+        }
+        Retained::autorelease_return(menu)
+    })
 }
 
 /// The holder item on the bar, and the menu hanging off it.
@@ -480,6 +600,30 @@ mod tests {
         assert_eq!(
             choice_of(MenuAction::Standard(StandardMenuAction::Copy)),
             None
+        );
+    }
+
+    /// PIN (T-MAC-DOCKMENU) — **the Dock menu leaves this file autoreleased.**
+    ///
+    /// `applicationDockMenu:` is not a method whose name gives its caller
+    /// ownership, so AppKit does not release what it is handed. A menu returned
+    /// with its retain count still this module's is one leaked menu per
+    /// right-click; a menu released on the way out is a freed object in the
+    /// Dock's hands. The one spelling that is neither is
+    /// `Retained::autorelease_return`, and it is asserted in the source text
+    /// because the two wrong answers both compile.
+    ///
+    /// MUTATION: swap it for `Retained::into_raw` and this goes red.
+    #[test]
+    fn the_dock_menu_is_handed_over_autoreleased() {
+        let source = include_str!("macos_menu.rs");
+        assert!(
+            source.contains("Retained::autorelease_return(menu)"),
+            "the Dock menu is not handed over autoreleased"
+        );
+        assert!(
+            !source.contains("Retained::into_raw"),
+            "a menu whose retain count is still this module's leaks once per right-click"
         );
     }
 

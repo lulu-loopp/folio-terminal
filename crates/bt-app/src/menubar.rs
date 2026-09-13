@@ -57,8 +57,8 @@
 //! measured above — one that will not act if pressed.
 
 use bt_platform::menu::{
-    AppMenuAction, MenuAction, MenuChord, MenuEntry, MenuItem, MenuKey, MenuList, MenuNamedKey,
-    MenuPlan, MenuRole, StandardMenuAction,
+    AppMenuAction, DockRow, MenuAction, MenuChoice, MenuChord, MenuEntry, MenuItem, MenuKey,
+    MenuList, MenuNamedKey, MenuPlan, MenuRole, StandardMenuAction,
 };
 use winit::keyboard::{ModifiersState, NamedKey};
 
@@ -227,6 +227,37 @@ const BAR: &[Bar] = &[
         rows: &[Row::Own(Text::MenuFolioHelp, AppMenuAction::Help)],
     },
 ];
+
+/// **What the Dock tile's menu carries**, above the rows AppKit puts on every
+/// application's (T-MAC-DOCKMENU, `docs/DESIGN.md` §13.50).
+///
+/// Two verbs, named by the same stable ids the bar names them by, so that the
+/// Dock and the File menu cannot come to call one verb two things — a Dock row's
+/// title is `BINDINGS`' own, read through the same `Shortcuts::row` the bar
+/// reads it through, which is this file's whole rule applied one surface along.
+///
+/// **Why these two and nothing else.** A Dock menu is opened by a reader who is
+/// *not in Folio*: they are in another application, or looking at an empty desk
+/// with Folio sitting in the Dock after its last window closed (M3-1). So the
+/// only rows that belong on it are the ones that answer "give me somewhere to
+/// work" — and both of these do, from either state. Everything else on the bar
+/// needs a window to act on, and a Dock row that greys itself is a row that
+/// looks like an offer and is not one.
+///
+/// **What was considered and left off**, because the ticket's own example is
+/// Terminal.app and it offers three rows rather than two:
+///
+/// * `New command…` and `New remote connection…` are Terminal's verbs and Folio
+///   has neither. A row that opened something else under one of those names
+///   would be a promise this product does not keep;
+/// * `Settings` is on the application menu and reachable from any window. It
+///   needs Folio to be frontmost to be any use, which is the one thing a reader
+///   opening this menu has said they are not;
+/// * the window list, *Options*, *Show All Windows*, *Hide* and *Quit* are
+///   **AppKit's own** and appear under these two without being asked for. Folio
+///   writing its own would be a second answer to a question the system has
+///   already answered — the same ruling `MenuRole::Windows` stands on.
+const DOCK: &[&str] = &["new-window", "new-tab"];
 
 /// **The rows of the shortcut table that hold a macOS chord and are deliberately
 /// not on the bar.**
@@ -407,7 +438,32 @@ pub(crate) fn plan(shortcuts: &Shortcuts, focus: Option<Focus>) -> MenuPlan {
                     .collect(),
             })
             .collect(),
+        dock: dock_rows(shortcuts),
     }
+}
+
+/// **The Dock tile's rows** (T-MAC-DOCKMENU).
+///
+/// `focus` is not an argument and that is the ruling rather than an oversight:
+/// every row of this menu is in force from every state this application can be
+/// in, including the one with no window at all, so there is nothing for the
+/// keyboard's whereabouts to decide. See [`DOCK`] for why only rows of that kind
+/// are on it.
+///
+/// The titles are the shortcut table's, exactly as the bar's are, which is what
+/// makes the Dock menu and the File menu say the same word for the same verb in
+/// whichever language the reader has chosen.
+fn dock_rows(shortcuts: &Shortcuts) -> Vec<DockRow> {
+    DOCK.iter()
+        .map(|id| DockRow {
+            // A row this build does not know cannot happen —
+            // `every_verb_the_menus_name_is_a_row` holds this list to
+            // `BINDINGS` — and the fallback is the id rather than a panic for
+            // `verb_entry`'s reason: a menu is drawn on a frame.
+            title: shortcuts.row(id).map_or(*id, |row| row.title.text()),
+            choice: MenuChoice::Verb(*id),
+        })
+        .collect()
 }
 
 /// One row of the constant, read against the table and the keyboard.
@@ -499,7 +555,7 @@ mod tests {
     /// table leaves a menu item with the id printed on it and no verb behind it,
     /// and nothing on Windows would ever draw that item.
     ///
-    /// MUTATION: change one id in `BAR` by a letter.
+    /// MUTATION: change one id in `BAR` or in `DOCK` by a letter.
     #[test]
     fn every_verb_on_the_bar_names_a_row() {
         let table = mac_table();
@@ -509,6 +565,87 @@ mod tests {
                 "the menu bar names {id}, which is not a row of BINDINGS"
             );
         }
+        // The Dock tile's rows are held to the same table by the same sentence
+        // (T-MAC-DOCKMENU): a row renamed in `BINDINGS` would otherwise leave
+        // the Dock offering `new-window` as its own title, on a surface no
+        // Windows workstation ever draws.
+        for id in DOCK {
+            assert!(
+                table.row(id).is_some(),
+                "the Dock menu names {id}, which is not a row of BINDINGS"
+            );
+        }
+    }
+
+    /// PIN (T-MAC-DOCKMENU) — **the Dock tile offers the two rows it was ruled
+    /// to offer, in that order, and nothing else.**
+    ///
+    /// The list is short enough to write out, and writing it out is the point:
+    /// the ticket refused `New command…`, `New remote connection…` and
+    /// `Settings` by name, and a row added here without that ruling being
+    /// revisited should have to go through this case.
+    #[test]
+    fn the_dock_offers_a_new_window_and_a_new_tab() {
+        assert_eq!(DOCK.to_vec(), vec!["new-window", "new-tab"]);
+        let table = mac_table();
+        let rows = dock_rows(&table);
+        assert_eq!(
+            rows.iter().map(|row| row.choice).collect::<Vec<_>>(),
+            vec![
+                MenuChoice::Verb("new-window"),
+                MenuChoice::Verb("new-tab")
+            ]
+        );
+    }
+
+    /// PIN (T-MAC-DOCKMENU) — **the Dock says the same word for a verb as the
+    /// bar does, in both languages.**
+    ///
+    /// Two surfaces naming one verb is exactly the shape this whole file exists
+    /// to refuse; the Dock is the second one and it reads the same table row.
+    /// Asked through `in_lang` rather than by installing a language, for
+    /// `every_word_on_the_bar_is_in_the_string_table_in_both_languages`' reason:
+    /// the language is a process-wide switch.
+    ///
+    /// MUTATION: give `dock_rows` a literal title and this goes red in whichever
+    /// language the literal is not.
+    #[test]
+    fn the_dock_names_a_verb_the_way_the_bar_names_it() {
+        let table = mac_table();
+        for row in dock_rows(&table) {
+            let MenuChoice::Verb(id) = row.choice else {
+                unreachable!("every Dock row is a verb of the table")
+            };
+            let binding = table.row(id).expect("the row is in BINDINGS");
+            assert_eq!(row.title, binding.title.text(), "{id} is titled twice");
+            let on_the_bar = plan(&table, Some(every_focus()))
+                .rows()
+                .find(|item| item.action == MenuAction::Verb(id))
+                .map(|item| item.title);
+            assert_eq!(Some(row.title), on_the_bar, "{id} is named two things");
+            for lang in Lang::ALL {
+                assert!(
+                    !binding.title.in_lang(lang).is_empty(),
+                    "{id} reads as nothing in {lang:?}"
+                );
+            }
+        }
+    }
+
+    /// PIN (T-MAC-DOCKMENU) — **the Dock's rows do not move with the keyboard.**
+    ///
+    /// The bar greys a verb row when there is no window, because there is
+    /// nothing to do a verb *to*; the Dock menu is read in exactly that state
+    /// and its two rows are the answer to it. So the plan carries the same two
+    /// rows whatever `focus` says, and `DockRow` has no flag to say otherwise.
+    #[test]
+    fn the_dock_is_the_same_with_no_window_as_with_one() {
+        let table = mac_table();
+        let with = plan(&table, Some(every_focus()));
+        let without = plan(&table, None);
+        assert_eq!(with.dock, without.dock);
+        assert_eq!(with.dock.len(), DOCK.len());
+        assert_ne!(with, without, "the bar itself does move with the keyboard");
     }
 
     /// PIN — **no verb is on the bar twice.**

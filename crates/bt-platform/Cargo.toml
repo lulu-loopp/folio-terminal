@@ -130,6 +130,19 @@ name = "macos_menu_bar"
 path = "tests/macos_menu_bar.rs"
 harness = false
 
+# **The Dock tile's own menu** (T-MAC-DOCKMENU), and it needs strictly more than
+# the target above: `applicationDockMenu:` is answered by the *application
+# delegate*, which is a class winit registers when its event loop is built, and
+# an ssh session cannot reach the window server a winit event loop needs. So the
+# gate is `macos_app_delegate`'s — the binary is **inside a `.app`**, started
+# with `open` — and an ordinary `cargo test -p bt-platform` prints one line and
+# exits on every platform. `harness = false` because a libtest case never runs on
+# the main thread, which is the only thread AppKit may be touched from.
+[[test]]
+name = "macos_dock_menu"
+path = "tests/macos_dock_menu.rs"
+harness = false
+
 # **The fourth target that owns the process's main thread** (M4-6), and its gate
 # is `macos_app_delegate`'s rather than `macos_sheet`'s: the notification centre
 # refuses a process with no bundle identifier, so the run that wants this one is
@@ -819,10 +832,11 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
 ] }
 
 # **The one dev-dependency this crate has ever had, and it is a test venue
-# rather than a dependency** (M3-1). `tests/macos_app_delegate.rs` proves that
-# four selectors added to `WinitApplicationDelegate` are delivered and that
-# every `ApplicationHandler` callback keeps arriving afterwards; there is no way
-# to state either claim without winit, because the class is winit's own and the
+# rather than a dependency** (M3-1; `tests/macos_dock_menu.rs` is the second
+# target to need it). `tests/macos_app_delegate.rs` proves that the selectors
+# added to `WinitApplicationDelegate` are delivered and that every
+# `ApplicationHandler` callback keeps arriving afterwards; there is no way to
+# state either claim without winit, because the class is winit's own and the
 # callbacks are winit's own. **It adds no package**: `=0.30.13` with the same
 # feature set is what the workspace already pins for `bt-app`, so `Cargo.lock`
 # and `THIRD-PARTY-NOTICES.md` gain nothing — and being a *dev*-dependency it is

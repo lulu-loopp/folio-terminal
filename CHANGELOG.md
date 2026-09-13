@@ -6,6 +6,13 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- **On a Mac, Folio's Dock icon offers a new window and a new tab.** Press and
+  hold the icon — or right-click it — and `New window` and `New tab` stand above
+  the rows macOS puts there for every app. They work from another app and from
+  an empty desk: with every window closed, either one opens a window.
+
 ### Fixed
 
 - **A formula that took a moment to typeset now appears when it is ready.** A

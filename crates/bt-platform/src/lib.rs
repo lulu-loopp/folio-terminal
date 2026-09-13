@@ -10676,7 +10676,8 @@ pub use app_delegate::{
     TerminationDecision, path_from_file_url,
 };
 
-/// **The four selectors added to winit's own application delegate** (M3-1).
+/// **The selectors added to winit's own application delegate** (M3-1, and the
+/// Dock tile's menu since T-MAC-DOCKMENU).
 ///
 /// The tenth unsafe boundary in this crate and the first against the
 /// Objective-C **runtime** rather than against a framework written in it:
@@ -10696,6 +10697,17 @@ mod macos_app;
 /// rather than about this crate's bookkeeping.
 #[cfg(target_os = "macos")]
 pub use macos_app::delegate_answers_the_four_selectors;
+
+/// **Whether AppKit's delegate answers the Dock tile's menu**, and whether
+/// winit's own class got there first (T-MAC-DOCKMENU).
+///
+/// Both on [`delegate_answers_the_four_selectors`]' footing and both for the
+/// `.app` proof: the first is `respondsToSelector:` asked of the object AppKit
+/// consults; the second is `class_getInstanceMethod` asked of winit's class,
+/// which is X-4's own measurement made again for the fifth selector and is the
+/// reading the whole route depends on.
+#[cfg(target_os = "macos")]
+pub use macos_app::{delegate_answers_the_dock_menu, winit_delegate_already_answers_the_dock_menu};
 
 /// **The Services provider object — Finder's *Services ▸ Open in Folio***
 /// (M4-9).
