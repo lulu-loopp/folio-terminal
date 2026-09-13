@@ -72,7 +72,7 @@ use std::ffi::c_void;
 use std::ptr::NonNull;
 
 use objc2::rc::Retained;
-use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{NSAutoresizingMaskOptions, NSView, NSWindowOrderingMode};
 use objc2_core_graphics::CGColor;
 use objc2_foundation::{NSPoint, NSRect, NSSize};
@@ -105,6 +105,21 @@ use crate::{NativeWindow, PageVisual, VisualLayer, composition_visual_offset, wi
 /// be the same shape. What travels is the **enum**, whose two variants say
 /// which end of the stack is meant, and this function is the only thing in the
 /// macOS arm that turns one into an AppKit argument.
+/// Whether a point is inside a rectangle, **half-open on the far edges** -
+/// `NSPointInRect`'s own rule, written out rather than called for (M4-3).
+///
+/// Two adjacent covers must not both claim the seam between them, and a cover
+/// that ends where the page's own rectangle ends must not claim the pixel
+/// outside it; a closed test would do both. The rectangle is in the same space
+/// as the point, which is the caller's whole job.
+#[must_use]
+fn inside(rect: NSRect, point: NSPoint) -> bool {
+    point.x >= rect.origin.x
+        && point.y >= rect.origin.y
+        && point.x < rect.origin.x + rect.size.width
+        && point.y < rect.origin.y + rect.size.height
+}
+
 #[must_use]
 fn ordering_for(layer: VisualLayer) -> NSWindowOrderingMode {
     match layer {
@@ -119,9 +134,11 @@ define_class!(
     // SAFETY:
     // - `NSView` has no subclassing requirements beyond being used on the main
     //   thread, which it declares itself and which this subclass inherits.
-    // - This class does not implement `Drop` and has no ivars.
+    // - This class implements no `Drop` of its own; the `RefCell` in its ivars
+    //   is dropped by the `dealloc` `define_class!` generates.
     #[unsafe(super(NSView))]
     #[name = "FolioPageSlotView"]
+    #[ivars = RefCell<Vec<NSRect>>]
     struct PageSlot;
 
     impl PageSlot {
@@ -158,6 +175,32 @@ define_class!(
         /// and for the same reason).
         #[unsafe(method(hitTest:))]
         fn hit_test(&self, point: NSPoint) -> *mut NSView {
+            // **And nil where Folio is standing on top of the page** (M4-3).
+            //
+            // The page's slot is the *whole* of the rectangle a page shows
+            // through, and Folio goes on drawing its own surfaces across that
+            // rectangle: the in-pane search capsule sits inside the pane below
+            // its head, a menu drops down over the body it was opened from, and
+            // a floated pane's own head is painted straight back over the hole
+            // its page is seen through. On Windows none of those is a question
+            // - a WebView2 in a composition visual is in no hit-test order at
+            // all, every press in the window arrives at Folio, and Folio
+            // forwards to the page the ones that were the page's. Here AppKit
+            // delivers to the `WKWebView` itself, so a capsule drawn over a page
+            // would be a capsule nothing could press.
+            //
+            // The rectangles are the window's own answer, handed in by
+            // [`Compositor::set_page_cover`] in this view's superview
+            // coordinates - which is the space `hitTest:` is asked in - so this
+            // compares two things in one space and invents nothing.
+            if self
+                .ivars()
+                .borrow()
+                .iter()
+                .any(|cover| inside(*cover, point))
+            {
+                return std::ptr::null_mut();
+            }
             // SAFETY: `hitTest:` on the superclass, with the point it was
             // given, on the thread AppKit called this method on.
             let answer: *mut NSView = unsafe { msg_send![super(self), hitTest: point] };
@@ -556,6 +599,55 @@ impl Compositor {
         Ok(())
     }
 
+    /// **Which parts of this page's rectangle are Folio's own** (M4-3), in
+    /// **physical** pixels of the client area - the same space
+    /// [`Self::place_web_visual`] is given.
+    ///
+    /// A `WKWebView` is a real view in the window's hierarchy and AppKit routes
+    /// a press to the frontmost view whose `hitTest:` claims the point, so the
+    /// page claims every press inside its own rectangle and Folio's chrome over
+    /// it claims none - Folio's frame is drawn into a view that answers nil by
+    /// design ([`crate::macos_impl`]'s surface view), because everything it
+    /// draws is answered by winit's view underneath. That arrangement is right
+    /// for every pixel of Folio that is *beside* a page and wrong for every
+    /// pixel of it that is *over* one.
+    ///
+    /// So the window says where it is standing, and the slot lets those
+    /// rectangles through. **The window is the only thing that can say it**: the
+    /// slot knows the page's box and nothing about what was drawn across it, and
+    /// a slot that tried to find out would be a second opinion about a layout
+    /// that already has one.
+    ///
+    /// Handed in whole rather than added to, because that is what it is: the
+    /// answer for this frame. An empty list is the ordinary case and means the
+    /// page has the whole of its rectangle.
+    pub fn set_page_cover(&self, page: PageVisual, rects: &[[f32; 4]]) -> Result<(), String> {
+        let what = "saying where the window stands over the page";
+        let _mtm = window_thread(what)?;
+        let slots = self.pages.borrow();
+        // **Mints nothing**, for [`Self::hide_web_visual`]'s reason: a page
+        // nothing has ever placed has no slot for anything to stand over.
+        let Some(slot) = slots.get(&page) else {
+            return Ok(());
+        };
+        let scale = self.backing_scale(what)?;
+        let covers = rects
+            .iter()
+            .filter(|rect| rect[2] > rect[0] && rect[3] > rect[1])
+            .map(|rect| {
+                self.in_content(NSRect::new(
+                    NSPoint::new(f64::from(rect[0]) / scale, f64::from(rect[1]) / scale),
+                    NSSize::new(
+                        f64::from(rect[2] - rect[0]) / scale,
+                        f64::from(rect[3] - rect[1]) / scale,
+                    ),
+                ))
+            })
+            .collect();
+        *slot.ivars().borrow_mut() = covers;
+        Ok(())
+    }
+
     /// **Take this page's slot off the glass** — the symmetric door to
     /// [`Self::place_web_visual`], and the whole of what a page that is not on
     /// the glass leaves behind: nothing.
@@ -576,6 +668,10 @@ impl Compositor {
         let Some(slot) = slots.get(&page) else {
             return Ok(());
         };
+        // The covers go with the rectangle they were rectangles *inside*: a
+        // page that is not on the glass has nothing standing over it, and a
+        // stale list would be a hole in the next pane placed here.
+        slot.ivars().borrow_mut().clear();
         without_animation(|| slot.setFrame(NSRect::ZERO));
         Ok(())
     }
@@ -641,10 +737,10 @@ impl Compositor {
     /// between the two calls.
     fn make_slot(&self, mtm: MainThreadMarker) -> Retained<PageSlot> {
         let empty = NSRect::ZERO;
-        // SAFETY: `NSView`'s designated initializer, on the main thread, on an
-        // instance of a subclass that adds no ivars.
-        let slot: Retained<PageSlot> =
-            unsafe { msg_send![PageSlot::alloc(mtm), initWithFrame: empty] };
+        let fresh = PageSlot::alloc(mtm).set_ivars(RefCell::new(Vec::new()));
+        // SAFETY: `NSView`'s designated initializer, on the main thread, on a
+        // freshly allocated instance of this class whose ivars are set.
+        let slot: Retained<PageSlot> = unsafe { msg_send![super(fresh), initWithFrame: empty] };
         without_animation(|| {
             // The floor is a layer's background colour, so the view has to have
             // a layer of its own rather than draw into its ancestor's — and the

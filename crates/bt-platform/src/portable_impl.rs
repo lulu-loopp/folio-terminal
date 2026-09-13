@@ -192,6 +192,13 @@ impl Compositor {
         Err(not_here("the web preview's visual tree"))
     }
 
+    /// The window says where its own chrome stands over a page. Refused, as
+    /// [`Self::attach_web_visual`]: there is no page here to be stood over.
+    pub fn set_page_cover(&self, page: PageVisual, rects: &[[f32; 4]]) -> Result<(), String> {
+        let _ = (page, rects);
+        Err(not_here("the web preview's visual tree"))
+    }
+
     /// A page is taken off the glass. Refused, as [`Self::attach_web_visual`].
     pub fn hide_web_visual(&self, page: PageVisual) -> Result<(), String> {
         let _ = page;

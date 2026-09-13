@@ -4571,6 +4571,61 @@ impl OverlayLayer {
             || self.opacity <= 0.0
     }
 
+    /// **The box this layer stands in, or nothing when it stands nowhere** —
+    /// one rectangle enclosing every surface of it that is actually on the
+    /// glass (M4-3).
+    ///
+    /// Written for a question that is not about drawing at all: on macOS a
+    /// page is a real `NSView` in the window and AppKit delivers presses to it
+    /// directly, so Folio has to say which parts of a page's rectangle its own
+    /// chrome is standing over, or a menu dropped across a page would be a menu
+    /// the reader cannot press. `bt_platform::Compositor::set_page_cover` is
+    /// where that goes; this is where the rectangle comes from.
+    ///
+    /// **Grounds, fills and a preview body, and not the words on them.** Every
+    /// surface in this window that a press can land on is drawn as a ground or a
+    /// fill first and lettered afterwards — that is the channel order the whole
+    /// overlay pipeline is built on — so the union of those is the union of the
+    /// layer, and a label is inside the thing it labels. A quad faded to
+    /// nothing is left out for the same reason [`Self::is_empty`] leaves the
+    /// whole layer out: a surface at zero alpha is not there.
+    ///
+    /// The layer's own [`opacity`](Self::opacity) folds in the same way: a layer
+    /// on its way out is not a surface either.
+    #[must_use]
+    pub fn opaque_bounds(&self) -> Option<[f32; 4]> {
+        if self.opacity <= 0.0 {
+            return None;
+        }
+        let mut bounds: Option<[f32; 4]> = None;
+        let mut take = |rect: [f32; 4]| {
+            if rect[2] <= rect[0] || rect[3] <= rect[1] {
+                return;
+            }
+            bounds = Some(match bounds {
+                None => rect,
+                Some(so_far) => [
+                    so_far[0].min(rect[0]),
+                    so_far[1].min(rect[1]),
+                    so_far[2].max(rect[2]),
+                    so_far[3].max(rect[3]),
+                ],
+            });
+        };
+        for ground in &self.grounds {
+            take(ground.rect);
+        }
+        for quad in &self.quads {
+            if quad.alpha > 0.0 {
+                take(quad.rect);
+            }
+        }
+        if let Some(body) = &self.body {
+            take(body.clip);
+        }
+        bounds
+    }
+
     /// This layer's fills with its own [`opacity`](Self::opacity) folded into
     /// their alpha.
     #[must_use]
@@ -22931,6 +22986,68 @@ mod tests {
         // And a layer that never mentioned opacity is fully there — CSS's own
         // initial value, not a derived zero.
         assert_eq!(OverlayLayer::default().opacity, 1.0);
+    }
+
+    /// RED (M4-3) — **the box a layer stands in, for the page underneath it.**
+    ///
+    /// [`OverlayLayer::opaque_bounds`] is read for a question that is not about
+    /// drawing: on macOS a page is a real view in the window and AppKit routes
+    /// presses to it directly, so Folio has to say which parts of a page's
+    /// rectangle its own chrome is standing over. What answers "standing over"
+    /// is what is *on the glass* — a ground, a fill, a preview body — and not the
+    /// words struck on them, which are inside the thing they label.
+    ///
+    /// MUTATION: ① count a zero-alpha quad and the second assertion grows a
+    /// rectangle nobody can see; ② drop the opacity guard and a layer on its way
+    /// out goes on swallowing presses; ③ return the first rectangle instead of
+    /// the union and the first assertion loses the ground.
+    #[test]
+    fn a_layers_box_is_every_surface_of_it_that_is_on_the_glass() {
+        let layer = OverlayLayer {
+            grounds: vec![OverlayGround {
+                rect: [10.0, 10.0, 40.0, 40.0],
+                color: [1, 2, 3],
+            }],
+            quads: vec![
+                OverlayQuad {
+                    rect: [30.0, 20.0, 90.0, 50.0],
+                    color: [1, 2, 3],
+                    alpha: 1.0,
+                },
+                // Faded to nothing: not a surface, and not part of the box.
+                OverlayQuad {
+                    rect: [0.0, 0.0, 500.0, 500.0],
+                    color: [1, 2, 3],
+                    alpha: 0.0,
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(layer.opaque_bounds(), Some([10.0, 10.0, 90.0, 50.0]));
+        assert_eq!(
+            OverlayLayer {
+                opacity: 0.0,
+                ..layer.clone()
+            }
+            .opaque_bounds(),
+            None,
+            "a layer on its way out is not something standing on a page"
+        );
+        assert_eq!(OverlayLayer::default().opaque_bounds(), None);
+        // A rectangle with no area is not a surface either — the shape a fill
+        // takes on the frame its pane is solved to nothing.
+        assert_eq!(
+            OverlayLayer {
+                grounds: vec![OverlayGround {
+                    rect: [10.0, 10.0, 10.0, 40.0],
+                    color: [1, 2, 3],
+                }],
+                quads: Vec::new(),
+                ..Default::default()
+            }
+            .opaque_bounds(),
+            None
+        );
     }
 
     #[test]
