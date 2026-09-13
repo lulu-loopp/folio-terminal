@@ -111,6 +111,29 @@ pub enum AppDelegateOrigin {
     Termination,
     /// `applicationShouldTerminateAfterLastWindowClosed:`.
     LastWindowClosed,
+    /// **Finder's *Services ▸ Open in Folio*** (M4-9), whose method is
+    /// `openInFolio:userData:error:` on the provider object
+    /// [`crate::macos_services`] owns.
+    ///
+    /// Not a delegate selector either, and it is the origin this enum was
+    /// written for: the row above already said that a Service delivers
+    /// [`AppDelegateEventKind::OpenPaths`] "with an origin of its own", and this
+    /// is it. **What the origin buys is a real difference in what happens
+    /// next**, which is why the two are not one arm at the landing:
+    ///
+    /// * [`Self::OpenUrls`] is *open this document* — `open -a Folio notes.md`,
+    ///   a file dropped on the Dock tile. A folder opens a tab standing in it
+    ///   and a **file opens a preview pane**, because the file is the thing the
+    ///   reader named;
+    /// * `Services` is *open Folio **here*** — the same verb Explorer's
+    ///   first-page row is on the other platform, where a clicked file has
+    ///   always meant the folder that contains it (`explorer_menu::folder_for`).
+    ///   A file selected in Finder opens a tab in **its folder**, not a preview
+    ///   of it.
+    ///
+    /// One list of paths, two readings of what a file among them means, and the
+    /// origin is the only thing that separates them.
+    Services,
     /// **A row of the application menu bar** (M3-2), whose action is
     /// `folioMenuChosen:` on a target [`crate::macos_menu`] owns.
     ///
@@ -135,6 +158,7 @@ impl AppDelegateOrigin {
             Self::OpenUrls => "application:openURLs:",
             Self::Termination => "applicationShouldTerminate:",
             Self::LastWindowClosed => "applicationShouldTerminateAfterLastWindowClosed:",
+            Self::Services => "openInFolio:userData:error:",
             Self::Menu => "folioMenuChosen:",
         }
     }
@@ -446,6 +470,50 @@ impl AppDelegate {
     #[must_use]
     pub fn is_ready(&self) -> bool {
         self.outbox.is_ready()
+    }
+
+    /// **A third AppKit door into this same channel: Finder's *Services ▸ Open
+    /// in Folio*** (M4-9).
+    ///
+    /// Registers the provider object AppKit sends `openInFolio:userData:error:`
+    /// to, and asks LaunchServices to re-read this bundle's Services table so
+    /// that a Folio which has just been downloaded, moved or built has the row
+    /// now rather than after a logout.
+    ///
+    /// **It is a call of its own and not a line inside [`AppDelegate::install`]**,
+    /// for one reason: the two can fail separately and the consequences are not
+    /// the same size. A delegate that could not be installed is a Folio that
+    /// never answers a Dock click; a Service that could not be registered is one
+    /// row missing from one Finder menu, with `folio <folder>` and every other
+    /// way in untouched. Folding them together would make the second refusal
+    /// cost the first.
+    ///
+    /// Called **after** `install` and from the main thread. After, because what
+    /// the provider posts into is the channel `install` fills, and a Service
+    /// arriving into an empty cell is a delivery on the floor. It is held until
+    /// [`AppDelegate::ready`] by the same buffer the four selectors are, which
+    /// is what makes the **cold** case — LaunchServices starting this process
+    /// *because of* the Service, X-4's delivery at t=222 ms against a `resumed`
+    /// at 247 ms — reach a window instead of a program that has not got one yet.
+    ///
+    /// # Errors
+    ///
+    /// On macOS, if this is called off the main thread. Off macOS it answers
+    /// `Ok(())` and registers nothing, which is [`AppDelegate::install`]'s own
+    /// shape and the same sentence: there is no Services menu on Windows or on a
+    /// Linux desktop, the verb reaches this program there through
+    /// [`crate::explorer_command`] and through the command line, and a refusal
+    /// printed on every launch of a platform that was never going to have the row
+    /// would be a fault report about the machine being itself.
+    pub fn offer_open_in_folio(&self) -> Result<(), String> {
+        #[cfg(target_os = "macos")]
+        {
+            crate::macos_services::install()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Ok(())
+        }
     }
 
     /// **A second AppKit door, speaking into this same channel** (M3-2).
@@ -953,6 +1021,131 @@ mod tests {
                 "{url} should be refused for {because}, and was {refusal:?}"
             );
         }
+    }
+
+    /// RED — **a Service is `OpenPaths` from an origin of its own, and it waits
+    /// behind the same door a cold `application:openURLs:` waits behind**
+    /// (M4-9).
+    ///
+    /// Both halves matter and neither is obvious from the type. The **kind** is
+    /// shared, so a `bt-app` that matched on the kind alone would answer a
+    /// Service as though it were a document; the **origin** is not, and it is
+    /// the only thing carrying the difference. And the **buffer** is the one
+    /// thing this ticket did not have to build: a Service can be the reason this
+    /// process exists, LaunchServices delivers it before `resumed` (X-4 timed
+    /// t=222 ms against 247 ms), and it reaches a window only because it is held
+    /// with everything else.
+    ///
+    /// MUTATION: give the Services door a channel of its own that forwards at
+    /// once and the first assertion fails; post it with
+    /// `AppDelegateOrigin::OpenUrls` and the second does.
+    #[test]
+    fn a_service_is_open_paths_from_its_own_origin_and_waits_for_ready() {
+        let (seen_here, send) = collector();
+        let door = a_door(send);
+        door.outbox.post(AppDelegateEvent {
+            origin: AppDelegateOrigin::Services,
+            kind: AppDelegateEventKind::OpenPaths(
+                ["/tmp/a folder", "/tmp/中文", "/tmp/plain"]
+                    .iter()
+                    .map(PathBuf::from)
+                    .collect(),
+            ),
+        });
+        assert!(
+            seen(&seen_here).is_empty(),
+            "a cold Service arrives before the application is up and must wait for it"
+        );
+
+        door.ready();
+        assert_eq!(
+            seen(&seen_here),
+            vec!["Services paths [\"/tmp/a folder\", \"/tmp/中文\", \"/tmp/plain\"]".to_owned()],
+            "a multi-selection crosses as one event, in the reader's own order, \
+             from the Services origin"
+        );
+    }
+
+    /// PIN — **the selector the origin names is the method the provider
+    /// answers, and the `NSMessage` the bundle declares is that selector's
+    /// first word** (M4-9).
+    ///
+    /// Three files have to agree for one Finder row to work and no compiler
+    /// reads any of the joins: `Info.plist`'s `NSMessage`, the
+    /// `#[unsafe(method(…))]` on the provider class, and this enum's own
+    /// sentence about where a Service comes from. A mismatch is not a build
+    /// failure — it is a row that draws, is pressed, and reports a Service that
+    /// failed to the reader.
+    ///
+    /// `NSMessage` is the **first word only**: AppKit appends `:userData:error:`
+    /// itself. Writing the whole selector into the plist is the plausible
+    /// mistake, and this is the test that has it.
+    ///
+    /// MUTATION: write `openInFolio:userData:error:` into the template's
+    /// `NSMessage`, or rename the method on the class, and this fails.
+    #[test]
+    fn the_service_this_bundle_declares_is_the_one_the_provider_answers() {
+        const SELECTOR: &str = "openInFolio:userData:error:";
+        const PROVIDER: &str = include_str!("macos_services.rs");
+        let plist = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../packaging/macos/Info.plist.in"
+        ))
+        .expect("the bundle template is at packaging/macos/Info.plist.in");
+
+        assert_eq!(
+            AppDelegateOrigin::Services.selector(),
+            SELECTOR,
+            "the origin names the method AppKit sends"
+        );
+        assert!(
+            PROVIDER.contains(&format!("#[unsafe(method({SELECTOR}))]")),
+            "the provider class does not answer {SELECTOR}"
+        );
+        let message = plist_string(&plist, "NSMessage");
+        assert_eq!(
+            message, "openInFolio",
+            "NSMessage is the first word of the selector and AppKit appends the rest"
+        );
+        assert!(
+            SELECTOR.starts_with(&format!("{message}:")),
+            "{message} is not the first word of {SELECTOR}"
+        );
+        assert_eq!(
+            plist_string(&plist, "NSPortName"),
+            plist_string(&plist, "CFBundleName"),
+            "a Service's port is the bundle's own name"
+        );
+        assert!(
+            plist.contains("<string>public.file-url</string>"),
+            "the row is offered for a file selection or for nothing"
+        );
+        assert!(
+            !plist.contains("<key>NSRequiredContext</key>"),
+            "a required context would take the row off files or off folders"
+        );
+        assert!(
+            PROVIDER.contains("NSUpdateDynamicServices()"),
+            "a freshly built or freshly moved bundle's row would not appear until a logout"
+        );
+        assert!(
+            PROVIDER.contains("AppDelegateOrigin::Services"),
+            "the provider posts a Service as something else"
+        );
+    }
+
+    /// The `<string>` a plist files under `key` — the reader
+    /// `bt_app::version`'s own plist pins use, for its reason: the thing under
+    /// test is the text of a generated file, and a parser would only ever agree
+    /// with the writer.
+    fn plist_string(plist: &str, key: &str) -> String {
+        let at = plist
+            .find(&format!("<key>{key}</key>"))
+            .unwrap_or_else(|| panic!("the template files something under {key}"));
+        let rest = &plist[at..];
+        let opens = rest.find("<string>").expect("a string follows the key") + "<string>".len();
+        let closes = rest.find("</string>").expect("the string is closed");
+        rest[opens..closes].to_owned()
     }
 
     /// RED — **a name that is not text is still a name.**

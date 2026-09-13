@@ -10814,6 +10814,150 @@ application is a consent prompt this venue does not spend.
 
 *(本节英文,待中文文案改写。)*
 
+### 13.36 M4-9: 访达的「在 Folio 中打开」——Services 提供者对象、冷热投递都走代理通道(`crates/bt-platform/src/macos_services.rs`(新)、`crates/bt-platform/src/{app_delegate,macos_app,lib}.rs`、`crates/bt-platform/tests/macos_services.rs`(新)、`crates/bt-platform/Cargo.toml`、`crates/bt-winres/src/plist.rs`、`packaging/macos/Info.plist.in`、`crates/bt-app/src/main.rs`)
+
+**① Two halves, in two files, and neither one is the feature.** A Service is not
+one dictionary — that is the correction §8 Q3 makes to the plan's first draft,
+and it is why this is a `bt-platform` ticket rather than a plist edit.
+`packaging/macos/Info.plist.in` grew an `NSServices` array, which is what decides
+whether the row is *drawn*; `macos_services.rs` registers an object with
+`-[NSApplication setServicesProvider:]`, and AppKit sends the method `NSMessage`
+names **to that object** when the row is *pressed*. Either half alone is a row
+that does nothing or an object nobody calls, and nothing in either file fails to
+build when the two disagree. `NSMessage` is also the **first word of the selector
+only** — AppKit appends `:userData:error:` itself — which is the plausible
+mistake and is a row that draws, is pressed, and reports a failed Service to the
+reader. So the join is pinned by a test that reads both files as text,
+`the_service_this_bundle_declares_is_the_one_the_provider_answers`, and it runs
+on a Windows workstation.
+
+**② It is the third door into M3-1's channel, and it needed nothing new there.**
+A Service never touches the application delegate — X-4 registered a provider and
+read `NSApp.servicesProvider` back to confirm it — but it arrives the way
+everything on that channel arrives: on the main thread, inside a framework
+callback, with a frame underneath it that this program does not own. So the
+method does what the four selectors do and no more — read the pasteboard, post,
+return. What it posts is `AppDelegateEventKind::OpenPaths`, which is what
+`AppDelegateOrigin`'s own documentation said a Service would post before this
+ticket existed, with an origin of its own. The **cold** case is the part that was
+already built: LaunchServices starts the application when nothing has its
+Services port open, and the delivery then arrives before `resumed` — X-4 timed
+t=222 ms against a `resumed` at 247 ms, with no window in existence. `Outbox`
+holds it and releases it at `AppDelegate::ready`; this file has no buffer of its
+own, because a second one would be a second answer to the same question.
+
+**③ The origin is not bookkeeping: one list of paths is landed two ways.**
+`application:openURLs:` is *open this document* — `open -a Folio notes.md`, a
+file dropped on the Dock tile — so a folder opens a tab standing in it and a file
+opens a **preview pane**, because the file is the thing the reader named.
+*Services ▸ Open in Folio* is *open Folio **here***, the same verb Explorer's
+first-page row is on the other platform, so a file opens a tab in **its folder**.
+That rule is `bt_app::explorer_menu::folder_for` — a folder is the folder, a file
+is its folder, a name with nothing at it opens nothing — and it is **called**
+rather than restated, so the two rows cannot come to disagree about what a
+clicked file means. `a_service_opens_the_folder_and_a_document_opens_itself` is
+the pin, and it goes red the moment a Service is answered through the document
+door.
+
+**④ Why the folder rule is at the landing and not in the provider.** The ticket
+asked whether the provider should validate that each URL names a folder. It does
+not, for three reasons that are each about the provider rather than about
+tidiness: the rule is the *product's* and lives in one place already (③'s
+sentence about a second answer); answering it **needs the disk**, and a `stat`
+per selected file inside a Services callback is exactly the work X-4's first rule
+says does not happen on that stack; and the disk can move between the gesture and
+the turn that lands it, so the judgement has to be taken where the tab is opened
+in any case. What crosses the door is what the reader selected, decoded, in
+order.
+
+**⑤ The paths are read by class and decoded as bytes.** `-[NSPasteboard
+readObjectsForClasses:options:]` with `[NSURL class]`, rather than the probe's
+walk over `pasteboardItems` and `stringForType:`: it is the same read with AppKit
+doing the conversion, and it covers the legacy `NSFilenamesPboardType` a sender
+older than the pasteboard-item API might write, without this file having to know
+that type exists. `NSSendTypes` advertises the one type Finder writes. Each URL
+is then taken through `absoluteString` and `path_from_file_url` — M3-1's decoder,
+**not** `-[NSURL path]` — for §13.18 ①'s reason: a path is not required to be
+text, the percent escapes in the URL are the file system representation's own
+bytes, and an `NSString` round trip past them hands back a different file. The
+spaces and the CJK in the acceptance sentence are that decoder's, already held by
+cases on a machine with no AppKit.
+
+**⑥ `NSUpdateDynamicServices`, and it is not cosmetic.** LaunchServices caches
+the Services table. A bundle that has just been built, downloaded or moved is one
+the cache has never read, and without this call the row appears after a logout
+rather than now — which for a first run is the difference between a feature and a
+feature nobody finds. One call, once, after the provider is registered.
+
+**⑦ A second Folio cannot receive a Service, and that is M3-5's doing rather than
+this ticket's.** The ticket asked what happens when the process a Service reaches
+is not the writer of record: the paths would have to go over the launch socket
+exactly as a second `folio <folder>` does. **The state does not arise.** `main`'s
+"if I am not the writer, hand this over and leave" (§13.28 ⑧) stands *above*
+`EventLoop::build`, so a non-writer process leaves before winit's delegate class
+exists, before `AppDelegate::install`, and therefore before any provider is
+registered — it never has a Services port for LaunchServices to deliver to. Warm,
+the delivery goes to the running writer, which is the process that opened the
+port; cold, the process LaunchServices starts is the only one and is the writer.
+The handover is upstream of this door rather than beside it, and a second route
+through the socket here would be a path with no caller and no case that could
+reach it.
+
+**⑧ The provider object is owned by the process, and the reason is one line in a
+header.** `-[NSApplication setServicesProvider:]` does not retain its argument.
+So the `Retained` is parked in a `static`, which is never dropped — the same
+shape and the same reason as `macos_app`'s `OUTBOX`, and out of the same
+underlying fact: what reaches this object is AppKit, which holds nothing of this
+program's and can ask at any moment. The cell is written once from the main
+thread and read by nobody, which is what the two `unsafe impl`s beside it say.
+
+**⑨ The `error` out-parameter is left as AppKit set it.** Writing through it puts
+a system alert in front of the reader, and the only state that would fill it — a
+pasteboard with no file URL on it — is one `NSSendTypes` says Finder does not
+build. A selection this method could not read is said on the diagnostic channel,
+where `application:openURLs:` says the same thing. That is `explorer_command`'s
+own discipline at a second door: refuse where there is somebody to refuse to, and
+do not invent an alert about a gesture that cannot happen.
+
+**⑩ The row's words are English, and the Chinese is not missing by accident.**
+`在 Folio 中打开` exists in the string table as `Text::ExplorerCommandVerb`'s
+Chinese side and is what Explorer's row says on Windows. A localized Services
+item is a `Resources/<lang>.lproj/` inside the bundle, and this bundle has no
+localized resources at all — `CFBundleDevelopmentRegion` is not set and nothing
+else in it is translated. One localized string in an otherwise unlocalized bundle
+is a Chinese row in an English menu bar. Bundle localization is its own ticket
+and this row joins it there; the note is in the template beside the array, where
+somebody adding a `.lproj` will read it.
+
+**⑪ What a Windows runner holds, and what only a Mac can.** Four claims run on
+the workstation: the plist-to-selector join in ①; that a Service is `OpenPaths`
+from the `Services` origin and waits behind the ready gate; that the shipped
+template's `NSServices` block survives the version render whole
+(`the_rendered_bundle_declares_the_finder_service`, in `bt-winres`, where the
+renderer is); and the landing pin in ③. Six cases can only run on a Mac and are
+`tests/macos_services.rs`: the provider AppKit holds answering the selector, a
+**cold** delivery with nothing crossing before `ready`, a plain folder, a folder
+with a space and a CJK character, a multi-selection of three in the reader's own
+order, and a file. The file case asserts the **door** delivers the file's own
+path; that the landing then opens its folder is ③'s pin, because `bt-platform`
+has no `bt-app` to ask.
+
+**⑫ The exercise is driven programmatically, and it needs two bundles.** X-4
+measured that a Service sent from the receiving application's own executable is
+refused — *"never opened its Services port before the timeout"*, a self-collision
+rather than a defect — so the sender is a second `.app` with an identifier of its
+own, and one binary is both halves (`--send-service`). The pasteboard is
+`+[NSPasteboard pasteboardWithUniqueName]` and **never the general one**: Finder
+uses the general pasteboard, and the machine this runs on synchronises the
+owner's clipboard between computers, so a case that wrote there would put its
+fixtures into a person's paste buffer on another machine. `NSPerformService`
+needs no Automation or Accessibility grant, which X-4 measured and which this run
+confirmed by never being asked for one. `docs/plans/port/m4-9/` carries the two
+launchers and the transcript: the six cases above, and the acceptance sentence on
+`debug/folio` — one Service cold on `中文 folder` and one warm on a plain one,
+with each tab's shell standing in the folder its Service named, read off the
+process's own working directory and off the `OSC 7` it wrote into the pane.
+
 ### 13.37 M4-7: 注意力端点走 Unix socket——边界从登录会话变成用户,写明而不是含糊(`crates/bt-platform/src/attention_pipe_unix.rs`(新)、`crates/bt-platform/src/{attention_pipe,attention_pipe_portable,instance,lib}.rs`、`crates/bt-app/src/{attention_wire,attention_hooks,attention_codex,attention_copilot,main}.rs`)
 
 **① The one thing this ticket owes is a sentence, and it is not `0600`.** The

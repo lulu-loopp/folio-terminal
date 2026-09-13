@@ -98494,6 +98494,56 @@ mod launch_landing_tests {
             "the stand-in a window is built holding is never taken away:\n{door}"
         );
     }
+
+    /// **RED (M4-9) — a Finder Service says *here*, and a file among the
+    /// selection means the folder it is in.**
+    ///
+    /// The two deliveries on M3-1's channel carry the same kind —
+    /// `OpenPaths` — and are answered differently, and this is the pin on the
+    /// difference: `application:openURLs:` is *open this document*, so a file
+    /// there opens a preview of itself; *Services ▸ Open in Folio* is the verb
+    /// Explorer's first-page row is on the other platform, so a file there opens
+    /// a tab in its folder. The function that decides the second is
+    /// `explorer_menu::folder_for` — **called**, not restated, because a second
+    /// copy of that rule is the two rows coming to disagree about what a clicked
+    /// file means.
+    ///
+    /// It is a source pin for this module's own reason: what the landing does
+    /// with the folder is a window, a tab and a shell, none of which exists in a
+    /// test process. What a machine can hold is which door it reaches for.
+    ///
+    /// MUTATION: answer a Service through `open_one_path_for_the_delegate` and
+    /// the first assertion fails — a folder would still open a tab, and a file
+    /// would quietly open a preview of itself instead of the place it is in,
+    /// which is the one case nobody would notice until they used it.
+    #[test]
+    fn a_service_opens_the_folder_and_a_document_opens_itself() {
+        let settle = body(concat!("    fn ", "settle_app_delegate_events("));
+        assert!(
+            settle.contains("AppDelegateOrigin::Services")
+                && settle.contains("self.open_one_place_for_a_service(event_loop, &path)?")
+                && settle.contains("self.open_one_path_for_the_delegate(event_loop, path)?"),
+            "one list of paths is landed two ways and the origin is what tells \
+             them apart:\n{settle}"
+        );
+        let service = body(concat!("    fn ", "open_one_place_for_a_service("));
+        assert!(
+            service.contains("explorer_menu::folder_for(path, cli::machine_path_kind(path))"),
+            "the Service's folder rule is not the one Explorer's row already \
+             answers:\n{service}"
+        );
+        assert!(
+            service.contains("tab: true") && service.contains("self.land_one_launch_request("),
+            "a place handed over by a Service does not land through the door a \
+             `--tab <folder>` launch lands through:\n{service}"
+        );
+        let document = body(concat!("    fn ", "open_one_path_for_the_delegate("));
+        assert!(
+            document.contains("runtime.open_preview(path)?"),
+            "a document handed over by Finder no longer opens on a preview \
+             pane:\n{document}"
+        );
+    }
 }
 
 /// **Every answer the hand gives spends a raised hint card** (§7.1.5e′, user
@@ -103990,6 +104040,7 @@ impl FolioApp {
     /// X-4's first rule.
     fn settle_app_delegate_events(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
         for event in app_delegate_wire::take() {
+            let origin = event.origin;
             match event.kind {
                 bt_platform::AppDelegateEventKind::Reopen { .. } => {
                     // **The flag AppKit sent is deliberately not read.** X-4
@@ -104001,9 +104052,23 @@ impl FolioApp {
                         self.raise_for_a_launch(id);
                     }
                 }
+                // **One list of paths, two readings of what a file among them
+                // means, and the origin is what separates them** (M4-9,
+                // §13.36). A document handed over by Finder or by `open -a` is
+                // the thing the reader named, so a file opens a preview of
+                // itself; a selection sent through *Services ▸ Open in Folio* is
+                // the verb `folder_for` has answered on the other platform since
+                // the first-page row existed, so a file opens a tab in **its
+                // folder**. A multi-selection is one landing per path, in the
+                // order the reader's own selection was written.
                 bt_platform::AppDelegateEventKind::OpenPaths(paths) => {
+                    let a_service = origin == bt_platform::AppDelegateOrigin::Services;
                     for path in paths {
-                        self.open_one_path_for_the_delegate(event_loop, path)?;
+                        if a_service {
+                            self.open_one_place_for_a_service(event_loop, &path)?;
+                        } else {
+                            self.open_one_path_for_the_delegate(event_loop, path)?;
+                        }
                     }
                 }
                 bt_platform::AppDelegateEventKind::TerminationRequested(answer) => {
@@ -104168,6 +104233,50 @@ impl FolioApp {
                 Ok(())
             }
         }
+    }
+
+    /// **One item of a Finder selection sent through *Services ▸ Open in
+    /// Folio*** (M4-9, `docs/DESIGN.md` §13.36).
+    ///
+    /// The sibling of [`Self::open_one_path_for_the_delegate`] and the whole of
+    /// the difference between them is the first line: this verb is *open Folio
+    /// **here***, so what a file names is **the folder it is in**, and that is
+    /// [`explorer_menu::folder_for`] — the very function Explorer's first-page
+    /// row is answered by on the other platform, called here rather than
+    /// restated, so that the two rows cannot come to disagree about what a
+    /// clicked file means. A folder is itself; a name with nothing at it opens
+    /// nothing, because a window standing in a folder that is not there is a
+    /// window somebody has to close.
+    ///
+    /// **The disk is asked here and not in the provider object.** The method
+    /// AppKit calls runs on AppKit's stack with a framework frame underneath it
+    /// and may only park what it was handed (X-4's first rule), and a path
+    /// judged there would in any case have been judged against a directory that
+    /// no longer has to exist by the time this turn comes round.
+    ///
+    /// What it lands is the request a `folio --tab <folder>` launch crosses the
+    /// launch socket as, through the same function, for
+    /// [`Self::open_one_path_for_the_delegate`]'s reason word for word: this is
+    /// not somebody starting Folio, it is somebody handing Folio a place.
+    fn open_one_place_for_a_service(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        path: &Path,
+    ) -> Result<()> {
+        let Some(folder) = explorer_menu::folder_for(path, cli::machine_path_kind(path)) else {
+            eprintln!(
+                "{APP_NAME} was asked to open {} and there is nothing there",
+                path.display()
+            );
+            return Ok(());
+        };
+        let request = launch_wire::LaunchRequest {
+            cwd: Some(folder),
+            tab: true,
+            ..launch_wire::LaunchRequest::default()
+        };
+        self.land_one_launch_request(event_loop, &request)?;
+        Ok(())
     }
 
     /// **The system asked this application to quit, and it is waiting** (M3-1).
@@ -112003,7 +112112,24 @@ fn main() -> Result<()> {
             app_delegate_wire::park(event);
             let _ = proxy.send_event(AppEvent::AppDelegateSpoke);
         }) {
-            Ok(door) => Some(door),
+            Ok(door) => {
+                // **And Finder's *Services ▸ Open in Folio*** (M4-9, §13.36).
+                //
+                // Here and not inside `install`, and after it rather than
+                // before: what the provider object posts into is the channel
+                // the line above just filled. No `cfg`, for the reason the
+                // install has none — the door answers `Ok(())` on a platform
+                // with no Services menu, and the same verb reaches this program
+                // on Windows through `--explorer-command`.
+                //
+                // **A refusal here is smaller than a refusal there and is said
+                // as such**: one row missing from one Finder menu, with the
+                // delegate, the command line and every other way in untouched.
+                if let Err(reason) = door.offer_open_in_folio() {
+                    eprintln!("{APP_NAME} is not in Finder's Services menu: {reason}");
+                }
+                Some(door)
+            }
             Err(reason) => {
                 eprintln!("{APP_NAME} has no application delegate: {reason}");
                 None
