@@ -93133,7 +93133,7 @@ impl Runtime<'_> {
         // exactly what tells a notch that was carried from one that was aimed at
         // a target the window had stopped recognising.
         let carried_before = self.window.card_aim;
-        let skip_before = leaf.card_skip;
+        let skip_before = leaf.card.persisted_skip(&leaf.session);
         // Whole detents, once whatever this seat is already holding is added in.
         // A report that does not complete one is **spent here anyway** — it is
         // being carried, and handing it on to the column as well would scroll
@@ -93173,11 +93173,11 @@ impl Runtime<'_> {
         // wheel trace (T-WHEEL-TRACE) records the resolved skip either way,
         // read into a local so the line captures a number and not the leaf.
         if !aim_card_window(leaf, rows, steps) {
-            let unchanged = leaf.card_skip;
+            let unchanged = leaf.card.persisted_skip(&leaf.session);
             mouse_trace::window_line(window, || aim_line(unchanged));
             return Ok(true);
         }
-        let aimed = leaf.card_skip;
+        let aimed = leaf.card.persisted_skip(&leaf.session);
         mouse_trace::window_line(window, || aim_line(aimed));
         // **The gesture channel** (`focus_thumb`, 2026-08-21): the hand moved
         // this seat's window, so this seat re-projects on the pass below
