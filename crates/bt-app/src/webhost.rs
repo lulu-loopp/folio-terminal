@@ -449,8 +449,8 @@ fn is_blank(url: &str) -> bool {
 // did. What did move is why the development target is allowed — the stub
 // admitted it by name, and §3’s loopback rule admits it now (DESIGN §7.8 ⑦).
 use crate::webnav::{
-    BLANK_PAGE, Decision, Mint, Origin, Refusal, address_bar, check, navigation_starting,
-    resource_request,
+    BLANK_PAGE, Decision, Mint, Origin, Refusal, address_bar, check, content_rules,
+    navigation_starting, resource_request,
 };
 
 // ── The development entry ──────────────────────────────────────────────────
@@ -486,6 +486,50 @@ pub(crate) fn user_data_folder_in(local_appdata: &Path) -> PathBuf {
     local_appdata.join("Folio").join("WebView2")
 }
 
+/// **Which folder a web seat's engine is given, on each machine** (M4-2), as a
+/// decision rather than as a `cfg`: `bt-app` asks
+/// [`bt_platform::host_platform`] what machine this is, which is what keeps
+/// `only_the_named_files_decide_what_platform_this_is` true of this file. The
+/// environment is handed in for [`crate::persist`]'s reason — a process-wide
+/// variable changed from a test is changed for every other test running beside
+/// it.
+///
+/// - **Windows:** `%LOCALAPPDATA%\Folio\WebView2` — the profile, holding the
+///   disk cache, the cookie jar and the crash dumps. See
+///   [`user_data_folder_in`].
+/// - **macOS:** `~/Library/Application Support/Folio/WebKit`, and **it is not
+///   the profile**. WKWebView's cookies, caches and storage live in the
+///   application's own container, keyed on the bundle identifier, and
+///   `WKWebsiteDataStore` is the only thing that can name them (plan §4.5;
+///   `docs/DESIGN.md` §13.29). What this folder actually holds is the
+///   `WKContentRuleListStore` — the compiled form of the third door — which is
+///   a directory the host must be given and which nothing else in this product
+///   has a place for.
+/// - **Other Unix:** no engine, so no folder; the seat's refusal names the
+///   platform rather than a missing variable.
+pub(crate) fn web_engine_folder(
+    platform: bt_platform::HostPlatform,
+    env: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    let named = |name: &str| {
+        env(name)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    };
+    match platform {
+        bt_platform::HostPlatform::Windows => {
+            named("LOCALAPPDATA").map(|base| user_data_folder_in(&base))
+        }
+        bt_platform::HostPlatform::MacOs => named("HOME").map(|home| {
+            home.join("Library")
+                .join("Application Support")
+                .join("Folio")
+                .join("WebKit")
+        }),
+        bt_platform::HostPlatform::OtherUnix => None,
+    }
+}
+
 /// The same, on this machine.
 ///
 /// Asked of the environment rather than assembled from a user name, on this
@@ -493,9 +537,9 @@ pub(crate) fn user_data_folder_in(local_appdata: &Path) -> PathBuf {
 /// or a taking of evidence isolates it by isolating `LOCALAPPDATA`, which is
 /// what makes "an isolated user data folder" one variable rather than two.
 pub(crate) fn user_data_folder() -> Option<PathBuf> {
-    std::env::var_os("LOCALAPPDATA")
-        .filter(|value| !value.is_empty())
-        .map(|base| user_data_folder_in(Path::new(&base)))
+    web_engine_folder(bt_platform::host_platform(), |name: &str| {
+        std::env::var_os(name)
+    })
 }
 
 // ── The keyboard contract ──────────────────────────────────────────────────
@@ -1819,7 +1863,7 @@ impl WebSeat {
         wake: Box<dyn Fn()>,
     ) -> Result<(Self, Vec<WebOutcome>), String> {
         let folder = user_data_folder().ok_or_else(|| {
-            String::from("LOCALAPPDATA is not set, so there is no profile to use")
+            String::from("this machine names no folder a web engine could be given")
         })?;
         let mint = Rc::new(RefCell::new(Mint::Nothing));
         let gate = Rc::clone(&mint);
@@ -1926,6 +1970,22 @@ impl WebSeat {
             playing_audio: false,
             zoom_said: None,
         };
+        // **The third door in its other spelling, said before the engine is
+        // even asked for** (M4-2, `docs/DESIGN.md` §13.29).
+        //
+        // `resource_request` above is the door as a *question*, and an engine
+        // that asks it per request needs nothing else. An engine that never
+        // asks — WKWebView, which fetches a document's pictures, stylesheets
+        // and scripts with no callback at all — takes the same rule as a list
+        // of patterns compiled before the document loads, and this is where the
+        // seat says what that list is. The mint it is said for is the one this
+        // seat was opened on, which is the mint the first navigation will be
+        // judged against; every later navigation says it again, on the way past
+        // [`WebEffect::Navigate`], because the rule moves when the mint does.
+        //
+        // The host decides what to do with it. On Windows the answer is
+        // nothing, and the door says so in one line.
+        web.host.set_request_rules(&content_rules(&web.minted))?;
         let effect = web.machine.request(url);
         debug_assert_eq!(effect, WebEffect::Ignore, "an engine that is not up yet");
         // **A refusal here is an answer, not a reason to have no seat** (§7.36).
@@ -2490,8 +2550,14 @@ impl WebSeat {
                         .map(|setting| setting.api())
                         .collect::<Vec<_>>()
                         .join(", ");
+                    // **Not "this WebView2 build"** (M4-2). The sentence is
+                    // read on both machines now, and the switches a WKWebView
+                    // has no counterpart for are reported through this same
+                    // line — `WebSetting::api` is the switch's identity across
+                    // the two engines, and the engine a reader is looking at is
+                    // the one they are running.
                     outcomes.push(WebOutcome::Fault(format!(
-                        "this WebView2 build would not take {named}"
+                        "the web engine on this machine would not take {named}"
                     )));
                 }
                 // **A visual that has just joined the tree has not been placed**
@@ -2539,6 +2605,14 @@ impl WebSeat {
                         crate::web_trace::mint(&minted),
                     )
                 });
+                // **The compiled spelling of the same mint, and before the
+                // navigation for the same reason the mint itself is** (M4-2).
+                // A list of patterns is attached to the engine and not asked
+                // per request, so one still carrying the previous mint's rule
+                // while the next document loads is the previous seat's policy
+                // enforced on this one's contents. The host is what makes the
+                // two orderly; on Windows it is one line that does nothing.
+                self.host.set_request_rules(&content_rules(&minted))?;
                 *self.mint.borrow_mut() = minted;
                 self.host.navigate(&target)?;
                 Ok(None)
@@ -4391,6 +4465,55 @@ mod folder_tests {
         assert_eq!(
             folder,
             Path::new(r"C:\Users\x\AppData\Local\Folio\WebView2")
+        );
+    }
+
+    /// RED — **each machine names its own folder, and the Unix that has no
+    /// engine names none** (M4-2, `docs/DESIGN.md` §13.29).
+    ///
+    /// The values are handed in rather than read off this process, for
+    /// `persist::storage_location`'s reason: a variable changed from a test is
+    /// changed for every test running beside it.
+    ///
+    /// RED GATE: answer the Windows folder on macOS — `%LOCALAPPDATA%` is unset
+    /// there, so the seat would refuse to open at all and the whole web preview
+    /// would be missing from the port with no card to say why.
+    #[test]
+    fn each_machine_names_the_folder_its_own_engine_is_given() {
+        use bt_platform::HostPlatform;
+        let env = |pairs: Vec<(&'static str, &'static str)>| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| std::ffi::OsString::from(*value))
+            }
+        };
+        assert_eq!(
+            web_engine_folder(
+                HostPlatform::Windows,
+                env(vec![("LOCALAPPDATA", r"C:\Users\x\AppData\Local")]),
+            ),
+            Some(PathBuf::from(r"C:\Users\x\AppData\Local\Folio\WebView2"))
+        );
+        assert_eq!(
+            web_engine_folder(HostPlatform::MacOs, env(vec![("HOME", "/Users/x")])),
+            Some(PathBuf::from(
+                "/Users/x/Library/Application Support/Folio/WebKit"
+            ))
+        );
+        // No engine, so no folder — and the seat's refusal then names the
+        // platform rather than a variable somebody could go and set.
+        assert_eq!(
+            web_engine_folder(HostPlatform::OtherUnix, env(vec![("HOME", "/home/x")])),
+            None
+        );
+        // An unset or empty variable is the same answer on both machines that
+        // have an engine: there is nowhere to put it.
+        assert_eq!(web_engine_folder(HostPlatform::Windows, env(vec![])), None);
+        assert_eq!(
+            web_engine_folder(HostPlatform::MacOs, env(vec![("HOME", "")])),
+            None
         );
     }
 }

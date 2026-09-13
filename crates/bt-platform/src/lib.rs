@@ -13456,6 +13456,161 @@ mod update_check_transport_tests {
     }
 }
 
+/// **The page host, held to one contract across three arms** (M4-2, DESIGN
+/// §13.29).
+///
+/// `bt-app` names `WebHost` with no `cfg` at all — `webhost.rs` is not on
+/// `only_the_named_files_decide_what_platform_this_is`' list and must never
+/// join it — so **three files have to agree about one set of doors, and no
+/// compiler on one machine can check more than one of them**: a Windows box
+/// compiles the arm in `webview.rs`, a Mac compiles `macos_webview.rs`, and
+/// `webview_portable.rs` is the arm neither of them builds.
+///
+/// So these read the three as text, which is the same instrument
+/// `update_check_transport_tests` above uses on the three HTTP arms and for the
+/// same reason. They run on every platform.
+#[cfg(test)]
+mod web_host_contract_tests {
+    /// The three arms' own text. The Windows one is inside `webview.rs`, behind
+    /// a `#[cfg(windows)]`, which is why this reads the whole file and finds the
+    /// one `impl WebHost` in it.
+    const WINDOWS: &str = include_str!("webview.rs");
+    const MACOS: &str = include_str!("macos_webview.rs");
+    const PORTABLE: &str = include_str!("webview_portable.rs");
+
+    /// Every door an arm declares: from `pub fn` to the opening brace, as one
+    /// line, sorted.
+    ///
+    /// **Sorted, because the order inside an `impl` is not a contract** — a
+    /// reader can group `zoom` beside `set_zoom` on one platform and beside
+    /// `find` on another — and **the whole signature and not just the name**,
+    /// because an arm that took a `&mut self` where another took `&self`, or
+    /// widened a return type, is a `bt-app` that compiles on one machine and not
+    /// on the other two.
+    fn doors(source: &str) -> Vec<String> {
+        let at = source
+            .find("\nimpl WebHost {")
+            .expect("every arm declares the host");
+        let body = &source[at + 1..];
+        let end = body
+            .find("\n}\n")
+            .expect("an impl block is closed at column zero");
+        let mut found = Vec::new();
+        let mut rest = &body[..end];
+        while let Some(at) = rest.find("\n    pub fn ") {
+            rest = &rest[at + 1..];
+            let close = rest.find(" {").expect("a signature ends at its brace");
+            found.push(
+                rest[..close]
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+        }
+        found.sort();
+        found
+    }
+
+    /// RED — **one host, spelled the same way in all three arms.**
+    ///
+    /// This is the claim `bt-app` rests on. An arm that grew a door, lost one,
+    /// or changed one's shape would compile on the machine it was written on and
+    /// fail on the other two — in `bt-app`, rather than in the crate that
+    /// changed.
+    ///
+    /// RED GATE: take `set_request_rules` out of any one arm, or give the macOS
+    /// `navigate` a `&mut self`, and this names the pair that disagree.
+    #[test]
+    fn the_three_arms_declare_one_host() {
+        let windows = doors(WINDOWS);
+        assert!(
+            windows.len() > 25,
+            "the Windows arm's doors were not found: {windows:#?}"
+        );
+        let macos = doors(MACOS);
+        let portable = doors(PORTABLE);
+        let difference = |ours: &[String], theirs: &[String]| -> Vec<String> {
+            ours.iter()
+                .filter(|door| !theirs.contains(door))
+                .cloned()
+                .collect()
+        };
+        assert_eq!(
+            difference(&windows, &macos),
+            Vec::<String>::new(),
+            "the macOS arm is missing doors the Windows arm has"
+        );
+        assert_eq!(
+            difference(&macos, &windows),
+            Vec::<String>::new(),
+            "the macOS arm has doors the Windows arm does not"
+        );
+        assert_eq!(
+            difference(&windows, &portable),
+            Vec::<String>::new(),
+            "the portable arm is missing doors the Windows arm has"
+        );
+        assert_eq!(
+            difference(&portable, &windows),
+            Vec::<String>::new(),
+            "the portable arm has doors the Windows arm does not"
+        );
+    }
+
+    /// RED — **the third door's compiled spelling is a door on every arm.**
+    ///
+    /// `bt_app::webhost` hands the seat's resource rule over in both languages
+    /// on every platform, and the arm that has a use for the compiled one uses
+    /// it. An arm where this was absent would be `bt-app` naming a method that
+    /// is not there; an arm where it silently did nothing *and said nothing*
+    /// would be worse, so each of the two that drop it says so in its own words.
+    ///
+    /// RED GATE: delete either sentence.
+    #[test]
+    fn the_arms_that_drop_the_compiled_rules_say_so() {
+        for (arm, source) in [("windows", WINDOWS), ("portable", PORTABLE)] {
+            let at = source
+                .find("pub fn set_request_rules")
+                .unwrap_or_else(|| panic!("the {arm} arm declares the door"));
+            let body = &source[at..];
+            let end = body
+                .find("\n    }")
+                .expect("a door is closed at four spaces");
+            assert!(
+                body[..end].contains("let _ = rules;"),
+                "the {arm} arm now does something with the compiled rules and does not say what"
+            );
+        }
+        assert!(
+            MACOS.contains("compileContentRuleListForIdentifier"),
+            "the macOS arm no longer compiles the rules it is handed"
+        );
+    }
+
+    /// RED — **the three module arms are mutually exclusive and each names its
+    /// own file.**
+    ///
+    /// The failure this guards against is quiet, and it is the one M4-10's own
+    /// gate names: a macOS arm added without narrowing the portable gate is two
+    /// `WebHost`s defined in one crate, and a portable gate left wide is a Mac
+    /// that quietly keeps the arm which refuses every page.
+    #[test]
+    fn one_arm_per_machine_and_no_overlap() {
+        // The three declarations live at the foot of `webview.rs`, beside the
+        // twelve data types every arm shares.
+        let root = WINDOWS;
+        for needle in [
+            "#[cfg(target_os = \"macos\")]\n#[path = \"macos_webview.rs\"]\nmod macos;",
+            "#[cfg(all(not(windows), not(target_os = \"macos\")))]\n#[path = \"webview_portable.rs\"]\nmod portable;",
+        ] {
+            assert!(
+                root.contains(needle),
+                "the web host's arms no longer read:\n{needle}"
+            );
+        }
+    }
+}
+
 /// The band contract, asked where there are no bands.
 ///
 /// It is the whole of what [`portable_priority`] promises, and it is worth a

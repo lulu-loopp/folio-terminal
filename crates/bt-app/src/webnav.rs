@@ -151,7 +151,23 @@ impl Mint {
         if stripped.starts_with(r"\\") || stripped.starts_with("UNC\\") {
             return Err(Refusal::NetworkPath);
         }
-        let mut url = String::from("file:///");
+        // **Three slashes, counting the one the path may already carry**
+        // (M4-2). `file:` URLs are `file://` plus an empty authority plus an
+        // absolute path, and the two kinds of absolute path this product sees
+        // spell their root differently: `D:\report.html` has no leading
+        // separator and `/Users/somebody/report.html` is nothing but one. The
+        // old spelling assumed the first, so a Mac minted
+        // `file:////Users/…` — four slashes — which is a URL the engine
+        // normalises back to three and which therefore matched neither
+        // [`Self::admits`] nor [`file_url_is_inside_the_folder_of`]: a local
+        // seat refused its own document.
+        //
+        // A question about the string and not about the machine, so this file
+        // still names no platform.
+        let mut url = String::from("file://");
+        if !stripped.starts_with('/') {
+            url.push('/');
+        }
         for character in stripped.chars() {
             match character {
                 '\\' => url.push('/'),
@@ -517,22 +533,30 @@ pub fn resource_request(candidate: &str, mint: &Mint) -> Decision {
         // candidate with none is not a request this window can reason about.
         return Decision::Refuse(Refusal::ExternalScheme);
     };
-    match scheme.as_str() {
-        "data" | "blob" => Decision::Navigate(trimmed.to_owned()),
-        "about" => {
-            if is_an_empty_document(trimmed) {
-                Decision::Navigate(trimmed.to_owned())
-            } else {
-                Decision::Refuse(Refusal::BrowserInternalScheme)
-            }
-        }
-        // The engine's own parts, listed rather than pattern-matched: a scheme
-        // this door has not been told about is refused, and adding one is a
-        // line somebody types on purpose.
-        "chrome-extension" | "chrome-untrusted" | "devtools" => {
+    // **Read off the four tables above and not out of a `match`'s patterns**
+    // (M4-2). The order is the order the arms stood in and the answers are the
+    // answers they gave; what changed is that the scheme sets are now named
+    // values, because [`content_rules`] has to be built out of the same ones or
+    // the two spellings of this rule drift apart.
+    let scheme = scheme.as_str();
+    if DOCUMENTS_OWN_BYTES.contains(&scheme) {
+        return Decision::Navigate(trimmed.to_owned());
+    }
+    if scheme == ABOUT {
+        return if is_an_empty_document(trimmed) {
             Decision::Navigate(trimmed.to_owned())
-        }
-        "file" => match mint {
+        } else {
+            Decision::Refuse(Refusal::BrowserInternalScheme)
+        };
+    }
+    // The engine's own parts, listed rather than pattern-matched: a scheme this
+    // door has not been told about is refused, and adding one is a line
+    // somebody types on purpose.
+    if ENGINE_INTERNAL.contains(&scheme) {
+        return Decision::Navigate(trimmed.to_owned());
+    }
+    if scheme == DISK {
+        return match mint {
             Mint::File(minted) if file_url_is_inside_the_folder_of(minted, trimmed) => {
                 Decision::Navigate(trimmed.to_owned())
             }
@@ -542,22 +566,155 @@ pub fn resource_request(candidate: &str, mint: &Mint) -> Decision {
             // otherwise be the blander `FileScheme`.
             _ if names_a_file_host(trimmed) => Decision::Refuse(Refusal::NetworkPath),
             _ => Decision::Refuse(Refusal::FileScheme),
-        },
-        "http" | "https" => match mint {
+        };
+    }
+    if NETWORK.contains(&scheme) {
+        return match mint {
             // Nothing minted is an ordinary browsing seat, and its page's own
             // subresources are the whole of what it is for.
             Mint::Nothing => Decision::Navigate(trimmed.to_owned()),
             Mint::Blank | Mint::File(_) => Decision::Refuse(Refusal::NotMinted),
-        },
-        other => Decision::Refuse(match classify_scheme(other) {
-            Err(refusal) => refusal,
-            // A scheme the allow-list would have taken is still not a thing a
-            // document may be built out of unless one of the arms above named
-            // it. Nothing reaches here today; the arm exists so that a scheme
-            // added to `classify_scheme` cannot quietly become a subresource.
-            Ok(()) => Refusal::ExternalScheme,
-        }),
+        };
     }
+    Decision::Refuse(match classify_scheme(scheme) {
+        Err(refusal) => refusal,
+        // A scheme the allow-list would have taken is still not a thing a
+        // document may be built out of unless one of the arms above named it.
+        // Nothing reaches here today; the arm exists so that a scheme added to
+        // `classify_scheme` cannot quietly become a subresource.
+        Ok(()) => Refusal::ExternalScheme,
+    })
+}
+
+// ── The same sentence, compiled in advance (M4-2) ──────────────────────────
+
+/// **The schemes that name bytes the document already holds.**
+///
+/// Neither is a fetch of anything outside the document, so both pass on every
+/// seat and no compiled rule ever names them.
+pub const DOCUMENTS_OWN_BYTES: [&str; 2] = ["data", "blob"];
+
+/// **The two empty documents a frame is made of**, under the one scheme that
+/// carries them. Which two is [`is_an_empty_document`]'s.
+pub const ABOUT: &str = "about";
+
+/// **The engine's own furniture** — the pages a browser draws its own viewers
+/// with. Refused as a *location* by [`check`] and allowed as a document's
+/// contents here, which is the difference between where a reader can be taken
+/// and what is already on the glass.
+pub const ENGINE_INTERNAL: [&str; 3] = ["chrome-extension", "chrome-untrusted", "devtools"];
+
+/// **The disk.**
+pub const DISK: &str = "file";
+
+/// **The network.**
+pub const NETWORK: [&str; 2] = ["http", "https"];
+
+/// **One compiled rule: an address pattern, and the refusal that is the only
+/// action this product ever emits.**
+///
+/// A type rather than a string so that [`content_rules`]'s JSON has exactly one
+/// author, and so that the test which holds the JSON to
+/// [`resource_request`]'s own answers can read what was emitted rather than
+/// re-derive it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContentRule {
+    /// The pattern, in the content-blocker dialect: anchored at `^`, an
+    /// optional alternation of scheme names, then the separator.
+    pub url_filter: String,
+}
+
+/// **Every scheme `resource_request` refuses outright for this mint, as
+/// patterns** — the list [`content_rules`] serialises.
+///
+/// # Why a seat needs this at all
+///
+/// The Windows engine asks the host about **every** request a document makes
+/// (`WebResourceRequested` with a filter over every context), so
+/// [`resource_request`] is called per request and this list has no reader
+/// there. WKWebView has no such callback — X-2 measured a picture, a
+/// stylesheet, a script and a `fetch` all reaching the far socket with no
+/// delegate ever naming them — and the only door left is a list of URL patterns
+/// compiled before the document loads. So the same sentence is written twice,
+/// in two languages, and `the_two_spellings_of_the_resource_rule_agree` is what
+/// keeps them one sentence.
+///
+/// # What the patterns can and cannot say, and who holds the rest
+///
+/// A pattern speaks about an **address**, so it can say *this seat reaches no
+/// server* and *this seat reaches no disk* — the two sentences the mint turns
+/// on. It cannot say *this file is inside that folder*, which is the local
+/// seat's other half, and nothing here tries: that half is carried by
+/// `-[WKWebView loadFileURL:allowingReadAccessToURL:]` with the minted file's
+/// own folder, which X-2 measured enforcing it with no rule list at all. The
+/// pair is the enforcement, and the test asserts the **pair** against
+/// [`resource_request`] rather than this list alone.
+#[must_use]
+pub fn content_rule_list(mint: &Mint) -> Vec<ContentRule> {
+    // **One rule per scheme, and no alternation in any of them.**
+    //
+    // `^(http|https)://` is the same sentence in one rule and is what this
+    // emitted first; `WKContentRuleListStore` refused to compile it — measured
+    // on the machine, M4-2's `.app` proof — because a content blocker's
+    // `url-filter` is a *subset* of regular expressions and a group is not in
+    // it. One rule per entry of the table is the spelling that compiles, and it
+    // is the one that is generated rather than written: a scheme added to
+    // [`NETWORK`] becomes another rule rather than another branch somebody has
+    // to remember to add.
+    let network = NETWORK.iter().map(|scheme| ContentRule {
+        url_filter: format!("^{scheme}://"),
+    });
+    let disk = ContentRule {
+        url_filter: format!("^{DISK}:"),
+    };
+    match mint {
+        // A browsing seat: the network is what it is for, and the disk is what
+        // it may not touch. WebKit refuses a `file:` subresource of an `http:`
+        // document before any callback of ours could — measured — so this rule
+        // is the belt beside that brace, and it is here because the pattern
+        // language can say what `resource_request` says.
+        Mint::Nothing => vec![disk],
+        // The host's own empty page fetches nothing at all.
+        Mint::Blank => network.chain(std::iter::once(disk)).collect(),
+        // A local document reads its own folder — which the load's read access
+        // is what grants — and reaches no server.
+        Mint::File(_) => network.collect(),
+    }
+}
+
+/// **The same list as Safari content-blocker JSON**, which is what
+/// `WKContentRuleListStore` compiles.
+///
+/// One rule per line of the list above, `block` for every one of them, and
+/// nothing else in it: no `resource-type`, because the sentence is about the
+/// address and not about what the document wanted the bytes for, and no
+/// `if-domain`, because a mint is not a domain.
+///
+/// Never empty. A mint whose list were empty would be a JSON document
+/// `WKContentRuleListStore` refuses to compile, and a seat whose compilation
+/// failed is a seat with no third door at all — so the browsing seat carries
+/// its `file:` refusal rather than an empty list.
+#[must_use]
+pub fn content_rules(mint: &Mint) -> String {
+    let mut json = String::from("[");
+    for (index, rule) in content_rule_list(mint).into_iter().enumerate() {
+        if index > 0 {
+            json.push(',');
+        }
+        json.push_str(r#"{"trigger":{"url-filter":""#);
+        // The patterns this module writes carry neither, and an escape written
+        // for a string that never needs one is the line that keeps it true.
+        for character in rule.url_filter.chars() {
+            match character {
+                '"' => json.push_str("\\\""),
+                '\\' => json.push_str("\\\\"),
+                other => json.push(other),
+            }
+        }
+        json.push_str(r#""},"action":{"type":"block"}}"#);
+    }
+    json.push(']');
+    json
 }
 
 /// The two `about:` documents that are documents rather than destinations.
@@ -600,12 +757,12 @@ fn file_url_is_inside_the_folder_of(minted: &str, candidate: &str) -> bool {
     ) else {
         return false;
     };
-    let Some(folder) = minted.rsplit_once('\\').map(|(head, _)| head) else {
+    let Some(folder) = minted.rsplit_once('/').map(|(head, _)| head) else {
         return false;
     };
     // The folder itself is not a file, so the comparison is against the folder
-    // plus its separator: `D:\report` must not admit `D:\reportage\x.png`.
-    let folder = format!("{}\\", folder.to_lowercase());
+    // plus its separator: `D:/report` must not admit `D:/reportage/x.png`.
+    let folder = format!("{}/", folder.to_lowercase());
     candidate.to_lowercase().starts_with(&folder)
 }
 
@@ -617,7 +774,7 @@ fn strip_the_tail(url: &str) -> &str {
     }
 }
 
-/// **A `file:///` URL as a Windows path**, with every percent escape undone.
+/// **A `file:///` URL as one absolute path**, with every percent escape undone.
 ///
 /// A second reader beside [`Mint::path_and_tail_of_file_url`] and deliberately
 /// so: that one is strict on purpose — it reads back only what
@@ -628,9 +785,12 @@ fn strip_the_tail(url: &str) -> &str {
 /// that only knew four escapes would answer `None` for a picture that is
 /// sitting in the folder it is allowed to read.
 ///
-/// `None` for anything that is not one absolute drive path: no authority, no
+/// `None` for anything that is not one absolute path — a drive-rooted one
+/// (`D:/report.html`) or a separator-rooted one (`/Users/somebody/report.html`),
+/// which are the two shapes this product's two machines write: no authority, no
 /// relative path, no `.` or `..` component, no interior NUL, and no escape that
-/// is not two hexadecimal digits.
+/// is not two hexadecimal digits. The separator in the answer is `/` on both,
+/// because the only reader of it compares two of these against each other.
 fn decoded_file_path(url: &str) -> Option<String> {
     let rest = url
         .get(..8)
@@ -654,26 +814,42 @@ fn decoded_file_path(url: &str) -> Option<String> {
             }
         }
     }
-    let path = String::from_utf8(bytes).ok()?.replace('/', "\\");
+    // **One separator, and it is the slash the URL already spelled** (M4-2).
+    // Both spellings are treated as separators, which is the refusing
+    // direction: a candidate meaning a literal backslash inside a file's name
+    // is turned away rather than admitted.
+    let path = String::from_utf8(bytes).ok()?.replace('\\', "/");
     if path.chars().any(char::is_control) {
         return None;
     }
-    let mut parts = path.split('\\');
-    let drive = parts.next()?;
-    // `C:` and nothing else: two characters, a letter and a colon.
-    let mut letters = drive.chars();
-    if !letters.next()?.is_ascii_alphabetic() || letters.next()? != ':' || letters.next().is_some()
-    {
+    let mut parts = path.split('/');
+    let first = parts.next()?;
+    // **Two shapes of absolute, and the string says which** — `D:/report.html`
+    // carries its root in a drive letter and `/Users/somebody/report.html`
+    // carries it in the separator the `file:///` prefix already ate. Asked of
+    // the string rather than of the machine, so this file still names no
+    // platform: a first component that reads as a drive is one, and anything
+    // else is the first component of a separator-rooted path.
+    let mut letters = first.chars();
+    let drive = letters
+        .next()
+        .is_some_and(|letter| letter.is_ascii_alphabetic())
+        && letters.next() == Some(':')
+        && letters.next().is_none();
+    let mut components = usize::from(!drive);
+    if !drive && (first == ".." || first == "." || first.is_empty()) {
         return None;
     }
-    let mut components = 0usize;
     for part in parts {
         if part == ".." || part == "." || part.is_empty() {
             return None;
         }
         components += 1;
     }
-    (components > 0).then_some(path)
+    if components == 0 {
+        return None;
+    }
+    Some(if drive { path } else { format!("/{path}") })
 }
 
 /// Split `input` into `(scheme, rest)` when it carries an explicit scheme.
@@ -1122,6 +1298,268 @@ mod resource_gate_tests {
                 "{candidate}"
             );
         }
+    }
+}
+
+/// **The compiled spelling of the third door, held to the spoken one** (M4-2,
+/// `docs/DESIGN.md` §13.29).
+///
+/// The engine on one platform asks [`resource_request`] about every request a
+/// document makes; the engine on the other never asks at all and takes a list
+/// of patterns compiled in advance ([`content_rules`]). Two spellings of one
+/// rule is two rules the day somebody edits one of them, so every case X-2
+/// measured on the machine is asked of **both** here, on every platform, with
+/// no WebKit in the room.
+#[cfg(test)]
+mod content_rule_tests {
+    use super::*;
+
+    /// The local seat, as a Windows path — the shape [`Mint::file`] writes.
+    fn a_report() -> Mint {
+        Mint::File(String::from("file:///D:/seat/open/report.html"))
+    }
+
+    /// **The emitted pattern, read rather than re-derived.**
+    ///
+    /// The whole dialect this module writes: `^`, an optional parenthesised
+    /// alternation of scheme names, and then the separator the scheme is
+    /// followed by. Anything else is a pattern somebody added without teaching
+    /// this reader about it, and the panic says so rather than answering
+    /// `false` — a filter nobody can evaluate must not read as a filter that
+    /// blocks nothing.
+    fn blocks(filter: &str, candidate: &str) -> bool {
+        let body = filter
+            .strip_prefix('^')
+            .unwrap_or_else(|| panic!("`{filter}` is not anchored"));
+        let cut = body
+            .find(':')
+            .unwrap_or_else(|| panic!("`{filter}` names no scheme"));
+        let (scheme, separator) = body.split_at(cut);
+        assert!(
+            scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-'),
+            "`{filter}` carries a pattern this reader does not understand"
+        );
+        // A content blocker's `url-filter` is case-insensitive unless the rule
+        // says otherwise, and none of these does.
+        let head = format!("{scheme}{separator}");
+        candidate.len() >= head.len() && candidate[..head.len()].eq_ignore_ascii_case(&head)
+    }
+
+    /// The other half of the local seat's enforcement:
+    /// `-[WKWebView loadFileURL:allowingReadAccessToURL:]`, which admits the
+    /// minted file's own folder and refuses every other path on the disk. X-2
+    /// measured it doing exactly this with no rule list in the room.
+    fn outside_the_read_access(mint: &Mint, candidate: &str) -> bool {
+        match mint {
+            Mint::File(minted) => {
+                candidate.len() >= 5
+                    && candidate[..5].eq_ignore_ascii_case("file:")
+                    && !file_url_is_inside_the_folder_of(minted, candidate)
+            }
+            // A seat that opened no file was granted no read access, so this
+            // half refuses nothing and the patterns carry the whole sentence.
+            Mint::Nothing | Mint::Blank => false,
+        }
+    }
+
+    /// RED — **the compiled rules and the spoken rule refuse the same things**,
+    /// case by case, over X-2's own fixture set.
+    ///
+    /// Each row is a line of the probe report's table
+    /// (`docs/plans/port/probe-x2-wkwebview-policy-2026-09-12.md`): the
+    /// cross-origin picture, stylesheet, script and `fetch`; the frame; the
+    /// `file:` subresource of a browsing page; the local seat's own folder, the
+    /// sibling folder it may not read, and the server it may not reach; the
+    /// share; and the three schemes that are a document's own bytes rather than
+    /// a fetch.
+    ///
+    /// What is compared is the **pair** — the patterns plus the load's read
+    /// access — because that pair is what stands on the machine. Comparing the
+    /// patterns alone would demand that a rule list say a thing the pattern
+    /// language cannot say.
+    ///
+    /// RED GATE: drop the `file:` rule from [`Mint::Nothing`]'s list, or the
+    /// network rule from a mint that has one, and the row that rule was written
+    /// for names itself.
+    #[test]
+    fn the_two_spellings_of_the_resource_rule_agree() {
+        let fixtures: [(&str, Mint); 21] = [
+            // A browsing seat: its own origins are its business.
+            ("http://127.0.0.1:9002/img.png", Mint::Nothing),
+            ("http://127.0.0.1:9002/style.css", Mint::Nothing),
+            ("http://127.0.0.1:9002/third.js", Mint::Nothing),
+            ("http://127.0.0.1:9002/fetched.txt", Mint::Nothing),
+            ("http://127.0.0.1:9002/frame.html", Mint::Nothing),
+            ("https://example.com/a.png", Mint::Nothing),
+            // …and the disk is what it may not touch.
+            ("file:///etc/hosts", Mint::Nothing),
+            ("file:///D:/seat/open/inside.png", Mint::Nothing),
+            ("file://server/share/x.png", Mint::Nothing),
+            // The document's own bytes, on every seat.
+            ("data:text/html,%3Cb%3Ehi%3C/b%3E", Mint::Nothing),
+            ("blob:http://127.0.0.1:9002/9d1", Mint::Nothing),
+            ("about:blank", Mint::Nothing),
+            ("data:text/html,%3Cb%3Ehi%3C/b%3E", a_report()),
+            // The local seat: its own folder, and the folders under it.
+            ("file:///D:/seat/open/inside.png", a_report()),
+            ("file:///D:/seat/open/images/plate.png", a_report()),
+            ("file:///D:/seat/open/report.html#ch3", a_report()),
+            // …and nothing else on the disk, and no server at all.
+            ("file:///D:/seat/outside/secret.png", a_report()),
+            ("file:///D:/seat/outside/secret.html", a_report()),
+            ("http://127.0.0.1:9002/img.png", a_report()),
+            ("https://example.com/a.png", a_report()),
+            // The host's own empty page fetches nothing.
+            ("http://127.0.0.1:9002/img.png", Mint::Blank),
+        ];
+        for (candidate, mint) in fixtures {
+            let rules = content_rule_list(&mint);
+            let by_pattern = rules.iter().any(|rule| blocks(&rule.url_filter, candidate));
+            let by_read_access = outside_the_read_access(&mint, candidate);
+            let spoken = matches!(resource_request(candidate, &mint), Decision::Refuse(_));
+            assert_eq!(
+                by_pattern || by_read_access,
+                spoken,
+                "{candidate} on {mint:?}: the compiled rules say {}, the rule says {}",
+                if by_pattern || by_read_access {
+                    "refuse"
+                } else {
+                    "allow"
+                },
+                if spoken { "refuse" } else { "allow" },
+            );
+        }
+    }
+
+    /// RED — **the patterns are made out of the tables the rule reads**, so a
+    /// scheme added to one arrives in both spellings or in neither.
+    ///
+    /// RED GATE: write `^https?://` out by hand and add a third scheme to
+    /// [`NETWORK`]; this fails while the test above still passes, because no
+    /// fixture names the third one yet.
+    #[test]
+    fn the_patterns_name_the_schemes_the_tables_do() {
+        let out_of_a_table: Vec<String> = NETWORK
+            .iter()
+            .map(|scheme| format!("^{scheme}://"))
+            .chain(std::iter::once(format!("^{DISK}:")))
+            .collect();
+        assert_eq!(out_of_a_table, ["^http://", "^https://", "^file:"]);
+        for mint in [Mint::Nothing, Mint::Blank, a_report()] {
+            for rule in content_rule_list(&mint) {
+                assert!(
+                    out_of_a_table.contains(&rule.url_filter),
+                    "{:?} carries a pattern out of no table: {}",
+                    mint,
+                    rule.url_filter
+                );
+            }
+        }
+        // **And no rule carries a group.** `WKContentRuleListStore` refuses one
+        // — measured on the machine, not reasoned about — so the one-rule-per-
+        // scheme shape above is a compile requirement rather than a style.
+        for mint in [Mint::Nothing, Mint::Blank, a_report()] {
+            for rule in content_rule_list(&mint) {
+                assert!(
+                    !rule.url_filter.contains('(') && !rule.url_filter.contains('|'),
+                    "{} is a pattern a content blocker will not compile",
+                    rule.url_filter
+                );
+            }
+        }
+    }
+
+    /// RED — **the JSON is what a content blocker reads, and no mint's is
+    /// empty.**
+    ///
+    /// `WKContentRuleListStore` refuses an empty list, and a seat whose
+    /// compilation failed has no third door at all — so "the browsing seat has
+    /// nothing to block" would be a browsing seat with no gate on its
+    /// subresources whatsoever.
+    ///
+    /// RED GATE: answer `"[]"` for [`Mint::Nothing`].
+    #[test]
+    fn every_mint_compiles_to_a_rule_list_with_something_in_it() {
+        assert_eq!(
+            content_rules(&Mint::Nothing),
+            r#"[{"trigger":{"url-filter":"^file:"},"action":{"type":"block"}}]"#
+        );
+        assert_eq!(
+            content_rules(&a_report()),
+            concat!(
+                r#"[{"trigger":{"url-filter":"^http://"},"action":{"type":"block"}},"#,
+                r#"{"trigger":{"url-filter":"^https://"},"action":{"type":"block"}}]"#
+            )
+        );
+        assert_eq!(
+            content_rules(&Mint::Blank),
+            concat!(
+                r#"[{"trigger":{"url-filter":"^http://"},"action":{"type":"block"}},"#,
+                r#"{"trigger":{"url-filter":"^https://"},"action":{"type":"block"}},"#,
+                r#"{"trigger":{"url-filter":"^file:"},"action":{"type":"block"}}]"#
+            )
+        );
+        for mint in [Mint::Nothing, Mint::Blank, a_report()] {
+            let json = content_rules(&mint);
+            assert!(json.starts_with('[') && json.ends_with(']'), "{json}");
+            assert!(json.len() > 2, "{mint:?} compiles to an empty list");
+            assert_eq!(
+                json.matches(r#""type":"block""#).count(),
+                content_rule_list(&mint).len(),
+                "{json}"
+            );
+        }
+    }
+
+    /// RED — **the reader this file measures with refuses a pattern it does not
+    /// understand**, rather than reading it as a filter that blocks nothing.
+    #[test]
+    #[should_panic(expected = "is not anchored")]
+    fn an_unanchored_pattern_is_not_silently_evaluated() {
+        blocks("http://", "http://example.com/");
+    }
+
+    /// RED — **a minted `file:` URL carries three slashes, on a machine whose
+    /// absolute paths begin with one and on a machine whose do not** (M4-2).
+    ///
+    /// The defect this pins is not hypothetical: `file:///` plus
+    /// `/Users/somebody/report.html` is `file:////Users/…`, which every engine
+    /// normalises back to three slashes — so the string the seat minted matched
+    /// neither the address the engine committed nor any candidate the folder
+    /// rule was asked about, and a local page on a Mac refused itself.
+    ///
+    /// RED GATE: put the third slash back into the literal and the second row
+    /// fails; take it out of the `push` and the first does.
+    #[test]
+    fn a_minted_file_url_has_one_root_however_the_path_spelled_it() {
+        let windows = Mint::file(Path::new(r"D:\seat\open\report.html")).expect("a drive path");
+        assert_eq!(
+            windows.target(),
+            Some("file:///D:/seat/open/report.html"),
+            "the spelling this product has always minted on Windows"
+        );
+        let posix =
+            Mint::file(Path::new("/Users/somebody/seat/open/report.html")).expect("a rooted path");
+        assert_eq!(
+            posix.target(),
+            Some("file:///Users/somebody/seat/open/report.html")
+        );
+        // And the two doors that compare one against the other agree with it,
+        // which is the whole of what the slash count costs.
+        assert_eq!(
+            navigation_starting("file:///Users/somebody/seat/open/report.html", &posix),
+            Decision::Navigate(String::from("file:///Users/somebody/seat/open/report.html"))
+        );
+        assert!(matches!(
+            resource_request("file:///Users/somebody/seat/open/inside.png", &posix),
+            Decision::Navigate(_)
+        ));
+        assert!(matches!(
+            resource_request("file:///Users/somebody/seat/outside/secret.png", &posix),
+            Decision::Refuse(_)
+        ));
     }
 }
 

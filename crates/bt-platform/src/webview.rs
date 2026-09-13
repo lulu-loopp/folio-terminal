@@ -1234,6 +1234,27 @@ impl WebHost {
         *self.shared.chords.borrow_mut() = chords;
     }
 
+    /// **The caller's resource rule in its compiled spelling — and here, the
+    /// door that does nothing** (M4-2, `docs/DESIGN.md` §13.29).
+    ///
+    /// This engine asks `request_gate` about **every** request a document
+    /// makes: `WebResourceRequested` with a filter over every context, plus
+    /// `FrameNavigationStarting` for the frames. A rule that runs per request
+    /// needs no second spelling, so the JSON the caller hands over has no
+    /// reader here and is dropped.
+    ///
+    /// It is a door and not an absence because `bt-app` names no platform: a
+    /// seat says its policy once, in both languages, and the host that has a
+    /// use for the second one uses it. The macOS arm compiles it into a
+    /// `WKContentRuleList` and swaps it onto the page's content controller,
+    /// because WKWebView has no per-request callback at all — X-2 measured a
+    /// picture, a stylesheet, a script and a `fetch` all reaching the far
+    /// socket with no delegate ever naming them.
+    pub fn set_request_rules(&self, rules: &str) -> Result<(), String> {
+        let _ = rules;
+        Ok(())
+    }
+
     pub fn has_controller(&self) -> bool {
         self.controller.is_some()
     }
@@ -3980,24 +4001,31 @@ mod rehost_contract_tests {
     }
 }
 
-/// **The page host, on a platform whose engine has not been written yet**
-/// (M4-2, gated on X-2).
+/// **The page host on a Mac: one `WKWebView` per page, one delegate class, and
+/// a compiled rule list where the third door's callback does not exist**
+/// (M4-2, on X-2's measurements; `docs/DESIGN.md` §13.29).
 ///
-/// X-2 has already settled what replaces it: one Objective-C class conforming
-/// to `WKNavigationDelegate` and `WKUIDelegate` calling the same
-/// `navigation_gate`, plus a `WKContentRuleList` compiled from the same
-/// constants `resource_request` reads, with two guarantees named as
-/// unsupported (`docs/plans/port/probe-x2-wkwebview-policy-2026-09-12.md`).
-/// None of that is M1-1's, and the twelve data types above travel unchanged
-/// into it.
+/// The twelve data types above travel into it unchanged, which is the whole of
+/// why they are compiled on every platform.
+#[cfg(target_os = "macos")]
+#[path = "macos_webview.rs"]
+mod macos;
+
+#[cfg(target_os = "macos")]
+pub use macos::{WebHost, forget_web_environment, webview2_runtime_version};
+
+/// **The page host, on a platform whose engine has not been written yet.**
+///
+/// Neither of the two real ones: a Linux build has no web engine this product
+/// hosts, and this is what says so honestly rather than pretending.
 ///
 /// **`WebHost::new` cannot refuse**, because its return type is `Self`: the
 /// window builds one per web seat and holds it. So the refusal lives where a
 /// page is actually asked for — `request_environment` — and everything after
 /// that is unreachable until a seat gets past it, which no seat does.
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
 #[path = "webview_portable.rs"]
 mod portable;
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub use portable::{WebHost, forget_web_environment, webview2_runtime_version};
