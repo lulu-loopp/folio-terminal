@@ -23,7 +23,7 @@ not merely files in a folder: they are part of what the test suite asserts on.
 | `latex-render-check.md` | **own** | The formula-rendering acceptance corpus. Its contents are standard mathematical notation — the quadratic formula, an integral, a matrix — which is not anyone's copyrightable expression. |
 | `md-formula-check.md` | **own** | The markdown-preview formula corpus, positive and negative cases. |
 
-### The five recordings
+### The six recordings
 
 All **generated**, and generated from nothing: each is two solid colours from
 `ffmpeg`'s own `lavfi` synthetic source, concatenated. There is no third-party
@@ -32,10 +32,19 @@ seconds (the `.mp4` is 5.0), with the first fifth of a second black so that a
 test asserting "the first frame is dark and a frame later in is not" has
 something to bite on.
 
-The five exist because there are five **containers**, and §7.44 ⑥ built the
-playable matrix by opening a file in each rather than by asking `CanPlayType` —
-a function §7.42 ⑧ caught under-reporting. Deleting one of these deletes the
-evidence for a row of that table.
+Five of the six exist because there are five **containers**, and §7.44 ⑥ built
+the playable matrix by opening a file in each rather than by asking
+`CanPlayType` — a function §7.42 ⑧ caught under-reporting. Deleting one of those
+deletes the evidence for a row of that table.
+
+**The sixth exists because the other five are silent**, which nothing needed
+until M4-5. Playback with sound is what §M4 acceptance ③ asks a reader to hear
+and what `EngineState::has_audio` reports, and neither claim can be made against
+a file with no audio track: on both platforms the five above answer
+`has_audio: false`, so a build whose audio path had been deleted outright would
+pass every assertion made with them. `folio-video-sound-test.mp4` carries one
+AAC track of a 440 Hz tone under the same two-colour picture, and it is the file
+the acceptance line should be performed with.
 
 | File | Bytes | Codec / container | Colour | Made by |
 |---|---|---|---|---|
@@ -44,6 +53,20 @@ evidence for a row of that table.
 | `folio-video-test.mkv` | 2457 | H.264 / Matroska | green `0x2FE07A` | below, 2026-08-28 |
 | `folio-video-test.avi` | 10986 | MPEG-4 part 2 (XVID) / AVI | pink `0xE02F7A` | below, 2026-08-28 |
 | `folio-video-test.wmv` | 3937 | WMV2 / ASF | violet `0x7A2FE0` | below, 2026-08-28 |
+| `folio-video-sound-test.mp4` | 22063 | H.264 + AAC / MPEG-4 | teal `0x2FE0D2` | below, 2026-09-12 |
+
+The one from 2026-09-12, made with the same ffmpeg 8.1.1. The tone is a `lavfi`
+`sine` source, so this file is synthetic to its last byte like the other five;
+`-shortest` is what keeps the audio and the picture the same three seconds.
+
+```
+ffmpeg -f lavfi -i color=c=black:s=160x120:r=5:d=0.2 \
+       -f lavfi -i color=c=0x2FE0D2:s=160x120:r=5:d=2.8 \
+       -f lavfi -i sine=frequency=440:sample_rate=44100:duration=3.0 \
+       -filter_complex "[0:v][1:v]concat=n=2:v=1:a=0[v]" -map "[v]" -map 2:a \
+       -c:v libx264 -preset veryslow -crf 28 -g 1 -pix_fmt yuv420p \
+       -c:a aac -b:a 48k -shortest folio-video-sound-test.mp4
+```
 
 The three from 2026-08-28, made with this repository's machine's own ffmpeg
 8.1.1, one line each with `<C>` and the encoder flags from the table above:
