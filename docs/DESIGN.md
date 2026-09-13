@@ -12134,9 +12134,10 @@ posted: CGEvent keyboard injection into Folio produces nothing on this Mac, so
 "change a heading in place" and "press the save chord" are the owner's, and this
 is written for their hand rather than left as a gap.
 
-Open `docs/plans/port/m2-7/` in a Folio built from this branch, with a page
-holding a heading, a table and a CJK paragraph in the preview and a terminal pane
-under it. Then, in order:
+In a Folio built from this branch, open `tests/assets/preview-samples/` in the
+files column — `sample.md` there is a heading, a table and a CJK paragraph, which
+is the page this row is about — click it into a preview pane, and split a
+terminal pane under it. Then, in order:
 
 1. **Click once in the heading.** A caret appears inside the heading's own text.
    *Wrong:* nothing happens (the press did not route — read `BT_MOUSE_TRACE`);
