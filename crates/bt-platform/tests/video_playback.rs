@@ -147,8 +147,18 @@ fn ready_engine(name: &str) -> Option<Engine> {
     // Before anything is played: nothing this suite runs may reach the owner's
     // speakers.
     engine.set_muted(true);
-    let ready = settle(&engine, |state| state.ready);
+    // Both halves, because the mute is a command the engine's own thread
+    // applies and the state is what that thread last published: a fixture whose
+    // metadata arrives in its constructor is `ready` on the first publish, one
+    // turn before the mute has been applied, and a case that read the state on
+    // that turn would see an engine that is about to be muted rather than one
+    // that is.
+    let ready = settle(&engine, |state| state.ready && state.muted);
     assert!(ready.ready, "{name} never loaded: {ready:?}");
+    assert!(
+        ready.muted,
+        "{name} was told to be quiet and is not: {ready:?}"
+    );
     Some(engine)
 }
 
