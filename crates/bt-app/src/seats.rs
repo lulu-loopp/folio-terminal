@@ -3287,9 +3287,9 @@ pub fn tab_strip_geometry(
     // tabs walk down their width tiers inside the smaller run first and the run
     // begins to scroll only once they are on their floor, which is the order the
     // ruling asks for and would be the wrong way round if the reserve were
-    // subtracted after the fact. `viewport` and therefore
-    // [`title_bar_app_run_right_px`] are the same number read back out, so the
-    // picture and the bridge cannot disagree about where the app's run ends.
+    // subtracted after the fact. `viewport` is that same number read back out,
+    // and it is what [`title_bar_folio_boxes`] crops this strip's boxes to, so
+    // the picture and the bridge cannot disagree about where the app's run ends.
     let reserve = WINDOW_TITLE_BAR_DRAG_RESERVE_LOGICAL_PX * scale;
     let strip_right = (run_left - reserve).max(0.0);
     // **The platform's own band, taken off the front of the run** (M3-3, owner
@@ -5833,95 +5833,6 @@ fn tab_width_tier(tab_width: f32, scale: f32) -> TabWidthTier {
     }
 }
 
-/// **Physical right edge of the app's own run in the title bar — everything left
-/// of it is the app's, everything right of it up to the caption run is window
-/// drag.**
-///
-/// This is the single number bt-platform's `WM_NCHITTEST` bridge is given, and
-/// the whole of what it knows about the bar: left of it is `HTCLIENT`, right of
-/// it is `HTCAPTION`. So it has to be the answer for *whatever the bar is
-/// currently wearing*, and the two layouts wear entirely different things.
-///
-/// **Horizontal** — the tab strip runs across the bar, so the app owns up to the
-/// `˅` (or, under scroll, the strip's whole viewport; see
-/// [`tab_strip_right_px`]). Either way it stops at least
-/// [`WINDOW_TITLE_BAR_DRAG_RESERVE_LOGICAL_PX`] short of the app's buttons,
-/// because the strip's own run was cut that short before a single tab was placed
-/// in it (user ruling 2026-09-09). That is the whole of the reserve, stated
-/// once: this number is read *off* the strip rather than clamped after it, so
-/// there is no second place for the band to be got wrong.
-///
-/// **Vertical** — the tabs have moved down the side and the bar is left holding
-/// the panel toggle and the program's name. Only the toggle is a *control*:
-/// `.apptitle` sits inside `.drag` in the mock-up, which is to say the name is
-/// part of the handle you drag the window by, exactly as a title always has
-/// been. So the app's run ends at the toggle's right edge — and when there is no
-/// toggle (an icon rail) the app owns nothing here at all and the answer is 0.
-///
-/// **The bug this replaced.** The old signature had no layout in it and asked
-/// [`tab_strip_right_px`] unconditionally, so in the vertical layout it went on
-/// describing a tab strip that was no longer in the bar — under enough tabs,
-/// "the app owns its whole run" — and the entire top bar answered `HTCLIENT`.
-/// The window could not be dragged by its own title bar. Same class of mistake
-/// as the one `profile_menu_layout` already carries a comment about: a pure
-/// function of a width and a tab count "goes on answering with a box in the
-/// title bar long after the tabs have moved down the side".
-#[must_use]
-pub fn title_bar_app_run_right_px(
-    width: f32,
-    scale: f32,
-    chrome: PlatformChrome,
-    tab_count: usize,
-    rail: RailState,
-) -> i32 {
-    // **Focus mode answers first, and answers `0` in both tab layouts**
-    // (§7.1.6b′). The mode takes the strip *and* the rail, and
-    // [`panel_toggle_box`] has already folded the one button the vertical bar
-    // carried — so below the caption run the app owns nothing up here, and every
-    // pixel of the bar is the window's to be dragged by. Asked of the layout
-    // alone, a horizontal window in focus mode would go on reserving the run of
-    // a strip that is not drawn: a dead band across the top of the window.
-    if rail.draws_focus_rail() {
-        return 0;
-    }
-    match rail.layout {
-        TabLayoutMode::Horizontal => tab_strip_right_px(width, scale, chrome, tab_count),
-        // Written off the box itself rather than off `12 + 30`, so a toggle that
-        // moves takes its dead zone with it.
-        TabLayoutMode::Vertical => panel_toggle_box(scale, chrome, rail)
-            .map_or(0, |toggle| toggle[2].ceil() as i32)
-            .max(0),
-    }
-}
-
-/// Physical right edge of the app-owned tab run in the **horizontal** layout.
-///
-/// Under scroll the answer is the strip's own right edge rather than the `˅`'s:
-/// a scrolling strip has no slack left in it, every pixel of the run is content,
-/// and the `˅` that used to mark the end of the app's territory is now somewhere
-/// off to the right of the viewport. Reporting the button's edge there would
-/// hand the app's own tabs to the window's drag handler.
-///
-/// Both arms therefore land inside the strip's own viewport, which already ends
-/// [`WINDOW_TITLE_BAR_DRAG_RESERVE_LOGICAL_PX`] short of the caption corner — so
-/// the drag band is not maintained here at all, and cannot drift from the
-/// picture.
-///
-/// Callers outside this module want [`title_bar_app_run_right_px`], which is
-/// this answer for the layout that has a strip and a different one for the
-/// layout that does not.
-pub fn tab_strip_right_px(width: f32, scale: f32, chrome: PlatformChrome, tab_count: usize) -> i32 {
-    // Neither the tiers nor the scroll offset move this answer: the tiers change
-    // nothing outside a tab's own body, and a strip either scrolls or it does
-    // not, whatever it currently shows.
-    let geometry = tab_strip_bodies(width, scale, chrome, tab_count, 0, 0.0);
-    if geometry.max_scroll > 0.0 {
-        geometry.viewport[1].ceil() as i32
-    } else {
-        geometry.new_tab_menu[2].ceil() as i32
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 pub fn hit_tab_chrome(
     width: f32,
@@ -6302,8 +6213,78 @@ pub fn hit_window_chrome(
         .map(|(target, _)| target)
 }
 
-/// **The empty part of the title bar — the window's own drag handle** (M3-3,
-/// owner ruling 2026-09-12).
+/// **Every box Folio itself draws in the header** (owner ruling 2026-09-13,
+/// §13.11 ⑥) — the list the window's own drag handle is the complement of, and
+/// the one list both platforms are answered from.
+///
+/// What is on it is what the reader can point at and press: the tabs (pills on
+/// a window whose buttons are the platform's, attached tabs on a window whose
+/// whole bar is Folio's), the `+` and the `˅` beside them, the panel toggle the
+/// vertical layouts carry, the gear, and — on the window that draws them — the
+/// minimise, maximise and close boxes. Every one of them is taken from the
+/// function that *lays it out*, never restated here: a second table of these
+/// rectangles would be a bar whose handle and whose buttons disagree the first
+/// time one of them moves, which is exactly the failure §13.48 ③ named.
+///
+/// **What is deliberately not on it.** The program's own name in the vertical
+/// layouts — `.apptitle` sits inside `.drag` in the mock-up, and a title has
+/// always been part of the handle you drag a window by. The air between two
+/// tabs, above and below a pill, and around a control that is shorter than the
+/// band it rides: none of those is a box, and the ruling is that all of them
+/// drag. And the platform's own three buttons, which are not Folio's to list —
+/// [`title_bar_drag_point`] leaves their whole band out for its own reason.
+///
+/// **The strip's boxes are cropped to the strip's own viewport**, because a tab
+/// scrolled out of the run is not on the glass: the pixels it would have stood
+/// on belong to whatever is drawn there instead, which past the viewport's right
+/// edge is the reserve — the band that keeps this window a handle however many
+/// tabs are open. It is the same crop [`hit_tab_chrome`] applies before it
+/// answers, said once more where the complement is taken.
+#[must_use]
+pub fn title_bar_folio_boxes(
+    width: f32,
+    scale: f32,
+    chrome: PlatformChrome,
+    tab_count: usize,
+    scroll: f32,
+    rail: RailState,
+    summoned: bool,
+) -> Vec<[f32; 4]> {
+    let mut boxes: Vec<[f32; 4]> = window_chrome_boxes(width, scale, chrome, rail, summoned)
+        .into_iter()
+        .map(|(_, rect)| rect)
+        .collect();
+    // **Asked of the strip that is on the glass and not of the preference**
+    // (§7.1.6b′): focus mode draws its card column in either tab layout and no
+    // strip at all, and the vertical layouts put the tab list down the side. A
+    // bar asked about the stored layout would go on reserving the boxes of a
+    // strip nobody is drawing — a dead band across the top of the window, which
+    // is the bug R3 was.
+    if rail.draws_focus_rail() || rail.layout != TabLayoutMode::Horizontal {
+        return boxes;
+    }
+    // The trailers change nothing outside a tab's own body and the active tab
+    // changes nothing at all about where the bodies stand, so this asks for the
+    // bodies alone — the same reading [`tab_scroll_to_reveal`] takes. The scroll
+    // is the live one: it moves every box in the run.
+    let strip = tab_strip_bodies(width, scale, chrome, tab_count, 0, scroll);
+    let cropped = |rect: [f32; 4]| -> Option<[f32; 4]> {
+        let left = rect[0].max(strip.viewport[0]);
+        let right = rect[2].min(strip.viewport[1]);
+        (right > left).then_some([left, rect[1], right, rect[3]])
+    };
+    boxes.extend(strip.tabs.iter().filter_map(|tab| cropped(tab.body)));
+    boxes.extend(
+        [strip.new_tab, strip.new_tab_menu]
+            .into_iter()
+            .filter_map(cropped),
+    );
+    boxes
+}
+
+/// **The part of the title bar that is not one of Folio's boxes — the window's
+/// own drag handle** (M3-3, owner ruling 2026-09-12, widened by the owner's
+/// ruling of 2026-09-13, §13.11 ⑥).
 ///
 /// The same band Windows' frame answers `HTCAPTION` for, written here because
 /// on macOS nobody asks: AppKit puts the question to a *view*
@@ -6314,26 +6295,32 @@ pub fn hit_window_chrome(
 /// drag and, on a double click, whatever the reader has asked a title bar's
 /// double click to do (`AppleActionOnDoubleClick`).
 ///
-/// **It is the Windows rule restated and not a second rule.** Both ends are read
-/// off the same two functions the picture is drawn from:
-/// [`title_bar_app_run_right_px`] is where Folio's own content stops — the strip
-/// in one layout, the sidebar toggle in the other — and [`caption_run_left`] is
-/// where the gear's run begins. Everything between them, for the height of the
-/// bar, belongs to the window. The band is never empty: the strip's run was cut
+/// **It is the Windows rule restated and not a second rule**, and since the
+/// ruling both are the same sentence: on the band, and not inside any box in
+/// [`title_bar_folio_boxes`]. It used to be a pair of edges —
+/// "after where Folio's content stops, before where the gear's run begins" —
+/// which describes a bar whose controls are packed against its two ends. This
+/// one is not: §13.48 ③ stood the gear in a 28-point square inside the 46 the
+/// strip reserves, leaving sixteen points of band that were neither the gear's
+/// nor the window's, and the same dead strip stands wherever a box is narrower
+/// than the room in front of it. The complement of the boxes has no such
+/// strips anywhere, on either host, by construction.
+///
+/// **The band is never empty.** The strip's run was cut
 /// [`WINDOW_TITLE_BAR_DRAG_RESERVE_LOGICAL_PX`] short before a single tab was
-/// placed in it (user ruling 2026-09-09), so there is a handle however many tabs
-/// are open.
+/// placed in it (user ruling 2026-09-09), so there is a handle however many
+/// tabs are open — and now the gaps between the tabs are handle too, which is
+/// what makes a crowded bar answer the hand in more than one place.
 ///
 /// **The platform's own band is not in it.** Left of `strip_left_px` stand the
 /// traffic lights, and a press there is AppKit's — the buttons are views above
 /// this window's content and take it before winit sees it. Answering `true` for
 /// the pixels *between* them would start a drag from inside a button's own
-/// rectangle, so the leading band is left out whole.
+/// rectangle, so the leading band is left out whole. It is the one part of this
+/// rule that is not about Folio's boxes, because it is about somebody else's.
 ///
-/// **And the band is this window's own header, not a constant** (T-MAC-LIGHTS,
-/// owner ruling 2026-09-12): a vertical layout on a platform that draws its own
-/// buttons wears that platform's 32 rather than Folio's 40, so the height this
-/// answers for is [`window_band_px`]'s and the run of pixels below it belongs to
+/// **And the band is this window's own header, asked of the one function that
+/// answers it** ([`window_band_px`]): the run of pixels below it belongs to
 /// whatever is drawn there.
 #[allow(clippy::too_many_arguments)]
 #[must_use]
@@ -6342,6 +6329,7 @@ pub fn title_bar_drag_point(
     scale: f32,
     chrome: PlatformChrome,
     tab_count: usize,
+    scroll: f32,
     rail: RailState,
     summoned: bool,
     x: f64,
@@ -6351,11 +6339,12 @@ pub fn title_bar_drag_point(
     if y < 0.0 || y >= window_band_px(scale, chrome) {
         return false;
     }
-    if x < chrome.strip_left_px as f32 {
+    if x < chrome.strip_left_px as f32 || x >= width {
         return false;
     }
-    x >= title_bar_app_run_right_px(width, scale, chrome, tab_count, rail) as f32
-        && x < caption_run_left(width, scale, chrome, summoned)
+    !title_bar_folio_boxes(width, scale, chrome, tab_count, scroll, rail, summoned)
+        .iter()
+        .any(|rect| contains(*rect, x, y))
 }
 
 /// The boxes of the caption run, in the order they stand: the gear, then
@@ -6377,9 +6366,8 @@ pub fn title_bar_drag_point(
 /// mock-up puts it inside `.drag` at the far left and the caption buttons at the
 /// far right. It is listed here for the same reason the gear is — this is the
 /// list of boxes in the title bar that belong to the *app*, and being on it is
-/// what makes a box clickable, tippable, and (via
-/// [`title_bar_app_run_right_px`]) something the window's own drag handler is
-/// told to keep out of.
+/// what makes a box clickable, tippable, and (via [`title_bar_folio_boxes`])
+/// something the window's own drag handler is told to keep out of.
 #[must_use]
 pub fn window_chrome_boxes(
     width: f32,
@@ -26531,24 +26519,28 @@ mod tests {",
         }
     }
 
-    /// PIN — R3: **the window's drag boundary answers to the layout, not to a tab
+    /// PIN — R3: **the window's drag handle answers to the layout, not to a tab
     /// strip that is no longer in the bar.**
     ///
-    /// The number under test is the only thing bt-platform's `WM_NCHITTEST`
-    /// bridge knows about the title bar: left of it is `HTCLIENT`, right of it is
-    /// `HTCAPTION`. With the tabs down the side the bar holds one button and a
-    /// label, so the app's run ends at the button — the label is inside `.drag`
-    /// and a title has always been part of the handle.
+    /// With the tabs down the side the bar holds one button and a label, so the
+    /// only box up there is the toggle — the label is inside `.drag`, and a title
+    /// has always been part of the handle you drag a window by.
     ///
     /// **Tab count is the witness.** The bug was a horizontal-strip formula asked
-    /// in the vertical layout, and a strip's answer *grows* with the number of
-    /// tabs until it claims the whole run. So the assertion that matters is that
-    /// thirty tabs move this number not at all when the tabs are in the rail —
-    /// under the old code they moved it to nearly the window's width, and the
-    /// entire top bar stopped being draggable.
+    /// in the vertical layout, and a strip's boxes *grow* with the number of tabs
+    /// until they claim the whole run. So the assertion that matters is that
+    /// thirty tabs put nothing at all in this bar when the tabs are in the rail —
+    /// under the old code they filled it, and the entire top bar stopped being
+    /// draggable.
     ///
-    /// Red gate: route the vertical arm back through `tab_strip_right_px` and the
-    /// thirty-tab case reports a strip-shaped boundary instead of 42.
+    /// **Written off the predicate since the owner's ruling of 2026-09-13**
+    /// (§13.11 ⑥). It used to be written off one number, the app's run right
+    /// edge; there is no such number now, because a bar is a list of boxes and
+    /// what drags is everything else.
+    ///
+    /// Red gate: ask [`title_bar_folio_boxes`] for the strip's boxes without
+    /// asking which layout is on the glass and the thirty-tab vertical row goes
+    /// red across the middle of the bar.
     #[test]
     fn the_drag_boundary_follows_the_tabs_off_the_title_bar() {
         let expanded = RailState {
@@ -26562,32 +26554,61 @@ mod tests {",
         };
         let horizontal = RailState::default();
         let (width, scale) = (960.0_f32, 1.0_f32);
+        let boxes =
+            |tabs, rail| title_bar_folio_boxes(width, scale, FOLIO_BAR, tabs, 0.0, rail, false);
+        let drags = |tabs, rail, x: f32, y: f32| {
+            title_bar_drag_point(
+                width,
+                scale,
+                FOLIO_BAR,
+                tabs,
+                0.0,
+                rail,
+                false,
+                f64::from(x),
+                f64::from(y),
+            )
+        };
+        let toggle = panel_toggle_box(scale, FOLIO_BAR, expanded).expect("the sidebar's toggle");
 
         for tabs in [1_usize, 2, 30] {
             assert_eq!(
-                title_bar_app_run_right_px(width, scale, FOLIO_BAR, tabs, expanded),
-                42,
-                "the app owns the toggle and nothing else, whatever {tabs} tabs \
-                 would have done to a strip"
+                boxes(tabs, expanded),
+                vec![toggle]
+                    .into_iter()
+                    .chain(
+                        window_caption_boxes(width, scale, FOLIO_BAR, false)
+                            .into_iter()
+                            .map(|(_, rect)| rect)
+                    )
+                    .collect::<Vec<_>>(),
+                "the app draws the toggle and its caption run and nothing else, \
+                 whatever {tabs} tabs would have done to a strip"
             );
-            assert_eq!(
-                title_bar_app_run_right_px(width, scale, FOLIO_BAR, tabs, icons),
-                0,
-                "an icon rail puts nothing in the bar at all, so all of it drags"
+            assert!(
+                drags(tabs, expanded, toggle[2] + 1.0, 20.0),
+                "so the bar beside the toggle is the window's, with {tabs} tabs"
             );
-            assert_eq!(
-                title_bar_app_run_right_px(width, scale, FOLIO_BAR, tabs, horizontal),
-                tab_strip_right_px(width, scale, FOLIO_BAR, tabs),
-                "the horizontal bar's answer is unchanged: it really does hold a \
-                 strip"
+            assert!(
+                drags(tabs, icons, 20.0, 20.0),
+                "and an icon rail puts nothing in the bar at all, so even its \
+                 leading edge drags ({tabs} tabs)"
+            );
+            assert!(
+                !drags(tabs, expanded, (toggle[0] + toggle[2]) / 2.0, 20.0),
+                "the toggle itself is never the handle"
             );
         }
-        // The witness itself: a strip's boundary grows with its tabs, which is
+        // The witness itself: a strip's boxes grow with its tabs, which is
         // exactly the growth that used to leak into the vertical layout.
         assert!(
-            tab_strip_right_px(width, scale, FOLIO_BAR, 30)
-                > title_bar_app_run_right_px(width, scale, FOLIO_BAR, 30, expanded),
-            "a thirty-tab strip claims far more of the bar than the toggle does"
+            boxes(30, horizontal).len() > boxes(30, expanded).len(),
+            "a thirty-tab strip puts far more in the bar than the toggle does"
+        );
+        assert!(
+            !drags(30, horizontal, 400.0, 20.0),
+            "and the horizontal bar really does hold a strip: a tab at the \
+             middle of it is not the window's"
         );
     }
 
@@ -26595,31 +26616,37 @@ mod tests {",
     /// (user report with screenshot, ruling 2026-09-09).
     ///
     /// The report was a window with a dozen tabs open: the strip had run all the
-    /// way to the gear and [`title_bar_app_run_right_px`] said so, so the
-    /// `WM_NCHITTEST` bridge answered `HTCLIENT` for every pixel of the top edge
-    /// and there was nothing left to take hold of. Neither dragging the window
-    /// nor double-clicking to maximise had a place to happen. It did not even
-    /// take a scroll to get there: whenever the tabs are between their two
-    /// clamps the run comes out exactly as long as the space it was handed, so a
-    /// strip that merely *fitted* already ended on the gear's own left edge.
+    /// way to the gear and the number the `WM_NCHITTEST` bridge was given said
+    /// so, so the frame answered `HTCLIENT` for every pixel of the top edge and
+    /// there was nothing left to take hold of. Neither dragging the window nor
+    /// double-clicking to maximise had a place to happen. It did not even take a
+    /// scroll to get there: whenever the tabs are between their two clamps the
+    /// run comes out exactly as long as the space it was handed, so a strip that
+    /// merely *fitted* already ended on the gear's own left edge.
     ///
     /// The ruling is a band of [`WINDOW_TITLE_BAR_DRAG_RESERVE_LOGICAL_PX`] that
     /// the strip never takes, and three things follow from it, asserted here:
     ///
-    /// * the app's run ends at least that far short of the gear, whatever the
-    ///   strip is wearing, and Win32 hears `HTCAPTION` across the whole band;
-    /// * the strip's own viewport ends on the same number rather than near it —
-    ///   [`title_bar_app_run_right_px`] is read *off* the strip, so the picture
-    ///   and the bridge cannot disagree about where the band starts;
+    /// * the strip's own viewport ends at least that far short of the gear,
+    ///   whatever the strip is wearing, and Win32 hears `HTCAPTION` across the
+    ///   whole band;
+    /// * every box the strip puts in the bar is cropped to that viewport, so the
+    ///   picture and the bridge cannot disagree about where the band starts;
     /// * the band is bought out of the run before the tabs are shared out, so
     ///   the tabs walk down their width tiers first and the strip begins to
     ///   scroll only once they are on their floor. A bar wider by exactly the
     ///   reserve is the same strip the old code drew, which is how "the tabs pay
     ///   for it in width, not in scroll" is said without naming a tier.
     ///
+    /// **The bridge is given the boxes since the owner's ruling of 2026-09-13**
+    /// (§13.11 ⑥), so this asks it the way the window asks it — with the list
+    /// `refresh_chrome` hands it. The reserve is still what makes the handle a
+    /// *band* rather than a seam: without it the only handles left on a crowded
+    /// bar would be the gaps between the tabs.
+    ///
     /// Red gate before the fix: with twelve and with thirty tabs the run ended
-    /// on the gear itself — `the app's run stops short of the gear: left 776,
-    /// run 776` — and the reserve's own pixels answered `Client`.
+    /// on the gear itself — `the strip stops short of the gear: left 776, run
+    /// 776` — and the reserve's own pixels answered `Client`.
     #[test]
     fn a_full_tab_strip_still_leaves_the_window_a_handle_to_drag_by() {
         use bt_platform::{CustomFrameHit, CustomFrameMetrics, custom_frame_hit_test};
@@ -26646,16 +26673,22 @@ mod tests {",
         );
         for tabs in [12_usize, 16, 30] {
             let geometry = tab_strip_geometry(width, scale, FOLIO_BAR, &resting(tabs), 0, 0.0);
-            let run_right = title_bar_app_run_right_px(width, scale, FOLIO_BAR, tabs, rail);
-            assert_eq!(
-                run_right,
-                geometry.viewport[1].ceil() as i32,
-                "the number the bridge is given is the strip's own right edge \
-                 with {tabs} tabs, not a second opinion about it"
+            let run_right = geometry.viewport[1].ceil() as i32;
+            let app_boxes: Vec<[i32; 4]> =
+                title_bar_folio_boxes(width, scale, FOLIO_BAR, tabs, 0.0, rail, false)
+                    .into_iter()
+                    .map(|rect| rect.map(|edge| edge.ceil() as i32))
+                    .collect();
+            assert!(
+                app_boxes
+                    .iter()
+                    .all(|rect| rect[2] <= run_right || rect[0] >= gear_left as i32),
+                "every box the strip puts in the bar is cropped to its own \
+                 viewport with {tabs} tabs — only the caption run stands past it"
             );
             assert!(
                 run_right as f32 <= gear_left - reserve,
-                "the app's run stops short of the gear: left {gear_left}, run \
+                "the strip stops short of the gear: left {gear_left}, run \
                  {run_right}, with {tabs} tabs"
             );
 
@@ -26663,9 +26696,7 @@ mod tests {",
                 width: width as i32,
                 height: 700,
                 title_bar_height: 40,
-                tab_strip_right_px: run_right,
-                caption_button_width: 46,
-                caption_button_count: 4,
+                app_boxes: &app_boxes,
                 resize_border: 8,
                 resizable: true,
             };
@@ -26700,12 +26731,11 @@ mod tests {",
         let roomy = tab_strip_geometry(1920.0, scale, FOLIO_BAR, &resting(2), 0, 0.0);
         assert_eq!(roomy.max_scroll, 0.0);
         assert_eq!(
-            title_bar_app_run_right_px(1920.0, scale, FOLIO_BAR, 2, rail),
-            470,
+            roomy.viewport[1].min(roomy.new_tab_menu[2]),
+            470.0,
             "two tabs on a wide bar end their run exactly where they did before \
-             the reserve existed"
+             the reserve existed, and that is the `˅`'s edge"
         );
-        assert_eq!(roomy.new_tab_menu[2], 470.0, "and that is the `˅`'s edge");
 
         // The tabs pay in width before they pay in scroll: a bar wider by the
         // reserve draws the strip the old arithmetic drew, and five tabs on this
@@ -26735,12 +26765,22 @@ mod tests {",
             mode: RailMode::Expanded,
             ..RailState::default()
         };
+        let toggle = panel_toggle_box(scale, FOLIO_BAR, vertical).expect("the sidebar's toggle");
         for tabs in [1_usize, 12, 30] {
-            assert_eq!(
-                title_bar_app_run_right_px(width, scale, FOLIO_BAR, tabs, vertical),
-                42,
+            assert!(
+                title_bar_drag_point(
+                    width,
+                    scale,
+                    FOLIO_BAR,
+                    tabs,
+                    0.0,
+                    vertical,
+                    false,
+                    f64::from(toggle[2] + 1.0),
+                    20.0,
+                ),
                 "the tabs are down the side, so {tabs} of them still buy the app \
-                 nothing but its toggle"
+                 nothing but its toggle and the bar beside it is the window's"
             );
         }
     }
@@ -27550,6 +27590,174 @@ mod tests {",
         }
     }
 
+    /// RED — **on the header, every pixel that is not one of Folio's own boxes
+    /// is a window-drag handle** (owner ruling 2026-09-13, §13.11 ⑥).
+    ///
+    /// The ruling was made on the band §13.48 ③ left behind: the gear stands in
+    /// a 28-point square inside the 46 the strip still reserves, so sixteen
+    /// points of bar in front of it and six behind it answered nothing at all —
+    /// neither the gear's, nor the window's. §13.19 ⑤ had already named the same
+    /// gap on the other axis (the five points of strip above and below a pill)
+    /// and left it for a ruling rather than a patch. This is that ruling, and it
+    /// is one sentence for both axes and both hosts.
+    ///
+    /// What the sentence costs is asserted here in both directions: the strips
+    /// of band beside and around a control drag, and no box ever does. The boxes
+    /// are asked of the same functions that lay them out, so a control that
+    /// moves takes its own answer with it.
+    ///
+    /// MUTATION: answer the handle from a pair of edges again — after the app's
+    /// run, before the caption run — and the two pixels beside the gear name it
+    /// on the mac geometry, the pixel above a pill names it on both, and the
+    /// band under the sidebar's toggle names it in all three vertical layouts.
+    /// Leave a box off the list and its own centre becomes a place the window
+    /// can be picked up by, which the second half of this test names.
+    #[test]
+    fn the_band_beside_a_box_drags_and_the_box_itself_never_does() {
+        let width = 1600.0_f32;
+        for scale in [1.0_f32, 1.5, 2.0] {
+            for chrome in [FOLIO_BAR, mac_bar(scale)] {
+                let band = window_band_px(scale, chrome);
+                let middle = (band / 2.0).floor();
+                let drags = |tabs, rail, x: f32, y: f32| {
+                    title_bar_drag_point(
+                        width,
+                        scale,
+                        chrome,
+                        tabs,
+                        0.0,
+                        rail,
+                        false,
+                        f64::from(x),
+                        f64::from(y),
+                    )
+                };
+
+                // ① The band beside the gear — the strip of bar this ruling was
+                // made about. On the window whose whole bar is Folio's the gear
+                // is a slot in a run and the band in front of it is the drag
+                // reserve; on the window whose buttons are the platform's it is
+                // a square with air on both sides. Both are the window's.
+                let run = window_caption_boxes(width, scale, chrome, false);
+                let gear = run[0].1;
+                assert!(
+                    drags(3, RailState::default(), gear[0] - 1.0, middle),
+                    "the pixel in front of the gear's box ({scale}x, lights={})",
+                    chrome.strip_left_px
+                );
+                assert!(
+                    !drags(3, RailState::default(), (gear[0] + gear[2]) / 2.0, middle),
+                    "and the gear itself never drags ({scale}x)"
+                );
+                // Behind the run, where there is anything behind it: the window
+                // whose caption run is wall-to-wall buttons ends it on its own
+                // edge, and the window that carries one square does not.
+                let last = run.last().expect("a caption run has a box in it").1;
+                if last[2] < width {
+                    assert!(
+                        drags(3, RailState::default(), last[2] + 1.0, middle),
+                        "the points behind the last box are the window's too, up \
+                         to the window's own edge ({scale}x)"
+                    );
+                }
+
+                // ② A tab, the `+` and the `˅` are boxes; the air above them and
+                // between them is not. This is §13.19 ⑤'s other axis, ruled.
+                let strip = tab_strip_geometry(width, scale, chrome, &resting(3), 0, 0.0);
+                let first = strip.tabs[0].body;
+                assert!(
+                    !drags(
+                        3,
+                        RailState::default(),
+                        (first[0] + first[2]) / 2.0,
+                        (first[1] + first[3]) / 2.0
+                    ),
+                    "a tab is the tab's ({scale}x)"
+                );
+                assert!(
+                    drags(3, RailState::default(), (first[0] + first[2]) / 2.0, 0.0),
+                    "the strip above it is the window's ({scale}x)"
+                );
+                assert!(
+                    drags(
+                        3,
+                        RailState::default(),
+                        (first[2] + strip.tabs[1].body[0]) / 2.0,
+                        (first[1] + first[3]) / 2.0
+                    ),
+                    "and so is the air between two tabs ({scale}x)"
+                );
+                for (what, rect) in [("the `+`", strip.new_tab), ("the `˅`", strip.new_tab_menu)] {
+                    assert!(
+                        !drags(
+                            3,
+                            RailState::default(),
+                            (rect[0] + rect[2]) / 2.0,
+                            (rect[1] + rect[3]) / 2.0
+                        ),
+                        "{what} is a box and boxes do not drag ({scale}x)"
+                    );
+                }
+
+                // ③ The vertical layouts: the toggle is the only box at the head
+                // of the bar, and the name beside it is inside `.drag`.
+                for rail in [
+                    vertical(RailMode::Expanded),
+                    vertical(RailMode::Icons),
+                    cards(),
+                ] {
+                    match panel_toggle_box(scale, chrome, rail) {
+                        Some(toggle) => {
+                            assert!(
+                                !drags(
+                                    3,
+                                    rail,
+                                    (toggle[0] + toggle[2]) / 2.0,
+                                    (toggle[1] + toggle[3]) / 2.0
+                                ),
+                                "the toggle is a box ({scale}x)"
+                            );
+                            assert!(
+                                drags(3, rail, toggle[2] + 1.0, middle),
+                                "the band beside it is the window's ({scale}x)"
+                            );
+                            assert!(
+                                drags(3, rail, (toggle[0] + toggle[2]) / 2.0, band - 1.0),
+                                "and so is the band under it, which the toggle is \
+                                 too short to reach ({scale}x)"
+                            );
+                        }
+                        None => assert!(
+                            drags(3, rail, (chrome.strip_left_px as f32) + 1.0, middle),
+                            "a bar with no toggle in it drags from its own head \
+                             ({scale}x)"
+                        ),
+                    }
+                }
+            }
+
+            // ④ And the boxes the Windows window draws that the mac window does
+            // not: minimise, maximise and close are Folio's own up there, so
+            // none of the three is a handle.
+            for (target, rect) in window_caption_boxes(width, scale, FOLIO_BAR, false) {
+                assert!(
+                    !title_bar_drag_point(
+                        width,
+                        scale,
+                        FOLIO_BAR,
+                        3,
+                        0.0,
+                        RailState::default(),
+                        false,
+                        f64::from((rect[0] + rect[2]) / 2.0),
+                        f64::from((rect[1] + rect[3]) / 2.0),
+                    ),
+                    "{target:?} is one of this window's own buttons ({scale}x)"
+                );
+            }
+        }
+    }
+
     /// RED — **when the platform takes its own buttons off the window, the
     /// lead-in goes with them** (owner ruling 2026-09-13, §13.48).
     ///
@@ -27737,6 +27945,7 @@ mod tests {",
                         scale,
                         mac,
                         2,
+                        0.0,
                         rail,
                         false,
                         f64::from(x),
@@ -27744,8 +27953,8 @@ mod tests {",
                     )
                 };
                 let lights = mac.strip_left_px as f32;
-                let gear = width - WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale;
-                let middle = (lights + gear) / 2.0;
+                let gear = window_caption_boxes(width, scale, mac, false)[0].1;
+                let middle = (lights + gear[0]) / 2.0;
                 assert!(
                     handle(middle, header / 2.0),
                     "the header's own empty part ({scale}x)"
@@ -27758,7 +27967,22 @@ mod tests {",
                     !handle(lights - 1.0, header / 2.0),
                     "nor is the platform's own run of buttons ({scale}x)"
                 );
-                assert!(!handle(width - 1.0, header / 2.0), "nor the gear's own box");
+                assert!(
+                    !handle((gear[0] + gear[2]) / 2.0, header / 2.0),
+                    "nor the gear's own box"
+                );
+                // **And the band the gear's box does not fill is the window's**
+                // (owner ruling 2026-09-13, §13.11 ⑥): the 28-point square
+                // stands inside the 46 the strip reserves, and both the strip of
+                // bar in front of it and the points behind it drag.
+                assert!(
+                    handle(gear[0] - 1.0, header / 2.0),
+                    "the band in front of the gear's box ({scale}x)"
+                );
+                assert!(
+                    handle(gear[2] + 1.0, header / 2.0),
+                    "and the band behind it, up to the window's own edge ({scale}x)"
+                );
             }
         }
     }
@@ -27828,16 +28052,16 @@ mod tests {",
         }
     }
 
-    /// RED — **the empty part of the strip is the window's drag region, and
-    /// exactly that part** (M3-3, owner ruling 2026-09-12).
+    /// RED — **the part of the strip that is none of Folio's boxes is the
+    /// window's drag region, and exactly that part** (M3-3, owner ruling
+    /// 2026-09-12, widened 2026-09-13 — §13.11 ⑥).
     ///
     /// The rule is the one Windows' frame already answers with `HTCAPTION`,
-    /// written where macOS can reach it: between where Folio's own content stops
-    /// and where the gear's run begins, for the height of the bar. This walks
-    /// the whole bar three pixels at a time and holds the predicate to the hit
-    /// test — every pixel the window may be picked up by is a pixel no control
-    /// of Folio's answers for, and every pixel a control answers for is not the
-    /// window's.
+    /// written where macOS can reach it: on the bar, and inside none of the
+    /// boxes this window draws there. This walks the whole bar three pixels at a
+    /// time and holds the predicate to the hit test — every pixel the window may
+    /// be picked up by is a pixel no control of Folio's answers for, and every
+    /// pixel a control answers for is not the window's.
     ///
     /// The traffic lights' own band is the one exception and it is stated: it is
     /// neither Folio's nor the window's to drag by, because AppKit's buttons
@@ -27845,8 +28069,8 @@ mod tests {",
     /// button's rectangle is a button that cannot be pressed.
     ///
     /// MUTATION: answer `true` for the whole bar and the caption run names it;
-    /// answer from the strip's right edge alone and the vertical layout names
-    /// it; drop the leading band and the first pixel does.
+    /// answer from the strip's right edge alone and the gaps between the tabs
+    /// name it; drop the leading band and the first pixel does.
     #[test]
     fn the_strips_empty_part_is_the_drag_region() {
         use bt_platform::{CustomFrameHit, CustomFrameMetrics, custom_frame_hit_test};
@@ -27872,18 +28096,19 @@ mod tests {",
                         // one rule rather than about two heights.
                         let title = window_band_px(scale, chrome);
                         // The other platform's own answer about the same bar,
-                        // built from the same two numbers its frame is given:
-                        // where the app's run ends, and how many slots the
-                        // caption run holds. Two implementations, one rule.
+                        // built from the very list `refresh_chrome` hands its
+                        // frame — the boxes this window draws up there, on whole
+                        // pixels. Two implementations, one rule, one list.
+                        let app_boxes: Vec<[i32; 4]> =
+                            title_bar_folio_boxes(width, scale, chrome, tabs, 0.0, rail, false)
+                                .into_iter()
+                                .map(|rect| rect.map(|edge| edge.ceil() as i32))
+                                .collect();
                         let frame = CustomFrameMetrics {
                             width: width as i32,
                             height: 700,
                             title_bar_height: title as i32,
-                            tab_strip_right_px: title_bar_app_run_right_px(
-                                width, scale, chrome, tabs, rail,
-                            ),
-                            caption_button_width: (WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale) as i32,
-                            caption_button_count: caption_targets(chrome, false).len() as i32,
+                            app_boxes: &app_boxes,
                             resize_border: 0,
                             resizable: false,
                         };
@@ -27893,7 +28118,7 @@ mod tests {",
                             let y = (title / 2.0) as i32;
                             let (fx, fy) = (f64::from(x), f64::from(y));
                             let dragging = title_bar_drag_point(
-                                width, scale, chrome, tabs, rail, false, fx, fy,
+                                width, scale, chrome, tabs, 0.0, rail, false, fx, fy,
                             );
                             // After the platform's own run of buttons the two
                             // are the same rule; inside it this window has
@@ -27966,6 +28191,7 @@ mod tests {",
                             scale,
                             chrome,
                             3,
+                            0.0,
                             RailState::default(),
                             false,
                             f64::from(width / 2.0),
@@ -28086,20 +28312,20 @@ mod tests {",
     /// * it is **not** the `⌄` claiming the space. [`hit_tab_chrome`] answers
     ///   `None` for every pixel of the band, so nothing in the strip ever
     ///   reports [`ChromeTarget::NewTabMenu`] for a point out there;
-    /// * it is that the band is **Win32's**. [`title_bar_app_run_right_px`] ends
-    ///   the app's run at the `⌄`'s right edge and
-    ///   `bt_platform::custom_frame_hit_test` turns everything from there to the
-    ///   caption run into `HTCAPTION` — a region winit reports no `CursorMoved`
-    ///   for at all, because its Windows backend handles `WM_MOUSEMOVE` and
-    ///   `WM_MOUSELEAVE` and not `WM_NCMOUSEMOVE`.
+    /// * it is that the band is **Win32's**. The `⌄`'s own box is the last thing
+    ///   the app puts in that bar, and `bt_platform::custom_frame_hit_test`
+    ///   turns everything from its right edge to the caption run into
+    ///   `HTCAPTION` — a region winit reports no `CursorMoved` for at all,
+    ///   because its Windows backend handles `WM_MOUSEMOVE` and `WM_MOUSELEAVE`
+    ///   and not `WM_NCMOUSEMOVE`.
     ///
     /// So a hand resting in the band produces exactly one `CursorLeft` and then
     /// silence, and "the pointer is away" can only reach the `⌄` clocks through
     /// the leave door — which is what `Runtime::pointer_left` now says.
     ///
     /// Red gate: widen `new_tab_menu` to the caption run and the first
-    /// assertion fails; hand `title_bar_app_run_right_px` the window's width
-    /// and the second does.
+    /// assertion fails; hand the frame a box that covers the band and the
+    /// second does.
     #[test]
     fn the_title_bar_band_right_of_the_chevron_is_win32s_and_not_the_chevrons() {
         use bt_platform::{CustomFrameHit, CustomFrameMetrics, custom_frame_hit_test};
@@ -28107,20 +28333,24 @@ mod tests {",
         let rail = RailState::default();
         let trailers = resting(tabs);
         let chevron = tab_strip_geometry(width, scale, FOLIO_BAR, &trailers, 0, 0.0).new_tab_menu;
-        let run_right = title_bar_app_run_right_px(width, scale, FOLIO_BAR, tabs, rail);
-        assert_eq!(
-            run_right,
-            chevron[2].ceil() as i32,
-            "the app's run in the bar ends at the `⌄`, which is the whole of \
-             what the WM_NCHITTEST bridge is told"
+        let app_boxes: Vec<[i32; 4]> =
+            title_bar_folio_boxes(width, scale, FOLIO_BAR, tabs, 0.0, rail, false)
+                .into_iter()
+                .map(|rect| rect.map(|edge| edge.ceil() as i32))
+                .collect();
+        let run_right = chevron[2].ceil() as i32;
+        assert!(
+            app_boxes
+                .iter()
+                .all(|rect| rect[2] <= run_right || rect[0] >= 1920 - 4 * 46),
+            "the `⌄` is the last thing the app puts in this bar before the \
+             caption run, which is what leaves the band between them empty"
         );
         let frame = CustomFrameMetrics {
             width: width as i32,
             height: 1080,
             title_bar_height: 40,
-            tab_strip_right_px: run_right,
-            caption_button_width: 46,
-            caption_button_count: 4,
+            app_boxes: &app_boxes,
             resize_border: 8,
             resizable: true,
         };
@@ -28149,7 +28379,7 @@ mod tests {",
         );
 
         // And the band the report is about — the whole of it, every 17th pixel.
-        let buttons_left = frame.width - frame.caption_button_width * frame.caption_button_count;
+        let buttons_left = window_caption_boxes(width, scale, FOLIO_BAR, false)[0].1[0] as i32;
         assert!(buttons_left > run_right, "there is a band to test");
         for x in (run_right..buttons_left).step_by(17) {
             assert_eq!(
@@ -28338,16 +28568,31 @@ mod tests {",
     fn tab_count_layout_changes_publish_a_new_strip_right_edge() {
         for scale in [1.0, 1.25, 1.5, 2.0] {
             let width = 960.0 * scale;
-            let one = tab_strip_right_px(width, scale, FOLIO_BAR, 1);
-            let two = tab_strip_right_px(width, scale, FOLIO_BAR, 2);
+            // The `˅` is the last box the strip puts in the bar, so its trailing
+            // edge is where the app's own run ends — the number this window used
+            // to publish to its frame, now read off the list it publishes.
+            let menu = |tabs| {
+                *title_bar_folio_boxes(
+                    width,
+                    scale,
+                    FOLIO_BAR,
+                    tabs,
+                    0.0,
+                    RailState::default(),
+                    false,
+                )
+                .last()
+                .expect("a bar with a strip in it has a `˅`")
+            };
+            let one = menu(1);
+            let two = menu(2);
             assert!(
-                two > one,
+                two[2] > one[2],
                 "adding a tab must move the edge at scale {scale}"
             );
             assert_eq!(
-                one,
-                tab_strip_geometry(width, scale, FOLIO_BAR, &resting(1), 0, 0.0).new_tab_menu[2]
-                    .ceil() as i32,
+                one[2],
+                tab_strip_geometry(width, scale, FOLIO_BAR, &resting(1), 0, 0.0).new_tab_menu[2],
                 "the published edge includes both end buttons at scale {scale}"
             );
         }
@@ -31073,9 +31318,9 @@ mod tests {",
     }
 
     /// PIN — A7/A8: a scrolling strip leaves no slack inside its own run, so the
-    /// boundary the platform's hit-test uses is that run's end and not the `˅`'s
-    /// edge — reporting the button under scroll would hand the app's own tabs to
-    /// the window drag handler.
+    /// last box the app puts in the bar ends on the run's own crop and not past
+    /// it — a `˅` reported from out there would hand the window's drag handler a
+    /// button, and a tab reported from out there would hand it the app's tabs.
     ///
     /// What lies beyond the run is the 2026-09-09 ruling's business and is
     /// asserted in `a_full_tab_strip_still_leaves_the_window_a_handle_to_drag_by`:
@@ -31084,19 +31329,37 @@ mod tests {",
     #[test]
     fn a_scrolling_strip_owns_its_whole_run_and_no_more() {
         let (scale, width) = (1.0_f32, 960.0_f32);
+        let strip_boxes = |tabs| {
+            title_bar_folio_boxes(
+                width,
+                scale,
+                FOLIO_BAR,
+                tabs,
+                0.0,
+                RailState::default(),
+                false,
+            )
+        };
+        let last_edge = |tabs| {
+            strip_boxes(tabs)
+                .iter()
+                .map(|rect| rect[2])
+                .filter(|edge| *edge <= caption_run_left(width, scale, FOLIO_BAR, false))
+                .fold(0.0_f32, f32::max)
+        };
         let roomy = tab_strip_geometry(width, scale, FOLIO_BAR, &resting(2), 0, 0.0);
         assert_eq!(roomy.max_scroll, 0.0);
         assert_eq!(
-            tab_strip_right_px(width, scale, FOLIO_BAR, 2),
-            roomy.new_tab_menu[2].ceil() as i32,
+            last_edge(2),
+            roomy.new_tab_menu[2],
             "with room to spare the app owns up to the `˅`, and the rest is drag"
         );
         let full = tab_strip_geometry(width, scale, FOLIO_BAR, &resting(30), 0, 0.0);
         assert!(full.max_scroll > 0.0);
         assert_eq!(
-            tab_strip_right_px(width, scale, FOLIO_BAR, 30),
-            full.viewport[1].ceil() as i32,
-            "a scrolling strip owns its whole run"
+            last_edge(30),
+            full.viewport[1],
+            "a scrolling strip owns its whole run, cropped to it and no further"
         );
     }
 
