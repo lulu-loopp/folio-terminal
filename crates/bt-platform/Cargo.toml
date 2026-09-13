@@ -189,6 +189,22 @@ name = "macos_window_restore"
 path = "tests/macos_window_restore.rs"
 harness = false
 
+# **The target that asks where a press goes** (T-MAC-POINTER, `docs/DESIGN.md`
+# §13.39), on `macos_sheet`'s gate: what it needs is a window server and a
+# window to put a question to, not a bundle identifier. It is a file of its own
+# rather than more cases in `macos_window_restore.rs` because the two ask about
+# different halves of the same window — that one about the rectangle AppKit
+# constrains, this one about the **view AppKit routes a press to** inside it.
+#
+# One of its three cases is arithmetic over a window list written down in the
+# file and runs on every platform, always; the other two open a window and are
+# `BT_MAC_GUI`'s. `harness = false` for the reason above: AppKit is the main
+# thread's and libtest does not hand a case that thread.
+[[test]]
+name = "macos_pointer_route"
+path = "tests/macos_pointer_route.rs"
+harness = false
+
 # **M2-2 adds no package either**, and it is worth saying because it looks like
 # it should: the process door (`src/handoff.rs`'s macOS arm) is `NSWorkspace`,
 # which is already on, and the trash (`src/macos_files.rs`) is `NSFileManager`,
