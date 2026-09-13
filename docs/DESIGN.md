@@ -9129,6 +9129,24 @@ Windows 还是原来那一行:`C: › Users › …`,盘符在先,因为一个�
 
 agent 安装那几行(`Claude Code hooks` 和它的两个邻居)读的是 `attention_hooks::config_dir`,它只问 `%USERPROFILE%`,所以在一台 Mac 上它们报告一个它们找不到的文件——那几行**不**隐藏,因为它们的主题是 `~/.claude/settings.json`,而那台机器有这个东西;缺的是那次发现,而 `Capability::AgentDiscovery` 已经说了那归哪张票。`Ctrl+click` 在两个平台上都把一个链接交给系统,而一个 Mac 读者的 `⌘` 是 M1-7 给别的每一个应用动词的那个和弦。而被召唤出来的那个终端归 M4-8:`hotkey::register` 的非 Windows 臂带着 `the global summon key is not on this platform yet` 拒绝,所以那整一页描述的是一扇 Mac 召不出来的窗。它的中文不再点 Windows 的名,而那是本票欠它的全部。
 
+**⑥ T-MAC-HIDE-ACRYLIC (owner ruling 2026-09-13): a row about a thing the platform has not got is absent, not explained — and `Acrylic` had been filed under the other rule.** The owner opened `Settings ▸ 外观` on the built Mac and photographed one row: **亚克力**, greyed whole, `Folio 在 macOS 上不画这种模糊。` under it, its picker held at `关`. The sentence is ② 's own work — ② gave this entry a Mac column on the reading that the two machines are grey for two different reasons and that the reason is what the reader came for. The ruling is that it is not: *if the Mac has not got the feature, the row should not be there at all.* So on macOS the row is **not rendered** — not greyed, not explained, absent — the page's rows close up over it, and nothing else on that page changes.
+
+**It is one more entry in ① 's list and not a second mechanism**, which is the whole of the implementation: `Capability::WindowBackdrop` says which platforms have the material `bt_platform::set_system_backdrop` asks for, `SettingsRow::needs` files `Acrylic` under it, and `visible_rows_for` filters the list once, where it already filtered four. The facility is Windows-only **in this build** and the entry says so in those words: macOS has `NSVisualEffectView` and Folio does not draw it yet (M1-3), and the day that arm lands this one gains macOS and the row comes back with nothing else to change. That is the difference between this entry and the other four, and it is written down rather than left to be re-derived.
+
+**The two questions stay apart, and they are asked in this order.** `needs()` is about the *platform*: this build has no backdrop door off Windows, so there is no row. `available()` is about the *machine*: a Windows too old to know what a backdrop is keeps the row, greyed, with the reason on its own line — `a_row_this_machine_cannot_honour_is_greyed_whole_and_says_why` is untouched and still passes on both of its rows. A reader who was told about the blur and then found the row dead is the reader `available()` exists for; a reader who could never have been told is the reader this clause is about.
+
+**The setting itself is not touched.** `acrylic` stays in `bt_persist`'s schema and in `settings.json`, which the owner's machines share through sync — a Windows Folio reading the file the Mac wrote must find the key it wrote, and a page that omits a row is not a page that edits the file. What the Mac drops is the row, and only the row. `Reset to defaults` follows it without being told: `reset_advanced_group` walks the rows the *page* is holding (`SettingsContent::advanced_rows`), so on a Mac it now restores seven values instead of eight and leaves the blur alone — which is the same sentence as the paragraph above, said about a verb rather than about a row, and it is what keeps one machine from writing a preference back for the other.
+
+**The explanatory string went with it.** `DescAcrylicUnavailable` has one column again (`pick`, not `pick_platform`) and reads the Windows sentence, because the only reader it has left is on a Windows with no backdrop; the entry joins `Text::WINDOWS_ONLY_SURFACES`, which is `no_string_a_mac_reader_meets_names_a_windows_program` 's exemption list, so the word `Windows` in it is the entry being correct rather than a Windows word on a Mac screen. Coming **off** that list is the event it exists for: the day the row returns to a Mac's page, the gate starts asking what that page says.
+
+**The sweep, and it found no second row.** Every `pick_platform` entry and every `…Unavailable` sentence in `i18n.rs` was read against this rule: `DescAcrylicUnavailable` was the only one that told a Mac reader a row could not act. The rows that differ by platform differ in *wording* — `Opening Folio again` names the Dock, Spotlight and the Applications folder instead of the taskbar; the summon key's Chinese no longer says which system the chord is registered with — and each of them can still act. `DescBackgroundOpacityUnavailable` is a fact about the surface this window was given and not about the platform, so it stays where it is. ⑤ 's four accounted-for rows are unchanged: the agent rows are about `~/.claude/settings.json`, which a Mac has.
+
+**Pins.** `a_mac_is_not_offered_a_row_about_a_facility_it_has_not_got` names four rows now instead of three, and still asks a Windows workstation what a Mac's page holds. `the_page_a_mac_reads_closes_up_over_the_blur_row` is the other half and is new: it lays the Appearance page out twice, for `Windows` and for `MacOs`, and asserts that the two pages hold the same rows less one, that nothing above the blur row moved, that everything below it came up by exactly that row's height, that `Always on top` begins where the blur row began, that within a group every band's foot is the next band's head — and that `Reset to defaults` came up with the group and still stands under it. Distances are measured from the scrollport's own top edge, because the two layouts are two dialogs and the frame's height is §7.1.6c-5's business. `no_sentence_a_mac_reads_needs_a_fourth_line` measures four sentences instead of five: the fifth is not a sentence a Mac reads any more.
+
+**A CHANGELOG line, unlike §13.47's.** That ticket's Windows behaviour was byte for byte what it had been and the absence of an entry was itself the pin. Here a Mac reader opens a page and finds one row fewer than yesterday, which is exactly what that file is for; Windows is the platform that reads no difference.
+
+*(本节英文,待中文文案改写。)*
+
 ### 13.33 T-MAC-LIVE: 第一次真机验收的四桩——⌥+滚轮、标记栏刷新、保存后的弹窗、访达只带一扇窗出来(`crates/bt-app/src/{main,input,seats}.rs`、`crates/bt-platform/src/{handoff,lib}.rs`)
 
 用户在一个 `main` 的 Mac 构建上跑的第一趟验收(2026-09-12,`~/folio-port/Folio-next.app`,`a9a1b3ca`)回来四句话。其中两句是缺陷,在这里修掉。一句是这个仓库画的恰好就是用户当天上午裁的东西,而拿来对照的那个 Windows 构建早于那条裁决。还有一句根本复现不出来,而说明这一点的那次测量,和真复现出来的那两桩一样值钱。
@@ -10142,6 +10160,39 @@ BT_PERSIST session.json fell back to defaults: ParseError("unknown variant `Url`
 
 **⑨ 严格模型是所有者的参照,没有被碰。** `mock-mac-strict.html`——所有者的文件,不是本仓库的;`theme.rs` 里按编号引用它,它在树外面——仍然把齿轮画在角落的 46 宽标题栏槽里,仍然把三个红绿灯放在 macOS 自己的 9 / 32 / 55,仍然给每种纵向布局 32 点头部,仍然把 `+`/`˅` 对底部锚定。四处都是所有者在**看完构建好的窗口之后**裁掉的东西,而参照就是干这个的:它是所有者对被要求的东西的陈述,不是对后来决定了什么的记录,不归本节改写。**构建恰好在那四处、且仅在那四处与它不同**,本段就是那份清单。
 
+**⑩ T-MAC-GEAR-HOVER: the gear's hover wash is a rounded square at the window's own corner radius, and the box grows to 34 to carry it** (owner ruling 2026-09-13, from a four-way mock).
+
+⑧ above named the hover wash as the one thing in ③ that was not in the ruling's own words — a `ControlPill` at the strip's 6 rather than the run's square slot, put there by the argument that every control inset in this bar wears the strip's pill — and said that one line from the owner overrules it. **This is that line.** The gear's wash is a **34 × 34 box, inset 3 from the top and 3 from the trailing edge, rounded at 12** (`MAC_WINDOW_CORNER_RADIUS_LOGICAL_PX`). R-MAC-CORNERS (`docs/plans/port/corners-2026-09-13.md`) measured the shipping window's corner at **12.1 points** on 2026-09-13, and 12 is that measurement with the tenth dropped, because a radius is drawn on whole physical pixels.
+
+**The owner's reason, and it is about this product rather than about macOS:** Folio has no circular controls of its own, and a control standing in a corner should share that corner's curvature. Two shapes were put up and turned down. A **circle** — rejected because it would be the only circular control in the window. **The window's radius on the old 28 box** — rejected because a 12 round inside a 28 square leaves four points of flat on each side and is not concentric with the arc behind it; the round has to be carried on a box the corner's own curvature fits.
+
+**Nothing about the ink moves, and the arithmetic is why:** `34 / 2 + 3 = 20`, which is ②'s mirror and ③'s `WINDOW_CAPTION_GEAR_INSET_LOGICAL_PX` exactly. The glyph, its 14, its ink, its verb and the update mark on its corner — which is placed off the *glyph* and not off the box — are all where ③ left them. What grew is the hit target, and it grew because **the wash must equal the hit target**: a wash wider than what answers the press is a control that lights up where it does not work. The two are one rectangle, the one `window_caption_boxes` returns, which is the derivation ⑧ already put the paint on.
+
+**The margin is what the arithmetic runs through, not the side.** The ruling states the box three ways — 34 square, 3 of margin, centre 20 — and on Folio's 40 band those are one statement. In device pixels at a fractional scale they stop being one: `34 × 1.5` is an odd 51 on an even 60-pixel band, and a box that cannot be centred on a whole physical pixel has left the mirror by half a pixel. So `window_caption_boxes` rounds the **margin** and lets the side be what the band has left (50 at 1.5×, not 51). `WINDOW_CAPTION_GEAR_MARGIN_LOGICAL_PX` is that 3, written down beside the 34 and asserted against it rather than assumed — `40 - 2 × 3 = 34` is a claim about two constants and it is checked.
+
+**Two radii, and they may not converge.** `MAC_WINDOW_CORNER_RADIUS_LOGICAL_PX` is a number about the *window*; `WINDOW_NEW_TAB_RADIUS_LOGICAL_PX` (6) is a number about the *strip*, and the `+`, the `˅`, the panel toggle and every other inset control keep it on this window too. The day macOS changes its corner exactly one of them moves. `the_windows_corner_and_the_strips_pill_are_two_radii` pins that, because the tidy-up that notices two radii doing "the same job" is the failure this section can see coming.
+
+**Windows is untouched and asked with the same capability read.** There is no new `cfg` and no fourth read of `buttons_are_the_platforms`: the box still comes from `window_caption_boxes`, and the paint still decides square-or-round by `rect[3] - rect[1] < title` — off the rectangle, not by asking the window a second time. On the window whose whole bar is Folio's the gear is the first slot of a 46 × 40 run under Windows 11's own corner, as tall as the bar, with the run's square wash, because abutting slots are what makes a run read as a run. `the_windows_gear_keeps_its_caption_slot_and_its_square_wash` states it.
+
+**What this supersedes.** ③'s "28 方块" and its `WINDOW_CAPTION_GEAR_BOX_LOGICAL_PX = WINDOW_NEW_TAB_BOX_LOGICAL_PX`; ⑧'s pill. §13.11 ⑥'s band arithmetic ("sixteen points in front, six behind") was the state of the bar on the day that ruling was made and is left as written: the drag handle is the complement of `title_bar_folio_boxes`, so a wider gear narrows the band by three points on each side with nothing to change — `the_band_beside_a_box_drags_and_the_box_itself_never_does` asks the boxes rather than naming a pixel, and passes as it stands. The 34 still sits inside the 46 the strip reserves (`34 + 3 = 37`), so `caption_run_left`, the drag reserve and `title_bar_app_run_right_px` answer what they answered before. ⑨'s strict model is still the owner's file and still draws the corner slot; this is the **fifth** place the build differs from it by a ruling taken after looking at the built window.
+**⑪ What the caption run costs the strip is asked of the caption run — and on this window that run is one slot, not four.** (owner report, 2026-09-13, on a running build.) The owner's window: 934 logical points wide, seven tabs, measured off a retina capture. Each pill came out about 74 points — under the 90 of `WINDOW_TAB_SQUEEZED_LOGICAL_PX`, so every tab was a bare profile mark with no word on it — while roughly 250 points of bar stood empty between the `˅` and the gear. On the window whose whole bar is Folio's this never happens: the tabs take the run, up to their 200 cap, and only what the cap leaves is empty band.
+
+**The term.** `tab_strip_geometry` opened with `let run_left = (width - 4.0 * caption).max(0.0)` (`crates/bt-app/src/seats.rs`): the *count* of the caption run a Windows window carries, written as a literal in the one place that never asks which run this window has. ③ above said the four-slot reservation was unchanged and meant it — the gear moved inside its slot and the slot stayed. What ③ did not say, because nothing had asked, is that the other three slots were never this window's to reserve: minimise, zoom and close are AppKit's, and they stand at the *other* end of this bar. So the strip was paying 138 points to buttons it does not draw, and the payment came out of the tabs.
+
+**The arithmetic, at the owner's 934 with seven tabs.** Before: `934 − 4×46 = 750`, less the 96-point drag reserve = 654, less the lights' 73 and the twelve after them, less the `+`/`˅` pair's 62, less six gaps of 1 = **501** shared seven ways = **71.57** each — Squeezed, no labels — with **246** points of band behind the `˅`. After: `934 − 46 = 888`, less 96 = 792, less 85, less 62, less 6 = **639** shared seven ways = **91.29** each — Tight, labels back — with **108** behind the `˅`, which is the drag reserve plus the twelve points of air the 28-point square leaves in front of itself inside the 46 (③; and since §13.11 ⑥ that band is the window's own drag handle).
+
+**The owner's estimate was 105, and the fourteen points between the two are the drag reserve.** The report subtracted the lead-in, the gear's slot and the pair, and expected the rest. `WINDOW_TITLE_BAR_DRAG_RESERVE_LOGICAL_PX` (user ruling 2026-09-09) takes 96 more, on every window and on this one for the same reason — a strip pressed flat against the gear is a window with nothing left to pick it up by. It is not touched here, so the share is 91.29 rather than 105. The tier is the one the report asked for, and the labels come back either way.
+
+**Asked of `caption_run_left`, not of a second count.** That function was already written off `caption_targets` — the list that decides which boxes a window's run carries — so it has answered `width − 46` on this window since M3-3, while the solver standing beside it said `width − 184`. The solver now calls it, with `summoned: false`, so the summoned terminal goes on reserving the resting run's width exactly as before; that trade is `caption_run_left`'s own note. **No fourth read of the capability**: the branch is `caption_targets`', ⑦'s three readers are still three, and `the_caption_run_is_decided_by_one_capability_read` counts what it counted.
+
+**The same literal stood in the paint, and went with it.** `window_chrome` cropped the program's name — the vertical layouts' resting content — at `width - 4 * 46` too, so on this window the name stopped 138 points early against three slots nothing draws. It reads the same function now, which is the whole of why there is one number.
+
+**Windows is byte-for-byte the window it was**, which is ⑧'s standard and is what makes this clause a fix rather than a ruling: `caption_targets(FOLIO_DRAWS_THE_WHOLE_BAR, false)` is four boxes, so `caption_run_left` answers `width − 184` there and every number under it — the strip's right wall, the drag band, the app title's crop — is the number it was. `the_windows_tab_strip_is_unchanged_by_the_pill` and `nothing_here_touches_the_window_whose_whole_bar_is_folios` stay green unamended.
+
+**One standing assertion was amended, and the amendment is the honest kind.** `the_mac_strip_starts_right_of_the_traffic_lights` showed that the lights come out of the tabs' width by comparing this window against a `FOLIO_DRAWS_THE_WHOLE_BAR` one. The two windows no longer reserve the same caption run, so that comparison would have changed two things at once and could not say which of them moved the tabs; it now runs against **the same window in full screen**, where only the lights differ. `the_mac_strip_is_given_every_point_the_one_gear_leaves` is the new pin, and it holds all three windows — this one, this one in full screen, and the Windows one — against one written-out solver.
+
+*(本节英文,待中文文案改写。)*
+
 ### 13.49 T-MAC-LOCALE: 系统没有的 locale 不编,但编码要说——Finder 起的 pane 不能留在 C 里(`crates/bt-platform/src/lib.rs`、`crates/bt-app/src/shell_integration.rs`)
 
 **取 13.49。** §13.47 是 T-MAC-FILEURI、§13.48 是 T-MAC-STRIP-ENDS,两节都已经合进
@@ -10403,5 +10454,295 @@ switched), above a separator and above AppKit's own rows; choosing `New tab`
 with Folio in the background brings the window the reader was last in forward and
 opens a tab in it; choosing either with **no** window open — Folio alive in the
 Dock after its last window closed — opens exactly one window and no more.
+
+*(本节英文,待中文文案改写。)*
+
+### 13.51 M4-8: 一把不在任何窗里的钥匙,在一台不肯把键盘借给谁的机器上——Carbon 认领和弦,交还前台的是应用而不是窗(`crates/bt-platform/src/{hotkey,lib}.rs`、`crates/bt-platform/Cargo.toml`、`crates/bt-app/src/{quake,shortcuts,webhost,main}.rs`、`crates/bt-platform/tests/macos_hotkey.rs`(新))
+
+**① What the owner saw.** On a Mac the Shortcuts page showed 唤出终端 with no key
+beside it, and there was no key a reader could record that would have worked.
+§7.54 is built entirely on `RegisterHotKey`; `bt-platform`'s macOS arm answered
+`HotkeyFault::Refused("the global summon key is not on this platform yet")`. So
+the quake terminal existed in Settings, in `session.json` and in the window list,
+and could not be summoned. The feature was there and unreachable.
+
+**② The mechanism, and the two that were refused.** macOS offers three ways to
+hear a key while another application has the keyboard, and only one of them is
+free:
+
+| | hears it unfocused | takes it out of the stream | asks the reader for |
+|---|---|---|---|
+| `CGEventTap` | yes | yes | **Input Monitoring** (TCC) |
+| `NSEvent.addGlobalMonitorForEvents` | yes | **no** — the chord also reaches whatever the reader is typing into | **Accessibility** (TCC) |
+| **`RegisterEventHotKey`** | yes | yes | **nothing** |
+
+The port plan's table (`docs/plans/port/macos-plan-2026-09-12.md`) reads "Global
+hotkey over `CGEventTap`", and X-5 gates M4-8 because a TCC grant is made against
+a code signature and an agent that re-signs on every build would be granting it
+again every time. **Both of those facts stop applying the moment the mechanism is
+Carbon**: there is no grant, so there is nothing for a signature to be attached
+to and nothing for X-5 to gate. `RegisterEventHotKey` is thirty years old, is
+what every launcher on the platform uses, and needs no permission at all — which
+is this port's own standing rule, that Folio asks for no TCC grant it can do
+without. The "in-app authorization action" and the "denied/revoked state" that
+row describes are therefore **not built**: they are states this mechanism cannot
+be in.
+
+Carbon has no binding in the `objc2` family, so its five entry points are
+declared by hand in `bt-platform`, the way `macos_watch` declares FSEvents' seven
+and `macos_impl` declares `CGDisplayCreateUUIDFromDisplayID`. **No package was
+added.** One feature was: `objc2-app-kit`'s `libc`, which is what makes the two
+`pid_t`-typed `NSRunningApplication` calls in ⑦ exist; `libc` 0.2 was already in
+this manifest and in the lock file.
+
+**③ The default is `` ⌃` `` , and neither half of the Windows default survives
+the crossing.** Windows ships `Win+\`` (§7.54b ①) for three reasons, all about
+other people's keyboards: the `Win` tier is what that desktop reserves for
+resident tools, Windows Terminal's own quake key is that chord, and a reader who
+has both already knows it. On a Mac:
+
+* **`` ⌘` `` is the system's.** It cycles the frontmost application's windows, in
+  every application, on every Mac. Taking it would break a key the reader uses in
+  every *other* program — the exact harm `Win+\`` was chosen to avoid.
+* **`` ⌥` `` is a dead key.** On ABC Extended, US International and several
+  European layouts it begins a grave accent, so a claim on it would eat the first
+  half of `à` desktop-wide.
+* **`` ⌃` `` is left, and it is left for a reason rather than by elimination.**
+  The shortcuts audit's rule (§7.1.5e 「A 案」, carried onto this platform by
+  M1-7) is that **Control belongs to the child on both desktops** and an
+  application verb wears `Cmd` — which makes Control the crowded column *inside a
+  window* and the empty one *outside* it. This chord is never read inside a
+  window: a registered claim is taken out of the input stream before any window,
+  ours included, is offered it. So it takes nothing from the shell, and macOS
+  itself binds no `` ⌃` ``.
+
+That is also why the two macOS dialect gates in `shortcuts.rs` now ask
+`Action::is_claimed_from_windows` rather than keeping a list of row ids.
+`every_mac_chord_wears_command_and_nothing_it_may_not` exists because a Control
+chord on that platform costs the child a byte; a chord no pane is ever handed
+costs it nothing, and the predicate is the sentence that says so. The row is
+still an ordinary row: the recorder moves it and *Restore all defaults* brings it
+back.
+
+**④ One field, two currencies.** `Hotkey::virtual_key` used to be a Win32 virtual
+key. It is now "the key code in the currency of the door that will claim it" — a
+`VK_*` where the claim is `RegisterHotKey`'s, a `kVK_*` where it is
+`RegisterEventHotKey`'s — and the one door that fills it is
+`bt_platform::hotkey::summon_key_code`, which takes a `SummonKey`: a character
+somebody typed, or a key with a name. That is the only description of a key that
+means the same thing on two machines, and `bt-app` is the side that has it.
+
+**It is one field rather than two because nothing above the module reads it.**
+`bt-app` fills it from that door and hands the whole value straight back to
+`register`; a struct with a field per platform would have one field that is
+always a lie.
+
+**`webhost::chord_virtual_key` was deliberately *not* made the same reader.** Its
+note said "one reader for both, because a summon claimed on a different virtual
+key than the one a page hands back would be two opinions about one chord", and on
+Windows that is still exactly what happens — both roads end at `VkKeyScanW` and
+the same named-key table, pinned by
+`every_named_key_a_page_can_claim_is_a_key_a_summon_can_claim`. What the
+separation admits is that they were never one question: a page's accelerator is
+answered by WebView2, which reports Win32 numbers on the one platform it runs on.
+Keeping them one function would have handed a page a key code from a different
+keyboard entirely.
+
+**⑤ The translation is a table, and that is the surprise.** The macOS arm is the
+*more* testable of the two. `RegisterEventHotKey` takes a key code that names a
+**position on the keyboard**, not a character — so there is no `VkKeyScanW` to
+call and no installed layout to ask, and `carbon_key_code` is a pure function
+compiled on every platform. Every assertion about the Mac translation in this
+workspace, this crate's and `bt-app`'s both, is made on the Windows host.
+
+**The limit is written down rather than discovered.** The character positions are
+the ANSI ones: `kVK_ANSI_A` is the key that types `a` on a US layout. A reader on
+a French AZERTY who records `⌃A` presses the key labelled `A`, which is the ANSI
+`Q` position, and this table claims the ANSI `A`. Three things bound how far that
+reaches: the shipped default is `` ⌃` `` and the backtick key sits in the same
+position on every Latin layout; the digits, the punctuation and the whole top row
+are positional everywhere, so only the letters can move; and a chord with no
+modifier is refused, so the worst case is a modified letter that summons nothing
+until it is recorded again — never a key taken away from another program. **The
+general answer, when a reader reports it, is `UCKeyTranslate`** against the
+current `TISInputSource`, which is the inverse question `VkKeyScanW` answers on
+the other side. It is not written now because it is a second unsafe surface, a
+sweep of the whole key-code space per call, and an answer that changes while the
+process is running; a table that is wrong for one layout and provable on every
+host is the better trade until somebody is actually holding the other keyboard.
+
+**⑥ Key code zero is a letter here.** `registration_bits` refuses
+`virtual_key == 0` because Win32 has no key on that number, so a zero there is
+`VkKeyScanW` having failed. `kVK_ANSI_A` **is** zero. Copying the clause would
+have been a summon on `⌃A` that silently never registered, and this is the one
+place the two arms of the module disagree about arithmetic on purpose
+(`the_letter_a_is_key_code_zero_and_is_still_a_hotkey`). "This keyboard cannot
+press that" is said one step earlier, by `carbon_key_code` answering `None`, which
+is the only place that can tell the two apart.
+
+**And no no-repeat bit**, because Carbon has none and needs none: a hot key held
+down delivers one `kEventHotKeyPressed` and nothing more until it is released,
+which is the behaviour `MOD_NOREPEAT` has to be asked for on the other side.
+
+**⑦ What the press does is said once, and the two roads are unrecognisable.**
+Windows posts a thread message into winit's own `PeekMessageW` pump and `bt-app`
+hangs the hook on the builder; macOS dispatches a Carbon event to a handler
+installed on the **application** event target, from inside this crate, where no
+closure of `bt-app`'s is in reach. So the *statement* moved to
+`bt_platform::hotkey::summons_wake`, which both roads end at, and
+`summon_message_hook` lost its `wake` parameter. What is left under a `cfg` in
+`bt-app` is the one thing that really is a fact about Windows: winit's
+`EventLoopBuilderExtWindows` exists only there.
+
+The handler is installed **once for the life of the process** and never removed.
+A chord moves — the recorder, a hand-edited `keybindings.json`, *Restore all
+defaults* — and `settle_quake` reconciles the claim every turn, so `register`
+runs again each time it does. The claim is what moves; the handler is not, and
+one per registration would leave a handler behind at every move and wake the loop
+once per handler for one press. The application event target outlives every
+window and every claim, so the process's exit is the only moment it stops being
+wanted.
+
+**The gate is two facts, which is `summon_should_act`'s rule in another dialect**:
+the event must carry this process's own four-character signature (`folo`) —
+anything in the address space may register a hot key, and frameworks do — and
+this process must hold a live claim under the id it names. The ledger
+`LIVE_CLAIMS`, which used to be `#[cfg(windows)]`, is now written by both
+registrations and read by both roads.
+
+**⑧ The foreground that goes back is an application, not a window.** This is the
+half that could not be ported by changing a `cfg`. Windows hands the keyboard to
+a *window* and `SetForegroundWindow` hands it back; macOS hands it to an
+*application* — `NSWorkspace.frontmostApplication` — and
+`-[NSRunningApplication activateWithOptions:]` hands it back, with which of that
+application's windows then holds it being its own business.
+
+So `foreground_window() -> Option<NativeWindow>` became
+`foreground_holder() -> Option<Foreground>`, and `give_foreground_to` split into
+two verbs that were only ever one call by an accident of the platform:
+
+| | Windows | macOS |
+|---|---|---|
+| `foreground_holder` | `GetForegroundWindow` | `frontmostApplication`, and **`None` when it is us** |
+| `hand_back_to` | `SetForegroundWindow` past the foreground lock: `AttachThreadInput`, read back, five rounds inside a 250 ms budget | `activateWithOptions:` with the default option set — no lock, no queue, no retry |
+| `give_foreground_to` | the same call as above, on a window of ours | `-[NSApplication activate]` **and** `makeKeyAndOrderFront:`, then `isKeyWindow` read back |
+
+`Foreground` is opaque and `bt-app` reads nothing out of it: it remembers one and
+gives it back. A `NativeWindow` could not carry it — that type means *a window of
+this process* everywhere else in the crate, and a pid stuffed into it is a number
+the next caller passes to AppKit as a view pointer.
+
+**Two orderings did not change and one guard moved.** Read the foreground before
+showing, hand it back after hiding: both desktops give the keyboard to *something*
+the moment the window holding it goes away. The guard that refuses to remember
+"the window this one came down over" when it *is* this one is
+`Foreground::is_window` on Windows and is answered one step earlier on macOS, by
+`foreground_holder` returning `None` for our own application — the same case seen
+from the platform that has no window to compare.
+
+**`give_foreground_to` needs both statements on macOS, and that is the one part of
+this that is not obvious.** `makeKeyAndOrderFront:` puts a window at the top of
+*this application's* windows; `-[NSApplication activate]` makes this application
+the one with the keyboard. A summon that made only the first would raise the quake
+window behind the editor the reader was in.
+
+**A pid is revalidated by the lookup, and the limit is stated.**
+`runningApplicationWithProcessIdentifier:` answering `nil` is how a process that
+has gone says so — R2-3's rule at this door, because a pid is reused by the kernel
+exactly as an `HWND` is by Windows. It cannot rule out a pid reused by *another*
+application between the summon and the dismissal; what that costs is one
+activation of the wrong program, in a window of time bounded by how long the
+terminal is left on the screen, and holding the `NSRunningApplication` object
+itself keeps something alive across the same window and answers no better.
+
+**⑨ 录键即生效, unchanged.** §7.54b ② is `settle_quake` reconciling the table
+against `claimed_for` every turn, and it is platform-free: `Recording` commits,
+the table changes, `about_to_wait` runs next, `register` is called, the new chord
+is claimed. Registration failure surfaces exactly where it already did —
+`hotkey_taken` into the General page's one line of dim text, and
+`note_the_summon_is_taken` on the Shortcuts row — because `eventHotKeyExistsErr`
+is mapped onto the `HotkeyFault::AlreadyRegistered` those two sentences already
+read. **No new notice, and no new variant.**
+
+**⑩ Red gates (mutation proofs in the doc comments).**
+
+- `bt-platform/src/hotkey.rs`: `every_carbon_modifier_reaches_its_own_bit` (swap
+  the `CONTROL_KEY` and `OPTION_KEY` literals and a `⌃` chord registers as `⌥`),
+  `the_command_key_is_the_windows_key_wearing_its_own_name` (read `win` into
+  `CONTROL_KEY`), `the_letter_a_is_key_code_zero_and_is_still_a_hotkey` (copy the
+  Windows zero clause across), `a_character_with_no_position_on_this_keyboard_is_refused`
+  (fall through to `0` instead of `None`),
+  `a_capital_is_the_same_key_as_its_own_lower_case` (drop the lower-casing),
+  `every_named_key_the_table_can_hold_has_a_position` (swap `Backspace` and
+  `Delete`, or put the function row in numeric order),
+  `a_carbon_summon_with_no_modifier_is_never_claimed` (drop the guard),
+  `a_claim_is_live_from_the_moment_it_is_noted_until_it_is_released` (drop the
+  `contains` guard, or change `retain`'s comparison).
+- `bt-app/src/quake.rs`:
+  `every_platform_ships_the_summon_on_a_key_its_own_door_can_claim` (write
+  `mac(CMD, …)` into the table and the modifier assertion names it; clear either
+  column and the first one does), and
+  `every_modifier_a_chord_wears_reaches_the_hotkey`, which pins what it always
+  pinned and now asserts each platform's own number for the same digit.
+- `bt-app/src/webhost.rs`:
+  `every_named_key_a_page_can_claim_is_a_key_a_summon_can_claim` (change any one
+  of the twenty-seven numbers in either table).
+- `bt-app/src/shortcuts.rs`: the two dialect gates, which now name `summon-quake`
+  if the predicate is dropped — the useful failure, because a row that stopped
+  being claimed from the system and kept this chord really would be taking a key
+  from the shell.
+
+**⑪ The proof on the machine.** `crates/bt-platform/tests/macos_hotkey.rs`,
+`harness = false` for the reason every other Mac proof here is: libtest never
+hands a case the process's main thread, and a Carbon handler on the application
+event target is dispatched on it. It runs inside a throwaway ad-hoc signed `.app`
+with an identifier of its own and an isolated `HOME` through a
+`CFBundleExecutable` wrapper script (§13.31 ⑧(d)), driven by
+`docs/plans/port/m4-8/hotkey-proof.sh`. Run on the venue machine
+(macOS 26.6.2, 2026-09-13), with the owner's own Folio frontmost and untouched:
+
+```text
+MEASURED carbon_registration_bits(⌃`) = modifiers 0x1000, key code 0x32
+PASS the shipped default is controlKey over kVK_ANSI_Grave
+PASS RegisterEventHotKey claimed ⌃` on this Mac
+MEASURED a second RegisterEventHotKey for the same chord: Err(AlreadyRegistered)
+PASS a chord already claimed is refused as AlreadyRegistered
+MEASURED SendEventToEventTarget(ours) accepted=true, handler fired 1 time(s)
+PASS the event the system sends on a press reaches the summon
+MEASURED SendEventToEventTarget(foreign signature) accepted=true, handler fired 0 time(s)
+PASS another registration's hot key is not this window's summon
+MEASURED SendEventToEventTarget(an id we hold no claim under) accepted=true, handler fired 0 time(s)
+PASS a summon nobody registered is not acted on
+POSTED one ⌃` chord to kCGHIDEventTap — four events, one press
+MEASURED the handler fired 0 time(s) within 500ms of the post
+MEASURED AXIsProcessTrusted() = false
+NOT-CHECKABLE-BY-AN-AGENT a synthesised press: …
+PASS dropping the claim gave the chord back — it registers again
+FAILURES 0
+```
+
+**The claim, the refusal and the release are measured on the real machine.** So
+is the whole of the delivery road: `SendEventToEventTarget` puts a
+`kEventHotKeyPressed` into the application's own dispatch, which is exactly where
+the system's hot key manager puts one, and it reaches the handler through the
+same gate — three sends, one answered and two refused, which is
+`summon_should_act`'s rule measured instead of argued.
+
+**What is not checkable from an agent's session is the physical press, and the
+reason is measured rather than guessed.** `CGEventPost` of a *keyboard* event is
+one of the calls macOS gates behind the Accessibility grant; it answers nothing
+at all when it is dropped, so the trust bit is read instead —
+`AXIsProcessTrusted()`, the call that never prompts — and it is `false`. Asking
+for that grant is precisely the prompt this ticket's mechanism was chosen to
+avoid, so the proof declines to ask and says so. **The earlier reading this
+corrects is X-3's**, whose note says keys were posted with `CGEventPost` from a
+Swift helper: that helper ran under a process that held the grant, and §12's own
+note on the `.app` matrix already recorded that posting into the session tap "在
+当前 macOS 上被辅助功能授权卡着". The two agree; only the first sentence was
+ambiguous about whose grant it was.
+
+**What a human should press:** `` ⌃` `` with any other application frontmost. The
+summoned terminal should come down over it, and a second press should send it
+away and put the keyboard back where it was.
 
 *(本节英文,待中文文案改写。)*

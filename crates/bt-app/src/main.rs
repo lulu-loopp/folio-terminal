@@ -37798,7 +37798,7 @@ impl Runtime<'_> {
     /// window has been on the glass at least once — which is what the first
     /// visible present's dpi check reads — and a hidden window is not a window
     /// that was never shown.
-    fn hide_quake_window(&mut self) -> Option<bt_platform::NativeWindow> {
+    fn hide_quake_window(&mut self) -> Option<bt_platform::hotkey::Foreground> {
         self.window.window.set_visible(false);
         self.app.quake.hidden()
     }
@@ -106767,7 +106767,7 @@ impl FolioApp {
         let Some(id) = self.app.as_ref().and_then(|app| app.quake.window()) else {
             return Ok(());
         };
-        let previous = bt_platform::hotkey::foreground_window();
+        let previous = bt_platform::hotkey::foreground_holder();
         let Some(mut runtime) = self.runtime(id) else {
             return Ok(());
         };
@@ -106778,7 +106778,14 @@ impl FolioApp {
             // this one: a summon pressed while the window already had the
             // keyboard would otherwise record the window it is about to hide as
             // the window it owes the keyboard to.
-            let previous = previous.filter(|before| Some(*before) != native);
+            //
+            // **Asked of the holder rather than compared to it** (M4-8). On
+            // Windows it is the same handle comparison it always was; on macOS
+            // the holder is an application, this same case is refused one step
+            // earlier by `foreground_holder` answering `None` for ourselves, and
+            // `Foreground::is_window` says so.
+            let previous =
+                previous.filter(|before| !native.is_some_and(|window| before.is_window(window)));
             app.quake.shown_over(previous);
         }
         if let Some(native) = native
@@ -106822,9 +106829,11 @@ impl FolioApp {
         let owed = runtime.hide_quake_window();
         // **After the window is off the screen, never before.** Windows gives the
         // foreground to *something* the moment a foreground window is hidden, and
-        // a handover made first would be undone by that.
-        if let Some(native) = owed
-            && !bt_platform::hotkey::give_foreground_to(native)
+        // a handover made first would be undone by that. macOS does the same
+        // thing by another road — hiding the key window makes some other window
+        // key — so the order is the order on both.
+        if let Some(holder) = owed
+            && !bt_platform::hotkey::hand_back_to(holder)
         {
             eprintln!("BT_QUAKE the keyboard could not be handed back");
         }
@@ -111722,8 +111731,7 @@ mod floated_page_tests {
         );
     }
 
-    /// RED (§7.54) — **the two Win32 orders a summon depends on cannot be
-    /// reversed.**
+    /// RED (§7.54) — **the two orders a summon depends on cannot be reversed.**
     ///
     /// Showing reads the foreground **before** the window goes up, because after
     /// it there is nothing left to read — the window *is* the foreground.
@@ -111731,15 +111739,22 @@ mod floated_page_tests {
     /// because Windows gives the foreground to something the moment a foreground
     /// window is hidden and a handover made first would be undone by that.
     ///
-    /// MUTATIONS: move `foreground_window()` below `show_quake_window()` and every
-    /// dismissal hands the keyboard to the summon itself. Move
-    /// `give_foreground_to` above `hide_quake_window()` and the window the reader
-    /// came from never comes back to the front.
+    /// **Both desktops, since M4-8** (§13.51 ⑧). The sentence above was written
+    /// about Win32 and is true word for word on macOS: hiding the key window
+    /// makes some other window key, by another road and with the same
+    /// consequence. What changed is the two names — `foreground_holder` and
+    /// `hand_back_to` — because the thing remembered there is an application
+    /// rather than a window.
+    ///
+    /// MUTATIONS: move `foreground_holder()` below `show_quake_window()` and
+    /// every dismissal hands the keyboard to the summon itself. Move
+    /// `hand_back_to` above `hide_quake_window()` and the window the reader came
+    /// from never comes back to the front.
     #[test]
     fn the_foreground_is_read_before_the_summon_and_handed_back_after_it() {
         let up = fn_body(concat!("    fn ", "summon_quake("));
         let read = up
-            .find("foreground_window()")
+            .find("foreground_holder()")
             .expect("the summon reads who had the keyboard");
         let show = up
             .find("show_quake_window()")
@@ -111754,7 +111769,7 @@ mod floated_page_tests {
             .find("hide_quake_window()")
             .expect("the dismissal hides the window");
         let hand = down
-            .find("give_foreground_to(")
+            .find("hand_back_to(")
             .expect("the dismissal hands the keyboard back");
         assert!(
             hide < hand,
@@ -114419,16 +114434,25 @@ fn main() -> Result<()> {
     // `unsafe` and this crate is under the workspace's `unsafe_code = "deny"`.
     // What is written here is the one thing the hook is allowed to do.
     let mut builder = EventLoop::<AppEvent>::with_user_event();
+    // **What a summon does, and it is said once for every platform** (M4-8).
+    //
+    // The two delivery roads have nothing in common — the message hook below on
+    // Windows, a Carbon event handler `bt_platform::hotkey::register` installs on
+    // macOS — and only one of them has a caller here to hand a closure to. So the
+    // *statement* moved to `bt_platform::hotkey::summons_wake`, which both roads
+    // end at, and what is left under the `cfg` is the one thing that really is a
+    // fact about Windows: winit's message pump has a door and its builder
+    // extension trait exists only there.
+    bt_platform::hotkey::summons_wake(|| {
+        if let Some(proxy) = SUMMON_PROXY.get() {
+            let _ = proxy.send_event(AppEvent::QuakeSummoned);
+        }
+    });
     #[cfg(windows)]
     {
         use winit::platform::windows::EventLoopBuilderExtWindows;
         builder.with_msg_hook(bt_platform::hotkey::summon_message_hook(
             quake::SUMMON_HOTKEY_ID,
-            || {
-                if let Some(proxy) = SUMMON_PROXY.get() {
-                    let _ = proxy.send_event(AppEvent::QuakeSummoned);
-                }
-            },
         ));
     }
     // **`Cmd+Q` is this product's `quit` row and not AppKit's menu item**

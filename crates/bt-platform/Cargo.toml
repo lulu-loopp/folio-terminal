@@ -143,6 +143,29 @@ name = "macos_dock_menu"
 path = "tests/macos_dock_menu.rs"
 harness = false
 
+# **The key a window answers to when it is not on the screen** (M4-8,
+# `docs/DESIGN.md` §13.51), and it needs the same two things the Dock menu does
+# plus a third of its own. `RegisterEventHotKey` against the *application* event
+# target is a statement about the main run loop and its handler is dispatched on
+# the main thread, so `harness = false` — libtest never hands a case that
+# thread. A hot key is delivered *into* an application's event dispatch, so the
+# proof builds a real winit event loop and runs it; a target with no loop would
+# prove that nothing was listening. And the gate is `macos_app_delegate`'s — the
+# binary is **inside a `.app`**, started with `open` — because an ssh session
+# cannot reach the window server, so an ordinary `cargo test -p bt-platform`
+# prints one line and exits on every platform.
+#
+# **It adds no package and turns on no feature.** The press is synthesised with
+# `CGEventPost`, whose five entry points are declared in the file itself rather
+# than by turning on `objc2-core-graphics`' `CGEvent` — that would put generated
+# bindings into the *product* for the sake of a test, and this crate already
+# declares two frameworks by hand (`macos_watch`'s CoreServices, `macos_impl`'s
+# ApplicationServices) for the same reason.
+[[test]]
+name = "macos_hotkey"
+path = "tests/macos_hotkey.rs"
+harness = false
+
 # **The fourth target that owns the process's main thread** (M4-6), and its gate
 # is `macos_app_delegate`'s rather than `macos_sheet`'s: the notification centre
 # refuses a process with no bundle identifier, so the run that wants this one is
@@ -694,6 +717,26 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     # Apple's own note on `processIdentifier` says to compare instances with
     # `isEqual:` rather than with a pid, which is what that case does.
     "NSRunningApplication",
+    # **M4-8 adds one feature and no package**, and it is worth saying because it
+    # names a crate that was not in this list before. The summon has to remember
+    # whoever had the keyboard so that dismissing can give it back, and on this
+    # platform that is an *application* rather than a window
+    # (`docs/DESIGN.md` §13.51 ⑦). The two calls that answer it —
+    # `-[NSRunningApplication processIdentifier]` and
+    # `+runningApplicationWithProcessIdentifier:` — are typed in `libc::pid_t`,
+    # and this binding puts every method with a `libc` type in its signature
+    # behind a feature of that name. So the feature is what makes those two
+    # exist; it is not a new dependency. **`libc` 0.2 is already here**, declared
+    # under `[target.'cfg(unix)'.dependencies]` below for the stdio arm, already
+    # in `Cargo.lock` and already in `THIRD-PARTY-NOTICES.md`.
+    #
+    # The pid is compared to our own and then carried in `hotkey::Foreground`,
+    # which is the one place in this crate a process id is a value rather than an
+    # argument — see that type's own note for why a `NativeWindow` could not hold
+    # it. M2-2's note above is about the *other* comparison and still stands:
+    # asking "is this the application I just launched" is `isEqual:`'s question,
+    # and asking "is this process me" is a pid's.
+    "libc",
     # A screen's device description, which is where its `CGDirectDisplayID` is.
     "NSGraphics",
     # `CGFloat` — the type every backing scale and every rectangle in AppKit is

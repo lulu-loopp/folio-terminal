@@ -8,12 +8,32 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Added
 
+- **On a Mac, a key summons the terminal from anywhere.** Press `Ctrl` and the
+  backtick key — the one to the left of `1` — and the quick terminal comes down
+  over whatever you were doing, from any application; press it again and it
+  goes away and the keyboard goes back where it came from. It is an ordinary
+  row on the Shortcuts page: record a different key and it takes effect at once,
+  and `Restore all defaults` brings this one back. Folio asks macOS for no
+  permission to do it. Windows keeps `Win` and the backtick, unchanged.
+
 - **On a Mac, Folio's Dock icon offers a new window and a new tab.** Press and
   hold the icon — or right-click it — and `New window` and `New tab` stand above
   the rows macOS puts there for every app. They work from another app and from
   an empty desk: with every window closed, either one opens a window.
 
 ### Changed
+
+- **On a Mac, the Appearance page no longer offers Acrylic.** Folio does not
+  blur what sits behind a window on macOS, and the row said so on a line of its
+  own while its picker stood greyed at `Off` — a row about something there is
+  nothing to decide. It is gone instead, and the rows under it close up. Nothing
+  changes on Windows, where the row still stands and still reports when a
+  version of Windows has no blur to offer; and your settings file keeps the
+  value either way, so a Windows machine sharing that file reads it as before.
+- **On a Mac, resting on the settings gear lights a rounded square that matches
+  the window's own corner.** The wash used to be a smaller pill; it is now the
+  same shape and the same curve as the corner it sits in, and the gear itself
+  has not moved.
 
 - **The card that appears when you rest on a file now fades in.** It used to
   arrive solid in a single frame; it now takes the same ninety milliseconds the
@@ -25,6 +45,7 @@ All notable changes to Folio are recorded here. The format follows
 ### Fixed
 
 - Keep focus cards on the same content when resizing, and make Alt+wheel respond immediately when reversing at the oldest content.
+- **On a Mac, tabs now take the whole width of the title bar.** The tab strip was setting aside room for four window buttons on a window that carries one — macOS draws minimise, zoom and close at the other end of the bar — so the tabs were squeezed to their profile marks, their names hidden, with a wide empty band before the settings gear. Seven tabs in a 934-point window now stand 91 points wide with their names showing instead of 72 without.
 
 - Reuse unchanged Markdown prose measurements across caret moves and edits, and reset block scroll offsets after reparsing.
 

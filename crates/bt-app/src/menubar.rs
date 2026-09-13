@@ -313,6 +313,15 @@ const NOT_ON_THE_BAR: &[(&str, &str)] = &[
         "the preview buffer's undo; the Edit menu's Undo is the first responder's",
     ),
     ("redo-preview", "as undo-preview"),
+    // **The summon.** Its chord is registered with the system (M4-8, Carbon
+    // `RegisterEventHotKey`) so that it fires while another app is frontmost,
+    // which is the whole point of it; the menu bar is only shown while Folio
+    // is frontmost, where the chord is already answered by the hotkey itself.
+    // A row would advertise a verb that the bar can never be the one to fire.
+    (
+        "summon-quake",
+        "a system-wide hotkey (M4-8); it fires when Folio is not frontmost, where there is no bar",
+    ),
 ];
 
 /// **The chords the Edit menu does not print, and why not yet.**

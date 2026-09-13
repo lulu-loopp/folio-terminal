@@ -29,11 +29,11 @@
 use bt_platform::NativeWindow;
 
 use bt_platform::WindowRect;
-use bt_platform::hotkey::{GlobalHotkey, Hotkey, HotkeyFault};
-use winit::keyboard::ModifiersState;
+use bt_platform::hotkey::{Foreground, GlobalHotkey, Hotkey, HotkeyFault};
+use winit::keyboard::{ModifiersState, NamedKey};
 use winit::window::WindowId;
 
-use crate::shortcuts::Chord;
+use crate::shortcuts::{Chord, ChordKey};
 
 /// **The id this process claims its one chord under.**
 ///
@@ -248,15 +248,25 @@ impl SummonScreen {
     }
 }
 
-/// **A chord as Windows will be asked for it**, or `None` when this layout has no
-/// key for it.
+/// **A chord as this machine's hotkey door will be asked for it**, or `None`
+/// when this keyboard has no key for it.
 ///
-/// The virtual key comes from `webhost::chord_virtual_key`, which is the same
-/// question a page's accelerator asks and is answered by the layout actually
-/// installed — a chord recorded as `` ` `` is `VK_OEM_3` on a US keyboard and
-/// something else elsewhere, and the person pressing it is the one whose layout
-/// counts. One reader for both, because a summon claimed on a different virtual
-/// key than the one a page hands back would be two opinions about one chord.
+/// The key code comes from `bt_platform::hotkey::summon_key_code`, which answers
+/// in the currency of the door that is about to be asked — a Win32 virtual key
+/// where the claim is `RegisterHotKey`'s, a `kVK_*` code where it is
+/// `RegisterEventHotKey`'s.
+///
+/// **It used to come from `webhost::chord_virtual_key`, and M4-8 separated
+/// them.** The note that stood here said "one reader for both, because a summon
+/// claimed on a different virtual key than the one a page hands back would be
+/// two opinions about one chord", and on Windows that is still exactly what
+/// happens: both roads end at `VkKeyScanW` and the same named-key table, held
+/// equal by `every_named_key_a_page_can_claim_is_a_key_a_summon_can_claim`. What
+/// the separation admits is that they were never one question. A page's
+/// accelerator is answered by WebView2, which reports Win32 virtual keys on the
+/// one platform it runs on; a summon is answered by whichever door this build
+/// has. Keeping them one function would have meant the macOS build handing a
+/// page a key code from a different keyboard entirely.
 #[must_use]
 pub(crate) fn hotkey_for(chord: &Chord) -> Option<Hotkey> {
     Some(Hotkey {
@@ -264,7 +274,59 @@ pub(crate) fn hotkey_for(chord: &Chord) -> Option<Hotkey> {
         alt: chord.modifiers.contains(ModifiersState::ALT),
         shift: chord.modifiers.contains(ModifiersState::SHIFT),
         win: chord.modifiers.contains(ModifiersState::SUPER),
-        virtual_key: crate::webhost::chord_virtual_key(&chord.key)?,
+        virtual_key: bt_platform::hotkey::summon_key_code(summon_key(&chord.key)?)?,
+    })
+}
+
+/// **The chord's key, said in a way two platforms can both hear** (M4-8).
+///
+/// [`bt_platform::hotkey::SummonKey`] is the same two cases this table's own
+/// [`ChordKey`] has — a character somebody typed, or a key with a name — and
+/// this is the whole of the conversion. It exists because the *number* on the
+/// other side of it is not the same number on the two platforms: a Win32 virtual
+/// key and a `kVK_*` key code are different answers to "which key is that", and
+/// which one is wanted is a fact about the machine rather than about this table.
+///
+/// `None` for a named key no summon can be claimed on. It is a narrower set than
+/// [`crate::webhost::named_key_virtual_key`]'s only by accident of which keys
+/// have names in both places, and the two are held equal by
+/// `every_named_key_a_page_can_claim_is_a_key_a_summon_can_claim`.
+#[must_use]
+pub(crate) fn summon_key(key: &ChordKey) -> Option<bt_platform::hotkey::SummonKey> {
+    use bt_platform::hotkey::{SummonKey, SummonNamedKey};
+
+    Some(match key {
+        ChordKey::Character(text) => SummonKey::Character(text.chars().next()?),
+        ChordKey::Named(named) => SummonKey::Named(match named {
+            NamedKey::Tab => SummonNamedKey::Tab,
+            NamedKey::Escape => SummonNamedKey::Escape,
+            NamedKey::Enter => SummonNamedKey::Enter,
+            NamedKey::Space => SummonNamedKey::Space,
+            NamedKey::Backspace => SummonNamedKey::Backspace,
+            NamedKey::Delete => SummonNamedKey::Delete,
+            NamedKey::Insert => SummonNamedKey::Insert,
+            NamedKey::Home => SummonNamedKey::Home,
+            NamedKey::End => SummonNamedKey::End,
+            NamedKey::PageUp => SummonNamedKey::PageUp,
+            NamedKey::PageDown => SummonNamedKey::PageDown,
+            NamedKey::ArrowLeft => SummonNamedKey::ArrowLeft,
+            NamedKey::ArrowUp => SummonNamedKey::ArrowUp,
+            NamedKey::ArrowRight => SummonNamedKey::ArrowRight,
+            NamedKey::ArrowDown => SummonNamedKey::ArrowDown,
+            NamedKey::F1 => SummonNamedKey::F1,
+            NamedKey::F2 => SummonNamedKey::F2,
+            NamedKey::F3 => SummonNamedKey::F3,
+            NamedKey::F4 => SummonNamedKey::F4,
+            NamedKey::F5 => SummonNamedKey::F5,
+            NamedKey::F6 => SummonNamedKey::F6,
+            NamedKey::F7 => SummonNamedKey::F7,
+            NamedKey::F8 => SummonNamedKey::F8,
+            NamedKey::F9 => SummonNamedKey::F9,
+            NamedKey::F10 => SummonNamedKey::F10,
+            NamedKey::F11 => SummonNamedKey::F11,
+            NamedKey::F12 => SummonNamedKey::F12,
+            _ => return None,
+        }),
     })
 }
 
@@ -341,7 +403,13 @@ pub(crate) struct Quake {
     /// Read once, at the moment of showing, and spent once, at the moment of
     /// hiding. There is no second chance to read it: by the time the window is
     /// going away the foreground is the window.
-    give_back: Option<NativeWindow>,
+    ///
+    /// **A [`Foreground`] and no longer a `NativeWindow`** (M4-8): on a Mac the
+    /// thing that had the keyboard is an *application*, and which of its windows
+    /// held it is its own business. Nothing here reads the value — it is
+    /// remembered and handed back — which is what lets one opaque type carry two
+    /// platforms' answers.
+    give_back: Option<Foreground>,
     /// **A press that has arrived and not yet been acted on.**
     ///
     /// The message hook does nothing but wake the loop (see the hook's own note
@@ -472,14 +540,14 @@ impl Quake {
     }
 
     /// Record that the window is up, and who is owed the keyboard back.
-    pub(crate) fn shown_over(&mut self, previous: Option<NativeWindow>) {
+    pub(crate) fn shown_over(&mut self, previous: Option<Foreground>) {
         self.shown = true;
         self.pending_dismiss = false;
         self.give_back = previous;
     }
 
     /// Record that it is down, and hand back whoever was owed the keyboard.
-    pub(crate) fn hidden(&mut self) -> Option<NativeWindow> {
+    pub(crate) fn hidden(&mut self) -> Option<Foreground> {
         self.shown = false;
         self.pending_dismiss = false;
         self.give_back.take()
@@ -644,8 +712,8 @@ impl Quake {
 #[cfg(test)]
 mod tests {
     use super::{
-        Quake, SummonMove, SummonScreen, hotkey_for, physical_rect, summon_move, summoned_rect,
-        typed_into_a_prompt,
+        Quake, SummonMove, SummonScreen, hotkey_for, physical_rect, summon_key, summon_move,
+        summoned_rect, typed_into_a_prompt,
     };
     use bt_platform::WindowRect;
     use bt_platform::hotkey::HotkeyFault;
@@ -810,10 +878,17 @@ mod tests {
     /// key half is asked of the layout.**
     ///
     /// The app's half of the translation `bt_platform::hotkey::registration_bits`
-    /// finishes: four booleans out of one `ModifiersState`, and a virtual key out
-    /// of the same reader a page's accelerator uses. A digit is the fixture
-    /// because its virtual key is the digit's own ASCII on every Latin layout, so
-    /// the assertion is about the crossing rather than about this machine.
+    /// finishes: four booleans out of one `ModifiersState`, and a key code out of
+    /// the door that answers for this machine. A digit is the fixture because
+    /// every keyboard has one, so the assertion is about the crossing rather than
+    /// about a layout.
+    ///
+    /// **The number a digit answers with is not the same number on the two
+    /// platforms** (M4-8), and writing both down is the point rather than a
+    /// nuisance: `1` is `VK_1` on Windows, which is the digit's own ASCII, and
+    /// `kVK_ANSI_1` on a Mac, which is a position on the keyboard and is `0x12`.
+    /// A test that asserted one of them would be a test that goes red the first
+    /// time somebody runs the suite on the other machine.
     ///
     /// MUTATION: read `SUPER` into `alt`, or drop it, and a summon bound with the
     /// Windows key registers as something else — a chord the reader never bound,
@@ -824,15 +899,31 @@ mod tests {
         use std::borrow::Cow;
         use winit::keyboard::ModifiersState;
 
+        let chord = |modifiers: ModifiersState| Chord {
+            modifiers,
+            key: ChordKey::Character(Cow::Borrowed("1")),
+        };
+        let expected = match bt_platform::host_platform() {
+            bt_platform::HostPlatform::Windows => 0x31,
+            bt_platform::HostPlatform::MacOs => 0x12,
+            // **A host with no door to claim a chord at has no key code
+            // either** — `bt_platform::hotkey::summon_key_code`'s own third arm.
+            // There is no crossing here to assert, and the absence is asserted
+            // instead: a summon that quietly registered nothing would be worse
+            // than one that says so.
+            bt_platform::HostPlatform::OtherUnix => {
+                assert!(hotkey_for(&chord(ModifiersState::CONTROL)).is_none());
+                return;
+            }
+        };
         let of = |modifiers: ModifiersState| {
-            hotkey_for(&Chord {
-                modifiers,
-                key: ChordKey::Character(Cow::Borrowed("1")),
-            })
-            .expect("a digit is a key every Latin layout can produce")
+            hotkey_for(&chord(modifiers)).expect("a digit is a key every keyboard this runs on has")
         };
         let bare = of(ModifiersState::empty());
-        assert_eq!(bare.virtual_key, 0x31, "the layout answers `1` with VK_1");
+        assert_eq!(
+            bare.virtual_key, expected,
+            "the digit's key code, in the currency of the door that claims it"
+        );
         assert!(!bare.ctrl && !bare.alt && !bare.shift && !bare.win);
         assert!(of(ModifiersState::CONTROL).ctrl);
         assert!(of(ModifiersState::ALT).alt);
@@ -862,11 +953,11 @@ mod tests {
     /// puts it up again, and the one that sent it away sends it away twice.
     #[test]
     fn ten_cycles_leave_the_summon_exactly_where_one_did() {
-        use bt_platform::NativeWindow;
+        use bt_platform::hotkey::Foreground;
 
         let mut quake = Quake::default();
         for cycle in 1..=10_u16 {
-            let over = Some(NativeWindow::stand_in(cycle));
+            let over = Some(Foreground::stand_in(cycle));
             assert!(!quake.is_showing(), "cycle {cycle} starts with it away");
             quake.shown_over(over);
             assert!(quake.is_showing(), "cycle {cycle} put it up");
@@ -941,6 +1032,87 @@ mod tests {
         assert!(!quake.hotkey_taken());
     }
 
+    /// RED (M4-8, §13.51 ②) — **the key each platform ships the summon on is a
+    /// key that platform's own door can claim.**
+    ///
+    /// The row is only a row: a default written into the table that no door will
+    /// accept is a feature that is there in Settings and cannot be triggered,
+    /// which is the exact state the Mac was in before this ticket. Both columns
+    /// are asserted **from whichever machine runs this**, on
+    /// `Shortcuts::defaults_for`'s own footing, so the Mac column is red on a
+    /// Windows host the moment somebody writes a key into it that has no
+    /// position on a Mac keyboard.
+    ///
+    /// The two shipped chords are `Win+\`` and `` ⌃` ``, and what is checked is
+    /// the whole road: the row is there, it wears a modifier a desktop-wide
+    /// claim may be made on, its key has a code on that platform, and the two
+    /// integers that platform's registration takes come out of it.
+    ///
+    /// MUTATION: write `mac(CMD, character("`"))` into the table — the tempting
+    /// answer, and the one §13.51 ② refuses because `` ⌘` `` is the system's own
+    /// window-cycling key — and the modifier assertion below fails naming it.
+    /// Clear either column and the first assertion fails.
+    #[test]
+    fn every_platform_ships_the_summon_on_a_key_its_own_door_can_claim() {
+        use crate::shortcuts::{Action, Chord, Shortcuts};
+        use bt_platform::HostPlatform;
+        use bt_platform::hotkey::{
+            Hotkey, carbon_key_code, carbon_registration_bits, registration_bits,
+        };
+        use winit::keyboard::ModifiersState;
+
+        let shipped = |platform| -> Chord {
+            Shortcuts::defaults_for(platform)
+                .rows()
+                .iter()
+                .find(|row| row.action == Action::SummonQuake)
+                .expect("the summon is a row of this table on every platform")
+                .chord
+                .clone()
+                .unwrap_or_else(|| panic!("{platform:?} ships the summon with no key at all"))
+        };
+        // **The key code is asked of the named platform's own table, not of
+        // `hotkey_for`.** That function answers in the currency of the machine
+        // running it, which is the right answer for the product and the wrong
+        // one for a test that is about the *other* column.
+        let as_hotkey = |chord: &Chord, key: u16| Hotkey {
+            ctrl: chord.modifiers.contains(ModifiersState::CONTROL),
+            alt: chord.modifiers.contains(ModifiersState::ALT),
+            shift: chord.modifiers.contains(ModifiersState::SHIFT),
+            win: chord.modifiers.contains(ModifiersState::SUPER),
+            virtual_key: key,
+        };
+
+        // macOS: the whole crossing, on any host, because the table is pure.
+        let mac = shipped(HostPlatform::MacOs);
+        let mac_key = carbon_key_code(
+            summon_key(&mac.key).expect("the shipped macOS summon names a key this crate knows"),
+        )
+        .expect("the shipped macOS summon names a key a Mac keyboard has");
+        let (modifiers, key) = carbon_registration_bits(as_hotkey(&mac, mac_key))
+            .expect("the shipped macOS summon is a chord Carbon will be asked for");
+        assert_eq!(
+            modifiers, 0x1000,
+            "controlKey and nothing else — not cmdKey, which is the system's own window cycle"
+        );
+        assert_eq!(key, 0x32, "kVK_ANSI_Grave, the key to the left of 1");
+
+        // Windows: the modifier mask is pure and is asserted everywhere; the key
+        // code is `VkKeyScanW`'s and exists only where that call does.
+        let windows = shipped(HostPlatform::Windows);
+        let (modifiers, _) = registration_bits(as_hotkey(&windows, 0xc0))
+            .expect("the shipped Windows summon is a chord RegisterHotKey will be asked for");
+        assert_eq!(modifiers, 0x4000 | 0x0008, "MOD_NOREPEAT | MOD_WIN");
+        // Asked of the host at run time and not of a `cfg`: bt-app's one
+        // platform decision is `host_platform()` (§4.3 of the port plan).
+        if matches!(bt_platform::host_platform(), HostPlatform::Windows) {
+            assert!(
+                hotkey_for(&windows).is_some_and(|hotkey| hotkey.virtual_key != 0),
+                "and on this machine the layout has a key for it"
+            );
+        }
+    }
+
     /// RED (§7.54) — **a chord that has not moved is not re-asked for.**
     ///
     /// The decision in front of the registration, which is the part that runs
@@ -998,9 +1170,9 @@ mod tests {
     /// before the *first* summon — very often one that has since been closed.
     #[test]
     fn the_window_owed_the_keyboard_is_handed_back_exactly_once() {
-        use bt_platform::NativeWindow;
+        use bt_platform::hotkey::Foreground;
 
-        let previous = Some(NativeWindow::stand_in(0x34));
+        let previous = Some(Foreground::stand_in(0x34));
         let mut quake = Quake::default();
         quake.shown_over(previous);
         assert!(quake.is_showing());
