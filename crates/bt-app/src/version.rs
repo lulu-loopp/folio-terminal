@@ -181,11 +181,23 @@ mod tests {
     /// Red gate: write `0.3.0` into either field of the template by hand. The
     /// bundle then agrees with the manifest exactly until the next release
     /// moves the manifest, which is the same failure the sibling test above was
-    /// written for and is invisible for exactly as long.
+    /// written for and is invisible for exactly as long. The failure names the
+    /// field it was written into: the whole-file checks below can only say that
+    /// a literal got in somewhere, and *somewhere* leaves the reader two fields
+    /// to look at, so the per-key check runs first.
     #[test]
     fn the_plist_carries_the_workspace_version_twice_and_no_literal() {
         let template = info_plist_template();
 
+        // Each field, by name, before anything is said about the file as a
+        // whole.
+        for key in ["CFBundleShortVersionString", "CFBundleVersion"] {
+            assert_eq!(
+                plist_string(&template, key),
+                "@VERSION@",
+                "{key} is filled from the manifest, not written out in the template"
+            );
+        }
         assert!(
             !template.contains(VERSION),
             "the template carries no literal version — it is a template"
@@ -196,17 +208,29 @@ mod tests {
             "the two fields are both substitutions"
         );
 
+        // Both fields get the manifest's version whole, which stays possible
+        // only while that line carries no channel suffix: `CFBundleVersion`
+        // takes dotted integers, and a plist has nowhere else to keep a
+        // `-preview`, so the suffix lives on the tag (`docs/RELEASING.md`).
+        // `plist::render` refuses one; this says the rule before the refusal
+        // does, so a manifest that grew a suffix fails by name rather than as
+        // a renderer error.
+        assert!(
+            !VERSION.contains(['-', '+']),
+            "a release channel suffix belongs to the tag: CFBundleVersion cannot carry {VERSION}"
+        );
+
         let plist = bt_winres::plist::render(&template, VERSION)
             .expect("the workspace version renders into the bundle's template");
         assert_eq!(
             plist_string(&plist, "CFBundleShortVersionString"),
             VERSION,
-            "what the user is shown is the manifest's version"
+            "CFBundleShortVersionString, what the user is shown, is the manifest's version"
         );
         assert_eq!(
             plist_string(&plist, "CFBundleVersion"),
             VERSION,
-            "and so is what the system compares builds with"
+            "CFBundleVersion, what the system orders builds by, is the same line"
         );
         assert_eq!(
             plist.matches(VERSION).count(),
