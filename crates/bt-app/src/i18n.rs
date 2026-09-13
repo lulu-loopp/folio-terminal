@@ -1389,6 +1389,62 @@ pub enum Text {
     GitGroupStagedTip,
     GitGroupChangesTip,
     GitGroupUntrackedTip,
+
+    // ── what a status is, in words (T-GIT-STATUS-WORDS) ────────────────────
+    /// **One word per letter of git's alphabet** (owner's report 2026-09-13: a
+    /// row wore `UU` and the owner had to ask what it meant).
+    ///
+    /// The row draws git's letters, because two letters in a 17-pixel chip is
+    /// the whole signal a 240-pixel column has room for. These are what the
+    /// tooltip says instead — the same fact as a word a reader can act on. Each
+    /// one is the *event*, not the column it happened in: where it happened is
+    /// the clause `git_status_staged` fits around it.
+    GitStatusModified,
+    GitStatusTypeChanged,
+    GitStatusAdded,
+    GitStatusDeleted,
+    GitStatusRenamed,
+    GitStatusCopied,
+    /// `??` and `!!`. **Their own entries and not the UNTRACKED heading's**:
+    /// the heading is upper case at the source (N4) and a sentence is not, and
+    /// case is content in this table rather than a style a painter applies.
+    GitStatusUntracked,
+    GitStatusIgnored,
+    /// **The working tree's half, when the index has a half too** — the second
+    /// clause of `MM`, `AD`, `RM` and the rest.
+    ///
+    /// A second vocabulary and not the words above with a lower-case letter:
+    /// what the first clause says is what git was told to remember, and what
+    /// this one says is what happened to the file *afterwards*, which is a
+    /// different sentence in both languages and a word with no case at all in
+    /// one of them.
+    GitStatusSinceModified,
+    GitStatusSinceTypeChanged,
+    GitStatusSinceAdded,
+    GitStatusSinceDeleted,
+    GitStatusSinceRenamed,
+    GitStatusSinceCopied,
+    /// **The seven unmerged pairs git names, and the word for an eighth nobody
+    /// has seen.**
+    ///
+    /// git's own table (`git status`, the short format's legend) spells a
+    /// conflict as a *pair* — `UU`, `AA`, `DD`, `AU`, `UA`, `DU`, `UD` — and
+    /// the pair is the meaning: `AA` is two additions that are a disagreement,
+    /// and neither letter says so on its own. So these are seven entries rather
+    /// than a composition of two halves.
+    ///
+    /// **`us` is `you`.** git says "added by us" and this window may not: the
+    /// window is not a party to the merge, and `no_string_in_the_window_speaks_in_the_first_person`
+    /// holds that line for every sentence in this table.
+    GitStatusConflict,
+    GitStatusConflictBothModified,
+    GitStatusConflictBothAdded,
+    GitStatusConflictBothDeleted,
+    GitStatusConflictAddedByYou,
+    GitStatusConflictAddedByThem,
+    GitStatusConflictDeletedByYou,
+    GitStatusConflictDeletedByThem,
+
     GitBranchesHeading,
     GitRemotesHeading,
     GitRemotesTipShut,
@@ -3646,6 +3702,73 @@ impl Text {
                 "Not in the repository yet. git does not track these",
                 "还不在仓库里 —— git 没有盯着这些",
             ),
+            // ── what a status is, in words (T-GIT-STATUS-WORDS) ────────────
+            // Every Chinese column in this family is the closest term already
+            // in use on this page, standing until the copywriter passes over
+            // it. The brief is the English beside it.
+            // zh: pending opus46 — the file's content changed.
+            Self::GitStatusModified => pick(lang, "Modified", "已修改"),
+            // zh: pending opus46 — the file became a symlink, or stopped being
+            // one. git's `T`.
+            Self::GitStatusTypeChanged => pick(lang, "Type changed", "类型已变"),
+            // zh: pending opus46 — the file is new to the repository and git
+            // has been told to remember it.
+            Self::GitStatusAdded => pick(lang, "Added", "已添加"),
+            // zh: pending opus46 — the file is gone.
+            Self::GitStatusDeleted => pick(lang, "Deleted", "已删除"),
+            // zh: pending opus46 — the same file under another name.
+            Self::GitStatusRenamed => pick(lang, "Renamed", "已重命名"),
+            // zh: pending opus46 — a second file made from one git already had.
+            Self::GitStatusCopied => pick(lang, "Copied", "已复制"),
+            // zh: pending opus46 — git has never been told about this file.
+            Self::GitStatusUntracked => pick(lang, "Untracked", "未跟踪"),
+            // zh: pending opus46 — git was told to say nothing about this file.
+            Self::GitStatusIgnored => pick(lang, "Ignored", "已忽略"),
+            // zh: pending opus46 — and it changed after that.
+            Self::GitStatusSinceModified => pick(lang, "modified since", "之后改动了"),
+            // zh: pending opus46 — and its type changed after that.
+            Self::GitStatusSinceTypeChanged => pick(lang, "type changed since", "之后类型变了"),
+            // zh: pending opus46 — and it was put there after that.
+            Self::GitStatusSinceAdded => pick(lang, "added since", "之后添加了"),
+            // zh: pending opus46 — and it was deleted after that.
+            Self::GitStatusSinceDeleted => pick(lang, "deleted since", "之后删除了"),
+            // zh: pending opus46 — and it was renamed after that.
+            Self::GitStatusSinceRenamed => pick(lang, "renamed since", "之后重命名了"),
+            // zh: pending opus46 — and it was copied after that.
+            Self::GitStatusSinceCopied => pick(lang, "copied since", "之后复制了"),
+            // zh: pending opus46 — a merge left two versions of this file to
+            // reconcile, and the pair of letters does not say which kind.
+            Self::GitStatusConflict => pick(lang, "Conflict", "有冲突"),
+            // zh: pending opus46 — both sides of the merge changed this file.
+            Self::GitStatusConflictBothModified => {
+                pick(lang, "Conflict (both modified)", "有冲突（双方都改了）")
+            }
+            // zh: pending opus46 — both sides added a file of this name.
+            Self::GitStatusConflictBothAdded => {
+                pick(lang, "Conflict (added by both)", "有冲突（双方都新增）")
+            }
+            // zh: pending opus46 — both sides deleted this file.
+            Self::GitStatusConflictBothDeleted => {
+                pick(lang, "Conflict (deleted by both)", "有冲突（双方都删了）")
+            }
+            // zh: pending opus46 — this side added the file, the other side did
+            // not have it. git says "added by us".
+            Self::GitStatusConflictAddedByYou => {
+                pick(lang, "Conflict (added by you)", "有冲突（你这边新增）")
+            }
+            // zh: pending opus46 — the other side added the file.
+            Self::GitStatusConflictAddedByThem => {
+                pick(lang, "Conflict (added by them)", "有冲突（对方新增）")
+            }
+            // zh: pending opus46 — this side deleted the file, the other side
+            // changed it. git says "deleted by us".
+            Self::GitStatusConflictDeletedByYou => {
+                pick(lang, "Conflict (deleted by you)", "有冲突（你这边删了）")
+            }
+            // zh: pending opus46 — the other side deleted the file.
+            Self::GitStatusConflictDeletedByThem => {
+                pick(lang, "Conflict (deleted by them)", "有冲突（对方删了）")
+            }
             Self::GitBranchesHeading => pick(lang, "BRANCHES", "分支"),
             Self::GitRemotesHeading => pick(lang, "REMOTES", "远程"),
             Self::GitRemotesTipShut => pick(
@@ -4756,7 +4879,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 638] = [
+    pub const ALL: [Self; 660] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -5104,6 +5227,28 @@ impl Text {
         Self::GitGroupStagedTip,
         Self::GitGroupChangesTip,
         Self::GitGroupUntrackedTip,
+        Self::GitStatusModified,
+        Self::GitStatusTypeChanged,
+        Self::GitStatusAdded,
+        Self::GitStatusDeleted,
+        Self::GitStatusRenamed,
+        Self::GitStatusCopied,
+        Self::GitStatusUntracked,
+        Self::GitStatusIgnored,
+        Self::GitStatusSinceModified,
+        Self::GitStatusSinceTypeChanged,
+        Self::GitStatusSinceAdded,
+        Self::GitStatusSinceDeleted,
+        Self::GitStatusSinceRenamed,
+        Self::GitStatusSinceCopied,
+        Self::GitStatusConflict,
+        Self::GitStatusConflictBothModified,
+        Self::GitStatusConflictBothAdded,
+        Self::GitStatusConflictBothDeleted,
+        Self::GitStatusConflictAddedByYou,
+        Self::GitStatusConflictAddedByThem,
+        Self::GitStatusConflictDeletedByYou,
+        Self::GitStatusConflictDeletedByThem,
         Self::GitBranchesHeading,
         Self::GitRemotesHeading,
         Self::GitRemotesTipShut,
@@ -7014,6 +7159,43 @@ fn git_renamed_from_in(lang: Lang, path: &str, from: &str) -> String {
     match lang {
         Lang::English => format!("{path} — renamed from {from}"),
         Lang::Chinese => format!("{path} —— 从 {from} 重命名而来"),
+    }
+}
+
+/// **Where a change stands, fitted around what the change is**
+/// (T-GIT-STATUS-WORDS) — `Modified` becomes `Modified, staged`.
+///
+/// A clause and not two more entries per letter: the index's column says *this
+/// is what git was told to remember*, and it says it the same way about every
+/// one of the six letters that can stand there.
+#[must_use]
+pub fn git_status_staged(word: &str) -> String {
+    git_status_staged_in(current(), word)
+}
+
+fn git_status_staged_in(lang: Lang, word: &str) -> String {
+    match lang {
+        Lang::English => format!("{word}, staged"),
+        // zh: pending opus46 — `<word>, and that is what is staged`.
+        Lang::Chinese => format!("{word}，已暂存"),
+    }
+}
+
+/// **The two halves of a file that is in the index and changed again since**
+/// (T-GIT-STATUS-WORDS) — `MM`, `AD`, `RM` and the rest of git's pairs.
+///
+/// The dash is [`git_renamed_from`]'s, which is the one this window already
+/// spends on "and here is the other half of that fact".
+#[must_use]
+pub fn git_status_since(staged: &str, since: &str) -> String {
+    git_status_since_in(current(), staged, since)
+}
+
+fn git_status_since_in(lang: Lang, staged: &str, since: &str) -> String {
+    match lang {
+        Lang::English => format!("{staged} — {since}"),
+        // zh: pending opus46 — `<staged half> —— <what happened after>`.
+        Lang::Chinese => format!("{staged} —— {since}"),
     }
 }
 
@@ -8998,6 +9180,18 @@ mod tests {
                 (
                     "git_renamed_from",
                     git_renamed_from_in(lang, "b.rs", "a.rs"),
+                ),
+                (
+                    "git_status_staged",
+                    git_status_staged_in(lang, Text::GitStatusModified.in_lang(lang)),
+                ),
+                (
+                    "git_status_since",
+                    git_status_since_in(
+                        lang,
+                        &git_status_staged_in(lang, Text::GitStatusAdded.in_lang(lang)),
+                        Text::GitStatusSinceDeleted.in_lang(lang),
+                    ),
                 ),
                 (
                     "git_branch_remote_tip",
