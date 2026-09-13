@@ -53,6 +53,7 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 /// The file resident diagnostics are appended to, beside `hang-reports\`.
 pub const LOG_FILENAME: &str = "diagnostics.log";
@@ -259,6 +260,13 @@ fn choose_resident_channel(storage: &Path) -> Channel {
     // product already writes into; creating it here costs one call on a path
     // that almost always exists.
     let _ = std::fs::create_dir_all(storage);
+    // **Read before anything of this run's touches the file**, and that order is
+    // the whole of what makes it mean something: it is the moment the *previous*
+    // run last said anything, which is what [`report_the_previous_runs_crash`]
+    // measures a system crash report against. One line further down the
+    // rotation renames the file, and one further still this run's own header
+    // moves the timestamp past every report there will ever be.
+    let previous_run_last_wrote = last_written(&log);
     rotate_if_oversized(&log, &storage.join(PREVIOUS_LOG_FILENAME), LOG_ROTATE_AT);
     let channel = if bt_platform::redirect_std_streams_to_file(&log) {
         Channel::Log
@@ -281,8 +289,152 @@ fn choose_resident_channel(storage: &Path) -> Channel {
                 std::process::id()
             )
         );
+        // **Under this run's header and not above it**, so that a reader
+        // scrolling the file finds the news about the previous run inside the
+        // run that noticed it, next to the build stamp that says which Folio
+        // was doing the noticing.
+        report_the_previous_runs_crash(previous_run_last_wrote);
     }
     channel
+}
+
+/// When a file was last written, or `None` for one that is not there — the
+/// first launch ever, or a storage directory somebody emptied.
+fn last_written(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+}
+
+/// **Name the crash report the system wrote for the previous run, if it wrote
+/// one** (M4-11, `docs/DESIGN.md` §13.31).
+///
+/// # What this is, and what it deliberately is not
+///
+/// On macOS a process that dies of a signal is not silent: `ReportCrash` writes
+/// a complete `.ips` — every thread's backtrace, the register file, the loaded
+/// images — into `~/Library/Logs/DiagnosticReports/`. Nobody who is not looking
+/// for it will ever find it, which is the whole of the gap this closes: the
+/// next launch looks, and says the path.
+///
+/// **It names and it does not copy**, and that is the Windows arm's behaviour
+/// rather than a shortcut. Nothing in this product has ever written a crash
+/// dump of its own — the minidumps §7.1.3u is argued from were taken by hand
+/// with a debugger — and what the previous run's fate costs the *user* there is
+/// one line: `BT_PERSIST previous session did not reach its clean-exit path`,
+/// from [`crate::persist`], off the sentinel. This is that sentence with the
+/// evidence's address in it. Copying the report beside the log would make a
+/// second copy of a file the system already keeps, already rotates, and already
+/// opens in Console.app when a reader double-clicks the path.
+///
+/// `None` — no log to measure against — reports nothing, because "newer than
+/// the last thing the previous run said" has no meaning before there was a
+/// previous run.
+fn report_the_previous_runs_crash(since: Option<SystemTime>) {
+    let Some(since) = since else {
+        return;
+    };
+    let Some(directory) = bt_platform::hang::system_crash_reports_directory() else {
+        return;
+    };
+    let Some(program) = this_programs_name() else {
+        return;
+    };
+    let Some(report) = newest_crash_report(&directory, &program, since) else {
+        return;
+    };
+    eprintln!(
+        "Folio: the previous run ended in a crash the system recorded — {}",
+        report.display()
+    );
+}
+
+/// **The name the system files this process's crash reports under**: the
+/// executable's own, which is what `ReportCrash` puts at the front of every
+/// `.ips` file name.
+///
+/// Read off `current_exe` rather than written down as `folio`, and that is
+/// generality and not caution: the shipped binary is `folio`, a development
+/// build is `bt-app`, and a report is named after whichever one died. A
+/// hard-coded product name would make this facility work for exactly the builds
+/// nobody debugs.
+fn this_programs_name() -> Option<String> {
+    Some(
+        std::env::current_exe()
+            .ok()?
+            .file_stem()?
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+/// **The newest crash report in `directory` that names `program` and was
+/// written after `since`.**
+///
+/// A function over a directory listing, so that the rule — which names count
+/// and which moment they are measured against — is a thing a test can drive
+/// with a temporary directory on either platform, rather than something only a
+/// crashed Mac can demonstrate.
+///
+/// Unreadable entries are skipped rather than failing the walk: a
+/// `DiagnosticReports` directory holds reports for every program this account
+/// runs, and one of somebody else's that cannot be stat'ed is not a reason to
+/// say nothing about ours.
+#[must_use]
+pub fn newest_crash_report(directory: &Path, program: &str, since: SystemTime) -> Option<PathBuf> {
+    let mut newest: Option<(SystemTime, PathBuf)> = None;
+    for entry in std::fs::read_dir(directory).ok()?.flatten() {
+        if !names_a_crash_report(&entry.file_name().to_string_lossy(), program) {
+            continue;
+        }
+        let Ok(written) = entry.metadata().and_then(|metadata| metadata.modified()) else {
+            continue;
+        };
+        if written <= since {
+            continue;
+        }
+        if newest.as_ref().is_none_or(|(best, _)| written > *best) {
+            newest = Some((written, entry.path()));
+        }
+    }
+    newest.map(|(_, path)| path)
+}
+
+/// **Is this file name a crash report for `program`?**
+///
+/// The system's own naming, and the whole of it: the process name, a separator,
+/// something that says when, and `.ips` — `folio-2026-09-12-143022.ips` — or the
+/// `.crash` the same directory held before macOS 12 and still can.
+///
+/// **The separator is the rule and not a nicety.** A bare prefix test would
+/// claim `folioscope-2026-….ips` as Folio's, and a reader told that this
+/// program crashed when another one did is worse served than one told nothing.
+/// So the character after the name must be one the system uses to join the
+/// fields — anything that is not a letter or a digit — or there must be no
+/// character at all.
+///
+/// Case-insensitive, because the executable inside a bundle and the name a
+/// report is filed under have disagreed about capitals before and neither
+/// spelling is wrong.
+#[must_use]
+pub fn names_a_crash_report(file_name: &str, program: &str) -> bool {
+    if program.is_empty() {
+        return false;
+    }
+    let name = file_name.to_lowercase();
+    let Some((stem, extension)) = name.rsplit_once('.') else {
+        return false;
+    };
+    if !matches!(extension, "ips" | "crash") {
+        return false;
+    }
+    let program = program.to_lowercase();
+    let Some(rest) = stem.strip_prefix(&program) else {
+        return false;
+    };
+    rest.chars()
+        .next()
+        .is_none_or(|next| !next.is_alphanumeric())
 }
 
 /// **Is there a screen a fault could be printed on?**
@@ -308,11 +460,131 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        Channel, LOG_ROTATE_AT, console_was_asked_for, named_file, rotate_if_oversized, switched_on,
+        Channel, LOG_ROTATE_AT, console_was_asked_for, named_file, names_a_crash_report,
+        newest_crash_report, rotate_if_oversized, switched_on,
     };
 
     fn names(list: &[&str]) -> Vec<OsString> {
         list.iter().map(|name| OsString::from(*name)).collect()
+    }
+
+    // ── M4-11: the system's own crash reports ──────────────────────────────
+
+    /// A directory of this test's own, under the machine's temporary folder.
+    fn a_reports_directory(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let serial = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!(
+            "bt-app-crash-reports-{tag}-{}-{serial}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        directory
+    }
+
+    /// Write a file and stamp it, so "newer than" is a fact the test states
+    /// rather than one it hopes the filesystem's clock produced.
+    fn a_report(directory: &std::path::Path, name: &str, at: std::time::SystemTime) {
+        let path = directory.join(name);
+        std::fs::write(&path, b"report").expect("the file is written");
+        let file = std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .expect("the file reopens");
+        file.set_modified(at).expect("the stamp is set");
+    }
+
+    /// RED (M4-11, `docs/DESIGN.md` §13.31) — **a report is this program's only
+    /// when the name is followed by a separator.**
+    ///
+    /// The system files a report as `<process>-<when>.ips`. A bare prefix test
+    /// reads `folioscope-….ips` as Folio's, and a launch that told a reader
+    /// "the previous run crashed" about another program's fault is worse than
+    /// one that said nothing at all.
+    ///
+    /// MUTATION: drop the separator rule and the third assertion goes red; drop
+    /// the extension rule and the log names whatever else is in that directory.
+    #[test]
+    fn a_crash_report_is_this_programs_only_when_the_name_is_followed_by_a_separator() {
+        assert!(names_a_crash_report("folio-2026-09-12-143022.ips", "folio"));
+        assert!(names_a_crash_report(
+            "folio_2026-09-12-143022_mac-mini.crash",
+            "folio"
+        ));
+        assert!(
+            !names_a_crash_report("folioscope-2026-09-12-143022.ips", "folio"),
+            "another program whose name starts the same way is not ours"
+        );
+        assert!(
+            names_a_crash_report("bt-app-2026-09-12-143022.ips", "bt-app"),
+            "a development build is named after the binary that died"
+        );
+        assert!(
+            !names_a_crash_report("folio-2026-09-12-143022.diag", "folio"),
+            "a power log in the same directory is not a crash report"
+        );
+        assert!(
+            !names_a_crash_report("folio", "folio"),
+            "and neither is a name with no extension at all"
+        );
+        assert!(
+            names_a_crash_report("Folio-2026-09-12-143022.ips", "folio"),
+            "the capitals of a bundle's executable are not a difference"
+        );
+        assert!(
+            !names_a_crash_report("folio-2026.ips", ""),
+            "a program with no name claims nothing"
+        );
+    }
+
+    /// RED (M4-11) — **the newest report after the moment the previous run last
+    /// wrote, and nothing from before it.**
+    ///
+    /// The moment is the log's own last write, so a report that has already been
+    /// named by an earlier launch is behind it and is not named twice; a report
+    /// from a crash that happened after that write is this crash.
+    ///
+    /// MUTATION: compare with `>=` against the wrong stamp, or take the first
+    /// match instead of the newest, and one of the three assertions goes red.
+    #[test]
+    fn the_newest_report_after_the_previous_runs_last_word_is_the_one_named() {
+        use std::time::{Duration, SystemTime};
+
+        let directory = a_reports_directory("newest");
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_757_000_000);
+        let since = base + Duration::from_secs(100);
+        a_report(&directory, "folio-old.ips", base);
+        a_report(&directory, "folio-new.ips", since + Duration::from_secs(10));
+        a_report(
+            &directory,
+            "folio-newest.ips",
+            since + Duration::from_secs(20),
+        );
+        a_report(
+            &directory,
+            "someoneelse-newest.ips",
+            since + Duration::from_secs(30),
+        );
+        assert_eq!(
+            newest_crash_report(&directory, "folio", since).and_then(|path| path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())),
+            Some("folio-newest.ips".to_owned())
+        );
+        assert_eq!(
+            newest_crash_report(&directory, "folio", since + Duration::from_secs(60)),
+            None,
+            "a launch that has already recorded them past this moment names none"
+        );
+        assert_eq!(
+            newest_crash_report(&directory.join("not-there"), "folio", since),
+            None,
+            "a machine that files no reports is not an error"
+        );
+        std::fs::remove_dir_all(&directory).expect("the directory is removed");
     }
 
     /// RED — **the channel is chosen off the one door that reports whether it

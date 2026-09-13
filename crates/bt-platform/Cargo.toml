@@ -289,8 +289,18 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
     "CFNumber",
     # The watcher thread's own run loop: what the stream is scheduled on, the
     # source the owner signals to stop it, and the default mode both are
-    # attached in.
+    # attached in. M4-11 adds `CFRunLoopPerformBlock`, `CFRunLoopWakeUp` and
+    # `kCFRunLoopCommonModes` off the same feature — the liveness handshake's
+    # whole surface.
     "CFRunLoop",
+    # M4-11: `CFRunLoopPerformBlock` takes a block, so the binding for it is
+    # behind this crate's own `block2` feature. **Not a package**: `block2`
+    # 0.6.2 has been a direct dependency of this crate since M2-3 (the sheet
+    # completion handlers) and is already in `THIRD-PARTY-NOTICES.md`; the one
+    # line `Cargo.lock` gains is its name appearing in this crate's dependency
+    # list, which is the same door `objc2-foundation`'s own `block2` feature
+    # came through in M4-10.
+    "block2",
     # M4-4: `CGSize`, `CGRect` and `CGAffineTransform` — the geometry the image
     # generator, the bitmap context and a track's preferred turn are all written
     # in. Already on by union through `objc2-app-kit`'s `objc2-core-foundation`
