@@ -2909,19 +2909,21 @@ impl Text {
                 "This window stays above every other window.",
                 "窗口始终在其他窗口之上。",
             ),
-            // **Two different reasons, not one sentence with a name swapped**
-            // (§13.32 ②). On Windows the row is grey because an older build of
-            // that system has no backdrop to ask for. On a Mac the system has
-            // one and Folio does not draw it yet, and a line reading “this
-            // version of macOS does not offer the blur” would be this window
-            // blaming the machine for its own omission.
-            Self::DescAcrylicUnavailable => pick_platform(
+            // **One sentence again, and a Windows one** (owner ruling
+            // 2026-09-13, §13.32 ⑥). §13.32 ② gave this a Mac column reading
+            // “Folio does not draw this blur on macOS”, on the reading that the
+            // two machines were grey for two different reasons and the reason
+            // was what the reader came for. The owner read that line on the
+            // built Mac and ruled the other way: a row about a thing this
+            // platform has not got is not explained, it is absent. The row is
+            // off the Mac's page now (`settings::SettingsRow::needs`), so the
+            // only reader left for this line is on a Windows too old to have a
+            // backdrop — which is what it says, and why this entry is on
+            // `WINDOWS_ONLY_SURFACES`.
+            Self::DescAcrylicUnavailable => pick(
                 lang,
-                platform,
                 "This version of Windows does not offer the blur.",
                 "这个版本的 Windows 不提供这种模糊。",
-                "Folio does not draw this blur on macOS.",
-                "Folio 在 macOS 上不画这种模糊。",
             ),
             Self::DescBackgroundOpacityUnavailable => pick(
                 lang,
@@ -5509,6 +5511,13 @@ impl Text {
         Self::DescPowerShellOffer,
         Self::PowerShellNoticeBody,
         Self::ShellIntegrationPending,
+        // — the Acrylic row's reason, which only a Windows with no backdrop
+        //   reads: off Windows this build has no backdrop to ask for and
+        //   `settings::visible_rows_for` does not offer the row at all (§13.32
+        //   ⑥). The day `NSVisualEffectView` lands the row returns to that page
+        //   and this line comes off this list, which is the gate asking what a
+        //   Mac reader would be told instead.
+        Self::DescAcrylicUnavailable,
         // — the Profiles page's integration value for a PowerShell profile.
         //   M1-5 seeds a Mac `bash` and `zsh` and no edition of PowerShell, so
         //   the value is never read into a row there.
@@ -8276,8 +8285,10 @@ mod tests {
     /// somewhere a Mac reader can see it has to come off this list, and taking
     /// it off is what makes this test ask about it.
     ///
-    /// MUTATION: put `Explorer` back into any of the eleven entries §13.32 ②
-    /// moved, or take one name off the exemption list, and this names it.
+    /// MUTATION: put `Explorer` back into any of the ten entries §13.32 ② moved
+    /// that still have a Mac column — §13.32 ⑥ took the eleventh's back, and
+    /// that entry is on the exemption list instead — or take one name off the
+    /// exemption list, and this names it.
     #[test]
     fn no_string_a_mac_reader_meets_names_a_windows_program() {
         const WINDOWS_WORDS: [&str; 11] = [

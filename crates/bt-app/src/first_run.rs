@@ -106,9 +106,10 @@ impl RowKind {
 /// out to be asking the identical question — a `PSReadLine 补丁` row on a Mac is
 /// the card's “a row nobody could have asked for” one page along, and answering
 /// it twice would be two tables to keep in step. So the type stays here, where
-/// it was argued for, and [`crate::settings::visible_rows_for`] reads it. Four
-/// rows of that dialog declare a facility and two of them name one the card
-/// never had a row for: [`Self::PsReadLineModule`] and [`Self::OptionKey`].
+/// it was argued for, and [`crate::settings::visible_rows_for`] reads it. Five
+/// rows of that dialog declare a facility and three of them name one the card
+/// never had a row for: [`Self::PsReadLineModule`], [`Self::WindowBackdrop`]
+/// and [`Self::OptionKey`].
 /// What each surface still owns is what it *does* with the answer — the card
 /// drops the question, the page drops the row.
 ///
@@ -186,6 +187,30 @@ pub enum Capability {
     /// in this table because the Settings row has to ask the same question the
     /// other three ask.
     PsReadLineModule,
+    /// The blurred material a window can be given instead of a ground of its
+    /// own — what `bt_platform::set_system_backdrop` asks for.
+    ///
+    /// Windows only **in this build**, and that is the whole of the claim: the
+    /// door has one arm, `DWMWA_SYSTEMBACKDROP_TYPE`, and off Windows it answers
+    /// `not here`. macOS has a material of its own and Folio does not draw it
+    /// yet (M1-3), which is a difference a reader of the Appearance page cannot
+    /// act on and could not have asked for — so the row is not there (owner
+    /// ruling 2026-09-13, §13.32 ⑥). It is the one entry in this table whose
+    /// `false` is about what Folio has written rather than about what the system
+    /// has got, and it is written down here rather than read as an absence: the
+    /// day `NSVisualEffectView` lands, this arm gains macOS and the row comes
+    /// back with nothing else to change.
+    ///
+    /// **Distinct from `acrylic_available`**, which is the same row's other
+    /// question and is about the *machine*: a Windows too old to know what a
+    /// backdrop is still gets the row, greyed, with the reason on its line
+    /// (`crate::settings::SettingsRow::available`). One says "this build of
+    /// Folio has nothing to ask for here"; the other says "Folio asked and this
+    /// Windows had none".
+    ///
+    /// **No first-run row**: the card asks about writes into other people's
+    /// files, and this is a window drawing itself.
+    WindowBackdrop,
     /// A key on the keyboard that is Alt to a terminal and an accent composer to
     /// the text system.
     ///
@@ -215,7 +240,8 @@ impl Capability {
             Self::ExplorerMenu
             | Self::PowerShellProfile
             | Self::AgentDiscovery
-            | Self::PsReadLineModule => matches!(platform, HostPlatform::Windows),
+            | Self::PsReadLineModule
+            | Self::WindowBackdrop => matches!(platform, HostPlatform::Windows),
             Self::OptionKey => matches!(platform, HostPlatform::MacOs),
         }
     }

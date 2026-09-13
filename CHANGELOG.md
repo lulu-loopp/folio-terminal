@@ -15,6 +15,14 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- **On a Mac, the Appearance page no longer offers Acrylic.** Folio does not
+  blur what sits behind a window on macOS, and the row said so on a line of its
+  own while its picker stood greyed at `Off` — a row about something there is
+  nothing to decide. It is gone instead, and the rows under it close up. Nothing
+  changes on Windows, where the row still stands and still reports when a
+  version of Windows has no blur to offer; and your settings file keeps the
+  value either way, so a Windows machine sharing that file reads it as before.
+
 - **The card that appears when you rest on a file now fades in.** It used to
   arrive solid in a single frame; it now takes the same ninety milliseconds the
   small labels elsewhere in the window take, and arrives without moving or
