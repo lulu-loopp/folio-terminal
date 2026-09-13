@@ -10372,3 +10372,293 @@ opens a tab in it; choosing either with **no** window open — Folio alive in th
 Dock after its last window closed — opens exactly one window and no more.
 
 *(本节英文,待中文文案改写。)*
+
+### 13.51 M4-8: 一把不在任何窗里的钥匙,在一台不肯把键盘借给谁的机器上——Carbon 认领和弦,交还前台的是应用而不是窗(`crates/bt-platform/src/{hotkey,lib}.rs`、`crates/bt-platform/Cargo.toml`、`crates/bt-app/src/{quake,shortcuts,webhost,main}.rs`、`crates/bt-platform/tests/macos_hotkey.rs`(新))
+
+**① What the owner saw.** On a Mac the Shortcuts page showed 唤出终端 with no key
+beside it, and there was no key a reader could record that would have worked.
+§7.54 is built entirely on `RegisterHotKey`; `bt-platform`'s macOS arm answered
+`HotkeyFault::Refused("the global summon key is not on this platform yet")`. So
+the quake terminal existed in Settings, in `session.json` and in the window list,
+and could not be summoned. The feature was there and unreachable.
+
+**② The mechanism, and the two that were refused.** macOS offers three ways to
+hear a key while another application has the keyboard, and only one of them is
+free:
+
+| | hears it unfocused | takes it out of the stream | asks the reader for |
+|---|---|---|---|
+| `CGEventTap` | yes | yes | **Input Monitoring** (TCC) |
+| `NSEvent.addGlobalMonitorForEvents` | yes | **no** — the chord also reaches whatever the reader is typing into | **Accessibility** (TCC) |
+| **`RegisterEventHotKey`** | yes | yes | **nothing** |
+
+The port plan's table (`docs/plans/port/macos-plan-2026-09-12.md`) reads "Global
+hotkey over `CGEventTap`", and X-5 gates M4-8 because a TCC grant is made against
+a code signature and an agent that re-signs on every build would be granting it
+again every time. **Both of those facts stop applying the moment the mechanism is
+Carbon**: there is no grant, so there is nothing for a signature to be attached
+to and nothing for X-5 to gate. `RegisterEventHotKey` is thirty years old, is
+what every launcher on the platform uses, and needs no permission at all — which
+is this port's own standing rule, that Folio asks for no TCC grant it can do
+without. The "in-app authorization action" and the "denied/revoked state" that
+row describes are therefore **not built**: they are states this mechanism cannot
+be in.
+
+Carbon has no binding in the `objc2` family, so its five entry points are
+declared by hand in `bt-platform`, the way `macos_watch` declares FSEvents' seven
+and `macos_impl` declares `CGDisplayCreateUUIDFromDisplayID`. **No package was
+added.** One feature was: `objc2-app-kit`'s `libc`, which is what makes the two
+`pid_t`-typed `NSRunningApplication` calls in ⑦ exist; `libc` 0.2 was already in
+this manifest and in the lock file.
+
+**③ The default is `` ⌃` `` , and neither half of the Windows default survives
+the crossing.** Windows ships `Win+\`` (§7.54b ①) for three reasons, all about
+other people's keyboards: the `Win` tier is what that desktop reserves for
+resident tools, Windows Terminal's own quake key is that chord, and a reader who
+has both already knows it. On a Mac:
+
+* **`` ⌘` `` is the system's.** It cycles the frontmost application's windows, in
+  every application, on every Mac. Taking it would break a key the reader uses in
+  every *other* program — the exact harm `Win+\`` was chosen to avoid.
+* **`` ⌥` `` is a dead key.** On ABC Extended, US International and several
+  European layouts it begins a grave accent, so a claim on it would eat the first
+  half of `à` desktop-wide.
+* **`` ⌃` `` is left, and it is left for a reason rather than by elimination.**
+  The shortcuts audit's rule (§7.1.5e 「A 案」, carried onto this platform by
+  M1-7) is that **Control belongs to the child on both desktops** and an
+  application verb wears `Cmd` — which makes Control the crowded column *inside a
+  window* and the empty one *outside* it. This chord is never read inside a
+  window: a registered claim is taken out of the input stream before any window,
+  ours included, is offered it. So it takes nothing from the shell, and macOS
+  itself binds no `` ⌃` ``.
+
+That is also why the two macOS dialect gates in `shortcuts.rs` now ask
+`Action::is_claimed_from_windows` rather than keeping a list of row ids.
+`every_mac_chord_wears_command_and_nothing_it_may_not` exists because a Control
+chord on that platform costs the child a byte; a chord no pane is ever handed
+costs it nothing, and the predicate is the sentence that says so. The row is
+still an ordinary row: the recorder moves it and *Restore all defaults* brings it
+back.
+
+**④ One field, two currencies.** `Hotkey::virtual_key` used to be a Win32 virtual
+key. It is now "the key code in the currency of the door that will claim it" — a
+`VK_*` where the claim is `RegisterHotKey`'s, a `kVK_*` where it is
+`RegisterEventHotKey`'s — and the one door that fills it is
+`bt_platform::hotkey::summon_key_code`, which takes a `SummonKey`: a character
+somebody typed, or a key with a name. That is the only description of a key that
+means the same thing on two machines, and `bt-app` is the side that has it.
+
+**It is one field rather than two because nothing above the module reads it.**
+`bt-app` fills it from that door and hands the whole value straight back to
+`register`; a struct with a field per platform would have one field that is
+always a lie.
+
+**`webhost::chord_virtual_key` was deliberately *not* made the same reader.** Its
+note said "one reader for both, because a summon claimed on a different virtual
+key than the one a page hands back would be two opinions about one chord", and on
+Windows that is still exactly what happens — both roads end at `VkKeyScanW` and
+the same named-key table, pinned by
+`every_named_key_a_page_can_claim_is_a_key_a_summon_can_claim`. What the
+separation admits is that they were never one question: a page's accelerator is
+answered by WebView2, which reports Win32 numbers on the one platform it runs on.
+Keeping them one function would have handed a page a key code from a different
+keyboard entirely.
+
+**⑤ The translation is a table, and that is the surprise.** The macOS arm is the
+*more* testable of the two. `RegisterEventHotKey` takes a key code that names a
+**position on the keyboard**, not a character — so there is no `VkKeyScanW` to
+call and no installed layout to ask, and `carbon_key_code` is a pure function
+compiled on every platform. Every assertion about the Mac translation in this
+workspace, this crate's and `bt-app`'s both, is made on the Windows host.
+
+**The limit is written down rather than discovered.** The character positions are
+the ANSI ones: `kVK_ANSI_A` is the key that types `a` on a US layout. A reader on
+a French AZERTY who records `⌃A` presses the key labelled `A`, which is the ANSI
+`Q` position, and this table claims the ANSI `A`. Three things bound how far that
+reaches: the shipped default is `` ⌃` `` and the backtick key sits in the same
+position on every Latin layout; the digits, the punctuation and the whole top row
+are positional everywhere, so only the letters can move; and a chord with no
+modifier is refused, so the worst case is a modified letter that summons nothing
+until it is recorded again — never a key taken away from another program. **The
+general answer, when a reader reports it, is `UCKeyTranslate`** against the
+current `TISInputSource`, which is the inverse question `VkKeyScanW` answers on
+the other side. It is not written now because it is a second unsafe surface, a
+sweep of the whole key-code space per call, and an answer that changes while the
+process is running; a table that is wrong for one layout and provable on every
+host is the better trade until somebody is actually holding the other keyboard.
+
+**⑥ Key code zero is a letter here.** `registration_bits` refuses
+`virtual_key == 0` because Win32 has no key on that number, so a zero there is
+`VkKeyScanW` having failed. `kVK_ANSI_A` **is** zero. Copying the clause would
+have been a summon on `⌃A` that silently never registered, and this is the one
+place the two arms of the module disagree about arithmetic on purpose
+(`the_letter_a_is_key_code_zero_and_is_still_a_hotkey`). "This keyboard cannot
+press that" is said one step earlier, by `carbon_key_code` answering `None`, which
+is the only place that can tell the two apart.
+
+**And no no-repeat bit**, because Carbon has none and needs none: a hot key held
+down delivers one `kEventHotKeyPressed` and nothing more until it is released,
+which is the behaviour `MOD_NOREPEAT` has to be asked for on the other side.
+
+**⑦ What the press does is said once, and the two roads are unrecognisable.**
+Windows posts a thread message into winit's own `PeekMessageW` pump and `bt-app`
+hangs the hook on the builder; macOS dispatches a Carbon event to a handler
+installed on the **application** event target, from inside this crate, where no
+closure of `bt-app`'s is in reach. So the *statement* moved to
+`bt_platform::hotkey::summons_wake`, which both roads end at, and
+`summon_message_hook` lost its `wake` parameter. What is left under a `cfg` in
+`bt-app` is the one thing that really is a fact about Windows: winit's
+`EventLoopBuilderExtWindows` exists only there.
+
+The handler is installed **once for the life of the process** and never removed.
+A chord moves — the recorder, a hand-edited `keybindings.json`, *Restore all
+defaults* — and `settle_quake` reconciles the claim every turn, so `register`
+runs again each time it does. The claim is what moves; the handler is not, and
+one per registration would leave a handler behind at every move and wake the loop
+once per handler for one press. The application event target outlives every
+window and every claim, so the process's exit is the only moment it stops being
+wanted.
+
+**The gate is two facts, which is `summon_should_act`'s rule in another dialect**:
+the event must carry this process's own four-character signature (`folo`) —
+anything in the address space may register a hot key, and frameworks do — and
+this process must hold a live claim under the id it names. The ledger
+`LIVE_CLAIMS`, which used to be `#[cfg(windows)]`, is now written by both
+registrations and read by both roads.
+
+**⑧ The foreground that goes back is an application, not a window.** This is the
+half that could not be ported by changing a `cfg`. Windows hands the keyboard to
+a *window* and `SetForegroundWindow` hands it back; macOS hands it to an
+*application* — `NSWorkspace.frontmostApplication` — and
+`-[NSRunningApplication activateWithOptions:]` hands it back, with which of that
+application's windows then holds it being its own business.
+
+So `foreground_window() -> Option<NativeWindow>` became
+`foreground_holder() -> Option<Foreground>`, and `give_foreground_to` split into
+two verbs that were only ever one call by an accident of the platform:
+
+| | Windows | macOS |
+|---|---|---|
+| `foreground_holder` | `GetForegroundWindow` | `frontmostApplication`, and **`None` when it is us** |
+| `hand_back_to` | `SetForegroundWindow` past the foreground lock: `AttachThreadInput`, read back, five rounds inside a 250 ms budget | `activateWithOptions:` with the default option set — no lock, no queue, no retry |
+| `give_foreground_to` | the same call as above, on a window of ours | `-[NSApplication activate]` **and** `makeKeyAndOrderFront:`, then `isKeyWindow` read back |
+
+`Foreground` is opaque and `bt-app` reads nothing out of it: it remembers one and
+gives it back. A `NativeWindow` could not carry it — that type means *a window of
+this process* everywhere else in the crate, and a pid stuffed into it is a number
+the next caller passes to AppKit as a view pointer.
+
+**Two orderings did not change and one guard moved.** Read the foreground before
+showing, hand it back after hiding: both desktops give the keyboard to *something*
+the moment the window holding it goes away. The guard that refuses to remember
+"the window this one came down over" when it *is* this one is
+`Foreground::is_window` on Windows and is answered one step earlier on macOS, by
+`foreground_holder` returning `None` for our own application — the same case seen
+from the platform that has no window to compare.
+
+**`give_foreground_to` needs both statements on macOS, and that is the one part of
+this that is not obvious.** `makeKeyAndOrderFront:` puts a window at the top of
+*this application's* windows; `-[NSApplication activate]` makes this application
+the one with the keyboard. A summon that made only the first would raise the quake
+window behind the editor the reader was in.
+
+**A pid is revalidated by the lookup, and the limit is stated.**
+`runningApplicationWithProcessIdentifier:` answering `nil` is how a process that
+has gone says so — R2-3's rule at this door, because a pid is reused by the kernel
+exactly as an `HWND` is by Windows. It cannot rule out a pid reused by *another*
+application between the summon and the dismissal; what that costs is one
+activation of the wrong program, in a window of time bounded by how long the
+terminal is left on the screen, and holding the `NSRunningApplication` object
+itself keeps something alive across the same window and answers no better.
+
+**⑨ 录键即生效, unchanged.** §7.54b ② is `settle_quake` reconciling the table
+against `claimed_for` every turn, and it is platform-free: `Recording` commits,
+the table changes, `about_to_wait` runs next, `register` is called, the new chord
+is claimed. Registration failure surfaces exactly where it already did —
+`hotkey_taken` into the General page's one line of dim text, and
+`note_the_summon_is_taken` on the Shortcuts row — because `eventHotKeyExistsErr`
+is mapped onto the `HotkeyFault::AlreadyRegistered` those two sentences already
+read. **No new notice, and no new variant.**
+
+**⑩ Red gates (mutation proofs in the doc comments).**
+
+- `bt-platform/src/hotkey.rs`: `every_carbon_modifier_reaches_its_own_bit` (swap
+  the `CONTROL_KEY` and `OPTION_KEY` literals and a `⌃` chord registers as `⌥`),
+  `the_command_key_is_the_windows_key_wearing_its_own_name` (read `win` into
+  `CONTROL_KEY`), `the_letter_a_is_key_code_zero_and_is_still_a_hotkey` (copy the
+  Windows zero clause across), `a_character_with_no_position_on_this_keyboard_is_refused`
+  (fall through to `0` instead of `None`),
+  `a_capital_is_the_same_key_as_its_own_lower_case` (drop the lower-casing),
+  `every_named_key_the_table_can_hold_has_a_position` (swap `Backspace` and
+  `Delete`, or put the function row in numeric order),
+  `a_carbon_summon_with_no_modifier_is_never_claimed` (drop the guard),
+  `a_claim_is_live_from_the_moment_it_is_noted_until_it_is_released` (drop the
+  `contains` guard, or change `retain`'s comparison).
+- `bt-app/src/quake.rs`:
+  `every_platform_ships_the_summon_on_a_key_its_own_door_can_claim` (write
+  `mac(CMD, …)` into the table and the modifier assertion names it; clear either
+  column and the first one does), and
+  `every_modifier_a_chord_wears_reaches_the_hotkey`, which pins what it always
+  pinned and now asserts each platform's own number for the same digit.
+- `bt-app/src/webhost.rs`:
+  `every_named_key_a_page_can_claim_is_a_key_a_summon_can_claim` (change any one
+  of the twenty-seven numbers in either table).
+- `bt-app/src/shortcuts.rs`: the two dialect gates, which now name `summon-quake`
+  if the predicate is dropped — the useful failure, because a row that stopped
+  being claimed from the system and kept this chord really would be taking a key
+  from the shell.
+
+**⑪ The proof on the machine.** `crates/bt-platform/tests/macos_hotkey.rs`,
+`harness = false` for the reason every other Mac proof here is: libtest never
+hands a case the process's main thread, and a Carbon handler on the application
+event target is dispatched on it. It runs inside a throwaway ad-hoc signed `.app`
+with an identifier of its own and an isolated `HOME` through a
+`CFBundleExecutable` wrapper script (§13.31 ⑧(d)), driven by
+`docs/plans/port/m4-8/hotkey-proof.sh`. Run on the venue machine
+(macOS 26.6.2, 2026-09-13), with the owner's own Folio frontmost and untouched:
+
+```text
+MEASURED carbon_registration_bits(⌃`) = modifiers 0x1000, key code 0x32
+PASS the shipped default is controlKey over kVK_ANSI_Grave
+PASS RegisterEventHotKey claimed ⌃` on this Mac
+MEASURED a second RegisterEventHotKey for the same chord: Err(AlreadyRegistered)
+PASS a chord already claimed is refused as AlreadyRegistered
+MEASURED SendEventToEventTarget(ours) accepted=true, handler fired 1 time(s)
+PASS the event the system sends on a press reaches the summon
+MEASURED SendEventToEventTarget(foreign signature) accepted=true, handler fired 0 time(s)
+PASS another registration's hot key is not this window's summon
+MEASURED SendEventToEventTarget(an id we hold no claim under) accepted=true, handler fired 0 time(s)
+PASS a summon nobody registered is not acted on
+POSTED one ⌃` chord to kCGHIDEventTap — four events, one press
+MEASURED the handler fired 0 time(s) within 500ms of the post
+MEASURED AXIsProcessTrusted() = false
+NOT-CHECKABLE-BY-AN-AGENT a synthesised press: …
+PASS dropping the claim gave the chord back — it registers again
+FAILURES 0
+```
+
+**The claim, the refusal and the release are measured on the real machine.** So
+is the whole of the delivery road: `SendEventToEventTarget` puts a
+`kEventHotKeyPressed` into the application's own dispatch, which is exactly where
+the system's hot key manager puts one, and it reaches the handler through the
+same gate — three sends, one answered and two refused, which is
+`summon_should_act`'s rule measured instead of argued.
+
+**What is not checkable from an agent's session is the physical press, and the
+reason is measured rather than guessed.** `CGEventPost` of a *keyboard* event is
+one of the calls macOS gates behind the Accessibility grant; it answers nothing
+at all when it is dropped, so the trust bit is read instead —
+`AXIsProcessTrusted()`, the call that never prompts — and it is `false`. Asking
+for that grant is precisely the prompt this ticket's mechanism was chosen to
+avoid, so the proof declines to ask and says so. **The earlier reading this
+corrects is X-3's**, whose note says keys were posted with `CGEventPost` from a
+Swift helper: that helper ran under a process that held the grant, and §12's own
+note on the `.app` matrix already recorded that posting into the session tap "在
+当前 macOS 上被辅助功能授权卡着". The two agree; only the first sentence was
+ambiguous about whose grant it was.
+
+**What a human should press:** `` ⌃` `` with any other application frontmost. The
+summoned terminal should come down over it, and a second press should send it
+away and put the keyboard back where it was.
+
+*(本节英文,待中文文案改写。)*

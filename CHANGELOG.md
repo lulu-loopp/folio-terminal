@@ -8,6 +8,14 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Added
 
+- **On a Mac, a key summons the terminal from anywhere.** Press `Ctrl` and the
+  backtick key — the one to the left of `1` — and the quick terminal comes down
+  over whatever you were doing, from any application; press it again and it
+  goes away and the keyboard goes back where it came from. It is an ordinary
+  row on the Shortcuts page: record a different key and it takes effect at once,
+  and `Restore all defaults` brings this one back. Folio asks macOS for no
+  permission to do it. Windows keeps `Win` and the backtick, unchanged.
+
 - **On a Mac, Folio's Dock icon offers a new window and a new tab.** Press and
   hold the icon — or right-click it — and `New window` and `New tab` stand above
   the rows macOS puts there for every app. They work from another app and from

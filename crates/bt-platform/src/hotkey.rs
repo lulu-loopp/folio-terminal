@@ -21,6 +21,21 @@
 //! because the foreground is a thing Windows will not simply hand to a process
 //! that does not already have it.
 //!
+//! # The same two halves on a Mac (M4-8)
+//!
+//! Both sentences above are true there with every noun changed. The chord is
+//! claimed with Carbon's `RegisterEventHotKey` against the **application** event
+//! target — the one mechanism on that platform that hears a key while another
+//! program has it *and* asks for no TCC grant; see the `macos_hotkey` module's
+//! own header for why the other two were refused. And the foreground that has
+//! to go back is an *application* rather than a window, which is why [`Foreground`] exists and
+//! why [`hand_back_to`] is a different verb from [`give_foreground_to`] rather
+//! than the same call twice.
+//!
+//! The two roads a press travels have nothing in common — a thread message into
+//! winit's pump on one side, a Carbon handler on the other — and they meet at
+//! [`summons_wake`], which is where this process says what a summon does.
+//!
 //! # What is pure and what is not
 //!
 //! [`registration_bits`] is the whole of the translation from a chord to the two
@@ -28,25 +43,393 @@
 //! host — the rule [`crate::custom_frame_hit_test`] is written under, for its
 //! reason: it is the part that can be wrong without a keyboard. Everything below
 //! it needs a message queue and is gated on Windows.
+//!
+//! **[`carbon_key_code`] and [`carbon_registration_bits`] are the macOS twins of
+//! that, and the macOS arm is the *more* testable of the two** — which is the
+//! one surprise in this module. `RegisterEventHotKey` takes a key code that
+//! names a position on the keyboard rather than a character, so the translation
+//! has no `VkKeyScanW` in it and no installed layout behind it: it is a table,
+//! it is pure, and every one of its answers is asserted on this workspace's
+//! Windows host.
 
-/// **A chord as `RegisterHotKey` understands one**: four modifier flags and the
-/// virtual key they are held with.
+use crate::NativeWindow;
+
+/// **A chord as the door that will claim it understands one**: four modifier
+/// flags and the key code they are held with.
 ///
-/// A virtual key and not a character, because the layout question is answered
-/// before a chord gets here — [`crate::virtual_key_for_character`] is the one
-/// call that answers it, and it answers for the layout actually installed. This
-/// type is what is left once that answer is in hand.
+/// A key code and not a character, because the question "which key is that" is
+/// answered before a chord gets here — [`summon_key_code`] is the one call that
+/// answers it, and it answers in the currency of the platform that is about to
+/// be asked. This type is what is left once that answer is in hand.
+///
+/// **The currency is the platform's and the field is one field** (M4-8). On
+/// Windows [`summon_key_code`] answers with a Win32 virtual key, the number
+/// `RegisterHotKey` takes; on macOS it answers with a `kVK_*` virtual key code,
+/// the number `RegisterEventHotKey` takes. They are two different numbers for
+/// the same press — `` ` `` is `0xc0` on one machine and `0x32` on the other —
+/// and a struct with one field per platform would be a struct whose other half
+/// is always a lie. What makes one field safe is that nothing above this module
+/// ever *reads* it: `bt-app` fills it from [`summon_key_code`] and hands the
+/// whole value straight back to [`register`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Hotkey {
     pub ctrl: bool,
     pub alt: bool,
     pub shift: bool,
-    /// The Windows key. No row of this product's own table wears it, but a
-    /// global summon is exactly the kind of key a person reaches for it on, and
-    /// dropping the flag here would make that a decision this crate had taken on
-    /// their behalf.
+    /// The Windows key, which is Command on a Mac — one bit, because
+    /// `winit`'s `ModifiersState::SUPER` is one bit and the two keyboards wear
+    /// it in the same place. No row of this product's own table wears it on
+    /// Windows, but a global summon is exactly the kind of key a person reaches
+    /// for it on, and dropping the flag here would make that a decision this
+    /// crate had taken on their behalf.
     pub win: bool,
+    /// The key, in the currency named on this type.
     pub virtual_key: u16,
+}
+
+/// **The key half of a summon chord, in nobody's currency** (M4-8).
+///
+/// The table upstairs stores a chord as a person wrote it — a character they
+/// typed, or a key that has a name rather than a character — and that is the
+/// only description of a key that means the same thing on two platforms. The
+/// numbers do not: a Win32 virtual key is one machine's answer and a `kVK_*`
+/// code is the other's, and [`summon_key_code`] is the single door between
+/// them. `bt-app` says which key; this crate says which number.
+///
+/// It is this crate's own enum rather than `winit::keyboard::Key` because
+/// `winit` is not a dependency of this crate outside its tests, and because the
+/// set of keys a *desktop-wide* claim may be made on is smaller than the set of
+/// keys a window answers: a chord with no modifier on it is refused
+/// ([`holds_a_summon_modifier`]), so nothing in here needs a name for a key that
+/// only ever arrives bare.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SummonKey {
+    /// The character the binding names, as the reader typed it into the
+    /// recorder.
+    Character(char),
+    /// A key with a name rather than a character.
+    Named(SummonNamedKey),
+}
+
+/// The keys a chord names rather than spells — `winit`'s `NamedKey`, narrowed to
+/// the rows this product's own table can hold.
+///
+/// It is deliberately the same set `bt_app::webhost::named_key_virtual_key`
+/// knows, and the two are held equal by a test in that crate rather than by a
+/// shared table: the numbers *that* function answers with go to WebView2 and
+/// the numbers this one answers with go to the platform's hotkey door, and a
+/// single table would be one place deciding two questions that only happen to
+/// have the same answer on Windows.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SummonNamedKey {
+    Tab,
+    Escape,
+    Enter,
+    Space,
+    Backspace,
+    Delete,
+    Insert,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    ArrowLeft,
+    ArrowUp,
+    ArrowRight,
+    ArrowDown,
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
+}
+
+/// **The number this machine's hotkey door names a key by**, or `None` when it
+/// has no number for it.
+///
+/// The one door between [`SummonKey`] and [`Hotkey::virtual_key`], and the
+/// reason that field can be one field. Each arm is described where it is
+/// written; what they share is the shape of the refusal. `None` is *not* "this
+/// platform has no global hotkey" — it is **"this keyboard cannot press that"**,
+/// which is a thing a reader can fix by recording a different key, and it is
+/// what [`HotkeyFault::NoSuchKey`] is the sentence for.
+#[must_use]
+pub fn summon_key_code(key: SummonKey) -> Option<u16> {
+    this_platforms_key_code(key)
+}
+
+/// [`summon_key_code`]'s three arms, as three definitions.
+///
+/// Three functions rather than three `cfg` blocks inside one, which is this
+/// crate's shape everywhere else: a `cfg` that chooses between *definitions* is
+/// read by the compiler before anything about types is decided, and a reader
+/// looking for what this platform does finds one body rather than a body with
+/// two thirds of it crossed out.
+#[cfg(windows)]
+fn this_platforms_key_code(key: SummonKey) -> Option<u16> {
+    win32_key_code(key)
+}
+
+#[cfg(target_os = "macos")]
+fn this_platforms_key_code(key: SummonKey) -> Option<u16> {
+    carbon_key_code(key)
+}
+
+/// A platform with no door to claim a chord at has no number to name a key by
+/// either, and answering one would be answering for a machine nobody asked.
+/// `register`'s own third arm says the same thing in a sentence.
+#[cfg(not(any(windows, target_os = "macos")))]
+fn this_platforms_key_code(key: SummonKey) -> Option<u16> {
+    let _ = key;
+    None
+}
+
+/// The Win32 half of [`summon_key_code`].
+///
+/// **A character is asked of the layout and a named key is read off a table**,
+/// and the difference is the whole of the Windows answer: `VkKeyScanW` reports
+/// which key *this* installed layout types a character on — `` ` `` is
+/// `VK_OEM_3` on a US keyboard and something else on a German one, and the
+/// person pressing it is the one whose layout counts — while a named key already
+/// *is* a virtual key wearing a name, so asking a layout about `F9` would be
+/// asking a question that has no second answer.
+#[cfg(windows)]
+fn win32_key_code(key: SummonKey) -> Option<u16> {
+    Some(match key {
+        SummonKey::Character(character) => crate::virtual_key_for_character(character)?,
+        SummonKey::Named(named) => match named {
+            SummonNamedKey::Tab => 0x09,
+            SummonNamedKey::Escape => 0x1b,
+            SummonNamedKey::Enter => 0x0d,
+            SummonNamedKey::Space => 0x20,
+            SummonNamedKey::Backspace => 0x08,
+            SummonNamedKey::Delete => 0x2e,
+            SummonNamedKey::Insert => 0x2d,
+            SummonNamedKey::Home => 0x24,
+            SummonNamedKey::End => 0x23,
+            SummonNamedKey::PageUp => 0x21,
+            SummonNamedKey::PageDown => 0x22,
+            SummonNamedKey::ArrowLeft => 0x25,
+            SummonNamedKey::ArrowUp => 0x26,
+            SummonNamedKey::ArrowRight => 0x27,
+            SummonNamedKey::ArrowDown => 0x28,
+            SummonNamedKey::F1 => 0x70,
+            SummonNamedKey::F2 => 0x71,
+            SummonNamedKey::F3 => 0x72,
+            SummonNamedKey::F4 => 0x73,
+            SummonNamedKey::F5 => 0x74,
+            SummonNamedKey::F6 => 0x75,
+            SummonNamedKey::F7 => 0x76,
+            SummonNamedKey::F8 => 0x77,
+            SummonNamedKey::F9 => 0x78,
+            SummonNamedKey::F10 => 0x79,
+            SummonNamedKey::F11 => 0x7a,
+            SummonNamedKey::F12 => 0x7b,
+        },
+    })
+}
+
+/// **The macOS half of [`summon_key_code`], and it is a table on purpose**
+/// (M4-8).
+///
+/// `RegisterEventHotKey` takes a **virtual key code**, which on this platform
+/// names a *position on the keyboard* and not a character: `kVK_ANSI_Grave` is
+/// the key to the left of `1`, whatever that key types. That is what makes the
+/// whole translation a pure function with no system call in it, and it is why
+/// the Windows arm above cannot be copied — there `VkKeyScanW` is the only
+/// honest answer, and here there is no question to ask.
+///
+/// **Named keys are exactly right.** `Escape`, `F9`, `Home` and the arrows have
+/// one position on every Mac keyboard ever sold, so the table below is the whole
+/// truth for them.
+///
+/// **Characters are right for a keyboard laid out like a US one, and the limit
+/// is written here rather than discovered.** The positions below are the ANSI
+/// ones: `kVK_ANSI_A` is the key that types `a` on a US layout. A reader on a
+/// French AZERTY who records `⌃A` presses the key labelled `A` — which is the
+/// ANSI `Q` position — and this table would claim the ANSI `A` position, a key
+/// their fingers are not on. Three things bound how far that reaches:
+///
+/// * the shipped default is `` ⌃` `` ([`crate::HostPlatform::MacOs`]'s column in
+///   `bt_app::shortcuts::BINDINGS`), and the backtick key sits in the same
+///   position on every Latin layout this product has a reader on;
+/// * the digits, the punctuation and the whole of the top row are positional on
+///   every layout, so only the letters can move;
+/// * a chord with no modifier is refused ([`holds_a_summon_modifier`]), so the
+///   worst case is a modified letter that summons nothing until it is recorded
+///   again — never a key taken away from another program.
+///
+/// **The general answer, when a reader reports it, is `UCKeyTranslate`** against
+/// the current `TISInputSource`: ask the installed layout which of the 128 key
+/// codes produces this character, exactly as `VkKeyScanW` is asked on the other
+/// side. It is not written here because it is a second unsafe surface, a run of
+/// the whole key-code space per call, and an answer that changes while the
+/// process is running — and because a table that is wrong for one layout and
+/// testable on every host is a better trade than a syscall that is right for
+/// every layout and provable on one machine.
+///
+/// **Compiled on every platform on purpose**, which is [`crate::HostPlatform`]'s
+/// own argument at a third door: the answer is a table, so the machine writing
+/// this ticket can ask what the machine running it will do. Every assertion
+/// about the macOS translation in this workspace — this crate's and `bt-app`'s
+/// both — is made on a Windows host.
+#[must_use]
+pub fn carbon_key_code(key: SummonKey) -> Option<u16> {
+    Some(match key {
+        SummonKey::Character(character) => match character.to_ascii_lowercase() {
+            'a' => 0x00,
+            's' => 0x01,
+            'd' => 0x02,
+            'f' => 0x03,
+            'h' => 0x04,
+            'g' => 0x05,
+            'z' => 0x06,
+            'x' => 0x07,
+            'c' => 0x08,
+            'v' => 0x09,
+            'b' => 0x0b,
+            'q' => 0x0c,
+            'w' => 0x0d,
+            'e' => 0x0e,
+            'r' => 0x0f,
+            'y' => 0x10,
+            't' => 0x11,
+            '1' => 0x12,
+            '2' => 0x13,
+            '3' => 0x14,
+            '4' => 0x15,
+            '6' => 0x16,
+            '5' => 0x17,
+            '=' => 0x18,
+            '9' => 0x19,
+            '7' => 0x1a,
+            '-' => 0x1b,
+            '8' => 0x1c,
+            '0' => 0x1d,
+            ']' => 0x1e,
+            'o' => 0x1f,
+            'u' => 0x20,
+            '[' => 0x21,
+            'i' => 0x22,
+            'p' => 0x23,
+            'l' => 0x25,
+            'j' => 0x26,
+            '\'' => 0x27,
+            'k' => 0x28,
+            ';' => 0x29,
+            '\\' => 0x2a,
+            ',' => 0x2b,
+            '/' => 0x2c,
+            'n' => 0x2d,
+            'm' => 0x2e,
+            '.' => 0x2f,
+            '`' => 0x32,
+            // Every other character — an accented letter, a CJK ideograph, a
+            // symbol no ANSI key carries — has no position on this keyboard,
+            // and saying so is what lets `register` answer `NoSuchKey` rather
+            // than claim key code zero, which on this platform is the letter
+            // `A` and not "no key at all".
+            _ => return None,
+        },
+        SummonKey::Named(named) => match named {
+            SummonNamedKey::Tab => 0x30,
+            SummonNamedKey::Escape => 0x35,
+            SummonNamedKey::Enter => 0x24,
+            SummonNamedKey::Space => 0x31,
+            // `kVK_Delete` is the key a Mac calls *delete* and every other
+            // keyboard calls backspace, and `kVK_ForwardDelete` is the one
+            // `Delete` names elsewhere. Reading the pair the other way round is
+            // the single likeliest mistake in this table, which is why they are
+            // adjacent here and pinned by a test.
+            SummonNamedKey::Backspace => 0x33,
+            SummonNamedKey::Delete => 0x75,
+            // `kVK_Help`, which is the position the `Insert` key occupies on a
+            // PC keyboard plugged into a Mac.
+            SummonNamedKey::Insert => 0x72,
+            SummonNamedKey::Home => 0x73,
+            SummonNamedKey::End => 0x77,
+            SummonNamedKey::PageUp => 0x74,
+            SummonNamedKey::PageDown => 0x79,
+            SummonNamedKey::ArrowLeft => 0x7b,
+            SummonNamedKey::ArrowUp => 0x7e,
+            SummonNamedKey::ArrowRight => 0x7c,
+            SummonNamedKey::ArrowDown => 0x7d,
+            // The function row is **not** in numeric order on this platform and
+            // never has been; the codes below are the ones `Events.h` publishes.
+            SummonNamedKey::F1 => 0x7a,
+            SummonNamedKey::F2 => 0x78,
+            SummonNamedKey::F3 => 0x63,
+            SummonNamedKey::F4 => 0x76,
+            SummonNamedKey::F5 => 0x60,
+            SummonNamedKey::F6 => 0x61,
+            SummonNamedKey::F7 => 0x62,
+            SummonNamedKey::F8 => 0x64,
+            SummonNamedKey::F9 => 0x65,
+            SummonNamedKey::F10 => 0x6d,
+            SummonNamedKey::F11 => 0x67,
+            SummonNamedKey::F12 => 0x6f,
+        },
+    })
+}
+
+/// Carbon's modifier masks, written as the numbers they are.
+///
+/// Constants of this crate's own for `MOD_ALT`'s reason at a second door: the
+/// mapping is the part with an opinion in it. Unlike the Win32 four there is no
+/// crate in the tree that publishes these — Carbon has no binding in the `objc2`
+/// family — so the pinning test on the other side has no counterpart here, and
+/// the numbers are instead held by the proof that presses the key on a real Mac.
+const CMD_KEY: u32 = 0x0100;
+const SHIFT_KEY: u32 = 0x0200;
+const OPTION_KEY: u32 = 0x0800;
+const CONTROL_KEY: u32 = 0x1000;
+
+/// **The macOS translation, and the only part of that arm a test can hold
+/// without a keyboard** — [`registration_bits`]'s twin, and written beside it
+/// for that reason.
+///
+/// The two integers `RegisterEventHotKey` takes, in the order this crate states
+/// them everywhere: modifiers, then the key.
+///
+/// **There is no zero clause here, and its absence is the finding** (M4-8). The
+/// Windows arm refuses `virtual_key == 0` because Win32 has no key on that
+/// number, so a zero is `VkKeyScanW` having failed. On this platform key code
+/// `0x00` is `kVK_ANSI_A` — an ordinary letter somebody may well bind — and a
+/// copied zero check would be a summon on `⌃A` that silently refused to
+/// register. "This keyboard cannot press that" is said by [`carbon_key_code`]
+/// answering `None`, upstream of here, which is the only place that can tell the
+/// two apart.
+///
+/// **And no no-repeat bit**, because Carbon has none and needs none: a hot key
+/// held down delivers one `kEventHotKeyPressed` and then nothing until it is
+/// released, which is the behaviour `MOD_NOREPEAT` has to be asked for on the
+/// other side.
+#[must_use]
+pub fn carbon_registration_bits(hotkey: Hotkey) -> Option<(u32, u32)> {
+    if !holds_a_summon_modifier(hotkey) {
+        return None;
+    }
+    let mut modifiers = 0;
+    if hotkey.ctrl {
+        modifiers |= CONTROL_KEY;
+    }
+    if hotkey.alt {
+        modifiers |= OPTION_KEY;
+    }
+    if hotkey.shift {
+        modifiers |= SHIFT_KEY;
+    }
+    if hotkey.win {
+        modifiers |= CMD_KEY;
+    }
+    Some((modifiers, u32::from(hotkey.virtual_key)))
 }
 
 /// Win32's `MOD_*` values, written as the numbers they are.
@@ -135,7 +518,9 @@ pub const fn holds_a_summon_modifier(hotkey: Hotkey) -> bool {
 /// Why a chord could not be claimed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HotkeyFault {
-    /// **Somebody else has this key** — `ERROR_HOTKEY_ALREADY_REGISTERED`.
+    /// **Somebody else has this key** — `ERROR_HOTKEY_ALREADY_REGISTERED` on
+    /// Windows, `eventHotKeyExistsErr` on macOS, which is the same sentence in
+    /// another dialect and is why M4-8 added no variant here.
     ///
     /// The one refusal that is neither the reader's mistake nor this program's:
     /// another running program registered the chord first, and there is nothing
@@ -228,13 +613,16 @@ pub fn registration_is_live(id: i32) -> bool {
     claims().contains(&id)
 }
 
-/// Record a claim Windows accepted.
+/// Record a claim the platform accepted.
 ///
-/// `#[cfg(windows)]` with the registration that calls it: off Windows nothing
-/// claims a chord yet (M4-8), so the ledger [`registration_is_live`] reads is
-/// only ever written on the platform that has one. The reader stays ungated,
-/// because "is this chord ours" has an answer everywhere and that answer is no.
-#[cfg(windows)]
+/// **Ungated since M4-8**, where the second platform that claims a chord
+/// arrived: the ledger is bookkeeping with no Win32 and no AppKit in it, both
+/// registrations write it at the same two moments, and the macOS event handler
+/// reads it for exactly the reason the Windows hook does — see
+/// [`summon_should_act`]. A platform with no door at all does not have it —
+/// [`registration_is_live`] then answers `false` for every id, which is the
+/// truth, and a writer with no caller would be a warning rather than a promise.
+#[cfg(any(windows, target_os = "macos", test))]
 fn note_claimed(id: i32) {
     let mut live = claims();
     if !live.contains(&id) {
@@ -242,16 +630,127 @@ fn note_claimed(id: i32) {
     }
 }
 
-/// Record a claim that has been released, or that Windows refused.
-#[cfg(windows)]
+/// Record a claim that has been released, or that the platform refused.
+#[cfg(any(windows, target_os = "macos", test))]
 fn note_released(id: i32) {
     claims().retain(|held| *held != id);
 }
 
+/// **What a summon does, said once for the whole process** (M4-8).
+///
+/// The two platforms deliver a press down roads that have nothing in common —
+/// Windows posts a thread message into winit's own `PeekMessageW` pump, macOS
+/// dispatches a Carbon event to a handler on the application event target — and
+/// the one thing they must agree on is what happens at the end of the road.
+/// This is that thing, and it is a `static` rather than a parameter because only
+/// one of the two roads has a caller to hand it to: the Windows hook is
+/// installed by `bt-app` on a builder, and the macOS handler is installed by
+/// [`register`] inside this crate, where no closure of `bt-app`'s is in reach.
+///
+/// **Set once, before the loop is built**, which is also before any chord can be
+/// claimed. A press that arrives before it is set is a press with nowhere to go,
+/// and is dropped — the same reading `bt-app`'s own proxy has for the same
+/// window of time.
+static SUMMON_WAKE: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>> = std::sync::OnceLock::new();
+
+/// Say what a press of the claimed chord does.
+///
+/// **`wake` must do nothing but wake the loop.** On Windows it runs inside
+/// winit's own message pump, before anything has been decided about the turn; on
+/// macOS it runs inside the application's event dispatch, in the same position.
+/// Which way the window goes is decided on the turn that reads the bit —
+/// `bt_app::FolioApp::settle_quake`.
+pub fn summons_wake(wake: impl Fn() + Send + Sync + 'static) {
+    // A second call is the caller changing its mind about a thing that is only
+    // ever said at startup; the first answer is kept rather than raced against
+    // a press that may already be in flight.
+    let _ = SUMMON_WAKE.set(Box::new(wake));
+}
+
+/// Ring it, if anybody has said what it does.
+///
+/// Not `pub`: the two hooks in this module are its only callers, and a door that
+/// let anything else ring it would be a door that summons the window without a
+/// key having been pressed. A platform with no delivery road does not have it,
+/// for the reason `note_claimed` is gated the same way.
+#[cfg(any(windows, target_os = "macos"))]
+fn wake_the_summon() {
+    if let Some(wake) = SUMMON_WAKE.get() {
+        wake();
+    }
+}
+
+/// **Whoever had the keyboard before the summon came down** (M4-8).
+///
+/// A type of its own, and the reason is that the two platforms do not answer
+/// the same question. Windows hands the keyboard to a **window**, and handing it
+/// back is `SetForegroundWindow` on that window. macOS hands it to an
+/// **application** — `NSWorkspace.frontmostApplication` — and handing it back is
+/// `-[NSRunningApplication activate…]`; which of that application's windows then
+/// has the keyboard is its own business and never was ours.
+///
+/// Until this ticket the answer was a [`NativeWindow`], which is the Windows
+/// shape wearing a cross-platform name. Two things go wrong with reusing it: a
+/// `NativeWindow` means *a window of this process* everywhere else in this
+/// crate — [`give_foreground_to`] is called with one to raise a window of our
+/// own — and a process id stuffed into that type would be a number the very next
+/// caller would pass to AppKit as a view pointer.
+///
+/// Opaque on purpose: `bt-app` reads nothing out of it. It remembers one, and
+/// gives it back.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Foreground {
+    /// The window handle on Windows, the process id on macOS. Private, and the
+    /// reason this type exists.
+    holder: std::num::NonZeroIsize,
+}
+
+impl Foreground {
+    /// **A holder that names nobody**, for a test that needs two values it can
+    /// tell apart — [`NativeWindow::stand_in`]'s twin, and every word of its
+    /// note applies here. `bt-app`'s quake suite decides *which* holder the
+    /// keyboard goes back to, and none of it touches the machine.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn stand_in(tag: u16) -> Self {
+        let holder = 0x0bad_0000_isize + (tag as isize) + 1;
+        match std::num::NonZeroIsize::new(holder) {
+            Some(holder) => Self { holder },
+            // `0x0bad_0000 + tag + 1` is positive for every `u16`.
+            None => unreachable!(),
+        }
+    }
+
+    /// **Whether the thing that had the keyboard is this very window.**
+    ///
+    /// Asked by the summon, which must not record the window it is about to hide
+    /// as the window it owes the keyboard to.
+    ///
+    /// On Windows it is handle equality. On macOS it is always `false`, and that
+    /// is an answer rather than a stub: what is remembered there is an
+    /// application, never a window, and the case this guard exists for —
+    /// *we already had the keyboard* — is refused one step earlier, by
+    /// [`foreground_holder`] answering `None` when the frontmost application is
+    /// this one.
+    #[cfg(windows)]
+    #[must_use]
+    pub fn is_window(self, window: NativeWindow) -> bool {
+        NativeWindow::from_win32(self.holder) == window
+    }
+
+    /// Off Windows a holder is never a window — see the note above.
+    #[cfg(not(windows))]
+    #[must_use]
+    pub fn is_window(self, window: NativeWindow) -> bool {
+        let _ = (self, window);
+        false
+    }
+}
+
 #[cfg(windows)]
 pub use windows_hotkey::{
-    GlobalHotkey, allow_foreground_for, foreground_window, give_foreground_to, register,
-    summon_message_hook,
+    GlobalHotkey, allow_foreground_for, foreground_holder, give_foreground_to, hand_back_to,
+    register, summon_message_hook,
 };
 
 #[cfg(windows)]
@@ -274,7 +773,7 @@ mod windows_hotkey {
         IsHungAppWindow, IsWindow, MSG, SetForegroundWindow,
     };
 
-    use super::{Hotkey, HotkeyFault, registration_bits};
+    use super::{Foreground, Hotkey, HotkeyFault, registration_bits};
     use crate::NativeWindow;
 
     /// **A claim on a chord, held for as long as this value is alive.**
@@ -376,9 +875,16 @@ mod windows_hotkey {
     /// is the one failure mode a `*const` can have that costs a comparison to
     /// rule out.
     ///
-    /// **`wake` must do nothing but wake the loop.** This runs inside winit's own
-    /// `PeekMessageW` dispatch, before anything has been decided about the turn;
-    /// it is `SystemSettingsWatch`'s discipline at a second door and for a
+    /// **What the press does is [`super::summons_wake`]'s and no longer this
+    /// function's parameter** (M4-8). It used to be a closure handed in here,
+    /// which was right while one platform had a door; the second platform's door
+    /// is installed inside this crate, where no closure of `bt-app`'s is in
+    /// reach, so the statement moved to the one place both roads end at. What is
+    /// left here is the half that really is Windows': which message is ours.
+    ///
+    /// **The wake must do nothing but wake the loop.** This runs inside winit's
+    /// own `PeekMessageW` dispatch, before anything has been decided about the
+    /// turn; it is `SystemSettingsWatch`'s discipline at a second door and for a
     /// stronger version of its reason.
     ///
     /// **Always `false`**, which is winit's word for "dispatch this normally".
@@ -386,10 +892,7 @@ mod windows_hotkey {
     /// to dispatch, and a `WM_HOTKEY` that *is* ours carries no window, so there
     /// is no window procedure for a dispatch to reach and letting it through
     /// costs nothing.
-    pub fn summon_message_hook(
-        id: i32,
-        wake: impl Fn() + 'static,
-    ) -> impl FnMut(*const c_void) -> bool {
+    pub fn summon_message_hook(id: i32) -> impl FnMut(*const c_void) -> bool {
         move |message: *const c_void| {
             if message.is_null() {
                 return false;
@@ -410,7 +913,7 @@ mod windows_hotkey {
                 id,
                 super::registration_is_live(id),
             ) {
-                wake();
+                super::wake_the_summon();
             }
             false
         }
@@ -428,6 +931,28 @@ mod windows_hotkey {
         // immediately narrowed to an integer and never dereferenced.
         let hwnd = unsafe { GetForegroundWindow() };
         NativeWindow::from_hwnd(hwnd)
+    }
+
+    /// [`foreground_window`], in the currency `bt-app` remembers (M4-8).
+    ///
+    /// On this platform the thing that has the keyboard is a window, so the two
+    /// readings are the same read; on macOS they are not, which is why the
+    /// caller's door is the one that speaks [`Foreground`].
+    #[must_use]
+    pub fn foreground_holder() -> Option<Foreground> {
+        foreground_window().map(|window| Foreground {
+            holder: window.as_handle(),
+        })
+    }
+
+    /// **Give the keyboard back to whoever had it before the summon.**
+    ///
+    /// The same call as [`give_foreground_to`] on this platform and deliberately
+    /// a different name, because it is a different sentence: that one is *bring
+    /// a window of ours to the front*, and this one is *let somebody else have
+    /// the front back*. On macOS they are not even the same API.
+    pub fn hand_back_to(holder: Foreground) -> bool {
+        give_foreground_to(NativeWindow::from_win32(holder.holder))
     }
 
     /// **Hand this process's foreground rights to another process** (`docs/DESIGN.md` §7.59).
@@ -626,51 +1151,6 @@ pub const fn handover_step(
     }
 }
 
-/// **The global summon key, on a platform whose event tap is M4-8's** (gated
-/// behind X-5, because Accessibility is granted against a code signature and an
-/// agent that re-signs on every build would be granting it again every time).
-///
-/// `CGEventTap` is the mechanism the owner ruled for (§8 Q2), authorized
-/// through an in-app *Enable global shortcut* action rather than at first
-/// summon — a chord that cannot be heard has no first summon to ask at. So the
-/// fault this arm answers with is the one M4-8 turns into that row's
-/// *not authorized* state, and it is `Refused` with a sentence rather than a
-/// new variant, because the variant M4-8 adds is about a permission that has
-/// been asked for and declined, which is a different thing from a mechanism
-/// that has not been written.
-#[cfg(not(windows))]
-#[derive(Debug)]
-pub struct GlobalHotkey {
-    /// Never constructed: [`register`] refuses.
-    _never: std::convert::Infallible,
-}
-
-#[cfg(not(windows))]
-impl GlobalHotkey {
-    /// The id this claim was made under. Unreachable: there is no claim.
-    #[must_use]
-    pub const fn id(&self) -> i32 {
-        match self._never {}
-    }
-}
-
-/// Claim the chord. Refused; M4-8.
-#[cfg(not(windows))]
-pub fn register(id: i32, hotkey: Hotkey) -> Result<GlobalHotkey, HotkeyFault> {
-    let _ = id;
-    // **The product's own refusal first, exactly as the Windows arm orders
-    // them** (R2-14): a chord with no modifier on it is refused for a reason
-    // that is true on every platform, and telling the reader "not on this
-    // platform" about a chord that would be refused anyway sends them to fix
-    // the wrong thing.
-    if !holds_a_summon_modifier(hotkey) {
-        return Err(HotkeyFault::NoModifier);
-    }
-    Err(HotkeyFault::Refused(
-        "the global summon key is not on this platform yet".to_owned(),
-    ))
-}
-
 /// **Let the process we are handing a launch to come to the front.**
 ///
 /// A no-op answering `false`, and one of §4.4's class-N items rather than
@@ -686,26 +1166,498 @@ pub fn allow_foreground_for(process: u32) -> bool {
     false
 }
 
-/// The handover, on a host with no foreground to hand.
+#[cfg(target_os = "macos")]
+pub use macos_hotkey::{
+    GlobalHotkey, foreground_holder, give_foreground_to, hand_back_to, register,
+};
+
+/// **The summon on a Mac: a Carbon hot key, and no permission asked for**
+/// (M4-8, `docs/DESIGN.md` §13.51).
 ///
-/// **Not the same statement as "there is no frontmost application"** — macOS
-/// has one, `NSWorkspace.frontmostApplication`, and M4-8 gives this arm a real
-/// answer when the quake terminal's foreground rules are ported. What this arm
-/// says is that nobody has asked yet, and the caller's own reading of `None`
-/// (`bt_app::quake`: remember nothing, give nothing back) is the honest
-/// behaviour until then.
-#[cfg(not(windows))]
+/// The eighth unsafe boundary in this crate and against an eighth thing: this is
+/// **the keyboard while another application has it**, which on this platform is
+/// a question with three possible answers and only one of them is free.
+///
+/// `CGEventTap` sees every key on the machine and needs *Input Monitoring*;
+/// `NSEvent.addGlobalMonitorForEvents` needs *Accessibility* and cannot take the
+/// key out of the stream, so the chord would also reach whatever the reader was
+/// typing into. Both are TCC prompts, and this port's rule is that Folio asks
+/// for no TCC grant it can do without. `RegisterEventHotKey` is the third:
+/// system-wide, delivered whether or not this application is frontmost,
+/// swallowed so nobody else sees it, and asking nobody for anything. It is
+/// Carbon, which is thirty years old and has no binding in the `objc2` family —
+/// so its five entry points are declared here, the way `macos_watch` declares
+/// FSEvents' seven, and for the same reason: a framework with no crate is what
+/// this crate is for.
+#[cfg(target_os = "macos")]
+mod macos_hotkey {
+    use std::ffi::c_void;
+    use std::marker::PhantomData;
+    use std::ptr;
+    use std::sync::OnceLock;
+
+    use objc2_app_kit::{
+        NSApplication, NSApplicationActivationOptions, NSRunningApplication, NSWorkspace,
+    };
+
+    use super::{Foreground, Hotkey, HotkeyFault, carbon_registration_bits};
+    use crate::NativeWindow;
+
+    // ── Carbon, declared by hand ───────────────────────────────────────────
+
+    /// `EventTypeSpec` — the class and kind of event a handler is offered.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct EventTypeSpec {
+        event_class: u32,
+        event_kind: u32,
+    }
+
+    /// `EventHotKeyID` — what the event carries to say *which* claim fired.
+    ///
+    /// Both fields are read back in the handler rather than only the id: the
+    /// signature is what separates this process's claims from any other
+    /// `RegisterEventHotKey` in the address space, and there is one in every
+    /// framework that has ever wanted a shortcut.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct EventHotKeyID {
+        signature: u32,
+        id: u32,
+    }
+
+    type EventRef = *mut c_void;
+    type EventHandlerCallRef = *mut c_void;
+    type EventTargetRef = *mut c_void;
+    type EventHandlerRef = *mut c_void;
+    type EventHotKeyRef = *mut c_void;
+    type EventHandlerProc = unsafe extern "C" fn(EventHandlerCallRef, EventRef, *mut c_void) -> i32;
+
+    #[link(name = "Carbon", kind = "framework")]
+    unsafe extern "C" {
+        fn GetApplicationEventTarget() -> EventTargetRef;
+        fn InstallEventHandler(
+            target: EventTargetRef,
+            handler: EventHandlerProc,
+            number_of_types: usize,
+            list: *const EventTypeSpec,
+            user_data: *mut c_void,
+            installed: *mut EventHandlerRef,
+        ) -> i32;
+        fn RegisterEventHotKey(
+            key_code: u32,
+            modifiers: u32,
+            id: EventHotKeyID,
+            target: EventTargetRef,
+            options: u32,
+            claimed: *mut EventHotKeyRef,
+        ) -> i32;
+        fn UnregisterEventHotKey(claimed: EventHotKeyRef) -> i32;
+        fn GetEventParameter(
+            event: EventRef,
+            name: u32,
+            parameter_type: u32,
+            actual_type: *mut u32,
+            buffer_size: usize,
+            actual_size: *mut usize,
+            data: *mut c_void,
+        ) -> i32;
+    }
+
+    /// Carbon's four-character codes and its two `OSStatus` values, written as
+    /// the numbers they are — `MOD_ALT`'s rule, and here it is not even a
+    /// choice: there is no header in this build to read them out of.
+    const K_EVENT_CLASS_KEYBOARD: u32 = u32::from_be_bytes(*b"keyb");
+    const K_EVENT_HOT_KEY_PRESSED: u32 = 5;
+    const K_EVENT_PARAM_DIRECT_OBJECT: u32 = u32::from_be_bytes(*b"obj ");
+    const TYPE_EVENT_HOT_KEY_ID: u32 = u32::from_be_bytes(*b"hkid");
+    const NO_ERR: i32 = 0;
+    /// `eventHotKeyExistsErr` — somebody else has this chord.
+    const EVENT_HOT_KEY_EXISTS_ERR: i32 = -9878;
+
+    /// **This process's own four-character signature.**
+    ///
+    /// `folo`, because the handler below is offered *every* hot key event that
+    /// reaches this application's event target, including ones a framework
+    /// registered without telling anybody. The signature plus the id is what
+    /// makes "is this ours" a question with an answer.
+    const SUMMON_SIGNATURE: u32 = u32::from_be_bytes(*b"folo");
+
+    /// **A claim on a chord, held for as long as this value is alive.**
+    ///
+    /// Neither `Send` nor `Sync`, for the Windows arm's reason wearing macOS
+    /// clothes: `RegisterEventHotKey` against the *application* event target is
+    /// a statement about the main run loop, and the handler that answers it runs
+    /// on the main thread. A claim that travelled to another thread could be
+    /// dropped there, and `UnregisterEventHotKey` from off the main thread is a
+    /// Carbon call outside the loop that owns it.
+    #[derive(Debug)]
+    pub struct GlobalHotkey {
+        id: i32,
+        /// What Carbon gave us, and the only thing that can release the claim.
+        claimed: EventHotKeyRef,
+        /// What makes the type thread-bound; it holds no pointer of its own.
+        _thread_bound: PhantomData<*const ()>,
+    }
+
+    impl GlobalHotkey {
+        /// The id this claim was made under — the `EventHotKeyID.id` its event
+        /// carries.
+        #[must_use]
+        pub const fn id(&self) -> i32 {
+            self.id
+        }
+    }
+
+    impl Drop for GlobalHotkey {
+        fn drop(&mut self) {
+            // SAFETY: `GlobalHotkey` is not `Send`, so this runs on the thread
+            // that registered — the main thread — and `claimed` is the reference
+            // `RegisterEventHotKey` answered with and nothing else has touched.
+            //
+            // Best-effort: a claim the window server has already dropped answers
+            // an error, and there is nothing left to do about it while a value
+            // is being destroyed.
+            let _ = unsafe { UnregisterEventHotKey(self.claimed) };
+            // **And the ledger goes down with the claim** (R2-5), exactly as on
+            // the other side: from here a hot key event carrying this id is an
+            // event nothing of ours asked for.
+            super::note_released(self.id);
+        }
+    }
+
+    /// **The handler, and it is the whole of the delivery road.**
+    ///
+    /// Carbon calls this on the main thread, from inside the application's own
+    /// event dispatch — the same position in the turn winit's `PeekMessageW`
+    /// hook occupies on Windows, which is why the two can end at one
+    /// [`super::wake_the_summon`].
+    ///
+    /// **Two facts and not one**, the macOS spelling of
+    /// [`super::summon_should_act`]: the event must carry *this process's*
+    /// signature, and this process must be holding a live claim under the id it
+    /// names. The second is not paranoia about a forged event — there is no
+    /// `PostThreadMessage` here — it is the same two states the Windows arm
+    /// closes: a shortcut cleared in the table, and a registration that was
+    /// refused. A `GlobalHotkey` that has been dropped has also been
+    /// unregistered, so in practice Carbon stops calling; the ledger is what
+    /// makes that a fact this code knows rather than one it assumes.
+    ///
+    /// **`noErr`**, which is Carbon's word for "handled": the press is ours and
+    /// stops here. Answering `eventNotHandledErr` would pass a chord this
+    /// application claimed on to the rest of the responder chain.
+    unsafe extern "C" fn summon_handler(
+        _call: EventHandlerCallRef,
+        event: EventRef,
+        _user_data: *mut c_void,
+    ) -> i32 {
+        let mut named = EventHotKeyID {
+            signature: 0,
+            id: 0,
+        };
+        // SAFETY: `event` is live for the length of this call — Carbon's own
+        // contract for a handler — and the out-parameter is a local of exactly
+        // the size handed to the call. The two `null_mut`s are documented as
+        // "do not report the actual type / size".
+        let status = unsafe {
+            GetEventParameter(
+                event,
+                K_EVENT_PARAM_DIRECT_OBJECT,
+                TYPE_EVENT_HOT_KEY_ID,
+                ptr::null_mut(),
+                size_of::<EventHotKeyID>(),
+                ptr::null_mut(),
+                (&raw mut named).cast::<c_void>(),
+            )
+        };
+        if status == NO_ERR
+            && named.signature == SUMMON_SIGNATURE
+            && super::registration_is_live(named.id as i32)
+        {
+            super::wake_the_summon();
+        }
+        NO_ERR
+    }
+
+    /// **The handler is installed once for the life of the process**, and the
+    /// `OnceLock` is the whole of the reason.
+    ///
+    /// A chord moves — the recorder, a hand-edited `keybindings.json`, *Restore
+    /// all defaults* — and `bt_app::FolioApp::settle_quake` reconciles the claim
+    /// every turn, so `register` is called again every time it does. The claim
+    /// is what moves; the handler is not. Installing one per registration would
+    /// leave a handler behind at each move and wake the loop once per handler
+    /// for one press.
+    ///
+    /// `RemoveEventHandler` is deliberately never called: this is installed on
+    /// the **application** event target, which outlives every window and every
+    /// claim, and the process's exit is the only moment it stops being wanted.
+    fn install_the_handler() -> Result<(), HotkeyFault> {
+        static INSTALLED: OnceLock<i32> = OnceLock::new();
+        let status = *INSTALLED.get_or_init(|| {
+            let wanted = EventTypeSpec {
+                event_class: K_EVENT_CLASS_KEYBOARD,
+                event_kind: K_EVENT_HOT_KEY_PRESSED,
+            };
+            let mut installed: EventHandlerRef = ptr::null_mut();
+            // SAFETY: `GetApplicationEventTarget` takes nothing and answers a
+            // target that lives as long as the application. The handler is a
+            // `extern "C"` function of this module with Carbon's own signature;
+            // the list is one live local read for the length of the call; no
+            // user data is passed, so the handler dereferences none. The
+            // reference is written into a local this function then drops on
+            // purpose — see the note above on `RemoveEventHandler`.
+            unsafe {
+                InstallEventHandler(
+                    GetApplicationEventTarget(),
+                    summon_handler,
+                    1,
+                    &raw const wanted,
+                    ptr::null_mut(),
+                    &raw mut installed,
+                )
+            }
+        });
+        if status == NO_ERR {
+            Ok(())
+        } else {
+            Err(HotkeyFault::Refused(format!(
+                "InstallEventHandler: OSStatus {status}"
+            )))
+        }
+    }
+
+    /// **Claim a chord for this application**, or say why it could not be
+    /// claimed.
+    ///
+    /// The application event target and not a window's, which is the same
+    /// decision the Windows arm makes by passing no `HWND`: the summoned window
+    /// is hidden for most of its life and destroyed when the reader closes it,
+    /// and a claim hung off it would die with it — leaving the key that summons
+    /// the window in the hands of the window it was supposed to summon.
+    ///
+    /// **No options.** `kEventHotKeyExclusive` asks the system to refuse the
+    /// chord to everybody else afterwards, which is a claim on other people's
+    /// programs rather than on a key, and this product's own note on
+    /// `RegisterHotKey` — "a default value is a starting point, not an
+    /// occupation" — reads the same here.
+    pub fn register(id: i32, hotkey: Hotkey) -> Result<GlobalHotkey, HotkeyFault> {
+        // **The product's own refusal first, exactly as the Windows arm orders
+        // them** (R2-14): a chord with no modifier on it is refused for a reason
+        // that is true on every platform, and the two are told apart because
+        // their remedies are.
+        if !super::holds_a_summon_modifier(hotkey) {
+            return Err(HotkeyFault::NoModifier);
+        }
+        let Some((modifiers, key_code)) = carbon_registration_bits(hotkey) else {
+            return Err(HotkeyFault::NoSuchKey);
+        };
+        install_the_handler()?;
+        let mut claimed: EventHotKeyRef = ptr::null_mut();
+        // SAFETY: the two integers come from `carbon_registration_bits`; the id
+        // is a plain struct passed by value; the target is the application's own
+        // and outlives the claim; the out-parameter is a local. The claim is
+        // released by `GlobalHotkey::drop` on this thread.
+        let status = unsafe {
+            RegisterEventHotKey(
+                key_code,
+                modifiers,
+                EventHotKeyID {
+                    signature: SUMMON_SIGNATURE,
+                    id: id as u32,
+                },
+                GetApplicationEventTarget(),
+                0,
+                &raw mut claimed,
+            )
+        };
+        match status {
+            NO_ERR if !claimed.is_null() => {
+                // **The ledger goes up with the claim and not before** (R2-5):
+                // it is what the handler reads to tell a press of ours from a
+                // press of somebody else's registration.
+                super::note_claimed(id);
+                Ok(GlobalHotkey {
+                    id,
+                    claimed,
+                    _thread_bound: PhantomData,
+                })
+            }
+            EVENT_HOT_KEY_EXISTS_ERR => {
+                super::note_released(id);
+                Err(HotkeyFault::AlreadyRegistered)
+            }
+            other => {
+                super::note_released(id);
+                // `noErr` with a null reference lands here too, and deliberately:
+                // a claim with nothing to release is not a claim.
+                Err(HotkeyFault::Refused(format!(
+                    "RegisterEventHotKey: OSStatus {other}"
+                )))
+            }
+        }
+    }
+
+    /// **Whoever has the keyboard right now**, or `None` when it is us.
+    ///
+    /// An *application* and not a window, which is the whole of [`Foreground`]'s
+    /// reason: macOS gives the keyboard to a process, and which of its windows
+    /// then holds it is that process's business.
+    ///
+    /// **`None` for ourselves, and that is where the Windows arm's "the window
+    /// this one came down over is not this one" guard lands on this platform.**
+    /// Folio being frontmost is exactly the state in which there is nothing to
+    /// give back — the summon is about to take the keyboard from one of our own
+    /// windows — and recording ourselves would mean a dismissal that activated
+    /// the application it was dismissing.
+    ///
+    /// Asked **before** the summoned window is shown and kept until it is
+    /// dismissed: there is no second chance to read it.
+    #[must_use]
+    pub fn foreground_holder() -> Option<Foreground> {
+        let workspace = NSWorkspace::sharedWorkspace();
+        let frontmost = workspace.frontmostApplication()?;
+        let pid = frontmost.processIdentifier();
+        // **Compared by pid and not by `isEqual:`**, which is the opposite of
+        // `handoff`'s own note — and for the reason that note gives. There the
+        // question was *is this the application I just launched*, where Apple's
+        // advice applies because two `NSRunningApplication` objects may name one
+        // process. Here the question is *is this process me*, and a pid is what
+        // that question is about.
+        if pid == NSRunningApplication::currentApplication().processIdentifier() {
+            return None;
+        }
+        // A pid of zero is the kernel and a negative one is not a process; both
+        // are answers `frontmostApplication` has no way to give, and the
+        // `NonZeroIsize` is what carries that into the type.
+        std::num::NonZeroIsize::new(pid as isize).map(|holder| Foreground { holder })
+    }
+
+    /// **Give the keyboard back to the application that had it.**
+    ///
+    /// `-[NSRunningApplication activateWithOptions:]` with no options, which is
+    /// the platform's whole answer: there is no foreground *lock* here, no
+    /// thread input queue to join, and therefore none of the Windows arm's
+    /// retry — the request either names a process that is still running or it
+    /// does not.
+    ///
+    /// **The pid is revalidated by the lookup itself** (R2-3's rule at this
+    /// door). A pid is reused by the kernel exactly as an `HWND` is by Windows,
+    /// and `runningApplicationWithProcessIdentifier:` answering `nil` is how a
+    /// process that has gone says so. It cannot rule out a pid that has been
+    /// reused by *another application* between the summon and the dismissal;
+    /// what that costs is one activation of the wrong program, in a window of
+    /// time bounded by how long a reader leaves the terminal on the screen, and
+    /// the alternative — holding the `NSRunningApplication` itself — keeps an
+    /// object alive across the same window and answers the same question no
+    /// better.
+    ///
+    /// **Failure is silent to the reader and reported to the caller**, which is
+    /// the Windows arm's own note and is true here for the same reason.
+    pub fn hand_back_to(holder: Foreground) -> bool {
+        let pid = holder.holder.get();
+        let Ok(pid) = i32::try_from(pid) else {
+            return false;
+        };
+        let Some(application) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+        else {
+            return false;
+        };
+        // The default option set, which is `handoff`'s own ruling at a second
+        // door: main and key, never `NSApplicationActivateAllWindows` — the
+        // reader is going back to the one window they were in, not to every
+        // window that application has open.
+        application.activateWithOptions(NSApplicationActivationOptions::empty())
+    }
+
+    /// **Put this window of ours in front**, and say whether it got there.
+    ///
+    /// Two statements and they are both needed, which is the one thing about
+    /// this that is not obvious: `makeKeyAndOrderFront:` puts a window at the
+    /// top of *this application's* windows, and `-[NSApplication activate]`
+    /// makes this application the one with the keyboard. A summon that made only
+    /// the first statement would raise the quake window behind the editor the
+    /// reader was in.
+    ///
+    /// **Read back rather than assumed**, which is the Windows arm's rule and is
+    /// what the answer means: `isKeyWindow` afterwards is the only report that
+    /// cannot be wrong. An activation is not instantaneous on this platform
+    /// either, so a `false` here is "not yet" as often as it is "not at all" —
+    /// and the caller's own reading of `false` is one line in the log, never a
+    /// card in front of the reader.
+    pub fn give_foreground_to(window: NativeWindow) -> bool {
+        let Ok((mtm, window)) = crate::macos_impl::window_for(window, "the summoned window") else {
+            return false;
+        };
+        let application = NSApplication::sharedApplication(mtm);
+        // `activate` is macOS 14's spelling of `activateIgnoringOtherApps:` and
+        // this product's deployment target is 14.0 (`LSMinimumSystemVersion`).
+        application.activate();
+        window.makeKeyAndOrderFront(None);
+        window.isKeyWindow()
+    }
+}
+
+/// The summon on a platform with no door to claim a chord at.
+///
+/// Not deferred work and not a stub for a third port: `bt-platform` is built for
+/// a Linux server in 0.5 (`docs/plans/port/macos-plan-2026-09-12.md` §4.6) and a
+/// server has no desktop to take a key out of. The refusal is a sentence rather
+/// than a variant of [`HotkeyFault`] for the reason the fault list itself gives:
+/// its variants are things a reader can do something about.
+#[cfg(not(any(windows, target_os = "macos")))]
+#[derive(Debug)]
+pub struct GlobalHotkey {
+    /// Never constructed: [`register`] refuses.
+    _never: std::convert::Infallible,
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+impl GlobalHotkey {
+    /// The id this claim was made under. Unreachable: there is no claim.
+    #[must_use]
+    pub const fn id(&self) -> i32 {
+        match self._never {}
+    }
+}
+
+/// Claim the chord. Refused: there is no desktop here.
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn register(id: i32, hotkey: Hotkey) -> Result<GlobalHotkey, HotkeyFault> {
+    let _ = id;
+    // **The product's own refusal first, exactly as the two real arms order
+    // them** (R2-14): a chord with no modifier on it is refused for a reason
+    // that is true on every platform, and telling the reader "not on this
+    // platform" about a chord that would be refused anyway sends them to fix
+    // the wrong thing.
+    if !holds_a_summon_modifier(hotkey) {
+        return Err(HotkeyFault::NoModifier);
+    }
+    Err(HotkeyFault::Refused(
+        "the global summon key is not on this platform".to_owned(),
+    ))
+}
+
+/// Nobody has the keyboard on a host with no desktop.
+#[cfg(not(any(windows, target_os = "macos")))]
 #[must_use]
-pub fn foreground_window() -> Option<crate::NativeWindow> {
+pub fn foreground_holder() -> Option<Foreground> {
     None
+}
+
+/// The handover, on a host with no foreground to hand.
+#[cfg(not(any(windows, target_os = "macos")))]
+#[must_use]
+pub fn hand_back_to(_holder: Foreground) -> bool {
+    false
 }
 
 /// The handover, on a host with no foreground to hand.
 ///
 /// The `bool` is read by `bt-app`, which prints one line when the window it
 /// summoned could not take the keyboard — so the refusal is visible in
-/// `diagnostics.log` rather than silent. M4-8 owns the real arm.
-#[cfg(not(windows))]
+/// `diagnostics.log` rather than silent.
+#[cfg(not(any(windows, target_os = "macos")))]
 #[must_use]
 pub fn give_foreground_to(_window: crate::NativeWindow) -> bool {
     false
@@ -930,6 +1882,274 @@ mod tests {
             "a round that would start past the budget is not started"
         );
         assert!(!another_round(4, Duration::from_secs(30)));
+    }
+
+    /// RED (M4-8) — **the ledger is one claim's life, on every platform.**
+    ///
+    /// Ungated since the second platform that claims a chord arrived: both
+    /// registrations write it at the same two moments and both delivery roads
+    /// read it, so a test that only ran on one of them would be a test of half
+    /// the callers.
+    ///
+    /// MUTATION: drop the `contains` guard in `note_claimed` and one id is
+    /// recorded twice, so the `note_released` below leaves — nothing, because
+    /// `retain` takes both. Change `retain`'s comparison to `==` and a release
+    /// keeps the claim it was told to drop, which is a window that answers a key
+    /// nobody holds.
+    #[test]
+    fn a_claim_is_live_from_the_moment_it_is_noted_until_it_is_released() {
+        // An id of this test's own: the ledger is process-wide.
+        const ID: i32 = 0x4d48;
+        super::note_released(ID);
+        assert!(!super::registration_is_live(ID));
+        super::note_claimed(ID);
+        super::note_claimed(ID);
+        assert!(super::registration_is_live(ID));
+        super::note_released(ID);
+        assert!(
+            !super::registration_is_live(ID),
+            "one release gives up the claim, however many times it was noted"
+        );
+    }
+
+    /// RED (M4-8) — **every Carbon modifier reaches its own bit, and nothing
+    /// else does.**
+    ///
+    /// The macOS twin of `every_modifier_reaches_its_own_bit`, and it runs on
+    /// this workspace's Windows host for the reason the module header gives:
+    /// `RegisterEventHotKey` takes a key *position*, so the whole translation is
+    /// a pure function.
+    ///
+    /// MUTATION: swap the `CONTROL_KEY` and `OPTION_KEY` literals and a summon
+    /// bound with `⌃` registers as one held with `⌥` — the window then answers a
+    /// chord nobody bound and never answers the one they did, and both halves of
+    /// that are invisible from inside this process. Give the mask a
+    /// `MOD_NOREPEAT`-shaped extra bit and `RegisterEventHotKey` answers
+    /// `paramErr` for a chord that is perfectly good.
+    #[test]
+    fn every_carbon_modifier_reaches_its_own_bit() {
+        // `` ⌃` ``, the shipped macOS default — see `docs/DESIGN.md` §13.51 ②.
+        let grave = super::carbon_key_code(super::SummonKey::Character('`'))
+            .expect("the backtick has a position on every keyboard this runs on");
+        let (modifiers, key) =
+            super::carbon_registration_bits(chord(true, false, false, false, grave))
+                .expect("a modified backtick is a hotkey");
+        assert_eq!(key, u32::from(grave), "the key code is carried unchanged");
+        assert_eq!(
+            modifiers, 0x1000,
+            "controlKey and nothing beside it — no no-repeat bit, because Carbon has none"
+        );
+        for (held, expected) in [
+            (chord(true, false, false, false, grave), 0x1000),
+            (chord(false, true, false, false, grave), 0x0800),
+            (chord(false, false, false, true, grave), 0x0100),
+            (chord(true, false, true, false, grave), 0x1000 | 0x0200),
+            (
+                chord(true, true, true, true, grave),
+                0x1000 | 0x0800 | 0x0200 | 0x0100,
+            ),
+        ] {
+            let (modifiers, _) =
+                super::carbon_registration_bits(held).expect("a modified key is a hotkey");
+            assert_eq!(
+                modifiers, expected,
+                "exactly the bits this chord names, and no others, for {held:?}"
+            );
+        }
+    }
+
+    /// RED (M4-8) — **the two spellings of the same key are the same key.**
+    ///
+    /// `WIN` and `CMD` are one bit in `bt_app::shortcuts` — `ModifiersState::SUPER`
+    /// under two names — and the whole point of the `win` field carrying it is
+    /// that a chord recorded on a Mac's Command key and one written `Win` in the
+    /// table reach the same claim.
+    ///
+    /// MUTATION: read `hotkey.win` into `CONTROL_KEY` instead and `⌘\`` is
+    /// claimed as `` ⌃` ``, which on a Mac is a chord the system does not
+    /// reserve and the reader never asked for.
+    #[test]
+    fn the_command_key_is_the_windows_key_wearing_its_own_name() {
+        let key = super::carbon_key_code(super::SummonKey::Character('`')).expect("a real key");
+        let as_win = super::carbon_registration_bits(chord(false, false, false, true, key));
+        let as_cmd = super::carbon_registration_bits(Hotkey {
+            ctrl: false,
+            alt: false,
+            shift: false,
+            // The same bit `shortcuts::CMD` is: there is one modifier here and
+            // two names for it upstairs.
+            win: true,
+            virtual_key: key,
+        });
+        assert_eq!(as_win, as_cmd);
+        assert_eq!(as_win.expect("a modified key is a hotkey").0, 0x0100);
+    }
+
+    /// RED (M4-8) — **key code zero is a letter here, not a refusal.**
+    ///
+    /// The one place the two arms of this module disagree about arithmetic, and
+    /// the disagreement is real: `registration_bits` refuses `virtual_key == 0`
+    /// because Win32 has no key on that number, while `kVK_ANSI_A` **is** zero.
+    ///
+    /// MUTATION: copy the Windows zero clause into `carbon_registration_bits`
+    /// and a reader who binds `⌃A` gets a summon that silently never registers.
+    #[test]
+    fn the_letter_a_is_key_code_zero_and_is_still_a_hotkey() {
+        assert_eq!(
+            super::carbon_key_code(super::SummonKey::Character('a')),
+            Some(0),
+            "kVK_ANSI_A is zero, which is why the Windows zero clause cannot be copied"
+        );
+        let bits = super::carbon_registration_bits(chord(true, false, false, false, 0))
+            .expect("a modified A is a hotkey on this platform");
+        assert_eq!(bits, (0x1000, 0));
+        assert_eq!(
+            registration_bits(chord(true, false, false, false, 0)),
+            None,
+            "and on the other side the very same zero is a layout that could not answer"
+        );
+    }
+
+    /// RED (M4-8) — **a key this keyboard has no position for is refused, and
+    /// refused rather than guessed.**
+    ///
+    /// The ticket's own case: a chord whose key has no code must come back as a
+    /// `None` that becomes [`HotkeyFault::NoSuchKey`], never a panic and never a
+    /// fallback onto some other key.
+    ///
+    /// MUTATION: make the character arm's fallthrough `_ => 0` instead of
+    /// `return None` and every unknown character claims `⌃A`.
+    #[test]
+    fn a_character_with_no_position_on_this_keyboard_is_refused() {
+        for absent in ['é', '中', '€', '±', '\u{0}'] {
+            assert_eq!(
+                super::carbon_key_code(super::SummonKey::Character(absent)),
+                None,
+                "{absent:?} has no ANSI position, so there is no key code to claim"
+            );
+        }
+        // And a chord built on one is refused by the product's own rule before
+        // any of this is asked — there is no key to put in the struct at all.
+        assert!(
+            super::summon_key_code(super::SummonKey::Character('中')).is_none(),
+            "the one door between a key and a number says no for every platform"
+        );
+    }
+
+    /// RED (M4-8) — **case is not a key.**
+    ///
+    /// The recorder stores what a person typed, and a person holding shift types
+    /// a capital. A table that only knew lower case would refuse `⇧⌃N` and
+    /// accept `⇧⌃n`, which are the same press.
+    ///
+    /// MUTATION: drop the `to_ascii_lowercase` and the first assertion fails.
+    #[test]
+    fn a_capital_is_the_same_key_as_its_own_lower_case() {
+        assert_eq!(
+            super::carbon_key_code(super::SummonKey::Character('N')),
+            super::carbon_key_code(super::SummonKey::Character('n')),
+        );
+        assert_eq!(
+            super::carbon_key_code(super::SummonKey::Character('n')),
+            Some(0x2d),
+        );
+    }
+
+    /// RED (M4-8) — **every key the table upstairs can hold has a position, and
+    /// the four that are easy to swap are the right way round.**
+    ///
+    /// Every named key `bt_app::shortcuts::BINDINGS` can carry is asked for by
+    /// name, so a variant added there and forgotten here fails this rather than
+    /// failing on somebody's Mac. The four spelled out are the ones whose names
+    /// mean different keys on the two keyboards.
+    ///
+    /// MUTATION: read `Backspace` and `Delete` the other way round — the
+    /// plausible mistake, because a Mac calls its backspace key *delete* — and
+    /// the second assertion fails. Put the function row in numeric order and the
+    /// third fails: `F1` is `0x7a` on this platform, not `0x3a`.
+    #[test]
+    fn every_named_key_the_table_can_hold_has_a_position() {
+        use super::SummonNamedKey as Named;
+        const EVERY: [Named; 27] = [
+            Named::Tab,
+            Named::Escape,
+            Named::Enter,
+            Named::Space,
+            Named::Backspace,
+            Named::Delete,
+            Named::Insert,
+            Named::Home,
+            Named::End,
+            Named::PageUp,
+            Named::PageDown,
+            Named::ArrowLeft,
+            Named::ArrowUp,
+            Named::ArrowRight,
+            Named::ArrowDown,
+            Named::F1,
+            Named::F2,
+            Named::F3,
+            Named::F4,
+            Named::F5,
+            Named::F6,
+            Named::F7,
+            Named::F8,
+            Named::F9,
+            Named::F10,
+            Named::F11,
+            Named::F12,
+        ];
+        let mut seen: Vec<u16> = Vec::new();
+        for named in EVERY {
+            let code = super::carbon_key_code(super::SummonKey::Named(named))
+                .unwrap_or_else(|| panic!("{named:?} is a key this table must know"));
+            assert!(
+                !seen.contains(&code),
+                "{named:?} shares key code {code:#04x} with a key already in the table"
+            );
+            seen.push(code);
+        }
+        assert_eq!(
+            (
+                super::carbon_key_code(super::SummonKey::Named(Named::Backspace)),
+                super::carbon_key_code(super::SummonKey::Named(Named::Delete)),
+            ),
+            (Some(0x33), Some(0x75)),
+            "kVK_Delete is the key a Mac calls delete and everyone else calls backspace"
+        );
+        assert_eq!(
+            super::carbon_key_code(super::SummonKey::Named(Named::F1)),
+            Some(0x7a),
+            "the function row is not in numeric order on this platform"
+        );
+    }
+
+    /// RED (M4-8) — **a chord no modifier holds down is never claimed on this
+    /// platform either.**
+    ///
+    /// R2-14's rule, restated at the second door that makes a desktop-wide
+    /// claim. `RegisterEventHotKey` takes a key away from every application on
+    /// the Mac exactly as `RegisterHotKey` does on Windows.
+    ///
+    /// MUTATION: drop the `holds_a_summon_modifier` guard from
+    /// `carbon_registration_bits` and a bare `k` recorded once means nothing on
+    /// that desk types the letter again until Folio exits.
+    #[test]
+    fn a_carbon_summon_with_no_modifier_is_never_claimed() {
+        let k = super::carbon_key_code(super::SummonKey::Character('k')).expect("a real key");
+        for bare in [
+            chord(false, false, false, false, k),
+            chord(false, false, true, false, k),
+        ] {
+            assert_eq!(super::carbon_registration_bits(bare), None, "{bare:?}");
+        }
+        for held in [
+            chord(true, false, false, false, k),
+            chord(false, true, false, false, k),
+            chord(false, false, false, true, k),
+        ] {
+            assert!(super::carbon_registration_bits(held).is_some(), "{held:?}");
+        }
     }
 
     #[test]
