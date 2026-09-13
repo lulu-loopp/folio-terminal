@@ -11951,9 +11951,10 @@ those two were ever ended.
 
 ### 13.40 M2-7: 阅读面验收扫——每一行在真机上过了一遍,过不了的写成手上的步骤(`crates/bt-app/src/{main,preview_trace}.rs`、`crates/bt-math/tests/acceptance_display_integral.rs`、`docs/plans/port/m2-7/`)
 
-**Taken as 13.40.** 13.19–13.37 are merged; 13.38 (M4-3) and 13.39
-(T-MAC-POINTER) are in flight on other branches of this port. This section takes
-the next number nothing has claimed.
+**Taken as 13.40.** 13.19–13.37 were merged when this ticket started and 13.38
+(M4-3) and 13.39 (T-MAC-POINTER) were in flight beside it; both have landed
+since, which is why ① and ⑧ below cite 13.39 rather than reopening the question
+it settled. This section takes the next number nothing has claimed.
 
 **① Three doors, because §M2's line is seven sentences and every one begins with
 a gesture.** Two of the gestures can be posted at a window this session started
@@ -11977,12 +11978,14 @@ around what would have been convenient.
   says without a key being pressed. That is how the `md5` the owner's hand
   procedure compares against gets onto the glass.
 * **The clicks** are CGEvents posted at this session's own window, at points read
-  out of that window's own `BT_CHROME_DUMP` frame. **A press does reach this
-  window's content**, which §13.34 ⑦(d) had left open: the first-run card was
-  dismissed by pressing its own button, and a press on a tree row arrives and
+  out of that window's own `BT_CHROME_DUMP` frame. They land: the first-run card
+  was dismissed by pressing its own button, and a press on a tree row arrives and
   routes — `chrome_mouse_input taken=1 at=press-routed … target=FilesRow { seat:
-  SeatId(1), index: 4 }`. What M3-4 saw was a press taken by something else, not
-  a press that failed to arrive.
+  SeatId(1), index: 4 }`. That is this sweep corroborating §13.39 rather than
+  discovering anything: a press is routed by the window server to whatever is
+  frontmost at that point, so what §13.34 ⑦(d) photographed was a patch of desk
+  with another application's panel parked over it, and a window with nothing over
+  its rows takes every press aimed at them.
 
 **② A clean data directory has a card on it, and that is the row rather than an
 obstacle.** The first launch of this bundle draws the first-run card over the
@@ -12180,12 +12183,13 @@ terminal pane under it. Then, in order:
   finished command's region, and this line was written by a startup file before
   the first prompt existed — it was never a block the detector was offered. It is
   recorded here only so the next agent does not read it as evidence.
-* **§13.34 ⑦(d) is answered and can be closed as a pointer question**: a press
-  posted at this window reaches its content and routes to the row under it. What
-  that ticket photographed was a press taken by something standing over the
-  content, which is what the first-run card did to this sweep's first run as
-  well — `route=none` with the card up, and `taken=1 at=press-routed` with it
-  gone.
+* **§13.39's rule has a second witness here, one layer up.** A press is taken by
+  whatever is frontmost at that point, and in this window that was sometimes
+  Folio's own first-run card: the run that had not dismissed it recorded
+  `mouse_input … route=none` for a press aimed at a tree row, and the run that
+  had recorded `taken=1 at=press-routed … FilesRow` for the same point. A modal
+  of one's own occludes exactly as another application's panel does, which is
+  worth a line in any later ticket that drives this product with a pointer.
 
 **⑨ The run.** Five runs of `docs/plans/port/m2-7/m2-7-acceptance.sh` on the Mac
 mini, each from a clean `out-acc` and its own isolated `HOME`; the build is
