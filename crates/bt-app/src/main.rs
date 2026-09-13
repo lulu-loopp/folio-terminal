@@ -95200,7 +95200,12 @@ impl Runtime<'_> {
     ) -> Result<()> {
         let copying = match action {
             bt_platform::menu::AppMenuAction::Help => {
-                return self.hand_url_to_the_browser(update::RELEASES_PAGE);
+                // The address is a constant of this build and always navigable;
+                // the hand-off's `false` is for a typed address and is not a
+                // verdict on this one (this is what the landing arm did before
+                // the verbs moved here).
+                self.hand_url_to_the_browser(update::RELEASES_PAGE)?;
+                return Ok(());
             }
             bt_platform::menu::AppMenuAction::CopySelection => true,
             bt_platform::menu::AppMenuAction::PasteIntoFocus => false,
