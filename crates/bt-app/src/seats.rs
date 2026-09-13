@@ -112,7 +112,7 @@ use bt_render::{
     WINDOW_TITLE_BAR_DRAG_RESERVE_LOGICAL_PX, WINDOW_TITLE_BAR_LOGICAL_PX, chrome_palette,
 };
 
-use crate::focus_thumb::MiniMetrics;
+use crate::focus_thumb::{MiniMetrics, grid_runs};
 // **A width is only worth having if it was taken wearing what the paint wears**
 // — the doctrine and the type both live on [`crate::git_panel::MeasureFace`],
 // where the Git page's own instance of this bug wrote them down. It is a fact
@@ -5779,6 +5779,27 @@ pub struct FocusThumbnail<'a> {
     /// Which seat of **this tab** holds its keyboard — `.fc-cell.focused`.
     pub focused: SeatId,
     pub seats: &'a BTreeMap<SeatId, MiniSeatContent>,
+    /// **One column of the terminal's face at the mini size, in physical
+    /// pixels** — the grid a mono row is laid on (§7.1.6b′ ⑤).
+    ///
+    /// The very number the cut was measured against
+    /// (`WindowRuntime::focus_mini_advance`, which
+    /// [`focus_thumb::mini_columns`] divides this seat's width by), carried down
+    /// beside the rows rather than re-derived, so the column a row was *cut* at
+    /// and the column it is *drawn* at cannot come from two measurements. A card
+    /// is a terminal set smaller, and a terminal is a grid: a row is placed
+    /// column by column at this advance and never at its own shaped one — see
+    /// [`focus_thumb::grid_runs`] for the report that made the difference
+    /// visible.
+    ///
+    /// Zero — a face nobody has measured yet — is the same answer
+    /// [`focus_thumb::mini_columns`] gives it: no columns, and so nothing to
+    /// draw. It needs no branch of its own here, because a grid of zero-wide
+    /// cells gives every run an empty box and an empty box is not drawn.
+    ///
+    /// [`focus_thumb::mini_columns`]: crate::focus_thumb::mini_columns
+    /// [`focus_thumb::grid_runs`]: crate::focus_thumb::grid_runs
+    pub mono_cell: f32,
 }
 
 /// Which part of the focus column is under this point.
@@ -14172,6 +14193,7 @@ fn focus_card_mini_chrome(
                 inner,
                 viewport,
                 scale,
+                thumbnail.mono_cell,
                 palette,
                 nudge_rows,
                 (labels, sprites, images),
@@ -14228,11 +14250,24 @@ fn focus_mini_seam_quads(seat: [f32; 4], stroke: f32, scale: f32) -> Vec<[f32; 4
 /// the line height that count was measured with — the same expression, from the
 /// same table (`focus_thumb::MiniMetrics`), so a row cannot be counted at one
 /// height and drawn at another.
+///
+/// **Nor how wide a column is.** `cell` is the advance the cut was measured
+/// against ([`FocusThumbnail::mono_cell`]), and a mono row is laid out *on* it
+/// rather than at its own shaped advance — the horizontal twin of the sentence
+/// above, and for the same reason: a row cut at one column and drawn at another
+/// is a picture of a grid that is not the one the pane holds.
+// One argument over clippy's taste, and it is the one that keeps the card's
+// columns and the terminal's columns the same columns: `cell` cannot be derived
+// from the rectangle, because it is a property of the *face* and only the
+// renderer has measured it. The other seven are already the minimum the two
+// halves of a cell need — see `collapse_bar_contents` for the same judgement.
+#[allow(clippy::too_many_arguments)]
 fn focus_mini_seat_content(
     content: &MiniSeatContent,
     inner: [f32; 4],
     viewport: [f32; 2],
     scale: f32,
+    cell: f32,
     palette: ChromePalette,
     nudge_rows: f32,
     output: (
@@ -14302,14 +14337,14 @@ fn focus_mini_seat_content(
                 if row[3] <= inner[1] {
                     continue;
                 }
-                mini_row_label(
+                mini_grid_row_labels(
                     labels,
-                    text.clone(),
+                    text,
                     row,
                     clip_to_list([row[0], row[1].max(inner[1]), row[2], row[3].min(inner[3])]),
                     metrics.font_logical_px * scale,
                     palette.focus_mini_text,
-                    metrics.mono,
+                    cell,
                 );
             }
         }
@@ -14332,15 +14367,40 @@ fn focus_mini_seat_content(
                 if row[1] >= inner[3] {
                     break;
                 }
-                mini_row_label(
-                    labels,
-                    text.clone(),
-                    row,
-                    clip_to_list([row[0], row[1], row[2], row[3].min(inner[3])]),
-                    metrics.font_logical_px * scale,
-                    palette.focus_mini_text,
-                    metrics.mono,
-                );
+                let clip = clip_to_list([row[0], row[1], row[2], row[3].min(inner[3])]);
+                let size = metrics.font_logical_px * scale;
+                // **A file of code is on the grid too, and a page of prose is
+                // not** (§7.1.6b′ ⑤). `mono` is already this seat's answer to
+                // "were these bytes written in a grid" — it is why the face is
+                // the terminal's — so it is the same answer to "may one glyph
+                // decide where the next one goes". A page of prose is set in the
+                // window's proportional face, where the running advance *is* the
+                // right answer and a grid would be a table nobody wrote.
+                //
+                // Read off the same table the face was chosen from, so that the
+                // seat cannot be *set* in one face and *placed* as if it were in
+                // the other.
+                if metrics.mono {
+                    mini_grid_row_labels(
+                        labels,
+                        text,
+                        row,
+                        clip,
+                        size,
+                        palette.focus_mini_text,
+                        cell,
+                    );
+                } else {
+                    mini_row_label(
+                        labels,
+                        text.clone(),
+                        row,
+                        clip,
+                        size,
+                        palette.focus_mini_text,
+                        false,
+                    );
+                }
             }
         }
         MiniSeatContent::Files(rows) => {
@@ -14536,7 +14596,12 @@ fn mini_row_label(
     color: [u8; 3],
     mono: bool,
 ) {
-    if text.is_empty() || rect[2] <= rect[0] || clip[3] <= clip[1] {
+    // The horizontal refusal is the vertical one's twin and arrived with
+    // [`mini_grid_row_labels`], which is the first caller that can hand this a
+    // box off the side of its seat: a run whose columns all lie past the cell's
+    // right edge. Every other caller's clip spans the whole row, so the test is
+    // free for them and the two edges are now refused by the same line.
+    if text.is_empty() || rect[2] <= rect[0] || clip[3] <= clip[1] || clip[2] <= clip[0] {
         return;
     }
     labels.push(ChromeLabel {
@@ -14558,6 +14623,55 @@ fn mini_row_label(
         tabular_numerals: false,
         mono,
     });
+}
+
+/// **One mini row of grid text, laid out column by column** (owner's report
+/// 2026-09-13, `docs/DESIGN.md` §7.1.6b′ ⑤).
+///
+/// The row arrives as one string and leaves as one label per *run*
+/// ([`grid_runs`], which owns the question of where a run ends).
+/// Each run is put down at `rect[0] + column × cell` — the card's spelling of
+/// the pane's own `frame_cell_bounds_px`, where a cell's pixel is its column's
+/// and never the running advance of the glyphs before it.
+///
+/// **A run is also clipped to the columns it owns**, which is the second half of
+/// "the grid wins": a glyph drawn from a fallback face can be wider than the
+/// columns the grid gave it — a CJK ideograph at 7.5px is one em where two mini
+/// columns are 1.1 — and this is what stops it from being *seen* outside them,
+/// now that pinning has already stopped it from *pushing* the rest of the row.
+/// The clip is the seat's own row clip narrowed to the run, so the cell's right
+/// edge still cuts the line exactly where it cut it before, and a run that
+/// begins past that edge is never built.
+///
+/// Nothing else about the row changes: same face, same size, same box, same
+/// baseline. What changes is only which x each piece is put at.
+fn mini_grid_row_labels(
+    labels: &mut Vec<ChromeLabel>,
+    text: &str,
+    rect: [f32; 4],
+    clip: [f32; 4],
+    font_size_px: f32,
+    color: [u8; 3],
+    cell: f32,
+) {
+    // **A column's pixel is a function of the column**, written once: a run's
+    // right edge is the column *after* its last one, not its left edge plus its
+    // width. The two are the same number in arithmetic and not always the same
+    // f32, and a border whose two neighbours disagreed about where their shared
+    // column is would be the seam this whole ruling is about, one ulp wide.
+    let edge = |column: usize| rect[0] + column as f32 * cell;
+    for run in grid_runs(text) {
+        let (left, right) = (edge(run.column), edge(run.column + run.columns));
+        mini_row_label(
+            labels,
+            run.text,
+            [left, rect[1], right, rect[3]],
+            [clip[0].max(left), clip[1], clip[2].min(right), clip[3]],
+            font_size_px,
+            color,
+            true,
+        );
+    }
 }
 
 /// A collapsed seat's bar carries its name and its state icon (§2.6.3) — except
@@ -40780,6 +40894,16 @@ mod tests {",
     /// A window tall enough for four cards with their bodies — see
     /// [`focus_of_in`].
     const TALL_FIXTURE_HEIGHT: f32 = 1200.0;
+    /// **One mini column, at the fixtures' scale of 1** —
+    /// [`FocusThumbnail::mono_cell`], which the renderer measures off the
+    /// terminal's own face and no fixture can ask for.
+    ///
+    /// The real value, not a round stand-in: §7.1.6b′'s width ruling pinned the
+    /// default face's advance on the machine at **0.5498em**, so 7.5px of
+    /// Consolas is 4.1235 physical pixels here. The grid tests below assert on
+    /// multiples of it, which is the point — a card's columns are this number
+    /// times an integer, and nothing else.
+    const MINI_CELL: f32 = 4.1235;
 
     /// One card's worth of tab, with whatever it has to report.
     fn card_tab(title: &str, pane_count: usize, mark: TabMarkState, pinned: bool) -> TabContent {
@@ -43685,6 +43809,7 @@ mod tests {",
                     tree: &tree,
                     focused: SeatId(1),
                     seats: &seats,
+                    mono_cell: MINI_CELL,
                 });
             }
             let column = window_chrome_with_thumbnails_in(
@@ -44394,6 +44519,7 @@ mod tests {",
             tree: &tree,
             focused: SeatId(1),
             seats: &seats,
+            mono_cell: MINI_CELL,
         })];
         let state = focus_rail(TabLayoutMode::Vertical);
         let column = window_chrome_with_thumbnails_in(
@@ -44490,6 +44616,133 @@ mod tests {",
             cell[3] - rows[held - 1].rect[3] < line,
             "with less than a whole row of slack under it, which is what \
              『填满』 means when the count is floored"
+        );
+    }
+
+    /// The owner's table (2026-09-13): a header row of ASCII, a body row whose
+    /// second cell holds ideographs, and the separator under them. Every row
+    /// carries a vertical border in columns 0, 5 and 12.
+    const TABLE: [&str; 3] = ["│ ID │ Name │", "│ 42 │ 名字 │", "├────┼──────┤"];
+
+    /// Where the vertical borders of one projected row are actually drawn, in
+    /// physical pixels — read off the labels the card emits, which is where a
+    /// glyph's x is decided.
+    fn border_x(rows: &[ChromeLabel], cell: [f32; 4], row: usize) -> Vec<f32> {
+        let top = cell[1] + row as f32 * crate::focus_thumb::MiniMetrics::TERM.line_px(1.0);
+        rows.iter()
+            .filter(|label| {
+                label.rect[1] == top && matches!(label.text.as_str(), "│" | "├" | "┼" | "┤")
+            })
+            .map(|label| label.rect[0])
+            .collect()
+    }
+
+    /// **A table projected onto a card is the same table** (owner's report,
+    /// 2026-09-13; §7.1.6b′ ⑤).
+    ///
+    /// The report was a screenshot: a box-drawing table whose cells hold Chinese
+    /// text, square in the pane and crooked on the card — the `│` of a row
+    /// carrying ideographs standing somewhere else than the `│` of the header
+    /// above it. The cause is one row shaped as one **string**: a CJK glyph
+    /// comes from a fallback face whose advance at 7.5px is not two mini
+    /// columns, so every ideograph in a row shortens the rest of that row, and
+    /// no two rows with different mixes drift alike.
+    ///
+    /// So the assertion is in the unit the grid is in: every border lands at the
+    /// cell's left edge plus its **column** times the advance the row was cut
+    /// at, on all three rows — not near it, on it.
+    ///
+    /// Red gate, and it is the mutation: hand the row to `mini_row_label` whole
+    /// and there is no label whose text is a border at all, so all three rows
+    /// answer with an empty list.
+    #[test]
+    fn a_table_projected_onto_a_card_keeps_its_columns() {
+        let (rows, cell) = transcript_rows_of(TABLE.iter().map(|&row| row.to_owned()).collect());
+        let wanted: Vec<f32> = [0.0, 5.0, 12.0]
+            .into_iter()
+            .map(|column: f32| cell[0] + column * MINI_CELL)
+            .collect();
+        for row in 0..TABLE.len() {
+            assert_eq!(
+                border_x(&rows, cell, row),
+                wanted,
+                "row {row} draws its borders on the grid's columns and not at \
+                 the running advance of the glyphs before them"
+            );
+        }
+    }
+
+    /// **A wide glyph is cut by its columns rather than allowed to shove them**
+    /// — the second half of "the grid wins".
+    ///
+    /// Pinning stops an ideograph from pushing the border after it; this stops
+    /// one drawn wider than the two columns it owns from being *seen* past
+    /// them. The clip on an ideograph's run is exactly two columns wide, which
+    /// is the same thing the pane does to its own wide cells.
+    ///
+    /// Red gate: clip a run to the whole row, as a row label is clipped, and the
+    /// width answered is the rest of the cell instead of two columns.
+    #[test]
+    fn a_wide_glyph_is_clipped_to_the_two_columns_it_owns() {
+        let (rows, cell) = transcript_rows_of(vec![TABLE[1].to_owned()]);
+        let ideograph = rows
+            .iter()
+            .find(|label| label.text == "名")
+            .expect("the ideograph is a run of its own");
+        assert_eq!(
+            ideograph.rect[0],
+            cell[0] + 7.0 * MINI_CELL,
+            "and it stands in the column the grid gave it"
+        );
+        let clip = ideograph.clip.expect("a mini row is clipped to its seat");
+        assert_eq!(
+            [clip[0], clip[2]],
+            [cell[0] + 7.0 * MINI_CELL, cell[0] + 9.0 * MINI_CELL],
+            "an ideograph is shown in its two columns and nowhere else — a \
+             glyph wider than they are is cut by them"
+        );
+    }
+
+    /// **A border immediately after a wide character stands in column two** —
+    /// the drift, isolated to one cluster and read off the card.
+    ///
+    /// Two rows differing only in what fills the first two columns: two Latin
+    /// letters, or one ideograph. On the screen the two rows' borders are one
+    /// pixel apart in x — the ideograph's face is not the row's face and its
+    /// advance is not two cells — and that single difference, repeated per cell,
+    /// is the whole of the crooked table. The card now answers the grid's
+    /// column for both.
+    ///
+    /// Red gate: shape either row as one string and there is no border label to
+    /// find at all.
+    #[test]
+    fn a_border_after_a_wide_character_stands_in_its_own_column() {
+        let (rows, cell) = transcript_rows_of(vec!["ab│".to_owned(), "名│".to_owned()]);
+        let wanted = vec![cell[0] + 2.0 * MINI_CELL];
+        assert_eq!(border_x(&rows, cell, 0), wanted, "after two Latin letters");
+        assert_eq!(border_x(&rows, cell, 1), wanted, "and after one ideograph");
+    }
+
+    /// **A row with nothing but Latin on it is drawn exactly as it was** — the
+    /// cost half of the same ruling.
+    ///
+    /// The face is monospaced and the cell is its own advance, so a stretch of
+    /// ASCII is one run: the card that was right stays one label a row, and the
+    /// only card that pays for the grid is the card that needed it.
+    #[test]
+    fn a_latin_row_is_still_one_label() {
+        let (rows, cell) =
+            transcript_rows_of(vec!["> cargo build".to_owned(), "  Compiling".to_owned()]);
+        assert_eq!(
+            rows.iter()
+                .map(|label| label.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["> cargo build", "  Compiling"],
+            "one label a row, whole"
+        );
+        assert!(
+            rows.iter().all(|label| label.rect[0] == cell[0]),
+            "each beginning at column zero, which is the cell's own left edge"
         );
     }
 
@@ -44668,16 +44921,19 @@ mod tests {",
                 tree: &terminal,
                 focused: SeatId(1),
                 seats: &tail,
+                mono_cell: MINI_CELL,
             }),
             Some(FocusThumbnail {
                 tree: &files,
                 focused: SeatId(1),
                 seats: &rows,
+                mono_cell: MINI_CELL,
             }),
             Some(FocusThumbnail {
                 tree: &preview,
                 focused: SeatId(1),
                 seats: &face,
+                mono_cell: MINI_CELL,
             }),
         ];
         let state = focus_rail(TabLayoutMode::Vertical);
@@ -44820,6 +45076,7 @@ mod tests {",
                 tree: &tree,
                 focused: SeatId(1),
                 seats: &page,
+                mono_cell: MINI_CELL,
             })],
             FocusFrame::SETTLED,
         )
@@ -44874,6 +45131,7 @@ mod tests {",
                 tree: &tree,
                 focused: SeatId(1),
                 seats: &face,
+                mono_cell: MINI_CELL,
             })],
             FocusFrame::SETTLED,
         )
@@ -44938,6 +45196,7 @@ mod tests {",
                 tree: &tree,
                 focused: SeatId(1),
                 seats: &shown,
+                mono_cell: MINI_CELL,
             })],
             FocusFrame::SETTLED,
         )
@@ -45009,6 +45268,7 @@ mod tests {",
                 tree: &tree,
                 focused: SeatId(1),
                 seats: &face,
+                mono_cell: MINI_CELL,
             })],
             FocusFrame::SETTLED,
         )
@@ -45068,11 +45328,13 @@ mod tests {",
                 tree: &preview,
                 focused: SeatId(1),
                 seats: &code,
+                mono_cell: MINI_CELL,
             }),
             Some(FocusThumbnail {
                 tree: &preview,
                 focused: SeatId(1),
                 seats: &prose,
+                mono_cell: MINI_CELL,
             }),
         ];
         let state = focus_rail(TabLayoutMode::Vertical);
@@ -45280,6 +45542,7 @@ mod tests {",
                 tree: &tree,
                 focused: SeatId(1),
                 seats: &content,
+                mono_cell: MINI_CELL,
             }),
             None,
         ];
@@ -45334,6 +45597,7 @@ mod tests {",
                 tree: &tree,
                 focused: SeatId(2),
                 seats: &content,
+                mono_cell: MINI_CELL,
             }),
         ];
         let state = focus_rail(TabLayoutMode::Vertical);

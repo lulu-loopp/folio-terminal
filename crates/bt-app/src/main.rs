@@ -39718,6 +39718,12 @@ impl Runtime<'_> {
                     tree: tab.seats.tree(),
                     focused: tab.focused_leaf,
                     seats: self.window.focus_thumbs.seats(tab.id)?,
+                    // The grid those rows are drawn on, which is the grid they
+                    // were cut to — see [`seats::FocusThumbnail::mono_cell`].
+                    // Measured a few lines up, on this window's own face at this
+                    // window's own scale, which is the face and the scale every
+                    // card in this column is about to be shaped in.
+                    mono_cell: focus_mini_advance,
                 })
             })
             .collect();
@@ -39758,6 +39764,14 @@ impl Runtime<'_> {
                     tree: &pane.tree,
                     focused: pane.focused,
                     seats: &pane.seats,
+                    // **This window's cell, for a projection the other window
+                    // cut.** The rows crossed the broker as text; the grid is a
+                    // fact about the face they are about to be *drawn* in, and
+                    // that face is this window's. A visitor's card whose columns
+                    // were cut wider than this card holds is clipped at this
+                    // card's edge exactly as it was before — that half is the
+                    // clip's, and it is unchanged.
+                    mono_cell: focus_mini_advance,
                 }),
                 None => stand_in_pane.as_ref().and_then(|(leaf, tree)| {
                     Some(seats::FocusThumbnail {
@@ -39766,6 +39780,7 @@ impl Runtime<'_> {
                         // that tab this pane is the one holding the keyboard.
                         focused: leaf.seat,
                         seats: self.window.focus_thumbs.seats(leaf.tab)?,
+                        mono_cell: focus_mini_advance,
                     })
                 }),
             };
