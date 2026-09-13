@@ -8,6 +8,11 @@
        输出中，位于下一行输入上方。">
 </picture>
 
+[![License: MIT or Apache-2.0](https://img.shields.io/badge/license-MIT%20or%20Apache--2.0-green)](#许可证)
+[![Build](https://github.com/lulu-loopp/folio-terminal/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/lulu-loopp/folio-terminal/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/lulu-loopp/folio-terminal?include_prereleases&label=release&color=blue)](https://github.com/lulu-loopp/folio-terminal/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/lulu-loopp/folio-terminal/total?label=downloads&color=pink)](https://github.com/lulu-loopp/folio-terminal/releases)
+
 Folio 是一个 Windows 终端。公式在命令输出中原位排版，文件在终端旁预览，agent 等待时标签页亮灯提醒。
 
 [English](README.md) · [快捷键](docs/shortcuts.md) ·
