@@ -14753,6 +14753,18 @@ pub fn measure_preview_paragraph_width(
         .fold(0.0_f32, f32::max)
 }
 
+/// Font environment shared by CPU-only preview measurement diagnostics.
+pub type PreviewMeasureFontSystem = FontSystem;
+
+/// CPU-only access to the renderer's text rows for Markdown anchor tests and
+/// diagnostics. Uses the same shaping and seam affinity as the window renderer.
+pub fn measure_preview_text_rows(
+    fonts: &mut FontSystem,
+    paragraph: &PreviewParagraph,
+) -> Vec<PreviewTextRow> {
+    preview_text_rows(fonts, paragraph)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -26835,75 +26847,3 @@ mod tests {
         }
     }
 }
-<<<<<<< HEAD
-
-/// The production font environment without a device, surface or window.
-pub fn preview_measure_font_system() -> FontSystem {
-    terminal_font_system()
-}
-
-/// CPU measurement shared by the renderer and non-GUI document probes.
-pub fn measure_preview_paragraph(
-    font_system: &mut FontSystem,
-    runs: &[PreviewRun],
-    width_px: f32,
-    font_size_px: f32,
-    line_height_px: f32,
-) -> f32 {
-    if runs.iter().all(|run| run.text.is_empty()) {
-        return line_height_px;
-    }
-    let mut buffer = Buffer::new(font_system, Metrics::new(font_size_px, line_height_px));
-    buffer.set_wrap(Wrap::WordOrGlyph);
-    buffer.set_size(Some(width_px.max(1.0)), None);
-    set_preview_runs(
-        font_system,
-        &mut buffer,
-        runs,
-        0.0,
-        Metrics::new(font_size_px, line_height_px),
-    );
-    buffer.shape_until_scroll(font_system, false);
-    buffer.layout_runs().count().max(1) as f32 * line_height_px
-}
-
-/// CPU measurement shared by the renderer and non-GUI document probes.
-pub fn measure_preview_paragraph_width(
-    font_system: &mut FontSystem,
-    runs: &[PreviewRun],
-    font_size_px: f32,
-    line_height_px: f32,
-) -> f32 {
-    if runs.iter().all(|run| run.text.is_empty()) {
-        return 0.0;
-    }
-    let mut buffer = Buffer::new(font_system, Metrics::new(font_size_px, line_height_px));
-    buffer.set_wrap(Wrap::None);
-    buffer.set_size(None, Some(line_height_px));
-    set_preview_runs(
-        font_system,
-        &mut buffer,
-        runs,
-        0.0,
-        Metrics::new(font_size_px, line_height_px),
-    );
-    buffer.shape_until_scroll(font_system, false);
-    buffer
-        .layout_runs()
-        .map(|run| run.line_w)
-        .fold(0.0_f32, f32::max)
-}
-
-/// Font environment shared by CPU-only preview measurement diagnostics.
-pub type PreviewMeasureFontSystem = FontSystem;
-
-/// CPU-only access to the renderer's text rows for Markdown anchor tests and
-/// diagnostics. Uses the same shaping and seam affinity as the window renderer.
-pub fn measure_preview_text_rows(
-    fonts: &mut FontSystem,
-    paragraph: &PreviewParagraph,
-) -> Vec<PreviewTextRow> {
-    preview_text_rows(fonts, paragraph)
-}
-=======
->>>>>>> main
