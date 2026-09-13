@@ -26,6 +26,13 @@ All notable changes to Folio are recorded here. The format follows
   variables Terminal.app uses for it. It still never picks a country for you, and
   a setting you already have — inherited, or written into a profile — is left
   alone.
+- **A menu closes when you press the button that opened it.** With the `Open ⌄`
+  menu up at the end of a preview's path row, pressing the pill again opened it
+  afresh instead of putting it away, and so did the `…` that stands in for the
+  folders a narrow row has no width to show. Every menu in this window that hangs
+  from a button now closes on a press on that button and does nothing else with
+  that press — including the commit graph's branch list inside a torn-off window,
+  which had the same fault and was not in the report.
 - **A formula that took a moment to typeset now appears when it is ready.** A
   page holding `$$\int_0^1 x\,dx$$` shows the formula as you wrote it until the
   picture is set, which is right — but if the picture arrived after the page had
