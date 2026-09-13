@@ -84,14 +84,14 @@
 //! re-project even though nothing behind it moved.
 
 use std::{
-    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     time::{Duration, Instant},
 };
 
+use bt_doc::{AnchorId, Bias, ContentAnchor, GridPoint, ScreenId};
 use bt_layout::{SeatId, SeatKind};
 use bt_term::DualPlaneSession;
-use bt_transcript::CapturedRow;
+use bt_transcript::{CapturedRow, GraphemeOffset};
 
 use crate::{
     TabId,
@@ -631,6 +631,14 @@ impl FocusThumbnails {
         }
     }
 
+    /// Resolve a card's source position only when its projection can pass the
+    /// clock. The gesture credit is read here and consumed by `project` itself.
+    pub(crate) fn position_due(&self, tab: TabId, seat: SeatId, now: Instant) -> bool {
+        self.entries
+            .get(&(tab, seat))
+            .is_none_or(|entry| entry.unthrottled || now.duration_since(entry.at) >= MIN_INTERVAL)
+    }
+
     /// **Gates 3 and 4** — bring one visible card's seats up to date.
     ///
     /// `demands` is the tab's seats in tree order, already carrying their own
@@ -1004,7 +1012,7 @@ pub fn mini_columns(rect: [f32; 4], advance: f32, scale: f32) -> usize {
 /// when the generation moved, and nothing behind the screen can move without
 /// moving it: history grows when the screen scrolls or is reflowed, which are
 /// the two doors [`DualPlaneSession::screen_revision`] counts.
-fn transcript_tail(
+pub(crate) fn transcript_tail(
     session: &DualPlaneSession,
     columns: usize,
     rows: usize,
@@ -1013,45 +1021,132 @@ fn transcript_tail(
     if rows == 0 {
         return (Vec::new(), false);
     }
-    let (grid_columns, grid_rows) = session.live_dimensions();
-    let grid_columns = grid_columns.get();
-    let wanted = rows.saturating_add(skip);
-    let mut climb: Vec<String> = Vec::with_capacity(wanted);
-    let live = (0..grid_rows.get())
+    let climb = card_climb(session, rows.saturating_add(skip), None);
+    let aimed = skip.min(climb.len().saturating_sub(rows));
+    let window = climb
+        .into_iter()
+        .skip(aimed)
+        .take(rows)
         .rev()
-        .filter_map(|row| session.live_row(row))
-        .map(|captured| {
+        .map(|row| cut_to(row.text.trim_end(), columns))
+        .collect();
+    (window, aimed > 0)
+}
+
+/// One assembled row, including every carrier joined into it on widening.
+/// An anchor inside a later fragment must still resolve to this row; keeping
+/// only the leading fragment would lose that within-line position on resize.
+struct CardRow {
+    text: String,
+    sources: Vec<ContentAnchor>,
+}
+
+impl CardRow {
+    fn contains(&self, anchor: &ContentAnchor) -> bool {
+        self.sources.iter().any(|source| match (source, anchor) {
             (
-                Cow::Owned(row_text(&captured)),
-                wrapped_at_a_width_the_pane_no_longer_has(
-                    captured.continues,
-                    captured.captured_columns,
-                    grid_columns,
-                ),
-            )
-        });
-    // **And on past the top of the screen, into the two planes the pane draws
-    // above it** — the staged rows first, because they left the screen after
-    // every frozen line did. Nothing here asks anybody anything: both are this
-    // session's own memory, and the walk stops the moment the card is full.
-    let behind = (!session.terminal_modes().alternate_screen)
+                ContentAnchor::History {
+                    id: a,
+                    generation: ga,
+                    ..
+                },
+                ContentAnchor::History {
+                    id: b,
+                    generation: gb,
+                    ..
+                },
+            ) => a == b && ga == gb,
+            // Staging IDs are unique; unrelated finalizations can advance the
+            // store generation while this carrier remains in staging.
+            (ContentAnchor::Staging { id: a, .. }, ContentAnchor::Staging { id: b, .. }) => a == b,
+            (
+                ContentAnchor::Live {
+                    screen: a,
+                    point: pa,
+                    generation: ga,
+                    ..
+                },
+                ContentAnchor::Live {
+                    screen: b,
+                    point: pb,
+                    generation: gb,
+                    ..
+                },
+            ) => a == b && pa.row == pb.row && ga == gb,
+            _ => false,
+        })
+    }
+}
+
+/// Bounded newest-first assembly shared by painting, resolving, and aiming.
+/// With an anchor, walk until its complete joined row and a full window are
+/// known. With no anchor, read only the requested tail-relative distance.
+fn card_climb(
+    session: &DualPlaneSession,
+    wanted: usize,
+    anchor: Option<&ContentAnchor>,
+) -> Vec<CardRow> {
+    let (columns, rows) = session.live_dimensions();
+    let alternate = session.terminal_modes().alternate_screen;
+    let screen = if alternate {
+        ScreenId::Alternate
+    } else {
+        ScreenId::Primary
+    };
+    let live = (0..rows.get()).rev().filter_map(|row| {
+        let captured = session.live_row(row)?;
+        let continues = wrapped_at_a_width_the_pane_no_longer_has(
+            captured.continues,
+            captured.captured_columns,
+            columns.get(),
+        );
+        Some((
+            CardRow {
+                text: row_text(&captured),
+                sources: vec![ContentAnchor::Live {
+                    screen,
+                    point: GridPoint { row, column: 0 },
+                    bias: Bias::Before,
+                    generation: session.grid_generation(),
+                }],
+            },
+            continues,
+        ))
+    });
+    let behind = (!alternate)
         .then(|| {
             let staged = session
                 .transcript()
                 .staged_rows_newest_first()
                 .map(|staged| {
                     (
-                        Cow::Owned(row_text(&staged.row)),
+                        CardRow {
+                            text: row_text(&staged.row),
+                            sources: vec![ContentAnchor::Staging {
+                                id: staged.id,
+                                offset: GraphemeOffset(0),
+                                bias: Bias::Before,
+                                generation: session.transcript().source_generation(),
+                            }],
+                        },
                         wrapped_at_a_width_the_pane_no_longer_has(
                             staged.row.continues,
                             staged.row.captured_columns,
-                            grid_columns,
+                            columns.get(),
                         ),
                     )
                 });
             let frozen = session.document().entries().values().rev().map(|entry| {
                 (
-                    Cow::Borrowed(entry.line.text.as_str()),
+                    CardRow {
+                        text: entry.line.text.clone(),
+                        sources: vec![ContentAnchor::History {
+                            id: entry.line.id,
+                            offset: GraphemeOffset(0),
+                            bias: Bias::Before,
+                            generation: entry.line.source_generation,
+                        }],
+                    },
                     wrapped_at_a_width_the_pane_no_longer_has(
                         entry.line.wrap_split,
                         entry
@@ -1059,7 +1154,7 @@ fn transcript_tail(
                             .fragments
                             .last()
                             .map_or(0, |fragment| fragment.captured_columns),
-                        grid_columns,
+                        columns.get(),
                     ),
                 )
             });
@@ -1067,58 +1162,155 @@ fn transcript_tail(
         })
         .into_iter()
         .flatten();
-    // **A wrap the pane no longer has is not a wrap the card draws** (user
-    // report, 2026-09-09).
-    //
-    // A row is the unit here and stays the unit: the pane broke that line at that
-    // column and the card is a picture of the pane, which is
-    // `the_tail_carries_the_rows_staged_between_the_screen_and_history`'s whole
-    // subject. What `wrapped_at_a_width_the_pane_no_longer_has` adds is
-    // the one case where the row is not the pane's own — the two planes behind
-    // the screen keep the geometry each row was *captured* on, and a row captured
-    // narrower than the pane is now is a break at a column the pane has not had
-    // since. The screen itself re-wrapped when the pane was resized; the planes
-    // behind it did not, and cannot, because that width is the provenance the
-    // rest of the product reads them by.
-    //
-    // The report is what that looks like when the two widths are far apart: a
-    // shell born in a folded seat printed its prompt two columns wide, and the
-    // card went on drawing `(b`, `as`, `e)`, ` P`, `S` down the side of a pane
-    // sixty columns across long after the pane's own screen had put the line back
-    // together.
-    //
-    // The cut stays where it was. A card is a **narrower** picture of a pane, so
-    // its right edge is its own (`cut_to`) and never the width the text happened
-    // to be captured at.
-    let mut line: Option<String> = None;
-    for (text, continues) in live.chain(behind) {
+    let mut climb = Vec::with_capacity(wanted.min(256));
+    let mut found = anchor.is_none();
+    let mut line: Option<CardRow> = None;
+    for (mut row, continues) in live.chain(behind) {
         if continues && let Some(open) = line.as_mut() {
-            open.insert_str(0, &text);
+            open.text.insert_str(0, &row.text);
+            row.sources.append(&mut open.sources);
+            open.sources = row.sources;
             continue;
         }
-        let Some(done) = line.replace(text.into_owned()) else {
-            continue;
+        if let Some(done) = line.replace(row) {
+            keep_card_line(done, &mut climb, anchor, &mut found);
+            if found && climb.len() >= wanted {
+                return climb;
+            }
+        }
+    }
+    if let Some(done) = line {
+        keep_card_line(done, &mut climb, anchor, &mut found);
+    }
+    climb
+}
+
+/// The card owns one registered source position, independently of the pane's
+/// viewport. `skip` is only a derived projection coordinate (or an old session
+/// file's numeric fallback until the first nonempty projection).
+#[derive(Debug)]
+pub(crate) struct CardPosition {
+    anchor: Option<AnchorId>,
+    skip: usize,
+    rows: usize,
+    revision: Option<u64>,
+    screen: Option<ScreenId>,
+}
+
+impl CardPosition {
+    pub(crate) fn new(skip: usize) -> Self {
+        Self {
+            anchor: None,
+            skip,
+            rows: 0,
+            revision: None,
+            screen: None,
+        }
+    }
+
+    pub(crate) fn skip(&self) -> usize {
+        self.skip
+    }
+
+    fn set_anchor(&mut self, session: &mut DualPlaneSession, anchor: Option<ContentAnchor>) {
+        if let Some(id) = self.anchor.take() {
+            session.release_content_anchor(id);
+        }
+        self.anchor = anchor.map(|anchor| session.register_content_anchor(anchor));
+    }
+
+    fn resolved(&self, session: &DualPlaneSession, rows: usize) -> (Vec<CardRow>, usize) {
+        let anchor = self.anchor.and_then(|id| session.anchor(id).ok());
+        let climb = card_climb(
+            session,
+            if anchor.is_some() {
+                rows
+            } else {
+                rows.saturating_add(self.skip)
+            },
+            anchor,
+        );
+        let skip = if self.anchor.is_some() {
+            anchor
+                .and_then(|anchor| climb.iter().position(|row| row.contains(anchor)))
+                .map_or(0, |index| (index + 1).saturating_sub(rows))
+        } else {
+            self.skip.min(climb.len().saturating_sub(rows))
         };
-        if keep_card_line(&done, columns, wanted, &mut climb) {
-            break;
+        (climb, skip)
+    }
+
+    /// Resolve after local resize, canonical settlement, output, or mini-height
+    /// changes. An unchanged card costs only revision and geometry comparisons.
+    pub(crate) fn prepare(&mut self, session: &mut DualPlaneSession, rows: usize) {
+        if rows == 0 {
+            return;
+        }
+        let screen = if session.terminal_modes().alternate_screen {
+            ScreenId::Alternate
+        } else {
+            ScreenId::Primary
+        };
+        if self.screen.is_some_and(|previous| previous != screen) {
+            self.set_anchor(session, None);
+            self.skip = 0;
+            self.revision = None;
+        }
+        self.screen = Some(screen);
+        if self.revision == Some(session.screen_revision()) && self.rows == rows {
+            return;
+        }
+        self.rows = rows;
+        self.revision = Some(session.screen_revision());
+        if self.anchor.is_none() && self.skip == 0 {
+            return;
+        }
+        let (climb, skip) = self.resolved(session, rows);
+        if climb.is_empty() {
+            return;
+        } // A restored numeric fallback awaits content.
+        self.skip = skip;
+        let first = &climb[(skip + rows).min(climb.len()) - 1];
+        let retained = self
+            .anchor
+            .and_then(|id| session.anchor(id).ok())
+            .is_some_and(|anchor| first.contains(anchor));
+        if !retained {
+            self.set_anchor(session, (skip > 0).then(|| first.sources[0].clone()));
         }
     }
-    if let Some(done) = line
-        && climb.len() < wanted
-    {
-        keep_card_line(&done, columns, wanted, &mut climb);
+
+    /// Whole detents select adjacent CURRENT rows. Clamp before registering the
+    /// reachable first row, so overflow cannot survive and delay a reversal.
+    pub(crate) fn aim(&mut self, session: &mut DualPlaneSession, rows: usize, steps: i32) -> bool {
+        self.prepare(session, rows);
+        if rows == 0 || steps == 0 {
+            return false;
+        }
+        let requested = if steps > 0 {
+            self.skip.saturating_add(steps.unsigned_abs() as usize)
+        } else {
+            self.skip.saturating_sub(steps.unsigned_abs() as usize)
+        };
+        let climb = card_climb(session, rows.saturating_add(requested), None);
+        let aimed = requested.min(climb.len().saturating_sub(rows));
+        let changed = aimed != self.skip;
+        self.skip = aimed;
+        let anchor = (aimed > 0).then(|| climb[aimed + rows - 1].sources[0].clone());
+        self.set_anchor(session, anchor);
+        changed
     }
-    // **Clamped to what is there**, which is the whole of "a window driven past
-    // the top stops at the top". A seat holding fewer rows than the reader asked
-    // to skip would otherwise hand back an empty picture, and an empty card is
-    // the one answer a reader turning a wheel cannot tell from a broken one.
-    // Note that this is also what keeps the two rulings of 2026-08-21 from
-    // meeting: a pane with less on it than the seat holds clamps `skip` to
-    // zero, so the top-aligned short tail is exactly the `skip == 0` case and
-    // nothing here can produce a short list with rows hidden under it.
-    let aimed = skip.min(climb.len().saturating_sub(rows));
-    let window: Vec<String> = climb.into_iter().skip(aimed).take(rows).rev().collect();
-    (window, aimed > 0)
+
+    /// Keep the existing on-disk u32. Source IDs belong to this session's
+    /// document, so save the resolved tail-relative fallback, not those IDs.
+    pub(crate) fn persisted_skip(&self, session: &DualPlaneSession) -> u32 {
+        let skip = if self.anchor.is_some() {
+            self.resolved(session, self.rows).1
+        } else {
+            self.skip
+        };
+        u32::try_from(skip).unwrap_or(u32::MAX)
+    }
 }
 
 /// Whether this piece of text was broken off the one below it at a column the
@@ -1147,21 +1339,23 @@ fn wrapped_at_a_width_the_pane_no_longer_has(
     continues && captured_columns > 0 && captured_columns < columns
 }
 
-/// Keep one line of the climb, and answer whether the card is now full.
+/// Keep one assembled row and record whether it contains the requested anchor.
 ///
 /// The blank floor is this function's rather than the walk's, because the climb
 /// it guards assembles each of its lines out of however many rows the terminal
 /// broke that line across: a line is blank when the whole of it is, and asking
 /// that of one row at a time was an answer about a fragment.
-fn keep_card_line(text: &str, columns: usize, wanted: usize, climb: &mut Vec<String>) -> bool {
-    let text = text.trim_end();
-    // Still climbing past the blank floor: nothing has been kept yet, so an
-    // empty row is not a blank line inside the tail, it is the floor.
-    if text.is_empty() && climb.is_empty() {
-        return false;
+fn keep_card_line(
+    row: CardRow,
+    climb: &mut Vec<CardRow>,
+    anchor: Option<&ContentAnchor>,
+    found: &mut bool,
+) {
+    if row.text.trim_end().is_empty() && climb.is_empty() {
+        return;
     }
-    climb.push(cut_to(text, columns));
-    climb.len() >= wanted
+    *found |= anchor.is_some_and(|anchor| row.contains(anchor));
+    climb.push(row);
 }
 
 /// One captured row's text.
@@ -2125,6 +2319,117 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("(base) PS D:\\Documents>")),
             "the card drew the fragments instead of the line: {lines:?}"
+        );
+    }
+
+    /// Mutation: retain only the first source of a joined row. The second
+    /// frozen fragment then cannot resolve, and narrowing cannot return to it.
+    #[test]
+    fn card_anchor_tracks_a_later_joined_history_fragment() {
+        let mut shell = DualPlaneSession::with_quotas(
+            NonZeroU32::new(4).unwrap(),
+            NonZeroU32::new(2).unwrap(),
+            std::num::NonZeroUsize::new(1).unwrap(),
+            std::num::NonZeroUsize::new(100).unwrap(),
+        );
+        shell
+            .feed(b"abcdefghijklmnopqrstuvwx\r\nT1\r\nT2\r\nT3")
+            .unwrap();
+        let climb = card_climb(&shell, 100, None);
+        let skip = climb
+            .iter()
+            .position(|row| row.text.trim_end() == "ijklmnop")
+            .unwrap();
+        assert!(matches!(
+            climb[skip].sources[0],
+            ContentAnchor::History { .. }
+        ));
+        let mut position = CardPosition::new(skip);
+        position.prepare(&mut shell, 1);
+        assert_eq!(
+            transcript_tail(&shell, 40, 1, position.skip()).0,
+            ["ijklmnop"]
+        );
+        shell
+            .resize(NonZeroU32::new(40).unwrap(), NonZeroU32::new(2).unwrap())
+            .unwrap();
+        position.prepare(&mut shell, 1);
+        assert!(
+            transcript_tail(&shell, 40, 1, position.skip()).0[0].starts_with("abcdefghijklmnop")
+        );
+        shell
+            .resize(NonZeroU32::new(4).unwrap(), NonZeroU32::new(2).unwrap())
+            .unwrap();
+        position.prepare(&mut shell, 1);
+        assert_eq!(
+            transcript_tail(&shell, 40, 1, position.skip()).0,
+            ["ijklmnop"]
+        );
+    }
+
+    #[test]
+    fn card_anchor_interior_blank_does_not_become_new_blank_floor() {
+        let mut shell =
+            DualPlaneSession::new(NonZeroU32::new(10).unwrap(), NonZeroU32::new(40).unwrap());
+        shell
+            .feed(b"A1\r\n\r\nA3\r\nA4\r\nA5\r\nA6\r\nA7\r\nA8\r\nA9\r\nA10")
+            .unwrap();
+        let mut position = CardPosition::new(7);
+        position.prepare(&mut shell, 2);
+        assert_eq!(
+            transcript_tail(&shell, 40, 2, position.skip()).0,
+            ["", "A3"]
+        );
+        shell
+            .resize(NonZeroU32::new(10).unwrap(), NonZeroU32::new(60).unwrap())
+            .unwrap();
+        position.prepare(&mut shell, 2);
+        assert_eq!(
+            transcript_tail(&shell, 40, 2, position.skip()).0,
+            ["", "A3"]
+        );
+    }
+
+    #[test]
+    fn card_anchor_tracks_a_later_staging_fragment_through_finalization() {
+        let mut shell =
+            DualPlaneSession::new(NonZeroU32::new(4).unwrap(), NonZeroU32::new(2).unwrap());
+        shell.feed(b"abcdefghijklmnopqrstuvwx").unwrap();
+        let climb = card_climb(&shell, 100, None);
+        let skip = climb
+            .iter()
+            .position(|row| row.text.trim_end() == "efgh")
+            .unwrap();
+        assert!(matches!(
+            climb[skip].sources[0],
+            ContentAnchor::Staging { .. }
+        ));
+        let mut position = CardPosition::new(skip);
+        position.prepare(&mut shell, 1);
+        assert_eq!(transcript_tail(&shell, 40, 1, position.skip()).0, ["efgh"]);
+        shell
+            .resize(NonZeroU32::new(40).unwrap(), NonZeroU32::new(2).unwrap())
+            .unwrap();
+        position.prepare(&mut shell, 1);
+        assert_eq!(
+            transcript_tail(&shell, 40, 1, position.skip()).0,
+            ["abcdefghijklmnopqrstuvwx"]
+        );
+        assert!(matches!(
+            shell.anchor(position.anchor.unwrap()).unwrap(),
+            ContentAnchor::History {
+                offset: GraphemeOffset(4),
+                ..
+            }
+        ));
+        // Frozen logical entries are never rewrapped at the pane width.
+        shell
+            .resize(NonZeroU32::new(4).unwrap(), NonZeroU32::new(2).unwrap())
+            .unwrap();
+        position.prepare(&mut shell, 1);
+        assert_eq!(
+            transcript_tail(&shell, 40, 1, position.skip()).0,
+            ["abcdefghijklmnop"]
         );
     }
 
