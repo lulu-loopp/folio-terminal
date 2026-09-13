@@ -7944,7 +7944,9 @@ impl WindowRenderer {
 
         let mut preview_text_layouts: Vec<ChromeTextLayout> = Vec::new();
         for body in self.preview_bodies.iter().chain(table_block_bodies.iter()) {
-            preview_text_layouts.extend(shape_preview_body(&mut gpu.font_system, body));
+            // A seat's document is never faded as a whole — a pane is the window,
+            // not a thing laid over it — so this lane passes full strength.
+            preview_text_layouts.extend(shape_preview_body(&mut gpu.font_system, body, 1.0));
         }
         if let Some(census) = census.as_mut() {
             census.record(
@@ -8020,7 +8022,7 @@ impl WindowRenderer {
             .iter()
             .chain(table_block_bodies.iter())
             .flat_map(|body| {
-                preview_body_rect_instances(body, self.config.width, self.config.height)
+                preview_body_rect_instances(body, 1.0, self.config.width, self.config.height)
             })
             .collect();
         let preview_body_rect_buffer = (!preview_body_rects.is_empty()).then(|| {
@@ -8161,6 +8163,7 @@ impl WindowRenderer {
             if let Some(body) = layer.body.as_ref() {
                 rects.extend(preview_body_rect_instances(
                     body,
+                    layer.opacity.clamp(0.0, 1.0),
                     self.config.width,
                     self.config.height,
                 ));
@@ -8215,7 +8218,11 @@ impl WindowRenderer {
             if let Some(body) = layer.body.as_ref() {
                 preview_text_frame.layer_bodies += 1;
                 preview_text_frame.layer_paragraphs += body.paragraph_count();
-                layouts.extend(shape_preview_body(&mut gpu.font_system, body));
+                layouts.extend(shape_preview_body(
+                    &mut gpu.font_system,
+                    body,
+                    layer.opacity.clamp(0.0, 1.0),
+                ));
             }
             preview_text_frame.layer_drawn += layouts.len();
             while self.overlay_text_renderers.len() <= index {
@@ -11573,7 +11580,6 @@ fn preview_paragraph_left(paragraph: &PreviewParagraph, buffer: &Buffer) -> f32 
     }
 }
 
-/// Shape a preview body — one buffer per visible paragraph.
 /// Every filled rectangle one preview body draws, already cropped.
 ///
 /// A free function because two lanes ask for it now: the seat's, which runs
@@ -11581,8 +11587,16 @@ fn preview_paragraph_left(paragraph: &PreviewParagraph, buffer: &Buffer) -> f32 
 /// ([`OverlayLayer::body`]) — and a second copy of these croppings is a second
 /// chance for a document in a float to be clipped differently from the same
 /// document in a pane.
+///
+/// `alpha` is the **carrier's** own opacity, folded in here for
+/// [`OverlayLayer::faded_quads`]'s reason: a document inside a layer that is
+/// fading in is part of the thing that is fading, and a body left at full
+/// strength is a card whose frame arrives over 90ms with its text already solid
+/// on the first frame. The seat's lane passes `1.0` — a pane is never faded as a
+/// whole — and the overlay's lane passes its layer's.
 fn preview_body_rect_instances(
     body: &PreviewBody,
+    alpha: f32,
     surface_width: u32,
     surface_height: u32,
 ) -> Vec<RectInstance> {
@@ -11594,9 +11608,10 @@ fn preview_body_rect_instances(
             // is in whole-surface coordinates and a second scissor would have to
             // be set and unset around two draws that are otherwise one.
             let rect = crop_to(quad.rect, body.clip)?;
-            Some(surface_pixel_rect(
+            Some(surface_pixel_rect_with_alpha(
                 rect,
                 quad.color,
+                alpha,
                 surface_width,
                 surface_height,
             ))
@@ -11611,9 +11626,10 @@ fn preview_body_rect_instances(
         };
         rects.extend(block.quads.iter().filter_map(|quad| {
             let rect = crop_to(quad.rect, window)?;
-            Some(surface_pixel_rect(
+            Some(surface_pixel_rect_with_alpha(
                 rect,
                 quad.color,
+                alpha,
                 surface_width,
                 surface_height,
             ))
@@ -11622,7 +11638,18 @@ fn preview_body_rect_instances(
     rects
 }
 
-fn shape_preview_body(font_system: &mut FontSystem, body: &PreviewBody) -> Vec<ChromeTextLayout> {
+/// Shape a preview body's letters — one buffer per visible paragraph.
+///
+/// `alpha` is the carrier's own opacity, folded into every run's ink exactly as
+/// [`shape_chrome_labels`] folds it into a label's, and for
+/// [`preview_body_rect_instances`]'s reason: the body's fills, its letters and
+/// its pictures ([`OverlayLayer::faded_document_rasters`]) are three channels of
+/// one document, and a fade that reaches two of them is not a fade.
+fn shape_preview_body(
+    font_system: &mut FontSystem,
+    body: &PreviewBody,
+    alpha: f32,
+) -> Vec<ChromeTextLayout> {
     let content = body
         .paragraphs
         .iter()
@@ -11653,6 +11680,7 @@ fn shape_preview_body(font_system: &mut FontSystem, body: &PreviewBody) -> Vec<C
             let buffer = shape_preview_paragraph(font_system, paragraph);
             let left = preview_paragraph_left(paragraph, &buffer);
             let [r, g, b] = paragraph.runs.first().map_or([0, 0, 0], |run| run.color);
+            let a = (alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
             ChromeTextLayout {
                 buffer,
                 left,
@@ -11666,7 +11694,7 @@ fn shape_preview_body(font_system: &mut FontSystem, body: &PreviewBody) -> Vec<C
                     right: clip[2].ceil() as i32,
                     bottom: clip[3].ceil() as i32,
                 },
-                color: Color::rgba(r, g, b, 255),
+                color: Color::rgba(r, g, b, a),
             }
         })
         .collect()
@@ -23001,6 +23029,43 @@ mod tests {
         // And a layer that never mentioned opacity is fully there — CSS's own
         // initial value, not a derived zero.
         assert_eq!(OverlayLayer::default().opacity, 1.0);
+    }
+
+    /// RED — **a layer's document fades with the layer** (owner's ruling
+    /// 2026-09-13, the glance card's fade).
+    ///
+    /// A [`PreviewBody`] has three channels — its fills, its letters and its
+    /// pictures — and until this slice the layer's own `opacity` reached exactly
+    /// one of them ([`OverlayLayer::faded_document_rasters`], mended on
+    /// 2026-08-26). The card over a file row is mostly *document*: a fade that
+    /// reached the card's frame and left the text solid would be a frame
+    /// arriving over ninety milliseconds around words that were already there,
+    /// which is not a fade of anything.
+    ///
+    /// MUTATION: pass `1.0` here instead of the layer's opacity — which is what
+    /// this lane did before — and the faded fill comes back at full coverage.
+    #[test]
+    fn a_faded_layers_document_fills_are_faded_too() {
+        let body = PreviewBody {
+            clip: [0.0, 0.0, 100.0, 100.0],
+            quads: vec![PreviewQuad {
+                rect: [10.0, 10.0, 50.0, 20.0],
+                color: [40, 50, 60],
+            }],
+            paragraphs: Vec::new(),
+            blocks: Vec::new(),
+            rasters: Vec::new(),
+        };
+        let solid = preview_body_rect_instances(&body, 1.0, 200, 200);
+        let half = preview_body_rect_instances(&body, 0.5, 200, 200);
+        assert_eq!(solid.len(), 1);
+        assert_eq!(half.len(), 1);
+        assert!((solid[0].color[3] - 1.0).abs() < f32::EPSILON);
+        assert!((half[0].color[3] - 0.5).abs() < f32::EPSILON);
+        // The colour itself is untouched — a fade is coverage, never a different
+        // ink — and so is the geometry.
+        assert_eq!(solid[0].color[..3], half[0].color[..3]);
+        assert_eq!(solid[0].rect, half[0].rect);
     }
 
     /// RED (M4-3) — **the box a layer stands in, for the page underneath it.**

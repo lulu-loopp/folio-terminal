@@ -13,6 +13,15 @@ All notable changes to Folio are recorded here. The format follows
   the rows macOS puts there for every app. They work from another app and from
   an empty desk: with every window closed, either one opens a window.
 
+### Changed
+
+- **The card that appears when you rest on a file now fades in.** It used to
+  arrive solid in a single frame; it now takes the same ninety milliseconds the
+  small labels elsewhere in the window take, and arrives without moving or
+  growing. The wait before it appears is unchanged, it still leaves the instant
+  you move away, and if you have asked your system for reduced motion it appears
+  and leaves instantly as before.
+
 ### Fixed
 
 - Reuse unchanged Markdown prose measurements across caret moves and edits, and reset block scroll offsets after reparsing.
@@ -28,6 +37,13 @@ All notable changes to Folio are recorded here. The format follows
   variables Terminal.app uses for it. It still never picks a country for you, and
   a setting you already have — inherited, or written into a profile — is left
   alone.
+- **A menu closes when you press the button that opened it.** With the `Open ⌄`
+  menu up at the end of a preview's path row, pressing the pill again opened it
+  afresh instead of putting it away, and so did the `…` that stands in for the
+  folders a narrow row has no width to show. Every menu in this window that hangs
+  from a button now closes on a press on that button and does nothing else with
+  that press — including the commit graph's branch list inside a torn-off window,
+  which had the same fault and was not in the report.
 - **A formula that took a moment to typeset now appears when it is ready.** A
   page holding `$$\int_0^1 x\,dx$$` shows the formula as you wrote it until the
   picture is set, which is right — but if the picture arrived after the page had
@@ -54,6 +70,12 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- **The top bar takes the hand anywhere it is not a button.** Dragging the window
+  by its top bar used to work only in the stretch between the last tab and the
+  buttons in the corner; the space between two tabs, the strip above them and the
+  gaps around the settings button did nothing at all. Every part of that bar that
+  is not one of this window's own buttons now picks the window up, and
+  double-clicking it still does what it did.
 - **A quit keeps every tab a window was holding.** Quitting with a page still
   closing down could write the session out again on the way out, with the tabs
   that had already gone missing from it; the document a quit writes is the one

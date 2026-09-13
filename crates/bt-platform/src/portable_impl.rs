@@ -361,11 +361,12 @@ impl CustomWindowFrame {
         false
     }
 
-    /// Where the tab strip ends, for the caption's hit test. There is no native
-    /// hit-test message here to answer: the application decides inside the
-    /// press and says so through [`Self::press_title_bar`].
-    pub fn set_tab_strip_right_px(&self, tab_strip_right_px: i32) {
-        let _ = tab_strip_right_px;
+    /// The boxes the application draws in the title bar, for the caption's hit
+    /// test. There is no native hit-test message here to answer: the application
+    /// decides inside the press and says so through [`Self::press_title_bar`],
+    /// off the very same list (§13.11 ⑥).
+    pub fn set_title_bar_boxes(&self, boxes: &[[i32; 4]]) {
+        let _ = boxes;
     }
 
     /// The smallest client the window may be dragged to. The system frame
@@ -1562,7 +1563,6 @@ mod refusal_tests {
                 window(),
                 crate::CustomFrameGeometry {
                     title_bar_logical_px: 40,
-                    caption_button_logical_px: 46,
                 },
                 Box::new(|| {}),
             )
