@@ -8703,441 +8703,110 @@ enabled 标志留着,而且仍然是拿着键盘的那扇窗被问的 `Scope::ho
 
 ### 13.27 M4-10: 更新检查走 NSURLSession,原地换包在 mac 上变成「打开发布页」(`crates/bt-platform/src/macos_http.rs`、`crates/bt-platform/src/{lib,http_portable}.rs`、`crates/bt-platform/Cargo.toml`、`crates/bt-app/src/{update,main}.rs`)
 
-**① The half of this ticket that was already true, and saying so is the finding.**
-§M4 defers in-place self-update out of 0.4 and rules that it "becomes *open the
-release page*" on a Mac. Read against the code, that ruling costs this product
-**nothing**, because the swap it replaces was never built: `update.rs`'s own
-header has said "Downloads nothing. There is no installer, no replacement, no
-restart" since §7.51 landed, and the one press the settings row offers is
-`Text::OpenReleasesPage` → `settings::releases_page_requested` →
-`hand_url_to_the_browser(update::RELEASES_PAGE)` → `bt_platform::shell_execute`,
-which is one of the five verbs M2-2 already answers with `-[NSWorkspace
-openURL:]`. So a Mac was going to open the release page from that row the day
-M2-2 merged; no `_mac` key, no schema change, no second behaviour to choose
-between, and the once-a-day rule and the row's four states are untouched. **The
-list in `main.rs` said otherwise and was wrong**: `update.rs` was on
-`FILES_THAT_MAY_NAME_A_PLATFORM` with the reason "the in-place swap, which off
-Windows becomes *open the release page*", and the arms it was actually on the
-list for were `latest_tag`'s — WinHTTP against `Err("this build has no HTTP
-stack")`, a question about a *transport*. That is what this ticket is, and
-everything below is one layer down from the row.
+**① 这张票里本来就成立的那一半,而把它说出来就是这次的发现。** §M4 把原地自更新推出 0.4,并裁定它在 Mac 上「变成*打开发布页*」。对着代码读,这条裁决让这个产品花的是**零**,因为它所取代的那次换包从来没被建出来:自 §7.51 落地起,`update.rs` 自己的头注就写着「什么也不下载。没有安装程序,没有替换,没有重启」,而设置那一行提供的那一按是 `Text::OpenReleasesPage` → `settings::releases_page_requested` → `hand_url_to_the_browser(update::RELEASES_PAGE)` → `bt_platform::shell_execute`,而后者是 M2-2 早就用 `-[NSWorkspace openURL:]` 作答的那五个动词之一。所以从 M2-2 合入那天起,一台 Mac 就会从那一行打开发布页;没有 `_mac` 键,没有 schema 改动,没有第二种行为要在其中选,而一天一次那条规矩和那一行的四种状态一笔没动。**`main.rs` 里那份名单说的是另一回事,而它是错的**:`update.rs` 在 `FILES_THAT_MAY_NAME_A_PLATFORM` 上,理由写着「原地换包,在 Windows 之外变成*打开发布页*」,而它实际上名单的那两条臂是 `latest_tag` 的——WinHTTP 对 `Err("this build has no HTTP stack")`,一个关于**传输**的问题。这张票是的就是这件事,而下面的一切都在那一行下面一层。
 
-**② The stack is `NSURLSession`, and it is Foundation, so it costs no package.**
-The Windows arm's header gives three reasons for reaching for the operating
-system's HTTP stack rather than a Rust client, and all three survive the
-crossing: it adds no package (a blocking Rust client is roughly forty once its
-TLS stack and its certificate store are counted, and every one of them lands in
-`THIRD-PARTY-NOTICES.md` and in the audit surface of a terminal that otherwise
-reaches the network exactly never); it is the machine's own configuration —
-proxy including PAC and WPAD, the certificate store, revocation, ATS, and
-whatever an MDM profile put there; and its failure mode is a `String` to throw
-away. What M4-10 adds to `Cargo.toml` is five `objc2-foundation` class features
-(`NSURLSession`, `NSURLRequest`, `NSURLResponse`, `NSData`, `NSOperation`) and
-that crate's own `block2` feature. **No package**, which is §8's bar and the same
-door `Win32_Networking_WinHttp` came through on the other platform. Stated
-exactly, because it is not quite the zero the Windows ticket could claim:
-`Cargo.lock` gains **one line** — `block2 0.6.2` appears in
-`objc2-foundation`'s dependency list, because that feature is now on — and
-`block2` was already in the lock file and already in `THIRD-PARTY-NOTICES.md`,
-which therefore does not move at all.
+**② 这套栈是 `NSURLSession`,而它属于 Foundation,所以不花任何包。** Windows 那条臂的头注给了三个理由,说明为什么去够操作系统自己的 HTTP 栈而不是一个 Rust 客户端,三个都挺过了这次跨越:它不加包(一个阻塞式 Rust 客户端连它的 TLS 栈和证书库一起数下来大约四十个,而每一个都会落进 `THIRD-PARTY-NOTICES.md`,也落进一个除此之外从不上网的终端的审计面);它就是这台机器自己的配置——代理,包括 PAC 与 WPAD,证书库,吊销,ATS,以及一份 MDM 配置文件往那里放的任何东西;而它的失败模式是一个丢掉就完的 `String`。M4-10 给 `Cargo.toml` 加的是五个 `objc2-foundation` 的类 feature(`NSURLSession`、`NSURLRequest`、`NSURLResponse`、`NSData`、`NSOperation`)和那个 crate 自己的 `block2` feature。**不加包**,那是 §8 的门槛,也是另一个平台上 `Win32_Networking_WinHttp` 走的同一扇门。说精确一点,因为它不完全是 Windows 那张票能声称的那个零:`Cargo.lock` 多**一行**——`block2 0.6.2` 出现在 `objc2-foundation` 的依赖列表里,因为那个 feature 现在开着——而 `block2` 本来就在锁文件里、也本来就在 `THIRD-PARTY-NOTICES.md` 里,所以后者一点没动。
 
-**③ An ephemeral configuration, because the shared session is three stores this
-request must not touch.** `+[NSURLSession sharedSession]` is the obvious call and
-it is the wrong one twice over. It uses the shared `NSURLCache`, the shared
-`NSHTTPCookieStorage` and the shared `NSURLCredentialStorage`, each of which
-persists under the container — so one update check would both read from and
-write to process-wide state that outlives it, which is the exact opposite of
-"carries nothing about the machine and leaves nothing behind". And
-`-[NSURLSession configuration]` answers a *copy*, so the shared session cannot be
-given the two timeouts this call is bounded by; a door whose deadline cannot be
-set is not this door.
-`+[NSURLSessionConfiguration ephemeralSessionConfiguration]` is Apple's own name
-for "no persistent storage for caches, cookies, or credentials", the session is
-`invalidateAndCancel`'d before the function returns, and `HTTPShouldSetCookies`
-is turned off on top of that — belt for the ephemeral session's braces.
+**③ 一份临时配置,因为共享 session 是三个这次请求不许碰的存储。** `+[NSURLSession sharedSession]` 是最顺手的那次调用,而它在两件事上都不对。它用共享的 `NSURLCache`、共享的 `NSHTTPCookieStorage` 和共享的 `NSURLCredentialStorage`,而这三个都在容器下面持久化——于是一次更新检查会既读又写一份活得比它久的进程级状态,而那和「不带这台机器的任何东西,也不留下任何东西」正好相反。而且 `-[NSURLSession configuration]` 答的是一个**拷贝**,所以没法给共享 session 设这次调用所受限的那两个超时;一扇设不了截止时间的门不是这扇门。`+[NSURLSessionConfiguration ephemeralSessionConfiguration]` 是 Apple 自己给「缓存、cookie、凭据都不持久存储」起的名字,这个 session 在函数返回之前被 `invalidateAndCancel`,而在这之上 `HTTPShouldSetCookies` 还被关掉了——给临时 session 这条背带再配一条腰带。
 
-**④ A delegate and not `dataTaskWithRequest:completionHandler:`, because two of
-the four promises are decisions taken mid-transfer.** The convenience method
-hands the body back whole, and Apple documents that supplying it turns the
-response and data delegate callbacks *off* — so it is one or the other, and this
-is the other.
+**④ 用一个委托而不是 `dataTaskWithRequest:completionHandler:`,因为那四条承诺里有两条是传输途中做的决定。** 那个便捷方法把整个响应体一次交回来,而 Apple 写明提供它会把响应与数据的委托回调**关掉**——所以要么这个要么那个,而这里是那个。
 
-* **The cap.** `HttpsGet::cap` is a refusal and not a truncation: half a JSON
-  document is not a smaller answer, it is a different one. A refusal that arrives
-  after the megabyte has already been read is a refusal that did not do its job,
-  so the check is in `URLSession:dataTask:didReceiveData:`, before the chunk is
-  kept, and it cancels the task — which is exactly where the Windows arm's
-  `body.len() + want > request.cap` sits, one `WinHttpReadData` at a time.
-* **The redirect policy.** This is the one place the two stacks disagree by
-  default, and it is worth the paragraph. WinHTTP follows redirects
-  automatically, up to `WINHTTP_OPTION_MAX_HTTP_AUTOMATIC_REDIRECTS` (ten), and
-  refuses exactly one kind:
-  `WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP`, which is the default.
-  A redirect it will not follow is not an error — the `30x` is handed to the
-  caller as the response, `WinHttpQueryHeaders` reports it, and the arm answers
-  `the server answered 302`. `NSURLSession` also follows redirects, **and follows
-  the downgrade**, unless a task delegate says otherwise. So
-  `URLSession:task:willPerformHTTPRedirection:newRequest:completionHandler:` is
-  implemented, it passes the new request back when its scheme is `https` and the
-  count is inside ten, and it passes `nil` otherwise — and `nil` there means the
-  loading system stops and completes the task with the redirect response, which
-  is the same sentence out of the same state. The count is kept here rather than
-  left to Foundation because Foundation's own limit is twenty; ten is what the
-  other arm does.
+* **上限。** `HttpsGet::cap` 是一次拒绝而不是一次截断:半份 JSON 文档不是一个更小的答案,是另一个答案。一次在那一兆字节已经读完之后才到的拒绝,是一次没干活的拒绝,所以这道检查在 `URLSession:dataTask:didReceiveData:` 里、在这一块被留下之前,而且它取消那个 task——那恰好就是 Windows 那条臂 `body.len() + want > request.cap` 所在的地方,一次 `WinHttpReadData` 一次 `WinHttpReadData` 地查。
+* **重定向策略。** 这是两套栈默认唯一不一致的地方,值得一段。WinHTTP 自动跟随重定向,上限是 `WINHTTP_OPTION_MAX_HTTP_AUTOMATIC_REDIRECTS`(十次),而且恰好拒绝一种:`WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP`,那是默认值。一次它不跟随的重定向不是错误——那个 `30x` 作为响应交给调用方,`WinHttpQueryHeaders` 报告它,而那条臂答 `the server answered 302`。`NSURLSession` 同样跟随重定向,**而且跟随降级**,除非一个 task 委托另有说法。所以 `URLSession:task:willPerformHTTPRedirection:newRequest:completionHandler:` 被实现了,它在新请求的 scheme 是 `https` 且计数还在十以内时把它传回去,否则传 `nil`——而那里的 `nil` 意思是加载系统停下、拿这次重定向的响应把这个 task 完成掉,也就是从同一个状态出发说的同一句话。计数是在这里记的而不是交给 Foundation,因为 Foundation 自己的上限是二十;十是另一条臂做的事。
 
-**⑤ The deadline is the Windows arm's, restated in this platform's three
-places.** `timeoutIntervalForRequest` is the per-response idle timeout and takes
-`phase_timeout`, which is what WinHTTP's four *phase* timeouts are;
-`timeoutIntervalForResource` takes `budget`, which is what the read loop's own
-deadline is over there; and the calling thread waits `budget + phase_timeout`,
-because the Windows loop tests its budget *before* a read and may therefore
-overshoot by one phase. "Nothing here outlives it by more than one phase timeout"
-is one sentence that is now true on both machines.
+**⑤ 截止时间是 Windows 那条臂的,在这个平台的三个地方重说一遍。** `timeoutIntervalForRequest` 是每次响应的空闲超时,收 `phase_timeout`,也就是 WinHTTP 那四个**阶段**超时;`timeoutIntervalForResource` 收 `budget`,也就是那边读循环自己的截止时间;而调用线程等 `budget + phase_timeout`,因为 Windows 那个循环是在一次读**之前**检查它的预算,因而可能多跑一个阶段。「这里没有任何东西比它多活超过一个阶段超时」现在在两台机器上是同一句成立的话。
 
-**A `Mutex` and a `Condvar`, not a `dispatch_semaphore`.** The delegate is
-accumulating a `Vec<u8>` this thread reads, and carrying the status and the
-refusal across the same boundary, so a lock is there whatever else is; a
-semaphore beside it would be a second primitive saying the same thing, and
-`Condvar::wait_timeout` already carries the deadline. (`dispatch2` is in
-`Cargo.lock`, so this was a choice about shape and not about packages.) The call
-is synchronous on the caller's own thread — `update::begin`'s background-band
-thread, the one that is *supposed* to block — and the delegate runs on the serial
-queue `NSURLSession` makes when it is handed no queue, so the two never share a
-thread and there is nothing to deadlock. `invalidateAndCancel` runs on every
-path out, because a session with a delegate retains that delegate until it is
-invalidated and a task this thread gave up on is a task that must stop.
+**一把 `Mutex` 加一个 `Condvar`,不是一个 `dispatch_semaphore`。** 那个委托在攒一个这条线程要读的 `Vec<u8>`,还要把状态码和拒绝带过同一道边界,所以不管怎样都得有一把锁;它旁边再放一个信号量就是第二个原语在说同一句话,而 `Condvar::wait_timeout` 本来就带着那个截止时间。(`dispatch2` 就在 `Cargo.lock` 里,所以这是一个关于形状的选择而不是关于包的选择。)这次调用在调用方自己的线程上是同步的——`update::begin` 那条后台带的线程,**本来就该**阻塞的那一条——而那个委托跑在 `NSURLSession` 在没被交给任何队列时自己造的那条串行队列上,所以两者从不共用一条线程,也没有什么可死锁的。`invalidateAndCancel` 在每一条出门的路上都跑,因为一个带委托的 session 会持有那个委托直到它被作废,而一个这条线程已经放弃了的 task 是一个必须停下的 task。
 
-**⑥ HTTPS-only is a rule about construction here, not a filter.** The Windows arm
-*cannot* be handed a scheme: `host` goes to `WinHttpConnect`, `path` goes to
-`WinHttpOpenRequest`, and `WINHTTP_FLAG_SECURE` is the whole of the TLS decision.
-This arm has to compose a string, and composition is where a scheme could be
-smuggled in — a `host` of `http://elsewhere` becomes `https://http://elsewhere…`,
-which a parser may well read as a host of `http`. So the composed URL is parsed
-back and asked two questions: **is its scheme `https`**, and **is its host the
-host that was asked for**. That is one general rule rather than a list of
-forbidden characters, and the same line refuses a scheme, a credential, a port
-and a second authority. It answers before a socket exists, which is the point: a
-request refused *after* it is sent has already put the agent and the path on a
-plaintext channel.
+**⑥ 只走 HTTPS 在这里是一条关于构造的规矩,不是一个过滤器。** Windows 那条臂**不可能**被递进一个 scheme:`host` 去 `WinHttpConnect`,`path` 去 `WinHttpOpenRequest`,而 `WINHTTP_FLAG_SECURE` 就是 TLS 这个决定的全部。这条臂得拼一个字符串,而拼接正是一个 scheme 能被夹带进来的地方——一个 `http://elsewhere` 的 `host` 会变成 `https://http://elsewhere…`,而一个解析器很可能把它读成一个叫 `http` 的主机。所以拼出来的 URL 被解析回来,问两个问题:**它的 scheme 是不是 `https`**,以及**它的主机是不是当初要的那个主机**。那是一条通则而不是一张禁用字符表,而同一行同时拒绝一个 scheme、一份凭据、一个端口和第二个 authority。它在套接字存在之前作答,而这正是要点:一个在发出**之后**才被拒绝的请求,已经把 agent 和路径放在一条明文通道上了。
 
-**⑦ One door, three arms, and no compiler that can see more than one of them.**
-`http` is now a three-way module — `http.rs` on Windows, `macos_http.rs` on
-macOS, `http_portable.rs` on everything else, which is the Linux build and not a
-product. `bt-app` names `https_get` with no `cfg` at all, so the three have to
-agree about one signature, six fields in one order, and one set of refusals; and
-no machine in this workspace can compile more than one of them.
-`update_check_transport_tests` in `lib.rs` therefore reads all three as *text* —
-the instrument `macos_process_door_tests` already uses on the five process doors
-— and pins five things: the signature is one line in all three, the request's six
-fields are the same six in the same order, the two real arms carry the four
-refusals that are statements about the *answer* word for word (`the server
-answered {status}`, `the body is longer than {} bytes`, `the body did not arrive
-inside its budget`, `the body is not text` — compared against the *code* half of
-each file, because `macos_http.rs` also quotes all four in a table), the macOS
-arm composes `https://{host}{path}` and asks the parse what scheme it got, and
-each of the three `cfg`s names the file it means. The refusals that name their
-own stack are deliberately *not* pinned: `WinHttpSendRequest: {error}` against
-`NSURLSession: {what Foundation called it}` is a log line, and `update.rs` turns
-every `Err` into the same silence anyway.
+**⑦ 一扇门,三条臂,而没有一个编译器同时看得见其中一条以上。** `http` 现在是一个三向模块——Windows 上是 `http.rs`,macOS 上是 `macos_http.rs`,其余一切上是 `http_portable.rs`,那是 Linux 构建而不是一个产品。`bt-app` 点 `https_get` 的名时一个 `cfg` 都没有,所以这三条必须在一个签名、六个字段一个顺序、一套拒绝上取得一致;而这个工作区里没有一台机器能同时编出其中一条以上。所以 `lib.rs` 里的 `update_check_transport_tests` 把三条都当**文本**读——`macos_process_door_tests` 已经在那五扇进程门上用过的那件仪器——并钉住五件事:三条里签名都是一行;请求那六个字段是同样六个、同样顺序;两条真臂逐字带着那四条关于**答案**的拒绝(`the server answered {status}`、`the body is longer than {} bytes`、`the body did not arrive inside its budget`、`the body is not text`——比的是每个文件里**代码**的那一半,因为 `macos_http.rs` 还在一张表里把这四条引了一遍);macOS 那条臂拼的是 `https://{host}{path}` 并且向解析结果问它拿到的是什么 scheme;以及那三个 `cfg` 各自点名它所指的那个文件。那些点名自己那套栈的拒绝是特意**不**钉的:`WinHttpSendRequest: {error}` 对 `NSURLSession: {Foundation 管它叫什么}` 是一行日志,而 `update.rs` 反正把每一个 `Err` 都变成同样的沉默。
 
-**⑧ `update.rs` left the cfg list, which is the second file ever to do so.**
-`GitHubReleases::latest_tag` is one arm again, so the file no longer asks the
-compiler what machine it is on, so
-`only_the_named_files_decide_what_platform_this_is`' **second** direction — a
-name on the list that has stopped naming a platform — goes red until the list
-loses it. Eleven files, and the reason the list is worth its second direction is
-in this entry's ①: the comment beside `update.rs` described a feature that did
-not exist, and a one-way list would have kept that comment for as long as anybody
-cared to read it. The claim is pinned from both ends now: that gate from
-`main.rs`, and `the_check_asks_one_stack_on_every_platform` from inside
-`update.rs`, which refuses a platform word on any `cfg` line of that file and
-names the one call to `bt_platform::http::https_get`.
+**⑧ `update.rs` 离开了那份 cfg 名单,而它是有史以来第二个这么做的文件。** `GitHubReleases::latest_tag` 又是一条臂了,所以这个文件不再去问编译器自己在哪台机器上,于是 `only_the_named_files_decide_what_platform_this_is` 的**第二个**方向——一个在名单上却已经不点平台名的名字——会一直红到名单把它去掉为止。十一份文件,而这份名单值得有它第二个方向的理由就在这一条的 ① 里:`update.rs` 旁边那条注描述的是一个并不存在的特性,而一份单向名单会把那条注留到再没人想读它为止。这个主张现在两头都钉着:`main.rs` 那道门,以及 `update.rs` 里面的 `the_check_asks_one_stack_on_every_platform`,它在那个文件的任何一行 `cfg` 上都拒绝一个平台词,并点名那唯一一次对 `bt_platform::http::https_get` 的调用。
 
-**⑨ What acceptance ⑦ costs, and the one case that needs the network.** §M4's
-line is "the update check reports the current release from a pane-visible
-settings row", and the transport is the whole of what stood between a Mac and it.
-`macos_http.rs`'s own suite is six cases. **Two are answered without a packet** —
-a port written into the host, five shapes of smuggled scheme, and a path that
-does not start with a slash, all refused by ⑥ in under a second. **One needs
-only the loopback**: nothing listens on `127.0.0.1:443`, which is the connection
-refusal an offline machine really has and the one the row's *could not check*
-state is for, and the case asserts it arrives inside the deadline rather than at
-it. **Three really ask `api.github.com`** — the release list, the cap against
-that list with `cap: 64`, and the `404` GitHub answers for a repository that is
-not there, which is the cheapest real non-`200` there is. Those three are
-ungated, because a transport that is only ever asked questions it can
-answer offline has not been shown to do the thing the acceptance line says — the
-certificate store, the proxy configuration and the ATS policy are all only
-exercised by a real request. The cost is stated rather than hidden: `cargo test
--p bt-platform` on a macOS machine with no network has three red cases, and they
-are red for the reason a reader would guess.
+**⑨ 验收 ⑦ 花了什么,以及那唯一一只需要网络的用例。** §M4 那句话是「更新检查从一行 pane 内可见的设置行上报告当前发布版」,而传输就是横在一台 Mac 和它之间的全部。`macos_http.rs` 自己那套是六只用例。**两只不发一个包就答完**——一个写进主机里的端口、五种夹带 scheme 的形状,以及一条不以斜杠开头的路径,全都被 ⑥ 在一秒之内拒掉。**一只只需要回环**:`127.0.0.1:443` 上没有人在听,那正是一台离线机器真正会遇到的那次连接拒绝,也是那一行**查不了**状态所对着的那一次,而这只用例断言它在截止时间**之内**到达而不是踩着它到达。**三只真的去问 `api.github.com`**——发布列表、拿 `cap: 64` 对着那份列表试上限,以及 GitHub 对一个不存在的仓库答的 `404`,那是最便宜的一个真实的非 `200`。这三只不设闸,因为一个只被问它离线就能答的问题的传输,并没有被证明干了验收那句话说的那件事——证书库、代理配置和 ATS 策略全都只有一次真请求才会走到。代价是写出来而不是藏起来的:在一台没有网络的 macOS 机器上,`cargo test -p bt-platform` 有三只红,而它们红的理由正是读者会猜到的那个。
 
 ### 13.28 M3-5: 一个数据目录一个写者——在 mac 上是建出来的:flock 锁、私有运行目录、对端校验、锁下清理(`crates/bt-platform/src/instance.rs`、`crates/bt-platform/src/launch_pipe_unix.rs`(新)、`crates/bt-platform/src/{launch_pipe_portable,lib}.rs`)
 
-**① What was there was not a weaker guarantee, it was the opposite of one.** `instance::claim_data_directory` off Windows returned **`Some`** — always, to everybody — with a comment saying so: "a machine with no kernel to ask always answers 'you are the one writer'". So the sentence `bt_app::persist` reads off it, *am I the process that writes this directory*, was answered **yes** to every copy of Folio on a Mac, and two of them over one `$HOME` were the whole of review row R4-5's data loss with nothing in the way of it. The plan's §4.4 ④ is the finding and it corrects both the first draft of the plan and the adversarial review, which each said this arm returned `None`; the consequence runs the other way, and it is why this ticket is `L` rather than `S`. Nothing here was ported. It was built.
+**① 原来那份不是一个更弱的保证,它是保证的反面。** Windows 之外的 `instance::claim_data_directory` 回的是 **`Some`**——永远回,对谁都回——而且注里就这么写着:「一台没有内核可问的机器永远答『你就是那个唯一的写者』」。于是 `bt_app::persist` 从它那里读到的那句话,*我是不是写这个目录的那个进程*,对一台 Mac 上每一份 Folio 都被答成**是**,而两份 Folio 压在同一个 `$HOME` 上,就是审计表 R4-5 那次数据丢失的全部,中间什么也没挡。计划 §4.4 ④ 就是这次发现,而它同时纠正了计划的初稿和那次对抗式审计,两者都说这条臂回的是 `None`;后果是反着来的,而这正是这张票是 `L` 而不是 `S` 的原因。这里没有一样东西是移植过来的。它是建出来的。
 
-**② Identity is the filesystem's answer, and the one property it must have is that it does not move when the directory is made.** `directory_tag` lowercased a lossy path string, which is what NTFS means by one path and is wrong twice over off Windows: a case-sensitive APFS or ext4 volume has two directories where a folded name sees one, and no amount of case folding says anything at all about a symlink or a `..` (§R5). The Unix arm asks the filesystem instead — `canonical_path`, which is `realpath` for the part of the path that exists with the remaining components appended as written — and hashes that. The appending is not tidiness. **An identity taken from the directory's own inode would have answered one thing before `mkdir` and another after**, and the ask happens on both sides of that line: `persist::is_writer_of` keys its claim table by `claim_name(directory)` *before* the claim is taken, and `storage_dir()` does not create anything, so a first run asks who the writer is before a byte has been written. Two answers to one question would be two claims on one directory, held by one process, the second of which the kernel refuses — a Folio that refuses itself. Canonicalising the longest existing prefix has the property the inode does not: `/a/b` does not move when `/a/b/Folio` is created, so the answer before and the answer after are the same string.
+**② 身份是文件系统给的答案,而它必须有的那一个性质是:目录被建出来的时候它不跟着动。** `directory_tag` 过去把一个有损的路径串转小写,那是 NTFS 眼里的一条路径,在 Windows 之外它在两件事上都不对:一个区分大小写的 APFS 或 ext4 卷上,一个折叠过的名字看成一个的地方实际有两个目录;而无论怎么折叠大小写,对一个软链或一个 `..` 都一句话说不出(§R5)。Unix 这条臂改问文件系统——`canonical_path`,对路径里存在的那一段做 `realpath`,剩下的组件按写下来的样子接上去——再对它取哈希。接上去那一下不是为了整洁。**一个取自目录自己 inode 的身份,会在 `mkdir` 之前答一样、之后答另一样**,而这次询问在那条线的两边都发生:`persist::is_writer_of` 是拿 `claim_name(directory)` 给它那张认领表做键的,而那**在**认领被取下之前;`storage_dir()` 什么也不创建,所以第一次运行是在一个字节都还没写出去的时候去问谁是写者的。一个问题两个答案就是一个目录上的两次认领,由同一个进程持有,而第二次会被内核拒绝——一个拒绝自己的 Folio。对存在的最长前缀做规范化有 inode 没有的那个性质:`/a/b/Folio` 被建出来时 `/a/b` 不会动,所以之前的答案和之后的答案是同一个字符串。
 
-What survives from Windows is that there is exactly **one** folding and two names are built out of it, which is the promise a run under an isolated data directory rests on: it must miss the reader's everyday Folio at *both* doors, and two spellings of one directory must find each other at both. `one_directory_is_one_claim_and_one_endpoint_however_it_is_spelled` asserts the equality of the two names rather than describing it.
+从 Windows 留下来的是折叠恰好只有**一次**、而两个名字都从它造出来,那是一次跑在隔离数据目录下的运行所依赖的承诺:它必须在**两扇门上**都错过读者日常那个 Folio,而同一个目录的两种拼法必须在两扇门上都找到彼此。`one_directory_is_one_claim_and_one_endpoint_however_it_is_spelled` 断言这两个名字相等,而不是描述这件事。
 
-**③ A private runtime directory, three refusals and one repair.** The lock and the socket both live in `$TMPDIR/folio-<uid>/`, and everything either of them promises rests on what is standing there. It is created with `mkdir(0700)` rather than created and then `chmod`-ed, so there is no instant in which it exists and is reachable by anybody else. It is then read with **`lstat` and not `stat`**: a symlink is refused outright, because following one would be this process putting its lock and its front door wherever somebody else pointed. A directory owned by another user is refused and never adopted. The mode is the one thing **repaired** rather than refused, and only after the owner check has passed — a directory this user owns is one this user may set the mode of, and refusing instead would be refusing the *claim*, which is a Folio that hands over to nobody and then opens a window that writes. The `<uid>` in the name matters only for the `/tmp` fallback: macOS's own `$TMPDIR` is already per-user, and a machine where it is not must not let the user who got there first decide what the second one finds.
+**③ 一个私有运行目录,三次拒绝和一次修复。** 锁和套接字都住在 `$TMPDIR/folio-<uid>/` 里,而两者承诺的一切都建立在那里立着的是什么之上。它是用 `mkdir(0700)` 创建的,而不是先创建再 `chmod`,所以不存在一个「它已经存在而且别人够得到」的瞬间。随后它是用 **`lstat` 而不是 `stat`** 读的:一个软链被直接拒绝,因为跟着它走就是这个进程把自己的锁和自己的前门放到别人指的地方去。一个归另一个用户所有的目录被拒绝,绝不接管。模式是唯一一样被**修复**而不是被拒绝的东西,而且只在属主那道检查过了之后——一个这个用户拥有的目录是这个用户可以设模式的目录,而在那里拒绝就是在拒绝那次**认领**,那是一个不向任何人交接、随后自己开一扇窗去写的 Folio。名字里的 `<uid>` 只对 `/tmp` 那条退路要紧:macOS 自己的 `$TMPDIR` 本来就是按用户分的,而一台不是这样的机器不许让先到的那个用户决定第二个用户会看到什么。
 
-**④ The claim is `flock` on a descriptor, and that is the whole of crash recovery for it.** `LOCK_EX | LOCK_NB`, so it asks rather than waits — a blocking `flock` would turn a second launch into a process that hangs until the first one quits, which is the opposite of the answer the caller needs. The lock attaches to the **open file description** and not to the file, so nothing in the lock file is ever read and the file being there means nothing at all: the staleness question a lock file usually drags behind it is not asked, because nobody is reading the file. `DataDirectoryClaim`'s Unix body is that descriptor and nothing else, which is §4.4 ①'s rule kept — the platform type stays inside the gated body — and there is deliberately **no hand-written `Drop`**: `File`'s own drop closes it, the kernel closes it when the process ends however it ends, and a `Drop` that also unlinked the lock file would be a claim that destroys the thing the next process is waiting on.
+**④ 认领是一个描述符上的 `flock`,而崩溃恢复对它来说就这么多。** `LOCK_EX | LOCK_NB`,所以它问而不等——一个阻塞的 `flock` 会把第二次启动变成一个挂到第一个退出为止的进程,而那正是调用方所需要的答案的反面。这把锁附在**打开文件描述**上而不是附在文件上,所以锁文件里的东西从来没人读,而这个文件在不在那里一点意义都没有:锁文件通常拖着的那个陈旧问题在这里根本不问,因为没有人在读这个文件。`DataDirectoryClaim` 的 Unix 函数体就是那个描述符,别的什么都没有,那是 §4.4 ① 那条规矩守住了——平台类型留在闸起来的函数体里面——而且特意**没有手写 `Drop`**:`File` 自己的 drop 会关掉它,进程无论怎么结束内核都会关掉它,而一个顺手把锁文件 unlink 掉的 `Drop`,就是一次把下一个进程正等着的那样东西毁掉的认领。
 
-**⑤ The endpoint is a path, so it has a length, and the frames are this module's own.** Three things Win32 was answering along the way had to be answered again, and only three:
+**⑤ 端点是一条路径,所以它有长度,而帧是这个模块自己的。** 一路上有三件 Win32 顺带答掉的事必须重新答一遍,而且只有三件:
 
-* **A name.** `\\.\pipe\…` lives in a kernel namespace; a Unix socket lives in the filesystem. `claim_name` is therefore the socket's path, and a path has a limit a name does not: `sun_path` is 104 bytes on macOS and 108 on Linux, and `SOCKET_PATH_LIMIT` is written down as the smaller of the two, because a limit that is right on one platform and generous on the other fails on the one this port is for. Nothing is at risk of reaching it — the name is a sixteen character digest and a five character suffix under `$TMPDIR/folio-<uid>/`, **whatever the data directory's own path length is**, which is the other half of why the name is a digest. That is a claim a Windows runner can check and `the_launch_socket_fits_a_sockaddr_un_however_long_the_data_directory_is` checks it against a three-thousand-character data directory.
-* **A framing.** `PIPE_TYPE_MESSAGE` made "one frame" a kernel fact; a `SOCK_STREAM` socket has none. So this module writes four bytes of big-endian length and then that many bytes, bounded by `attention_pipe::MAX_MESSAGE_BYTES` on the way in *and* on the way out, and reads with `read_exact` — a stream socket is allowed to hand over a prefix, and a parser given a prefix of a JSON object answers the wrong question rather than no question.
-* **A wake-up.** `WaitForMultipleObjects` on a pipe handle and a stop event becomes `poll` on the listener and the read end of a self-pipe. A byte already sitting in a pipe is read whenever the listener next looks, which a flag would not be.
+* **一个名字。** `\\.\pipe\…` 住在一个内核命名空间里;一个 Unix 套接字住在文件系统里。所以 `claim_name` 就是那个套接字的路径,而一条路径有一个名字没有的上限:`sun_path` 在 macOS 上是 104 字节、在 Linux 上是 108,而 `SOCKET_PATH_LIMIT` 写的是两者中较小的那个,因为一个在一个平台上刚好、在另一个平台上宽裕的上限,会在这次移植所针对的那个平台上失败。没有任何东西有够到它的风险——那个名字是十六个字符的摘要加五个字符的后缀,放在 `$TMPDIR/folio-<uid>/` 底下,**不管数据目录自己的路径有多长**,而这就是名字取摘要的另一半理由。那是一个 Windows 跑器能核的主张,而 `the_launch_socket_fits_a_sockaddr_un_however_long_the_data_directory_is` 拿一个三千字符的数据目录核它。
+* **一套分帧。** `PIPE_TYPE_MESSAGE` 让「一帧」成了一个内核事实;一个 `SOCK_STREAM` 套接字没有这回事。所以这个模块写四个字节的大端长度、再写那么多字节,进出**两个方向**都受 `attention_pipe::MAX_MESSAGE_BYTES` 约束,并且用 `read_exact` 读——一个流式套接字是允许只交出一个前缀的,而一个拿到 JSON 对象前缀的解析器答的是一个错的问题,而不是不答。
+* **一次叫醒。** 管道句柄加停止事件上的 `WaitForMultipleObjects`,变成监听器和一条自管道读端上的 `poll`。一个已经躺在管道里的字节,监听器下次一看就读得到,而一个标志位做不到这件事。
 
-Everything above that is the product's and does not move: `Decision<T>` decided once and carried, the reply written back, the client's `CONFIRM` as the commit point, a line the grammar refuses dropped without a word and without effect, `HANDOVER_BUDGET` bounding the whole handover and `STEP_DEADLINE` bounding one step of it. §7.59b's five rulings are about a launch and not about a transport, and each of them has a case here in the same shape it has on Windows.
+这之上的一切都是产品的,不动:`Decision<T>` 决定一次然后带着走、回复写回去、客户端的 `CONFIRM` 作为提交点、一行文法不认的输入不吭声也不起作用地丢掉、`HANDOVER_BUDGET` 罩着整次交接而 `STEP_DEADLINE` 罩着其中一步。§7.59b 那五条裁决是关于一次启动而不是关于一种传输的,而每一条在这里都有一只和它在 Windows 上同形的用例。
 
-**⑥ Peer verification replaces the image check, and it is asked from both ends — but the boundary it draws is a user and not a logon session.** On Windows the client asks the kernel who is serving the pipe and refuses to write a command line to an image that is not this program (§7.59b, C-7), and the server's half of the boundary is a DACL naming the **logon session**, deliberately, "so a second session of the same user is outside it". A socket has file permissions, and file permissions name a **user**. `0600` inside a `0700` directory is therefore a *wider* principal than the Windows door — a second `ssh` login, a launch agent, a second console of this user are all inside it — and that is stated rather than substituted (§R6). It is also the right boundary for this particular door: what is behind it is one `$HOME`'s data directory, which every session of that user shares anyway. The sentence the Windows module ends on is unchanged and is the one that matters: **this is not a defence against a hostile process running as you.**
+**⑥ 对端校验取代了镜像检查,而且两头都问——但它划下的边界是一个用户而不是一次登录会话。** Windows 上客户端问内核是谁在服务这条管道,并拒绝把一条命令行写给一个不是这个程序的镜像(§7.59b,C-7),而服务端那一半边界是一份点名**登录会话**的 DACL,特意如此,「好让同一个用户的第二次会话在它外面」。一个套接字有文件权限,而文件权限点的是一个**用户**。所以一个 `0700` 目录里的 `0600` 是一个比 Windows 那扇门**更宽**的主体——第二次 `ssh` 登录、一个 launch agent、这个用户的第二个控制台,全都在它里面——而这件事是写出来的而不是被替换掉的(§R6)。它同时也是这扇特定的门该有的边界:它后面是一个 `$HOME` 的数据目录,而那个用户的每一次会话反正都共享它。Windows 那个模块收尾那句话没变,而且它才是要紧的那句:**这不是对一个以你的身份运行的敌意进程的防御。**
 
-What replaces the DACL is that both ends ask, because on this platform both ends can:
+取代 DACL 的是两头都问,因为这个平台上两头都问得了:
 
-* **The server** takes the peer's credentials off the connected socket — `getpeereid` for the uid, `LOCAL_PEERPID` for the pid — and refuses a peer whose uid is not its own or whose executable (`proc_pidpath` on that pid) is not the same file as its own. A pid out of a frame would be a number the peer chose; these come from the kernel.
-* **The client** reads the endpoint's own file before it connects — a socket, not a link, this user's, mode `0600` — and then asks the same two questions of the connected peer, **before a byte of the command line is written**. A folder somebody is standing in is not told to a process that is not this program.
+* **服务端**从连上的套接字上取对端的凭据——uid 用 `getpeereid`,pid 用 `LOCAL_PEERPID`——并拒绝一个 uid 不是自己的、或者可执行文件(对那个 pid 做 `proc_pidpath`)跟自己不是同一个文件的对端。一个从帧里读出来的 pid 是对端自己挑的一个数;这些是内核给的。
+* **客户端**在连接之前先读端点自己那个文件——是套接字、不是链接、属于这个用户、模式 `0600`——然后**在命令行的一个字节被写出去之前**,对连上的对端问同样那两个问题。一个人站着的文件夹不会被告诉给一个不是这个程序的进程。
 
-"The same file" is **device and inode**, which is stricter than the Windows arm's comparison of image *names*, and the difference is deliberate rather than an oversight: there the running Folio may be a newer build in another folder and the wire's own version check answers that difference; here the peer's path comes from the kernel and an application on this platform lives at one path inside one bundle, so the stronger question is the one that can be asked. The cost of the difference is benign — two Folios that really are two files refuse each other and the second opens its own window, which is the fallback every failure path here already takes.
+「同一个文件」是**设备号加 inode**,比 Windows 那条臂比较镜像**名字**更严,而这个差别是有意的而不是疏忽:那边跑着的 Folio 可能是另一个文件夹里的新构建,而那个差别由线上自己那次版本检查作答;这边对端的路径是内核给的,而这个平台上一个应用住在一个包里的一条路径上,所以更强的那个问题正是问得出来的那个。这个差别的代价是良性的——两个真的是两个文件的 Folio 互相拒绝,第二个开它自己的窗,而那正是这里每一条失败路径本来就走的那条退路。
 
-**⑦ The socket is the one thing a crash leaves behind, and it is cleaned up under the ownership lock.** The kernel releases the `flock` and closes the listener of a process that died; the **name** stays in the filesystem, and a client that connects to it is refused rather than told there is nobody home. Unlinking it is safe on exactly one condition — that nobody is listening on it — and the only thing that makes that condition true is holding the claim, because the endpoint is only ever opened by the process that holds it. So the unlink is in `claim_data_directory`, on the line after `flock` succeeded, and nowhere else (§R5): before the lock, or without it, it would be one Folio deleting a running Folio's front door. `a_stale_endpoint_is_removed_by_the_next_holder_and_only_under_the_lock` asserts both directions of that, and the mutation that turns it red is moving the `remove_file` one statement earlier. `LaunchPipe`'s own drop unlinks the name too, and that is **not** the general answer and is not written as though it were: `bt-app` parks the endpoint in a `OnceLock` static, a static is never dropped, and so a real Folio leaves its name behind on an orderly quit exactly as it does on a crash. The drop serves a scope that owns one — every case below — and the cleanup under the lock is what the product actually runs.
+**⑦ 一次崩溃留下来的只有那个套接字,而它是在归属锁底下被清理的。** 一个死掉的进程,它的 `flock` 由内核释放、它的监听器由内核关掉;那个**名字**留在文件系统里,而一个连上去的客户端得到的是一次拒绝而不是「家里没人」。把它 unlink 掉只在恰好一个条件下是安全的——没有人在上面监听——而唯一让这个条件成立的东西就是握着那次认领,因为这个端点只会被握着认领的那个进程打开。所以那次 unlink 在 `claim_data_directory` 里、在 `flock` 成功之后那一行上,别处没有(§R5):放在锁之前、或者不带锁,就是一个 Folio 在删另一个正在跑的 Folio 的前门。`a_stale_endpoint_is_removed_by_the_next_holder_and_only_under_the_lock` 对这两个方向都断言,而把它弄红的那次变异就是把 `remove_file` 往前挪一条语句。`LaunchPipe` 自己的 drop 也会 unlink 那个名字,而那**不是**通则,写的时候也没当它是通则:`bt-app` 把端点停在一个 `OnceLock` 静态里,而静态从不被 drop,所以一个真的 Folio 在有序退出时留下它的名字,跟它崩溃时留下来的一模一样。那次 drop 服务的是一个真的拥有一个端点的作用域——下面每一只用例——而锁下那次清理才是产品实际跑的东西。
 
-**⑧ `bt-app` does not change shape, and that is the result rather than the absence of one.** `persist::is_writer_of`, `launch_wire::open`, `launch_wire::hand_over` and `main`'s "if I am not the writer, hand this over and leave" are the same lines they were, with no `cfg` anywhere among them. The module is a third arm beside the Windows one on `http`'s footing (§13.27) — two real transports and one honest refusal for a platform that has neither — and every name `bt-app` reaches for exists in all three. `hotkey::allow_foreground_for` answers `false` off Windows, which is the truthful answer (there is no foreground lock to ask permission from) and is already what §4.4's class-N arm says; the landing itself is M3-1's `settle_launch_requests` and is untouched.
+**⑧ `bt-app` 的形状没变,而那是结果而不是「什么都没发生」。** `persist::is_writer_of`、`launch_wire::open`、`launch_wire::hand_over` 和 `main` 里那句「如果我不是写者,把这个交出去然后走」还是原来那几行,中间一个 `cfg` 都没有。这个模块是挨着 Windows 那个的第三条臂,站在 `http` 的基础上(§13.27)——两种真传输加一次给两者都没有的平台的老实拒绝——而 `bt-app` 伸手去够的每一个名字三条臂里都有。`hotkey::allow_foreground_for` 在 Windows 之外答 `false`,那是老实的答案(没有一把前台锁可以向它请许可),而且本来就是 §4.4 里 N 类那条臂说的话;落位本身是 M3-1 的 `settle_launch_requests`,一笔没动。
 
-**⑨ What a Windows runner holds, what only a Mac can, and the one thing neither does.** Four pins run on the workstation: the socket-path length above, and a source pin that reads this file's own text — that the Unix arm exists, that `DataDirectoryClaim`'s Unix body holds an owned descriptor rather than being a unit struct again, that the runtime directory is created `0700` and refuses a link and another user's directory, and that the `flock` is `LOCK_EX | LOCK_NB` and precedes the unlink. `update_check_transport_tests` is the precedent: a claim about a platform arm is a claim about the source when no runner can hold it, and the way an arm rots is that somebody simplifies one of those four lines with no compiler anywhere that would notice.
+**⑨ 一台 Windows 跑器按得住什么、只有 Mac 按得住什么,以及两者都不按的那一件事。** 工作站上跑四根钉:上面那条套接字路径长度,再加一根读这个文件自己文本的源码钉——Unix 那条臂存在、`DataDirectoryClaim` 的 Unix 函数体握着一个自有描述符而不是又变回一个单元结构体、运行目录是按 `0700` 创建的而且拒绝一个链接和另一个用户的目录,以及那个 `flock` 是 `LOCK_EX | LOCK_NB` 并且排在 unlink 之前。`update_check_transport_tests` 是先例:当没有跑器按得住时,一个关于平台臂的主张就是一个关于源码的主张,而一条臂烂掉的方式就是有人把那四行里的一行「简化」了,而任何地方都没有一个编译器会注意到。
 
-Eight cases run on the Mac and cannot run anywhere else: two claims on one canonical directory with the second `None`; one directory reached through a symlink and through a `..` being one claim; case folded where the volume folds it **and nowhere else**, asked of the volume the test is standing on rather than assumed from the platform; the runtime directory's mode, owner and link-freedom; the stale socket cleaned only under the lock; the endpoint `0600` inside a `0700` directory and gone when its listener is; a door that is not a private socket of this user's refused before it is connected to; and the round trip — `Decision` → reply → `CONFIRM` → `Admission` — over a real socket with the peer id the kernel reported.
+Mac 上跑八只用例,而且别处跑不了:同一个规范目录上的两次认领,第二次是 `None`;经一个软链和经一个 `..` 够到的同一个目录是同一次认领;在卷折叠大小写的地方折叠、**别的地方不折**,而且是问这只测试所站的那个卷、不是从平台上假定;运行目录的模式、属主和无链接;陈旧套接字只在锁下被清理;端点在一个 `0700` 目录里是 `0600`、而且它的监听器没了它也没了;一扇不是这个用户的私有套接字的门,在连上去之前就被拒绝;以及那趟往返——`Decision` → 回复 → `CONFIRM` → `Admission`——跑在一个真套接字上,带着内核报告的那个对端 id。
 
-**The one thing neither holds is a connection from a peer that is a different executable.** The rule is tested at the predicate (`vet_executable` says yes to this process's own image and no to `/bin/sh`), and the connected half is tested only in the direction that passes — every case above is a peer whose executable *is* this test binary, and each is served. A refusal end to end would need a second program built for the purpose that speaks this wire, and that is a cost this ticket did not pay. It is written down here rather than left as a gap in a list.
+**两者都不按的那一件事,是一个可执行文件不同的对端发来的连接。** 这条规矩在谓词上被测过(`vet_executable` 对本进程自己的镜像答是,对 `/bin/sh` 答否),而连上的那一半只在通过的方向上被测——上面每一只用例的对端,它的可执行文件**就是**这个测试二进制,而每一只都被服务了。一次端到端的拒绝需要一个为此专门建出来的、会说这条线的第二个程序,而那是本票没有付的代价。它写在这里,而不是当作一份名单里的一个缺口留着。
 
-**⑩ The acceptance sentence, on the real binary.** `docs/plans/port/m3-5/` carries the two launchers and the transcript. Two isolated `$HOME`s and one of them entered twice, on the Mac mini, `debug/folio` built from this branch. A first `folio` under data directory **A** comes up (`A1=24175`) and that directory lists `settings.json` and, once the first session write falls due, `session.json`. A second `folio` under **A** exits **0 in under a second**, prints nothing, and leaves **one** folio process alive — the first one; a handover that had failed would have opened a window and never returned, because that invocation was in the foreground. A `folio` under **B** (`B1=24248`) runs beside it, two processes and two data directories. The runtime directory is `drwx------`, this user's, with one `srw-------` socket and one `-rw-------` lock per data directory. **The `.sock` files are still there after both processes ended**, which is ⑦'s point made by the product rather than by a case: a static is never dropped, so the cleanup under the lock is the answer and the drop is not. Both pids were written down when they were started and only those two were ever ended.
+**⑩ 验收那句话,在真二进制上。** `docs/plans/port/m3-5/` 里带着那两个启动脚本和记录。两个隔离的 `$HOME`,其中一个进了两次,在 Mac mini 上,这条分支建出来的 `debug/folio`。数据目录 **A** 下的第一个 `folio` 起来了(`A1=24175`),那个目录里列出 `settings.json`,而等第一次会话写到期之后还有 `session.json`。**A** 下的第二个 `folio` **一秒之内以 0 退出**,什么也不打印,而且留下**一个**活着的 folio 进程——第一个;一次失败的交接会开出一扇窗并且永不返回,因为那次调用是在前台的。**B** 下的一个 `folio`(`B1=24248`)在它旁边跑着,两个进程两个数据目录。运行目录是 `drwx------`、属于这个用户,每个数据目录一个 `srw-------` 的套接字和一个 `-rw-------` 的锁。**两个进程都结束之后那些 `.sock` 文件还在那里**,那就是 ⑦ 那个要点由产品本身而不是由一只用例说出来:静态从不被 drop,所以锁下那次清理才是答案,而那次 drop 不是。两个 pid 在它们被起来的时候就记下来了,而被结束的从头到尾只有这两个。
 
 ### 13.29 M4-2: WKWebView 宿主——一个委托类走 navigation_gate,子资源靠编译好的规则表,数据仓按 bundle id 存(`crates/bt-platform/src/macos_webview.rs`(新)、`crates/bt-platform/src/{webview,webview_portable,lib}.rs`、`crates/bt-platform/tests/macos_webview.rs`(新)、`crates/bt-platform/Cargo.toml`、`crates/bt-app/src/{webnav,webhost}.rs`)
 
-**① One host, three arms, and `bt-app` still names no platform.** `webview.rs`
-declares twelve plain data types and compiles them everywhere; under them sit
-three `WebHost`s — the WebView2 one behind `#[cfg(windows)]`, the new
-`macos_webview.rs`, and `webview_portable.rs` for the machine that has neither.
-`web_host_contract_tests` in `lib.rs` reads all three as text and holds them to
-**one set of doors, spelled the same way**, because no compiler on one machine
-can check more than one of them — the same instrument, and the same argument, as
-M4-10's `update_check_transport_tests`. Two doors moved to make that true: the
-portable arm gained `browser_process_id` and `dpi_ownership`, which the Windows
-arm has, and lost `guards`, which the Windows arm never had and no caller in
-`bt-app` ever asked for.
+**① 一个宿主,三条臂,而 `bt-app` 仍然不点任何平台的名。** `webview.rs` 声明十二个纯数据类型,在哪里都编;它们底下坐着三个 `WebHost`——`#[cfg(windows)]` 后面那个 WebView2 的、新的 `macos_webview.rs`,以及给两者都没有的机器用的 `webview_portable.rs`。`lib.rs` 里的 `web_host_contract_tests` 把三条都当文本读,把它们按在**同一套门、同一种拼法**上,因为一台机器上没有一个编译器能同时核其中一条以上——跟 M4-10 的 `update_check_transport_tests` 是同一件仪器,也是同一条论证。为此挪了两扇门:可移植那条臂长出了 `browser_process_id` 与 `dpi_ownership`,那是 Windows 那条臂有的;并丢掉了 `guards`,那是 Windows 那条臂从来没有、`bt-app` 里也从来没有调用方要过的。
 
-**② `WKWebView` is handed to the composition, not made by it.** The two engines
-are hosted the opposite way round. WebView2 renders into a visual the host makes
-and takes it through `put_RootVisualTarget`; WebKit makes its **own** `NSView`
-and the host has to take *that*. M4-1 built the door for it —
-`Compositor::attach_page_view(page, NativeWindow)` (§13.24) — and `install`'s
-fifth step is the one call through it. The slot is what sizes the page, so
-`set_bounds`, `set_rasterization_scale` and `notify_parent_window_moved` are
-honestly empty here: a second writer of one rectangle is how two clocks come to
-disagree.
+**② `WKWebView` 是交给合成的,不是由它造的。** 两个引擎的寄宿方向正好相反。WebView2 渲染进一个宿主造的 visual,再经 `put_RootVisualTarget` 把它拿走;WebKit 造**它自己的** `NSView`,而宿主得把**那个**拿过来。M4-1 为它建了那扇门——`Compositor::attach_page_view(page, NativeWindow)`(§13.24)——而 `install` 的第五步就是经它的那一次调用。定尺寸的是那个槽,所以 `set_bounds`、`set_rasterization_scale` 和 `notify_parent_window_moved` 在这里是老实的空:同一个矩形的第二个写者,正是两个钟开始说法不一的来路。
 
-**③ Creation is two steps here too, and the second one really is asynchronous.**
-`request_environment` establishes the only thing that is shared and does live in
-a folder — the `WKContentRuleListStore` — and queues `WebEvent::Environment` on
-the spot. `request_controller` makes the view, and then *waits*: the seat's rule
-list is compiled in a completion block, and a page whose third door is not yet on
-it is not a page this host will let anybody navigate, so `WebEvent::Controller`
-is queued from that block. A navigation that arrives ahead of its rules is
-**parked** and the same block performs it. That is the whole of the ordering, and
-it is what makes `WebGuards::resource_requests` true rather than hopeful at
-install time.
+**③ 创建在这里也是两步,而第二步真的是异步的。** `request_environment` 建立唯一一样共享而且真的住在一个文件夹里的东西——那个 `WKContentRuleListStore`——并当场排一条 `WebEvent::Environment`。`request_controller` 造出那个 view,然后**等**:这个座的规则表是在一个 completion block 里编译的,而一个第三扇门还没装上的页面不是这个宿主会让任何人去导航的页面,所以 `WebEvent::Controller` 是从那个 block 里排出去的。一次比它的规则先到的导航被**停下**,而由同一个 block 把它做掉。次序就这么多,而这正是让 `WebGuards::resource_requests` 在装好那一刻是真的而不是但愿的东西。
 
-**④ One Objective-C class is the entire policy**, conforming to both
-`WKNavigationDelegate` and `WKUIDelegate` — X-2 measured one object serving the
-whole matrix. `decidePolicyForNavigationAction:` is asked about the main frame,
-every subframe, every redirect hop, a script setting `location`, a `data:` link
-and a `mailto:`, so it is the one callback that has to tell the first door from
-the third: `targetFrame.isMainFrame` picks `navigation_gate` or `request_gate`,
-which is the split `NavigationStarting` and `FrameNavigationStarting` make on the
-other platform. `Decision::Navigate(target)` where the target differs becomes
-cancel-then-load, and the substitute is started **after** the decision handler has
-been called rather than inside it. `decidePolicyForNavigationResponse:` is the
-download refusal (`canShowMIMEType == false`), `shouldPerformDownload` is its
-other half on the action, `createWebViewWithConfiguration:` returns nil after
-routing the address through the gate, and the three JavaScript panel methods are
-implemented and answer immediately — being there and returning at once is what
-`AreDefaultScriptDialogsEnabled(false)` plus `ScriptDialogOpening` buys on
-Windows.
+**④ 一个 Objective-C 类就是整套策略**,同时符合 `WKNavigationDelegate` 和 `WKUIDelegate`——X-2 量过,一个对象服务整张矩阵。`decidePolicyForNavigationAction:` 会被问到主框架、每一个子框架、每一跳重定向、一段设置 `location` 的脚本、一个 `data:` 链接和一个 `mailto:`,所以它是唯一一个必须把第一扇门和第三扇门分开的回调:`targetFrame.isMainFrame` 挑 `navigation_gate` 还是 `request_gate`,也就是另一个平台上 `NavigationStarting` 和 `FrameNavigationStarting` 划的那一刀。目标不同的 `Decision::Navigate(target)` 变成先取消再加载,而那个替代目标是在决策 handler 被调用**之后**才启动的,不是在它里面。`decidePolicyForNavigationResponse:` 是下载拒绝(`canShowMIMEType == false`),`shouldPerformDownload` 是它在 action 上的另一半,`createWebViewWithConfiguration:` 把地址过一遍那扇门之后返回 nil,而三个 JavaScript 面板方法都实现了并且立刻作答——在那里并且立刻返回,正是 Windows 上 `AreDefaultScriptDialogsEnabled(false)` 加 `ScriptDialogOpening` 买到的东西。
 
-**⑤ The third door is a compiled rule list, and it is generated rather than
-written twice.** WKWebView has no per-request callback at all: X-2 measured a
-picture, a stylesheet, a script and a `fetch` each reaching a second origin's
-socket with no delegate ever naming them. So `webnav.rs` grows one function and
-**no new policy** — `content_rules(&Mint) -> String`, emitting Safari
-content-blocker JSON out of the same four scheme tables `resource_request` now
-reads (`DOCUMENTS_OWN_BYTES`, `ENGINE_INTERNAL`, `DISK`, `NETWORK`). A browsing
-seat blocks `^file:`, the host's blank page blocks that and both network
-schemes, and a local seat blocks the network only — because the *folder* half is
-not a pattern at all.
+**⑤ 第三扇门是一张编译好的规则表,而它是生成的而不是写第二遍。** WKWebView 根本没有逐请求的回调:X-2 量到一张图片、一份样式表、一段脚本和一次 `fetch` 各自够到了第二个源的套接字,而从头到尾没有任何委托点过它们的名。所以 `webnav.rs` 长出一个函数、**不长任何新策略**——`content_rules(&Mint) -> String`,从 `resource_request` 现在读的那同样四张 scheme 表(`DOCUMENTS_OWN_BYTES`、`ENGINE_INTERNAL`、`DISK`、`NETWORK`)里吐出 Safari 内容拦截器的 JSON。一个浏览座挡 `^file:`,宿主那个空白页把它和两个网络 scheme 都挡上,而一个本地座只挡网络——因为**文件夹**那一半根本不是一个模式。
 
-**One rule per scheme, and that is a measured requirement rather than a style.**
-The first spelling of this was `^(http|https)://`, one rule carrying the
-alternation, and `WKContentRuleListStore` refused to compile it — found on the
-machine by the `.app` proof below, because a content blocker's `url-filter` is a
-*subset* of regular expressions and a group is not in it. One rule per entry of
-the table is what compiles, and it is still generated rather than written: a
-scheme added to `NETWORK` becomes another rule rather than another branch
-somebody has to remember. `the_patterns_name_the_schemes_the_tables_do` refuses
-a pattern carrying `(` or `|` so that the finding cannot be lost again, and a
-compile that does fail now carries **WebKit's own sentence** into the seat's
-fault line: the first run of the proof spent a whole cycle establishing a fact
-the framework had already said out loud. It is `-[WKWebView loadFileURL:allowingReadAccessToURL:]` with
-the minted file's own folder, which X-2 measured enforcing it with no rule list
-in the room. `the_two_spellings_of_the_resource_rule_agree` asks every row of
-X-2's fixture set of **both** spellings and requires the pair — patterns plus
-read access — to refuse exactly what `resource_request` refuses. No mint compiles
-to an empty list, because `WKContentRuleListStore` refuses one and a seat whose
-compilation failed would have no third door at all.
+**一条 scheme 一条规则,而这是一条量出来的要求而不是一种风格。** 这件事的第一种拼法是 `^(http|https)://`,一条规则带着那个「或」,而 `WKContentRuleListStore` 拒绝编译它——是下面那次 `.app` 证明在机器上查出来的,因为一个内容拦截器的 `url-filter` 是正则表达式的一个**子集**,而分组不在里面。编得过的是表里一条一条各出一条规则,而它仍然是生成的而不是写出来的:往 `NETWORK` 里加一个 scheme 就多出一条规则,而不是多出一条要有人记着的分支。`the_patterns_name_the_schemes_the_tables_do` 拒绝任何带 `(` 或 `|` 的模式,好让这次发现不会再丢一次;而一次真的失败的编译现在会把 **WebKit 自己那句话**带进这个座的故障行里:那次证明的第一趟花了整整一轮去确立一件框架早就明说出来的事。文件夹那一半是 `-[WKWebView loadFileURL:allowingReadAccessToURL:]`,带着铸出来那个文件自己的文件夹,而 X-2 量过它在屋里一张规则表都没有的时候照样生效。`the_two_spellings_of_the_resource_rule_agree` 拿 X-2 那套夹具的每一行去问**两种**拼法,并要求这一对——模式加读取权限——拒绝的恰好就是 `resource_request` 拒绝的。没有哪个 mint 会编出一张空表,因为 `WKContentRuleListStore` 拒绝空表,而一个编译失败了的座根本就没有第三扇门。
 
-The rule moves when the mint does, so the seat says it again before every
-navigation. `WebHost::set_request_rules` is therefore a door on **every** arm —
-`bt-app` names no platform — and the two arms whose engine asks per request drop
-what they are handed in one line that says so. The identifier a list is compiled
-under is a hash of its own contents, because `WKContentRuleListStore` caches by
-identifier on disk and a name that meant "the file seat's" would go on answering
-with last week's compilation.
+规则跟着 mint 动,所以这个座在每次导航之前把它再说一遍。所以 `WebHost::set_request_rules` 在**每一条**臂上都是一扇门——`bt-app` 不点平台的名——而那两条引擎本来就逐请求问的臂,用一行明说的代码把递给它们的东西丢掉。一张表被编译时用的那个标识符是它自身内容的哈希,因为 `WKContentRuleListStore` 在磁盘上是按标识符缓存的,而一个意思是「文件座那张」的名字会一直拿上周编的那份来作答。
 
-**⑥ The website data store is the default, persistent one, keyed on the bundle
-identifier.** That is the same promise `%LOCALAPPDATA%\Folio\WebView2` makes on
-the other platform — a page a reader signed into is a page still signed in
-tomorrow — and it is why the plan builds the bundle from M1 rather than from M5
-(§4.5). X-2 recommended the non-persistent store; that would be a change to what
-the *product* promises rather than a question about how this platform is spelled,
-so the port keeps the behaviour and `SECURITY.md`'s web-preview paragraph records
-the cost on both machines. **There is no "clear web data" verb on either arm** to
-give an arm of: the Windows user data folder is a profile and is deliberately not
-deleted, and the macOS store is cleared the way any application's container is —
-`removeDataOfTypes:modifiedSince:completionHandler:` is where a later ticket would
-put one. What the folder `bt-app` still hands the host *is* used, and it is not
-the profile: `web_engine_folder` answers
-`~/Library/Application Support/Folio/WebKit` on a Mac, and what lives there is the
-compiled rule lists. It is asked of `bt_platform::host_platform` rather than of a
-`cfg`, which is what keeps `webhost.rs` off
-`only_the_named_files_decide_what_platform_this_is`' list.
+**⑥ 网站数据仓是默认的那个持久仓,按 bundle 标识符定。** 那就是另一个平台上 `%LOCALAPPDATA%\Folio\WebView2` 做的同一个承诺——一个读者登录过的页面明天还是登录着的——也是计划为什么从 M1 而不是从 M5 开始就建这个 bundle 的原因(§4.5)。X-2 建议用非持久仓;那会是对**产品**承诺的一次改动,而不是一个关于这个平台怎么拼的问题,所以这次移植保留行为,而 `SECURITY.md` 的 web 预览那一段把两台机器上的代价都记下来。**两条臂上都没有一个「清除 web 数据」的动词**可以给它配一条臂:Windows 那个用户数据文件夹是一份 profile,而且特意不删;macOS 那个仓的清法跟任何应用的容器一样——`removeDataOfTypes:modifiedSince:completionHandler:` 就是后来某张票要放它的地方。`bt-app` 仍然递给宿主的那个文件夹**确实**在用,而且它不是 profile:`web_engine_folder` 在 Mac 上答 `~/Library/Application Support/Folio/WebKit`,而住在那里的是编译好的那些规则表。它是问 `bt_platform::host_platform` 而不是问一个 `cfg`,而这正是让 `webhost.rs` 留在 `only_the_named_files_decide_what_platform_this_is` 那份名单之外的东西。
 
-**⑦ A panic in a delegate callback is a refusal, not an abort.** X-2's second
-carry-forward: a panic unwinding out of a `#[unsafe(method(…))]` body crosses into
-Objective-C and ends the process, and a bundle started by `open` has no terminal
-to say so. Every entry point is wrapped, and the value a wrap falls back to is
-always the refusing one — cancel the navigation, deny the permission, open no
-window. A door that failed to decide has not decided.
+**⑦ 一个委托回调里的 panic 是一次拒绝,不是一次中止。** X-2 的第二条挂账:一个从 `#[unsafe(method(…))]` 函数体里展开出来的 panic 会跨进 Objective-C 并结束进程,而一个由 `open` 起来的 bundle 没有终端可以说这件事。每一个入口点都被包起来,而一个包装退回去的那个值永远是拒绝的那一个——取消这次导航、否掉这次权限、不开窗。一扇没能做出决定的门就是没有做决定。
 
-**⑧ X-2's first carry-forward did not need the hammer it was found with.** objc2
-verifies every selector against the receiver's **class** while debug assertions
-are on, and WebKit hands the authentication challenge over as
-`WKNSURLAuthenticationChallenge`, a forwarding wrapper whose `protectionSpace` is
-not a method on that class; the send works and only the verification refuses it.
-The probe turned the verification off, which a crate cannot do locally — objc2's
-`disable-encoding-assertions` is a Cargo feature and Cargo features unify across a
-build, so it would switch the checking off for every `msg_send!` in this
-workspace. The local answer is `performSelector:`, which *is* a method on every
-class descended from `NSObject`: the verification passes on it and the forwarding
-happens inside Objective-C, where it belongs. The challenge is read because it has
-to be — the same callback carries TLS server-trust challenges, and answering
-`RejectProtectionSpace` to those would break every `https` page. Server trust gets
-the system's own evaluation; every password box gets the refusal.
+**⑧ X-2 的第一条挂账,并不需要当初找到它时用的那把锤子。** 只要调试断言开着,objc2 就会拿每一个选择子对着接收者的**类**校验一遍;而 WebKit 把认证挑战作为 `WKNSURLAuthenticationChallenge` 交过来,那是一个转发包装,它的 `protectionSpace` 不是那个类上的一个方法;消息发得出去,只是校验不让。探针当时把校验关了,而一个 crate 没法在局部这么干——objc2 的 `disable-encoding-assertions` 是一个 Cargo feature,而 Cargo feature 在一次构建里是合并的,所以那会把这个工作区里每一次 `msg_send!` 的检查都关掉。局部的答案是 `performSelector:`,而它**是**每一个继承自 `NSObject` 的类上的方法:校验在它上面通过,而转发发生在 Objective-C 里面,那才是它该在的地方。这个挑战必须被读,因为同一个回调也带着 TLS 服务器信任挑战,而对它们答 `RejectProtectionSpace` 会弄坏每一个 `https` 页面。服务器信任交给系统自己去评估;每一个密码框拿到那次拒绝。
 
-**⑨ A page's process dying is the renderer's kind, not the browser's.**
-`webViewWebContentProcessDidTerminate:` is WebKit's only process notification and
-it names the one that draws. The `WKWebView` is still a live object with its
-delegates on it, and Apple's documented recovery is a reload — which is exactly
-what `WebMachine::on_render_process_failed` already answers a renderer death with.
-The browser-process kind would start a rebuild from an environment this platform
-does not have. There is likewise no `BrowserProcessExited`: a closing seat goes
-through `BROWSER_EXIT_DEADLINE`, which is the graceful path the Windows arm
-already measured — one shutdown in eight never said anything either.
+**⑨ 一个页面的进程死了,那是渲染器那一种,不是浏览器那一种。** `webViewWebContentProcessDidTerminate:` 是 WebKit 唯一的进程通知,而它点的是画画的那个。那个 `WKWebView` 仍然是一个活着的对象、委托还挂在上面,而 Apple 写明的恢复办法是重新加载——那恰好就是 `WebMachine::on_render_process_failed` 对一次渲染器死亡已经给出的回答。浏览器进程那一种会从一个这个平台上没有的 environment 开始重建。同样也没有 `BrowserProcessExited`:一个正在关的座走 `BROWSER_EXIT_DEADLINE`,那是 Windows 那条臂本来就量过的优雅路径——八次关闭里也有一次从头到尾什么都没说。
 
-**⑩ What the port gives up, in plain words.** Seven sentences, and M4-3 is what
-says them in the product.
+**⑩ 这次移植放弃了什么,说白话。** 七句话,而 M4-3 是在产品里说这些话的那张票。
 
-* There is **no per-request door** for a document's own contents. A refusal is a
-  pattern that matched, not a question this program answered, so a rule that
-  cannot be written as a pattern cannot be enforced.
-* A request stopped that way is **dropped by the engine rather than answered**
-  with the empty 403 the Windows host mints, and Folio never learns it happened —
-  no `RequestRefused` line for the trace and no reason for a card to show.
-* Requests a **service worker or a shared worker** makes were not measured. The
-  Windows arm filters them on purpose; here they are unknown rather than covered.
-* **Permissions are refused one capability at a time**, so a capability a later
-  WebKit adds arrives with Apple's default rather than with Folio's refusal
-  already standing.
-* **A `javascript:` link is never offered to the gate.** X-2's matrix put it
-  beside `data:` and `blob:` in row 13 and it does not belong there: measured by
-  the `.app` proof, WebKit evaluates the URL in the page's own context and
-  raises no navigation action at all, where WebView2 raises `NavigationStarting`
-  and `webnav` refuses it as `ScriptOrInlineScheme`. What the claim reduces to
-  is what the *address* does, and the address does nothing — the seat does not
-  move, and a page can already run its own script with a `<script>` tag, so
-  nothing reaches an origin or a disk that could not before.
-* **The engine's own context menu stays.** `AreDefaultContextMenusEnabled` has no
-  counterpart in WKWebView's public API, so that row of `WEB_SETTINGS` is reported
-  unapplied rather than quietly assumed — one line on the diagnostics stream, and
-  nothing refuses a page over it.
-* **A page's icon and its match count never arrive.** WebKit announces neither in
-  any public form, so the seat wears the product's own mark and the search capsule
-  shows no number rather than a wrong one. The address also stands still for a
-  single-page application, because the history API moves it through key-value
-  observation rather than through a delegate.
-* **Nothing forwards the pointer, and nothing yet decides whether it arrives.** A
-  `WKWebView` is a real `NSView` in the window's own hierarchy, so AppKit delivers
-  to it directly and `send_mouse` has nothing to send — but the page's slot stands
-  *under* Folio's surface view (§13.24), and whether an event reaches the page at
-  all is a question about that view's hit testing. Neither M4-1 nor M4-2 settles
-  it; it is written down here and carried forward.
+* 对一份文档自己的内容,**没有逐请求的门**。一次拒绝是一个匹配上的模式,不是这个程序答的一个问题,所以一条写不成模式的规矩就执行不了。
+* 这样被拦下的请求是**由引擎丢掉而不是被答复**,不像 Windows 宿主会铸一个空的 403,而且 Folio 从不知道这件事发生过——trace 里没有 `RequestRefused` 行,卡片也没有理由可显示。
+* 一个 **service worker 或 shared worker** 发出的请求没有量过。Windows 那条臂特意过滤它们;这里它们是未知而不是被覆盖。
+* **权限是一样能力一样能力地拒绝的**,所以后来某个 WebKit 新加的一样能力,到达时带的是 Apple 的默认,而不是 Folio 那条已经立着的拒绝。
+* **一个 `javascript:` 链接从来不会被送到那扇门前。** X-2 的矩阵把它和 `data:`、`blob:` 一起放在第 13 行,而它不属于那里:那次 `.app` 证明量到,WebKit 在页面自己的上下文里求值那个 URL,根本不掀起任何导航 action,而 WebView2 掀起 `NavigationStarting`、`webnav` 把它作为 `ScriptOrInlineScheme` 拒掉。这条主张归结下来就是那个**地址**做了什么,而那个地址什么也没做——座不动,而一个页面本来就能用一个 `<script>` 标签跑它自己的脚本,所以没有任何从前够不到的源或磁盘被够到。
+* **引擎自己的右键菜单留着。** `AreDefaultContextMenusEnabled` 在 WKWebView 的公开 API 里没有对应物,所以 `WEB_SETTINGS` 的那一行是被报告为未应用,而不是被悄悄当成已经应用——诊断流上一行,没有任何东西因此拒绝一个页面。
+* **一个页面的图标和它的匹配计数从来不到。** WebKit 两样都没有任何公开形式的通告,所以这个座穿的是产品自己的标记,而搜索胶囊不显示数字而不是显示一个错的。地址在单页应用里也站着不动,因为 history API 是经键值观察而不是经一个委托去挪它的。
+* **没有东西转发指针,而指针到不到得了也还没人定。** 一个 `WKWebView` 是窗口自己层级里一个真的 `NSView`,所以 AppKit 直接投给它,而 `send_mouse` 没有什么可发——但页面的槽站在 Folio 的 surface view **底下**(§13.24),而一个事件到底到不到得了页面,是一个关于那个 view 命中测试的问题。M4-1 和 M4-2 都没有定它;它写在这里并挂账带下去。
 
-**⑪ One package, and it is the web engine.** `objc2-web-kit` 0.3.2 — the same
-repository, the same release and the same `objc2` 0.6.4 as the seven crates
-already named. A `WKWebView` and its two delegate protocols are forty-odd
-selectors across a dozen classes, three of them taking completion blocks and two
-taking `NS_ENUM` returns; hand-declaring that is forty unchecked selectors and
-four hand-written struct layouts, which is the case §8 puts a dependency on the
-other side of. **`Cargo.lock` gains exactly one package and no other line moves**:
-every crate `objc2-web-kit` pulls in under the features named — `bitflags`,
-`block2`, `objc2`, `objc2-app-kit`, `objc2-core-foundation`, `objc2-foundation` —
-was already resolved, and `objc2-javascript-core` is an optional dependency no
-feature named here turns on.
+**⑪ 一个包,而它就是那个 web 引擎。** `objc2-web-kit` 0.3.2——跟已经点过名的那七个 crate 同一个仓库、同一个 release、同一个 `objc2` 0.6.4。一个 `WKWebView` 和它那两个委托协议是跨十来个类的四十来个选择子,其中三个收 completion block、两个返回 `NS_ENUM`;手写声明那些就是四十个没被校验的选择子加四份手写的结构体布局,而那正是 §8 把一个依赖放在天平另一边的那种情形。**`Cargo.lock` 恰好多一个包,别的一行都没动**:在点名的那些 feature 下 `objc2-web-kit` 拉进来的每一个 crate——`bitflags`、`block2`、`objc2`、`objc2-app-kit`、`objc2-core-foundation`、`objc2-foundation`——本来就已经解析进来了,而 `objc2-javascript-core` 是一个这里没有 feature 打开的可选依赖。
 
-**⑫ The proof needs a bundle, and that is the finding worth carrying.**
-`tests/macos_webview.rs` is a fourth `harness = false` target, and its gate is not
-`BT_MAC_GUI` but *being inside a `.app`*: `defaultDataStore` is the application's
-store and the identifier is what makes it the application's, so a run out of
-`target/debug/deps` would prove something about a different store. It builds a
-window, a `Compositor`, a `WebHost` with the `Mint::File` policy written out, and
-drives every row of X-2's matrix that needs no network — the folder read and the
-folder refused, a `data:` link, a `javascript:` link, `window.open`, a download,
-`alert()`, a `file:` location outside the mint, and the view leaving the window
-when the seat closes. Two of those rows report a door rather than assert one,
-because that is what the run found: the `javascript:` link above, and the
-`file:` location outside the mint, which **the engine refuses before any
-callback** — `loadFileURL:allowingReadAccessToURL:`'s scope is X-2's row 9
-arriving one door earlier than the gate. The proof names which door refused
-instead of insisting on the one that did not have to. It reads `document.title` back off the page, which is the
-only channel a seat with no bridge has and is the one X-2 used; it photographs
-**its own** window with `CGWindowListCreateImage`, which needs no Screen Recording
-grant; and it drives nothing through System Events, so no privacy prompt can land
-on anybody's desk.
+**⑫ 这次证明需要一个 bundle,而那是值得带下去的那条发现。** `tests/macos_webview.rs` 是第四个 `harness = false` 的目标,而它的闸不是 `BT_MAC_GUI` 而是*人在一个 `.app` 里面*:`defaultDataStore` 是这个应用的仓,而标识符正是让它成为这个应用的那样东西,所以一次从 `target/debug/deps` 里的运行证的是另一个仓的事。它建一扇窗、一个 `Compositor`、一个策略写作 `Mint::File` 的 `WebHost`,然后把 X-2 那张矩阵里每一行不需要网络的都跑一遍——文件夹放行的和文件夹拒绝的、一个 `data:` 链接、一个 `javascript:` 链接、`window.open`、一次下载、`alert()`、一个 mint 之外的 `file:` 地址,以及座关掉时那个 view 离开窗口。其中两行是报告一扇门而不是断言一扇门,因为那次运行查出来的就是这样:上面那个 `javascript:` 链接,以及那个 mint 之外的 `file:` 地址——**引擎在任何回调之前就拒绝了它**——`loadFileURL:allowingReadAccessToURL:` 的作用域就是 X-2 第 9 行提前一扇门到达。这次证明点名的是实际拒绝了的那扇门,而不是硬要那扇根本没轮到的门去拒绝。它从页面上把 `document.title` 读回来,那是一个没有桥的座唯一的通道,也是 X-2 用的那一个;它用 `CGWindowListCreateImage` 拍**它自己的**窗,那不需要屏幕录制授权;而且它不经 System Events 驱动任何东西,所以没有任何隐私提问会落到谁的桌面上。
 
-**⑬ One defect the ticket did not name, found by writing the fixture down.**
-`Mint::file` composed `file:///` and then appended the path — which is right for
-`D:eport.html` and wrong for `/Users/somebody/report.html`, because the second
-already carries its own root. A Mac therefore minted `file:////Users/…`, four
-slashes, which every engine normalises back to three: the string the seat minted
-then matched neither the address the engine committed (`Mint::admits`) nor any
-candidate the folder rule was asked about, and **a local page refused itself**.
-The fix is two lines and it is a question about the string rather than about the
-machine, so `webnav.rs` still names no platform;
-`a_minted_file_url_has_one_root_however_the_path_spelled_it` pins both spellings
-and both doors. What is still owed is the *display* half —
-`Mint::path_and_tail_of_file_url` reads a URL back as a drive-absolute Windows
-path, so `local_path_form` answers `None` on a Mac and the surfaces that show a
-local file show its URL instead of its path. That is a ticket of its own and is
-carried forward here rather than smuggled in.
+**⑬ 一个本票没点名的缺陷,是靠把夹具写下来查出来的。** `Mint::file` 拼的是 `file:///` 再把路径接上去——对 `D:\report.html` 是对的,对 `/Users/somebody/report.html` 是错的,因为第二个自带它的根。于是一台 Mac 铸出来的是 `file:////Users/…`,四条斜杠,而每一个引擎都把它归一化回三条:这个座铸出来的那个串,随后既配不上引擎提交的那个地址(`Mint::admits`),也配不上文件夹规则被问到的任何一个候选,而**一个本地页面拒绝了它自己**。修法两行,而且它是一个关于字符串而不是关于机器的问题,所以 `webnav.rs` 仍然不点平台的名;`a_minted_file_url_has_one_root_however_the_path_spelled_it` 把两种拼法和两扇门都钉住。还欠着的是**显示**那一半——`Mint::path_and_tail_of_file_url` 把一个 URL 读回成一条带盘符的 Windows 绝对路径,所以 `local_path_form` 在 Mac 上答 `None`,而那些显示本地文件的表面显示的是它的 URL 而不是它的路径。那是一张自己的票,在这里挂账带下去,而不是夹带进来。
 
 ### 13.30 M4-6: 通知走 UNUserNotificationCenter,Dock 图标的注意标记(`crates/bt-platform/src/macos_notify.rs`(新)、`crates/bt-platform/src/{lib,portable_impl}.rs`、`crates/bt-platform/tests/macos_notifications.rs`(新)、`crates/bt-platform/Cargo.toml`)
 
