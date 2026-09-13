@@ -910,6 +910,21 @@ mod macos_handoff {
 
         use super::*;
 
+        /// **Whether this run may put something on the desk.** The two cases
+        /// below open a Finder window and launch an editor; on a machine where
+        /// a person is working, an unasked-for window and the panel a vanished
+        /// folder raises are an intrusion, so they run only under the consent
+        /// every window-opening target of this crate reads — `BT_MAC_GUI=1`
+        /// (`docs/BT-ENVIRONMENT.md`). Without it each prints one line and
+        /// passes, and the door's answers are still held by the refusal cases.
+        fn desk_consent() -> bool {
+            if std::env::var_os("BT_MAC_GUI").is_some() {
+                return true;
+            }
+            eprintln!("skipped — set BT_MAC_GUI to let this case open a window on the desk");
+            false
+        }
+
         /// A directory of this test's own, under the system's temporary
         /// directory and named for this process, removed however the case ends.
         fn scratch(name: &str) -> PathBuf {
@@ -1018,6 +1033,9 @@ mod macos_handoff {
         /// all.
         #[test]
         fn a_reveal_asks_the_disk_before_it_asks_finder() {
+            if !desk_consent() {
+                return;
+            }
             let window = crate::NativeWindow::stand_in(0);
             let root = scratch("reveal");
             let file = root.join("a file, with a \" in it.txt");
@@ -1036,7 +1054,11 @@ mod macos_handoff {
             // The folder half takes the other road (`openURL:`), and that one
             // does answer.
             assert_eq!(reveal_in_explorer(window, &root), Ok(()));
-            let _ = std::fs::remove_dir_all(&root);
+            // The directory Finder was just pointed at stays where it is: a
+            // Finder window whose folder is deleted under it puts a "cannot
+            // be found" panel on the desk (measured on the owner's screen,
+            // 2026-09-13), and a few bytes under the temporary directory are
+            // cheaper than that.
         }
 
         /// RED — **a file handed to the workspace really opens**, which is the
@@ -1071,6 +1093,9 @@ mod macos_handoff {
         /// launching, because one asked mid-launch is documented to be refused.
         #[test]
         fn open_local_path_hands_a_file_to_the_workspace() {
+            if !desk_consent() {
+                return;
+            }
             let window = crate::NativeWindow::stand_in(0);
             let root = scratch("open");
             let file = root.join("folio-m2-2.txt");
