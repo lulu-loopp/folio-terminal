@@ -9801,3 +9801,256 @@ with a posted pointer:
    the shape they cover is the shape a centred card is drawn in.
 
 *(本节英文,待中文文案改写。)*
+
+### 13.40 M2-7: 阅读面验收扫——每一行在真机上过了一遍,过不了的写成手上的步骤(`crates/bt-app/src/{main,preview_trace}.rs`、`crates/bt-math/tests/acceptance_display_integral.rs`、`docs/plans/port/m2-7/`)
+
+**Taken as 13.40.** 13.19–13.37 were merged when this ticket started and 13.38
+(M4-3) and 13.39 (T-MAC-POINTER) were in flight beside it; both have landed
+since, which is why ① and ⑧ below cite 13.39 rather than reopening the question
+it settled. This section takes the next number nothing has claimed.
+
+**① Three doors, because §M2's line is seven sentences and every one begins with
+a gesture.** Two of the gestures can be posted at a window this session started
+and one cannot, so the sweep is written around exactly that split rather than
+around what would have been convenient.
+
+* **The folder in the files column** is opened through the application's own
+  door for a column that was open a moment ago: a seeded `session.json` at
+  schema 15 whose tab is **pinned**. `folio <folder>` does not do it —
+  `cli::resolve` turns a directory argument into a terminal seat's `cwd` and
+  `Seats::lone_terminal` has no files leaf in it — and the gesture that does
+  cannot be posted, because CGEvent keyboard injection into Folio produces
+  nothing on this Mac (§13.34 ⑦). The pin is the whole of why this opens with
+  nothing standing over it: `App::restore_question` collects the tabs that were
+  **not** pinned, and the one card is raised only when that list is not empty.
+* **"From a pane"** is a second shell in the ssh session against the same
+  folder. The watcher cannot tell one writer from another and is not supposed
+  to; what those two rows assert is the **watch**. The pane is real and running
+  all the same — `folio.zsh` hands `ZDOTDIR` back at the end of itself, so the
+  pane's shell reads the isolated `HOME`'s own `.zshrc` and prints what that file
+  says without a key being pressed. That is how the `md5` the owner's hand
+  procedure compares against gets onto the glass.
+* **The clicks** are CGEvents posted at this session's own window, at points read
+  out of that window's own `BT_CHROME_DUMP` frame. They land: the first-run card
+  was dismissed by pressing its own button, and a press on a tree row arrives and
+  routes — `chrome_mouse_input taken=1 at=press-routed … target=FilesRow { seat:
+  SeatId(1), index: 4 }`. That is this sweep corroborating §13.39 rather than
+  discovering anything: a press is routed by the window server to whatever is
+  frontmost at that point, so what §13.34 ⑦(d) photographed was a patch of desk
+  with another application's panel parked over it, and a window with nothing over
+  its rows takes every press aimed at them.
+
+**② A clean data directory has a card on it, and that is the row rather than an
+obstacle.** The first launch of this bundle draws the first-run card over the
+reading surfaces, because that is what a clean data directory is. It is
+dismissed the way a reader dismisses it, by pressing `完成`, and the frames
+before and after are both photographed. Nothing is suppressed and no
+`settings.json` is written by hand: a sweep that wrote its way past the card
+would be testing a state no first run is ever in.
+
+**③ The table.** Venue: Apple M4, macOS 26.6.2, one 4K panel presented at
+1920×1080 points, **backing scale 2**; the window at `100,100` `1280×800` points,
+`2560×1600` physical. The application is the debug `folio` of this branch inside
+a throwaway bundle with an identifier of its own and an isolated `HOME` (§13.31
+⑧(d)), with `BT_PTY_DUMP`, `BT_CHROME_DUMP`, `BT_MOUSE_TRACE` and
+`BT_PREVIEW_TRACE` all naming files under the run's own directory. Rectangles are
+that window's physical pixels; the document band read below is `(660,200)`–
+`(2540,1120)`, which is the pane's page with its head and rail above it and its
+foot below.
+
+| row of §M2 | driven by | verdict | measured |
+|---|---|---|---|
+| open a folder in the files column | a seeded `session.json` (schema 15, tab **pinned**) | **PASS** | the column draws `sub ▸ before.txt`, `math.md`, `picture.png`, `table-cjk.md`; its head says `pages` and its foot `~/pages` |
+| click a `.md` with a table and a CJK paragraph, and the preview renders it | the seed for the content; the press itself is proved on the `.png` row below | **PASS** | `document bytes=362 blocks=3 parse_us=71 intrinsic_us=4 layout_us=1440`, 11 paragraphs and 18 quads on the glass; five line boxes in the document band, the table 192 px of them over three columns; ink 72267, mean 0.2788, aa 0.9919 |
+| change a heading in place, press the save chord, `md5 <file>` in a pane shows bytes that changed | **nothing** — no key can be posted at this window (§13.34 ⑦) | **NOT-CHECKABLE** | the pane prints `M27-MD5-BEFORE e4ce946198203a728f2de986ffd341dc` at startup, which is the digest the owner's procedure in ⑦ compares against |
+| replace the file from a pane and the preview updates without a click | a second shell against the same folder | **PASS** | `document bytes=8 blocks=1` arrives **0.33 / 0.62 / 0.63 / 0.61 / 0.62 s** after `os.replace`, one figure per run; the document band drops from five line boxes to two |
+| create a file in a *subdirectory* of the open folder and the tree shows it | the same shell | **PASS** | `made-by-the-sweep.txt` is a row of the next chrome frame **0.31 / 0.64 / 0.63 / 0.63 / 0.63 s** after the write; the control — the same create at the **watched root** — is **0.33 / 0.34 / 0.33 / 0.34 / 0.32 s**, every run |
+| click a `.png` and it shows | CGEvent, a real pair inside `MULTI_CLICK_INTERVAL` | **PASS** | one press routes and selects (`press-routed … FilesRow { index: 4 }`) and raises the glance card; the pair opens it — `open_preview_image enter path=…/picture.png`, `preview_landing_surface seat=SeatId(2) reused=1`, `leave=opened` — and the head then reads `picture.png — 3200×3240` |
+| open a file containing `$$\int_0^1 x\,dx$$` and the integral is typeset, not printed as source | the seed | **FAIL on the build this sweep opened with; PASS on the fix — see ⑤** | before: the page printed `\int_0^1 x\,dx`, centred, on every run — at 14 s, at 30 s and after a press — in a band **23 px** tall, which is a line of text beside a 28 px line of prose. After: the band is **69 px**, and `math answered set=1` at 1558.027 ms is followed by `math formulas=1 drawn=1 asked=0` at 1558.142 ms |
+
+**The FSEvents latency, read out of those two rows.** The stream's own window is
+0.300 s (`watch_clock::WATCH_QUIET`, §13.12 ②), and every number above is one or
+two of it. A single `open`-write-`close` at the watched root is **one** window,
+every time, and 0.33 s is that window plus the poll that reads it. The other two
+writes are a create and a rename (`printf > new && mv`) and a create and a write,
+which are two arrivals a few milliseconds apart; when the second falls inside the
+first's quiet window the debounce restarts and the answer costs 0.63 s. Both are
+the policy working: nothing was dropped on any run, and the tree and the page
+were correct in the frame that followed.
+
+**④ Three surfaces of one window disagreed about where the reader was.** The
+ticket named one and the sweep found the other two. §13.32 ③ gave the
+breadcrumbs the `~` rule and stopped there, so a Mac window with a folder open
+under the reader's home said three things at once: the rail said `~ › pages`, the
+files column's foot said
+`/Users/<owner>/folio-port/wt/m2-7/out-acc/home/pages`, and the terminal pane's
+head said the same long thing again — **while the shell in that very pane printed
+`m2-7 pages %`**, having written the same run as `~` itself.
+
+The rule is asked once. `home_crumb_for` is the decision §13.32 ③ already made —
+"is this path under a home this reader's machine writes `~` for" — lifted out of
+`crumb_segments_on` so the feet and the head ask it rather than keeping opinions
+of their own. `home_shortened_path_on` is that answer spelled for a surface which
+prints a path rather than a row of crumbs, and it **takes the separator from the
+string the filesystem handed over** instead of inventing one, which is what lets
+a Windows workstation assert what a Mac's foot says. Windows substitutes nothing
+anywhere — `home_crumb_for` answers `None` for that platform outright — so each
+of these surfaces prints the string it always printed there, borrowed rather than
+rebuilt.
+
+Three surfaces and two functions, because the third was already right: the
+docked files column's foot and a torn-out files tree's foot are one call apiece
+(`dress_files_feet`, the float builder), and the pane head is `cwd_whole`, whose
+own doc already said it renders "the folder as this reader writes it". The pins
+are `a_files_foot_prints_the_root_its_breadcrumbs_would_print` and
+`a_pane_heads_folder_is_written_the_way_this_reader_writes_one`; the second
+carries a source pin as well, because what has to stay true is not only that a
+head prints `~` on a Mac but that it reaches that answer **through the rail's own
+function**.
+
+**⑤ The integral was not typeset, the engine was not why, and the port only lost
+a race it had always been running.** The page drew `\int_0^1 x\,dx` — the
+delimiters stripped and the run centred, so the block *was* recognised as display
+mathematics and it was the picture that never came. A page standing on its source
+text is the right behaviour for a formula that is pending **and** for one the
+engine refused, which is what made this unreadable from outside: the two draw the
+identical thing, and the worker thread's own stack is parked in `recv` either
+way. So `BT_PREVIEW_TRACE` grew the station that tells them apart — `math
+formulas=<n> drawn=<n> asked=<n> worker=<0|1>` for one page's pass and `math
+answered set=<0|1> …` for one answer coming back — and the run then said the
+whole thing in four lines:
+
+```
+110.867 build … bytes=143 owed=0
+111.421 math formulas=1 drawn=0 asked=1 worker=1
+175.534 built … paragraphs=3 quads=1
+1684.536 math answered set=1 mode=Display em_milli=26000 chars=14
+```
+
+and never another `build` line, through thirty seconds and a press. The picture
+was **set** and it **landed**; nothing asked the page to be laid out a second
+time, so `PreviewMathCache::generation` — which exists for exactly that next
+layout — was read by nobody.
+
+`apply_math_results` publishes a frame, and a publish is not a rebuild: it asks
+the window to draw again out of the bodies it is already holding, and the body
+built while the formula was pending holds the author's LaTeX.
+`refresh_preview_body` is reached from a resize, a scroll, an edit, an open and a
+palette change, and a formula arriving is none of them. The glance card had
+already been given this exact sentence in 2026-08-26's report — "the card first,
+the picture when it comes" — and a **docked pane** had not, so that half of the
+fix has been missing ever since. It is a race rather than a platform, and the
+port is what lost it: this Mac's first typesetting of a session costs about
+1.7 s (the engine's font book is built on the worker thread before the first
+answer) against a startup that settles inside 200 ms, so on this machine the
+answer *always* arrives too late. A slow first formula on any machine is the same
+defect, which is why this one is in the changelog and the flag it is gated on now
+says what it means (`picture_landed`, set by a picture and never by a refusal —
+a refused block draws exactly what it was drawing and owes no rebuild).
+
+**And the same run afterwards**, which is the whole of what a fix is entitled to
+claim: `math answered set=1` at 1558.027 ms, `math formulas=1 drawn=1 asked=0` at
+**1558.142 ms** — the page resolved again 115 microseconds later — and the
+integral on the glass in the frame that followed, standing in a band 69 px tall
+where the source had stood in one of 23.
+
+**⑥ What a Windows reference could settle, and what it could not.**
+`crates/bt-math/tests/acceptance_display_integral.rs` sets the acceptance line's
+own formula offscreen — no window, no GPU, no swapchain — and prints what came
+out. Run on a Windows workstation and on the Mac mini it prints, to the
+character:
+
+```
+M27-INTEGRAL source=\int_0^1 x\,dx width=297 height=227 content_height=227 ascent=134.802 descent=92.198 baseline=134.802 groups=5 alpha_fnv1a=b3a820340f682400
+M27-INTEGRAL group heights: [(4, 81, 208), (91, 114, 40), (140, 184, 38), (204, 246, 60), (250, 293, 38)]
+```
+
+Identical on both machines down to the digest of the alpha plane, which is the
+whole of what a portable crate is entitled to promise and exactly the fact ⑤
+needed: the engine is not the defect. The operator's group is 208 px tall against
+38 for the letters beside it, and that is the number that says "set" rather than
+"printed" — a line of source is one band of glyphs all of a height. The test
+asserts that ratio rather than the digest, so a typst upgrade moves the printed
+numbers without turning the gate red for the wrong reason.
+
+The other two subjects are read against references of their own rather than
+against a second rendering, because a second rendering would restate M2-5. **The
+picture**: the file's own decoded pixels are the same bytes on both machines, and
+what the Mac drew follows them — `picture.png` is 3200×3240, aspect 0.9877, and
+the band it stands in on the glass is 675×684 px, aspect **0.9868**, mean
+coverage 0.8692 against the page's own ground. **The prose and the table**: every
+byte of the parse and the layout is portable code that
+`scripts/check-portable-core.ps1` keeps portable, so the only place a difference
+can live is the glyph raster — which §13.22 ③ already measured offscreen on both
+machines and found agreeing to within 0.06 of mean coverage band for band, on two
+different faces.
+
+**⑦ The hand procedure for the row an agent cannot drive.** Nothing here can be
+posted: CGEvent keyboard injection into Folio produces nothing on this Mac, so
+"change a heading in place" and "press the save chord" are the owner's, and this
+is written for their hand rather than left as a gap.
+
+In a Folio built from this branch, open `tests/assets/preview-samples/` in the
+files column — `sample.md` there is a heading, a table and a CJK paragraph, which
+is the page this row is about — click it into a preview pane, and split a
+terminal pane under it. Then, in order:
+
+1. **Click once in the heading.** A caret appears inside the heading's own text.
+   *Wrong:* nothing happens (the press did not route — read `BT_MOUSE_TRACE`);
+   the whole page turns into a source view (the flip was hit instead of the
+   block).
+2. **Type a word at the end of the heading.** It arrives at heading size and the
+   rest of the page does not move. *Wrong:* the characters arrive at body size —
+   the block fell back to prose; the letters land in the terminal pane below —
+   the keyboard is routed to the wrong seat (§13.13 ①); the page re-flows and the
+   scroll jumps — the intrinsic cache missed on a block that did not change.
+3. **Look at the pane's head.** It carries the unsaved mark. *Wrong:* no mark, or
+   a mark that was already there before the edit.
+4. **Press the save chord — `⌘S` on this machine**, because Command is the
+   application's and Control is the terminal's (§13.13 ①). The mark clears.
+   *Wrong:* nothing happens and the mark stays — the chord did not reach the
+   application, and the thing to try next is the menu bar's own `File ▸ Save`,
+   which AppKit answers **before** the responder chain and which therefore
+   separates "the chord is not bound" from "the key never arrived" (§13.26).
+5. **In the terminal pane, run `md5 <file>`.** The digest differs from the
+   `M27-MD5-BEFORE …` the pane printed at startup — or, outside the sweep's
+   fixture, from the one you took before step 2. *Wrong:* the same digest (the
+   save wrote nothing), or a file whose timestamp moved while its digest did not.
+6. **Watch the page while step 4 lands.** It must not flash, reload or scroll:
+   Folio's own save is a write the watcher hears, and what the reader is looking
+   at is already the new bytes. *Wrong:* the page redraws from the top, or the
+   news line says the file changed on disk under you.
+
+**⑧ Three things that are not defects, and one that is somebody else's.**
+
+* **The card over the reading surfaces on a first run** is the first run, and ②
+  is why the sweep presses it rather than writing past it.
+* **A newline between two CJK characters becomes a space.** The fixture's
+  paragraph reads `…读起来是 同一份文档,and…` on the glass where the file has a
+  line break. That is CommonMark's soft break rendered as CommonMark defines it,
+  through portable code that says the same thing on Windows, so it is not
+  anything this port did. Whether a CJK page should drop that space is a question
+  about typography and it wants an owner's ruling, not a platform's.
+* **The terminal pane printed `$$\int_0^1 x\,dx$$` as source too**, and that is
+  *not* a second sighting of ⑤. The pane's own display mathematics is found in a
+  finished command's region, and this line was written by a startup file before
+  the first prompt existed — it was never a block the detector was offered. It is
+  recorded here only so the next agent does not read it as evidence.
+* **§13.39's rule has a second witness here, one layer up.** A press is taken by
+  whatever is frontmost at that point, and in this window that was sometimes
+  Folio's own first-run card: the run that had not dismissed it recorded
+  `mouse_input … route=none` for a press aimed at a tree row, and the run that
+  had recorded `taken=1 at=press-routed … FilesRow` for the same point. A modal
+  of one's own occludes exactly as another application's panel does, which is
+  worth a line in any later ticket that drives this product with a pointer.
+
+**⑨ The run.** Five runs of `docs/plans/port/m2-7/m2-7-acceptance.sh` on the Mac
+mini, each from a clean `out-acc` and its own isolated `HOME`; the build is
+`m2-7-door.sh` in lane `m2-7` with its own target directory. `cargo build -p
+bt-app -j 4` green; `cargo test -p bt-platform -j 4` green; `cargo test -p
+bt-math -j 4` **7 passed, 0 failed**, including this ticket's own. Every pid the
+sweep started was written down and only those were ended; the bundle was
+unregistered and the identifier's three library folders removed at the end of
+each run, and `df -h ~` never fell below 38 GiB.
+
+*(本节英文,待中文文案改写。)*

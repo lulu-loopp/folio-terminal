@@ -8735,13 +8735,7 @@ fn crumb_segments_on(
     if platform == bt_platform::HostPlatform::Windows {
         return segments;
     }
-    let rooted = |home: &&Path| {
-        matches!(
-            home.components().next(),
-            Some(std::path::Component::RootDir | std::path::Component::Prefix(_))
-        )
-    };
-    match home.filter(|home| rooted(home) && path.starts_with(home)) {
+    match home_crumb_for(path, platform, home) {
         Some(home) => {
             segments.drain(..crumb_segments_rooted(home).len());
             segments.insert(
@@ -8759,6 +8753,80 @@ fn crumb_segments_on(
         }
     }
     segments
+}
+
+/// **The one question either surface asks about `~`, asked in one place**
+/// (owner ruling 2026-09-12, §13.32 ③; the feet joined the rail at §13.40).
+///
+/// Answers with the home directory when this path is the reader's home or
+/// stands under it *and* the platform is one that writes `~` for it, and with
+/// `None` otherwise. Windows leaves every path alone, because `%USERPROFILE%`
+/// is not a word Explorer says and a drive is a place a reader navigates to.
+///
+/// `home` is ignored unless it is **rooted**: an empty `HOME` is a prefix of
+/// every path, and a rail answering `~ › / › Applications` to it — or a foot
+/// answering `~/Applications` — would be worse than the row this replaced.
+/// Rooted is asked of the first component rather than through
+/// [`Path::is_absolute`], which answers by the *running* host's rules and would
+/// make the Mac shape unreadable from a Windows workstation.
+fn home_crumb_for<'a>(
+    path: &Path,
+    platform: bt_platform::HostPlatform,
+    home: Option<&'a Path>,
+) -> Option<&'a Path> {
+    if platform == bt_platform::HostPlatform::Windows {
+        return None;
+    }
+    home.filter(|home| {
+        matches!(
+            home.components().next(),
+            Some(std::path::Component::RootDir | std::path::Component::Prefix(_))
+        ) && path.starts_with(home)
+    })
+}
+
+/// **A foot spells the path its rail's crumbs spell** (§13.40).
+///
+/// The files column and a torn-out files tree both print their root along the
+/// bottom of the surface, and both printed it whole: a Mac read
+/// `/Users/alice/folio-port/repo` in the foot of a window whose breadcrumbs
+/// read `~ › folio-port › repo`. Two spellings of one place in one window is
+/// the fault §13.32 ③ was about, and the foot is the same reader's same
+/// question — so it asks [`home_crumb_for`], which is the rail's own rule.
+///
+/// The separator between `~` and what stands below it is **taken from the
+/// string the filesystem handed over**, never invented: this function therefore
+/// never has to know which character the *running* host writes, and a Windows
+/// workstation can read what a Mac's foot says. On Windows nothing is
+/// substituted and the borrowed string is the string that went in.
+fn home_shortened_path_on<'a>(
+    path: &'a str,
+    platform: bt_platform::HostPlatform,
+    home: Option<&Path>,
+) -> std::borrow::Cow<'a, str> {
+    let Some(home) = home_crumb_for(Path::new(path), platform, home) else {
+        return std::borrow::Cow::Borrowed(path);
+    };
+    let below = Path::new(path)
+        .strip_prefix(home)
+        .map_or(0, |rest| rest.as_os_str().len());
+    if below == 0 {
+        return std::borrow::Cow::Owned(seats::PREVIEW_CRUMB_HOME.to_owned());
+    }
+    std::borrow::Cow::Owned(format!(
+        "{}{}",
+        seats::PREVIEW_CRUMB_HOME,
+        &path[path.len() - below - 1..]
+    ))
+}
+
+/// [`home_shortened_path_on`] for the reader this process is serving.
+fn home_shortened_path(path: &str) -> std::borrow::Cow<'_, str> {
+    home_shortened_path_on(
+        path,
+        bt_platform::host_platform(),
+        profiles::home_directory(&bt_pty::SystemShellEnvironment).as_deref(),
+    )
 }
 
 /// The walk itself — every component a segment, the root folded into whatever
@@ -60718,6 +60786,7 @@ impl Runtime<'_> {
         let foreground_rgb = palette.files_row_text;
         self.window.preview_math.tick = self.window.preview_math.tick.saturating_add(1);
         let mut document = DocumentMath::default();
+        let (mut formulas, mut drawn, mut asked) = (0_usize, 0_usize, 0_usize);
         for (source, mode, em_px) in document_formulas(blocks, metrics) {
             let key = PreviewMathKey {
                 source,
@@ -60732,15 +60801,29 @@ impl Runtime<'_> {
                 &key,
                 &mut needs_typesetting,
             );
+            formulas += 1;
             if let Some(picture) = answer {
+                drawn += 1;
                 document.insert(&key, picture);
             }
             // Spent the moment the borrow above ends: the door wants the whole
             // runtime and that wants one of its caches — [`answer_one_picture`]'s
             // arrangement, for its reason.
             if needs_typesetting {
+                asked += 1;
                 self.request_preview_math(key);
             }
+        }
+        // **Why a page is standing on its source text** (M2-7, §13.40). A
+        // formula that has not been typeset yet and one the engine refused draw
+        // the identical thing — the author's own LaTeX — and from outside the
+        // window the two are one picture. This is the line that tells them
+        // apart, and it is silent unless a page has a formula in it at all.
+        if formulas > 0 {
+            let worker = u8::from(self.app.math_worker_running);
+            preview_trace::emit(preview_trace::global(), || {
+                format!("math formulas={formulas} drawn={drawn} asked={asked} worker={worker}")
+            });
         }
         document
     }
@@ -66873,7 +66956,12 @@ impl Runtime<'_> {
             );
             tree.foot_revealed = said.is_some();
             tree.foot_dissolved = dissolved;
-            let text = said.unwrap_or(root);
+            // A receipt is a sentence, not a path; only the root is spelled the
+            // way the rail above it spells one (§13.40).
+            let text = match said.as_deref() {
+                Some(said) => std::borrow::Cow::Borrowed(said),
+                None => home_shortened_path(&root),
+            };
             let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
             tree.foot_path = settings::ellipsized_left(&text, room, font, &mut measure);
@@ -77770,7 +77858,12 @@ impl Runtime<'_> {
             now,
         );
         let revealed = said.is_some();
-        let root = said.unwrap_or(root);
+        // The torn-out tree's foot is the docked column's foot in a window of
+        // its own, so it spells a root the same way (§13.40).
+        let root = match said.as_deref() {
+            Some(said) => std::borrow::Cow::Borrowed(said),
+            None => home_shortened_path(&root),
+        };
         let (name, path) = {
             let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
@@ -80067,21 +80160,23 @@ impl Runtime<'_> {
         lane_gone: bool,
     ) -> Result<()> {
         let mut changed = lane_gone;
-        // **A formula that lands under a glance card owes the *chrome* a frame,
-        // not the seats'** (user report, 2026-08-26).
+        // **A formula that lands owes a rebuild to whatever was standing on its
+        // source text** (user report, 2026-08-26; widened by M2-7, §13.40).
         //
-        // The card is an overlay layer, and `publish_frame` does not rebuild one:
-        // it presents what the last `refresh_overlay` composed. So a picture that
-        // arrived while the pointer rested still would be filed in the window's
-        // cache, tick the generation nothing was going to read, and leave the card
-        // standing on its source text until some unrelated gesture rebuilt the
-        // overlay. `complete_peek_page` says the same sentence about a page for
-        // the same reason.
+        // Neither surface is rebuilt by a publish. The card is an overlay layer
+        // and `publish_frame` presents what the last `refresh_overlay` composed;
+        // a docked pane's body is built by `refresh_preview_body`, which a
+        // resize, a scroll, an edit, an open and a palette change reach and a
+        // picture landing did not. Either way a picture that arrived after its
+        // reader had settled was filed in the window's cache, ticked the
+        // generation nothing was going to read, and left the block standing on
+        // its LaTeX until some unrelated gesture happened along.
+        // `complete_peek_page` says the same sentence about a page.
         //
         // Gathered across the drain and asked once at the end rather than per
         // completion: a page of forty formulas answers forty times, and forty
         // rebuilds of every layer in the window would be the cost of one card.
-        let mut card_owes_frame = false;
+        let mut picture_landed = false;
         for completion in answers_for(batch, |result| self.owns(result.owner())) {
             let leaf = completion.leaf.leaf;
             let target_index = self.window.tabs.iter().position(|tab| tab.id == leaf.tab);
@@ -80271,6 +80366,20 @@ impl Runtime<'_> {
                 // standing on its source text now has a picture to draw and
                 // nothing else will ask for a frame.
                 DecorationWorkerCompletion::PreviewMath { key, result } => {
+                    // The other half of the `math` station (§13.40): one line
+                    // per answer, so "the picture is late" and "the engine
+                    // refused it" stop being the same picture on the glass.
+                    let (set, mode, em_milli, chars) = (
+                        u8::from(result.is_ok()),
+                        key.mode,
+                        key.em_milli_px,
+                        key.source.chars().count(),
+                    );
+                    preview_trace::emit(preview_trace::global(), || {
+                        format!(
+                            "math answered set={set} mode={mode:?} em_milli={em_milli} chars={chars}"
+                        )
+                    });
                     let artifact = match result {
                         Ok(raster) => PreviewMathArtifact::Ready(PreviewMathPicture {
                             key: key.texture_key(),
@@ -80285,7 +80394,7 @@ impl Runtime<'_> {
                     // drawing exactly what it was drawing — the source the author
                     // wrote — so it owes nobody a frame, which is the same reason
                     // it does not tick the generation.
-                    card_owes_frame |= matches!(artifact, PreviewMathArtifact::Ready(_));
+                    picture_landed |= matches!(artifact, PreviewMathArtifact::Ready(_));
                     self.window.preview_math.land(*key, artifact);
                     true
                 }
@@ -80341,8 +80450,38 @@ impl Runtime<'_> {
         // Asked only while a card is actually up — `file_peek_subject` is the one
         // gate that says so, and asking it is what keeps a document nobody is
         // hovering from paying for an overlay rebuild per formula.
-        if card_owes_frame && self.file_peek_subject().is_some() && self.refresh_overlay() {
+        if picture_landed && self.file_peek_subject().is_some() && self.refresh_overlay() {
             self.present_chrome_change()?;
+        }
+        // **And the page in the pane, which is the same sentence one surface
+        // over** (M2-7; `docs/DESIGN.md` §13.40). The block above says "the card
+        // first, the picture when it comes" and arranges it for a *card*; a
+        // docked preview pane was left with only the publish below, and a
+        // publish is not a rebuild — it asks the window to draw again out of the
+        // bodies it is already holding, and the body that was built while the
+        // formula was still pending holds the author's LaTeX.
+        //
+        // `PreviewMathCache::generation` exists precisely to make the next
+        // rebuild find the picture, and nothing on this road was asking for that
+        // rebuild: `refresh_preview_body` is reached from a resize, a scroll, an
+        // edit, an open and a palette change, and a formula landing is none of
+        // those. So a page that had **settled** before its picture arrived stood
+        // on its source text for as long as the reader left it alone.
+        //
+        // It has always been a race and the port is what lost it: the Mac's
+        // first typesetting of a session takes about 1.7 s (the engine's font
+        // book is built on the worker thread before the first answer), while
+        // the startup's own layout passes are done inside 200 ms — so on that
+        // machine the answer *always* lands after the page has settled, and
+        // §M2's "the integral is typeset" row failed on every run. A slow first
+        // formula on any machine is the same defect.
+        //
+        // Gated on a picture rather than on `changed`, and on the same flag the
+        // card is: a refusal leaves the block drawing exactly what it was
+        // drawing, so it owes nobody a rebuild. Before the publish, so the frame
+        // that goes out carries the new body rather than the one after it.
+        if picture_landed {
+            self.refresh_preview_body();
         }
         if changed {
             self.publish_frame(FrameTrigger {
@@ -107365,8 +107504,23 @@ fn cwd_leaf(directory: &Path) -> Option<String> {
 /// `C:\` would otherwise yield an empty one. This function is not looking for
 /// anything; it is printing what the shell reported, and if the shell said `C:\`
 /// then `C:\` is where it is standing.
+///
+/// **"As this reader writes it" is the whole sentence, so off Windows the run
+/// above the home directory is `~`** (§13.32 ③ as extended by §13.40). The
+/// reading sweep photographed a window in which the breadcrumbs said `~ ›
+/// pages`, the files column's foot said `~/pages`, and this head — a hundred
+/// physical pixels below both — said
+/// `/Users/<owner>/folio-port/wt/m2-7/out-acc/<the run’s own home>/pages`. That ruling's own
+/// words are that `~` "is the character the shell in the pane below prints for
+/// the same folder", and the pane below this head is that shell: its prompt
+/// says `~` while its head says the long form of the same place. One question
+/// one answer, through [`home_shortened_path`] — which is the breadcrumbs'
+/// rule, not a copy of it. Windows substitutes nothing and this function
+/// returns the string it always returned.
 fn cwd_whole(directory: &Path) -> Option<String> {
-    directory.to_str().map(ToOwned::to_owned)
+    directory
+        .to_str()
+        .map(|path| home_shortened_path(path).into_owned())
 }
 
 /// How one reader wants a session's folder written: the rendering, and the
@@ -148291,6 +148445,239 @@ mod tests {
                 ".zcompdump".to_owned(),
             ],
             "the Windows shape keeps its root crumb and knows no `~`"
+        );
+    }
+
+    /// RED GATE (§13.40) — **a foot spells a root the way the rail above it
+    /// spells one.** The reading sweep opened a folder under the owner's home
+    /// on the Mac and read two spellings of one place in one window: the
+    /// breadcrumbs said `~ › folio-port › repo` and the files column's foot,
+    /// two hundred physical pixels below them, said
+    /// `/Users/<owner>/folio-port/repo`. The rule is not copied here — the foot
+    /// asks [`home_crumb_for`], which is the rail's own question.
+    ///
+    /// The separator is never invented: it is the byte the filesystem put
+    /// between the home run and what stands below it, which is why a Windows
+    /// workstation can assert what a Mac's foot says.
+    ///
+    /// MUTATIONS:
+    /// ① give the Windows arm the substitution too — the last case grows a `~`
+    ///    in front of a drive path and goes red;
+    /// ② join with `MAIN_SEPARATOR_STR` instead of slicing the original — every
+    ///    Mac case reads `~\folio-port` when this test is run on Windows;
+    /// ③ drop the `below == 0` guard — the home directory itself reads `~e`,
+    ///    the tail of its own last component;
+    /// ④ drop the rooted guard — the empty-`HOME` case swallows the whole path.
+    #[test]
+    fn a_files_foot_prints_the_root_its_breadcrumbs_would_print() {
+        use bt_platform::HostPlatform::{MacOs, Windows};
+
+        let home = Path::new("/Users/alice");
+        let foot =
+            |path: &str, platform, home| home_shortened_path_on(path, platform, home).into_owned();
+        // The rail and the foot, side by side, on the run that found this.
+        let deep = "/Users/alice/folio-port/repo";
+        assert_eq!(
+            crumb_segments_on(Path::new(deep), MacOs, Some(home))
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>()
+                .join("/"),
+            foot(deep, MacOs, Some(home)),
+            "the two surfaces of one window say one thing"
+        );
+        assert_eq!(foot(deep, MacOs, Some(home)), "~/folio-port/repo");
+        assert_eq!(
+            foot("/Users/alice", MacOs, Some(home)),
+            seats::PREVIEW_CRUMB_HOME,
+            "the home directory itself is `~` and nothing after it"
+        );
+        assert_eq!(
+            foot("/Users/alice/中文 folder", MacOs, Some(home)),
+            "~/中文 folder",
+            "the cut falls on the separator, not inside a character"
+        );
+
+        // Outside home, and a machine that never said where home is: the path
+        // the filesystem handed over, unaltered.
+        assert_eq!(
+            foot("/Applications/Utilities", MacOs, Some(home)),
+            "/Applications/Utilities"
+        );
+        assert_eq!(foot("/etc/hosts", MacOs, None), "/etc/hosts");
+        assert_eq!(
+            foot("/etc/hosts", MacOs, Some(Path::new(""))),
+            "/etc/hosts",
+            "an empty HOME is not a prefix of everything"
+        );
+        assert_eq!(
+            foot("/Users/alice/notes.md", MacOs, Some(Path::new("/Users/a"))),
+            "/Users/alice/notes.md",
+            "a home is a run of whole components, not a string prefix — `/Users/a` \
+             is a prefix of this path's characters and of none of its folders"
+        );
+
+        // Windows is the string it was, home or no home.
+        assert_eq!(
+            foot(r"D:\work\repo", Windows, Some(Path::new(r"C:\Users\alice"))),
+            r"D:\work\repo"
+        );
+        assert_eq!(
+            foot(
+                r"C:\Users\alice\notes",
+                Windows,
+                Some(Path::new(r"C:\Users\alice"))
+            ),
+            r"C:\Users\alice\notes",
+            "Explorer does not say `~`, so neither does this foot"
+        );
+        assert!(
+            matches!(
+                home_shortened_path_on(
+                    r"C:\Users\alice",
+                    Windows,
+                    Some(Path::new(r"C:\Users\alice"))
+                ),
+                std::borrow::Cow::Borrowed(_)
+            ),
+            "the Windows arm allocates nothing: the string that went in comes out"
+        );
+    }
+
+    /// RED GATE (§13.40) — **a pane head writes its folder the way this reader
+    /// writes one.** The sweep photographed a Mac window in which three
+    /// surfaces named one place: the rail said `~ › pages`, the files column's
+    /// foot said `~/pages`, and the terminal pane's head, a hundred physical
+    /// pixels under both, said
+    /// `/Users/<owner>/folio-port/wt/m2-7/out-acc/<the run’s own home>/pages` — while the shell
+    /// in that very pane printed `~` in its own prompt. §13.32 ③'s words for
+    /// `~` are "the character the shell in the pane below prints for the same
+    /// folder", and this head is the one directly above that shell.
+    ///
+    /// Two halves, and the Windows half is the one a Windows gate can hold
+    /// outright: **nothing is substituted here**, so a head prints the string
+    /// the shell reported, byte for byte, on this machine. The Mac half is the
+    /// rule's own pin above; what ties the two together is that the head goes
+    /// *through* that rule rather than having one of its own, which is what the
+    /// source pin asserts.
+    ///
+    /// MUTATIONS:
+    /// ① give `cwd_whole` its old `to_str()` body — the source pin goes red and
+    ///    a Mac head goes back to printing the whole run above home;
+    /// ② substitute on Windows too — the first assertion goes red on this host;
+    /// ③ point the head at a second renderer beside `CWD_AS_WHOLE_PATH` — the
+    ///    inventory that constant's doc keeps stops being the whole list, and
+    ///    the source pin names the function that got around it.
+    #[test]
+    fn a_pane_heads_folder_is_written_the_way_this_reader_writes_one() {
+        const SOURCE: &str = include_str!("main.rs");
+        let write = CWD_AS_WHOLE_PATH.write;
+        let home = profiles::home_directory(&bt_pty::SystemShellEnvironment)
+            .expect("the reader running this test has a home directory");
+        let under = home.join("notes");
+        assert_eq!(
+            write(&under).as_deref(),
+            under.to_str(),
+            "Windows knows no `~`, so a head prints what the shell reported"
+        );
+        assert_eq!(
+            write(Path::new("/nowhere/at/all")).as_deref(),
+            Some("/nowhere/at/all"),
+            "a folder under nobody's home is printed whole on either machine"
+        );
+        // The Mac's half of the same claim, read from here because the rule
+        // takes its platform and its home as values (§13.32 ③).
+        assert_eq!(
+            home_shortened_path_on(
+                "/Users/alice/pages",
+                bt_platform::HostPlatform::MacOs,
+                Some(Path::new("/Users/alice")),
+            ),
+            "~/pages",
+            "and a Mac's head says what a Mac's breadcrumbs say"
+        );
+        let body = SOURCE
+            .split_once("fn cwd_whole(directory: &Path) -> Option<String> {")
+            .expect("`cwd_whole` is still spelled this way")
+            .1
+            .split_once("\n}\n")
+            .expect("it still has an end")
+            .0;
+        assert!(
+            body.contains("home_shortened_path"),
+            "the head asks the breadcrumbs' own question rather than keeping a \
+             second opinion about where a path starts — body was: {body}"
+        );
+    }
+
+    /// RED GATE (§13.40) — **a formula that lands rebuilds whatever was
+    /// standing on its source text**, the pane as well as the card.
+    ///
+    /// The Mac's reading sweep opened a page holding `$$\int_0^1 x\,dx$$` and
+    /// photographed `\int_0^1 x\,dx` printed where the integral belonged, on
+    /// every run, thirty seconds in and after a press. `BT_PREVIEW_TRACE` says
+    /// what happened: `math formulas=1 drawn=0 asked=1 worker=1` at 111 ms, the
+    /// page built at 175 ms, `math answered set=1` at **1684 ms** — and then no
+    /// `build` line ever again. The picture was set, it landed, and nothing
+    /// asked the page to be laid out a second time, so
+    /// `PreviewMathCache::generation` — which exists for exactly that next
+    /// layout — was read by nobody.
+    ///
+    /// This is a race and not a platform: `refresh_preview_body` is reached
+    /// from a resize, a scroll, an edit, an open and a palette change, and a
+    /// formula arriving is none of them, so the picture only ever reached the
+    /// glass because the page had not settled yet. The port is what lost the
+    /// race — a Mac's first typesetting of a session takes about 1.7 s against
+    /// a startup that settles inside 200 ms — and a slow first formula on any
+    /// machine is the same defect.
+    ///
+    /// A **source pin**, because the shape being asserted is a call in a method
+    /// that needs a window, a device and a worker to run at all, and the three
+    /// facts worth keeping are all in the text: that the rebuild is asked for,
+    /// that it is gated on a *picture* rather than on `changed` (a refusal
+    /// leaves the block drawing exactly what it was drawing), and that it
+    /// happens before the publish rather than after it.
+    ///
+    /// MUTATIONS:
+    /// ① drop the `refresh_preview_body` call — this goes red, and a page whose
+    ///    formula is slow stands on its LaTeX for as long as the reader leaves
+    ///    it alone;
+    /// ② gate it on `changed` instead — the flag assertion goes red, and every
+    ///    refusal costs a rebuild of every document in the window;
+    /// ③ move it below the publish — the order assertion goes red, and the
+    ///    frame that goes out is one behind the picture.
+    #[test]
+    fn a_formula_that_lands_rebuilds_the_page_that_was_standing_on_its_source() {
+        const SOURCE: &str = include_str!("main.rs");
+        let body = SOURCE
+            .split_once("fn apply_math_results(")
+            .expect("`apply_math_results` is still spelled this way")
+            .1
+            .split_once("\n    }\n")
+            .expect("it still has an end")
+            .0;
+        let rebuild = body
+            .find("self.refresh_preview_body();")
+            .expect("a landed picture asks the page to be laid out again");
+        let publish = body
+            .find("self.publish_frame(FrameTrigger {")
+            .expect("and the window still owes a frame after it");
+        assert!(
+            rebuild < publish,
+            "the rebuild goes before the publish, so the frame that goes out \
+             carries the new body rather than the one after it"
+        );
+        let guard = body[..rebuild]
+            .rfind("if picture_landed {")
+            .expect("the rebuild is gated on a picture");
+        assert!(
+            guard < rebuild && body[guard..rebuild].find("changed").is_none(),
+            "gated on a picture rather than on `changed`: a refusal leaves the \
+             block drawing exactly what it was drawing and owes no rebuild"
+        );
+        assert!(
+            body.contains("picture_landed |= matches!(artifact, PreviewMathArtifact::Ready(_));"),
+            "and the flag is set by a picture, never by a refusal"
         );
     }
 

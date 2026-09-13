@@ -8,6 +8,13 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **A formula that took a moment to typeset now appears when it is ready.** A
+  page holding `$$\int_0^1 x\,dx$$` shows the formula as you wrote it until the
+  picture is set, which is right — but if the picture arrived after the page had
+  settled, nothing put it on the page, and the page went on showing the text you
+  wrote until you scrolled it, resized the pane or opened something else. The
+  first formula of a session is the slow one, so this was most of the time it
+  could happen.
 - **A letter your keyboard layout makes reaches the shell.** On a German layout
   `ü`, `ä`, `ö` and `ß` produced nothing at all — the key was pressed, and not a
   byte left this window — and the same was true of every other letter a layout
