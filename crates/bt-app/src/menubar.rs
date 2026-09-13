@@ -455,13 +455,14 @@ pub(crate) fn plan(shortcuts: &Shortcuts, focus: Option<Focus>) -> MenuPlan {
 /// whichever language the reader has chosen.
 fn dock_rows(shortcuts: &Shortcuts) -> Vec<DockRow> {
     DOCK.iter()
+        .copied()
         .map(|id| DockRow {
             // A row this build does not know cannot happen —
-            // `every_verb_the_menus_name_is_a_row` holds this list to
-            // `BINDINGS` — and the fallback is the id rather than a panic for
-            // `verb_entry`'s reason: a menu is drawn on a frame.
-            title: shortcuts.row(id).map_or(*id, |row| row.title.text()),
-            choice: MenuChoice::Verb(*id),
+            // `every_verb_on_the_bar_names_a_row` holds this list to `BINDINGS`
+            // as well as the bar's — and the fallback is the id rather than a
+            // panic for `verb_entry`'s reason: a menu is drawn on a frame.
+            title: shortcuts.row(id).map_or(id, |row| row.title.text()),
+            choice: MenuChoice::Verb(id),
         })
         .collect()
 }
