@@ -8296,7 +8296,7 @@ fn restart_seed(profile: usize, last_reported_cwd: Option<&Path>) -> LeafSeed {
         // A running pane's profile is one this build has, by construction — it
         // started a process from it.
         unknown_profile_id: None,
-        // A restart keeps the pane, so it keeps the pane's aim.
+        // A new shell has new content identities: restart its card at the tail.
         card_skip: 0,
         // A restart is a new shell in the same place; nothing is owed to its prompt.
         prefill: None,
@@ -10287,24 +10287,9 @@ struct LeafSession {
     /// through their build log, which is the exact thing `column_visibility`
     /// declines to do on the hover path.
     column_awake: Instant,
-    /// **Where this pane's focus card aims its window**, in rows above the tail
-    /// (user ruling 2026-08-21, §7.1.6b′ 「卡片窗口瞄准」).
-    ///
-    /// `0` is the tail, which is what every card showed before the ruling and
-    /// what every seat is born at. Anything above lifts the card's window that
-    /// many rows off the floor of the screen — the answer to a program whose
-    /// bottom rows are fixed furniture, arrived at by aiming rather than by
-    /// recognising the program.
-    ///
-    /// **On the leaf, beside [`Self::profile`] and for its reason**: it is a
-    /// fact about *this pane*, so it travels whole through a tear-out into a new
-    /// tab and a merge into another tab's layout, rather than being re-derived
-    /// from whichever tab the pane landed in. It is also why the number survives
-    /// `Move pane to new tab` without that path knowing it exists.
-    ///
-    /// Written to `session.json` on the leaf that owns it (`TermLeafV1`), so a
-    /// window reopened tomorrow is aimed where it was left.
-    card_skip: usize,
+    /// Independent first-displayed content anchor; its numeric skip is only a
+    /// projection/persistence fallback. It travels with this leaf on tear-out.
+    card: focus_thumb::CardPosition,
     grid: GridSize,
     conpty_grid: GridSize,
     pending_pty_resize: Option<PendingPtyResize>,
@@ -15903,7 +15888,7 @@ impl TabState {
             card_skip: self
                 .sessions
                 .get(&seat)
-                .map_or(0, |leaf| leaf.card_skip as u32),
+                .map_or(0, |leaf| leaf.card.persisted_skip(&leaf.session)),
             // **The line this pane's shell was last told to run**, or nothing at all
             // (§7.54e ④). Read off the command marks, so a shell with no integration
             // writes an empty string — which is the honest answer rather than a guess
@@ -16661,11 +16646,8 @@ impl TabState {
                 let leaf = self.sessions.get(&seat)?;
                 Some(focus_thumb::SeatSource::Terminal {
                     session: &leaf.session,
-                    // **The reader's aim, handed over unread** (user ruling
-                    // 2026-08-21): this file does not know what a row is, and
-                    // the projection is where the clamp against a short screen
-                    // belongs — it is the only place that has walked the grid.
-                    skip: leaf.card_skip,
+                    // Resolved from the registered source before demands are built.
+                    skip: leaf.card.skip(),
                 })
             }
             SeatKind::Files => Some(focus_thumb::SeatSource::Files {
@@ -21847,6 +21829,11 @@ impl CardAim {
         });
         steps
     }
+}
+
+/// Apply the whole rows spent by `CardAim` to the leaf's card window.
+fn aim_card_window(leaf: &mut LeafSession, rows: usize, steps: i32) -> bool {
+    leaf.card.aim(&mut leaf.session, rows, steps)
 }
 
 /// What one wheel notch over the focus column is for.
@@ -33868,7 +33855,7 @@ fn create_leaf_session(
         // Aimed at the tail, which is where a card looks until somebody turns a
         // wheel over it — a shell that has just started has no furniture on its
         // floor to be aimed past.
-        card_skip: seed.card_skip,
+        card: focus_thumb::CardPosition::new(seed.card_skip),
         projection,
         thumb_awake: Instant::now(),
         column_awake: Instant::now(),
@@ -91294,6 +91281,24 @@ impl Runtime<'_> {
         {
             boxes.push((index, [0.0, 0.0, width, height]));
         }
+        for &(index, mini) in &boxes {
+            let Some(tab) = self.window.tabs.get_mut(index) else {
+                continue;
+            };
+            for seat in seats::focus_mini_seats(tab.seats.tree(), mini, scale) {
+                if seat.kind == SeatKind::Terminal
+                    && self.window.focus_thumbs.position_due(tab.id, seat.id, now)
+                    && let Some(leaf) = tab.sessions.get_mut(&seat.id)
+                {
+                    let rows = focus_thumb::mini_rows(
+                        seat.rect,
+                        focus_thumb::MiniMetrics::TERM.line_px(scale),
+                        scale,
+                    );
+                    leaf.card.prepare(&mut leaf.session, rows);
+                }
+            }
+        }
         let mono_advance = self.window.focus_mini_advance;
         let face_advance = self.window.focus_mini_face_advance;
         let mut visible = BTreeSet::new();
@@ -93061,17 +93066,14 @@ impl Runtime<'_> {
         if steps == 0 {
             return Ok(true);
         }
-        // Wheel-up is a positive notch and lifts the window; wheel-down lowers
-        // it and stops at the tail.
-        let aimed = if steps > 0 {
-            leaf.card_skip.saturating_add(steps.unsigned_abs() as usize)
-        } else {
-            leaf.card_skip.saturating_sub(steps.unsigned_abs() as usize)
-        };
-        if aimed == leaf.card_skip {
+        let rows = focus_thumb::mini_rows(
+            seat.rect,
+            focus_thumb::MiniMetrics::TERM.line_px(scale),
+            scale,
+        );
+        if !aim_card_window(leaf, rows, steps) {
             return Ok(true);
         }
-        leaf.card_skip = aimed;
         // **The gesture channel** (`focus_thumb`, 2026-08-21): the hand moved
         // this seat's window, so this seat re-projects on the pass below
         // whatever the 10Hz clock would otherwise have said. The credit is one
@@ -101766,21 +101768,13 @@ mod focus_column_notch_tests {
         );
     }
 
-    /// **One writer moves a card's window**, so "the plain notch does not change
-    /// `card_skip`" is a claim about one line rather than about a search.
+    /// The plain wheel never calls the card's content-position update.
     #[test]
     fn one_line_moves_a_cards_window() {
-        let needle = ["card", "_skip", " = "].concat();
-        let writes: Vec<&str> = SOURCE
-            .lines()
-            .map(str::trim)
-            .filter(|line| line.contains(needle.as_str()))
-            .collect();
-        assert_eq!(
-            writes,
-            vec![format!("leaf.{needle}aimed;")],
-            "a card's window is aimed from one place and no other"
-        );
+        let aim = body("    fn aim_focus_card_window(");
+        assert!(aim.contains("aim_card_window(leaf, rows, steps)"));
+        let scroll = body("    fn scroll_rail(");
+        assert!(!scroll.contains("aim_card_window("));
     }
 }
 
@@ -103758,9 +103752,9 @@ mod pty_drain_budget_tests {
         let call = ["commit_leaf_", "resize("].concat();
         assert_eq!(
             SOURCE.matches(call.as_str()).count(),
-            // its own declaration, the one release that calls it, and the three tests that drive
-            // the four steps directly.
-            5,
+            // Its declaration, the one production release, and four test callers
+            // (including the card's deferred resize fixture).
+            6,
             "the commit has one caller in the product, and that caller is the release"
         );
         assert!(
@@ -152313,6 +152307,296 @@ mod tests {
         )
     }
 
+    fn card_anchor_fixture() -> LeafSession {
+        let mut leaf = leaf_saying("");
+        leaf.session = DualPlaneSession::new(nonzero_u32(10), nonzero_u32(40));
+        leaf.grid = GridSize {
+            columns: std::num::NonZeroU16::new(10).unwrap(),
+            rows: std::num::NonZeroU16::new(40).unwrap(),
+        };
+        leaf.conpty_grid = leaf.grid;
+        for number in 1..=100 {
+            leaf.session
+                .feed(format!("H{number:03}\r\n").as_bytes())
+                .unwrap();
+        }
+        let live = (1..=20)
+            .map(|number| format!("L{number:03}:abcdefghijk"))
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        assert!(live.split("\r\n").all(|line| line.len() == 16));
+        leaf.session.feed(live.as_bytes()).unwrap();
+        leaf.card = focus_thumb::CardPosition::new(130);
+        assert_eq!(leaf.session.document().entries().len(), 100);
+        assert_eq!(
+            (0..40)
+                .filter(|row| leaf
+                    .session
+                    .live_row(*row)
+                    .is_some_and(|row| row.cells.iter().any(|cell| !cell.text.trim().is_empty())))
+                .count(),
+            40
+        );
+        assert_eq!(
+            focus_thumb::transcript_tail(&leaf.session, 40, 200, 0)
+                .0
+                .len(),
+            140
+        );
+        assert_eq!(card_anchor_first(&mut leaf), "H007");
+        leaf
+    }
+
+    fn card_anchor_first(leaf: &mut LeafSession) -> String {
+        leaf.card.prepare(&mut leaf.session, 4);
+        focus_thumb::transcript_tail(&leaf.session, 40, 4, leaf.card.skip()).0[0].clone()
+    }
+
+    fn card_anchor_widen(leaf: &mut LeafSession) {
+        schedule_leaf_grid_change(
+            leaf,
+            GridSize {
+                columns: std::num::NonZeroU16::new(40).unwrap(),
+                rows: std::num::NonZeroU16::new(40).unwrap(),
+            },
+            PhysicalSize::new(400, 400),
+            Instant::now(),
+            LeafOnStage::Shown,
+            "resize card anchor fixture",
+        )
+        .unwrap();
+        assert_eq!(
+            focus_thumb::transcript_tail(&leaf.session, 40, 200, 0)
+                .0
+                .len(),
+            120
+        );
+    }
+
+    /// T-CARD-ANCHOR, owner's 2026-09-13 report. Mutation: retain the raw
+    /// bottom-relative S=130 across 10x40 -> 40x40 reflow. N=140 -> 120,
+    /// R=4, maximum=116: H007 becomes H001. These three tests independently
+    /// inspect projection output; replacing anchor resolution with raw skip
+    /// must fail preservation, upward movement, and reversal.
+    #[test]
+    fn card_anchor_preserves_h007_across_reflow() {
+        let mut leaf = card_anchor_fixture();
+        card_anchor_widen(&mut leaf);
+        assert_eq!(card_anchor_first(&mut leaf), "H007");
+    }
+
+    #[test]
+    fn card_anchor_upward_detent_reaches_h006() {
+        let mut leaf = card_anchor_fixture();
+        card_anchor_widen(&mut leaf);
+        let before = card_anchor_first(&mut leaf);
+        let mut carry = None;
+        let steps = CardAim::spend(
+            &mut carry,
+            LeafId {
+                tab: TabId(1),
+                seat: SeatId(1),
+            },
+            MouseScrollDelta::LineDelta(0.0, 1.0),
+        );
+        aim_card_window(&mut leaf, 4, steps);
+        let after = card_anchor_first(&mut leaf);
+        eprintln!("upward projection: {before} -> {after}");
+        assert_eq!(after, "H006");
+        assert_ne!(after, before);
+    }
+
+    #[test]
+    fn card_anchor_reverse_detent_moves_toward_tail() {
+        let mut leaf = card_anchor_fixture();
+        card_anchor_widen(&mut leaf);
+        let before = card_anchor_first(&mut leaf);
+        let mut carry = None;
+        let steps = CardAim::spend(
+            &mut carry,
+            LeafId {
+                tab: TabId(1),
+                seat: SeatId(1),
+            },
+            MouseScrollDelta::LineDelta(0.0, -1.0),
+        );
+        aim_card_window(&mut leaf, 4, steps);
+        let after = card_anchor_first(&mut leaf);
+        eprintln!("reverse projection: {before} -> {after}");
+        assert_eq!(after, "H008");
+        assert_ne!(after, before);
+    }
+
+    fn card_anchor_resize(leaf: &mut LeafSession, columns: u16, rows: u16, stage: LeafOnStage) {
+        let next = GridSize {
+            columns: std::num::NonZeroU16::new(columns).unwrap(),
+            rows: std::num::NonZeroU16::new(rows).unwrap(),
+        };
+        schedule_leaf_grid_change(
+            leaf,
+            next,
+            PhysicalSize::new(400, 400),
+            Instant::now(),
+            stage,
+            "card anchor resize",
+        )
+        .unwrap();
+        if stage == LeafOnStage::Behind {
+            let mut pending = false;
+            commit_leaf_resize(
+                &mut leaf.session,
+                None,
+                ResizeReanchor {
+                    pending: &mut pending,
+                    integration: profiles::Integration::None,
+                },
+                leaf.grid,
+                next,
+                PhysicalSize::new(400, 400),
+                Instant::now(),
+            )
+            .unwrap();
+            leaf.grid = next;
+        }
+    }
+
+    fn card_anchor_settle(leaf: &mut LeafSession) {
+        leaf.session.mark_pty_resize_requested_at(
+            nonzero_u32(leaf.grid.columns.get()),
+            nonzero_u32(leaf.grid.rows.get()),
+            Instant::now(),
+        );
+        let deadline = leaf.session.resize_finish_deadline().unwrap();
+        leaf.session.finish_resize_if_quiescent(deadline).unwrap();
+    }
+
+    /// Removing canonical reseating strands a live card in the preceding
+    /// generation. Removing within-line preservation loses the second fragment
+    /// when widening and narrowing through a line with the same source text.
+    #[test]
+    fn card_anchor_live_offset_survives_local_and_canonical_reflow() {
+        let mut leaf = card_anchor_fixture();
+        leaf.card = focus_thumb::CardPosition::new(15);
+        assert_eq!(card_anchor_first(&mut leaf), "fghijk");
+        card_anchor_widen(&mut leaf);
+        assert_eq!(card_anchor_first(&mut leaf), "L011:abcdefghijk");
+        card_anchor_settle(&mut leaf);
+        assert_eq!(card_anchor_first(&mut leaf), "L011:abcdefghijk");
+        card_anchor_resize(&mut leaf, 10, 40, LeafOnStage::Shown);
+        assert_eq!(card_anchor_first(&mut leaf), "fghijk");
+        card_anchor_settle(&mut leaf);
+        assert_eq!(card_anchor_first(&mut leaf), "fghijk");
+    }
+
+    #[test]
+    fn card_anchor_height_only_change_preserves_live_content() {
+        let mut leaf = card_anchor_fixture();
+        leaf.card = focus_thumb::CardPosition::new(16);
+        assert_eq!(card_anchor_first(&mut leaf), "L011:abcde");
+        card_anchor_resize(&mut leaf, 10, 10, LeafOnStage::Shown);
+        assert_eq!(card_anchor_first(&mut leaf), "L011:abcde");
+        card_anchor_settle(&mut leaf);
+        // Finalizing displaced wrapped fragments joins them into a frozen line.
+        assert!(card_anchor_first(&mut leaf).starts_with("L011:"));
+    }
+
+    #[test]
+    fn card_anchor_deferred_resize_and_persisted_fallback_preserve_h007() {
+        let mut leaf = card_anchor_fixture();
+        card_anchor_resize(&mut leaf, 40, 40, LeafOnStage::Behind);
+        assert_eq!(leaf.card.persisted_skip(&leaf.session), 110);
+        card_anchor_settle(&mut leaf);
+        assert_eq!(card_anchor_first(&mut leaf), "H007");
+        let saved = leaf.card.persisted_skip(&leaf.session);
+        leaf.card = focus_thumb::CardPosition::new(saved as usize);
+        assert_eq!(card_anchor_first(&mut leaf), "H007");
+    }
+
+    #[test]
+    fn card_anchor_alternate_screen_excludes_primary_history() {
+        let mut leaf = card_anchor_fixture();
+        leaf.session.feed(b"\x1b[?1049h").unwrap();
+        let text = (1..=20)
+            .map(|number| format!("A{number:03}"))
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        leaf.session.feed(text.as_bytes()).unwrap();
+        // Screen change starts a fresh tail, independently of primary history.
+        assert_eq!(card_anchor_first(&mut leaf), "A017");
+        aim_card_window(&mut leaf, 4, 10);
+        assert_eq!(card_anchor_first(&mut leaf), "A007");
+        card_anchor_resize(&mut leaf, 40, 40, LeafOnStage::Shown);
+        assert_eq!(card_anchor_first(&mut leaf), "A007");
+        card_anchor_settle(&mut leaf);
+        assert_eq!(card_anchor_first(&mut leaf), "A007");
+        let assembled = focus_thumb::transcript_tail(&leaf.session, 40, 200, 0).0;
+        let nonblank = assembled
+            .iter()
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>();
+        assert_eq!(nonblank.len(), 20);
+        assert!(
+            nonblank
+                .iter()
+                .all(|line| line.trim_start().starts_with('A')),
+            "primary content leaked into the alternate card: {assembled:?}"
+        );
+    }
+
+    #[test]
+    fn card_anchor_boundary_discards_overflow_before_reversal() {
+        let mut leaf = card_anchor_fixture();
+        card_anchor_widen(&mut leaf);
+        aim_card_window(&mut leaf, 4, i32::MAX);
+        assert_eq!(card_anchor_first(&mut leaf), "H001");
+        aim_card_window(&mut leaf, 4, i32::MAX);
+        let mut carry = None;
+        let steps = CardAim::spend(
+            &mut carry,
+            LeafId {
+                tab: TabId(1),
+                seat: SeatId(1),
+            },
+            MouseScrollDelta::LineDelta(0.0, -1.0),
+        );
+        aim_card_window(&mut leaf, 4, steps);
+        assert_eq!(card_anchor_first(&mut leaf), "H002");
+    }
+
+    /// A newer equal-text line without any registered anchors must not steal
+    /// the older card's occurrence. The following distinct row proves identity.
+    #[test]
+    fn card_anchor_keeps_older_duplicate_occurrence() {
+        let mut leaf = leaf_saying("");
+        leaf.session = DualPlaneSession::new(nonzero_u32(10), nonzero_u32(40));
+        leaf.grid = GridSize {
+            columns: std::num::NonZeroU16::new(10).unwrap(),
+            rows: std::num::NonZeroU16::new(40).unwrap(),
+        };
+        leaf.conpty_grid = leaf.grid;
+        let text = (1..=20)
+            .map(|number| {
+                if number == 5 || number == 15 {
+                    "same:abcdefghijk".to_owned()
+                } else {
+                    format!("L{number:03}:abcdefghijk")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        leaf.session.feed(text.as_bytes()).unwrap();
+        leaf.card = focus_thumb::CardPosition::new(28);
+        assert_eq!(card_anchor_first(&mut leaf), "same:abcde");
+        card_anchor_resize(&mut leaf, 40, 40, LeafOnStage::Shown);
+        assert_eq!(card_anchor_first(&mut leaf), "same:abcdefghijk");
+        let projected = focus_thumb::transcript_tail(&leaf.session, 40, 4, leaf.card.skip()).0;
+        assert_eq!(projected[1], "L006:abcdefghijk");
+        card_anchor_settle(&mut leaf);
+        assert_eq!(card_anchor_first(&mut leaf), "same:abcdefghijk");
+        let projected = focus_thumb::transcript_tail(&leaf.session, 40, 4, leaf.card.skip()).0;
+        assert_eq!(projected[1], "L006:abcdefghijk");
+    }
+
     /// One shell with a word in it that no other shell in the test has.
     ///
     /// `pty: None` — this is the same shell-less mode `BT_PROBE_INPUT` uses, so
@@ -152341,7 +152625,7 @@ mod tests {
             // No ConPTY, so no reader thread, so nothing to wake — see the field.
             wake: None,
             // Aimed at the tail, like every shell that has not been aimed.
-            card_skip: 0,
+            card: focus_thumb::CardPosition::new(0),
             // A shell-less fixture is not a shell of some other kind: these
             // panes exist to carry scrollback, and the default profile is what
             // the pane they stand in for would have been started as.

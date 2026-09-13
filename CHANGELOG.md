@@ -24,6 +24,8 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- Keep focus cards on the same content when resizing, and make Alt+wheel respond immediately when reversing at the oldest content.
+
 - Reuse unchanged Markdown prose measurements across caret moves and edits, and reset block scroll offsets after reparsing.
 
 - **While you type pinyin, the caret stands at the end of what you have typed.**

@@ -366,6 +366,10 @@ struct ReflowWitness {
     /// Where it stood in the tail before the reflow, kept only to sort the witnesses into content
     /// order — which line, and how far into it.
     order: (usize, usize),
+    /// Equal-text occurrences after this one, including unregistered lines.
+    occurrence: usize,
+    /// Padding below the last content line is not an interior blank occurrence.
+    blank_floor: bool,
     /// The whole soft-wrapped logical line it sat in, as that tail read it.
     line: String,
     /// Its position inside that line, in bytes.
@@ -382,11 +386,65 @@ enum ReflowQuery {
 /// What a resize wrote down about the grid it is about to hand over.
 #[derive(Clone, Debug, Default)]
 struct ReflowSnapshot {
+    alternate: bool,
     witnesses: Vec<ReflowWitness>,
     /// How many soft-wrapped logical lines that grid held, which is how far back into the reflowed
     /// tail an answer can possibly be: a reflow re-cuts lines into other rows and neither reorders
     /// them nor invents them, so the plane's lines are the last this-many of `staging ++ grid`.
     lines: usize,
+}
+
+impl ReflowSnapshot {
+    fn capture(
+        before: Vec<ReflowLine>,
+        disturbed: Vec<(AnchorId, ReflowQuery, Bias)>,
+        alternate: bool,
+    ) -> Self {
+        let content_end = before
+            .iter()
+            .rposition(|line| !line.text.is_empty())
+            .map_or(0, |index| index + 1);
+        let mut counts = BTreeMap::new();
+        let occurrences = before
+            .iter()
+            .rev()
+            .map(|line| {
+                let count = counts.entry(line.text.as_str()).or_insert(0);
+                let occurrence = *count;
+                *count += 1;
+                occurrence
+            })
+            .collect::<Vec<_>>();
+        let mut witnesses = disturbed
+            .into_iter()
+            .filter_map(|(id, query, bias)| {
+                let (index, within) = before
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, line)| Some((index, line.locate(query)?)))?;
+                Some(ReflowWitness {
+                    id,
+                    bias,
+                    order: (index, within),
+                    occurrence: occurrences[before.len() - index - 1]
+                        - if before[index].text.is_empty() && index < content_end {
+                            before.len() - content_end
+                        } else {
+                            0
+                        },
+                    blank_floor: index >= content_end,
+                    line: before[index].text.clone(),
+                    within,
+                })
+            })
+            .collect::<Vec<_>>();
+        witnesses.sort_by_key(|witness| witness.order);
+        Self {
+            witnesses,
+            lines: before.len(),
+            alternate,
+        }
+    }
 }
 
 /// Which plane a reflowed physical row ended up on.
@@ -1092,6 +1150,9 @@ pub struct DualPlaneSession {
     terminal: TerminalAdapter,
     transcript: TranscriptStore,
     document: HistoryDocument,
+    /// External readers own these positions themselves. Generic capture rebases
+    /// are not semantic placement proofs for them; resize witnesses are.
+    content_anchors: BTreeSet<AnchorId>,
     decorations: BTreeMap<TranscriptId, DecorationRecord>,
     scheduler: WorkerScheduler,
     resize_epoch: ResizeEpoch,
@@ -1588,6 +1649,7 @@ impl DualPlaneSession {
             terminal: TerminalAdapter::new(columns, rows),
             transcript: TranscriptStore::with_quotas(staging_quota, frozen_quota),
             document: HistoryDocument::default(),
+            content_anchors: BTreeSet::new(),
             decorations: BTreeMap::new(),
             scheduler: WorkerScheduler::default(),
             resize_epoch: ResizeEpoch::default(),
@@ -2734,6 +2796,19 @@ impl DualPlaneSession {
         self.live_invalidation_count
     }
 
+    /// Register an independently owned content position for capture, finalize,
+    /// and resize migration. The owner must release it when it stops holding it.
+    pub fn register_content_anchor(&mut self, anchor: ContentAnchor) -> AnchorId {
+        let id = self.document.register_anchor(anchor);
+        self.content_anchors.insert(id);
+        id
+    }
+
+    pub fn release_content_anchor(&mut self, id: AnchorId) {
+        self.content_anchors.remove(&id);
+        self.document.release_anchor(id);
+    }
+
     pub fn register_live_anchor(
         &mut self,
         screen: ScreenId,
@@ -3034,6 +3109,11 @@ impl DualPlaneSession {
         } else {
             ReflowSnapshot::default()
         };
+        let alternate_reflow = if plan.begin_transaction {
+            self.alternate_reflow_witnesses()
+        } else {
+            ReflowSnapshot::default()
+        };
         if plan.begin_transaction {
             self.cursor_logical_line_memory = None;
             if self.resize_epoch.is_active() {
@@ -3138,6 +3218,7 @@ impl DualPlaneSession {
             // one rule for both halves instead of a rebase for one and a rematch for the other.
             let taken = !reflow.witnesses.is_empty();
             self.reseat_anchors_after_reflow(reflow);
+            self.reseat_anchors_after_reflow(alternate_reflow);
             if taken {
                 self.retire_marks_with_stale_anchors();
             }
@@ -3241,6 +3322,16 @@ impl DualPlaneSession {
         observed_at: Instant,
     ) -> bool {
         let reconciled = self.resize_epoch.is_active();
+        let reflow = if reconciled {
+            self.reflow_witnesses()
+        } else {
+            ReflowSnapshot::default()
+        };
+        let alternate_reflow = if reconciled {
+            self.alternate_reflow_witnesses()
+        } else {
+            ReflowSnapshot::default()
+        };
         if reconciled {
             self.resume_resize_staging();
         }
@@ -3263,8 +3354,6 @@ impl DualPlaneSession {
             // screen's damage counter has to move with it — see
             // [`Self::screen_revision`].
             self.screen_revision = self.screen_revision.wrapping_add(1);
-            self.document
-                .capture_rows_transaction(&[], self.grid_generation);
             // ConPTY reconciliation is the second deterministic reflow boundary. Re-seat both
             // command anchors and their row-write facts in the new generation before a later C
             // marker decides whether its line-start coordinate is end-exclusive.
@@ -3302,6 +3391,9 @@ impl DualPlaneSession {
         );
         if reconciled {
             self.stage_resize_history();
+            self.reseat_anchors_after_reflow(reflow);
+            self.reseat_anchors_after_reflow(alternate_reflow);
+            self.retire_marks_with_stale_anchors();
         }
         reconciled
     }
@@ -5078,8 +5170,7 @@ impl DualPlaneSession {
         // its rows into strings once per frame of a window drag is a cost with no question behind
         // it. The anchors are cheap to look at; the rows are not.
         let staged = self
-            .transcript
-            .resize_staged_rows()
+            .reflow_staged_rows()
             .iter()
             .map(|row| row.id)
             .collect::<BTreeSet<_>>();
@@ -5120,34 +5211,54 @@ impl DualPlaneSession {
         }
         // The whole tail, because an anchor may be anywhere in it. The bound belongs on the *other*
         // side of the reflow, where it is this count.
-        let before = self.reflow_corpus(usize::MAX);
-        let mut witnesses = disturbed
-            .into_iter()
-            .filter_map(|(id, query, bias)| {
-                let (index, within) = before
-                    .iter()
-                    .enumerate()
-                    .find_map(|(index, line)| Some((index, line.locate(query)?)))?;
-                Some(ReflowWitness {
-                    id,
+        ReflowSnapshot::capture(self.reflow_corpus(usize::MAX), disturbed, false)
+    }
+
+    /// Alternate rows do not reflow into primary history. Witness only their
+    /// own displayed namespace, using the same occurrence and within-row proof.
+    fn alternate_reflow_witnesses(&self) -> ReflowSnapshot {
+        if self.live_screen != ScreenId::Alternate {
+            return ReflowSnapshot::default();
+        }
+        let disturbed = self
+            .document
+            .anchors()
+            .filter_map(|(id, anchor)| match anchor {
+                ContentAnchor::Live {
+                    screen: ScreenId::Alternate,
+                    point,
                     bias,
-                    order: (index, within),
-                    line: before[index].text.clone(),
-                    within,
-                })
+                    generation,
+                } if *generation == self.grid_generation => {
+                    Some((id, ReflowQuery::Live(*point), *bias))
+                }
+                _ => None,
             })
             .collect::<Vec<_>>();
-        // Document order, which is the order the reflow preserves and therefore the order the
-        // placement matches in. The registry is keyed by `AnchorId`, i.e. by the order the anchors
-        // were *registered*, which is not the order their content stands in.
-        witnesses.sort_by_key(|witness| witness.order);
-        ReflowSnapshot {
-            witnesses,
-            // How far back the placement has to look. Every line these anchors sat in was a line of
-            // *this* tail, and a reflow neither reorders lines nor invents them, so afterwards they
-            // are the last this-many logical lines of `staging ++ grid`.
-            lines: before.len(),
+        if disturbed.is_empty() {
+            return ReflowSnapshot::default();
         }
+        ReflowSnapshot::capture(self.alternate_reflow_corpus(), disturbed, true)
+    }
+
+    fn alternate_reflow_corpus(&self) -> Vec<ReflowLine> {
+        (0..self.live_dimensions().1.get())
+            .filter_map(|row| {
+                let captured = self.live_row(row)?;
+                let (text, boundaries) = captured_row_logical_text_and_boundaries(&captured);
+                let byte_end = text.len();
+                Some(ReflowLine {
+                    text,
+                    rows: vec![ReflowRow {
+                        plane: ReflowPlane::Live(row),
+                        byte_start: 0,
+                        byte_end,
+                        boundaries,
+                        grapheme_offsets: captured_grapheme_offsets(&captured),
+                    }],
+                })
+            })
+            .collect()
     }
 
     /// **Put each of those anchors back on the line it named** (DESIGN §3.2).
@@ -5166,7 +5277,11 @@ impl DualPlaneSession {
     /// whose line is not there at all is simply not placed — it keeps the generation it had, which
     /// makes it stale, which is the honest reading of "the content this named is gone".
     fn reseat_anchors_after_reflow(&mut self, snapshot: ReflowSnapshot) {
-        let ReflowSnapshot { witnesses, lines } = snapshot;
+        let ReflowSnapshot {
+            witnesses,
+            lines,
+            alternate,
+        } = snapshot;
         if witnesses.is_empty() {
             return;
         }
@@ -5187,16 +5302,28 @@ impl DualPlaneSession {
             .collect::<BTreeSet<_>>();
         let witnesses = witnesses
             .into_iter()
-            .filter(|witness| match self.document.anchor(witness.id).ok() {
-                Some(ContentAnchor::Live { generation, .. }) => *generation != grid_generation,
-                Some(ContentAnchor::Staging { id, .. }) => !seated.contains(id),
-                _ => false,
+            .filter(|witness| {
+                // A height shrink can rebase an external reader to live row 0
+                // in the new generation before resize staging is installed.
+                // That is not evidence that it still names its original text.
+                self.content_anchors.contains(&witness.id)
+                    || match self.document.anchor(witness.id).ok() {
+                        Some(ContentAnchor::Live { generation, .. }) => {
+                            *generation != grid_generation
+                        }
+                        Some(ContentAnchor::Staging { id, .. }) => !seated.contains(id),
+                        _ => false,
+                    }
             })
             .collect::<Vec<_>>();
         if witnesses.is_empty() {
             return;
         }
-        let corpus = self.reflow_corpus(lines);
+        let corpus = if alternate {
+            self.alternate_reflow_corpus()
+        } else {
+            self.reflow_corpus(lines)
+        };
         // One entry per distinct line, newest first, so several anchors on one row are one claim.
         //
         // **A line's identity here is its text *and* its place, not its text alone.** Two runs of
@@ -5220,16 +5347,32 @@ impl DualPlaneSession {
         let mut placements = Vec::new();
         let mut ceiling = corpus.len();
         for (line, _, holders) in wanted {
-            let Some(found) = corpus[..ceiling]
+            // A lone card anchor can name an older duplicate while the newer
+            // occurrence has no registered anchors at all. Registry order alone
+            // cannot distinguish them; retain the ordinal in the full corpus.
+            let witness = &witnesses[holders[0]];
+            let occurrence = witness.occurrence;
+            let content_end = corpus
                 .iter()
-                .rposition(|candidate| candidate.text == line)
+                .rposition(|line| !line.text.is_empty())
+                .map_or(0, |index| index + 1);
+            let Some((found, _)) = corpus
+                .iter()
+                .enumerate()
+                .rev()
+                .filter(|(index, candidate)| {
+                    candidate.text == line
+                        && (!line.is_empty() || witness.blank_floor || *index < content_end)
+                })
+                .nth(occurrence)
+                .filter(|(index, _)| *index < ceiling)
             else {
                 continue;
             };
             ceiling = found;
             for holder in holders {
                 let witness = &witnesses[holder];
-                let Some(anchor) = corpus[found].seat(
+                let Some(mut anchor) = corpus[found].seat(
                     witness.within,
                     witness.bias,
                     source_generation,
@@ -5237,6 +5380,9 @@ impl DualPlaneSession {
                 ) else {
                     continue;
                 };
+                if alternate && let ContentAnchor::Live { screen, .. } = &mut anchor {
+                    *screen = ScreenId::Alternate;
+                }
                 placements.push((witness.id, anchor));
             }
         }
@@ -5255,6 +5401,23 @@ impl DualPlaneSession {
         }
     }
 
+    /// Rows about to return to native ownership. The first resize can reverse
+    /// harvest an ordinary unfinished candidate; later resizes return escrow.
+    /// Both sets need witnesses before their staging IDs disappear.
+    fn reflow_staged_rows(&self) -> Vec<&bt_transcript::StagedRow> {
+        if self.resize_epoch.is_active() {
+            self.transcript.resize_staged_rows().iter().collect()
+        } else {
+            let mut rows = self
+                .transcript
+                .staged_rows_newest_first()
+                .take(self.terminal.resize_staging_candidate_rows())
+                .collect::<Vec<_>>();
+            rows.reverse();
+            rows
+        }
+    }
+
     /// The **last `wanted` logical lines** of the reflowed tail: resize staging, then the grid.
     ///
     /// Bounded rather than whole, and the bound is the pre-reflow plane's own line count — see
@@ -5262,7 +5425,7 @@ impl DualPlaneSession {
     /// window edge would re-read the vendor's entire escrow, which is thousands of rows on a pane
     /// that has been printing all day, once per resize event.
     fn reflow_corpus(&self, wanted: usize) -> Vec<ReflowLine> {
-        let staged = self.transcript.resize_staged_rows();
+        let staged = self.reflow_staged_rows();
         let live = self.live_rows.len();
         let rows = staged.len().saturating_add(live);
         // Walk back from the newest row, keeping what it reads, until one more line than asked for
@@ -5271,6 +5434,7 @@ impl DualPlaneSession {
         // the middle of a line, and a line read from its middle matches nothing.
         let mut tail: Vec<(ReflowPlane, CapturedRow)> = Vec::new();
         let mut closed = 0;
+        let mut floor = true;
         let mut index = rows;
         while index > 0 && closed <= wanted {
             index -= 1;
@@ -5286,7 +5450,10 @@ impl DualPlaneSession {
                     None => continue,
                 }
             };
-            if !entry.1.continues {
+            // Widening or growing height can add arbitrary blank padding.
+            // It must not spend the content budget and hide the anchored line.
+            floor &= entry.1.cells.iter().all(|cell| cell.text.trim().is_empty());
+            if !floor && !entry.1.continues {
                 closed += 1;
             }
             tail.push(entry);
