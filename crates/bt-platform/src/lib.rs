@@ -170,19 +170,35 @@ pub enum WheelScrollAmount {
 
 /// Geometry consumed by the pure half of the Win32 `WM_NCHITTEST` bridge.
 /// All values are physical pixels; callers derive them from the live window DPI.
+///
+/// **The bar arrives as boxes and not as a boundary** (owner ruling 2026-09-13,
+/// `docs/DESIGN.md` §13.11 ⑥). This used to carry one `x` — where the
+/// application's run in the title bar ended — plus the width and the count of
+/// the caption run at the other end, and everything between the two was the
+/// window's handle. A boundary can only describe a bar whose controls are packed
+/// against its two ends, and this product's are not: a control narrower than the
+/// space in front of it leaves a strip of bar that is neither the control's nor
+/// the window's. So the application states the boxes it draws up there and the
+/// rule is their complement.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CustomFrameMetrics {
+pub struct CustomFrameMetrics<'a> {
     pub width: i32,
     pub height: i32,
     pub title_bar_height: i32,
-    pub tab_strip_right_px: i32,
-    pub caption_button_width: i32,
-    pub caption_button_count: i32,
+    /// **Every box the application itself draws in the title bar**, as
+    /// `[left, top, right, bottom]` in the same physical pixels as the fields
+    /// above, half-open on the far edges. The caption buttons are among them —
+    /// on this host they are the application's own drawing like everything else
+    /// in that bar.
+    ///
+    /// Order is not read and overlaps are allowed: the only question asked of
+    /// this list is whether a point is in any of them.
+    pub app_boxes: &'a [[i32; 4]],
     pub resize_border: i32,
     pub resizable: bool,
 }
 
-/// The self-drawn frame's two logical measurements, handed in at install time
+/// The self-drawn frame's own logical measurement, handed in at install time
 /// rather than restated here.
 ///
 /// # One number for the bar that is painted and the bar that is clicked
@@ -196,13 +212,20 @@ pub struct CustomFrameMetrics {
 /// the side that draws it. So it arrives as an argument, and this crate no
 /// longer has an opinion about how tall a title bar is.
 ///
-/// Logical pixels at Win32's 96-DPI baseline; every read scales them by the
+/// **And the caption button's width left with the boundary** (§13.11 ⑥): the
+/// run at the trailing end used to be described here as a width and counted in
+/// the hit test, which is a second statement of a box the application already
+/// lays out. It arrives with the other boxes now
+/// ([`CustomFrameMetrics::app_boxes`]), so what is left here is the one
+/// measurement this crate cannot be told any other way — how tall the bar is, at
+/// install, before there is a frame to state boxes to.
+///
+/// Logical pixels at Win32's 96-DPI baseline; every read scales it by the
 /// window's live DPI, so one window at 1.5x and another at 2.0x are two
-/// different physical bars from one pair of numbers.
+/// different physical bars from one number.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CustomFrameGeometry {
     pub title_bar_logical_px: u32,
-    pub caption_button_logical_px: u32,
 }
 
 /// **What the platform's own window frame already draws in this window's title
@@ -285,10 +308,18 @@ pub enum CustomFrameHit {
 }
 
 /// Map one client-coordinate point to the native non-client region it represents.
-/// Resize edges win over the title bar, and the complete settings/caption-button
-/// run stays `Client` so the application can paint and handle those buttons.
+/// Resize edges win over the title bar, and every box the application draws in
+/// that bar — the caption run included — stays `Client` so the application can
+/// paint and handle it.
+///
+/// **The bar is the complement of those boxes and nothing narrower** (owner
+/// ruling 2026-09-13, §13.11 ⑥): on the title bar, every pixel that is not one
+/// of the application's own boxes is a place the window may be picked up by, and
+/// that is the whole rule. `bt-app` answers the same question with the same
+/// list on the host where the press reaches the application instead of the
+/// frame, so the two platforms run one rule rather than two that agree.
 #[must_use]
-pub fn custom_frame_hit_test(metrics: CustomFrameMetrics, x: i32, y: i32) -> CustomFrameHit {
+pub fn custom_frame_hit_test(metrics: CustomFrameMetrics<'_>, x: i32, y: i32) -> CustomFrameHit {
     let border = metrics.resize_border.max(0);
     let left = metrics.resizable && x >= 0 && x < border;
     let right = metrics.resizable && x >= metrics.width.saturating_sub(border) && x < metrics.width;
@@ -308,22 +339,20 @@ pub fn custom_frame_hit_test(metrics: CustomFrameMetrics, x: i32, y: i32) -> Cus
         _ => {}
     }
 
-    let buttons_width = metrics
-        .caption_button_width
-        .max(0)
-        .saturating_mul(metrics.caption_button_count.max(0));
-    let buttons_left = metrics.width.saturating_sub(buttons_width);
     if y < border || y >= metrics.title_bar_height.max(border) {
         return CustomFrameHit::Client;
     }
-    if x < metrics.tab_strip_right_px.max(0) {
+    if x < 0 || x >= metrics.width {
         return CustomFrameHit::Client;
     }
-    if x < buttons_left || x >= metrics.width {
-        CustomFrameHit::Caption
-    } else {
-        CustomFrameHit::Client
+    if metrics
+        .app_boxes
+        .iter()
+        .any(|rect| x >= rect[0] && x < rect[2] && y >= rect[1] && y < rect[3])
+    {
+        return CustomFrameHit::Client;
     }
+    CustomFrameHit::Caption
 }
 
 /// A pending move/size, as `WM_WINDOWPOSCHANGING` states one.
@@ -3197,7 +3226,6 @@ mod windows_impl {
     const CUSTOM_FRAME_SUBCLASS_ID: usize = 0x4254_4346;
     const TASKBAR_SUBCLASS_ID: usize = 0x4254_5442;
     const SYSTEM_SETTINGS_SUBCLASS_ID: usize = 0x4254_5343;
-    const CAPTION_BUTTON_COUNT: i32 = 4;
 
     /// The shell's `TaskbarButtonCreated` broadcast, registered once per process.
     ///
@@ -4386,7 +4414,18 @@ mod windows_impl {
         /// mid-session would be painted at one number and clicked at another,
         /// which is the very thing this field exists to prevent.
         geometry: CustomFrameGeometry,
-        tab_strip_right_px: AtomicI32,
+        /// **The boxes the application draws in this window's title bar**, in
+        /// physical pixels, as [`CustomFrameMetrics::app_boxes`] takes them
+        /// (§13.11 ⑥). Restated whenever the bar is rebuilt, because every one
+        /// of them moves: a tab is a box and tabs open, close and scroll.
+        ///
+        /// A `RefCell` and not an atomic, for the reason `TaskbarState`'s own
+        /// `Cell` gives: a list cannot be an atomic, and it does not need to be —
+        /// both sides are the same thread. The setter is called from the event
+        /// loop, and the subclass procedure runs on the thread that owns the
+        /// `HWND`, which is that same event loop. Nothing between the borrow and
+        /// its end sends a message, so the callback cannot re-enter it.
+        title_bar_boxes: RefCell<Vec<[i32; 4]>>,
         /// Smallest client size the window may be dragged to, in logical pixels,
         /// or `(0, 0)` for "no minimum". Logical rather than physical so the
         /// constraint survives a DPI change without anyone recomputing it.
@@ -4458,7 +4497,7 @@ mod windows_impl {
             let hwnd = window.as_hwnd();
             let state = Box::new(CustomFrameState {
                 geometry,
-                tab_strip_right_px: AtomicI32::new(0),
+                title_bar_boxes: RefCell::new(Vec::new()),
                 min_client_logical_width: AtomicI32::new(0),
                 min_client_logical_height: AtomicI32::new(0),
                 adopting: AtomicBool::new(false),
@@ -4586,10 +4625,17 @@ mod windows_impl {
             )
         }
 
-        pub fn set_tab_strip_right_px(&self, tab_strip_right_px: i32) {
-            self.state
-                .tab_strip_right_px
-                .store(tab_strip_right_px.max(0), Ordering::Relaxed);
+        /// **State the boxes the application draws in this window's title bar**
+        /// (§13.11 ⑥), in physical pixels. Everything in the bar that is not one
+        /// of them answers `HTCAPTION`, so the window is picked up by it.
+        ///
+        /// Said again on every rebuild of the bar rather than settled at
+        /// install: a tab is one of these boxes, and tabs open, close, scroll
+        /// and change width.
+        pub fn set_title_bar_boxes(&self, boxes: &[[i32; 4]]) {
+            let mut held = self.state.title_bar_boxes.borrow_mut();
+            held.clear();
+            held.extend_from_slice(boxes);
         }
 
         /// Constrain how far the window may be resized, in logical pixels of
@@ -4822,7 +4868,10 @@ mod windows_impl {
                 // SAFETY: `CustomWindowFrame` owns this allocation and removes the subclass
                 // before dropping it, so the reference-data pointer is live for every callback.
                 let state = unsafe { &*(reference_data as *const CustomFrameState) };
-                let tab_strip_right_px = state.tab_strip_right_px.load(Ordering::Relaxed);
+                // Borrowed for the length of the answer and no longer. The
+                // setter runs on this same thread and nothing below it sends a
+                // message, so this borrow meets no other.
+                let app_boxes = state.title_bar_boxes.borrow();
                 let hit = custom_frame_hit_test(
                     CustomFrameMetrics {
                         width: client.right.saturating_sub(client.left),
@@ -4831,12 +4880,7 @@ mod windows_impl {
                             state.geometry.title_bar_logical_px,
                             dpi,
                         ),
-                        tab_strip_right_px,
-                        caption_button_width: logical_px_for_dpi(
-                            state.geometry.caption_button_logical_px,
-                            dpi,
-                        ),
-                        caption_button_count: CAPTION_BUTTON_COUNT,
+                        app_boxes: app_boxes.as_slice(),
                         resize_border,
                         resizable: resize_border > 0,
                     },

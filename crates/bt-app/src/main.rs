@@ -36345,16 +36345,16 @@ impl Runtime<'_> {
         // `bt_platform::clipboard_text`, `set_clipboard_text` and
         // `cancel_composition` ask it rather than their callers.
         bt_platform::register_clipboard_owner(native);
-        // The frame's two measurements travel with the install, from the crate
-        // that paints them (spike Q5 item 2): the title bar the pointer is
-        // tested against and the title bar the renderer draws are now literally
-        // the same number instead of two constants in two crates that happened
-        // to agree.
+        // The frame's own measurement travels with the install, from the crate
+        // that paints it (spike Q5 item 2): the title bar the pointer is tested
+        // against and the title bar the renderer draws are literally the same
+        // number instead of two constants in two crates that happened to agree.
+        // The caption run's width left this pair with the drag boundary
+        // (§13.11 ⑥): what is clicked in that bar arrives as boxes now.
         let custom_window_frame = bt_platform::CustomWindowFrame::install(
             native,
             bt_platform::CustomFrameGeometry {
                 title_bar_logical_px: bt_render::WINDOW_TITLE_BAR_LOGICAL_PX as u32,
-                caption_button_logical_px: bt_render::WINDOW_CAPTION_BUTTON_LOGICAL_PX as u32,
             },
             // **And how the frame asks for a turn when what it measured moves**
             // (§13.48) — the shape `SystemSettingsWatch` already has, for its
@@ -36995,7 +36995,6 @@ impl Runtime<'_> {
             native,
             bt_platform::CustomFrameGeometry {
                 title_bar_logical_px: bt_render::WINDOW_TITLE_BAR_LOGICAL_PX as u32,
-                caption_button_logical_px: bt_render::WINDOW_CAPTION_BUTTON_LOGICAL_PX as u32,
             },
             // A second window asks for its turn the way the first one does —
             // see that constructor's note (§13.48).
@@ -38714,25 +38713,40 @@ impl Runtime<'_> {
     fn refresh_chrome(&mut self) -> bool {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let (width, _) = self.window.renderer.presentation_geometry().swapchain_size;
-        // **The window's own drag handler is told what the bar is wearing now.**
-        // With the rail out, the tabs are not in the title bar at all and almost
-        // none of it belongs to the app — asking the horizontal strip's geometry
-        // regardless is what left the whole top bar answering `HTCLIENT`, so the
-        // window could not be dragged by it (R3).
+        // **The window's own drag handler is told what the bar is wearing now**
+        // (§13.11 ⑥). It is handed the boxes Folio draws up there, not a
+        // boundary: on the title bar every pixel that is not one of those boxes
+        // is a place the window may be picked up by, and a single `x` cannot say
+        // that about a bar whose controls do not fill the space in front of
+        // them. The same list answers the press on the host where the press
+        // reaches this application instead of the frame.
         //
-        // The posture and not the preference, for the same reason one layout
-        // further on: focus mode takes the strip away in *either* tab layout, so
-        // a bar asked about the stored preference would go on reserving the run
-        // of a strip nobody is drawing.
+        // The posture and not the preference, for the reason R3 left behind:
+        // focus mode takes the strip away in *either* tab layout and the
+        // vertical layouts put the tab list down the side, so a bar asked about
+        // the stored preference would go on reserving the boxes of a strip
+        // nobody is drawing — which is how the whole top bar came to answer
+        // `HTCLIENT` and the window could not be dragged at all.
+        //
+        // **Ceiled and not rounded**, because the frame asks with whole pixels:
+        // for an integer `x`, `x >= left && x < right` on the solved rectangle is
+        // `x >= left.ceil() && x < right.ceil()` exactly, so the boxes the frame
+        // holds claim precisely the pixel columns the boxes here do.
+        let folio_boxes: Vec<[i32; 4]> = seats::title_bar_folio_boxes(
+            width as f32,
+            scale,
+            self.platform_chrome(),
+            self.window.tabs.len(),
+            self.window.tab_scroll,
+            self.rail_posture(),
+            self.is_quake_window(),
+        )
+        .into_iter()
+        .map(|rect| rect.map(|edge| edge.ceil() as i32))
+        .collect();
         self.window
             .custom_window_frame
-            .set_tab_strip_right_px(seats::title_bar_app_run_right_px(
-                width as f32,
-                scale,
-                self.platform_chrome(),
-                self.window.tabs.len(),
-                self.rail_posture(),
-            ));
+            .set_title_bar_boxes(&folio_boxes);
         // The badge's box is a function of the number in it, and only the font
         // knows how wide a number is — so the measuring happens here, where the
         // renderer is, and the strip is handed the answer rather than a font.
@@ -88690,10 +88704,10 @@ impl Runtime<'_> {
             // for the primary-seat version this replaced and what it cost.
             self.window.tab_clicks.interrupt();
             // **The window's own drag handle, before anything under it** (M3-3,
-            // owner ruling 2026-09-12). The empty part of the title bar is the
-            // band between where Folio's own content stops and where the gear's
-            // run begins, and picking the window up by it is what every title
-            // bar on every platform does.
+            // owner ruling 2026-09-12, widened 2026-09-13 — §13.11 ⑥). The
+            // handle is every pixel of the title bar that is not one of Folio's
+            // own boxes, and picking the window up by it is what every title bar
+            // on every platform does.
             //
             // It is answered here, in the arm for a press that named no chrome,
             // because that is precisely what it is: the complement of every box
@@ -88719,6 +88733,7 @@ impl Runtime<'_> {
                 self.window.renderer.metrics().scale_factor as f32,
                 self.platform_chrome(),
                 self.window.tabs.len(),
+                self.window.tab_scroll,
                 self.rail_posture(),
                 self.is_quake_window(),
                 position.x,
@@ -154311,9 +154326,16 @@ mod tests {
     /// tabs, because that is the case that made a strip claim the whole bar — and
     /// with the tabs in the rail there is no strip in the bar to claim it.
     ///
-    /// Red gate: feed `seats::tab_strip_right_px` to the vertical row and the
-    /// caption assertions fail — which is precisely the bug, a title bar that
-    /// answers `Client` everywhere and a window that will not move.
+    /// Red gate: hand the frame an empty list and the toggle and the gear stop
+    /// being the application's; hand it the whole bar as one box and the window
+    /// will not move — which is precisely the bug R3 was, a title bar that
+    /// answers `Client` everywhere.
+    ///
+    /// **And the second half of it is the owner's ruling of 2026-09-13**
+    /// (§13.11 ⑥): the frame is no longer told where the application's run
+    /// *ends*, it is told the application's own boxes, so the air between two
+    /// tabs and the band above a control shorter than the bar drag like the rest
+    /// of it.
     #[test]
     fn the_top_bar_drags_beside_the_toggle_when_the_tabs_are_in_the_rail() {
         use bt_platform::CustomFrameHit;
@@ -154324,64 +154346,109 @@ mod tests {
             ..seats::RailState::default()
         };
         let horizontal = seats::RailState::default();
-        let frame = |rail| bt_platform::CustomFrameMetrics {
-            width: width as i32,
-            height: 600,
-            title_bar_height: 40,
-            tab_strip_right_px: seats::title_bar_app_run_right_px(
+        // The very list `refresh_chrome` hands the frame, built the way it
+        // builds it — the boxes this window draws in its bar, on whole pixels.
+        let boxes = |rail| -> Vec<[i32; 4]> {
+            seats::title_bar_folio_boxes(
                 width,
                 scale,
                 crate::seats::FOLIO_BAR,
                 tabs,
+                0.0,
                 rail,
-            ),
-            caption_button_width: 46,
-            caption_button_count: 4,
-            resize_border: 8,
-            resizable: true,
+                false,
+            )
+            .into_iter()
+            .map(|rect| rect.map(|edge| edge.ceil() as i32))
+            .collect()
         };
-        let hit = |rail, x| bt_platform::custom_frame_hit_test(frame(rail), x, 20);
+        let hit = |rail, x, y| {
+            let app_boxes = boxes(rail);
+            bt_platform::custom_frame_hit_test(
+                bt_platform::CustomFrameMetrics {
+                    width: width as i32,
+                    height: 600,
+                    title_bar_height: 40,
+                    app_boxes: &app_boxes,
+                    resize_border: 8,
+                    resizable: true,
+                },
+                x,
+                y,
+            )
+        };
 
-        // The rail's bar: one button, then handle all the way to the caption run.
+        // The rail's bar: one button, then handle all the way to the gear.
         assert_eq!(
-            hit(vertical, 20),
+            hit(vertical, 20, 20),
             CustomFrameHit::Client,
             "the toggle itself"
         );
         assert_eq!(
-            hit(vertical, 60),
+            hit(vertical, 20, 36),
+            CustomFrameHit::Caption,
+            "and the band under it, which the toggle is too short to reach \
+             (above it is the window's resize edge, which outranks the bar)"
+        );
+        assert_eq!(
+            hit(vertical, 60, 20),
             CustomFrameHit::Caption,
             "the name is inside `.drag`, so it drags"
         );
         assert_eq!(
-            hit(vertical, 400),
+            hit(vertical, 400, 20),
             CustomFrameHit::Caption,
             "R3: the empty middle of the bar is what the hand reaches for"
         );
         assert_eq!(
-            hit(vertical, 770),
+            hit(vertical, 770, 20),
             CustomFrameHit::Caption,
-            "right up to the caption run"
+            "right up to the gear"
         );
-        assert_eq!(hit(vertical, 800), CustomFrameHit::Client, "the gear's run");
         assert_eq!(
-            bt_platform::custom_frame_hit_test(frame(vertical), 400, 60),
+            hit(vertical, 800, 20),
+            CustomFrameHit::Client,
+            "the gear's own box"
+        );
+        assert_eq!(
+            hit(vertical, 400, 60),
             CustomFrameHit::Client,
             "below the bar is the terminal's, in either layout"
         );
 
-        // The strip's bar: the tabs are app-owned and must not be draggable, which
-        // is the promise the vertical fix may not break.
+        // The strip's bar: every box in it is the application's and must not be
+        // draggable, which is the promise the vertical fix may not break.
+        let strip = boxes(horizontal);
+        for rect in &strip {
+            assert_eq!(
+                hit(horizontal, (rect[0] + rect[2]) / 2, (rect[1] + rect[3]) / 2),
+                CustomFrameHit::Client,
+                "a box this window draws at {rect:?} is not the window's to be \
+                 dragged by — handing the tabs to the drag handler is the bug \
+                 this boundary exists to prevent"
+            );
+        }
+        // And what is left of the bar is the window's — including, since the
+        // ruling, the air between two tabs.
+        let held = |x: i32, y: i32| {
+            strip
+                .iter()
+                .any(|rect| x >= rect[0] && x < rect[2] && y >= rect[1] && y < rect[3])
+        };
+        let first_tab = strip
+            .iter()
+            .map(|rect| rect[0])
+            .filter(|left| *left > 0)
+            .min()
+            .expect("a thirty-tab strip has tabs in it");
+        let gap = (first_tab..700)
+            .find(|x| !held(*x, 20))
+            .expect("thirty tabs at their floor stand apart, and the gaps are air");
         assert_eq!(
-            hit(horizontal, 400),
-            CustomFrameHit::Client,
-            "a thirty-tab strip owns its whole run — handing it to the window's \
-             drag handler is the bug this boundary exists to prevent"
-        );
-        assert_eq!(
-            hit(horizontal, 800),
-            CustomFrameHit::Client,
-            "the gear's run"
+            hit(horizontal, gap, 20),
+            CustomFrameHit::Caption,
+            "x={gap} is inside the strip's own run and inside none of its boxes, \
+             so it is the window's"
         );
     }
 

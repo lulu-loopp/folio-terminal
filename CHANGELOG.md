@@ -34,6 +34,12 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- **The top bar takes the hand anywhere it is not a button.** Dragging the window
+  by its top bar used to work only in the stretch between the last tab and the
+  buttons in the corner; the space between two tabs, the strip above them and the
+  gaps around the settings button did nothing at all. Every part of that bar that
+  is not one of this window's own buttons now picks the window up, and
+  double-clicking it still does what it did.
 - **A quit keeps every tab a window was holding.** Quitting with a page still
   closing down could write the session out again on the way out, with the tabs
   that had already gone missing from it; the document a quit writes is the one
