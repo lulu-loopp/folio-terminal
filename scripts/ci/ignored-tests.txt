@@ -10,7 +10,7 @@
 #     cargo test --workspace --locked -- --ignored --list
 #
 # Why any of them are ignored at all — the policy this list exists to state.
-# Twenty-four of the twenty-six are **probes**, not regressions:
+# Twenty-five of the twenty-seven are **probes**, not regressions:
 #
 #   * nineteen in `bt-pty` drive real ConPTY sessions against a real PowerShell
 #     and read what comes back. Their assertions are about host timing and about
@@ -18,8 +18,8 @@
 #     which is a question with a different right answer on every machine.
 #   * two in `bt-transcript` are the reference-resolution probes over a printed
 #     scrollback.
-#   * two in `bt-app`: one writes a picture for a person to look at, and one
-#     is the large-document typing benchmark (T-MD-TYPING-PATH), which times
+#   * three in `bt-app`: one writes a picture for a person to look at, and two
+#     are the large-document typing benchmarks (T-MD-TYPING-PATH; the eager one is the reference), which time
 #     the whole input-to-layout path on docs/DESIGN.md and prints a table --
 #     wall-clock on a shared machine, so it is read by a person and never
 #     asserted; the counted-work pins beside it run in the normal suite. Run
@@ -54,6 +54,7 @@ marks::tests::the_symbol_sheet_is_written_for_a_person_to_look_at
 paths::tests::a_scrollback_relative_reference_keeps_the_directory_it_was_printed_under
 paths::tests::an_unquoted_path_cut_at_a_space_does_not_link_its_prefix
 preview_typing::md_typing_path_benchmark
+preview_typing::md_typing_path_eager_benchmark
 tests::a_long_chinese_session_never_runs_the_atlas_out_of_room
 tests::a_recall_carved_into_the_prompt_is_the_child_s_own_console_buffer
 tests::a_session_long_enough_to_wear_the_packer_out_gets_its_text_back
