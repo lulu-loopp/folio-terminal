@@ -2264,6 +2264,38 @@ pub const WINDOW_CAPTION_GLYPH_LOGICAL_PX: f32 = 10.0;
 /// `.capbtn.gear svg { width: 14px; height: 14px }` — the settings gear alone
 /// is larger, because its silhouette is a ring of teeth rather than one stroke.
 pub const WINDOW_CAPTION_GEAR_GLYPH_LOGICAL_PX: f32 = 14.0;
+/// **Where the gear's centre stands on a window whose window buttons are the
+/// platform's** — this far in from the window's trailing edge (owner rulings
+/// 2026-09-13, `docs/DESIGN.md` §13.48).
+///
+/// The mirror of the leading light, and the leading light has moved. The first
+/// ruling of the day read macOS's own inset — close at x 9, diameter 14, centre
+/// 16 — and asked for 16 at the other end. The second put the red light itself
+/// on the window corner's 45° diagonal: on Folio's 40-point strip its centre is
+/// already 20 from the top, so 20 from the leading edge is the point where the
+/// two insets are equal, and the light moved to x 13. **Its centre is therefore
+/// `(20, 20)`, and this is the 20 mirrored.** On this window the gear is not a
+/// slot in a run — there is no run, because the other three boxes are the
+/// platform's own buttons at the far side — so it is placed by its centre rather
+/// than by a slot's edge.
+///
+/// A number of this product's and not a measurement, on purpose: the run the
+/// platform takes is *measured* off the live window (`PlatformChrome`), but that
+/// measurement is the trailing edge of the last button after Folio has placed
+/// them, and what this mirrors is the centre of the first. It is the same
+/// arithmetic on the same bar — `WINDOW_TITLE_BAR_LOGICAL_PX / 2` — said at the
+/// other end, and it is written as its own constant because the day the bar or
+/// the diagonal moves, one of them is a design decision and the other is not.
+pub const WINDOW_CAPTION_GEAR_INSET_LOGICAL_PX: f32 = 20.0;
+/// **And how big the box around that centre is** — a square, the `+`'s own 28.
+///
+/// The gear keeps its glyph, its ink and its verb; what it loses on this window
+/// is the 46x40 caption slot, which is the shape of a *run* of buttons and there
+/// is no run here. Twenty-eight is not a new number: it is
+/// [`WINDOW_NEW_TAB_BOX_LOGICAL_PX`], the box every other control that stands
+/// inset in this bar is given, and it fits inside the 40-point strip and the
+/// platform's own 32-point band alike.
+pub const WINDOW_CAPTION_GEAR_BOX_LOGICAL_PX: f32 = WINDOW_NEW_TAB_BOX_LOGICAL_PX;
 /// The active horizontal tab's height (`.tab { height: 34px }`).
 pub const WINDOW_TAB_HEIGHT_LOGICAL_PX: f32 = 34.0;
 /// **The floating pill's height** (`mock-mac-strict.html` `--pill-h: 30px`,

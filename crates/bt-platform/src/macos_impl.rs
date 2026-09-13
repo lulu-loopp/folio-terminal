@@ -100,9 +100,9 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
-    NSApplication, NSAutoresizingMaskOptions, NSColor, NSEvent, NSEventType, NSFloatingWindowLevel,
-    NSNormalWindowLevel, NSScreen, NSView, NSWindow, NSWindowButton, NSWindowDelegate,
-    NSWindowDidBecomeKeyNotification, NSWindowDidEnterFullScreenNotification,
+    NSApplication, NSAutoresizingMaskOptions, NSButton, NSColor, NSEvent, NSEventType,
+    NSFloatingWindowLevel, NSNormalWindowLevel, NSScreen, NSView, NSWindow, NSWindowButton,
+    NSWindowDelegate, NSWindowDidBecomeKeyNotification, NSWindowDidEnterFullScreenNotification,
     NSWindowDidExitFullScreenNotification, NSWindowDidResignKeyNotification,
     NSWindowDidResizeNotification, NSWindowDidUpdateNotification, NSWindowOcclusionState,
     NSWindowStyleMask, NSWindowTitleVisibility, NSWorkspace,
@@ -1096,6 +1096,7 @@ pub fn clear_surface_layers(window: NativeWindow) -> Result<usize, String> {
 pub fn adopt_window_chrome(
     window: NativeWindow,
     bar_logical_px: f64,
+    wake: Box<dyn Fn()>,
 ) -> Result<(crate::PlatformChrome, Option<WindowButtonsWatch>), String> {
     let what = "taking over a window's title bar";
     let (mtm, ns_window) = window_for(window, what)?;
@@ -1105,47 +1106,108 @@ pub fn adopt_window_chrome(
     // The window's `title` is left alone: Mission Control, the window menu and
     // the Dock still read it, and none of them draws it in this bar.
     ns_window.setMovableByWindowBackground(false);
-    let scale = ns_window.backingScaleFactor();
+    // **The pitch is read before anything moves, and the run is measured after
+    // everything has** (owner ruling 2026-09-13, §13.48). Both halves of that
+    // sentence are load-bearing and they pull in opposite directions: the
+    // spacing between the buttons has to be macOS's own, so it is taken from a
+    // window this product has not touched; the inset `bt-app` starts its strip
+    // after has to be where the buttons *end up*, so it is taken from a window
+    // this product has finished with. While only `y` moved these were the same
+    // reading; since the red light goes onto the corner's diagonal they are not.
+    let pitch = read_button_pitch(&ns_window);
+    // **And the band the buttons are placed on is the band the window wears**
+    // (the owner's two rulings of 2026-09-12 read together). `bar_logical_px` is
+    // the caller's, because which of its layouts this window is wearing is a
+    // fact about the design. The window can change layout without relaunching,
+    // and [`WindowButtonsWatch::follow_the_band`] is how the buttons follow.
+    centre_window_buttons(&ns_window, bar_logical_px, pitch);
+    let Some(chrome) = measure_window_chrome(&ns_window, mtm) else {
+        return Ok((crate::PlatformChrome::FOLIO_DRAWS_THE_WHOLE_BAR, None));
+    };
+    let watch = WindowButtonsWatch::install(&ns_window, bar_logical_px, pitch, chrome, wake);
+    Ok((chrome, Some(watch)))
+}
+
+/// **What the platform is drawing in this window's bar, right now** — the whole
+/// of [`crate::PlatformChrome`], measured off the live window.
+///
+/// `None` for a window that has no standard buttons at all: a style mask with no
+/// title bar in it answers `nil` three times, and the honest answer for that
+/// window is [`crate::PlatformChrome::FOLIO_DRAWS_THE_WHOLE_BAR`] — the same
+/// answer Windows gives, which is what keeps the whole thing a capability rather
+/// than a platform name.
+///
+/// **A window that has the buttons but is not showing them is a third answer,
+/// and it is not `None`** (owner ruling 2026-09-13, §13.48). In full screen
+/// macOS takes the three lights off the window until the pointer reaches the top
+/// edge; the header stays, so the band is unchanged, but the leading run is
+/// gone. That window's honest answer is a run with a height and no width, and
+/// [`button_stands_in_this_window`] is where the difference is read. Answering `None`
+/// there would say the platform draws nothing in this bar at all, which would
+/// take the band with it and stand the panes eight points too high.
+fn measure_window_chrome(
+    ns_window: &NSWindow,
+    mtm: MainThreadMarker,
+) -> Option<crate::PlatformChrome> {
     // The three are asked for individually rather than assumed to be in order:
     // a window may carry any subset of them, and what the strip has to clear is
     // whichever of them is furthest right. Their frames are in the frame view's
     // own space, whose origin is the window's leading edge, so `maxX` is
     // already the inset measured from there.
-    let inset = [
-        NSWindowButton::CloseButton,
-        NSWindowButton::MiniaturizeButton,
-        NSWindowButton::ZoomButton,
-    ]
-    .into_iter()
-    .filter_map(|which| ns_window.standardWindowButton(which))
-    .map(|button| {
-        let frame = button.frame();
-        frame.origin.x + frame.size.width
-    })
-    .fold(None, |best: Option<f64>, edge| {
-        Some(best.map_or(edge, |best| best.max(edge)))
-    });
-    let Some(inset) = inset else {
-        return Ok((crate::PlatformChrome::FOLIO_DRAWS_THE_WHOLE_BAR, None));
-    };
-    // **Both of the run's numbers are taken before a single button moves.**
-    // The inset is an `x` and only `y` changes below (T-MAC-PILL's ordering
-    // note), and the band is arithmetic on a style mask rather than a rectangle
-    // off this window (T-MAC-LIGHTS), so neither reading depends on the
-    // placement — which is what keeps the two numbers `bt-app` reads honest
-    // even on a window whose buttons AppKit has just put back.
-    let band = title_bar_height(&ns_window, mtm);
-    // **And the band the buttons are placed on is the band the window wears**
-    // (the owner's two rulings of 2026-09-12 read together). `bar_logical_px` is
-    // the caller's, because which of its layouts this window is wearing is a
-    // fact about the design: 40 while Folio's tab strip stands in this bar, and
-    // the platform's own band — the very number just measured — in every layout
-    // that puts its tab list down the side, where `(32 - 14) / 2` is the 9 macOS
-    // itself would have used. The window can change layout without relaunching,
-    // and [`WindowButtonsWatch::follow_the_band`] is how the buttons follow.
-    centre_window_buttons(&ns_window, bar_logical_px);
-    let watch = WindowButtonsWatch::install(&ns_window, bar_logical_px);
-    Ok((platform_chrome_of(inset, band, scale), Some(watch)))
+    let buttons: Vec<Retained<NSButton>> = STANDARD_WINDOW_BUTTONS
+        .into_iter()
+        .filter_map(|which| ns_window.standardWindowButton(which))
+        .collect();
+    if buttons.is_empty() {
+        return None;
+    }
+    let inset = buttons
+        .iter()
+        .filter(|button| button_stands_in_this_window(button, ns_window))
+        .map(|button| {
+            let frame = button.frame();
+            frame.origin.x + frame.size.width
+        })
+        .fold(0.0_f64, f64::max);
+    let band = title_bar_height(ns_window, mtm);
+    Some(platform_chrome_of(
+        inset,
+        band,
+        ns_window.backingScaleFactor(),
+    ))
+}
+
+/// **Whether one of those buttons is standing at this window's leading edge**
+/// (§13.48).
+///
+/// Asked of the view and not of the window's full-screen bit, because what the
+/// strip needs to know is whether there is anything at its head to stand clear
+/// of, and that is a fact about the button. Three ways it can fail to be, and
+/// they are three different things AppKit does rather than one written three
+/// times:
+///
+/// * **It is out of the view tree** — `superview` is `nil`.
+/// * **It is hidden, or something above it is.** `isHiddenOrHasHiddenAncestor`
+///   is AppKit's own name for the pair: the three live inside a title-bar
+///   container, and a container that is hidden hides them without any of them
+///   carrying the flag itself.
+/// * **It is in a different window.** Going full screen is AppKit moving the
+///   title bar into a window of its own, above the screen's top edge, and a
+///   button that has gone there is not at the leading edge of *this* window
+///   however visible it is in that one. This is the case the measurement is
+///   really about, and it is the one a `isHidden` check alone would miss.
+fn button_stands_in_this_window(button: &NSView, ns_window: &NSWindow) -> bool {
+    // SAFETY: a view's own superview, asked on the window's thread — the marker
+    // every door in this file passes through. The call is `unsafe` in these
+    // bindings because `NSView` is main-thread-only, which is the condition this
+    // module has already proved.
+    if unsafe { button.superview() }.is_none() {
+        return false;
+    }
+    if button.isHiddenOrHasHiddenAncestor() {
+        return false;
+    }
+    button.window().is_some_and(|host| &*host == ns_window)
 }
 
 /// **How tall the bar those buttons stand in is** (T-MAC-LIGHTS) — asked of
@@ -1178,9 +1240,15 @@ fn title_bar_height(ns_window: &NSWindow, mtm: MainThreadMarker) -> f64 {
 /// A function of three measurements rather than three lines inside
 /// [`adopt_window_chrome`], because the pair is a claim that can be checked:
 /// the run has a width and a height, both are this window's own numbers at this
-/// window's own backing scale, and a window with a run has both of them or it is
+/// window's own backing scale, and a window with a run has a band or it is
 /// [`crate::PlatformChrome::FOLIO_DRAWS_THE_WHOLE_BAR`] — there is no window
 /// whose buttons occupy a band of no height.
+///
+/// **The other way round is a state and not a contradiction** (§13.48): a run of
+/// no width in a band that has one is the window in full screen, where macOS has
+/// taken the three lights away and left the header. That window still has a
+/// band for Folio's header to be, and nothing at its leading edge to stand clear
+/// of.
 fn platform_chrome_of(inset: f64, band: f64, scale: f64) -> crate::PlatformChrome {
     crate::PlatformChrome {
         // Up and not to nearest: the strip may begin one pixel clear of the
@@ -1194,22 +1262,40 @@ fn platform_chrome_of(inset: f64, band: f64, scale: f64) -> crate::PlatformChrom
     }
 }
 
-/// **Put the three traffic lights on the axis of Folio's own strip** (T-MAC-PILL,
-/// owner ruling 2026-09-12).
+/// **Put the three traffic lights on the axis of Folio's own strip, and the red
+/// one on the window corner's diagonal** (T-MAC-PILL, owner ruling 2026-09-12;
+/// the horizontal half is the owner's ruling of 2026-09-13, `docs/DESIGN.md`
+/// §13.48, off `docs/plans/port/corners-2026-09-13.md`).
 ///
 /// macOS sizes its window buttons for a 32-point title bar: a 14-point button
 /// with nine points of air above and below it, centred at y 16. Folio's strip is
 /// **40** points tall, and the tabs on it are pills centred at y 20. Three
 /// buttons sitting four points high of everything beside them is the one thing
 /// the reader would see before anything else in that bar, so the buttons move to
-/// the strip's axis — top at 13, centre at 20 — and nothing else about them
-/// changes.
+/// the strip's axis — top at 13, centre at 20.
 ///
-/// **Only `y` moves.** The x positions are macOS's own (9, 32, 55 on this
-/// release) and are not restated here: a window's buttons standing at a
-/// different horizontal rhythm from every other window's is a different bug from
-/// the one this fixes, and `strip_left_px` is measured off wherever they
-/// actually are.
+/// **And then the leading edge, which is one line of arithmetic and a ruling.**
+/// The shipping window's corner is rounded at 12.1 points, so the corner circle's
+/// centre is near `(12, 12)` and the corner's own 45° line is `x = y`. A button
+/// already 20 down is on that line when it is 20 across — so the red light's
+/// centre is `(20, 20)` and **its left air is its top air**. That identity *is*
+/// the rule, and it is why there is no second number here: `above` is computed
+/// once and used on both axes. On the 40-point strip it is 13; on a 32-point
+/// band it is 9, which is where macOS itself had them, so a window wearing that
+/// band needs no exception.
+///
+/// **The other two keep macOS's own pitch, read before anything moved.** The
+/// caller hands in the offsets the three buttons stood at when the window was
+/// first taken over ([`read_button_pitch`]), so miniaturize and zoom keep the 23
+/// points AppKit spaced them by rather than a 23 written down here — and the
+/// pitch cannot drift, because it is read once and never re-read off buttons
+/// this function has already moved. At the standard metrics the run becomes
+/// **13 / 36 / 59** and ends at 73.
+///
+/// **`strip_left_px` is measured after this runs, and that ordering is now
+/// load-bearing.** It was not while only `y` moved — the inset is an `x` — and
+/// `adopt_window_chrome` places the buttons before it asks the window what they
+/// occupy.
 ///
 /// **Measured against the view they are in, and the view decides its own axis.**
 /// A button's frame is in its superview's coordinates — `NSTitlebarView`, whose
@@ -1221,23 +1307,22 @@ fn platform_chrome_of(inset: f64, band: f64, scale: f64) -> crate::PlatformChrom
 /// At the standard metrics the button lands 13..27 inside a 32-point bar, so it
 /// is moved four points down and still stands wholly inside the view it is in —
 /// which is why this is a move rather than `NSTitlebarContainerView`-resizing
-/// surgery.
+/// surgery. The same is true across: the run ends at 73 inside a view that is
+/// the window's whole width.
 ///
-/// **The band is the caller's, and "centred on it" is the whole rule for both
-/// of this window's bars** (T-MAC-PILL × T-MAC-LIGHTS, the owner's rulings of
-/// 2026-09-12 read together). Folio's own strip is 40 and puts the button at
-/// `(40 - 14) / 2 = 13`; every vertical layout wears a header of the platform's
-/// own height instead, and 32 puts it back at `(32 - 14) / 2 = 9`, which is
-/// where macOS had it. So the vertical layouts need no second arm here and no
-/// exception: they are this arithmetic given the other number. Which number a
-/// window is wearing can change while it is open, and
-/// [`WindowButtonsWatch::follow_the_band`] is the door that says so.
-fn centre_window_buttons(ns_window: &NSWindow, bar_logical_px: f64) {
-    for which in [
-        NSWindowButton::CloseButton,
-        NSWindowButton::MiniaturizeButton,
-        NSWindowButton::ZoomButton,
-    ] {
+/// **The band is the caller's, and "centred on it" is the whole rule** (T-MAC-PILL
+/// × T-MAC-LIGHTS, the owner's rulings of 2026-09-12, amended 2026-09-13 —
+/// `docs/DESIGN.md` §13.48). Folio's own header is 40 and puts the button at
+/// `(40 - 14) / 2 = 13`, four points below where macOS had it, and it is 40 in
+/// every layout: the vertical ones wore the platform's own 32 for a day and the
+/// owner ruled that a header shorter than the strip it replaces is two different
+/// windows. So there is no second arm here and no exception — there is one
+/// number, and this is the arithmetic it goes through. It remains the caller's
+/// and remains a door rather than an argument to `install`, because which header
+/// a window wears is a fact about the design and
+/// [`WindowButtonsWatch::follow_the_band`] is where the design says it.
+fn centre_window_buttons(ns_window: &NSWindow, bar_logical_px: f64, pitch: ButtonPitch) {
+    for (index, which) in STANDARD_WINDOW_BUTTONS.into_iter().enumerate() {
         let Some(button) = ns_window.standardWindowButton(which) else {
             continue;
         };
@@ -1249,15 +1334,13 @@ fn centre_window_buttons(ns_window: &NSWindow, bar_logical_px: f64) {
             continue;
         };
         let frame = button.frame();
-        // The air above the button when the button is centred on the strip:
-        // (40 - 14) / 2 = 13 at the standard metrics. Rounded, so a bar of odd
-        // height puts the button on a whole point rather than half of one.
-        let above = ((bar_logical_px - frame.size.height) / 2.0).round();
+        let above = button_air(bar_logical_px, frame.size.height);
         let y = if host.isFlipped() {
             above
         } else {
             host.bounds().size.height - above - frame.size.height
         };
+        let x = above + pitch.0[index];
         // **Written only when it is not already there** (measured 2026-09-12,
         // at the merge with T-MAC-LIGHTS). This runs from `NSWindowDidUpdate`
         // as well now, and a frame *set* inside an update is a reason for
@@ -1265,10 +1348,55 @@ fn centre_window_buttons(ns_window: &NSWindow, bar_logical_px: f64) {
         // as long as it was on screen. Comparing first makes the common case —
         // the buttons are already where this puts them — cost three reads and
         // write nothing, which is what ends the chase.
-        if (frame.origin.y - y).abs() > 0.01 {
-            button.setFrameOrigin(NSPoint::new(frame.origin.x, y));
+        if (frame.origin.y - y).abs() > 0.01 || (frame.origin.x - x).abs() > 0.01 {
+            button.setFrameOrigin(NSPoint::new(x, y));
         }
     }
+}
+
+/// The three, in the order macOS lays them out, named once.
+const STANDARD_WINDOW_BUTTONS: [NSWindowButton; 3] = [
+    NSWindowButton::CloseButton,
+    NSWindowButton::MiniaturizeButton,
+    NSWindowButton::ZoomButton,
+];
+
+/// **The air a button of this height keeps from the bar it stands in** — and it
+/// is one number for both axes, which is the whole of the owner's 2026-09-13
+/// ruling (§13.48).
+///
+/// `(40 - 14) / 2 = 13` at the standard metrics on Folio's own strip, `(32 - 14)
+/// / 2 = 9` on the platform's own band. Rounded, so a bar of odd height puts the
+/// button on a whole point rather than half of one.
+///
+/// Pure, and separated from the placement for the reason every other pure half
+/// in this file is separated: it is the part that can be wrong without a window.
+fn button_air(bar_logical_px: f64, button_height: f64) -> f64 {
+    ((bar_logical_px - button_height) / 2.0).round()
+}
+
+/// **How far apart macOS itself spaced this window's buttons**, as offsets from
+/// the leading one (§13.48).
+///
+/// Read **once**, before this product moves anything, and carried from there: a
+/// pitch re-read off buttons that have already been placed is a pitch that
+/// drifts every time the placement is re-stated, and the placement is re-stated
+/// on six notifications. `0` for a button this window does not carry, which is
+/// also the offset the leading one has.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ButtonPitch([f64; 3]);
+
+fn read_button_pitch(ns_window: &NSWindow) -> ButtonPitch {
+    let xs = STANDARD_WINDOW_BUTTONS.map(|which| {
+        ns_window
+            .standardWindowButton(which)
+            .map(|b| b.frame().origin.x)
+    });
+    let lead = xs.iter().flatten().copied().fold(f64::INFINITY, f64::min);
+    if !lead.is_finite() {
+        return ButtonPitch::default();
+    }
+    ButtonPitch(xs.map(|x| x.map_or(0.0, |x| x - lead)))
 }
 
 /// **The re-application, because AppKit puts them back** (T-MAC-PILL).
@@ -1308,43 +1436,91 @@ fn centre_window_buttons(ns_window: &NSWindow, bar_logical_px: f64) {
 /// window opened with would spend the rest of the session dragging the buttons
 /// back to the bar the window no longer has. [`Self::follow_the_band`] is the
 /// one writer.
+///
+/// **And on two of those events the measurement itself has changed** (owner
+/// ruling 2026-09-13, §13.48). Entering and leaving full screen is the one
+/// transition in which macOS takes the three lights off this window and gives
+/// them back, and `PlatformChrome` is the sentence "what the platform is drawing
+/// in this bar" — so on those two, and only those two, the watch measures the
+/// window again and tells the application to lay its bar out against the new
+/// answer. Every other event in the list re-states a placement and changes
+/// nothing that was measured.
 pub struct WindowButtonsWatch {
     observer: Retained<WindowButtonsObserver>,
 }
 
 impl WindowButtonsWatch {
-    fn install(ns_window: &NSWindow, bar_logical_px: f64) -> Self {
+    fn install(
+        ns_window: &NSWindow,
+        bar_logical_px: f64,
+        pitch: ButtonPitch,
+        chrome: crate::PlatformChrome,
+        wake: Box<dyn Fn()>,
+    ) -> Self {
         let observer = WindowButtonsObserver::new(WindowButtonsPlacement {
             window: ns_window.retain(),
             bar_logical_px: Cell::new(bar_logical_px),
+            pitch,
+            chrome: Cell::new(chrome),
+            wake,
         });
         let centre = NSNotificationCenter::defaultCenter();
         // SAFETY: AppKit's own notification names, read the way the other
         // subscription in this file reads `NSWorkspace`'s — constants in the
         // framework this process is linked against, never written by anybody.
-        let names = unsafe {
+        //
+        // The two full-screen names carry the other selector, which re-measures
+        // the window before it re-states the placement: they are the transition
+        // in which what was measured has moved. One registration each rather
+        // than both selectors on both names, so every notification costs exactly
+        // one pass over three buttons.
+        let placements = unsafe {
             [
                 NSWindowDidResizeNotification,
-                NSWindowDidExitFullScreenNotification,
-                NSWindowDidEnterFullScreenNotification,
                 NSWindowDidBecomeKeyNotification,
                 NSWindowDidResignKeyNotification,
                 NSWindowDidUpdateNotification,
             ]
         };
-        for name in names {
+        let measurements = unsafe {
+            [
+                NSWindowDidEnterFullScreenNotification,
+                NSWindowDidExitFullScreenNotification,
+            ]
+        };
+        for (name, selector) in placements
+            .into_iter()
+            .map(|name| (name, sel!(folioWindowButtonsNeedCentring:)))
+            .chain(
+                measurements
+                    .into_iter()
+                    .map(|name| (name, sel!(folioWindowChromeChanged:))),
+            )
+        {
             // SAFETY: the observer outlives every registration — `Drop` below
             // removes it first — and it answers the selector named here.
             unsafe {
                 centre.addObserver_selector_name_object(
                     &observer,
-                    sel!(folioWindowButtonsNeedCentring:),
+                    selector,
                     Some(name),
                     Some(ns_window),
                 );
             }
         }
         Self { observer }
+    }
+
+    /// **What the platform is drawing in this window's bar, as this watch last
+    /// measured it** (§13.48).
+    ///
+    /// The live number, and the reason the frame keeps no second copy: a window
+    /// that has entered full screen has a different answer from the one taken at
+    /// `install`, and two copies of it would be the window drawing its strip
+    /// against one and hit-testing it against the other.
+    #[must_use]
+    pub fn chrome(&self) -> crate::PlatformChrome {
+        self.observer.ivars().chrome.get()
     }
 
     /// **This window wears a different band now** (T-MAC-LIGHTS × T-MAC-PILL,
@@ -1363,7 +1539,7 @@ impl WindowButtonsWatch {
     pub fn follow_the_band(&self, band_logical_px: f64) {
         let placement = self.observer.ivars();
         placement.bar_logical_px.set(band_logical_px);
-        centre_window_buttons(&placement.window, band_logical_px);
+        centre_window_buttons(&placement.window, band_logical_px, placement.pitch);
     }
 }
 
@@ -1384,6 +1560,19 @@ impl Drop for WindowButtonsWatch {
 struct WindowButtonsPlacement {
     window: Retained<NSWindow>,
     bar_logical_px: Cell<f64>,
+    /// **The spacing macOS gave this window's buttons**, read before any of them
+    /// was moved (§13.48). Not a `Cell`: it is a fact about the platform's own
+    /// layout of this window and nothing that happens later can change it.
+    pitch: ButtonPitch,
+    /// **What the platform is drawing in this window's bar** (§13.48), kept here
+    /// for the reason the band is: it changes while the window is open, and this
+    /// is the one object that hears about it. A `Cell` and no lock, for the same
+    /// reason — every reader and the one writer are on the window's own thread.
+    chrome: Cell<crate::PlatformChrome>,
+    /// How this observer asks the event loop for a turn. All an AppKit callback
+    /// may do (X-4): the measurement above is a read of AppKit's own state on
+    /// AppKit's own thread, and laying a window's bar out again is the loop's.
+    wake: Box<dyn Fn()>,
 }
 
 define_class!(
@@ -1400,7 +1589,43 @@ define_class!(
         #[unsafe(method(folioWindowButtonsNeedCentring:))]
         fn buttons_need_centring(&self, _notification: Option<&NSNotification>) {
             let placement = self.ivars();
-            centre_window_buttons(&placement.window, placement.bar_logical_px.get());
+            centre_window_buttons(
+                &placement.window,
+                placement.bar_logical_px.get(),
+                placement.pitch,
+            );
+        }
+
+        /// **This window has just gone into full screen or come back out of
+        /// it**, which is the transition in which macOS takes its three window
+        /// buttons away and gives them back (§13.48).
+        ///
+        /// So the measurement is taken again — the band is unchanged and the
+        /// leading run is not — and the application is asked for a turn, because
+        /// the run it leads its strip in by has just moved and nothing else on
+        /// this window is going to happen to make it draw. The placement is
+        /// re-stated too, exactly as the other four notifications do it: this is
+        /// one of the events AppKit lays the bar out on, and the buttons coming
+        /// back come back on macOS's own axis.
+        #[unsafe(method(folioWindowChromeChanged:))]
+        fn chrome_changed(&self, _notification: Option<&NSNotification>) {
+            let placement = self.ivars();
+            let Some(mtm) = MainThreadMarker::new() else {
+                return;
+            };
+            // Placed first and measured second, which is `adopt_window_chrome`'s
+            // own order and for its reason (§13.48): the inset this reports is
+            // where the buttons end up, and coming out of full screen AppKit has
+            // just put them back on its own axis.
+            centre_window_buttons(
+                &placement.window,
+                placement.bar_logical_px.get(),
+                placement.pitch,
+            );
+            if let Some(chrome) = measure_window_chrome(&placement.window, mtm) {
+                placement.chrome.set(chrome);
+            }
+            (placement.wake)();
         }
     }
 
@@ -1757,6 +1982,99 @@ mod tests {
         // begin one pixel clear of it, never one pixel inside it.
         let fractional = platform_chrome_of(68.5, 31.5, 1.0);
         assert_eq!((fractional.strip_left_px, fractional.band_px), (69, 32));
+    }
+
+    /// **RED — the red light's centre lands on the window corner's diagonal, and
+    /// the other two keep macOS's own pitch** (owner ruling 2026-09-13, §13.48).
+    ///
+    /// The rule is an identity rather than a pair of numbers: the air a button
+    /// keeps from the top of the bar is the air the leading one keeps from the
+    /// leading edge, so its centre sits on `x = y` — the 45° line of a corner
+    /// rounded at 12.1 points, whose circle centres near `(12, 12)`. On Folio's
+    /// 40-point strip that is 13, so the light's centre is `(20, 20)`; on the
+    /// platform's own 32-point band it is 9, which is where macOS had it, and
+    /// that is why there is no second arm in the placement.
+    ///
+    /// The pitch is asserted as *macOS's own* and not as 23: `read_button_pitch`
+    /// takes the offsets off a window nothing has moved, and this asserts that
+    /// whatever they were they are carried, which is the difference between a
+    /// run that follows the platform and a run that restates a number measured
+    /// on one release.
+    ///
+    /// MUTATION: leave `origin.x` alone and the first triple goes red; write 23
+    /// here instead of carrying the pitch and the last assertion does; use the
+    /// bar's *width* anywhere in `button_air` and the 32-point case does.
+    #[test]
+    fn the_leading_light_sits_on_the_corners_diagonal_and_the_rest_keep_the_pitch() {
+        // macOS 26.6's own layout, measured 2026-09-12 (§13.11): 9 / 32 / 55,
+        // 14 across, a pitch of 23.
+        let pitch = ButtonPitch([0.0, 23.0, 46.0]);
+        let place = |bar: f64| {
+            let air = button_air(bar, 14.0);
+            [air + pitch.0[0], air + pitch.0[1], air + pitch.0[2]]
+        };
+        assert_eq!(
+            place(40.0),
+            [13.0, 36.0, 59.0],
+            "on Folio's own strip the run is 13 / 36 / 59 and ends at 73"
+        );
+        assert_eq!(
+            button_air(40.0, 14.0),
+            20.0 - 14.0 / 2.0,
+            "which is the same air the button keeps from the top, so its centre \
+             is (20, 20) — the corner's own diagonal"
+        );
+        assert_eq!(
+            place(32.0),
+            [9.0, 32.0, 55.0],
+            "and on the platform's own band it is where macOS itself had them"
+        );
+        // A bar of odd height puts the button on a whole point, not half of one.
+        assert_eq!(button_air(41.0, 14.0), 14.0);
+        // Whatever the pitch was, it is the pitch that is carried.
+        let other = ButtonPitch([0.0, 20.0, 40.0]);
+        let air = button_air(40.0, 14.0);
+        assert_eq!(
+            [air + other.0[0], air + other.0[1], air + other.0[2]],
+            [13.0, 33.0, 53.0],
+            "the spacing is read off the window and not written down here"
+        );
+    }
+
+    /// **RED — a window whose buttons have been taken off it still has a band**
+    /// (owner ruling 2026-09-13, §13.48).
+    ///
+    /// Full screen is macOS withdrawing the three traffic lights until the
+    /// pointer reaches the top edge, and leaving the header they stood in. The
+    /// measurement that comes out of that window is a run with a height and no
+    /// width, and it is *not* `FOLIO_DRAWS_THE_WHOLE_BAR`: the buttons are still
+    /// this window's, and the header is still there to be drawn in. What changes
+    /// is that nothing stands at the leading edge for Folio's first control to
+    /// keep clear of.
+    ///
+    /// MUTATION: answer the withdrawn window with `FOLIO_DRAWS_THE_WHOLE_BAR`
+    /// and the band goes to zero here; keep the inset of a button that is off
+    /// the screen and the first assertion does.
+    #[test]
+    fn a_window_whose_buttons_are_withdrawn_keeps_its_band() {
+        let withdrawn = platform_chrome_of(0.0, 32.0, 2.0);
+        assert_eq!(
+            withdrawn.strip_left_px, 0,
+            "there is nothing at the leading edge to stand clear of"
+        );
+        assert_eq!(
+            withdrawn.band_px, 64,
+            "and the header the buttons stood in is still the header"
+        );
+        assert!(
+            withdrawn.buttons_are_the_platforms,
+            "they are still this window's buttons; they are off the screen"
+        );
+        assert_ne!(
+            withdrawn,
+            crate::PlatformChrome::FOLIO_DRAWS_THE_WHOLE_BAR,
+            "which is a different window from one that never had any"
+        );
     }
 
     /// The rectangle a window reports and the rectangle winit reports are the
