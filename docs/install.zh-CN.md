@@ -15,7 +15,7 @@
 
 ## macOS
 
-从同一[发布页](https://github.com/lulu-loopp/folio-terminal/releases)下载 `Folio-<version>-macos-arm64.dmg`，打开后将 **Folio** 拖入 Applications。需要 **Apple silicon Mac，macOS 14 及以上**；当前预览版无 Intel 构建。`SHA256SUMS.txt` 是下载文件的校验和。
+从同一[发布页](https://github.com/lulu-loopp/folio-terminal/releases)下载 `Folio-<version>-macos-arm64.dmg`，打开后将 **Folio** 拖入 Applications。需要 **Apple silicon Mac，macOS 14 及以上**；当前预览版无 Intel 构建。`SHA256SUMS-macos.txt` 是下载文件的校验和。
 
 也可以用 [Homebrew](https://brew.sh)：
 

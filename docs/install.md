@@ -32,7 +32,7 @@ everything except the web preview works, and the preview says what is missing.
 Take `Folio-<version>-macos-arm64.dmg` from the same
 [releases page](https://github.com/lulu-loopp/folio-terminal/releases), open it,
 and drag **Folio** to Applications. Needs an **Apple silicon Mac running macOS 14
-or newer**; there is no Intel build in this preview. `SHA256SUMS.txt` is the hash
+or newer**; there is no Intel build in this preview. `SHA256SUMS-macos.txt` is the hash
 of what you downloaded.
 
 Or, with [Homebrew](https://brew.sh):
