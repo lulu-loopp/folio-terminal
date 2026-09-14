@@ -333,6 +333,7 @@ version = "0.4.0"
 dependencies = [
  "bt-doc",
  "mitex",
+ "mitex-lexer",
  "mitex-spec-gen",
  "resvg",
  "serde",

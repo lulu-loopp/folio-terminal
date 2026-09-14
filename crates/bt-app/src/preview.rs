@@ -2377,13 +2377,12 @@ pub fn parse_markdown_mapped(
             continue;
         }
 
-        // ── display mathematics, which swallows its lines as a fence does ───
-        //
-        // **After the fence and before everything else.** A `$$` inside a fence
-        // is a fence's business and the branch above has already taken it; a
-        // `$$` anywhere else is the author opening a formula, and nothing below
-        // may see those lines as prose, as a rule or as a table.
-        if let Some(rest) = line.strip_prefix("$$") {
+        // Display math is recognized after code fences. A closer ends the
+        // formula even with prose after it; an unfinished block cannot cross a
+        // blank line. An empty same-line pair is ordinary text, not an opener.
+        if let Some(rest) = line.strip_prefix("$$").filter(|rest| {
+            find_unescaped(rest, "$$", 0).is_none_or(|close| !rest[..close].trim().is_empty())
+        }) {
             flush_paragraph(&mut paragraph, &mut paragraph_lines, &mut out);
             flush_list(
                 &mut list,
@@ -2392,46 +2391,37 @@ pub fn parse_markdown_mapped(
                 &mut list_lines,
                 &mut out,
             );
-            index += 1;
-            let mut body: Vec<&str> = Vec::new();
-            // `$$E = mc^2$$` — opened and closed on one line. Asked of the line
-            // with its trailing space gone, because a delimiter followed by
-            // nothing but blanks is still the last thing on the line.
-            match rest.trim_end().strip_suffix("$$") {
-                Some(inner) if !inner.trim().is_empty() => body.push(inner.trim()),
-                _ => {
-                    // Whatever the opener carried after its delimiter is the
-                    // formula's first line: `$$\begin{aligned}` is one way to
-                    // write what `$$` on a line of its own writes in two.
-                    if !rest.trim().is_empty() {
-                        body.push(rest.trim());
+            let mut body = Vec::new();
+            let mut part = rest;
+            let tail = loop {
+                index += 1;
+                if let Some(close) = find_unescaped(part, "$$", 0) {
+                    if !part[..close].trim().is_empty() {
+                        body.push(part[..close].trim());
                     }
-                    while index < lines.len() {
-                        let line = lines[index];
-                        index += 1;
-                        let Some(head) = line.trim_end().strip_suffix("$$") else {
-                            body.push(line);
-                            continue;
-                        };
-                        if !head.trim().is_empty() {
-                            body.push(head.trim());
-                        }
-                        break;
-                    }
-                    // A formula nobody closed still renders, rather than
-                    // swallowing the rest of the document in silence — the same
-                    // ruling the unterminated fence above is decided by.
+                    break Some(&part[close + 2..]);
                 }
-            }
+                if !part.trim().is_empty() {
+                    body.push(if index == at + 1 { part.trim() } else { part });
+                }
+                let Some(next) = lines.get(index).filter(|line| !line.trim().is_empty()) else {
+                    break None;
+                };
+                part = next;
+            };
             let origins = math_origins(&body, &out);
-            out.push_lines(
-                MarkdownBlock::Math {
-                    source: body.join("\n"),
-                },
-                at,
-                index - 1,
-                origins,
-            );
+            let block = MarkdownBlock::Math {
+                source: body.join("\n"),
+            };
+            if let Some(tail) = tail.filter(|tail| !tail.trim().is_empty()) {
+                // Display math owns its delimiters; prose owns the rest of the
+                // line and joins later prose normally. Their ranges never overlap.
+                out.push(block, out.line_start(at)..out.offset_of(tail), origins);
+                paragraph.push(tail);
+                paragraph_lines.push(index - 1);
+            } else {
+                out.push_lines(block, at, index - 1, origins);
+            }
             continue;
         }
 
@@ -2787,13 +2777,12 @@ struct ParagraphSource {
 }
 
 impl ParagraphSource {
-    fn new(paragraph: &[&str], at: &[usize], out: &RangedBlocks, span: Range<usize>) -> Self {
+    fn new(paragraph: &[&str], out: &RangedBlocks, span: Range<usize>) -> Self {
         let mut lines = Vec::with_capacity(paragraph.len());
         let mut joined = 0usize;
-        for (line, index) in paragraph.iter().zip(at) {
+        for line in paragraph {
             let text = line.trim();
-            let indent = line.len() - line.trim_start().len();
-            lines.push((joined, text.len(), out.line_start(*index) + indent));
+            lines.push((joined, text.len(), out.offset_of(text)));
             // The single space [`join_source_lines`] puts between two lines.
             joined += text.len() + 1;
         }
@@ -2854,14 +2843,9 @@ impl ParagraphSource {
 /// be wrong in prose about markdown far more often than it was right in prose
 /// about physics.
 ///
-/// **Bounded by the paragraph, which is the one place this parts company with
-/// `$$`.** An unclosed `$$` swallows the rest of the document and draws it,
-/// because a `$$` standing first on a line is not something prose contains by
-/// accident. A `\[` is — see above — and so the partner has to turn up before
-/// the blank line that ends this paragraph; if it does not, nothing here was
-/// mathematics and every line of it stays prose. Nothing is lost by the bound: a
-/// formula with a blank line through the middle of it is not a formula TeX would
-/// set either.
+/// Like `$$`, these forms cannot cross a blank line. Unlike `$$`, an
+/// unfinished backslash form stays prose: `\[` is also a CommonMark escape.
+/// The existing dollar form still offers its unfinished body to the renderer.
 fn display_math_block(
     lines: &[&str],
     start: usize,
@@ -3202,16 +3186,11 @@ fn join_source_lines(lines: &[&str]) -> String {
 }
 
 fn flush_paragraph(paragraph: &mut Vec<&str>, at: &mut Vec<usize>, out: &mut RangedBlocks) {
-    let (Some(first), Some(last)) = (at.first().copied(), at.last().copied()) else {
+    let (Some(first), Some(last)) = (paragraph.first(), at.last().copied()) else {
         return;
     };
     let text = join_source_lines(paragraph);
-    let source = ParagraphSource::new(
-        paragraph,
-        at,
-        out,
-        out.line_start(first)..out.line_end(last),
-    );
+    let source = ParagraphSource::new(paragraph, out, out.offset_of(first)..out.line_end(last));
     paragraph.clear();
     at.clear();
     let mut images = Vec::new();
@@ -9713,6 +9692,68 @@ mod tests {
         );
     }
 
+    #[test]
+    fn display_math_tail_and_heading_keep_their_own_blocks_and_ranges() {
+        for newline in ["\n", "\r\n"] {
+            let src = format!("$$x$$ **tail**{newline}{newline}# Heading{newline}");
+            let (blocks, ranges, origins) = parse_markdown_mapped(&src);
+            assert!(matches!(&blocks[0], MarkdownBlock::Math { source } if source == "x"));
+            assert!(
+                matches!(&blocks[1], MarkdownBlock::Paragraph(spans) if spans[0].text == "tail")
+            );
+            assert!(matches!(&blocks[2], MarkdownBlock::Heading { .. }));
+            assert_eq!(&src[ranges[0].clone()], "$$x$$");
+            assert_eq!(&src[ranges[1].clone()], format!(" **tail**{newline}"));
+            assert_eq!(&src[ranges[2].clone()], format!("# Heading{newline}"));
+            assert_eq!(
+                origins[1].pieces[0].origin_of(0),
+                Some(crate::preview_provenance::Origin::File(
+                    src.find("tail").unwrap()
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn display_math_tail_joins_following_prose_and_keeps_escaped_dollars() {
+        let src = "$$x\\$$+1$$ tail\ncontinued\n\n# Heading\n";
+        let (blocks, ranges) = parse_markdown_ranged(src);
+        assert_eq!(
+            blocks[0],
+            MarkdownBlock::Math {
+                source: r"x\$$+1".to_owned()
+            }
+        );
+        assert_eq!(
+            blocks[1],
+            MarkdownBlock::Paragraph(vec![Span::plain("tail continued")])
+        );
+        assert!(matches!(blocks[2], MarkdownBlock::Heading { .. }));
+        assert_eq!(&src[ranges[1].clone()], " tail\ncontinued\n");
+    }
+
+    #[test]
+    fn empty_display_dollars_are_text() {
+        let blocks = parse_markdown("$$$$\n\n# Heading\n");
+        assert_eq!(
+            blocks[0],
+            MarkdownBlock::Paragraph(vec![Span::plain("$$$$")])
+        );
+        assert!(matches!(blocks[1], MarkdownBlock::Heading { .. }));
+    }
+
+    #[test]
+    fn unfinished_display_math_stops_at_a_blank_line() {
+        let blocks = parse_markdown("$$\nx+1\n  \n# Heading\n");
+        assert_eq!(
+            blocks[0],
+            MarkdownBlock::Math {
+                source: "x+1".to_owned()
+            }
+        );
+        assert!(matches!(blocks[1], MarkdownBlock::Heading { .. }));
+    }
+
     /// PIN (same report) — **a fence is not mathematics**, and neither is a code
     /// span. The structural protection markdown already has is the whole of the
     /// rule: no dollar inside either is ever a delimiter.
@@ -13617,6 +13658,15 @@ mod tests {
         for (name, src) in [
             ("the page", ranged_page()),
             ("the open fence", ranged_open_fence()),
+            (
+                "display math with a tail",
+                "$$x$$ **tail**\ncontinued\n\n# Heading\n".to_owned(),
+            ),
+            ("empty display delimiters", "$$$$\n\n# Heading\n".to_owned()),
+            (
+                "unfinished display math",
+                "$$\nx+1\n\n# Heading\n".to_owned(),
+            ),
             ("nothing at all", String::new()),
             ("one break", "\n".to_owned()),
             ("one word", "word".to_owned()),

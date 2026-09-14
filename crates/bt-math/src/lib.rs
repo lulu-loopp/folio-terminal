@@ -14,6 +14,38 @@ use typst_library::{
     text::{FontBook, FontInfo, FontStyle},
 };
 
+mod macro_budget;
+
+thread_local! {
+    static CONVERTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The app's panic hook must log these panics, then return to the unwind boundary
+/// instead of showing its fatal-error dialog or exiting the process.
+pub fn conversion_panic_is_contained() -> bool {
+    CONVERTING.get()
+}
+
+fn convert_math(source: &str) -> Result<String, MathRenderError> {
+    struct ConversionGuard(bool);
+    impl Drop for ConversionGuard {
+        fn drop(&mut self) {
+            CONVERTING.set(self.0);
+        }
+    }
+    let source = source.to_owned();
+    // MiTeX is a pure conversion over owned input and a cloned immutable spec.
+    // No MathEngine, locks, or caller state enter this closure; unwinding drops
+    // all partial conversion state, so AssertUnwindSafe cannot hide a poisoned
+    // shared invariant. The process hook retains the diagnostic in its log.
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _guard = ConversionGuard(CONVERTING.replace(true));
+        mitex::convert_math(&source, Some(DEFAULT_SPEC.clone()))
+    }))
+    .map_err(|_| MathRenderError::ConversionPanic)?
+    .map_err(|error| MathRenderError::Convert(error.to_string()))
+}
+
 pub const MAX_SOURCE_BYTES: usize = 8 * 1024;
 pub const VERTICAL_PADDING_LOGICAL_PX: u32 = 8;
 /// CPU raster budget. Wide display math is tiled to the GPU's per-axis texture limit later, so
@@ -155,6 +187,14 @@ pub enum MathRenderError {
     UnsafeCommand,
     #[error("math source nesting exceeds 256")]
     NestingTooDeep,
+    #[error("math macro definitions contain a cycle")]
+    MacroCycle,
+    #[error("math macro expansion exceeds the work limit")]
+    MacroExpansionLimit,
+    #[error("math macro definition cannot be bounded safely")]
+    UnboundedMacro,
+    #[error("math conversion could not complete")]
+    ConversionPanic,
     #[error("MiTeX conversion failed: {0}")]
     Convert(String),
     #[error("Typst compilation failed: {0}")]
@@ -190,10 +230,13 @@ pub enum MathFailureStage {
 impl MathRenderError {
     pub fn failure_stage(&self) -> Option<MathFailureStage> {
         match self {
-            Self::SourceTooLong | Self::UnsafeCommand | Self::NestingTooDeep => {
-                Some(MathFailureStage::Validate)
-            }
-            Self::Convert(_) => Some(MathFailureStage::Convert),
+            Self::SourceTooLong
+            | Self::UnsafeCommand
+            | Self::NestingTooDeep
+            | Self::MacroCycle
+            | Self::MacroExpansionLimit
+            | Self::UnboundedMacro => Some(MathFailureStage::Validate),
+            Self::Convert(_) | Self::ConversionPanic => Some(MathFailureStage::Convert),
             Self::Compile(_) | Self::NoPage | Self::Svg(_) | Self::InvalidDimensions => {
                 Some(MathFailureStage::Compile)
             }
@@ -271,8 +314,7 @@ impl MathEngine {
     /// while it is measuring the same document the reader gets.
     fn typeset(&self, source: &str, key: MathRenderKey) -> Result<PagedDocument, MathRenderError> {
         validate_source(source)?;
-        let converted = mitex::convert_math(source, Some(DEFAULT_SPEC.clone()))
-            .map_err(|error| MathRenderError::Convert(error.to_string()))?;
+        let converted = convert_math(source)?;
         let mut inputs = Dict::new();
         inputs.insert(
             "fallback_fonts".into(),
@@ -545,7 +587,7 @@ fn validate_source(source: &str) -> Result<(), MathRenderError> {
             _ => {}
         }
     }
-    Ok(())
+    macro_budget::validate(source)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -943,6 +985,25 @@ fn unpremultiply_srgb_rgba(rgba: &mut [u8]) {
 mod tests {
     use super::*;
     use serde::Deserialize;
+
+    #[test]
+    fn a_conversion_panic_is_a_neutral_refusal_and_clears_its_guard() {
+        assert_eq!(
+            convert_math(r"\newcommand{\a}{#}"),
+            Err(MathRenderError::ConversionPanic)
+        );
+        assert!(!conversion_panic_is_contained());
+        assert_eq!(
+            MathRenderError::ConversionPanic.failure_stage(),
+            Some(MathFailureStage::Convert)
+        );
+        assert!(
+            !MathRenderError::ConversionPanic
+                .to_string()
+                .contains("unwrap")
+        );
+        assert!(convert_math("x+1").is_ok());
+    }
 
     fn key() -> MathRenderKey {
         MathRenderKey {

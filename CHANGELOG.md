@@ -190,6 +190,9 @@ Nothing yet.
   standing in a block of its own, on the live screen and back through the
   scrollback. What it washes is what it copies: cross part of a formula and only
   that part is washed.
+- Keep rendering later formulas when an incomplete macro definition fails during conversion.
+- Refuse recursive macros and excessive macro expansion before they can stall formula rendering.
+- Preserve prose and later headings after display formulas, empty delimiters, and unfinished math blocks.
 - **A table on a focus card lines up again.** A card showing a box-drawing table whose cells hold Chinese text drew its borders in a different place on every row, while the same table in the pane beside it was square. A card's rows are now laid out column by column, as the pane's own grid is, so a wide character takes exactly two columns and a border stands in the same place on every row.
 - **On a Mac, `Edit ▸ Copy` and `Edit ▸ Paste` now act on the pane you are
   looking at.** Over a terminal they did nothing at all — the selection never
