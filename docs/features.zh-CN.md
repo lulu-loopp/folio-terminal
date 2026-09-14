@@ -1,15 +1,8 @@
-<!-- zh: pending -->
-# What Folio does
+# Folio 的功能
 
-<!-- zh: pending -->
-The long version of the front page. [`README.zh-CN.md`](../README.zh-CN.md) is
-the short one; [`install.zh-CN.md`](install.zh-CN.md) is how to get Folio onto a
-machine and what the first run looks like.
+首页的详细版。[`README.zh-CN.md`](../README.zh-CN.md) 是简要版；[`install.zh-CN.md`](install.zh-CN.md) 介绍安装和初次启动。
 
-<!-- zh pending opus46 -->
-The keys named below are the Windows ones. [快捷键](shortcuts.md) has both
-columns: on a Mac an application verb wears **Command** where Windows wears
-**Ctrl**, which is what leaves **Control** to the terminal on both.
+下文列出的快捷键为 Windows 版本。[快捷键](shortcuts.md)中有两列对照：Mac 上应用操作使用 **Command** 而非 **Ctrl**，这样两个平台上 **Control** 都留给了终端。
 
 ## 终端中的 LaTeX 排版
 
@@ -26,7 +19,7 @@ columns: on a Mac an application verb wears **Command** where Windows wears
 - 命令输出中的 `$…$` 和 `$$…$$` 在打印所在行排版。
 - 预览窗格还支持 `\(…\)`、`\[…\]` 和 `amsmath` 环境。
 - 不支持的语法保持原样显示。
-- 行内 `$…$` 通过 PowerShell 整合与 shell 变量区分。未启用整合时行内公式保持原文，`$$…$$` 块仍正常排版。 <!-- zh pending opus46 -->
+- 行内 `$…$` 通过 shell 整合与 shell 变量区分——Windows 上是 PowerShell，Mac 上是 zsh 或 bash。未启用整合时行内公式保持原文，`$$…$$` 块仍正常排版。
 
 ## 为 agent 而设计
 
@@ -41,19 +34,10 @@ columns: on a Mac an application verb wears **Command** where Windows wears
        结束通知选项。">
 </picture>
 
-<!-- zh pending opus46 -->
-- A waiting agent lights a dot on its tab. If another program has the focus,
-  Windows flashes the taskbar and macOS bounces the Dock icon until you come
-  back; if the window is minimised or on another desktop, the machine's own
-  notification is raised. On a Mac the first of those is where macOS asks
-  whether Folio may send notifications — answer it once, and a refusal is
-  reported on the Agent page rather than swallowed.
+- 等待中的 agent 在标签页上亮起一个圆点。其他程序在前台时，Windows 闪烁任务栏按钮，macOS 弹跳 Dock 图标；窗口最小化或在其他桌面时，发送系统通知。Mac 上首次发送通知时 macOS 会询问是否允许——回答一次即可，如果拒绝，Agent 页会显示此状态。
 - 每次请求最多提醒一次，回应后或程序撤回请求后标记消失。`Ctrl+Shift+A` 跳转到等待最久的 agent。
-- Claude Code、Codex 和 GitHub Copilot CLI 在设置的 Agent 页各有一个开关，开启时向对应工具的配置文件写入通知钩子，关闭时移除。默认不安装。 <!-- zh pending opus46 -->
-- Seven profiles start an agent — Claude Code, Codex, Copilot CLI, Kimi Code,
-  pi, Hermes, OpenCode — found on the `PATH`; on Windows, one installed inside
-  WSL is run from the WSL profile. Any program that writes
-  `OSC 1337;RequestAttention=yes` raises the mark.
+- Claude Code、Codex 和 GitHub Copilot CLI 在设置的 Agent 页各有一个开关，开启时向对应工具的配置文件写入通知钩子，关闭时移除。默认不安装。
+- 七个配置自带 agent 启动——Claude Code、Codex、Copilot CLI、Kimi Code、pi、Hermes、OpenCode——在 `PATH` 上查找；Windows 上装在 WSL 内的从 WSL 配置启动。任何程序写入 `OSC 1337;RequestAttention=yes` 即可触发标签页标记。
 
 ## 终端旁的预览：文件、PDF、视频、网页
 
@@ -68,11 +52,8 @@ columns: on a Mac an application verb wears **Command** where Windows wears
 </picture>
 
 - 鼠标悬停在文件列的文件名上时弹出卡片：PDF 逐页显示，视频直接播放，文本显示前几行，图片直接展示。
-- 预览窗格打开文件：Markdown 排版显示，PDF 逐页翻阅，视频播放，网页带地址栏和后退按钮。 <!-- zh pending opus46 -->
-- A path the terminal printed opens in the preview pane on a click, and goes to
-  the machine's own application on `Ctrl`+click — that one is `Ctrl` on both
-  platforms, and not Command on a Mac. Paths nobody marked up are found too,
-  once the file is confirmed to exist.
+- 预览窗格打开文件：Markdown 排版显示，PDF 逐页翻阅，视频播放，网页带地址栏和后退按钮。
+- 终端输出的路径点击后在预览窗格打开，`Ctrl`+点击交给系统默认程序——两个平台上都是 `Ctrl`，Mac 上不是 Command。没有标记的裸路径只要文件确认存在，同样识别。
 - 网址同理：点击在预览窗格打开，`Ctrl`+点击交给浏览器。
 - 一个窗口可以打开与预览窗格数量相同的页面。打开第二个页面时使用新窗格而非覆盖第一个，锁定页面后再打开新页面可并排显示。拖拽页面到指定窗格则在该窗格打开。
 
@@ -103,7 +84,7 @@ columns: on a Mac an application verb wears **Command** where Windows wears
 - 保存只改动编辑过的部分，文件其余内容逐字节保持原样。开头几个字节声明了自身编码的文件——Windows PowerShell 写出的文件最常见——按原编码写回。换行符、行尾空格、末尾缺少的换行都照旧保留。
 - `Esc` 退出这一页，点击正文旁的空白处或点到窗格之外也一样。页面回到阅读状态，光标停在离开时的位置。
 - 超过 8 MB 的文件，以及无法整篇按文本读入的文件，照常打开、阅读和复制，但不能编辑；窗格底部说明原因。
-- 文件列的右键菜单就地新建文件和文件夹：`New file…`（新建文件）和 `New folder…`（新建文件夹）在树中新行将要出现的位置放一个名称输入框，`Enter` 创建，`Esc` 取消。文件夹不接受的名称就在输入框中变红，不另开提示。`Delete`（删除）把文件或整个文件夹送进回收站，不先询问——它去的地方就是回收站。 <!-- zh pending opus46 -->
+- 文件列的右键菜单就地新建文件和文件夹：`New file…`（新建文件）和 `New folder…`（新建文件夹）在树中新行将要出现的位置放一个名称输入框，`Enter` 创建，`Esc` 取消。文件夹不接受的名称就在输入框中变红，不另开提示。`Delete`（删除）把文件或整个文件夹送进 Windows 的回收站或 Mac 的废纸篓，不先询问。
 - 在文件列的空白处点右键，打开的是该列当前所在文件夹的菜单，空文件夹也能建出第一个文件。
 - `Ctrl+Shift+P` 在文件列当前所在的文件夹下查找文件，`Enter` 在预览窗格中打开，可直接输入。
 
@@ -139,13 +120,7 @@ columns: on a Mac an application verb wears **Command** where Windows wears
 
 一个快捷键调出终端覆盖在屏幕上方，再按一次收回。
 
-<!-- zh: pending -->
-**The chord is each platform's own**, and it is claimed from the system rather
-than read by a focused window, so it answers from inside any application:
-``Win+` `` on Windows and ``⌃` `` on a Mac. It is an ordinary row on the
-Shortcuts page — record a different chord and it takes effect at once, and
-`Restore all defaults` brings this one back. Neither platform is asked for a
-permission for it.
+**快捷键因平台而异**，向系统注册而非依赖窗口焦点，因此在任何应用内都能响应：Windows 上是 ``Win+` ``，Mac 上是 ``⌃` ``。在快捷键页可以录入其他组合，立即生效；**恢复默认**可还原。两个平台均无需申请权限。
 
 <picture>
   <source media="(prefers-color-scheme: dark)"
@@ -156,7 +131,7 @@ permission for it.
        中显示四条提交记录和目录列表，下方是等待输入的空行。">
 </picture>
 
-- ``Win+` ``（Mac 上是 ``⌃` ``）在鼠标所在屏幕顶部拉下一个终端窗口，覆盖当前内容。再按一次收回窗口并将焦点还给之前的程序。 <!-- zh: pending -->
+- ``Win+` ``（Mac 上是 ``⌃` ``）在鼠标所在屏幕顶部拉下一个终端窗口，覆盖当前内容。再按一次收回窗口并将焦点还给之前的程序。
 - 这是完整的 Folio——标签页、窗格、文件列、预览、所有快捷键都可用。shell 和滚动历史在每次呼出之间保持。
 - 手动移动或调整过的窗口按显示器记忆，下次在该屏幕呼出时沿用。
 - 快捷终端随 Folio 启停。关闭最后一个可见窗口即结束运行。
@@ -194,31 +169,14 @@ permission for it.
 - **设置 > General > 资源管理器菜单**：打开时写入两个注册表键到 `HKEY_CURRENT_USER\Software\Classes`，加入「在 Folio 中打开」。在 Windows 11 上这项在「显示更多选项」页；在 Windows 10 上它在唯一的菜单中。如果 Windows 11 的文件夹里有 `folio.msix`，则同时注册该包到当前账户，使菜单项出现在第一页。无需管理员。关闭时移除已注册的项。正在运行的资源管理器只在启动时读取第一页的条目，如果「在 Folio 中打开」还没有出现，注销后重新登录。该菜单项在上次使用的窗口中将文件夹打开为标签页，并将窗口带到前台。从任务栏、快捷方式或 folio.exe 再次启动默认开新窗口，可在同页**再次启动 Folio** 行改为标签页。
 - Windows PowerShell 5.1 自带的 PSReadLine 2.0.0 在窗口缩放后会错位输入行。Folio 附带修补版 2.4.6，可按需安装到用户模块目录。执行策略为 `Restricted` 时开关会提示，并给出对应的 `Set-ExecutionPolicy` 命令。
 
-<!-- zh pending opus46 -->
-## macOS integration
+## macOS 集成
 
-<!-- zh pending opus46 -->
-- **Finder's right-click menu** carries **Open in Folio** under **Services**.
-  Folio registers it the first time it runs, so it is there without a sign-out
-  and with nothing to enable. A folder opens as a tab standing in it; a file, as
-  a tab standing in the folder it is in. Either arrives in the window you used
-  last rather than starting a second Folio.
-- **The menu bar is the shortcut table.** Every item takes its key from the same
-  row of [快捷键](shortcuts.md) the keyboard does, so a verb has one name
-  and one key wherever you meet it.
-- **The Dock icon is the attention channel.** A waiting agent bounces it until
-  you come back; a command that reports how far along it is puts that on the
-  icon as a badge.
-- **Paths are written from your home directory.** A file under it reads `~ › …`
-  in the files column, and the `~` is a step you can click like any other.
-- **Three Settings rows are not on a Mac at all** — the Explorer context menu,
-  the PowerShell integration and the PSReadLine repair. None of the three has a
-  macOS counterpart, and a greyed row explaining a mechanism the machine does
-  not have only teaches a Windows word. One row is a Mac's alone: **Option key
-  sends Alt**, off by default, so that Option keeps typing the character it is
-  printed with.
-- **Not on macOS:** the sparse-package route to the first page of a right-click
-  menu, and the Store video extensions. macOS is **arm64 only** in this preview.
+- **Finder 右键菜单**的**服务**下有 **Open in Folio**。Folio 首次运行时自动注册，无需手动开启，也不需要注销。在文件夹上点击时打开一个标签页进入该文件夹；在文件上点击时进入文件所在的文件夹。两者都在上次使用的窗口中打开，不会启动第二个 Folio。
+- **菜单栏就是快捷键表。** 每一项的快捷键取自[快捷键](shortcuts.md)表中的同一行，一个操作在任何地方都是同一个名称和同一个快捷键。
+- **Dock 图标是提醒通道。** 等待中的 agent 弹跳 Dock 图标直到切回；报告进度的命令将进度显示为图标角标。
+- **路径从主目录起写。** 主目录下的文件在文件列中显示为 `~ › …`，`~` 本身也可以点击。
+- **三项设置在 Mac 上不存在**——资源管理器菜单、PowerShell 整合和 PSReadLine 修复，因为 macOS 没有对应功能。Mac 独有一项：**Option 键发送 Alt**，默认关闭，保持 Option 键输入其印刷字符的行为。
+- **macOS 上没有的功能：** 右键菜单第一页的签名包注册，以及 Store 视频扩展。当前预览版 macOS 仅支持 **arm64**。
 
 ## Visual Studio Code
 
@@ -236,25 +194,12 @@ permission for it.
 
 之后 **Terminal > Open in External Terminal**（`Ctrl+Shift+C`）即可在编辑器当前目录打开 Folio。该 `.cmd` 文件向 Folio 传入 `--cwd` 和 `--from-here`，因为此设置不向程序传递参数。`--from-here` 表示在某个文件夹打开终端，不是再启动一个 Folio。无论**设置 > General > 再次启动 Folio** 怎样选，都在上次使用的窗口里开标签页。
 
-<!-- zh pending opus46 -->
-On macOS that setting names an application rather than a command, so there is no
-`folio-here` for it to run. Finder's **Open in Folio** above is the way to put a
-folder in front of a shell.
+macOS 上该设置指向应用而非命令，因此没有 `folio-here` 可用。把文件夹交给 shell 的方式是上文提到的 Finder 右键菜单 **Open in Folio**。
 
-<!-- zh: pending -->
-## English and Chinese
+## 中英双语
 
-<!-- zh: pending -->
-Every string a reader can see is written in both, and the interface is one of
-them at a time.
+界面中所有文字都有中英两种语言，随时可切换。
 
-<!-- zh: pending -->
-- **Settings > General > Language** offers English, 中文, or the system setting,
-  and a change reaches every pane, menu and dialog the moment it is made —
-  nothing has to be restarted for it.
-- The front page is written twice as well: [`README.md`](../README.md) and
-  [`README.zh-CN.md`](../README.zh-CN.md), and this document has
-  [an English half](features.md).
-- The shortcut table, the settings descriptions and the messages a pane prints
-  are all in the same two languages, so switching does not leave a row of one
-  standing in the other.
+- **设置 > 通用 > 语言**提供英文、中文和跟随系统三个选项，切换后所有窗格、菜单和对话框立即生效，无需重启。
+- 首页同样有两份：[`README.md`](../README.md) 和 [`README.zh-CN.md`](../README.zh-CN.md)，本文档也有[英文版](features.md)。
+- 快捷键表、设置描述和窗格中的提示信息都同时提供两种语言，切换后不会出现一行中文夹一行英文的情况。

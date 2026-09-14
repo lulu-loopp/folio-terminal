@@ -1,10 +1,6 @@
-<!-- zh: pending -->
-# Installing Folio
+# 安装 Folio
 
-<!-- zh: pending -->
-[`README.zh-CN.md`](../README.zh-CN.md) has the three lines most people need.
-This is the rest: what each download contains, what a machine has to be, what
-the first run asks, and what to do if the system puts a panel in front of you.
+[`README.zh-CN.md`](../README.zh-CN.md) 是多数人需要的简要版。这里是详细内容：每个下载包里有什么、系统要求、初次启动时的设置，以及系统弹出提示时该怎么办。
 
 ## Windows
 
@@ -19,56 +15,30 @@ the first run asks, and what to do if the system puts a panel in front of you.
 
 ## macOS
 
-<!-- zh pending opus46 -->
-Take `Folio-<version>-macos-arm64.dmg` from the same
-[releases page](https://github.com/lulu-loopp/folio-terminal/releases), open it,
-and drag **Folio** to Applications. Needs an **Apple silicon Mac running macOS 14
-or newer**; there is no Intel build in this preview. `SHA256SUMS.txt` is the hash
-of what you downloaded.
+从同一[发布页](https://github.com/lulu-loopp/folio-terminal/releases)下载 `Folio-<version>-macos-arm64.dmg`，打开后将 **Folio** 拖入 Applications。需要 **Apple silicon Mac，macOS 14 及以上**；当前预览版无 Intel 构建。`SHA256SUMS.txt` 是下载文件的校验和。
 
-<!-- zh: pending -->
-Or, with [Homebrew](https://brew.sh):
+也可以用 [Homebrew](https://brew.sh)：
 
 ```sh
 brew install --cask lulu-loopp/folio/folio
 ```
 
-<!-- zh pending opus46 -->
-The web preview uses the WebKit already on the machine. There is nothing to
-install.
+网页预览使用系统自带的 WebKit，无需额外安装。
 
-<!-- zh: pending -->
-## If Windows or macOS shows a warning
+## 如果 Windows 或 macOS 弹出提示
 
-<!-- zh: pending -->
-Every release is signed, and the macOS one is notarized by Apple as well;
-[`RELEASING.md`](RELEASING.md) says what is signed on each platform and who
-holds the certificate. A machine that has not seen a signature before still puts
-one panel in front of you the first time.
+发布包已签名，macOS 版本还经过 Apple 公证；[`RELEASING.md`](RELEASING.md) 说明各平台的签名方式和证书持有人。首次运行时系统可能仍会弹出一个提示。
 
-<!-- zh: pending -->
-- **Windows** — "Windows protected your PC". **More info** names the publisher,
-  and **Run anyway** starts it. Check that the name there is the holder
-  `RELEASING.md` names.
-- **macOS** — a panel naming the developer, with **Open** in it. If it opens
-  without offering **Open**, right-click the application and choose **Open**
-  instead. It asks once and not again.
+- **Windows**——提示"Windows 已保护你的电脑"。点击**更多信息**可看到发布者名称，点击**仍要运行**即可启动。核实发布者名称与 `RELEASING.md` 中一致。
+- **macOS**——弹出一个显示开发者名称的面板，其中有**打开**按钮。如果面板没有提供**打开**，右键点击应用选择**打开**。只询问一次。
 
-<!-- zh pending opus46 -->
-What must **not** appear on a Mac is a panel saying the developer **cannot be
-verified**, or that Folio is **damaged and can't be opened**. Either means what
-you have is not what was published — an interrupted download, or a copy altered
-after it was signed. Check it against `SHA256SUMS.txt` and take it from the
-releases page again.
+Mac 上**不应**看到提示说开发者**无法验证**，或者 Folio **已损坏且无法打开**。出现这类提示意味着文件与发布版本不一致——可能是下载中断或签名后被修改。用 `SHA256SUMS.txt` 校验后重新从发布页下载。自行编译并临时签名的版本也会触发同样的提示；处理方式见 [`BUILDING.md`](BUILDING.md)。
 
 ## 初次启动
 
 首次运行 Folio 的机器会看到一张初次设置卡（**欢迎使用 Folio**），仅出现一次。卡片为本机能做的每件事列一行，行尾是开关：有新版本时通知（唯一默认开启的选项）、在右键菜单中添加 Folio、PowerShell 整合，以及为本机已安装的 Claude Code、Codex 和 Copilot CLI 各设一行标签页提醒。三个 agent 行只在对应工具装在本机时出现，所以卡片少则两行，多则六行。不涉及主题、字体、大小、语言或布局——这些在设置中随时能改，选错了也没什么。
 
-<!-- zh pending opus46 -->
-**The card offers only the rows the machine can honour.** The folder right-click
-menu and the PowerShell integration are Windows facilities, so a Mac is asked
-about the update check and the agents and nothing else.
+**卡片只列出本机可用的选项。** 右键菜单和 PowerShell 整合是 Windows 功能，Mac 上只询问更新检查和 agent 相关选项。
 
 <picture>
   <source media="(prefers-color-scheme: dark)"
@@ -87,53 +57,23 @@ about the update check and the agents and nothing else.
 
 **卡片上的每一行也是设置中的一行**，随时可以更改。**完成**应用当前开启的选项；**暂不**或 `Esc` 保留默认值——检查更新开启，其余关闭。卡片只出现一次。已用过 Folio 的机器不会再看到它。
 
-<!-- zh pending opus46 -->
-The first tab opens the first shell your machine actually has. On Windows the
-five shipped profiles are looked for in order — PowerShell 7, Windows
-PowerShell, WSL, Git Bash, Command Prompt; on a Mac it is the shell your account
-already uses, then zsh, then bash, then `/bin/sh`. One whose program is not
-installed does not appear in the menus that start a shell; it stays on the
-Profiles page in Settings, greyed out and naming the program that was looked
-for. The seven agent profiles are found the same way, on the `PATH`, and that is
-the same lookup the card's agent rows use.
+首个标签页打开本机实际安装的第一个 shell。Windows 上按顺序查找五个内置配置——PowerShell 7、Windows PowerShell、WSL、Git Bash、命令提示符；Mac 上先用账户当前设置的 shell，然后依次是 zsh、bash、`/bin/sh`。未安装的 shell 不出现在启动菜单中，但保留在设置的配置页，显示为灰色并标注所查找的程序。七个 agent 配置以同样方式在 `PATH` 上查找，初次设置卡的 agent 行也使用同一查找结果。
 
-<!-- zh pending opus46 -->
-**On Windows**, the PowerShell integration adds one line —
-`. "$env:APPDATA\Folio\shell-integration\folio.ps1"` — to the `$PROFILE` a
-PowerShell names for itself, after copying the file as it stood to a dated
-backup beside it; delete that line to undo it. The change takes effect in the
-next PowerShell session, and Settings > Terminal says so until it does. Git Bash
-and WSL need none of it, and neither do zsh and bash on a Mac: Folio hands those
-their own integration as it starts them, out of its own directory, and writes
-nothing of yours.
+**Windows 上**，PowerShell 整合向 PowerShell 指定的 `$PROFILE` 末尾添加一行 `. "$env:APPDATA\Folio\shell-integration\folio.ps1"`，写入前将原文件带日期备份在旁边；删除该行即可撤销。改动在下一个 PowerShell 会话中生效，设置 > 终端在生效前会提示。Git Bash 和 WSL 无需此操作，Mac 上的 zsh 和 bash 也不需要：Folio 在启动它们时从自己的目录传入整合脚本，不写入用户文件。
 
 如果初次设置卡未询问此项，Folio 会在 PowerShell 窗格首次输出时弹出提示条。**添加到 `$PROFILE`** 立即写入，**不再提示**关闭后续询问，直接关闭提示条不做决定——下次 PowerShell 启动时再问一次。命令标记和行内 `$…$` 公式排版依赖此整合。Git Bash 和 WSL 无需此整合。
 
-<!-- zh pending opus46 -->
-**On a Mac**, what Folio remembers lives in
-`~/Library/Application Support/Folio`.
+**Mac 上**，Folio 的数据存放在 `~/Library/Application Support/Folio`。
 
-<!-- zh pending opus46 -->
-The first time a waiting agent's mark has to leave the window, macOS asks
-whether Folio may send notifications. Answer it once. Say no and the Agent page
-in Settings says so rather than going quiet, the dot on the tab and the Dock
-icon go on working, and Folio does not ask again.
+agent 等待标记首次需要在窗口之外提醒时，macOS 会询问是否允许 Folio 发送通知。回答一次即可。如果拒绝，设置中的 Agent 页会显示此状态，标签页上的圆点和 Dock 图标提醒仍然有效，Folio 不会再次询问。
 
-<!-- zh pending opus46 -->
-Finder's right-click menu gets **Open in Folio**, under **Services** — Folio
-registers it the first time it runs, so there is nothing to switch on and no
-need to sign out. On a folder it opens a tab standing in that folder; on a file,
-a tab standing in the folder the file is in. Folio also has a menu bar of its
-own, and every item in it carries the same key as the row it has in
-[快捷键](shortcuts.md).
+Finder 右键菜单的**服务**下有 **Open in Folio**——Folio 首次运行时自动注册，无需手动开启，也不需要注销。在文件夹上点击时打开一个标签页进入该文件夹；在文件上点击时进入文件所在的文件夹。Folio 还有自己的菜单栏，每一项的快捷键与[快捷键](shortcuts.md)表中对应行一致。
 
 Agent 页的三个开关**默认关闭**，各自读取对应工具的配置文件并显示当前状态。新机器上配置文件不存在，三项均显示关闭。
 
 ## 已知问题
 
-- **曾有一例报告窗口上半部全黑**，发生在移至第二显示器后，尚未复现。如遇到请附上 `%APPDATA%\Folio\diagnostics.log`（Mac 上是 `~/Library/Application Support/Folio/diagnostics.log`）。 <!-- zh pending opus46 -->
-- **Windows：`.webm` 需要从 Microsoft Store 安装 VP9 或 AV1 Video Extension**。Windows 默认未包含，缺少时无法播放。 <!-- zh pending opus46 -->
-- **macOS: a run that ends in a crash** leaves its report where the system puts
-  every one, `~/Library/Logs/DiagnosticReports`; the next Folio names the file
-  in its own log rather than copying it anywhere.
+- **曾有一例报告窗口上半部全黑**，发生在移至第二显示器后，尚未复现。如遇到请附上 `%APPDATA%\Folio\diagnostics.log`（Mac 上是 `~/Library/Application Support/Folio/diagnostics.log`）。
+- **Windows：`.webm` 需要从 Microsoft Store 安装 VP9 或 AV1 Video Extension**。Windows 默认未包含，缺少时无法播放。
+- **macOS：崩溃退出时**，系统将崩溃报告放在 `~/Library/Logs/DiagnosticReports`；下次启动时 Folio 在自己的日志中记录该报告的路径。
 - 其余已知问题见 [`CHANGELOG.md`](../CHANGELOG.md)。

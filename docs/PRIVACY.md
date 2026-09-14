@@ -200,7 +200,6 @@ are the whole of it.
 Folio 不向任何地方发送与你有关的数据。没有遥测、没有统计、没有崩溃上报。联网的只有两
 件事：你在网页预览里打开的那个页面，由操作系统自带的网页引擎抓取——Windows 上是
 WebView2，macOS 上是 WebKit；以及下面这个更新检查。
-<!-- zh pending opus46: M4-3 只改了「哪个引擎抓的」这半句,措辞待审 -->
 
 Folio 记住的一切都在本机，分在两个目录里。
 
@@ -218,32 +217,18 @@ Folio 向 GitHub 询问是否存在更新的版本，对答案只做一件事：
 | **答案存放位置** | 下文那个设置目录里的 `update-check.json`：上次询问的时间、返回的 tag，以及你已看到过的 tag。 |
 | **如何关闭** | 设置 > 常规 > **检查新版**，或在 `settings.json` 中写 `"update_check": false`；在从未运行过 Folio 的机器上，它也是初次设置卡的第一行，在那里它默认开启，且可在第一次请求之前关掉。关闭后不启动线程、不发出请求，也不写 `update-check.json`。 |
 
-<!-- zh pending opus46 -->
-GitHub receives the request the way it receives any request: your IP address and
-the time. Folio adds nothing to that. The request goes through the operating
-system's own HTTP stack on both platforms — WinHTTP on Windows, `NSURLSession`
-on macOS — so it follows the proxy settings, the certificate store and the
-revocation checking your machine already has, and Folio carries no HTTP client
-and no certificates of its own. On macOS the session is an ephemeral one that is
-cancelled after each check, so nothing of the request is cached between them.
+GitHub 收到的信息与任何请求一样：你的 IP 地址和时间。Folio 不额外附加任何内容。请求通过操作系统自身的 HTTP 栈发出——Windows 上是 WinHTTP，macOS 上是 `NSURLSession`——因此遵循本机已有的代理设置、证书存储和吊销检查，Folio 不携带自己的 HTTP 客户端和证书。macOS 上使用临时会话，每次检查后即销毁，请求之间不缓存任何内容。
 
-<!-- zh pending opus46 -->
-There is nothing to download on either platform: what the answer can do is draw
-a mark on the settings gear and a line in Settings. On macOS that line carries a
-button which opens the releases page in your browser, and that is the whole of
-what "update" means there. Folio never replaces itself on either.
+两个平台上都没有需要下载的内容：更新检查的结果只是在设置齿轮上画一个标记，在设置中显示一行。macOS 上那一行带有一个按钮，点击后在浏览器中打开发布页，"更新"的全部含义就是这些。两个平台上 Folio 都不会替换自身。
 
 ### 设置与会话
 
-<!-- zh pending opus46 -->
 | | |
 | --- | --- |
-| **Windows** | `%APPDATA%\Folio`, roaming configuration. |
-| **macOS** | `~/Library/Application Support/Folio`. Nothing is migrated into it from anywhere: Folio has never shipped on a Mac under another name, so a directory there under one is somebody else's. |
+| **Windows** | `%APPDATA%\Folio`，漫游配置。 |
+| **macOS** | `~/Library/Application Support/Folio`。不从任何位置迁入数据：Folio 从未在 Mac 上以其他名称发布过，因此该目录下其他名称的文件夹不属于 Folio。 |
 
-<!-- zh pending opus46 -->
-One directory, the same file names in it, and the same keys inside those files.
-Delete it and Folio starts as it did the first time.
+两个平台各一个目录，目录里文件名相同，文件里的键名也相同。删除该目录后 Folio 恢复为初次启动的状态。
 
 | 文件 | 内容 |
 | --- | --- |
@@ -274,8 +259,6 @@ rm -rf ~/Library/Application\ Support/Folio/diagnostics*.log \
 ```
 
 ### 网页预览的 profile
-
-<!-- zh pending opus46: M4-3 重写了这一节(加了 macOS 那一路),措辞与句读待审 -->
 
 跟上面那个目录不是一处，具体在哪里取决于引擎。预览保存的东西和任何浏览器一样——cookie、
 本地存储、磁盘缓存——Folio 不会删它。
@@ -323,27 +306,11 @@ rm -rf ~/Library/WebKit/<Folio 的 bundle identifier> ~/Library/Caches/<Folio �
 
 ### 其它位置
 
-<!-- zh pending opus46 -->
-- `%TEMP%\bt-app-panic.log` — appended to if Folio panics on Windows. On macOS
-  the same report goes to the temporary directory of that run as
-  `folio-panic.log`, and the failure itself is in `diagnostics.log` above.
-- **macOS: `~/Library/Logs/DiagnosticReports`.** When a run ends in a crash the
-  system writes the report there, for every program on the machine and not only
-  this one — it is macOS's file, not Folio's. Folio neither writes nor copies
-  it: the next launch finds the newest one belonging to this application and
-  prints its path in `diagnostics.log`, once.
-- **macOS: a runtime directory under `$TMPDIR`.** One lock file and one socket,
-  in `folio-<your uid>/`, created readable only by you and used by a second
-  Folio to hand its arguments to the first. They hold no content, and the next
-  Folio to take the lock clears what a dead one left.
-- **macOS: the notification permission.** The first notification Folio has to
-  send is where macOS asks. The answer is recorded by macOS against the
-  application, not by Folio, and it is changed in System Settings ▸
-  Notifications like any other program's.
-- **macOS: the Finder Services entry.** **Open in Folio** is declared inside the
-  application itself and registered with the system when Folio runs. Nothing is
-  written into your account for it: remove the application and the entry goes
-  with it.
+- `%TEMP%\bt-app-panic.log`——Folio 在 Windows 上发生 panic 时追加写入。macOS 上同样的报告写入当次运行的临时目录，文件名为 `folio-panic.log`，错误本身记录在上文提到的 `diagnostics.log` 中。
+- **macOS：`~/Library/Logs/DiagnosticReports`。** 崩溃退出时系统将崩溃报告写在这里——所有程序都是如此，不只是 Folio。这是 macOS 的文件，Folio 不写入也不复制。下次启动时 Folio 找到属于自己的最新一份，将其路径记入 `diagnostics.log`。
+- **macOS：`$TMPDIR` 下的运行时目录。** 一个锁文件和一个 socket，在 `folio-<你的 uid>/` 下，仅当前用户可读，用于第二个 Folio 将启动参数交给第一个。不含任何内容，下一个取得锁的 Folio 会清除前一个遗留的文件。
+- **macOS：通知权限。** Folio 首次需要发送通知时 macOS 会询问。答案由 macOS 记录在应用标识下，不由 Folio 管理，在系统设置 ▸ 通知中修改，与其他程序相同。
+- **macOS：Finder 服务条目。** **Open in Folio** 声明在应用内部，Folio 运行时向系统注册。不向账户写入任何内容：移除应用，条目随之消失。
 - 打开资源管理器菜单行时，写入两个注册表键到 `HKEY_CURRENT_USER\Software\Classes`；若
   Windows 11 的文件夹里有 `folio.msix`，则注册该包到当前账户（这是 Windows 包注册，不是
   Folio 的文件；该注册会出现在「设置 > 应用 > 已安装的应用」中）。这些都只针对当前账户，
