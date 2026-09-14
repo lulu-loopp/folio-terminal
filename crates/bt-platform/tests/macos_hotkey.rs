@@ -163,10 +163,25 @@ mod mac {
         id: u32,
     }
 
-    const K_EVENT_CLASS_KEYBOARD: u32 = u32::from_be_bytes(*b"keyb");
-    const K_EVENT_HOT_KEY_PRESSED: u32 = 5;
-    const K_EVENT_PARAM_DIRECT_OBJECT: u32 = u32::from_be_bytes(*b"obj ");
-    const TYPE_EVENT_HOT_KEY_ID: u32 = u32::from_be_bytes(*b"hkid");
+    // **Borrowed from the product and not copied out of it**
+    // (T-MAC-SUMMON-DIAG), which is the whole reason this proof missed a
+    // release's worth of a wrong number.
+    //
+    // These four were declared here as their own literals. One of them —
+    // `kEventParamDirectObject` — was `'obj '` on both sides, and a synthetic
+    // event written with a wrong name and read with the same wrong name
+    // round-trips perfectly; only the system's own press, which this file could
+    // not make without the Accessibility grant, carries the real `'----'`. A
+    // test that writes its own copy of the number under test is not a proof of
+    // that number, so it no longer has one: what `send_a_hot_key_event` sets is
+    // what `bt_platform::hotkey`'s handler gets, by construction, and what makes
+    // either of them right is the pin in `hotkey.rs`'s own test module that
+    // reads the characters as well as the numbers.
+    use bt_platform::hotkey::{
+        K_EVENT_CLASS_KEYBOARD, K_EVENT_HOT_KEY_PRESSED, K_EVENT_PARAM_DIRECT_OBJECT,
+        TYPE_EVENT_HOT_KEY_ID,
+    };
+
     const K_EVENT_ATTRIBUTE_NONE: u32 = 0;
     const NO_ERR: i32 = 0;
 

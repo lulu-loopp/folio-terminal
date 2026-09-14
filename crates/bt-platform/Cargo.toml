@@ -241,6 +241,27 @@ name = "macos_pointer_route"
 path = "tests/macos_pointer_route.rs"
 harness = false
 
+# **The first example this workspace has, and it is a question rather than a
+# demonstration** (T-MAC-SUMMON-DIAG, `docs/DESIGN.md` §13.51).
+#
+# `tests/macos_hotkey.rs` proves the summon road with an event it builds itself,
+# and that is the shape of proof that let a wrong four-character code ship: the
+# sender and the receiver were two halves of one repository agreeing with each
+# other. What is missing from it — and cannot be added to it, because a `#[test]`
+# cannot ask somebody to press a key — is a **physical press**.
+#
+# So it is an example and not a test. Nothing runs it in CI, nothing gates on it,
+# and it links none of this crate's own hot key code on purpose: it is the
+# smallest Carbon program that can answer "does this Mac deliver `` ⌃` `` to a
+# process of this user's", and its whole value is that it shares no assumption
+# with the code it is used to diagnose.
+#
+# Declared here rather than left to autodiscovery so that this paragraph has
+# somewhere to live.
+[[example]]
+name = "hotkey_probe"
+path = "examples/hotkey_probe.rs"
+
 # **M2-2 adds no package either**, and it is worth saying because it looks like
 # it should: the process door (`src/handoff.rs`'s macOS arm) is `NSWorkspace`,
 # which is already on, and the trash (`src/macos_files.rs`) is `NSFileManager`,

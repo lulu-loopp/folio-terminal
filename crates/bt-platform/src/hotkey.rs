@@ -391,6 +391,66 @@ const SHIFT_KEY: u32 = 0x0200;
 const OPTION_KEY: u32 = 0x0800;
 const CONTROL_KEY: u32 = 0x1000;
 
+/// **Carbon's four-character codes, out where a test can reach them**
+/// (T-MAC-SUMMON-DIAG).
+///
+/// These six were written inside the `#[cfg(target_os = "macos")]` module, which
+/// is the only part of this file's macOS arm a Windows host cannot see — and it
+/// is where the one wrong number in the whole road spent a release. See
+/// [`K_EVENT_PARAM_DIRECT_OBJECT`] for what it was.
+///
+/// [`carbon_key_code`]'s own note is the rule they now follow: **compiled on
+/// every platform on purpose**, so the machine writing the ticket can ask what
+/// the machine running it will do. `pub` for the same reason that function is —
+/// the assertion is made from a test on a host that has no Carbon at all, and a
+/// constant a `cfg` hides is a constant no such test can name.
+///
+/// `kEventClassKeyboard`. A hot key press is a keyboard event, and it is the
+/// only class this module ever asks for.
+pub const K_EVENT_CLASS_KEYBOARD: u32 = u32::from_be_bytes(*b"keyb");
+
+/// `kEventHotKeyPressed`. `kEventHotKeyReleased` is 6 and is deliberately not
+/// asked for: this key's verb is a toggle spent on the press.
+pub const K_EVENT_HOT_KEY_PRESSED: u32 = 5;
+
+/// **`kEventParamDirectObject`, and it is four hyphens** — the defect
+/// T-MAC-SUMMON-DIAG found, written here as the number rather than only as the
+/// characters so that the pinning test is a second reading rather than an echo.
+///
+/// It shipped as `'obj '`, which is a real four-character code in another
+/// namespace entirely — `typeObjectSpecifier`, an Apple event's way of naming a
+/// thing rather than a Carbon event's way of naming its subject. Nothing
+/// refused it: `GetEventParameter` answered `eventParameterNotFoundErr` for a
+/// parameter the event does not carry, the handler below read that as
+/// "not ours" and returned `noErr`, and the press was **swallowed in silence**.
+/// The chord was claimed, so no other program saw it either; the window never
+/// came down; nothing was written anywhere.
+///
+/// **Why the proof passed it.** `crates/bt-platform/tests/macos_hotkey.rs`
+/// builds the event it sends, with `SetEventParameter` under the same constant.
+/// Two halves of one file agreeing on a wrong name round-trip perfectly. The
+/// system's own `kEventHotKeyPressed` does not agree with either of them — it
+/// carries the `EventHotKeyID` under `'----'`, which is what
+/// every Carbon hot key sample ever published reads it out of — so the one
+/// station in that proof that used a real press was the one that failed, and it
+/// failed for a second true reason (no Accessibility grant for `CGEventPost`)
+/// that hid this one.
+pub const K_EVENT_PARAM_DIRECT_OBJECT: u32 = u32::from_be_bytes(*b"----");
+
+/// `typeEventHotKeyID` — the type the parameter above is carried as.
+pub const TYPE_EVENT_HOT_KEY_ID: u32 = u32::from_be_bytes(*b"hkid");
+
+/// `eventHotKeyExistsErr` — somebody else has this chord.
+pub const EVENT_HOT_KEY_EXISTS_ERR: i32 = -9878;
+
+/// **This process's own four-character signature.**
+///
+/// `folo`, because the handler is offered *every* hot key event that reaches
+/// this application's event target, including ones a framework registered
+/// without telling anybody. The signature plus the id is what makes "is this
+/// ours" a question with an answer.
+pub const SUMMON_SIGNATURE: u32 = u32::from_be_bytes(*b"folo");
+
 /// **The macOS translation, and the only part of that arm a test can hold
 /// without a keyboard** — [`registration_bits`]'s twin, and written beside it
 /// for that reason.
@@ -678,6 +738,210 @@ fn wake_the_summon() {
     if let Some(wake) = SUMMON_WAKE.get() {
         wake();
     }
+}
+
+/// **`BT_HOTKEY_TRACE` — one named file, one line per station on the road a
+/// press travels** (T-MAC-SUMMON-DIAG, `docs/BT-ENVIRONMENT.md`).
+///
+/// This module is the one surface in the product that could fail with **nothing
+/// said anywhere**. A claim the system refused is a sentence on the settings
+/// page; a claim the system accepted and then delivered to a handler that threw
+/// the press away is a key that does nothing, and until this ticket there was no
+/// build, no log line and no switch that could tell the two apart — which is
+/// exactly the state the owner reported from and exactly the state the defect in
+/// [`K_EVENT_PARAM_DIRECT_OBJECT`] put them in.
+///
+/// Same five properties as `bt_app::trace`, which wrote them down first and
+/// whose machinery this cannot borrow because that crate is the binary and this
+/// one is underneath it: the value is a **file** and not a folder, it is
+/// appended rather than truncated, every line is flushed, a closure at every
+/// call site means an unset gate formats no field, and set-but-empty is off.
+///
+/// **It ends at one file although it is written from two crates.** The stations
+/// are five and they are the five places a press can stop —
+/// `reconcile wanted=…` and [`TRACE_WAKE`]/[`TRACE_ANSWERED`] are `bt-app`'s,
+/// [`trace_register`] and [`trace_handler`] are this module's — and a reader
+/// asking "how far did my press get" needs them interleaved in one order, not
+/// spread over two logs that agree about nothing.
+struct SummonTrace {
+    file: std::sync::Mutex<std::fs::File>,
+    /// [`Instant`](std::time::Instant) rather than a wall clock, for
+    /// `bt_app::trace`'s reason: what a reader of this file needs is the
+    /// *distance* between two stations of one press.
+    started: std::time::Instant,
+}
+
+/// Named in the header so a file holding two runs, or two traces, stays
+/// readable by whoever opens it.
+const TRACE_HEADER: &str = "# BT_HOTKEY_TRACE_V1 elapsed_ms station field=value";
+
+impl SummonTrace {
+    fn opened() -> Option<Self> {
+        use std::io::Write as _;
+
+        // Set-but-empty is off, which is this product's rule for every one of
+        // these: `BT_HOTKEY_TRACE=` is a shell saying "not this run", and a run
+        // that answered it with a file named the empty string would fail in a
+        // way that looks like the feature is broken.
+        let path = std::env::var_os("BT_HOTKEY_TRACE").filter(|value| !value.is_empty())?;
+        let path = std::path::PathBuf::from(path);
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                let _ = writeln!(file, "{TRACE_HEADER}");
+                let _ = file.flush();
+                Some(Self {
+                    file: std::sync::Mutex::new(file),
+                    started: std::time::Instant::now(),
+                })
+            }
+            // Said out loud and then dropped: a trace that could not be opened
+            // is a diagnostic that will not run, which the person who asked for
+            // it has to be told — and is not a reason for the terminal to refuse
+            // to start.
+            Err(error) => {
+                eprintln!(
+                    "the hotkey trace names {} but it could not be opened: {error}",
+                    path.display()
+                );
+                None
+            }
+        }
+    }
+
+    fn write(&self, message: &str) {
+        use std::io::Write as _;
+
+        let elapsed = self.started.elapsed().as_secs_f64() * 1000.0;
+        // A poisoned lock means another thread panicked mid-line. The bytes are
+        // still a file and this line is still worth having: a diagnostic must
+        // not be the thing that turns one panic into two.
+        let mut file = self
+            .file
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = writeln!(file, "{elapsed:9.3} {message}");
+        let _ = file.flush();
+    }
+}
+
+/// The process's trace, opened at the first station any road reaches.
+static SUMMON_TRACE: std::sync::OnceLock<Option<SummonTrace>> = std::sync::OnceLock::new();
+
+/// **Write one station**, formatting nothing at all when the variable is unset.
+///
+/// `pub` because three of the five stations are `bt-app`'s — see
+/// [`SummonTrace`] for why they end at one file — and because the handler this
+/// module installs is reached from a road no caller of that crate can see.
+pub fn trace(message: impl FnOnce() -> String) {
+    if let Some(trace) = SUMMON_TRACE.get_or_init(SummonTrace::opened) {
+        trace.write(&message());
+    }
+}
+
+/// The station `bt-app`'s wake closure writes: the press has left this crate.
+///
+/// A constant rather than a literal at the call site, for the reason the line
+/// formatters below are functions: a station whose exact bytes a test pins is a
+/// station a reader can grep for, and the test and the caller must be reading
+/// one spelling.
+pub const TRACE_WAKE: &str = "summons_wake called";
+
+/// The station `bt-app` writes when the loop's own turn has taken the press —
+/// the far end of the road, and the line whose absence says the proxy, not the
+/// keyboard, is where the press stopped.
+pub const TRACE_ANSWERED: &str = "QuakeSummoned handled";
+
+/// `register keycode=0x32 modifiers=0x1000 -> Ok`, or the `OSStatus` that
+/// refused it.
+///
+/// Pure, and compiled on every platform, for [`carbon_key_code`]'s reason: the
+/// host that writes this ticket has no Carbon and must still be able to assert
+/// what the host that runs it will write down.
+#[must_use]
+pub fn trace_register(key_code: u32, modifiers: u32, status: i32) -> String {
+    let outcome = if status == 0 {
+        "Ok".to_owned()
+    } else {
+        format!("Err({status})")
+    };
+    format!("register keycode={key_code:#x} modifiers={modifiers:#x} -> {outcome}")
+}
+
+/// `register -> Err(NoSuchKey)` — the refusals this product makes before Carbon
+/// is asked anything, which carry no `OSStatus` because no call was made.
+#[must_use]
+pub fn trace_register_refused(fault: &HotkeyFault) -> String {
+    let named = match fault {
+        HotkeyFault::AlreadyRegistered => "AlreadyRegistered".to_owned(),
+        HotkeyFault::NoSuchKey => "NoSuchKey".to_owned(),
+        HotkeyFault::NoModifier => "NoModifier".to_owned(),
+        HotkeyFault::Refused(why) => format!("Refused({why})"),
+    };
+    format!("register -> Err({named})")
+}
+
+/// `install handler -> Ok`, or the `OSStatus` that refused it.
+///
+/// Its own station because a handler that was never installed and a handler that
+/// was never *called* are two different faults with one symptom, and the order
+/// of the lines in the file is what tells them apart.
+#[must_use]
+pub fn trace_install(status: i32) -> String {
+    if status == 0 {
+        "install handler -> Ok".to_owned()
+    } else {
+        format!("install handler -> Err({status})")
+    }
+}
+
+/// `handler fired id=1 signature=folo live=yes` — a hot key event reached this
+/// process, said with both halves of the gate [`summon_should_act`] describes.
+///
+/// Every event is written, including the ones the gate refuses, because "a
+/// framework in this address space has the chord" and "the press never arrived"
+/// are the two readings a silent file would leave open.
+#[must_use]
+pub fn trace_handler(signature: u32, id: u32, live: bool) -> String {
+    let signature = four_character_code(signature);
+    let live = if live { "yes" } else { "no" };
+    format!("handler fired id={id} signature={signature} live={live}")
+}
+
+/// `handler fired id=none GetEventParameter=Err(-9870)` — **the line this
+/// ticket exists for.**
+///
+/// The handler ran, the event was a hot key press, and the parameter naming
+/// *which* claim fired could not be read out of it. That is the whole of the
+/// defect [`K_EVENT_PARAM_DIRECT_OBJECT`] was, and a build carrying this station
+/// says it in one line instead of in a key that does nothing.
+#[must_use]
+pub fn trace_handler_lost(status: i32) -> String {
+    format!("handler fired id=none GetEventParameter=Err({status})")
+}
+
+/// **A four-character code as its four characters**, which is the only form a
+/// reader can compare against a header.
+///
+/// A byte outside printable ASCII is written as `.`: these are `OSType`s and a
+/// framework may well hold one that is not text, and a trace line is not a place
+/// to put a raw byte into somebody's terminal.
+#[must_use]
+pub fn four_character_code(value: u32) -> String {
+    value
+        .to_be_bytes()
+        .iter()
+        .map(|byte| {
+            if byte.is_ascii_graphic() || *byte == b' ' {
+                char::from(*byte)
+            } else {
+                '.'
+            }
+        })
+        .collect()
 }
 
 /// **Whoever had the keyboard before the summon came down** (M4-8).
@@ -1200,7 +1464,11 @@ mod macos_hotkey {
         NSApplication, NSApplicationActivationOptions, NSRunningApplication, NSWorkspace,
     };
 
-    use super::{Foreground, Hotkey, HotkeyFault, carbon_registration_bits};
+    use super::{
+        EVENT_HOT_KEY_EXISTS_ERR, Foreground, Hotkey, HotkeyFault, K_EVENT_CLASS_KEYBOARD,
+        K_EVENT_HOT_KEY_PRESSED, K_EVENT_PARAM_DIRECT_OBJECT, SUMMON_SIGNATURE,
+        TYPE_EVENT_HOT_KEY_ID, carbon_registration_bits,
+    };
     use crate::NativeWindow;
 
     // ── Carbon, declared by hand ───────────────────────────────────────────
@@ -1264,24 +1532,12 @@ mod macos_hotkey {
         ) -> i32;
     }
 
-    /// Carbon's four-character codes and its two `OSStatus` values, written as
-    /// the numbers they are — `MOD_ALT`'s rule, and here it is not even a
-    /// choice: there is no header in this build to read them out of.
-    const K_EVENT_CLASS_KEYBOARD: u32 = u32::from_be_bytes(*b"keyb");
-    const K_EVENT_HOT_KEY_PRESSED: u32 = 5;
-    const K_EVENT_PARAM_DIRECT_OBJECT: u32 = u32::from_be_bytes(*b"obj ");
-    const TYPE_EVENT_HOT_KEY_ID: u32 = u32::from_be_bytes(*b"hkid");
-    const NO_ERR: i32 = 0;
-    /// `eventHotKeyExistsErr` — somebody else has this chord.
-    const EVENT_HOT_KEY_EXISTS_ERR: i32 = -9878;
-
-    /// **This process's own four-character signature.**
+    /// `noErr`, which is zero here as it is everywhere else in this framework.
     ///
-    /// `folo`, because the handler below is offered *every* hot key event that
-    /// reaches this application's event target, including ones a framework
-    /// registered without telling anybody. The signature plus the id is what
-    /// makes "is this ours" a question with an answer.
-    const SUMMON_SIGNATURE: u32 = u32::from_be_bytes(*b"folo");
+    /// The one Carbon number still written inside this module, because it is the
+    /// one no keyboard and no header could make wrong — see
+    /// [`super::K_EVENT_PARAM_DIRECT_OBJECT`] for why the other six moved out.
+    const NO_ERR: i32 = 0;
 
     /// **A claim on a chord, held for as long as this value is alive.**
     ///
@@ -1370,10 +1626,17 @@ mod macos_hotkey {
                 (&raw mut named).cast::<c_void>(),
             )
         };
-        if status == NO_ERR
-            && named.signature == SUMMON_SIGNATURE
-            && super::registration_is_live(named.id as i32)
-        {
+        if status != NO_ERR {
+            // **The line this ticket exists for** — see
+            // [`super::trace_handler_lost`]. The handler ran and the event did
+            // not carry the parameter naming which claim fired, which is a fault
+            // in this file rather than anywhere near the keyboard.
+            super::trace(|| super::trace_handler_lost(status));
+            return NO_ERR;
+        }
+        let live = super::registration_is_live(named.id as i32);
+        super::trace(|| super::trace_handler(named.signature, named.id, live));
+        if named.signature == SUMMON_SIGNATURE && live {
             super::wake_the_summon();
         }
         NO_ERR
@@ -1418,6 +1681,11 @@ mod macos_hotkey {
                 )
             }
         });
+        // **Inside the `OnceLock`'s answer and not inside its initialiser**, so
+        // that a reader who set the variable after the first `register` still
+        // sees the handler's state on the line above their press rather than
+        // only in the run that installed it.
+        super::trace(|| super::trace_install(status));
         if status == NO_ERR {
             Ok(())
         } else {
@@ -1447,9 +1715,11 @@ mod macos_hotkey {
         // that is true on every platform, and the two are told apart because
         // their remedies are.
         if !super::holds_a_summon_modifier(hotkey) {
+            super::trace(|| super::trace_register_refused(&HotkeyFault::NoModifier));
             return Err(HotkeyFault::NoModifier);
         }
         let Some((modifiers, key_code)) = carbon_registration_bits(hotkey) else {
+            super::trace(|| super::trace_register_refused(&HotkeyFault::NoSuchKey));
             return Err(HotkeyFault::NoSuchKey);
         };
         install_the_handler()?;
@@ -1471,6 +1741,11 @@ mod macos_hotkey {
                 &raw mut claimed,
             )
         };
+        // **The station the owner's report had no way to reach.** A claim Carbon
+        // accepted and a claim Carbon refused look identical from a keyboard —
+        // the key does nothing either way — and this is the one line that tells
+        // them apart before the handler is ever reached.
+        super::trace(|| super::trace_register(key_code, modifiers, status));
         match status {
             NO_ERR if !claimed.is_null() => {
                 // **The ledger goes up with the claim and not before** (R2-5):
@@ -2166,6 +2441,146 @@ mod tests {
         assert!(
             !is_our_hotkey(0x0100, 0, 1, 1),
             "WM_KEYDOWN is not WM_HOTKEY"
+        );
+    }
+
+    /// RED (T-MAC-SUMMON-DIAG) — **Carbon's own numbers, asserted as numbers on
+    /// a host that has no Carbon.**
+    ///
+    /// The one defect this ticket found was a four-character code that was a
+    /// real code in another framework's namespace, written inside the
+    /// `#[cfg(target_os = "macos")]` module where no test on this host could
+    /// name it. So the literals moved out and are read here **twice** — once as
+    /// the `u32` `CarbonEvents.h` publishes and once as the four characters that
+    /// spell it — because a pin that only re-wrote `*b"----"` would be the same
+    /// echo the old proof was.
+    ///
+    /// MUTATION: put `'obj '` back in `K_EVENT_PARAM_DIRECT_OBJECT` and this
+    /// goes red on this host, in a run with no Mac in it, naming the constant —
+    /// which is the whole of what was missing while the summon key did nothing.
+    #[test]
+    fn carbons_four_character_codes_are_the_ones_carbon_events_publishes() {
+        assert_eq!(
+            super::K_EVENT_CLASS_KEYBOARD,
+            0x6B65_7962,
+            "kEventClassKeyboard is 'keyb'"
+        );
+        assert_eq!(
+            super::K_EVENT_HOT_KEY_PRESSED,
+            5,
+            "kEventHotKeyPressed is 5; 6 is the release this module never asks for"
+        );
+        assert_eq!(
+            super::K_EVENT_PARAM_DIRECT_OBJECT,
+            0x2D2D_2D2D,
+            "kEventParamDirectObject is '----', four hyphens — and 0x6F626A20 \
+             ('obj ') is typeObjectSpecifier, an Apple event's namespace"
+        );
+        assert_eq!(
+            super::TYPE_EVENT_HOT_KEY_ID,
+            0x686B_6964,
+            "typeEventHotKeyID is 'hkid'"
+        );
+        assert_eq!(
+            super::EVENT_HOT_KEY_EXISTS_ERR,
+            -9878,
+            "eventHotKeyExistsErr, measured on the Mac mini by M4-8 ③"
+        );
+        assert_eq!(
+            super::SUMMON_SIGNATURE,
+            0x666F_6C6F,
+            "this application's own signature, 'folo'"
+        );
+    }
+
+    /// RED (T-MAC-SUMMON-DIAG) — **Carbon's modifier masks**, which until this
+    /// ticket were held by nothing but a keyboard on somebody's desk.
+    ///
+    /// MUTATION: swap `CONTROL_KEY` and `OPTION_KEY` — the two that are one
+    /// nibble apart and the easiest pair in the file to transpose — and this
+    /// names both. A build with them transposed claims `` ⌥` ``, which on
+    /// several layouts is the dead key that begins a grave accent: the summon
+    /// would not come and the accent would stop working desktop-wide.
+    #[test]
+    fn carbons_modifier_masks_are_the_ones_macos_publishes() {
+        assert_eq!(super::CMD_KEY, 0x0100, "cmdKey");
+        assert_eq!(super::SHIFT_KEY, 0x0200, "shiftKey");
+        assert_eq!(super::OPTION_KEY, 0x0800, "optionKey");
+        assert_eq!(super::CONTROL_KEY, 0x1000, "controlKey");
+    }
+
+    /// RED (T-MAC-SUMMON-DIAG) — **the shipped macOS summon, all the way to the
+    /// two integers Carbon is handed**, read on a host with no Carbon at all.
+    ///
+    /// `` ⌃` `` is `controlKey` and `kVK_ANSI_Grave`, and this is the assertion
+    /// the owner's report is about: the claim they made with a physical press
+    /// was made with exactly these numbers.
+    ///
+    /// MUTATION: change the backtick's answer in `carbon_key_code` from 0x32 to
+    /// any neighbouring code and this names it. 0x0A is `kVK_ISO_Section`, the key left
+    /// of `1` on an **ISO** keyboard, and is deliberately *not* what this
+    /// answers — the product registers the ANSI position, the probe registers
+    /// both and says which one a physical press arrives on, and the general
+    /// answer is `UCKeyTranslate` (`docs/DESIGN.md` §13.51 ⑤).
+    #[test]
+    fn the_shipped_macos_summon_reaches_carbon_as_control_and_grave() {
+        let grave = super::carbon_key_code(super::SummonKey::Character('`')).expect("a real key");
+        assert_eq!(grave, 0x32, "kVK_ANSI_Grave");
+        assert_eq!(
+            super::carbon_registration_bits(chord(true, false, false, false, grave)),
+            Some((0x1000, 0x32)),
+            "controlKey and kVK_ANSI_Grave, in the order RegisterEventHotKey takes them"
+        );
+    }
+
+    /// RED (T-MAC-SUMMON-DIAG) — **the trace's five stations, spelled once.**
+    ///
+    /// The lines are the whole product of this ticket's observability half, and
+    /// a reader of `BT_HOTKEY_TRACE` reads them rather than running them. Pinned
+    /// here because they are pure — formatting, on any host — and because the
+    /// ticket, the documentation and the file have to agree about the bytes.
+    ///
+    /// MUTATION: drop the `#x` from either integer in `trace_register` and the
+    /// line says `register keycode=50 modifiers=4096`, which is the same fact
+    /// written in the one base no Carbon header uses.
+    #[test]
+    fn every_station_of_the_trace_is_one_line_a_reader_can_grep() {
+        assert_eq!(
+            super::trace_register(0x32, 0x1000, 0),
+            "register keycode=0x32 modifiers=0x1000 -> Ok"
+        );
+        assert_eq!(
+            super::trace_register(0x32, 0x1000, -9878),
+            "register keycode=0x32 modifiers=0x1000 -> Err(-9878)"
+        );
+        assert_eq!(
+            super::trace_register_refused(&super::HotkeyFault::NoSuchKey),
+            "register -> Err(NoSuchKey)"
+        );
+        assert_eq!(super::trace_install(0), "install handler -> Ok");
+        assert_eq!(super::trace_install(-50), "install handler -> Err(-50)");
+        assert_eq!(
+            super::trace_handler(super::SUMMON_SIGNATURE, 1, true),
+            "handler fired id=1 signature=folo live=yes"
+        );
+        assert_eq!(
+            super::trace_handler(super::SUMMON_SIGNATURE, 1, false),
+            "handler fired id=1 signature=folo live=no"
+        );
+        assert_eq!(
+            super::trace_handler_lost(-9870),
+            "handler fired id=none GetEventParameter=Err(-9870)",
+            "eventParameterNotFoundErr — what the shipped 'obj ' produced"
+        );
+        assert_eq!(
+            super::four_character_code(0x2D2D_2D2D),
+            "----",
+            "and this is how a reader checks the one number that was wrong"
+        );
+        assert_eq!(
+            super::four_character_code(0x0001_0002),
+            "....",
+            "a signature that is not text is not put into somebody's terminal"
         );
     }
 }
