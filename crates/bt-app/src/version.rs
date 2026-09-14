@@ -178,7 +178,7 @@ mod tests {
     /// template is on no list of places carrying a version because it carries
     /// none; this test is what keeps that true.
     ///
-    /// Red gate: write `0.3.0` into either field of the template by hand. The
+    /// Red gate: write `0.4.0` into either field of the template by hand. The
     /// bundle then agrees with the manifest exactly until the next release
     /// moves the manifest, which is the same failure the sibling test above was
     /// written for and is invisible for exactly as long. The failure names the

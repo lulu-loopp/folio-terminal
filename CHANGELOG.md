@@ -6,7 +6,22 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+Nothing yet.
+
+## 0.4.0-preview — 2026-09-14
+
 ### Added
+
+- **Folio runs on macOS.** It is the same program, built for Apple silicon and
+  asking for macOS 14 or newer. A pane runs a native shell, and the files
+  column, the Git page and the preview pane — a Markdown document you can edit
+  where it is shown, pictures, video, typeset formulas — are the ones that were
+  already there; several windows come back where they were left, and a
+  background agent still says when it has finished. Where the two systems
+  differ, this one follows the system it is on: the chords are Command chords
+  and the Shortcuts page lists them that way, the window wears the three buttons
+  macOS draws instead of its own, and the menu bar is a real one. A settings
+  file written on either machine is read by both.
 
 - **On a Mac, a key summons the terminal from anywhere.** Press `Ctrl` and the
   backtick key — the one to the left of `1` — and the quick terminal comes down
@@ -23,9 +38,18 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- **Moving the caret and typing in a very large Markdown document no longer
+  waits on the whole document.** Each keystroke used to copy the text, rescan
+  every line for the widest one and rebuild the caret's map of lines from
+  scratch; on a three-megabyte document that was a visible pause on every key.
+  The document is now shared rather than copied, undo is derived from the edit
+  itself, and the line index and widths are kept up to date incrementally. On
+  that same document a caret move inside a paragraph went from a few
+  milliseconds to nothing measurable; opening it is still slow, and that is the
+  next change.
+
 - Realize large Markdown documents around the viewport and preserve the reading position while estimated heights change.
 
-- Reduce typing and caret-movement delays in large Markdown documents.
 - **Badges in a Markdown preview now stand in a row instead of one under
   another.** Folio does not fetch pictures from the web, and it used to say so
   in a full-width card three lines tall for every one of them — so the four
@@ -47,15 +71,6 @@ All notable changes to Folio are recorded here. The format follows
   the window's own corner.** The wash used to be a smaller pill; it is now the
   same shape and the same curve as the corner it sits in, and the gear itself
   has not moved.
-- **Moving the caret and typing in a very large Markdown document no longer
-  waits on the whole document.** Each keystroke used to copy the text, rescan
-  every line for the widest one and rebuild the caret's map of lines from
-  scratch; on a three-megabyte document that was a visible pause on every key.
-  The document is now shared rather than copied, undo is derived from the edit
-  itself, and the line index and widths are kept up to date incrementally. On
-  that same document a caret move inside a paragraph went from a few
-  milliseconds to nothing measurable; opening it is still slow, and that is the
-  next change.
 - **A changed file in the Git page says what happened to it in words.** Resting
   on a row used to give you its path and the name of the group it stands in,
   leaving git's two letters to be read off the badges: `UU` on a row meant
@@ -72,6 +87,42 @@ All notable changes to Folio are recorded here. The format follows
   growing. The wait before it appears is unchanged, it still leaves the instant
   you move away, and if you have asked your system for reduced motion it appears
   and leaves instantly as before.
+- **The top bar takes the hand anywhere it is not a button.** Dragging the window
+  by its top bar used to work only in the stretch between the last tab and the
+  buttons in the corner; the space between two tabs, the strip above them and the
+  gaps around the settings button did nothing at all. Every part of that bar that
+  is not one of this window's own buttons now picks the window up, and
+  double-clicking it still does what it did.
+- **A quit keeps every tab a window was holding.** Quitting with a page still
+  closing down could write the session out again on the way out, with the tabs
+  that had already gone missing from it; the document a quit writes is the one
+  the next launch reads, so it is no longer written over by the teardown.
+- **The preview's bottom line appears only when it has something to say.** Every
+  preview — a document, a Markdown page, a picture, a PDF, a recording, in a pane
+  or in a window you have torn off — used to keep a strip along its bottom edge
+  whether or not there was anything in it, and most of the time there was not.
+  The page now runs all the way to the bottom of what is showing it. When there
+  is news — `Saved`, `Revealed`, or a file that changed on disk under your edits
+  — it floats over the bottom of the page for as long as it has something to say,
+  and moves nothing while it comes and goes; `Changed on disk` still waits there
+  with `Reload` and `Keep my edits` until you answer it. A file you cannot edit
+  shows a small padlock at the end of the path row instead, which says why when
+  you point at it — and says it out loud, for two seconds, the moment you click
+  into the page or type at it, with `Open in default app` beside it. What a
+  picture is — `PNG · 670 KB`, `6000 × 4000 · shown at 41%` — has moved up to
+  that same row, and the video controls sit on the bottom edge of the picture
+  with the recording's format and size at their right end.
+- **A file the preview cannot show offers to open it in the default app, like an
+  executable does.** A picture Folio declines — one with too many pixels, a file
+  too large to read, a picture that would not load — used to say so in the middle
+  of an empty pane and leave you there. It now wears the card an unknown file
+  type has always worn: the same sentence, and under it the same
+  `Open in default app` button, which hands the file to whatever the system has
+  registered for it. The same goes for a picture Folio could not draw, a pane too
+  small to draw one in, and a recording in a format this machine cannot play. It
+  is the same card in a torn-off window as in a pane. A file the disk itself
+  refused to read still says only what happened, because another program would
+  be refused in the same way.
 
 ### Fixed
 
@@ -156,45 +207,6 @@ All notable changes to Folio are recorded here. The format follows
   With the caret in the command palette, the search box, a name being edited, the
   branch prompt, the commit graph's search or a document being edited, `Win+C`
   typed a `c`. A chord is not text, and none of these take one now.
-
-### Changed
-
-- **The top bar takes the hand anywhere it is not a button.** Dragging the window
-  by its top bar used to work only in the stretch between the last tab and the
-  buttons in the corner; the space between two tabs, the strip above them and the
-  gaps around the settings button did nothing at all. Every part of that bar that
-  is not one of this window's own buttons now picks the window up, and
-  double-clicking it still does what it did.
-- **A quit keeps every tab a window was holding.** Quitting with a page still
-  closing down could write the session out again on the way out, with the tabs
-  that had already gone missing from it; the document a quit writes is the one
-  the next launch reads, so it is no longer written over by the teardown.
-- **The preview's bottom line appears only when it has something to say.** Every
-  preview — a document, a Markdown page, a picture, a PDF, a recording, in a pane
-  or in a window you have torn off — used to keep a strip along its bottom edge
-  whether or not there was anything in it, and most of the time there was not.
-  The page now runs all the way to the bottom of what is showing it. When there
-  is news — `Saved`, `Revealed`, or a file that changed on disk under your edits
-  — it floats over the bottom of the page for as long as it has something to say,
-  and moves nothing while it comes and goes; `Changed on disk` still waits there
-  with `Reload` and `Keep my edits` until you answer it. A file you cannot edit
-  shows a small padlock at the end of the path row instead, which says why when
-  you point at it — and says it out loud, for two seconds, the moment you click
-  into the page or type at it, with `Open in default app` beside it. What a
-  picture is — `PNG · 670 KB`, `6000 × 4000 · shown at 41%` — has moved up to
-  that same row, and the video controls sit on the bottom edge of the picture
-  with the recording's format and size at their right end.
-- **A file the preview cannot show offers to open it in the default app, like an
-  executable does.** A picture Folio declines — one with too many pixels, a file
-  too large to read, a picture that would not load — used to say so in the middle
-  of an empty pane and leave you there. It now wears the card an unknown file
-  type has always worn: the same sentence, and under it the same
-  `Open in default app` button, which hands the file to whatever the system has
-  registered for it. The same goes for a picture Folio could not draw, a pane too
-  small to draw one in, and a recording in a format this machine cannot play. It
-  is the same card in a torn-off window as in a pane. A file the disk itself
-  refused to read still says only what happened, because another program would
-  be refused in the same way.
 
 ## 0.3.0-preview — 2026-09-12
 
