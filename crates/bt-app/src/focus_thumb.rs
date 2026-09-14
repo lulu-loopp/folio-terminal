@@ -2937,6 +2937,139 @@ mod tests {
         assert_eq!(transcript_tail(&shell, 40, 3, position.skip()).0, seen);
     }
 
+    /// **A mini seat of `height` logical pixels, on a display of `scale`** —
+    /// how many rows it holds, by the window's own arithmetic and not by a
+    /// number chosen here.
+    ///
+    /// The eighty-five is a height at which the two scales genuinely disagree,
+    /// which is the case worth a test: [`mini_rows`] divides the seat's
+    /// *physical* rectangle, less a border and two paddings each rounded on its
+    /// own, by a line height rounded on its own, so the count is not a function
+    /// of the logical box alone. A card whose box never changed can therefore
+    /// hold one more row on one display than on another.
+    fn card_rows_at(height_logical_px: f32, scale: f32) -> usize {
+        // The width takes no part in the count and is the card column's own, so
+        // that the rectangle is a rectangle a card really stands in.
+        let rect = [0.0, 0.0, 263.0 * scale, height_logical_px * scale];
+        mini_rows(rect, MiniMetrics::TERM.line_px(scale), scale)
+    }
+
+    /// The height these two tests hang a card on. One number, because the card
+    /// box is the same box on both displays — the whole point is that the
+    /// *rows* still move.
+    const A_MINI_SEAT_LOGICAL_PX: f32 = 85.0;
+
+    /// T-CARD-ANCHOR-DPI (i), owner's 2026-09-14 report: **a window carried
+    /// full-screen to a display of another scale and back shows what it
+    /// showed.**
+    ///
+    /// The round trip T-CARD-ANCHOR-BOTTOM proved is one display's: the pane
+    /// changes width and the card changes height, both measured at one scale.
+    /// This one changes the scale as well, and the scale reaches the card by a
+    /// road of its own — see [`card_rows_at`] — so the pane's width and the
+    /// card's height move at once and by unrelated amounts. The card must still
+    /// come back to the line it was standing on.
+    ///
+    /// Mutation: resolve the offset once and carry the number across the two
+    /// displays instead of deriving it from the anchor through [`card_climb`]
+    /// each time. The narrow pane's distance is then read off the wide one's
+    /// tail and the last two assertions fail.
+    #[test]
+    fn a_card_comes_back_from_a_display_of_another_scale_showing_what_it_showed() {
+        let at_200 = card_rows_at(A_MINI_SEAT_LOGICAL_PX, 2.0);
+        let at_150 = card_rows_at(A_MINI_SEAT_LOGICAL_PX, 1.5);
+        assert_ne!(
+            at_200, at_150,
+            "the fixture's whole subject is a card whose height moves with the scale"
+        );
+        assert!(at_200 > 0 && at_150 > 0, "{at_200} and {at_150} rows");
+
+        let mut shell = a_wrapped_shell();
+        resize_shell(&mut shell, 24);
+        let joined = card_lines(&shell);
+        let mut position = CardPosition::new(9);
+        position.prepare(&mut shell, at_200);
+        let skip = position.persisted_skip(&shell);
+        let seen = transcript_tail(&shell, 40, at_200, position.skip()).0;
+        assert_eq!(
+            seen.len(),
+            at_200,
+            "the fixture must fill the card: {seen:?}"
+        );
+        assert!(skip > 0, "the card must be standing off the tail: {seen:?}");
+
+        // The other display: a pane of another width, and a card of another
+        // height, both at once. Twelve and not some rounder number, for
+        // [`a_wrapped_shell`]'s reason — the fixture's fragments were captured
+        // at twelve columns, so twelve is the width at which the wide pane's
+        // joined lines are in pieces again.
+        resize_shell(&mut shell, 12);
+        position.prepare(&mut shell, at_150);
+        let split = card_lines(&shell);
+        assert_ne!(
+            split.len(),
+            joined.len(),
+            "the narrow pane must break the lines the wide one joined"
+        );
+        assert!(
+            position.persisted_skip(&shell) > 0,
+            "the card is still standing off the tail on the second display"
+        );
+
+        // And home again.
+        resize_shell(&mut shell, 24);
+        position.prepare(&mut shell, at_200);
+        assert_eq!(
+            card_lines(&shell),
+            joined,
+            "the transcript itself did not come back: nothing below can be read"
+        );
+        assert_eq!(position.persisted_skip(&shell), skip);
+        assert_eq!(transcript_tail(&shell, 40, at_200, position.skip()).0, seen);
+    }
+
+    /// T-CARD-ANCHOR-DPI (ii): **the two halves of a display move land the card
+    /// in the same place in either order.**
+    ///
+    /// A display move reaches this program as two events and Windows promises
+    /// nothing about which is seen first: `WM_DPICHANGED` carries the scale, and
+    /// the `WM_SIZE` its own `SetWindowPos` produces carries the rectangle. The
+    /// pane's width comes with the rectangle and the card's height comes with
+    /// the scale, so the card is moved by two facts that can arrive either way
+    /// round — and they are one move, so they must end in one place.
+    ///
+    /// Mutation: let [`CardPosition::prepare`]'s early return compare the
+    /// session's revision alone and not the card's height. The order that
+    /// changes the height while the transcript stands still is then refused,
+    /// the card keeps the offset the other display's height resolved, and the
+    /// two orders part company.
+    #[test]
+    fn the_two_halves_of_a_display_move_land_the_card_in_the_same_place_in_either_order() {
+        let at_200 = card_rows_at(A_MINI_SEAT_LOGICAL_PX, 2.0);
+        let at_150 = card_rows_at(A_MINI_SEAT_LOGICAL_PX, 1.5);
+        let landing = |rectangle_first: bool| {
+            let mut shell = a_wrapped_shell();
+            resize_shell(&mut shell, 24);
+            let mut position = CardPosition::new(9);
+            position.prepare(&mut shell, at_200);
+            assert!(position.persisted_skip(&shell) > 0, "aimed off the tail");
+            if rectangle_first {
+                resize_shell(&mut shell, 12);
+                position.prepare(&mut shell, at_200);
+                position.prepare(&mut shell, at_150);
+            } else {
+                position.prepare(&mut shell, at_150);
+                resize_shell(&mut shell, 12);
+                position.prepare(&mut shell, at_150);
+            }
+            (
+                position.persisted_skip(&shell),
+                transcript_tail(&shell, 40, at_150, position.skip()).0,
+            )
+        };
+        assert_eq!(landing(true), landing(false));
+    }
+
     /// T-CARD-ANCHOR-BOTTOM (iii): a card nobody has aimed rests on the newest
     /// line, and no resize moves it off — nor quietly nails it to the line that
     /// happened to be newest while the window was being dragged.
