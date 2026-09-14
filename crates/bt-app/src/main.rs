@@ -113053,7 +113053,7 @@ mod floated_page_tests {
         // that closes the process, so a second fault in the same second cannot
         // take the first one's message box off the screen.
         assert!(
-            hook.contains("if !announce_panic(&path) {"),
+            hook.contains("if !announce_panic(path) {"),
             "every panic now ends the process, so two faults in one second race \
              to cut each other's alert off:\n{hook}"
         );

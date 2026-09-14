@@ -85,7 +85,9 @@ Compiled out of release builds.
 ## 2. Read only when the tests are compiled
 
 Never present in a release binary. `BT_PSREADLINE_MODULE_PATH`, `BT_BURST_EMIT`,
-`BT_BURST_ONLY`, `BT_DEFER_EMIT`.
+`BT_BURST_ONLY`, `BT_DEFER_EMIT`, `BT_MATH_ROBUSTNESS_TEST_CHILD` (the marker a
+test process sets on the child it spawns to prove the decoration worker survives a
+hostile formula).
 
 ## 3. `BT_` names in the source that are not environment variables
 
