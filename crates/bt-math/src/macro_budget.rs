@@ -1,10 +1,14 @@
 //! A static bound for the pinned MiTeX macro engine, before it can expand anything.
 //!
 //! Use its *plain* lexer so comments, escaped commands and starred names have
-//! exactly the converter's token boundaries. Accept only complete, literal,
-//! zero-argument command definitions. Parameter substitution, custom environments
-//! and generated declarations need a different proof and are refused. In
-//! particular a parameter can introduce recursion absent from a name graph.
+//! exactly the converter's token boundaries. Accept only complete, literal
+//! command definitions. A definition may take parameters (`[n]`), on one
+//! condition that keeps the name graph honest: an argument handed to such a
+//! macro may not mention a defined macro, because a parameter is the one way
+//! to smuggle recursion past the graph (`\newcommand{\a}[1]{#1}\a{\a}`).
+//! With that door shut an argument expands no further, so its cost is its
+//! bytes times the parameter uses in the body. Custom environments and
+//! generated declarations need a different proof and are refused.
 //! Duplicate definitions contribute the union of their edges and the sum of
 //! their costs, covering every scope/redefinition order conservatively.
 //!
@@ -30,6 +34,11 @@ type Tok<'a> = (Token, &'a str);
 struct Definition<'a> {
     bytes: usize,
     references: Vec<&'a str>,
+    /// How many arguments the definition takes (`[n]`).
+    params: usize,
+    /// How many `#` tokens its body carries: an upper bound on the times an
+    /// argument is copied into one expansion.
+    uses: usize,
 }
 
 fn command(token: Tok<'_>) -> Option<&str> {
@@ -121,14 +130,20 @@ pub(super) fn validate(source: &str) -> Result<(), MathRenderError> {
         if name.is_empty() || declaration(name) || unsupported(name) {
             return Err(MathRenderError::UnboundedMacro);
         }
-        // An explicit [0] is the same literal definition. All other parameter
-        // lists are refused: an acyclic name graph alone cannot bound them.
+        // `[n]` names the parameter count, one digit. The arguments those
+        // parameters receive are charged where the macro is used, below.
+        let mut params = 0;
         if tokens.get(at).map(|t| t.0) == Some(Token::Left(BraceKind::Bracket)) {
-            if tokens.get(at + 1).map(|t| t.1) != Some("0")
-                || tokens.get(at + 2).map(|t| t.0) != Some(Token::Right(BraceKind::Bracket))
-            {
+            let count = tokens
+                .get(at + 1)
+                .filter(|t| t.0 == Token::Word)
+                .and_then(|t| t.1.parse::<usize>().ok())
+                .filter(|n| *n <= 9);
+            let closed = tokens.get(at + 2).map(|t| t.0) == Some(Token::Right(BraceKind::Bracket));
+            let (Some(count), true) = (count, closed) else {
                 return Err(MathRenderError::UnboundedMacro);
-            }
+            };
+            params = count;
             at += 3;
         }
         let body_start = tokens
@@ -143,7 +158,11 @@ pub(super) fn validate(source: &str) -> Result<(), MathRenderError> {
         // the actual braced source range is tighter and preserves useful macros.
         let body_bytes = tokens[at - 1].1.as_ptr() as usize - body_start;
         definition.bytes = definition.bytes.saturating_add(body_bytes + 1);
+        definition.params = definition.params.max(params);
         for token in body {
+            if token.0 == Token::Hash {
+                definition.uses += 1;
+            }
             if let Some(reference) = command(token) {
                 if declaration(reference) || unsupported(reference) {
                     return Err(MathRenderError::UnboundedMacro);
@@ -177,11 +196,60 @@ pub(super) fn validate(source: &str) -> Result<(), MathRenderError> {
             return Err(MathRenderError::MacroCycle);
         }
     }
-    let work = tokens
+    let mut work = tokens
         .iter()
         .filter_map(|token| command(*token))
         .filter_map(|name| costs.get(name))
         .fold(source.len(), |total, cost| total.saturating_add(*cost));
+
+    // The arguments. Every use of a parameterised macro — in the formula and
+    // inside other definitions alike — reads its `params` groups. An argument
+    // that names a defined macro is refused outright; the rest are literal
+    // text copied `uses` times, and that is what they cost.
+    let mut at = 0;
+    while at < tokens.len() {
+        let token = tokens[at];
+        at += 1;
+        let Some(name) = command(token) else { continue };
+        if declaration(name) {
+            // The declared name is not a use of it: step over the name group
+            // (or `\def`'s bare name) so it is not read as an invocation.
+            if name == "def" {
+                at += 1;
+            } else if tokens.get(at).map(|t| t.0) == Some(Token::Left(BraceKind::Curly)) {
+                group(&tokens, &mut at)?;
+            }
+            continue;
+        }
+        let Some(definition) = definitions.get(name) else {
+            continue;
+        };
+        for _ in 0..definition.params {
+            let (argument, bytes) =
+                if tokens.get(at).map(|t| t.0) == Some(Token::Left(BraceKind::Curly)) {
+                    let start = tokens[at].1.as_ptr() as usize;
+                    let inner = group(&tokens, &mut at)?;
+                    (inner, tokens[at - 1].1.as_ptr() as usize - start + 1)
+                } else if let Some(&single) = tokens.get(at) {
+                    at += 1;
+                    (vec![single], single.1.len())
+                } else {
+                    break;
+                };
+            for token in &argument {
+                if let Some(reference) = command(*token)
+                    && (definitions.contains_key(reference)
+                        || declaration(reference)
+                        || unsupported(reference))
+                {
+                    return Err(MathRenderError::UnboundedMacro);
+                }
+            }
+            work = work
+                .saturating_add(bytes.saturating_mul(definition.uses.max(1)))
+                .min(MAX_WORK + 1);
+        }
+    }
     if work > MAX_WORK {
         return Err(MathRenderError::MacroExpansionLimit);
     }
@@ -243,6 +311,39 @@ mod tests {
         ] {
             assert_eq!(validate(source), Err(MathRenderError::UnboundedMacro));
         }
+    }
+
+    #[test]
+    fn a_parameterised_macro_with_literal_arguments_is_admitted() {
+        for source in [
+            r"\newcommand{\vect}[1]{\mathbf{#1}} \vect{v_0} \cdot \vect{w_1}",
+            r"\newcommand{\f}[2]{\frac{#1}{#2}} \f{a}{b} + \f x y",
+            r"\newcommand{\a}[1]{#1}\newcommand{\b}{\a{x}}\b",
+        ] {
+            assert_eq!(validate(source), Ok(()), "{source}");
+        }
+    }
+
+    #[test]
+    fn an_argument_that_names_a_defined_macro_is_refused() {
+        for source in [
+            r"\newcommand{\a}[1]{#1}\a{\a}",
+            r"\newcommand{\a}[1]{#1}\newcommand{\c}{x}\a{\c}",
+            r"\newcommand{\a}[1]{#1}\a\a",
+        ] {
+            assert_eq!(
+                validate(source),
+                Err(MathRenderError::UnboundedMacro),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_argument_copied_many_times_is_charged_each_time() {
+        let uses = "#1".repeat(100);
+        let source = format!("\\newcommand{{\\d}}[1]{{{uses}}}\\d{{{}}}", "x".repeat(400));
+        assert_eq!(validate(&source), Err(MathRenderError::MacroExpansionLimit));
     }
 
     #[test]
