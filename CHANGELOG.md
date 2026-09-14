@@ -150,6 +150,19 @@ Nothing yet.
 
 ### Fixed
 
+- **Hovering a typeset formula puts that formula's two buttons beside it.** The
+  `<>` and copy buttons had stopped arriving at all, and where a second formula
+  had been hovered a moment earlier they stood beside *that* one — a block above
+  the one the pointer was on, which was the block wearing the lit background. The
+  background is painted into the terminal's own picture and the buttons are drawn
+  over it, and the buttons were being placed from the picture the pane had shown
+  *before* the pointer moved, with nothing coming back to look again once the new
+  one had been drawn. The buttons now belong to the formula the pointer named, so
+  they and the background can never be on two different formulas, and the moment
+  the picture that lights a formula reaches the screen its buttons are drawn on
+  it and fade in over the same ninety milliseconds as everything else this window
+  raises under the hand.
+
 - **A terminal showing formulas no longer stops when the window leaves full screen or
   changes display.** A formula that a narrower window folded onto the next row was
   placed on that row but still counted against the row its line began on, and the

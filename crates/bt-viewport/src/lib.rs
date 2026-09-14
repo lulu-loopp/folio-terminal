@@ -443,6 +443,56 @@ impl MathBlockAnchor {
             Self::History { run, .. } | Self::Live { run, .. } => *run,
         }
     }
+
+    /// **Whether two anchors name the same block** — the identity a decoration
+    /// record is looked up by, and nothing else.
+    ///
+    /// Equality is not that question and cannot be made into it. An anchor
+    /// carries two things a *record* is never keyed on: the `run` above, and — on
+    /// a live anchor — the rows the band happens to stand on this frame
+    /// (`band_start_row`/`band_end_row`), which a fold or a resize moves while
+    /// the block underneath is the same block (`bt_term`'s own hover sweep
+    /// `set_math_hover` compares exactly the fields below and neither of those).
+    ///
+    /// It exists because the ground under a band and the two marks beside it must
+    /// answer one question and not two: the ground is laid on the placement the
+    /// hover lit, and the marks are placed on the placement this predicate finds
+    /// from that same hovered anchor.
+    #[must_use]
+    pub fn same_block(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::History { start, end, .. },
+                Self::History {
+                    start: other_start,
+                    end: other_end,
+                    ..
+                },
+            ) => start == other_start && end == other_end,
+            (
+                Self::Live {
+                    screen,
+                    start,
+                    end,
+                    generation,
+                    ..
+                },
+                Self::Live {
+                    screen: other_screen,
+                    start: other_start,
+                    end: other_end,
+                    generation: other_generation,
+                    ..
+                },
+            ) => {
+                screen == other_screen
+                    && start == other_start
+                    && end == other_end
+                    && generation == other_generation
+            }
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

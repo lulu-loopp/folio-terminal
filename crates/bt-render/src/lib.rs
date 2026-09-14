@@ -288,6 +288,39 @@ pub struct MathToolBoxes {
     pub copy: [f32; 4],
 }
 
+/// **The one placement a hovered anchor names, and its boxes** — see
+/// [`WindowRenderer::math_tool_boxes`], which is this with the renderer's own
+/// grid and seat filled in.
+///
+/// Two conditions and they are deliberately the *same two* the ground is drawn
+/// under (`math_block_ground_is_drawn`): the placement carries `toolbar_visible`,
+/// and it is the block the hover lit. The list is walked forwards and the first
+/// match is taken because there is exactly one — `bt_term`'s `set_math_hover`
+/// sweeps every record before it lights one, so one frame holds at most one lit
+/// placement — and walking it backwards for "whichever was last" is precisely
+/// the reading this ticket removed: it answers with *some* block on a frame
+/// where the named one is not lit, and some block is not this block.
+fn math_tool_boxes_for(
+    metrics: CellMetrics,
+    seat: SeatViewport,
+    frame: &ViewportFrame,
+    hovered: &MathBlockAnchor,
+) -> Option<MathToolBoxes> {
+    let placement = frame.math_blocks.iter().find(|placement| {
+        placement.artifact.kind == bt_viewport::RgbaArtifactKind::Math
+            && placement.toolbar_visible
+            && placement.anchor.same_block(hovered)
+    })?;
+    let geometry = math_block_geometry_px(metrics, seat, frame, placement)?;
+    Some(MathToolBoxes {
+        anchor: placement.anchor.clone(),
+        display: placement.display,
+        block: geometry.block,
+        source: geometry.eye?,
+        copy: geometry.copy?,
+    })
+}
+
 /// Which inline run of this placement the pointer is on.
 ///
 /// An inline placement is one composite covering a whole line, so the block rectangle alone cannot
@@ -327,6 +360,104 @@ struct MathBlockGeometry {
     clip: [f32; 4],
     eye: Option<[f32; 4]>,
     copy: Option<[f32; 4]>,
+}
+
+/// **Where one formula band stands in its pane**, in the pane body's own pixels.
+///
+/// Free of the renderer because nothing in it is about the GPU: a band's box is
+/// the grid it is measured on ([`CellMetrics`]) and the seat it is cut to, and
+/// both are plain numbers. [`WindowRenderer::math_block_geometry`] is the one
+/// caller that holds those two as state; every other reader of this arithmetic —
+/// the ground under a band, the two marks beside it, and the pin that says the
+/// two stand on one block — can now be answered without a surface.
+fn math_block_geometry_px(
+    metrics: CellMetrics,
+    seat: SeatViewport,
+    frame: &ViewportFrame,
+    placement: &MathBlockPlacement,
+) -> Option<MathBlockGeometry> {
+    if !frame.drawable_interval_overlaps(placement.top_subpixels, placement.clip_height_subpixels) {
+        return None;
+    }
+    let pane_left = metrics.padding_px;
+    let pane_right =
+        (pane_left + frame.columns.get() as f32 * metrics.cell_width_px).min(seat.width as f32);
+    let pane_top = metrics.padding_px;
+    let pane_bottom = seat.height as f32;
+    let band_top = pane_top + placement.top_subpixels as f32 / SUBPIXELS_PER_PX as f32;
+    let top = if placement.artifact.mode == MathMode::Inline {
+        band_top + metrics.ascii_baseline_px
+            - placement.artifact.baseline_subpixels as f32 / SUBPIXELS_PER_PX as f32
+    } else {
+        band_top + placement.content_offset_subpixels as f32 / SUBPIXELS_PER_PX as f32
+    };
+    let clip_height = placement.clip_height_subpixels.max(1) as f32 / SUBPIXELS_PER_PX as f32;
+    let scaled_width = if placement.display == MathBlockDisplay::Source {
+        placement
+            .source
+            .lines()
+            .map(|line| line.chars().count() + 4)
+            .max()
+            .unwrap_or(4) as f32
+            * metrics.cell_width_px
+    } else {
+        placement.artifact.width_px as f32 * placement.artifact.render_scale_milli as f32 / 1000.0
+    };
+    let scaled_height = if placement.display == MathBlockDisplay::Source {
+        clip_height
+    } else {
+        placement.artifact.height_px as f32 * placement.artifact.render_scale_milli as f32 / 1000.0
+    };
+    let ([visible_top, visible_bottom], [clip_top, clip_bottom]) = math_vertical_bounds(
+        placement.artifact.mode,
+        pane_top,
+        pane_bottom,
+        band_top,
+        top,
+        scaled_height,
+        clip_height,
+    );
+    let (visible_left, visible_right) = math_horizontal_bounds(
+        metrics,
+        seat.width,
+        frame.columns,
+        placement.left_subpixels,
+        scaled_width,
+        placement.display == MathBlockDisplay::Rendered,
+    )?;
+    if visible_right <= visible_left || visible_bottom <= visible_top {
+        return None;
+    }
+    let block = [visible_left, visible_top, visible_right, visible_bottom];
+    // Display math owns a complete presentation box: alpha-tight ink is offset by symmetric
+    // padding inside the band, while the clip is the band itself. Inline math retains its
+    // baseline-relative clip. In both cases the visible raster is intersected with this clip
+    // above, so the frame-level rule remains explicit: clip contains every block pixel.
+    let clip = [visible_left, clip_top, pane_right, clip_bottom];
+    // The scissor must never crop the visible raster: its top may not sit below the block's
+    // top, nor its bottom above the block's bottom. This is the invariant the centred multi-
+    // line clip violated (see above); asserting it here fails the moment any future change
+    // decouples the clip from `top` again.
+    debug_assert!(
+        clip[1] <= block[1] + 0.5 && clip[3] >= block[3] - 0.5,
+        "math scissor crops the raster: clip={clip:?} block={block:?}"
+    );
+    let (eye, copy) = if placement.toolbar_visible {
+        let (source, copy) = math_tool_boxes_px(
+            [visible_right, visible_top, visible_bottom],
+            [pane_left, pane_right],
+            metrics.scale_factor as f32,
+        );
+        (Some(source), Some(copy))
+    } else {
+        (None, None)
+    };
+    Some(MathBlockGeometry {
+        block,
+        clip,
+        eye,
+        copy,
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -6905,37 +7036,35 @@ impl WindowRenderer {
         ime_cursor_area_for_metrics(self.metrics, frame)
     }
 
-    /// **Where the hovered band's floor and its two marks stand**, in the pane
+    /// **Where one named band's floor and its two marks stand**, in the pane
     /// body's own pixels — the drawing half of what [`Self::math_hit_test`]
     /// answers for the pointer.
     ///
-    /// One band or none: `toolbar_visible` is written to exactly one shell and
-    /// there is one pointer, so at most one block in a frame is wearing its
-    /// tools. The caller (`bt_app`) is the one that rasterizes house marks, and
-    /// it reads these boxes out of the same `math_block_geometry` that
-    /// `math_hit_test` reads — which is what keeps the box you can press and the
-    /// box you can see from being two boxes.
+    /// `hovered` is the anchor the pointer produced and the shell was told to
+    /// light (`bt_app`'s `math_hover_anchor`, written into the session by
+    /// `set_math_hover`). **It is a parameter, and that is the whole of the fix
+    /// of 2026-09-14** (T-MATH-TOOLS-SEAT): until then this asked the frame a
+    /// question of its own — *the last placement carrying `toolbar_visible`* —
+    /// while the ground asked each placement *do you carry it*, and the caller
+    /// asked both of two different frames. Two questions and two frames can name
+    /// two blocks, and the owner's screenshot is what that looks like: the floor
+    /// under the block the pointer was on, the marks beside the block above it.
+    /// Now there is one answer — the hovered anchor — and both the floor and the
+    /// marks are read off the placement it names, so they cannot be placed on
+    /// two different blocks however stale the frame in hand is.
     ///
-    /// Returns `None` for a band that is off screen, for a band with no tools up
-    /// and for a table (`RgbaArtifactKind::Table`), matching `math_hit_test`'s
-    /// own reading of the same list.
+    /// Returns `None` for a band that is off screen, for a band with no tools up,
+    /// for a table (`RgbaArtifactKind::Table`), and — deliberately — for a frame
+    /// in which the hovered block is not (yet) the lit one: a frame older than
+    /// the gesture draws no marks for one frame rather than drawing them
+    /// somewhere else.
     #[must_use]
-    pub fn math_tool_boxes(&self, frame: &ViewportFrame) -> Option<MathToolBoxes> {
-        frame.math_blocks.iter().rev().find_map(|placement| {
-            if placement.artifact.kind != bt_viewport::RgbaArtifactKind::Math
-                || !placement.toolbar_visible
-            {
-                return None;
-            }
-            let geometry = self.math_block_geometry(frame, placement)?;
-            Some(MathToolBoxes {
-                anchor: placement.anchor.clone(),
-                display: placement.display,
-                block: geometry.block,
-                source: geometry.eye?,
-                copy: geometry.copy?,
-            })
-        })
+    pub fn math_tool_boxes(
+        &self,
+        frame: &ViewportFrame,
+        hovered: &MathBlockAnchor,
+    ) -> Option<MathToolBoxes> {
+        math_tool_boxes_for(self.metrics, self.seat, frame, hovered)
     }
 
     pub fn math_hit_test(&self, frame: &ViewportFrame, x: f64, y: f64) -> Option<MathHit> {
@@ -9909,92 +10038,7 @@ impl WindowRenderer {
         frame: &ViewportFrame,
         placement: &MathBlockPlacement,
     ) -> Option<MathBlockGeometry> {
-        if !frame
-            .drawable_interval_overlaps(placement.top_subpixels, placement.clip_height_subpixels)
-        {
-            return None;
-        }
-        let pane_left = self.metrics.padding_px;
-        let pane_right = (pane_left + frame.columns.get() as f32 * self.metrics.cell_width_px)
-            .min(self.seat.width as f32);
-        let pane_top = self.metrics.padding_px;
-        let pane_bottom = self.seat.height as f32;
-        let band_top = pane_top + placement.top_subpixels as f32 / SUBPIXELS_PER_PX as f32;
-        let top = if placement.artifact.mode == MathMode::Inline {
-            band_top + self.metrics.ascii_baseline_px
-                - placement.artifact.baseline_subpixels as f32 / SUBPIXELS_PER_PX as f32
-        } else {
-            band_top + placement.content_offset_subpixels as f32 / SUBPIXELS_PER_PX as f32
-        };
-        let clip_height = placement.clip_height_subpixels.max(1) as f32 / SUBPIXELS_PER_PX as f32;
-        let scaled_width = if placement.display == MathBlockDisplay::Source {
-            placement
-                .source
-                .lines()
-                .map(|line| line.chars().count() + 4)
-                .max()
-                .unwrap_or(4) as f32
-                * self.metrics.cell_width_px
-        } else {
-            placement.artifact.width_px as f32 * placement.artifact.render_scale_milli as f32
-                / 1000.0
-        };
-        let scaled_height = if placement.display == MathBlockDisplay::Source {
-            clip_height
-        } else {
-            placement.artifact.height_px as f32 * placement.artifact.render_scale_milli as f32
-                / 1000.0
-        };
-        let ([visible_top, visible_bottom], [clip_top, clip_bottom]) = math_vertical_bounds(
-            placement.artifact.mode,
-            pane_top,
-            pane_bottom,
-            band_top,
-            top,
-            scaled_height,
-            clip_height,
-        );
-        let (visible_left, visible_right) = math_horizontal_bounds(
-            self.metrics,
-            self.seat.width,
-            frame.columns,
-            placement.left_subpixels,
-            scaled_width,
-            placement.display == MathBlockDisplay::Rendered,
-        )?;
-        if visible_right <= visible_left || visible_bottom <= visible_top {
-            return None;
-        }
-        let block = [visible_left, visible_top, visible_right, visible_bottom];
-        // Display math owns a complete presentation box: alpha-tight ink is offset by symmetric
-        // padding inside the band, while the clip is the band itself. Inline math retains its
-        // baseline-relative clip. In both cases the visible raster is intersected with this clip
-        // above, so the frame-level rule remains explicit: clip contains every block pixel.
-        let clip = [visible_left, clip_top, pane_right, clip_bottom];
-        // The scissor must never crop the visible raster: its top may not sit below the block's
-        // top, nor its bottom above the block's bottom. This is the invariant the centred multi-
-        // line clip violated (see above); asserting it here fails the moment any future change
-        // decouples the clip from `top` again.
-        debug_assert!(
-            clip[1] <= block[1] + 0.5 && clip[3] >= block[3] - 0.5,
-            "math scissor crops the raster: clip={clip:?} block={block:?}"
-        );
-        let (eye, copy) = if placement.toolbar_visible {
-            let (source, copy) = math_tool_boxes_px(
-                [visible_right, visible_top, visible_bottom],
-                [pane_left, pane_right],
-                self.metrics.scale_factor as f32,
-            );
-            (Some(source), Some(copy))
-        } else {
-            (None, None)
-        };
-        Some(MathBlockGeometry {
-            block,
-            clip,
-            eye,
-            copy,
-        })
+        math_block_geometry_px(self.metrics, self.seat, frame, placement)
     }
 
     /// This seat's rendered tables, turned into bodies in whole-window coordinates.
@@ -18292,6 +18336,226 @@ mod tests {
         assert!(
             math_block_ground_is_drawn(&source, false),
             "a source block owns no texture; its ground is under its own text",
+        );
+    }
+
+    /// The grid these seat pins are struck on: [`fade_metrics`]' 10×20 cell, an
+    /// 8px pane inset, and a seat big enough that nothing below is clamped by it.
+    fn seat_test_seat() -> SeatViewport {
+        SeatViewport::whole(400, 400)
+    }
+
+    /// A display band standing on `rows` of that grid from `first_row`, wearing
+    /// its tools or not.
+    ///
+    /// Its anchor is the line it begins on, which is how `bt_term` keys the
+    /// decoration record whose `hovered` put `toolbar_visible` here.
+    fn seat_test_band(first_row: u32, rows: u32, lit: bool) -> MathBlockPlacement {
+        let row_subpixels = 20 * SUBPIXELS_PER_PX;
+        let mut placement = test_math_placement(
+            &format!("band-{first_row}"),
+            i64::from(first_row) * row_subpixels,
+            i64::from(rows) * row_subpixels,
+            4,
+        );
+        let id = bt_transcript::TranscriptId(u64::from(first_row) + 1);
+        let end = bt_transcript::TranscriptId(u64::from(first_row) + u64::from(rows));
+        placement.start = id;
+        placement.anchor = bt_viewport::MathBlockAnchor::History {
+            run: None,
+            start: id,
+            end,
+        };
+        placement.artifact.kind = bt_viewport::RgbaArtifactKind::Math;
+        placement.artifact.mode = MathMode::Display;
+        placement.artifact.width_px = 120;
+        placement.artifact.height_px = 20 * rows;
+        placement.artifact.render_scale_milli = 1000;
+        placement.toolbar_visible = lit;
+        placement
+    }
+
+    /// The composite an ordinary line of prose carrying `$…$` runs becomes.
+    ///
+    /// Pushed **after** both bands, because that is where the session pushes it
+    /// (`decorate_math_frame`'s per-row inline loops run after the projection's
+    /// own placements are already in the vector) — so the last element of a
+    /// frame is routinely a block that is neither hovered nor even a display
+    /// band, and "the last one carrying tools" was never a safe way to name one.
+    fn seat_test_inline_line(row: u32) -> MathBlockPlacement {
+        let row_subpixels = 20 * SUBPIXELS_PER_PX;
+        let mut placement = seat_test_band(row, 1, false);
+        placement.artifact.mode = MathMode::Inline;
+        placement.artifact.baseline_subpixels = 15 * SUBPIXELS_PER_PX;
+        placement.clip_height_subpixels = row_subpixels;
+        placement
+    }
+
+    /// Two display bands with a line of inline formulas between them, and the
+    /// band at `lit` — and only it — wearing its tools, exactly as one frame of
+    /// the owner's `type math-test.md` holds them.
+    fn seat_test_frame(lit: usize) -> ViewportFrame {
+        let mut frame = wash_frame(40, 8);
+        let mut blocks = vec![
+            seat_test_band(0, 2, false),
+            seat_test_band(3, 2, false),
+            seat_test_inline_line(2),
+        ];
+        blocks[lit].toolbar_visible = true;
+        frame.math_blocks = blocks;
+        frame
+    }
+
+    fn seat_test_geometry(frame: &ViewportFrame, index: usize) -> MathBlockGeometry {
+        math_block_geometry_px(
+            fade_metrics(),
+            seat_test_seat(),
+            frame,
+            &frame.math_blocks[index],
+        )
+        .expect("a band on screen has a box")
+    }
+
+    fn seat_test_boxes(frame: &ViewportFrame, hovered: &MathBlockAnchor) -> Option<MathToolBoxes> {
+        math_tool_boxes_for(fade_metrics(), seat_test_seat(), frame, hovered)
+    }
+
+    /// PIN (owner's report 2026-09-14, T-MATH-TOOLS-SEAT): **the floor and the
+    /// two marks are one answer about one block.**
+    ///
+    /// The report is a picture of them being two: the ground under the matrix
+    /// block the pointer was on, and the two marks a whole block higher, beside
+    /// the Gaussian. Both halves are asserted here of one frame — the ground's
+    /// own predicate over every placement, and the marks' boxes — and they are
+    /// asserted to name the same block and to stand on that block's own rows.
+    ///
+    /// MUTATION: place the marks from the frame rather than from the name — the
+    /// `frame.math_blocks.iter().rev()` this replaced — and the claim stops
+    /// being about the named block at all: the vector's last element is the
+    /// inline line, and its last *lit* element is whichever band the last frame
+    /// lit, which is the case below.
+    #[test]
+    fn the_bands_floor_and_its_marks_are_read_off_one_block() {
+        for lit in [0_usize, 1] {
+            let frame = seat_test_frame(lit);
+            let hovered = &frame.math_blocks[lit].anchor;
+            let boxes = seat_test_boxes(&frame, hovered).expect("the named band has its marks");
+            let geometry = seat_test_geometry(&frame, lit);
+
+            // ① The marks belong to the block the ground belongs to.
+            assert!(boxes.anchor.same_block(hovered), "{:?}", boxes.anchor);
+            assert_eq!(boxes.block, geometry.block);
+
+            // ② And exactly that one block draws a floor.
+            let grounded = frame
+                .math_blocks
+                .iter()
+                .enumerate()
+                .filter(|(_, placement)| math_block_ground_is_drawn(placement, true))
+                .map(|(index, _)| index)
+                .collect::<Vec<usize>>();
+            assert_eq!(grounded, vec![lit]);
+
+            // ③ The marks stand on that block's own rows — inside its band top
+            //    to bottom, and clear of every other band in the frame.
+            for mark in [boxes.source, boxes.copy] {
+                assert!(
+                    mark[1] >= geometry.block[1] && mark[3] <= geometry.block[3],
+                    "{mark:?} left the band {:?}",
+                    geometry.block
+                );
+                for other in [0_usize, 1, 2].into_iter().filter(|index| *index != lit) {
+                    let elsewhere = seat_test_geometry(&frame, other);
+                    assert!(
+                        mark[3] <= elsewhere.block[1] || mark[1] >= elsewhere.block[3],
+                        "{mark:?} is drawn on the rows of block {other} ({:?})",
+                        elsewhere.block
+                    );
+                }
+            }
+        }
+    }
+
+    /// PIN (owner's report 2026-09-14, T-MATH-TOOLS-SEAT): **the marks move with
+    /// the pointer, and they move to the block it moved to.**
+    ///
+    /// The two frames are the two the gesture produces: the picture that lit the
+    /// first band, and the picture that lit the second. The marks are read from
+    /// each under the name that frame lit, and the two answers must be two
+    /// different boxes on two different bands — which is the whole of "hovering
+    /// the second formula puts its own tools beside it".
+    #[test]
+    fn crossing_from_one_band_to_the_next_takes_the_marks_with_it() {
+        let first = seat_test_frame(0);
+        let second = seat_test_frame(1);
+        let on_first =
+            seat_test_boxes(&first, &first.math_blocks[0].anchor).expect("the first band's marks");
+        let on_second = seat_test_boxes(&second, &second.math_blocks[1].anchor)
+            .expect("the second band's marks");
+
+        assert!(!on_first.anchor.same_block(&on_second.anchor));
+        assert_ne!(on_first.source, on_second.source);
+        assert_ne!(on_first.copy, on_second.copy);
+        // Down, not up: the second band is below the first, and so are its marks.
+        assert!(
+            on_second.source[1] >= on_first.source[3],
+            "the marks went to {:?} from {:?}",
+            on_second.source,
+            on_first.source
+        );
+    }
+
+    /// PIN (owner's report 2026-09-14, T-MATH-TOOLS-SEAT): **a picture that has
+    /// not caught up draws no marks, rather than another block's.**
+    ///
+    /// This is the defect itself, in one line. The marks are built in `bt_app`
+    /// from a pane's *last presented* frame, and the picture that lights a band
+    /// is presented after the gesture that lit it — so the frame in hand at the
+    /// moment the pointer crosses onto a formula is the one from before it
+    /// crossed. Asked "where do this band's marks stand" of that frame, the only
+    /// true answer is "this frame does not have that band lit".
+    ///
+    /// MUTATION: answer with whichever placement in the frame carries
+    /// `toolbar_visible` — the reading this ticket removed — and both assertions
+    /// return the *other* band's boxes. That is the owner's screenshot: the
+    /// ground on the block under the pointer, the marks one block above it.
+    #[test]
+    fn a_frame_that_has_not_caught_up_places_no_marks_at_all() {
+        let stale = seat_test_frame(0);
+        let ahead = seat_test_frame(1);
+
+        assert!(
+            seat_test_boxes(&stale, &ahead.math_blocks[1].anchor).is_none(),
+            "the band the pointer moved to is not lit in the picture it moved from"
+        );
+        assert!(
+            seat_test_boxes(&ahead, &stale.math_blocks[0].anchor).is_none(),
+            "and the band it left is not lit in the picture it moved to"
+        );
+    }
+
+    /// PIN (owner's report 2026-09-14, T-MATH-TOOLS-SEAT): **the name is the
+    /// record's identity, not the anchor's every field.**
+    ///
+    /// The name handed in is the *hit's* anchor, and a hit fills in the inline
+    /// run under the pointer (`MathBlockAnchor::with_run`) while a placement's
+    /// own anchor leaves it `None`. Compare the two with `==` and a band whose
+    /// line carries runs is never found, and the marks vanish for good; compare
+    /// them with the identity `bt_term`'s own hover sweep compares
+    /// (`same_block`) and the run selects within the block, as it is documented
+    /// to. The inline composite on the line between the two bands is asked for
+    /// too: it carries no tools, so it has none to give.
+    #[test]
+    fn the_band_is_found_by_the_identity_the_hover_sweep_keys_on() {
+        let frame = seat_test_frame(1);
+        let named = frame.math_blocks[1].anchor.with_run(Some(1));
+        let boxes =
+            seat_test_boxes(&frame, &named).expect("a run names a block, not a third thing");
+        assert_eq!(boxes.block, seat_test_geometry(&frame, 1).block);
+
+        assert!(
+            seat_test_boxes(&frame, &frame.math_blocks[2].anchor).is_none(),
+            "the line of prose between the bands wears no tools"
         );
     }
 
