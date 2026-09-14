@@ -84,10 +84,6 @@ Nothing yet.
   changes on Windows, where the row still stands and still reports when a
   version of Windows has no blur to offer; and your settings file keeps the
   value either way, so a Windows machine sharing that file reads it as before.
-- **On a Mac, resting on the settings gear lights a rounded square that matches
-  the window's own corner.** The wash used to be a smaller pill; it is now the
-  same shape and the same curve as the corner it sits in, and the gear itself
-  has not moved.
 - **A changed file in the Git page says what happened to it in words.** Resting
   on a row used to give you its path and the name of the group it stands in,
   leaving git's two letters to be read off the badges: `UU` on a row meant

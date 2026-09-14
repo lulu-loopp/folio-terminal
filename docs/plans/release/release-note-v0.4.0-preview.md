@@ -44,9 +44,6 @@ measurable.
   blur what sits behind a window on macOS, so the row is gone rather than greyed
   at `Off`; Windows is unchanged, and a settings file shared between the two
   keeps the value either way.
-- **On a Mac, resting on the settings gear lights a rounded square that matches
-  the window's own corner**, in place of a smaller pill; the gear itself has not
-  moved.
 - **A Markdown file opens complete, and is editable at once.** The whole file is
   read on the first open, up to the 8 MB editing ceiling, so the document
   scrolls to its end and the caret can go in immediately; the `Read-only · 64 KB`

@@ -2287,63 +2287,15 @@ pub const WINDOW_CAPTION_GEAR_GLYPH_LOGICAL_PX: f32 = 14.0;
 /// other end, and it is written as its own constant because the day the bar or
 /// the diagonal moves, one of them is a design decision and the other is not.
 pub const WINDOW_CAPTION_GEAR_INSET_LOGICAL_PX: f32 = 20.0;
-/// **And how big the box around that centre is** — a square of **34**, which is
-/// the 40-point strip with three points of margin cut from its top, its foot and
-/// the window's trailing edge (owner ruling 2026-09-13, T-MAC-GEAR-HOVER,
-/// §13.48 ⑩).
+/// **And how big the box around that centre is** — a square, the `+`'s own 28.
 ///
 /// The gear keeps its glyph, its ink and its verb; what it loses on this window
 /// is the 46x40 caption slot, which is the shape of a *run* of buttons and there
-/// is no run here. §13.48 ③ first gave it the `+`'s own 28 — the box every other
-/// control inset in this bar is given — and named the hover wash that followed
-/// from that box as a judgement call for the owner to overrule in one line. The
-/// line came: the box is 34 and its wash is the window's own corner
-/// ([`MAC_WINDOW_CORNER_RADIUS_LOGICAL_PX`]), because the control standing in
-/// the corner should share the corner's curvature, and a 12-point round on a 28
-/// box leaves four points of flat on each side and is not concentric with the
-/// arc behind it.
-///
-/// **The mirror does not move**: `34 / 2 + 3 = 20`, so the ink's centre is the
-/// [`WINDOW_CAPTION_GEAR_INSET_LOGICAL_PX`] §13.48 ② derived, said with a wider
-/// box around it. What grows is the hit target and the wash — which are the same
-/// rectangle, and have to be: a wash wider than what answers the press is a
-/// button that lights up where it cannot be clicked.
-pub const WINDOW_CAPTION_GEAR_BOX_LOGICAL_PX: f32 = 34.0;
-/// **The air the gear's box leaves on the three edges it has one on** — three
-/// points above it, below it and between it and the window's trailing edge
-/// (owner ruling 2026-09-13, T-MAC-GEAR-HOVER).
-///
-/// Written down because it is the half of the ruling the arithmetic runs
-/// through: the box is not placed by its side, it is placed by this margin, and
-/// the side is whatever the band has left. On a fractional scale those are
-/// different boxes — `34 × 1.5` is an odd 51 on an even 60-pixel band, and a box
-/// that cannot be centred on a whole physical pixel is a box whose ink has left
-/// the mirror §13.48 ② derived. Taking the margin first costs at most one
-/// physical pixel of the side and keeps the centre exact.
-///
-/// Not an independent number: `40 - 2 × 3 = 34` is the same statement as
-/// [`WINDOW_CAPTION_GEAR_BOX_LOGICAL_PX`] on Folio's own
-/// [`WINDOW_TITLE_BAR_LOGICAL_PX`] band, and the test beside §13.48 asserts that
-/// the three agree rather than trusting that they do.
-pub const WINDOW_CAPTION_GEAR_MARGIN_LOGICAL_PX: f32 = 3.0;
-/// **A macOS window's own corner radius**, in logical points — the round the
-/// gear's hover wash takes, and the only place in this product that asks for it.
-///
-/// Measured rather than assumed: `docs/plans/port/corners-2026-09-13.md`
-/// (R-MAC-CORNERS) photographed the **shipping** window on macOS 26 and read
-/// **12.1 points** off the arc — the memo's own correction to a first reading of
-/// 16.2, which had been taken from the probe window, whose *style* gives it a
-/// different corner. Twelve is that measurement with the tenth dropped, because
-/// a radius is drawn on whole physical pixels and the tenth cannot survive the
-/// rounding at any scale this product runs at.
-///
-/// It is a number about the **window**, not about the strip, which is why it is
-/// not [`WINDOW_NEW_TAB_RADIUS_LOGICAL_PX`] and must not drift into it: the `+`,
-/// the `˅`, the panel toggle and every other control inset in the bar wear the
-/// strip's 6, and only the one control that stands inside the window's own
-/// corner wears this. The day macOS changes the corner, this is the constant
-/// that moves and the other one does not.
-pub const MAC_WINDOW_CORNER_RADIUS_LOGICAL_PX: f32 = 12.0;
+/// is no run here. Twenty-eight is not a new number: it is
+/// [`WINDOW_NEW_TAB_BOX_LOGICAL_PX`], the box every other control that stands
+/// inset in this bar is given, and it fits inside the 40-point strip and the
+/// platform's own 32-point band alike.
+pub const WINDOW_CAPTION_GEAR_BOX_LOGICAL_PX: f32 = WINDOW_NEW_TAB_BOX_LOGICAL_PX;
 /// The active horizontal tab's height (`.tab { height: 34px }`).
 pub const WINDOW_TAB_HEIGHT_LOGICAL_PX: f32 = 34.0;
 /// **The floating pill's height** (`mock-mac-strict.html` `--pill-h: 30px`,
