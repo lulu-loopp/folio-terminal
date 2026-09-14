@@ -14894,7 +14894,7 @@ fn create_math_pipeline(
         multiview_mask: None,
         cache: None,
     });
-    (pipeline, bind_group_layout, sampler)
+    (pipeline, bind_group_layout, samplers)
 }
 
 /// One tile of a [`ChromeIcon`], cut down to the box it may be seen in.
@@ -15045,7 +15045,7 @@ fn create_background_pipeline(
         multiview_mask: None,
         cache: None,
     });
-    (pipeline, bind_group_layout, samplers)
+    (pipeline, bind_group_layout, sampler)
 }
 
 /// The six vertices of the ground quad, covering the whole surface.
