@@ -1,5 +1,5 @@
 //! The preview's content plane: what a file *is*, the tab's shared pool of live
-//! buffers, and the thread that reads their heads off the event loop.
+//! buffers, and the thread that reads their content off the event loop.
 //!
 //! **A buffer belongs to a FILE; a pane is a VIEW** (`DESIGN.md` §7.1.3, user
 //! ruling 2026-07-17, which moved buffer ownership up from the pane to the tab).
@@ -12,7 +12,7 @@
 //!
 //! **Why a thread.** The same sentence `files` opens with: a file is not a data
 //! structure, it is a question for a disk. §7.1.3 asks for an asynchronous,
-//! cancellable head read of at most [`PREVIEW_HEAD_BYTES`], and this module owns
+//! bounded reads (whole Markdown or fallback heads), and this module owns
 //! the shape `bt-files-worker` already owns — a named thread, a request channel,
 //! a response channel, an [`AppEvent`] to wake the loop, newest-per-target
 //! coalescing, and a one-way degradation when the thread is gone. Not a second
@@ -48,31 +48,13 @@ use crate::{AppEvent, TabId};
 /// for it with anything a user would miss.
 pub const PV_BUFFER_CAP: usize = 8;
 
-/// How much of a file a preview reads.
-///
-/// §7.1.3's number, and the reason it is a *head* read rather than a whole one:
-/// a preview is a look, and a look at the first screenful of a gigabyte costs
-/// exactly as much as a look at the first screenful of a kilobyte. Past this the
-/// buffer is marked truncated, which is what makes the read-only degradation the
-/// design asks for expressible rather than silent.
+/// Bounded fallback for over-limit files and standalone hover/other-format reads.
+/// Markdown panes read complete content on first open up to [`PREVIEW_EDIT_BYTES`].
 pub const PREVIEW_HEAD_BYTES: usize = 64 * 1024;
 
-/// How much of a file this window will take responsibility for editing.
-///
-/// **The head read stays the glance, and asking to edit buys a whole-file read**
-/// (research §10 Q2, owner's ruling 2026-09-10). [`PREVIEW_HEAD_BYTES`] is what
-/// a *look* costs, and it has to stay small for the reason written above it; but
-/// a cap on the look became a cap on the feature, and the document that motivates
-/// Markdown editing — `docs/DESIGN.md` — is far over 64KB. So there are two
-/// reads on one lane now: the head, which every glance takes, and the whole
-/// file, which is bought by asking to edit ([`PreviewBuffer::ask_for_the_whole_file`]).
-///
-/// This is the second read's own ceiling, and it exists because the first one's
-/// reason does not go away — the body is a `String` in memory, re-parsed and
-/// re-measured on every keystroke, and there is a size past which that is not an
-/// editor but a hang. Past it the buffer keeps the head it has and stays
-/// read-only, saying so through the same channel a truncated buffer already
-/// speaks on.
+/// Input-byte ceiling for complete Markdown loading and editing (8 MiB).
+/// Larger files return a bounded head *with* size status, even on first open.
+/// The per-tab pool remains soft: dirty and displayed buffers are protected.
 pub const PREVIEW_EDIT_BYTES: usize = 8 * 1024 * 1024;
 
 /// The notice shown once when the preview worker has stopped.
@@ -4073,15 +4055,13 @@ pub fn preview_lossy_notice() -> &'static str {
     crate::i18n::Text::PreviewLossy.text()
 }
 
-/// **What a file past [`PREVIEW_EDIT_BYTES`] says** (T2 ③, 2026-09-10).
-///
-/// The third phrase on that strip, and the one that means "this is as far as
-/// asking to edit gets you": the whole-file read was made and the file is larger
-/// than this window will put in memory and re-parse on every keystroke. The size
-/// is the constant said the way [`format_byte_size`] says it, pinned by a test
-/// rather than left as two numbers that can drift apart.
-pub fn preview_too_large_notice() -> &'static str {
-    crate::i18n::Text::PreviewTooLargeToEdit.text()
+/// Read-only size badge, naming the file's actual size rather than the ceiling.
+/// Build both language variants on arrival so a live language switch needs no
+/// file read and no allocation on each frame.
+pub fn preview_too_large_notice(file_bytes: u64, lang: crate::i18n::Lang) -> String {
+    crate::i18n::Text::PreviewTooLargeToEdit
+        .in_lang(lang)
+        .replace("{size}", &format_byte_size(file_bytes))
 }
 
 /// A byte count the way a file manager says it.
@@ -4649,12 +4629,10 @@ pub struct PreviewBuffer {
     /// What the header and the switcher call it.
     pub name: String,
     pub ftype: PreviewFtype,
-    /// The head of the file, once read.
+    /// The complete file or explicitly incomplete fallback, once read.
     pub content: Option<crate::preview_text::Text>,
     line_index: crate::preview_text::LineIndex,
-    /// Whether [`PREVIEW_HEAD_BYTES`] cut the body short. The read-only
-    /// degradation §7.1.3 asks for hangs off this; slice 1 carries the fact and
-    /// the view that says so is slice 2's.
+    /// Whether this body omits bytes from the file. Incomplete bodies never edit.
     pub truncated: bool,
     /// Unsaved edits.
     ///
@@ -4817,38 +4795,17 @@ pub struct PreviewBuffer {
     /// each U+FFFD on the disk over the byte it was standing in for and nothing
     /// would have said so.
     lossy: bool,
-    /// **The reader asked to edit this file, so its reads are whole-file reads
-    /// now** (T2 ③, owner's ruling 2026-09-10; research §10 Q2).
-    ///
-    /// Written through one door ([`Self::ask_for_the_whole_file`]) and never
-    /// cleared, and *never cleared* is the load-bearing half. The re-read a
-    /// watcher asks for goes down the same lane the first read went down
-    /// ([`Self::claim_head_read`]), so a buffer that forgot this would answer an
-    /// external change by replacing the whole document it is being edited in
-    /// with the first 64KB of it and going read-only under the reader's hands.
+    /// Persistent read intent: true from creation for Markdown panes, or after
+    /// an explicit edit upgrade for other text. Standalone glances stay heads.
+    /// Watcher reloads must never downgrade an editor to a head reader.
     reads_whole: bool,
-    /// **This file is past [`PREVIEW_EDIT_BYTES`]** — [`HeadOutcome::TooLargeToEdit`]
-    /// filed.
-    ///
-    /// The bit that stops [`Self::reads_whole`] from asking for ever: the whole
-    /// read came back saying the file is too large, so the head on the glass
-    /// stands, the buffer stays read-only, and no further read is owed. It is a
-    /// fact about the file rather than about the reading, so like
-    /// [`Self::lossy`] it is answered by [`Self::read_only_notice`].
-    ///
-    /// **It is a state of the buffer and not only a sentence in the foot**
-    /// (ticket T-EDIT-DISK, finding A10). [`Self::is_editable`] refuses it: the
-    /// body the reader can see is the last one that was read, and the file has
-    /// grown past it, so there is no body here for a keystroke to be about.
-    ///
-    /// **And a later read clears it**, which is the other half of the same
-    /// finding. A file can shrink — a log truncated, a generated document
-    /// rewritten — and a bit that only ever went one way meant the document
-    /// could never be edited again for the life of the buffer, whatever the file
-    /// did afterwards. The watcher marks the buffer stale, the re-read goes down
-    /// the same lane, and an answer that brings bytes back says by arriving that
-    /// the ceiling is no longer the answer.
+    /// The last whole read exceeded the input ceiling. Initial arrival installs
+    /// its mandatory fallback head; later arrivals retain existing bytes/history.
+    /// Complete and refused replacements clear this fact, so shrinking files can
+    /// become editable again. This bit refuses editing as well as ending waits.
     too_large_to_edit: bool,
+    /// Localized badge naming the handle's actual over-limit size.
+    over_limit_notice: Option<[String; crate::i18n::Lang::COUNT]>,
     /// **What this body has been through** — the undo log (ticket T3,
     /// 2026-09-10; [`crate::preview_undo`]).
     ///
@@ -4968,6 +4925,7 @@ impl PreviewBuffer {
             // would sit under a "Loading …" line for ever.
             PreviewSource::Web(_) => PreviewLoad::Ready,
         };
+        let reads_whole = ftype == PreviewFtype::Markdown && source.file_path().is_some();
         Self {
             source,
             name,
@@ -4989,8 +4947,9 @@ impl PreviewBuffer {
             content_says_text: false,
             encoding: HeadEncoding::Utf8,
             lossy: false,
-            reads_whole: false,
+            reads_whole,
             too_large_to_edit: false,
+            over_limit_notice: None,
             undo: crate::preview_undo::UndoLog::default(),
         }
     }
@@ -5022,7 +4981,7 @@ impl PreviewBuffer {
     /// **The buffer a glance takes over a file** (user ruling 2026-08-25;
     /// `docs/DESIGN.md` §7.10 ⑥).
     ///
-    /// [`Self::new`] with one difference, and the difference is the ruling: a
+    /// A bounded head reader even for Markdown. In addition, a
     /// file whose name says page and whose **bytes are text**
     /// ([`PageGlance::Source`] — `.html`, `.htm`) is a text buffer here. Not a
     /// second lane for it, not a second reader: the same `Text` ftype an `.rs`
@@ -5054,6 +5013,7 @@ impl PreviewBuffer {
     /// exactly as [`Self::new`] made it.
     pub fn glancing(source: PreviewSource, name: String) -> Self {
         let mut buffer = Self::new(source, name);
+        buffer.reads_whole = false;
         buffer.read_a_pages_bytes_as_text();
         buffer
     }
@@ -5101,13 +5061,10 @@ impl PreviewBuffer {
     /// a question about bytes, bytes come off a disk, and the disk is this
     /// worker's. Nothing new reads a file — the read that was already the
     /// preview's one trip is the read the verdict comes back on.
-    /// **And a body that is only the head of a file somebody has asked to edit
-    /// is owed the rest of it** (T2 ③, 2026-09-10). The third clause is what
-    /// makes the two-stage read converge rather than stall: the read the flip
-    /// files is a `Whole` one, but a head read already out with the worker can
-    /// land after it and put the first 64KB back, and this is the line that
-    /// notices and asks again. [`Self::too_large_to_edit`] is what stops it,
-    /// because past the editing cap the head is the honest final answer.
+    /// A whole reader that still holds a nonterminal head is owed the rest.
+    /// This also recovers a head accepted before whole content arrived. A late
+    /// head cannot replace whole content: `land_read` rejects its old revision.
+    /// Over-limit status makes the retained head a terminal answer.
     pub fn wants_head_read(&self) -> bool {
         self.source.file_path().is_some()
             && (self.load == PreviewLoad::Pending
@@ -5123,39 +5080,10 @@ impl PreviewBuffer {
             )
     }
 
-    /// **The reader has asked to edit this file, so the next read is the whole
-    /// of it** (T2 ③, owner's ruling on research §10 Q2, 2026-09-10).
-    ///
-    /// The one door onto [`Self::reads_whole`], and the whole of what "asking to
-    /// edit buys a whole-file read" means on this side. Answers whether a read
-    /// is now owed, so that the caller can put the question on the worker's lane
-    /// through [`Self::claim_head_read`] exactly as every other read goes.
-    ///
-    /// **The two gestures that call it, and why they are the two** (T2's own
-    /// choice, written down here because it is the sort of thing a later reader
-    /// has to be able to find):
-    ///
-    /// 1. **The flip to the source face of a Markdown buffer.** The rendered
-    ///    page has nothing to type into and its source has, so the flip *is* the
-    ///    asking.
-    /// 2. **A press inside the body of a surface whose face edits** — a text
-    ///    file, or a Markdown file already flipped. A reader who has just put
-    ///    the pointer in a document has said what they intend.
-    ///
-    /// They are the two places a *person* asks, and that is the whole of the
-    /// choice: every other consultation of [`Self::is_editable`] is a frame
-    /// drawing itself — a head button, a foot notice, a shortcut table — and a
-    /// disk read on that beat is sixty a second. A glance, a hover card and a
-    /// focus card therefore still cost exactly one head read, which is the whole
-    /// point of the head read.
-    ///
-    /// **Nothing is asked for a body that could not be edited anyway**: a lossy
-    /// decode, a file past the editing cap, a face with no caret. A read whose
-    /// answer changes nothing is a trip to a disk for nothing. `md_source` is
-    /// the *view's*, exactly as [`Self::is_editable`] takes it and for that
-    /// method's own recorded reason — a press inside a rendered Markdown page is
-    /// not somebody asking to edit, and the flip is what turns that page into a
-    /// surface with a caret.
+    /// Explicit upgrade for a head-only text buffer. Markdown panes already
+    /// request whole content at creation; entering edit issues no second read.
+    /// A standalone glance never calls this gesture-only door. Lossy and
+    /// over-limit bodies cannot be made editable by asking again.
     pub fn ask_for_the_whole_file(&mut self, md_source: bool) -> bool {
         if self.reads_whole
             || !self.truncated
@@ -5175,22 +5103,15 @@ impl PreviewBuffer {
         self.mark_stale()
     }
 
-    /// **A whole-file read is out and the body it will replace is still the
-    /// head** (T5 ①, 2026-09-10).
-    ///
-    /// The one question a gesture has to ask between the press that bought the
-    /// file and the frame the file lands on: this buffer is not editable *yet*
-    /// and the only thing standing between it and editable is a read already on
-    /// the worker. A press that gets this answer keeps its caret on the pane
-    /// until the body arrives ([`Runtime::settle_preview_caret`]) instead of
-    /// making the reader click a second time.
-    ///
-    /// Both halves are needed and neither is the other. `reads_whole` alone is
-    /// true for ever after the first ask, including long after the file landed;
-    /// `truncated` alone is true for every head nobody has asked about.
+    /// An edit-capable whole result is still owed. Completion or a terminal refusal
+    /// ends pending caret intent; an over-limit head must never wait forever.
     #[must_use]
     pub fn awaits_the_whole_file(&self) -> bool {
-        self.reads_whole && self.truncated
+        self.reads_whole
+            && !self.too_large_to_edit
+            && !self.lossy
+            && (self.load == PreviewLoad::Pending
+                || (self.load == PreviewLoad::Ready && self.truncated))
     }
 
     /// **Which of the two reads this buffer is owed, stamped with the body it is
@@ -5440,45 +5361,11 @@ impl PreviewBuffer {
         self.say(DiskNews::Level)
     }
 
-    /// Whether this buffer would be shown on a surface that edits, **as the
-    /// surface asking is showing it**.
-    ///
-    /// The name's judgement ([`is_editable`]) **and two facts only a body
-    /// knows**. A buffer with no body has nothing to put a caret in; a
-    /// *truncated* one has only the first 64KB of its file, and an edit surface
-    /// over the head of a file is a save button wired to `truncate`. §7.1.3's
-    /// "超大文件只读降级" is exactly this line — the degradation is read-only,
-    /// and read-only has to be enforced where the editing is, not where the
-    /// notice is printed.
-    ///
-    /// `md_source` is the *view's*, not the buffer's, and that is the 2026-08-13
-    /// ruling: a rendered markdown page has nothing to type into and its source
-    /// has, so whether this file is editable right now is a question about the
-    /// surface looking at it. Two surfaces on one markdown file can answer it
-    /// differently at the same moment, and both are right.
-    ///
-    /// **And one fact only the source knows**: an edit surface exists to write
-    /// bytes back, and a document with no file behind it has nowhere to write
-    /// them. A git diff is a reading of a repository, not a second place to type
-    /// into it.
-    /// **And one fact only the decode knows** (T2 ②, 2026-09-10): a body that
-    /// came back with characters this window invented is not a body it will
-    /// write. `truncated` is the same sentence about a different half of the
-    /// file — what is missing off the end — and since T2 it is answerable: the
-    /// reader asks to edit, [`Self::ask_for_the_whole_file`] buys the rest, and
-    /// the clause below stops refusing on its own. What it never stops refusing
-    /// is a file past [`PREVIEW_EDIT_BYTES`], where the head is all there will
-    /// ever be.
-    /// **And one fact only the last read knows** (ticket T-EDIT-DISK, finding
-    /// A10): a file that answered [`HeadOutcome::TooLargeToEdit`] left this
-    /// buffer holding a body the file has grown past. It is kept on the glass —
-    /// it is the last reading there is — but it is a *retained* body and not a
-    /// current one, and typing into it would be typing into a document whose
-    /// file is elsewhere. The foot has said so since T2
-    /// ([`Self::read_only_notice`]); until this ticket the caret did not, so the
-    /// refusal was a sentence with nothing behind it and the save that followed
-    /// answered [`SaveOutcome::Conflict`] on an mtime, which is a refusal nobody
-    /// can act on.
+    /// A supported file-backed surface edits only complete, lossless content.
+    /// Both Markdown faces edit. Incomplete heads cannot safely be saved, and
+    /// lossy decodes would overwrite original bytes with invented characters.
+    /// An over-limit result may retain an older body/history, but that retained
+    /// body is no longer an editable reading of the current file.
     pub fn is_editable(&self, md_source: bool) -> bool {
         self.source.file_path().is_some()
             && self.load == PreviewLoad::Ready
@@ -5764,31 +5651,18 @@ impl PreviewBuffer {
         SaveOutcome::Saved
     }
 
-    /// **The sentence a body that cannot be edited owes its reader**, if it owes
-    /// one.
-    ///
-    /// §7.1.3's "超大文件只读降级": the degradation is not that the file failed,
-    /// it is that what is on screen is the beginning of it — and a preview that
-    /// showed the first 64KB without saying so would be a preview quietly
-    /// claiming the file ends there.
-    ///
-    /// **It was `read_only_notice` until 2026-09-10**, when T2 gave the reader
-    /// two more ways to be told the same thing, and one channel is the ruling
-    /// here: a refused edit is explained in the right hand of the pane's foot
-    /// and nowhere else, so a second notice surface for "this file decoded
-    /// lossily" would be a second place to look for one kind of answer.
-    ///
-    /// The order is the order a reader can act on. **Lossy first**, because it
-    /// is a fact about bytes and no amount of reading more of them changes it.
-    /// **Then the editing cap**, which is why a truncated body is staying
-    /// truncated. **Then truncation itself**, which since T2 is the temporary
-    /// one — the head of a file nobody has asked to edit yet.
-    pub fn read_only_notice(&self) -> Option<&'static str> {
+    /// Over-limit files always name their actual size, including lossy heads.
+    /// Otherwise report lossiness or another format's bounded head extent.
+    /// Complete eligible Markdown carries no read-only notice.
+    pub fn read_only_notice(&self) -> Option<&str> {
+        if self.too_large_to_edit {
+            return self
+                .over_limit_notice
+                .as_ref()
+                .map(|notices| notices[crate::i18n::current() as usize].as_str());
+        }
         if self.lossy {
             return Some(preview_lossy_notice());
-        }
-        if self.too_large_to_edit {
-            return Some(preview_too_large_notice());
         }
         self.truncated.then_some(preview_truncated_notice())
     }
@@ -5917,6 +5791,8 @@ impl PreviewBuffer {
         self.lossy = false;
         self.max_columns = 0;
         self.disk_mtime = None;
+        self.too_large_to_edit = false;
+        self.over_limit_notice = None;
         self.load = PreviewLoad::Unavailable(words);
     }
 
@@ -6011,6 +5887,7 @@ impl PreviewBuffer {
                 // came back, so the file is inside the editing cap again and the
                 // refusal that ceiling filed is spent.
                 self.too_large_to_edit = false;
+                self.over_limit_notice = None;
                 self.content_says_text = content_says_text;
                 // **The sniff, and the one place it is read** (user ruling
                 // 2026-08-27; §7.32). A name in a table has already been
@@ -6029,6 +5906,8 @@ impl PreviewBuffer {
                         self.line_index = crate::preview_text::LineIndex::default();
                         self.truncated = false;
                         self.max_columns = 0;
+                        self.encoding = HeadEncoding::Utf8;
+                        self.lossy = false;
                         self.disk_mtime = None;
                         self.load = PreviewLoad::Refused(PreviewRefusal::Type);
                         return;
@@ -6080,30 +5959,29 @@ impl PreviewBuffer {
                 self.lossy = false;
                 self.max_columns = 0;
                 self.disk_mtime = None;
+                self.too_large_to_edit = false;
+                self.over_limit_notice = None;
                 self.load = PreviewLoad::Refused(refusal);
             }
-            // **The file read, and it is too big to take responsibility for**
-            // (T2 ③). Nothing on the glass is replaced and nothing about the
-            // body is re-filed: the head this buffer is already showing is the
-            // right head, it is simply the last one there is going to be. What
-            // changes is one bit and the sentence in the foot that hangs off it.
-            //
-            // The read that was out is closed by this answer exactly as the two
-            // arms above close it, which is what keeps
-            // [`Self::wants_head_read`]'s third clause from asking again for
-            // ever.
-            //
-            // **And nothing else is touched** (ticket T-EDIT-DISK, finding
-            // A10). This arm used to fall through a preamble that moved the
-            // revision, cleared the mark and emptied the undo log for a body it
-            // had not replaced — so a document somebody had typed in, whose file
-            // then grew past the cap, answered by throwing their history away
-            // and leaving the bytes. What the body has been through is still
-            // what it has been through; what changed is that the file is out of
-            // this window's reach, which [`Self::is_editable`] refuses and
-            // [`Self::read_only_notice`] says.
-            HeadOutcome::TooLargeToEdit => {
+            HeadOutcome::TooLargeToEdit { head, file_bytes } => {
+                // Initial loading has no prior body to retain. Install the
+                // bounded head through the normal replacement/reset door once.
+                // A later over-limit result preserves existing bytes/history.
+                if self.content.is_none() {
+                    self.accept(HeadOutcome::Read {
+                        text: head.text,
+                        truncated: true,
+                        mtime: head.mtime,
+                        content_says_text: head.content_says_text,
+                        encoding: head.encoding,
+                        lossy: head.lossy,
+                    });
+                }
                 self.too_large_to_edit = true;
+                self.over_limit_notice = Some(
+                    [crate::i18n::Lang::English, crate::i18n::Lang::Chinese]
+                        .map(|lang| preview_too_large_notice(file_bytes, lang)),
+                );
             }
         }
     }
@@ -6440,8 +6318,8 @@ fn next_incarnation() -> u64 {
 pub enum PreviewWant {
     /// At most [`PREVIEW_HEAD_BYTES`] of the body.
     Head(PreviewBase),
-    /// **The whole file, up to [`PREVIEW_EDIT_BYTES`]** — what asking to edit
-    /// buys (T2 ③, research §10 Q2, owner's ruling 2026-09-10).
+    /// Complete content up to [`PREVIEW_EDIT_BYTES`], or an over-limit fallback.
+    /// Initial Markdown panes and explicit text upgrades both use this request.
     ///
     /// [`Self::Head`]'s own question with a larger answer, and on this lane
     /// rather than a second one for the reason this enum exists: it is the same
@@ -6620,7 +6498,7 @@ impl DiskVerdict {
     }
 }
 
-/// A head either reads or it does not, and both are answers.
+/// A disk read supplies content, an explicit over-limit fallback, or a refusal.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HeadOutcome {
     Read {
@@ -6678,16 +6556,23 @@ pub enum HeadOutcome {
         lossy: bool,
     },
     Refused(PreviewRefusal),
-    /// **The file is past [`PREVIEW_EDIT_BYTES`]** — the one answer only
-    /// [`read_whole`] gives (T2 ③, 2026-09-10).
-    ///
-    /// Not a [`Self::Refused`], because nothing was refused: the file read
-    /// perfectly well and the reader is looking at the head of it. What could
-    /// not be granted is the *edit*, and this is the buffer being told so —
-    /// nothing it holds is replaced, and the sentence it puts up is the one a
-    /// truncated buffer already speaks
-    /// ([`PreviewBuffer::read_only_notice`]).
-    TooLargeToEdit,
+    /// Complete loading exceeded the edit ceiling. The fallback is mandatory:
+    /// this is a valid first response, not a flag assuming a body already exists.
+    TooLargeToEdit {
+        head: FallbackHead,
+        file_bytes: u64,
+    },
+}
+
+/// Decoded, explicitly incomplete content supplied by an over-limit read.
+/// Its fields cannot describe a bodyless refusal or an unbounded recursive outcome.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FallbackHead {
+    text: String,
+    mtime: Option<SystemTime>,
+    content_says_text: bool,
+    encoding: HeadEncoding,
+    lossy: bool,
 }
 
 /// **How many bytes of a head decide whether an unnamed kind of file is text**
@@ -6927,34 +6812,14 @@ pub fn read_head(path: &Path) -> HeadOutcome {
     read_up_to(path, PREVIEW_HEAD_BYTES)
 }
 
-/// Read the whole file, up to [`PREVIEW_EDIT_BYTES`] — **the read asking to edit
-/// buys** (T2 ③, research §10 Q2).
-///
-/// [`read_head`]'s own body with a larger limit, and deliberately the same
-/// function underneath: it goes through the same
-/// [`bt_transcript::paths::may_read_unasked_through_links`] door, on the same
-/// worker thread, and comes back as the same [`HeadOutcome`] that the same
-/// [`PreviewBuffer::accept`] files — so the disk news, the stamp and the sniff
-/// are answered once each and by one author, not twice by two.
-///
-/// The one thing it says that a head read cannot: a file past the editing cap is
-/// [`HeadOutcome::TooLargeToEdit`] rather than another truncated body. Truncated
-/// is what a *glance* is, and a second truncated body would replace the 64KB on
-/// the glass with 8MB of the same document to no one's benefit; what the reader
-/// is owed here is the sentence that this file stays read-only, and the head
-/// they are already reading.
+/// Read complete content up to [`PREVIEW_EDIT_BYTES`], or a mandatory bounded
+/// fallback head with the actual file size. Safe on first open and on upgrades.
+/// The same path gate, serial worker, decode and stamped acceptance serve both.
 pub fn read_whole(path: &Path) -> HeadOutcome {
-    match read_up_to(path, PREVIEW_EDIT_BYTES) {
-        // Truncated at *this* limit means the file is past the editing cap —
-        // there is nothing else a whole-file read can be cut short by.
-        HeadOutcome::Read {
-            truncated: true, ..
-        } => HeadOutcome::TooLargeToEdit,
-        outcome => outcome,
-    }
+    read_up_to(path, PREVIEW_EDIT_BYTES)
 }
 
-/// The read both lanes are, with the limit as the only difference.
+/// Shared path validation, bounded I/O, recognition and decoding for both reads.
 fn read_up_to(path: &Path, limit: usize) -> HeadOutcome {
     // **The read is behind this line, so the question is asked in front of it** (route B of the
     // untrusted-path audit, 2026-09-08). `File::open` followed by `read_to_end` has no end when
@@ -6975,19 +6840,39 @@ fn read_up_to(path: &Path, limit: usize) -> HeadOutcome {
             return HeadOutcome::Refused(PreviewRefusal::Fault(PreviewFault::from_io(&error)));
         }
     };
-    // One byte past the limit, which is the cheapest honest way to learn that
-    // there *is* more: a length is a second question and a metadata read can
-    // disagree with the bytes on a file being written to right now.
+    // Stat the opened handle once, as before (never resolve the path again).
+    // Known over-limit files need only a fallback; eligible files still read
+    // one probe byte beyond the edit ceiling to detect growth while reading.
+    let metadata = file.metadata().ok();
+    let known_bytes = metadata.as_ref().map_or(0, |meta| meta.len());
+    let budget = if limit == PREVIEW_EDIT_BYTES && known_bytes > limit as u64 {
+        PREVIEW_HEAD_BYTES
+    } else {
+        limit
+    };
     let mut head = Vec::new();
-    if let Err(error) = file.by_ref().take(limit as u64 + 1).read_to_end(&mut head) {
+    if let Err(error) = file.by_ref().take(budget as u64 + 1).read_to_end(&mut head) {
         return HeadOutcome::Refused(PreviewRefusal::Fault(PreviewFault::from_io(&error)));
     }
-    let truncated = head.len() > limit;
-    head.truncate(limit);
-    // Asked of the handle the bytes came out of, not of the path: between two
-    // calls by name a file can be replaced entirely, and a stamp belonging to a
-    // file other than the one that was read is worse than no stamp at all.
-    let mtime = file.metadata().ok().and_then(|meta| meta.modified().ok());
+    #[cfg(test)]
+    crate::preview_typing::count("preview read bytes", head.len());
+    let truncated = head.len() > budget;
+    let over_limit = limit == PREVIEW_EDIT_BYTES && truncated;
+    // If growth crossed the ceiling, refresh size through this same handle.
+    // Never understate even the bytes this read proved were present.
+    let file_bytes = if over_limit && budget == PREVIEW_EDIT_BYTES {
+        file.metadata()
+            .map_or(known_bytes, |meta| meta.len())
+            .max(head.len() as u64)
+    } else {
+        known_bytes
+    };
+    head.truncate(if over_limit {
+        PREVIEW_HEAD_BYTES
+    } else {
+        budget
+    });
+    let mtime = metadata.and_then(|meta| meta.modified().ok());
     // **The strict question, asked of every head and read by almost none of
     // them** (user ruling 2026-08-27; §7.32). It is what a name nobody listed is
     // promoted on — see [`HeadOutcome::Read::content_says_text`] — and it is
@@ -7012,7 +6897,21 @@ fn read_up_to(path: &Path, limit: usize) -> HeadOutcome {
     if holds_a_nul {
         return HeadOutcome::Refused(PreviewRefusal::Binary);
     }
+    #[cfg(test)]
+    crate::preview_typing::count("preview decoded bytes", head.len());
     let (text, lossy) = decode_head(&head, truncated);
+    if over_limit {
+        return HeadOutcome::TooLargeToEdit {
+            head: FallbackHead {
+                text,
+                mtime,
+                content_says_text,
+                encoding,
+                lossy,
+            },
+            file_bytes,
+        };
+    }
     HeadOutcome::Read {
         text,
         truncated,
@@ -10898,26 +10797,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// RED (T2 ③, research §10 Q2 — the owner's ruling) — **the glance reads the
-    /// head; asking to edit buys the rest of the file.**
-    ///
-    /// The cap on the *look* had become a cap on the feature: past
-    /// [`PREVIEW_HEAD_BYTES`] a buffer is truncated, a truncated buffer refuses
-    /// a caret, and `docs/DESIGN.md` — the document that motivates editing
-    /// Markdown in this pane at all — is far over 64KB. So the read is in two
-    /// stages now, and this is both of them: the glance costs one head read and
-    /// the file stays read-only; the asking costs one whole-file read and the
-    /// same buffer becomes editable, without ever having unloaded what was on
-    /// the glass.
-    ///
-    /// Red gate: without the third clause of
-    /// [`PreviewBuffer::wants_head_read`] and the `Whole` want beside it, the
-    /// second half of the file never arrives and the buffer is read-only for
-    /// ever.
+    /// Text keeps its explicit head-to-whole upgrade. Markdown's automatic
+    /// first load is covered by the md_loading regressions below.
     #[test]
     fn asking_to_edit_a_file_too_big_to_glance_at_buys_the_whole_of_it() {
         let dir = scratch("whole-read");
-        let path = dir.join("long.md");
+        let path = dir.join("long.txt");
         let body = "a line of a long document\n".repeat(4000);
         assert!(
             body.len() > PREVIEW_HEAD_BYTES,
@@ -10926,7 +10811,7 @@ mod tests {
         std::fs::write(&path, &body).unwrap();
 
         let mut buffer =
-            PreviewBuffer::new(PreviewSource::file(path.clone()), "long.md".to_owned());
+            PreviewBuffer::new(PreviewSource::file(path.clone()), "long.txt".to_owned());
         assert!(matches!(
             buffer.claim_head_read(),
             Some(PreviewWant::Head(_))
@@ -10943,7 +10828,7 @@ mod tests {
         // file is the click that gets the caret when it lands.
         assert!(
             buffer.ask_for_the_whole_file(false),
-            "a press in a rendered page asks to edit"
+            "a press in a text body asks to edit"
         );
         assert!(
             !buffer.ask_for_the_whole_file(true),
@@ -11015,8 +10900,11 @@ mod tests {
             buffer.claim_head_read(),
             Some(PreviewWant::Whole(_))
         ));
-        assert_eq!(read_whole(&path), HeadOutcome::TooLargeToEdit);
-        buffer.accept(HeadOutcome::TooLargeToEdit);
+        assert!(matches!(
+            read_whole(&path),
+            HeadOutcome::TooLargeToEdit { .. }
+        ));
+        buffer.accept(over_limit_answer());
 
         assert_eq!(
             buffer.content.as_deref(),
@@ -11024,7 +10912,13 @@ mod tests {
             "what the reader is looking at is untouched"
         );
         assert!(buffer.truncated && !buffer.is_editable(false));
-        assert_eq!(buffer.read_only_notice(), Some(preview_too_large_notice()));
+        assert_eq!(
+            buffer.read_only_notice(),
+            Some(
+                preview_too_large_notice(PREVIEW_EDIT_BYTES as u64 + 1, crate::i18n::Lang::English)
+                    .as_str()
+            )
+        );
         assert!(
             !buffer.wants_head_read(),
             "and the answer is final — nothing asks again"
@@ -11034,6 +10928,386 @@ mod tests {
             "including the next time somebody presses in the body"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // T-MD-LOADING-STATE: exercise the actual request selection and arrival.
+    fn loading_open(path: &Path) -> PreviewBuffer {
+        let mut buffer = PreviewBuffer::new(
+            PreviewSource::file(path.to_owned()),
+            path.file_name().unwrap().to_str().unwrap().to_owned(),
+        );
+        let (outcome, base) = match buffer.claim_head_read().unwrap() {
+            PreviewWant::Head(base) => (read_head(path), base),
+            PreviewWant::Whole(base) => (read_whole(path), base),
+            other => panic!("unexpected body request: {other:?}"),
+        };
+        assert_eq!(buffer.land_read(outcome, base), ReadLanded::Took);
+        buffer
+    }
+
+    #[test]
+    fn md_loading_three_mb_opens_complete_and_editable() {
+        let dir = scratch("loading-complete");
+        let path = dir.join("large.md");
+        let body = "# document\n\nA paragraph.\n".repeat(140_000);
+        assert!(body.len() > 3 * 1024 * 1024 && body.len() < PREVIEW_EDIT_BYTES);
+        std::fs::write(&path, &body).unwrap();
+        let mut buffer = loading_open(&path);
+        assert!(
+            !buffer.truncated,
+            "the first open must contain the whole Markdown file"
+        );
+        assert_eq!(buffer.content.as_deref(), Some(body.as_str()));
+        assert!(buffer.is_editable(false) && buffer.is_editable(true));
+        assert_eq!(buffer.read_only_notice(), None);
+        assert!(!buffer.ask_for_the_whole_file(false));
+        assert!(!buffer.awaits_the_whole_file());
+        assert!(
+            buffer.claim_head_read().is_none(),
+            "entering edit buys no second read"
+        );
+        assert_eq!(buffer.revision, 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn md_loading_over_limit_first_read_has_head_size_and_refuses_edit() {
+        let dir = scratch("loading-over-limit");
+        let path = dir.join("large.md");
+        let bytes = vec![b'a'; PREVIEW_EDIT_BYTES + 2 * 1024 * 1024];
+        std::fs::write(&path, &bytes).unwrap();
+        let mut buffer = loading_open(&path);
+        assert_eq!(buffer.content.as_ref().unwrap().len(), PREVIEW_HEAD_BYTES);
+        assert!(buffer.truncated && buffer.too_large_to_edit);
+        assert_eq!(buffer.read_only_notice(), Some("Read-only · 10.0 MB"));
+        assert!(!buffer.is_editable(false));
+        assert!(!buffer.ask_for_the_whole_file(false));
+        assert!(!buffer.awaits_the_whole_file());
+        assert!(!buffer.wants_head_read());
+        // Direct whole-first reads must also be safe, without an assumed head.
+        let mut first = PreviewBuffer::new(PreviewSource::file(path.clone()), "large.md".into());
+        first.accept(read_whole(&path));
+        assert!(
+            first.content.is_some(),
+            "over-limit first read must never leave an empty buffer"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn md_loading_late_head_cannot_replace_whole_content() {
+        let mut buffer =
+            PreviewBuffer::new(PreviewSource::file(r"C:\w\large.md"), "large.md".into());
+        let base = buffer.base();
+        buffer.land_read(read("complete document", false), base);
+        let revision = buffer.revision;
+        assert!(matches!(
+            buffer.land_read(read("old head", true), base),
+            ReadLanded::Kept { .. }
+        ));
+        assert_eq!(buffer.content.as_deref(), Some("complete document"));
+        assert!(!buffer.truncated);
+        assert_eq!(buffer.revision, revision);
+    }
+
+    #[test]
+    fn md_loading_utf16_over_limit_trims_partial_surrogate() {
+        let dir = scratch("loading-utf16");
+        let path = dir.join("large.md");
+        let mut bytes = vec![0xff, 0xfe];
+        bytes.extend_from_slice(&[b'a', 0].repeat((PREVIEW_HEAD_BYTES - 4) / 2));
+        bytes.extend_from_slice(&[0x3d, 0xd8, 0x00, 0xde]);
+        bytes.resize(PREVIEW_EDIT_BYTES + 2, 0);
+        std::fs::write(&path, &bytes).unwrap();
+        let buffer = loading_open(&path);
+        assert!(buffer.too_large_to_edit && buffer.truncated);
+        assert!(!buffer.lossy, "the cut surrogate is not a malformed file");
+        assert!(!buffer.content.as_ref().unwrap().contains('\u{fffd}'));
+        assert_eq!(buffer.encoding, HeadEncoding::Utf16Le);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn md_loading_whole_read_detects_binary_beyond_head() {
+        let dir = scratch("loading-binary");
+        let path = dir.join("binary.md");
+        let mut bytes = vec![b'a'; PREVIEW_HEAD_BYTES * 2];
+        bytes[PREVIEW_HEAD_BYTES + 100] = 0;
+        std::fs::write(&path, bytes).unwrap();
+        let buffer = loading_open(&path);
+        assert_eq!(buffer.refusal(), Some(PreviewRefusal::Binary));
+        assert!(buffer.content.is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn md_loading_pool_evicts_unprotected_large_bodies() {
+        let mut pool = PreviewPool::default();
+        let sources: Vec<_> = (0..12)
+            .map(|i| PreviewSource::file(format!(r"C:\w\large-{i}.md")))
+            .collect();
+        let displayed = vec![sources[0].clone()];
+        let mut allocations = Vec::new();
+        for (i, source) in sources.iter().enumerate() {
+            let buffer = pool.open(source.clone(), format!("large-{i}.md"), &displayed);
+            buffer.accept(read(&"a".repeat(1_600_000), false));
+            allocations.push(buffer.content.as_ref().unwrap().weak());
+            if i == 1 {
+                buffer.dirty = true;
+            }
+        }
+        assert_eq!(pool.buffers.len(), PV_BUFFER_CAP);
+        assert!(pool.get(&sources[0]).is_some());
+        assert!(pool.get(&sources[1]).unwrap().dirty);
+        for i in 2..6 {
+            assert!(pool.get(&sources[i]).is_none());
+            assert!(
+                allocations[i].upgrade().is_none(),
+                "eviction releases the large text allocation"
+            );
+        }
+        assert!(allocations[0].upgrade().is_some() && allocations[1].upgrade().is_some());
+        assert_eq!(
+            pool.buffers
+                .iter()
+                .map(|b| b.content.as_ref().unwrap().len())
+                .sum::<usize>(),
+            PV_BUFFER_CAP * 1_600_000
+        );
+    }
+
+    #[test]
+    fn md_loading_caret_wait_ends_on_refusal() {
+        let mut buffer =
+            PreviewBuffer::new(PreviewSource::file(r"C:\w\large.md"), "large.md".into());
+        assert!(
+            buffer.awaits_the_whole_file(),
+            "Markdown's first load is already the whole-file request"
+        );
+        buffer.accept(HeadOutcome::Refused(PreviewRefusal::Binary));
+        assert!(!buffer.awaits_the_whole_file());
+    }
+
+    #[test]
+    #[ignore = "serial worker I/O diagnostic; no wall-clock assertions"]
+    fn md_loading_worker_benchmark() {
+        let dir = scratch("loading-worker-benchmark");
+        let whole = dir.join("whole.md");
+        let head = dir.join("head.txt");
+        std::fs::write(&whole, vec![b'a'; PREVIEW_EDIT_BYTES]).unwrap();
+        std::fs::write(&head, vec![b'b'; PREVIEW_HEAD_BYTES * 2]).unwrap();
+        for sample in 0..9 {
+            let (tx, rx) = mpsc::channel();
+            for (path, want) in [
+                (&whole, PreviewWant::Whole(a_base())),
+                (&head, PreviewWant::Head(a_base())),
+            ] {
+                tx.send(PreviewRequest {
+                    window: winit::window::WindowId::from(1_u64),
+                    tab: crate::TabId(1),
+                    source: PreviewSource::file(path.clone()),
+                    want,
+                })
+                .unwrap();
+            }
+            drop(tx);
+            let start = std::time::Instant::now();
+            let mut order = Vec::new();
+            run_preview_worker(rx, |request| {
+                let began = start.elapsed();
+                let outcome = match request.want {
+                    PreviewWant::Whole(_) => read_whole(request.source.file_path().unwrap()),
+                    PreviewWant::Head(_) => read_head(request.source.file_path().unwrap()),
+                    _ => unreachable!(),
+                };
+                let HeadOutcome::Read { text, .. } = outcome else {
+                    panic!("read failed");
+                };
+                println!(
+                    "sample={sample} want={:?} decoded_bytes={} queue_ms={:.3} read_ms={:.3}",
+                    request.want,
+                    text.len(),
+                    began.as_secs_f64() * 1000.0,
+                    (start.elapsed() - began).as_secs_f64() * 1000.0
+                );
+                order.push(text.len());
+            });
+            assert_eq!(order, [PREVIEW_EDIT_BYTES, PREVIEW_HEAD_BYTES]);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn md_loading_design_document_has_no_read_only_badge() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("docs/DESIGN.md");
+        let expected = std::fs::read_to_string(&path).unwrap();
+        assert!(expected.len() > 3 * 1024 * 1024 && expected.len() < PREVIEW_EDIT_BYTES);
+        let buffer = loading_open(&path);
+        assert_eq!(
+            buffer.content.as_ref().map(|text| text.len()),
+            Some(expected.len())
+        );
+        assert_eq!(buffer.content.as_deref(), Some(expected.as_str()));
+        assert_eq!(
+            buffer.line_starts(),
+            crate::preview_edit::line_starts(&expected)
+        );
+        assert!(buffer.is_editable(false));
+        assert_eq!(buffer.read_only_notice(), None);
+        assert!(!buffer.awaits_the_whole_file());
+    }
+
+    #[test]
+    fn md_loading_pool_cap_is_soft_until_an_unprotected_buffer_can_go() {
+        let mut pool = PreviewPool::default();
+        let sources: Vec<_> = (0..10)
+            .map(|i| PreviewSource::file(format!(r"C:\w\protected-{i}.md")))
+            .collect();
+        for source in &sources {
+            let buffer = pool.open(source.clone(), "protected.md".into(), &[]);
+            buffer.accept(read(&"x".repeat(1024 * 1024), false));
+            buffer.dirty = true;
+        }
+        assert_eq!(pool.buffers.len(), 10);
+        pool.get_mut(&sources[2]).unwrap().dirty = false;
+        pool.get_mut(&sources[3]).unwrap().dirty = false;
+        let weak = pool
+            .get(&sources[3])
+            .unwrap()
+            .content
+            .as_ref()
+            .unwrap()
+            .weak();
+        pool.open(
+            PreviewSource::file(r"C:\w\new.md"),
+            "new.md".into(),
+            &[sources[2].clone()],
+        );
+        assert!(
+            pool.get(&sources[2]).is_some(),
+            "display protects even a clean buffer"
+        );
+        assert!(pool.get(&sources[3]).is_none());
+        assert!(weak.upgrade().is_none());
+        assert_eq!(
+            pool.buffers.len(),
+            10,
+            "remaining buffers are protected or newly opened"
+        );
+    }
+
+    #[test]
+    fn md_loading_over_limit_whole_first_never_empty() {
+        let dir = scratch("loading-whole-first");
+        let path = dir.join("first.md");
+        std::fs::write(&path, vec![b'x'; PREVIEW_EDIT_BYTES + 1]).unwrap();
+        let mut buffer = PreviewBuffer::new(PreviewSource::file(path.clone()), "first.md".into());
+        buffer.accept(read_whole(&path));
+        assert_eq!(
+            buffer.content.as_ref().map(|body| body.len()),
+            Some(PREVIEW_HEAD_BYTES)
+        );
+        assert_eq!(buffer.load, PreviewLoad::Ready);
+        assert!(buffer.truncated && buffer.too_large_to_edit);
+        assert!(!buffer.is_editable(false));
+        assert_eq!(buffer.revision, 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn md_loading_whole_policy_is_scoped_to_markdown_panes() {
+        let source = PreviewSource::file(r"C:\w\notes.md");
+        let mut pane = PreviewBuffer::new(source.clone(), "notes.md".into());
+        assert!(matches!(
+            pane.claim_head_read(),
+            Some(PreviewWant::Whole(_))
+        ));
+        let mut glance = PreviewBuffer::glancing(source, "notes.md".into());
+        assert!(matches!(
+            glance.claim_head_read(),
+            Some(PreviewWant::Head(_))
+        ));
+        for name in ["notes.txt", "table.csv", "changes.diff", "unknown.xyz"] {
+            let mut buffer =
+                PreviewBuffer::new(PreviewSource::file(format!(r"C:\w\{name}")), name.into());
+            assert!(
+                matches!(buffer.claim_head_read(), Some(PreviewWant::Head(_))),
+                "{name}"
+            );
+        }
+    }
+
+    fn over_limit_answer() -> HeadOutcome {
+        HeadOutcome::TooLargeToEdit {
+            head: FallbackHead {
+                text: "fallback head".into(),
+                mtime: None,
+                content_says_text: true,
+                encoding: HeadEncoding::Utf8,
+                lossy: false,
+            },
+            file_bytes: PREVIEW_EDIT_BYTES as u64 + 1,
+        }
+    }
+
+    #[test]
+    fn md_loading_input_and_decode_work_are_bounded_at_the_ceiling() {
+        let dir = scratch("loading-budget");
+        let path = dir.join("boundary.md");
+        for size in [PREVIEW_EDIT_BYTES, PREVIEW_EDIT_BYTES + 1] {
+            std::fs::write(&path, vec![b'a'; size]).unwrap();
+            crate::preview_typing::reset_work();
+            let buffer = loading_open(&path);
+            if size == PREVIEW_EDIT_BYTES {
+                assert!(buffer.is_editable(false));
+                assert!(!buffer.truncated);
+                assert_eq!(crate::preview_typing::work("preview read bytes"), size);
+                assert_eq!(crate::preview_typing::work("preview decoded bytes"), size);
+            } else {
+                assert!(buffer.too_large_to_edit && buffer.truncated);
+                assert_eq!(
+                    crate::preview_typing::work("preview read bytes"),
+                    PREVIEW_HEAD_BYTES + 1
+                );
+                assert_eq!(
+                    crate::preview_typing::work("preview decoded bytes"),
+                    PREVIEW_HEAD_BYTES
+                );
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn md_loading_over_limit_badge_caches_both_languages_and_resets() {
+        let mut buffer = PreviewBuffer::new(PreviewSource::file(r"C:\w\size.md"), "size.md".into());
+        let HeadOutcome::TooLargeToEdit { mut head, .. } = over_limit_answer() else {
+            unreachable!()
+        };
+        head.lossy = true;
+        buffer.accept(HeadOutcome::TooLargeToEdit {
+            head,
+            file_bytes: 10 * 1024 * 1024,
+        });
+        assert_eq!(
+            buffer.over_limit_notice.as_ref().unwrap(),
+            &["Read-only · 10.0 MB", "只读 · 10.0 MB"]
+        );
+        assert!(buffer.lossy && !buffer.is_editable(false));
+        assert_eq!(buffer.read_only_notice(), Some("Read-only \u{b7} 10.0 MB"));
+        assert!(!buffer.awaits_the_whole_file());
+        buffer.accept(read("complete", false));
+        assert!(buffer.is_editable(false));
+        assert!(buffer.over_limit_notice.is_none());
+        buffer.accept(over_limit_answer());
+        buffer.accept(HeadOutcome::Refused(PreviewRefusal::Binary));
+        assert!(!buffer.too_large_to_edit && buffer.over_limit_notice.is_none());
+        assert!(!buffer.awaits_the_whole_file());
     }
 
     // ── T-EDIT-DISK: a buffer knows which disk state it is holding ─────────
@@ -11081,8 +11355,8 @@ mod tests {
         // Something outside this window wrote the file, so a re-read goes out
         // while the body is still the disk's.
         assert!(buffer.mark_stale());
-        let Some(PreviewWant::Head(base)) = buffer.claim_head_read() else {
-            panic!("the read is owed and it is a head read");
+        let Some(PreviewWant::Whole(base)) = buffer.claim_head_read() else {
+            panic!("the Markdown whole read is owed");
         };
 
         // And the reader types while it is in flight.
@@ -11133,8 +11407,8 @@ mod tests {
             PreviewBuffer::new(PreviewSource::file(r"C:\w\notes.md"), "notes.md".to_owned());
         buffer.accept(read("one\n", false));
         assert!(buffer.mark_stale());
-        let Some(PreviewWant::Head(base)) = buffer.claim_head_read() else {
-            panic!("a head read is owed");
+        let Some(PreviewWant::Whole(base)) = buffer.claim_head_read() else {
+            panic!("a Markdown whole read is owed");
         };
         type_into(&mut buffer, &mut caret, 4);
 
@@ -11177,7 +11451,7 @@ mod tests {
         type_into(&mut buffer, &mut caret, 4);
         let typed = buffer.content.clone().expect("a body");
 
-        buffer.accept(HeadOutcome::TooLargeToEdit);
+        buffer.accept(over_limit_answer());
         assert_eq!(
             buffer.content,
             Some(typed),
@@ -11348,7 +11622,7 @@ mod tests {
         buffer.accept(read("the whole file, as it was\n", false));
         assert!(buffer.is_editable(false), "a complete text body edits");
 
-        buffer.accept(HeadOutcome::TooLargeToEdit);
+        buffer.accept(over_limit_answer());
         assert_eq!(
             buffer.content.as_deref(),
             Some("the whole file, as it was\n"),
@@ -11358,7 +11632,13 @@ mod tests {
             !buffer.is_editable(false),
             "and it is a retained body, not a body a keystroke can be about"
         );
-        assert_eq!(buffer.read_only_notice(), Some(preview_too_large_notice()));
+        assert_eq!(
+            buffer.read_only_notice(),
+            Some(
+                preview_too_large_notice(PREVIEW_EDIT_BYTES as u64 + 1, crate::i18n::Lang::English)
+                    .as_str()
+            )
+        );
     }
 
     /// RED (ticket T-EDIT-DISK, finding A10) — **a file that shrinks back under
@@ -11378,7 +11658,7 @@ mod tests {
         let mut buffer =
             PreviewBuffer::new(PreviewSource::file(r"C:\w\log.txt"), "log.txt".to_owned());
         buffer.accept(read("the whole file, as it was\n", false));
-        buffer.accept(HeadOutcome::TooLargeToEdit);
+        buffer.accept(over_limit_answer());
         assert!(!buffer.is_editable(false));
 
         // The file is rewritten, small this time, and the watcher says so.
@@ -11426,7 +11706,7 @@ mod tests {
     #[test]
     fn the_editing_ceilings_phrase_names_the_size_it_is() {
         assert_eq!(
-            preview_too_large_notice(),
+            preview_too_large_notice(PREVIEW_EDIT_BYTES as u64, crate::i18n::Lang::English),
             format!(
                 "Read-only · {}",
                 format_byte_size(PREVIEW_EDIT_BYTES as u64)

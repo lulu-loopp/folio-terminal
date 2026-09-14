@@ -15,6 +15,8 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- Markdown files up to 8 MB open complete and editable; the 64 KB read-only head is gone.
+
 - Realize large Markdown documents around the viewport and preserve the reading position while estimated heights change.
 
 - Reduce typing and caret-movement delays in large Markdown documents.
