@@ -14643,6 +14643,20 @@ fn mini_row_label(
 /// edge still cuts the line exactly where it cut it before, and a run that
 /// begins past that edge is never built.
 ///
+/// **The clip is a boundary and not a knife** (owner's report 2026-09-14,
+/// T-CARD-GRID-SYMBOL-CLIP). For nine days it was both, and a shell printing
+/// `○ general-purpose` showed what the difference costs: the pane drew a clean
+/// hollow circle and the card drew a large arc — U+25CB, from a face the pane
+/// never chose, cut at the right edge of the one column it owns. The painter
+/// answers both halves now, and both are the pane's own answers rather than new
+/// rules: `bt_render::mono_cluster_family` routes the cluster to the face the
+/// pane's grid would draw *that code point* from, and
+/// `bt_render::grid_cell_fit_font_size_px` re-sets a cell that is still wider
+/// than its columns until it fits them — the chrome's spelling of the size policy
+/// `NarrowShapingCache::get_or_shape` applies to every too-wide cluster in the
+/// terminal. So what arrives at this clip already stands inside it, and the clip
+/// is left saying the thing it is for: which columns are this run's.
+///
 /// Nothing else about the row changes: same face, same size, same box, same
 /// baseline. What changes is only which x each piece is put at.
 fn mini_grid_row_labels(
@@ -44721,6 +44735,77 @@ mod tests {",
         let wanted = vec![cell[0] + 2.0 * MINI_CELL];
         assert_eq!(border_x(&rows, cell, 0), wanted, "after two Latin letters");
         assert_eq!(border_x(&rows, cell, 1), wanted, "and after one ideograph");
+    }
+
+    /// **The owner's second row** (report 2026-09-14): a shell printing
+    /// `○ general-purpose`, whose circle the pane draws whole and the card drew as
+    /// an arc.
+    ///
+    /// The half of that report this file owns is the geometry: U+25CB is one
+    /// column wide ([`bt_unicode`] calls East Asian Ambiguous narrow), it is a run
+    /// of its own because it is not on the face's own advance, it stands in column
+    /// zero, and the words after it begin in column one — so the projection says
+    /// the same thing about this row that the terminal does.
+    ///
+    /// The other half — *which face draws it, and how wide* — is not decidable
+    /// here, because nothing in this module shapes anything. It is pinned where
+    /// the shaping is, in `bt_render`:
+    /// `a_grid_symbol_on_a_card_shapes_in_the_face_the_pane_routes_it_to` and
+    /// `a_grid_cell_wider_than_its_columns_is_fitted_to_them`.
+    ///
+    /// Red gate: hand the row to `mini_row_label` whole and there is no label
+    /// whose text is the circle alone.
+    #[test]
+    fn a_symbol_is_a_run_of_its_own_standing_in_its_column() {
+        let (rows, cell) = transcript_rows_of(vec!["○ general-purpose".to_owned()]);
+        let circle = rows
+            .iter()
+            .find(|label| label.text == "○")
+            .expect("the circle is a run of its own");
+        assert_eq!(
+            circle.rect[0], cell[0],
+            "and it stands in column zero, which is the cell's own left edge"
+        );
+        let clip = circle.clip.expect("a mini row is clipped to its seat");
+        assert_eq!(
+            [clip[0], clip[2]],
+            [cell[0], cell[0] + MINI_CELL],
+            "one column is what the grid gave it, and the clip says so — the \
+             painter fits the glyph to those columns rather than cutting it at them"
+        );
+        let words = rows
+            .iter()
+            .find(|label| label.text == " general-purpose")
+            .expect("what follows the circle is one run of the face's own advance");
+        assert_eq!(
+            words.rect[0],
+            cell[0] + MINI_CELL,
+            "beginning in column one, because the circle occupies exactly one \
+             column however wide the face draws it"
+        );
+    }
+
+    /// **A border after a symbol stands in its own column** — the mixed row, and
+    /// the guard that fitting one cluster cannot move the next one.
+    ///
+    /// The circle is re-set smaller when its face draws it wider than its column;
+    /// the `│` after it is placed by the grid either way, because a run's `x` is
+    /// its column and never the advance of what came before it. A projection where
+    /// the border moved with the symbol's face would be the crooked table
+    /// T-CARD-GRID-ALIGN closed, re-opened by the fix for the circle.
+    ///
+    /// Red gate: place a run at the running advance and the border follows the
+    /// circle's own width off its column.
+    #[test]
+    fn a_border_after_a_symbol_stands_in_its_own_column() {
+        let (rows, cell) = transcript_rows_of(vec!["ab│".to_owned(), "○ │".to_owned()]);
+        let wanted = vec![cell[0] + 2.0 * MINI_CELL];
+        assert_eq!(border_x(&rows, cell, 0), wanted, "after two Latin letters");
+        assert_eq!(
+            border_x(&rows, cell, 1),
+            wanted,
+            "and after a symbol and a space, which are one column each"
+        );
     }
 
     /// **A row with nothing but Latin on it is drawn exactly as it was** — the

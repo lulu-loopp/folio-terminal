@@ -10724,6 +10724,200 @@ fn chrome_label_attrs(
     attrs
 }
 
+/// **The face one cluster of grid text is drawn from** — the pane's own answer,
+/// asked from the chrome so that a card gets the same one (owner's report
+/// 2026-09-14, `docs/DESIGN.md` §7.1.6b′ ⑤).
+///
+/// [`ChromeLabel::mono`] says "this line is a document written in a grid", and
+/// until this function it said it in one word: `Family::Monospace`. That word
+/// resolves to the family the grid is actually set in — [`primary_font_family`],
+/// which [`GpuContext::set_terminal_font`] moves whenever the reader picks a
+/// terminal font — so the *primary* face was never the difference. What was left
+/// over is every code point that face does not cover: `Family::Monospace` hands
+/// those to cosmic-text's generic fallback, and the pane hands them to
+/// [`font_presentation_route`], which is a different question with a different
+/// answer.
+///
+/// That divergence is the whole of the report. A shell printed `○` (U+25CB); the
+/// pane drew a clean hollow circle, because the route sends a geometric shape to
+/// [`TEXT_SYMBOL_FONT_FAMILY`], and the card drew a large arc, because the
+/// fallback chain found some other installed face whose circle is wider than the
+/// one mini column the grid had given it, and the column cut it.
+///
+/// **ASCII is answered without asking.** The primary face is a monospaced face
+/// chosen to draw a terminal; it covers ASCII by construction — it is the very
+/// face a mini column's advance is measured on — and asking the route would
+/// spend a database query and a charmap walk per cluster to arrive at
+/// `TerminalText`. Nearly every mono label this chrome draws is ASCII from one
+/// end to the other.
+///
+/// The colour arm takes the pane's *preference order* and not the pane's trial:
+/// [`shape_narrow_buffer_for_key`] shapes the cluster in both emoji faces and
+/// measures which one really drew it in colour inside the cell, because it is
+/// also deciding how large to draw the answer. A chrome label decides no such
+/// thing, so it asks the cheap half of the question and leaves the expensive
+/// half where the size policy that needs it lives.
+fn mono_cluster_family(cluster: &str, font_system: &mut FontSystem) -> Family<'static> {
+    if cluster.is_ascii() {
+        return Family::Monospace;
+    }
+    match font_presentation_route(cluster, font_system) {
+        PresentationRoute::TerminalText => Family::Monospace,
+        PresentationRoute::TextSymbol => Family::Name(TEXT_SYMBOL_FONT_FAMILY),
+        PresentationRoute::ColorEmoji => {
+            if font_family_available(font_system, SEGOE_COLOR_EMOJI_FONT_FAMILY) {
+                Family::Name(SEGOE_COLOR_EMOJI_FONT_FAMILY)
+            } else {
+                Family::Name(COLOR_EMOJI_FONT_FAMILY)
+            }
+        }
+    }
+}
+
+/// **One mono chrome label's text, cut into the spans its faces divide it into**
+/// — maximal, so a row of ASCII with one symbol in it is three spans and not one
+/// per character.
+///
+/// `None` means "every cluster is on the grid's own face", which is the ordinary
+/// case and is answered with the single unstyled span the shaper was handed
+/// before this existed. It is also what keeps the route from *widening* its
+/// reach: [`font_presentation_route`] reads the whole string it is given with
+/// `chars().any(..)`, so asking it about a line rather than about a cluster would
+/// move a whole row of Latin onto the symbol face because one arrow stood at the
+/// end of it. The pane asks per cell; this asks per cluster, which is the same
+/// grain.
+fn mono_label_spans(
+    text: &str,
+    font_system: &mut FontSystem,
+) -> Option<Vec<(Range<usize>, Family<'static>)>> {
+    let mut spans: Vec<(Range<usize>, Family<'static>)> = Vec::new();
+    let mut routed = false;
+    let mut at = 0usize;
+    for cluster in bt_unicode::graphemes(text) {
+        let range = at..at + cluster.len();
+        at = range.end;
+        let family = mono_cluster_family(cluster, font_system);
+        routed |= !matches!(family, Family::Monospace);
+        match spans.last_mut() {
+            Some((last, standing)) if *standing == family => last.end = range.end,
+            _ => spans.push((range, family)),
+        }
+    }
+    routed.then_some(spans)
+}
+
+/// Put one chrome label's text into its buffer, in the face or faces it is drawn
+/// from.
+///
+/// The chrome's own labels are one face by definition — the window talking about
+/// itself — so they take the path they always took. A `mono` label is a document
+/// quoted out of a grid, and a grid's faces are per cluster
+/// ([`mono_label_spans`]).
+fn set_chrome_label_text(
+    buffer: &mut Buffer,
+    font_system: &mut FontSystem,
+    text: &str,
+    attrs: &Attrs<'static>,
+    mono: bool,
+) {
+    match mono.then(|| mono_label_spans(text, font_system)).flatten() {
+        Some(spans) => buffer.set_rich_text(
+            spans.iter().map(|(range, family)| {
+                let mut span = attrs.clone();
+                span.family = *family;
+                (&text[range.clone()], span)
+            }),
+            attrs,
+            Shaping::Advanced,
+            None,
+        ),
+        None => buffer.set_text(text, attrs, Shaping::Advanced, None),
+    }
+}
+
+/// How wide one shaped chrome label came out, in physical pixels.
+///
+/// A chrome label is one line — `Wrap::None`, and a one-line field's text has had
+/// its newlines taken out long before it reaches here — so the widest of the
+/// buffer's runs is the label's width.
+fn shaped_line_width(buffer: &Buffer) -> f32 {
+    buffer
+        .layout_runs()
+        .map(|run| run.line_w)
+        .fold(0.0_f32, f32::max)
+}
+
+/// **The size a grid cell is re-set at so that it fits the columns it owns** —
+/// `None` for a label that already fits, which is every label but the rare one
+/// this exists for.
+///
+/// # Why a cell and not a label
+///
+/// A `mono` label carrying exactly one cluster **is** a cell of a grid: that is
+/// what `focus_thumb::grid_runs` emits for every non-ASCII cluster of a projected
+/// row, and `seats::mini_grid_row_labels` gives it a box that is precisely the
+/// columns the grid counted for it. A mono label of several clusters is a *line*
+/// — a run of ASCII, a quoted source line — whose box is a layout box and whose
+/// overflow is a cut, exactly as `overflow: hidden` has always cut it.
+///
+/// # Why fitted and not cut
+///
+/// Because the pane fits it. A too-wide narrow cluster is not clipped in the
+/// terminal either: `NarrowShapingCache::get_or_shape` re-shapes it at
+/// [`narrow_fallback_em_scale`] (or, for a text-coordinated symbol,
+/// [`text_coordinated_symbol_em_scale`]) so the ink lands inside its cell, and
+/// the grid keeps both of its promises — the glyph is whole, and the next column
+/// still begins where the column count says it does. A card that cut the same
+/// glyph instead would be the one place in this window where the grid is bought
+/// with half a symbol; the owner's screenshot of a circle drawn as an arc is what
+/// that looks like.
+///
+/// The ratio is the shaped **advance** against the box, which is the measurement
+/// a label has: advance is linear in font size for a given face, so one re-set at
+/// `size × box / advance` lands the run on its columns rather than iterating
+/// toward them. The pane's own scales are ink-box ratios instead, because a cell
+/// is aligned on its ink; a chrome label is placed by its advance and cropped by
+/// its box, so the advance is the honest number here.
+///
+/// # What counts as overflowing
+///
+/// **The clip's own pixel grid, and not the box's exact edge.** A crop is applied
+/// as [`TextBounds`], whose right edge is `clip[2].ceil()` — rounded *outward* —
+/// so ink that overhangs its box by less than the pixel it stands in is not cut
+/// by anything, and nothing about it needs re-setting. The distinction is not
+/// cosmetic: a single-character ASCII cell's advance is its column by
+/// construction, and the two are computed by different arithmetic
+/// (`origin + (n+1) × cell` minus `origin + n × cell`, against the shaper's own
+/// sum), so they part company in the last bits of an `f32`. Without this every
+/// one-character cell on a card would be re-shaped a millionth smaller, for a
+/// cut that could not have happened.
+///
+/// Floored at one physical pixel, for [`Buffer::set_metrics`]' own refusal: a box
+/// squeezed to nothing would otherwise ask for a zero-sized face, and a cell that
+/// small has no picture to keep whole anyway.
+fn grid_cell_fit_font_size_px(label: &ChromeLabel, shaped_width: f32) -> Option<f32> {
+    let box_width = label.rect[2] - label.rect[0];
+    if !label.mono || box_width <= 0.0 || !shaped_width.is_finite() {
+        return None;
+    }
+    // Both edges, and the second is the one a cell at the seat's own right edge
+    // turns on: a cluster the *card* is cutting in half is being cut by the end of
+    // the row and not by its columns, exactly as the terminal's last column cuts a
+    // line, and shrinking it to the sliver still on screen would be the card
+    // inventing a size out of how much of the seat is left.
+    let room = label.clip.unwrap_or(label.rect)[2].ceil() - label.rect[0];
+    if shaped_width <= box_width || shaped_width <= room {
+        return None;
+    }
+    let one_cluster = bt_unicode::graphemes(&label.text)
+        .next()
+        .is_some_and(|cluster| cluster.len() == label.text.len());
+    if !one_cluster {
+        return None;
+    }
+    Some((label.font_size_px * box_width / shaped_width).max(1.0))
+}
+
 /// **Where every character boundary of one shaped run falls**, in physical
 /// pixels from the run's start.
 ///
@@ -10929,7 +11123,9 @@ fn shape_chrome_measurement(
     // No width bound at all: this asks what the text *wants*, not what it would
     // be squeezed into.
     buffer.set_size(None, Some(line_height));
-    buffer.set_text(
+    set_chrome_label_text(
+        &mut buffer,
+        font_system,
         text,
         // **Tabular figures are a parameter, and they were not** (user report,
         // 2026-08-17). The note that stood here said they could only ever make a
@@ -10942,8 +11138,7 @@ fn shape_chrome_measurement(
         // and runs off the right of it, where the clip cuts the last glyph in
         // half. That is what the Git page's meta column was doing at every width.
         &chrome_label_attrs(weight, letter_spacing_em, tabular_numerals, mono),
-        Shaping::Advanced,
-        None,
+        mono,
     );
     buffer.shape_until_scroll(font_system, false);
     Some(buffer)
@@ -11007,12 +11202,19 @@ fn shape_chrome_labels(
                 label.tabular_numerals,
                 label.mono,
             );
-            buffer.set_text(&label.text, &attrs, Shaping::Advanced, None);
+            set_chrome_label_text(&mut buffer, font_system, &label.text, &attrs, label.mono);
             buffer.shape_until_scroll(font_system, false);
-            let text_width = buffer
-                .layout_runs()
-                .map(|run| run.line_w)
-                .fold(0.0_f32, f32::max);
+            let mut text_width = shaped_line_width(&buffer);
+            // **A cell of a grid is fitted to its columns and never cut by them**
+            // (owner's report 2026-09-14, §7.1.6b′ ⑤) — the pane's own size
+            // policy, said once here for the one label shape that is a cell. See
+            // [`grid_cell_fit_font_size_px`] for which labels those are and why
+            // the ratio is the advance's.
+            if let Some(fitted) = grid_cell_fit_font_size_px(label, text_width) {
+                buffer.set_metrics(Metrics::new(fitted, line_height));
+                buffer.shape_until_scroll(font_system, false);
+                text_width = shaped_line_width(&buffer);
+            }
             let left = if label.align_center {
                 (label.rect[0] + (width - text_width) / 2.0).max(label.rect[0])
             } else if label.align_right {
@@ -22722,6 +22924,198 @@ mod tests {
                  nobody chose"
             );
         }
+    }
+
+    /// One mini transcript row's label, at the size and in the box a focus card
+    /// gives it: `column` columns wide, standing at column zero of its row.
+    ///
+    /// The column is *measured* rather than written down, exactly as the app
+    /// measures it (`WindowRuntime::focus_mini_advance` asks
+    /// [`GpuContext::measure_chrome_mono_text`] for `"0"`), so the box this test
+    /// argues about is the box the card actually draws.
+    #[cfg(target_os = "windows")]
+    fn mini_grid_cell_label(font_system: &mut FontSystem, text: &str, columns: f32) -> ChromeLabel {
+        let size = theme::FOCUS_MINI_TERM_FONT_LOGICAL_PX;
+        let cell = measure_chrome_label(
+            font_system,
+            "0",
+            size,
+            ChromeLabelWeight::Regular,
+            0.0,
+            false,
+            true,
+        );
+        ChromeLabel {
+            mono: true,
+            text: text.to_owned(),
+            rect: [0.0, 0.0, columns * cell, size * 1.4],
+            font_size_px: size,
+            color: [255, 255, 255],
+            align_right: false,
+            align_center: false,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+            clip: None,
+        }
+    }
+
+    /// RED (T-CARD-GRID-SYMBOL-CLIP, owner's report 2026-09-14; §7.1.6b′ ⑤) —
+    /// **a symbol on a card's mini grid row is drawn from the face the pane draws
+    /// it from.**
+    ///
+    /// The report was two screenshots of one row: a shell printing
+    /// `○ general-purpose`, a clean hollow circle in the pane, a large cut arc in
+    /// the focus card's projection of the same row. Two faces, one code point.
+    /// The pane routes U+25CB through [`font_presentation_route`] to
+    /// [`TEXT_SYMBOL_FONT_FAMILY`]; the card asked for `Family::Monospace`, and
+    /// what Consolas does not carry cosmic-text's generic fallback answered from
+    /// whichever loaded face has it — SimSun or the sans, whose circle is most of
+    /// an em where a mini column is 0.55 of one.
+    ///
+    /// Both halves are asserted, and the second has the teeth: it is not enough
+    /// that the glyph resolves, it has to resolve in the *pane's* face.
+    ///
+    /// Red gate: hand the label `Family::Monospace` — the one word this label
+    /// carried before [`mono_cluster_family`] — and the circle comes back in a
+    /// face that is not the symbol face.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_grid_symbol_on_a_card_shapes_in_the_face_the_pane_routes_it_to() {
+        const CIRCLE: &str = "○";
+        let mut font_system = terminal_font_system();
+        assert!(
+            font_family_available(&font_system, TEXT_SYMBOL_FONT_FAMILY),
+            "the symbol face is part of this renderer's own startup list, and the \
+             pane's route is written on the assumption that it loaded"
+        );
+        assert_eq!(
+            font_presentation_route(CIRCLE, &mut font_system),
+            PresentationRoute::TextSymbol,
+            "the pane sends a geometric shape to the symbol face — this is the \
+             answer the card is being made to agree with"
+        );
+        let label = mini_grid_cell_label(&mut font_system, CIRCLE, 1.0);
+        let layouts = shape_chrome_labels(&mut font_system, std::slice::from_ref(&label), 0.7, 1.0);
+        let run = layouts[0]
+            .buffer
+            .layout_runs()
+            .next()
+            .expect("the label shapes");
+        let glyph = run.glyphs.first().expect("the circle gets a glyph");
+        assert_ne!(
+            glyph.glyph_id, 0,
+            "the circle came back as .notdef — no face on the chain has it"
+        );
+        assert_eq!(
+            glyph_family(&font_system, glyph),
+            TEXT_SYMBOL_FONT_FAMILY,
+            "a mini row's symbol must come out of the face the pane drew it from, \
+             not out of whatever the generic fallback reaches first"
+        );
+        // And the other half of the report: whichever width that face gives the
+        // circle, the card draws all of it. The crop is `TextBounds`, whose right
+        // edge is `clip[2].ceil()`, so "nothing is cut" is exactly "the advance
+        // stands inside that pixel" — reached either because the face already fits
+        // the column or because [`grid_cell_fit_font_size_px`] set it smaller until
+        // it did.
+        let room = label.rect[2].ceil() - label.rect[0];
+        let drawn = shaped_line_width(&layouts[0].buffer);
+        assert!(
+            drawn <= room + 0.01,
+            "the circle is {drawn}px wide inside a column that is cut at {room}px — \
+             that overhang is the arc in the owner's screenshot"
+        );
+    }
+
+    /// RED (T-CARD-GRID-SYMBOL-CLIP) — **a grid cell wider than the columns it
+    /// owns is fitted to them and never cut by them.**
+    ///
+    /// The clip that T-CARD-GRID-ALIGN put on every pinned run is what made the
+    /// circle an arc: the run is placed at `column × cell` and shown in its own
+    /// columns, so a glyph whose advance is wider than them lost its right-hand
+    /// side at a vertical edge. The pane does not cut it either —
+    /// `NarrowShapingCache::get_or_shape` re-shapes a too-wide narrow cluster at
+    /// [`text_coordinated_symbol_em_scale`] so the ink lands inside its cell — and
+    /// this is that rule, in the measurement a chrome label has.
+    ///
+    /// The cluster is an ideograph in a **one**-column box rather than the
+    /// report's own circle, and deliberately: the rule has to hold for any cluster
+    /// a fallback face draws too wide, and a CJK face's em at 7.5px is wider than
+    /// one mini column on every machine — where a symbol face's circle might
+    /// happen to fit, which would make this test green for a reason that has
+    /// nothing to do with the fix. The circle's own row is pinned in
+    /// [`a_grid_symbol_on_a_card_shapes_in_the_face_the_pane_routes_it_to`].
+    ///
+    /// Red gate: drop [`grid_cell_fit_font_size_px`] and the shaped advance is the
+    /// premise's number — wider than the box, which is the cut.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_grid_cell_wider_than_its_columns_is_fitted_to_them() {
+        const IDEOGRAPH: &str = "名";
+        let mut font_system = terminal_font_system();
+        let label = mini_grid_cell_label(&mut font_system, IDEOGRAPH, 1.0);
+        let column = label.rect[2] - label.rect[0];
+        let unfitted = measure_chrome_label(
+            &mut font_system,
+            IDEOGRAPH,
+            label.font_size_px,
+            ChromeLabelWeight::Regular,
+            0.0,
+            false,
+            true,
+        );
+        assert!(
+            unfitted > label.rect[2].ceil() - label.rect[0],
+            "the premise: at {}px this cluster shapes {unfitted}px wide against a \
+             {column}px column — that overhang is what a card's clip cuts",
+            label.font_size_px
+        );
+        let layouts = shape_chrome_labels(&mut font_system, std::slice::from_ref(&label), 0.7, 1.0);
+        let fitted = shaped_line_width(&layouts[0].buffer);
+        assert!(
+            fitted <= column + 0.01,
+            "the cell is set smaller until it stands inside its own column — \
+             {fitted}px in a {column}px column"
+        );
+        assert!(
+            fitted > column * 0.5,
+            "and only as small as it has to be: fitting is a scale to the box, not \
+             a retreat from it"
+        );
+    }
+
+    /// **A mini row of ASCII is shaped exactly as it was** — the cost half of the
+    /// same ticket, and the guard on [`mono_label_spans`]' fast path.
+    ///
+    /// Every cluster on this row is on the grid's own face, so the label is handed
+    /// to the shaper as the one plain span it always was, no route is asked, and a
+    /// stretch of ASCII still advances by whole columns. The width test is the one
+    /// that would catch a regression of substance: a mono row that stopped
+    /// measuring `n` columns for `n` characters would take the whole grid with it.
+    ///
+    /// Red gate: route a cluster the primary face covers to the symbol face and
+    /// the row is no longer `n` columns wide.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_mini_row_of_ascii_is_still_whole_columns_wide() {
+        const ROW: &str = "> cargo build";
+        let mut font_system = terminal_font_system();
+        assert!(
+            mono_label_spans(ROW, &mut font_system).is_none(),
+            "a row on the grid's own face is one span and asks the route nothing"
+        );
+        let label = mini_grid_cell_label(&mut font_system, ROW, ROW.len() as f32);
+        let columns = label.rect[2] - label.rect[0];
+        let layouts = shape_chrome_labels(&mut font_system, std::slice::from_ref(&label), 0.7, 1.0);
+        let width = shaped_line_width(&layouts[0].buffer);
+        assert!(
+            (width - columns).abs() < 0.01,
+            "{} characters of a monospaced face advance {} columns — saw {width}px \
+             against {columns}px",
+            ROW.len(),
+            ROW.len()
+        );
     }
 
     /// RED — **the database this renderer shapes with holds no face with no
