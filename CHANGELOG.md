@@ -150,6 +150,13 @@ Nothing yet.
 
 ### Fixed
 
+- **A terminal showing formulas no longer stops when the window leaves full screen or
+  changes display.** A formula that a narrower window folded onto the next row was
+  placed on that row but still counted against the row its line began on, and the
+  frame's own check refused it; Folio then ended without a word. The placement and
+  the check now read the same row, and if a frame is ever refused again the cause is
+  written to the panic log and shown before Folio stops.
+
 - **On a Mac, the key that summons the terminal works.** Pressing `Ctrl` and the
   backtick key did nothing at all: no window came down, and nothing was written
   anywhere that said why. Folio had claimed the chord from the system correctly

@@ -899,6 +899,9 @@ let line = live_grid_input(&task.inputs, task.start.row).map_or("", |input| inpu
 
 **一句诚实的界限。** 用户截图里那块 pane 是 **79 列**(`put`/`s the` 的折点、`surfa`/`ce counts` 的折点、以及按等宽字距量出来的 18.0px 三处互相印证),而 79 列在本机 release `d3d8a3f` 上是**排得出来的**——真机逐列复现出的失败带是 **≤74 列**。所以被证的是:**这个缺陷会把这一句公式在「图」和「源码」之间按窗宽逐列翻面,症状与用户报的那一张逐条对上(只有第一条公式停在源码,同屏其余五条全排),而它就在用户那条路上**;没被证的是那张截图当时那块 pane 到底经历过哪几次宽度。这一条与 §4.6a 末尾那句界限是同一种诚实。
 
+A rendered live inline placement owns one physical row's band. Its `band_start_row`, `band_end_row`, top and clip height must all come from the same entry of the published frame's row map; the logical occurrence's source endpoints remain unchanged for selection and identity. A width reflow can put a later run one row below the occurrence's first run: at the measured 2x metrics that difference is 44 * 1024 = 45056 subpixels. Preserved rasters during resize and rerendered rasters after an em or scale change obey the same rule. `validate_shape` continues to reject inconsistent bands; a fatal frame-shape rejection keeps the orderly shutdown and now records its full cause in the existing crash log before using the existing console-or-dialog announcement, so the window cannot vanish with only a diagnostic-file entry (T-MATH-BAND-STOP).
+*(本节英文,待中文文案改写。)*
+
 ### 4.6d 同一行的公式不互相压制,行分隔符不需要 `&` 才能被读出(公式两处修,2026-09-14,已落地;`crates/bt-term/src/session.rs`、`crates/bt-detect/src/lib.rs`)
 
 对一份 Markdown 文件执行 `cat`,同一屏上出现两份报告,最终查明是两个独立缺陷,分属两层。两者记在这里,因为都是从同一张照片上读出来的,而且都差点被归咎于 `\infty`——一个在表中存在、从未出过错的宏。

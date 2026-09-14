@@ -8900,13 +8900,17 @@ impl DualPlaneSession {
                 artifact.width_px,
             );
             for placement in placements {
-                let Some((top_subpixels, row_height_subpixels)) = frame
-                    .row_map
-                    .get(placement.row as usize)
-                    .map(|mapped| (mapped.top_subpixels, mapped.height_subpixels))
-                else {
+                let Some(mapped) = frame.row_map.get(placement.row as usize) else {
                     continue;
                 };
+                let Some(live_row) = mapped.live_grid_row else {
+                    continue;
+                };
+                // Each picture owns its physical row, even when the occurrence spans a fold.
+                // Read the band and its geometry from the same published map; source endpoints
+                // still describe the whole logical occurrence for identity and selection.
+                let top_subpixels = mapped.top_subpixels;
+                let row_height_subpixels = mapped.height_subpixels;
                 for index in &placement.cells {
                     if let Some(cell) = frame.cells.get_mut(*index) {
                         cell.text.clear();
@@ -8920,8 +8924,8 @@ impl DualPlaneSession {
                         screen: record.screen,
                         start: record.start,
                         end: record.end,
-                        band_start_row: record.start.row,
-                        band_end_row: record.end.row,
+                        band_start_row: live_row,
+                        band_end_row: live_row,
                         generation: record.generation,
                     },
                     source: record.span.original_source.clone(),
@@ -27342,6 +27346,101 @@ mod tests {
             }
         }
         completed
+    }
+
+    /// T-MATH-BAND-STOP: the window fold moves an inline run one 44px row below its
+    /// logical line. Its placement band must move with the picture, including while stale.
+    #[test]
+    fn live_math_bands_follow_window_resize_and_scale_changes() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(192), nz(49));
+        session.set_cell_height_subpixels(NonZeroI64::new(44 * SUBPIXELS_PER_PX).unwrap());
+        session.set_cell_width_subpixels(NonZeroI64::new(20 * SUBPIXELS_PER_PX).unwrap());
+        session.set_ascii_baseline_subpixels(NonZeroI64::new(30_480).unwrap());
+        session.set_layout_key(LayoutKey {
+            dpi_milli: nz(2000),
+            ..session.layout_key()
+        });
+        session.set_font_size_subpixels(NonZeroI64::new(32 * SUBPIXELS_PER_PX).unwrap());
+        let stream = format!(
+            "\x1b]133;A\x07>\x1b]133;B\x07type math-test.md\x1b]133;C\x07\r\n\
+             $$x^2$$\r\n$x$ {} $y$\r\n\
+             \x1b]133;D;0\x07\x1b]133;A\x07>\x1b]133;B\x07",
+            "a".repeat(100)
+        );
+        session.feed_at(stream.as_bytes(), started).unwrap();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        assert!(complete_live_math_for_real(&mut session) >= 2);
+        let mut projection = session.new_projection(session.layout_key());
+        let check = |session: &DualPlaneSession,
+                     projection: &mut ViewportProjection,
+                     stage,
+                     ready: bool| {
+            let frame = session
+                .viewport_frame(projection)
+                .unwrap_or_else(|error| panic!("{stage}: {error:?}"));
+            for mode in [MathMode::Display, MathMode::Inline] {
+                if mode == MathMode::Inline && !ready {
+                    continue;
+                }
+                assert!(
+                    frame.math_blocks.iter().any(|block| {
+                        block.display == MathBlockDisplay::Rendered && block.artifact.mode == mode
+                    }),
+                    "{stage}: missing {mode:?} picture"
+                );
+            }
+            for block in &frame.math_blocks {
+                if block.display == MathBlockDisplay::Rendered
+                    && block.frozen_prefix_rows == 0
+                    && let MathBlockAnchor::Live { band_start_row, .. } = block.anchor
+                {
+                    let row = frame
+                        .row_map
+                        .iter()
+                        .find(|row| row.live_grid_row == Some(band_start_row))
+                        .expect("the live band is visible");
+                    assert_eq!(block.top_subpixels, row.top_subpixels, "{stage}");
+                }
+            }
+            frame
+        };
+        check(&session, &mut projection, "fullscreen 2x", true);
+        // 3840x2160 -> 1920x1200, with 20x44 physical cells: 192x49 -> 96x27.
+        for (step, columns, rows, scale_change) in
+            [(1, 96, 27, false), (2, 192, 49, false), (3, 96, 27, true)]
+        {
+            let at = started + Duration::from_secs(step);
+            if scale_change {
+                session.set_cell_height_subpixels(NonZeroI64::new(33 * SUBPIXELS_PER_PX).unwrap());
+                session.set_cell_width_subpixels(NonZeroI64::new(15 * SUBPIXELS_PER_PX).unwrap());
+                session.set_ascii_baseline_subpixels(NonZeroI64::new(22_860).unwrap());
+                session.set_layout_key(LayoutKey {
+                    dpi_milli: nz(1500),
+                    ..session.layout_key()
+                });
+                session.set_font_size_subpixels(NonZeroI64::new(24 * SUBPIXELS_PER_PX).unwrap());
+            }
+            session.resize_at(nz(columns), nz(rows), at).unwrap();
+            session.mark_pty_resize_requested_at(nz(columns), nz(rows), at);
+            session.refresh_projection(&mut projection);
+            check(&session, &mut projection, "immediate resize", false);
+            session
+                .finish_resize_if_quiescent(at + Duration::from_millis(500))
+                .unwrap();
+            session.advance_live_stability(at + Duration::from_secs(1));
+            complete_live_math_for_real(&mut session);
+            session.refresh_projection(&mut projection);
+            let frame = check(&session, &mut projection, "settled resize", true);
+            if columns == 96 {
+                assert_eq!(rendered_inline_blocks(&frame).len(), 2);
+                let tops = inline_blocks_by_row(&frame);
+                assert_eq!(
+                    tops[1].0 - tops[0].0,
+                    if scale_change { 33_792 } else { 45_056 }
+                );
+            }
+        }
     }
 
     fn rendered_inline_blocks(frame: &ViewportFrame) -> Vec<&bt_viewport::MathBlockPlacement> {

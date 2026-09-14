@@ -108743,6 +108743,9 @@ impl FolioApp {
             return;
         }
         eprintln!("{APP_NAME} stopped: {error:#}");
+        report_frame_shape_stop(&error, &panic_log_path(), |path| {
+            announce_panic(path);
+        });
         // Every window, because the failure is the process's: a shell left
         // running behind a window nobody can see is the one outcome worse than
         // stopping. `ending` for every one of them, and that is the point: this
@@ -115404,6 +115407,32 @@ fn panic_log_path() -> PathBuf {
 fn append_panic_report(path: &std::path::Path, report: &str) -> std::io::Result<()> {
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     writeln!(file, "{report}")
+}
+
+/// A rejected frame is an application invariant failure. If it takes the orderly stop road,
+/// it owes the reader the same log and visible announcement as a panic, without unwinding.
+/// Keep ordinary operational errors on their existing road; classify the typed cause through
+/// anyhow's context rather than matching the diagnostic's wording.
+fn report_frame_shape_stop(error: &anyhow::Error, path: &Path, announce: impl FnOnce(&Path)) {
+    if !matches!(
+        error.downcast_ref::<bt_viewport::FrameProjectionError>(),
+        Some(bt_viewport::FrameProjectionError::FrameShape(_))
+    ) {
+        return;
+    }
+    let report = format!(
+        "{}\n{}\nstopped: {error:#}\nbacktrace:\n{}\n",
+        version::banner(),
+        hang_watch::utc_timestamp(SystemTime::now()),
+        Backtrace::force_capture()
+    );
+    if let Err(write_error) = append_panic_report(path, &report) {
+        eprintln!(
+            "failed to write frame-shape report {}: {write_error}",
+            path.display()
+        );
+    }
+    announce(path);
 }
 
 fn main() -> Result<()> {
@@ -136827,6 +136856,40 @@ mod tests {
     /// window disappearing. The sentence raised in its place has to carry the
     /// path, because a log file whose location is not on screen is a log file
     /// nobody attaches.
+    #[test]
+    fn a_frame_shape_stop_records_its_cause_before_announcing() {
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/math-band-stop-tests")
+            .join(std::process::id().to_string());
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("folio-panic.log");
+        let error = anyhow::Error::new(bt_viewport::FrameProjectionError::FrameShape(
+            bt_viewport::FrameShapeError::MathBlockBandTop {
+                expected: 643_072,
+                actual: 688_128,
+            },
+        ))
+        .context("project terminal grid into viewport frame");
+        let mut announced = false;
+        report_frame_shape_stop(&error, &path, |announced_path| {
+            assert_eq!(announced_path, path);
+            let report = std::fs::read_to_string(announced_path).unwrap();
+            assert!(report.contains(&version::banner()));
+            assert!(report.contains("stopped: project terminal grid into viewport frame"));
+            assert!(
+                report.contains("live math block top is 688128 subpixels, band starts at 643072")
+            );
+            assert!(report.contains("backtrace:"));
+            announced = true;
+        });
+        assert!(announced);
+        std::fs::remove_file(&path).unwrap();
+        report_frame_shape_stop(&anyhow!("ordinary operational error"), &path, |_| {
+            panic!("an unrelated stop must not be classified as a frame invariant failure");
+        });
+        assert!(!path.exists());
+    }
+
     #[test]
     fn the_sentence_a_crash_raises_names_the_file_it_left() {
         let path = std::env::temp_dir().join("folio-panic.log");
