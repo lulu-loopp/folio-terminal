@@ -13765,6 +13765,14 @@ struct WindowRuntime {
     /// Whether a scale change arrived while the hand was on the frame and has
     /// not been paid for yet. See [`DpiSettlement`], which holds the argument.
     dpi_settlement: DpiSettlement,
+    /// Whether the rectangle that goes with the scale this window is now
+    /// measured at has arrived yet. See [`DpiRectangle`], which holds the
+    /// argument. Announced by [`Runtime::scale_factor_changed`], read by
+    /// [`Runtime::resize_leaves_to_layout`], and answered either by the
+    /// `WindowEvent::Resized` Windows sends alongside the scale change
+    /// ([`Runtime::resized`]) or by [`Runtime::settle_dpi_rectangle`] on the
+    /// next turn.
+    dpi_rectangle: DpiRectangle,
 }
 
 /// **What a present tells this window's traces**, travelling as one place.
@@ -15873,6 +15881,64 @@ impl DpiSettlement {
         }
         self.owed = false;
         true
+    }
+}
+
+/// **The rectangle a scale change is owed, and has not been handed yet**
+/// (T-CARD-ANCHOR-DPI, user report 2026-09-14; §7.1.6b′ ④).
+///
+/// A DPI change is a similarity transform and a transform has two halves — the
+/// scale, and the rectangle it is applied to. Windows delivers them in two
+/// messages, in that order: `WM_DPICHANGED` says the scale, and the
+/// `SetWindowPos` winit performs at the *end* of that handler is what produces
+/// the rectangle. So for the whole of [`Runtime::scale_factor_changed`] the
+/// window still has the rectangle of the display it is leaving.
+///
+/// That rectangle is the right one for the swapchain and for the frame, because
+/// it is what is on the glass. It is the wrong one for a pane's grid, because a
+/// grid is pixels counted in cells and only one of the two has changed yet:
+/// counting one display's pixels in the other display's cells gives a width no
+/// pane ever has. And a grid change is not a view — it is a vendor reflow,
+/// which re-wraps the live screen and freezes whatever it pushes off the top at
+/// the width it pushed it off *at*, for ever. A window carried 4K → 1080p and
+/// back therefore reflowed its panes through 240 → 320 → 160 → 120 → 240
+/// columns, two of those five widths belonging to no display, and the
+/// transcript a focus card assembles its lines out of came back cut
+/// differently.
+///
+/// Separate from [`DpiSettlement`], which answers a different question about
+/// the same event: that one is about a *hand* still on the frame and defers the
+/// whole expensive half; this one is about the *rectangle* and defers only the
+/// grids. A window nobody is touching owes this one and not that one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct DpiRectangle {
+    in_flight: bool,
+}
+
+impl DpiRectangle {
+    /// A scale has arrived and the rectangle that goes with it has not.
+    fn announced(&mut self) {
+        self.in_flight = true;
+    }
+
+    /// Whether a pane may be handed a grid cut from the rectangle in hand.
+    fn may_cut_a_grid(self) -> bool {
+        !self.in_flight
+    }
+
+    /// A rectangle from the OS. It is the rectangle the scale was owed whether
+    /// or not the scale changed, so this is said on every one of them.
+    fn arrived(&mut self) {
+        self.in_flight = false;
+    }
+
+    /// One turn of the loop. `true` when a scale change was announced and no
+    /// rectangle followed it — a maximized or full-screen window whose own
+    /// display's scale changed underneath it keeps every physical pixel it had,
+    /// so Windows produces no `WM_SIZE` and winit no `Resized`. Its panes still
+    /// owe their grids: the pixels stayed and the cells did not.
+    fn due(&mut self) -> bool {
+        std::mem::take(&mut self.in_flight)
     }
 }
 
@@ -36289,6 +36355,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         size_policy: SizePolicy::Lawful,
         lawful_client_size: None,
         dpi_settlement: DpiSettlement::default(),
+        dpi_rectangle: DpiRectangle::default(),
         pending_restore,
     }
 }
@@ -83194,6 +83261,21 @@ impl Runtime<'_> {
         observed_at: Instant,
         context: &'static str,
     ) -> Result<Option<GridSize>> {
+        // **No pane is handed a grid cut from the rectangle the window is
+        // leaving** (T-CARD-ANCHOR-DPI; see [`DpiRectangle`], which holds the
+        // argument). The gate is here rather than at the two DPI call sites
+        // because the sentence is about the rectangle and not about who is
+        // asking: a tab activated, a divider let go or a seat layout settled
+        // inside the same interval would cut the same phantom grid out of the
+        // same pixels.
+        //
+        // Nothing is queued by the refusal. The rectangle this window ends the
+        // DPI change with is re-solved either by the `Resized` that follows or
+        // by [`Self::settle_dpi_rectangle`] on the next turn, and both of those
+        // re-derive every leaf's grid from the tree as it stands.
+        if !self.window.dpi_rectangle.may_cut_a_grid() {
+            return Ok(None);
+        }
         let scale = self.window.renderer.metrics().scale_factor as f32;
         // **The shells are about to be told what the tree looks like**, which
         // makes this the one honest place to record that they know. See
@@ -96402,11 +96484,76 @@ impl Runtime<'_> {
         self.app.quake.remember(monitor, bounds);
     }
 
+    /// **The scale has arrived and the rectangle that goes with it has not**
+    /// (T-CARD-ANCHOR-DPI, user report 2026-09-14).
+    ///
+    /// Windows sends `WM_DPICHANGED` and winit turns it into this event *before*
+    /// it applies the new rectangle: the `SetWindowPos` is the last thing its
+    /// handler does, after this returns. `claim_lawful_layout` already says so
+    /// in as many words — it claims the next rectangle sight unseen "before the
+    /// new rectangle is known" — and everything below that line then works with
+    /// `inner_size()`, which for the whole of this call is still the rectangle
+    /// of the display the window is leaving.
+    ///
+    /// That rectangle is the right one for the swapchain and for the frame,
+    /// because it is what is on the glass; it is the wrong one for a pane's
+    /// grid, because a grid is pixels counted in cells and only one of those two
+    /// has changed yet. See [`DpiRectangle`], which is announced here and holds
+    /// the whole of that argument.
     fn scale_factor_changed(&mut self) -> Result<()> {
         self.claim_lawful_layout();
+        self.window.dpi_rectangle.announced();
         self.defer_preview_resample(Instant::now());
         self.reconcile_authoritative_dpi("scale-factor-changed")?;
         self.resize(self.window.window.inner_size())
+    }
+
+    /// **A rectangle from the OS**, and the one road on which a pane's grid may
+    /// be derived from one.
+    ///
+    /// Lowering the flag here rather than inside [`Self::resize`] is the whole
+    /// of the distinction: `scale_factor_changed` calls that method too, with a
+    /// rectangle Windows has not chosen yet, and a window told "the rectangle
+    /// has arrived" by its own call would be told it by the very event that
+    /// says it has not.
+    fn resized(&mut self, physical: PhysicalSize<u32>) -> Result<()> {
+        self.window.dpi_rectangle.arrived();
+        self.resize(physical)
+    }
+
+    /// **Pay for a DPI change no rectangle followed** (T-CARD-ANCHOR-DPI).
+    ///
+    /// Windows always performs a `SetWindowPos` after `WM_DPICHANGED`, but it
+    /// does not always change the client size with it: a maximized or
+    /// full-screen window whose own display's scale was changed underneath it
+    /// keeps every physical pixel it had, so no `WM_SIZE` is produced and no
+    /// `Resized` ever arrives. Its panes still owe their grids — the pixels
+    /// stayed and the cells did not.
+    ///
+    /// Run from [`Runtime::turn`] for [`Self::settle_deferred_dpi`]'s reason and
+    /// directly after it: the loop coming back round is the first moment at
+    /// which every message the DPI change produced has been delivered, so the
+    /// rectangle in hand by then is the one the window is keeping — whether that
+    /// is a new one or the one it already had.
+    fn settle_dpi_rectangle(&mut self) -> Result<()> {
+        if !self.window.dpi_rectangle.due() {
+            return Ok(());
+        }
+        let physical = presentation_physical_size(self.window.renderer.presentation_geometry());
+        if !resize_worth_solving(self.window_is_iconic(), physical) {
+            return Ok(());
+        }
+        self.resolve_seat_layout(physical);
+        self.resize_leaves_to_layout(
+            Instant::now(),
+            "rebuild terminal grid on the rectangle a scale change settled on",
+        )?;
+        self.sync_math_layout_key();
+        self.publish_frame(FrameTrigger {
+            occurred_at: Instant::now(),
+            source: FrameSource::Expose,
+        })?;
+        Ok(())
     }
 
     /// **Pay for a DPI change the drag deferred** (§7.50, user ruling
@@ -99326,6 +99473,13 @@ impl Runtime<'_> {
         // time this returns true, so nothing here is done to a window that is
         // still moving.
         self.settle_deferred_dpi()?;
+        // **And directly after that one**, for the half of a DPI change that is
+        // owed to a rectangle rather than to a hand (T-CARD-ANCHOR-DPI). Every
+        // message `WM_DPICHANGED` produced has been delivered by the time a turn
+        // comes round, so this is the first moment at which the rectangle in
+        // hand is the one the window is keeping. It is a no-op on every road
+        // where a `Resized` did arrive, which is most of them.
+        self.settle_dpi_rectangle()?;
         self.apply_math_context_menu_result();
         self.apply_folder_pick_result()?;
         self.apply_image_pick_result()?;
@@ -105079,6 +105233,73 @@ mod pty_drain_budget_tests {
         );
     }
 
+    /// **PIN (user report, 2026-09-14; T-CARD-ANCHOR-DPI) — a scale change
+    /// hands no pane a grid cut from the rectangle the window is leaving.**
+    ///
+    /// Two facts about where a line sits relative to another line, which no
+    /// value in the program carries, so they are held against the source the way
+    /// this file's other structural promises are. [`DpiRectangle`] holds the
+    /// argument and `a_scale_change_owes_a_rectangle_and_is_paid_by_the_first_one_to_arrive`
+    /// holds its behaviour; what is left for this test is that the road really
+    /// goes through it.
+    ///
+    /// ① The gate is the first thing `resize_leaves_to_layout` does — ahead of
+    /// `shells_settled_revision`, which is the ledger saying the shells have
+    /// been told what the tree looks like, and a refusal must not write it.
+    ///
+    /// ② The `Resized` arm goes through `resized` and not straight to `resize`.
+    /// That is the whole of the distinction the flag is for:
+    /// `scale_factor_changed` calls `resize` itself, with a rectangle Windows
+    /// has not chosen yet, so a window told "the rectangle has arrived" inside
+    /// `resize` would be told it by the very event that says it has not.
+    ///
+    /// Mutation: lower the flag inside `resize` instead of in the arm, and the
+    /// scale road answers its own announcement one line later — the phantom grid
+    /// is back, cut from the display being left.
+    #[test]
+    fn a_scale_change_hands_no_pane_a_grid_from_the_rectangle_it_is_leaving() {
+        let announced = method_body("scale_factor_changed");
+        assert!(
+            announced.contains("self.window.dpi_rectangle.announced();"),
+            "the event that carries a scale without its rectangle must say so"
+        );
+
+        let leaves = method_body("resize_leaves_to_layout");
+        let gate = leaves
+            .find("if !self.window.dpi_rectangle.may_cut_a_grid() {")
+            .expect("no pane is handed a grid while the rectangle is in flight");
+        let ledger = leaves
+            .find("self.window.shells_settled_revision =")
+            .expect("the walk records that the shells have been told");
+        assert!(
+            gate < ledger,
+            "a refused walk must not write the ledger that says the shells were told"
+        );
+
+        assert!(
+            SOURCE.contains("WindowEvent::Resized(size) => runtime.resized(size),"),
+            "a rectangle from the OS is the one road on which the flag comes down"
+        );
+        assert!(
+            method_body("resized").contains("self.window.dpi_rectangle.arrived();"),
+            "and `resized` is where it comes down"
+        );
+        assert!(
+            !method_body("resize").contains("dpi_rectangle"),
+            "`resize` is called by the scale road too, so it may not answer the announcement"
+        );
+
+        assert!(
+            method_body("turn").contains("self.settle_dpi_rectangle()?;"),
+            "a scale change no rectangle followed is spent on the first turn after it"
+        );
+        let settled = method_body("settle_dpi_rectangle");
+        assert!(
+            settled.contains("self.resize_leaves_to_layout("),
+            "and spending it is the grids it was owed"
+        );
+    }
+
     /// PIN — **the release walks every leaf, because every leaf now has a queue.**
     ///
     /// A coalescer whose release only ever asked the focused leaf would be worse than no
@@ -109464,7 +109685,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             WindowEvent::CursorLeft { .. } => runtime.pointer_left(),
             WindowEvent::MouseInput { state, button, .. } => runtime.mouse_input(state, button),
             WindowEvent::MouseWheel { delta, .. } => runtime.queue_wheel(delta),
-            WindowEvent::Resized(size) => runtime.resize(size),
+            WindowEvent::Resized(size) => runtime.resized(size),
             // **The engine is told the window moved** (§7.7 ⑩, user report
             // 2026-08-25). The pages are drawn through DirectComposition and
             // get no window messages of their own, so the only thing that knows
@@ -123122,6 +123343,70 @@ mod tests {
         assert!(!settlement.due(false), "and owes nothing afterwards");
         assert!(settlement.arrived(false), "so is 2");
         assert!(!settlement.due(false), "and it owes nothing either");
+    }
+
+    /// **RED — a scale change owes a rectangle, and is paid by the first one to
+    /// arrive** (T-CARD-ANCHOR-DPI, user report 2026-09-14; §7.1.6b′ ④).
+    ///
+    /// The report is a focus card scrolled back through a shell's output on a
+    /// full-screen window carried 4K → 1080p → 4K. It came back showing
+    /// something else, and the reason is on this road rather than on the card's:
+    /// winit raises `ScaleFactorChanged` from inside its `WM_DPICHANGED`
+    /// handler, *before* the `SetWindowPos` that handler ends with, so the whole
+    /// of `scale_factor_changed` works with the rectangle of the display being
+    /// left. Cutting a grid out of it counts one display's pixels in the other
+    /// display's cells — and a grid change is a vendor reflow, which freezes
+    /// whatever it pushes off the top at the width it pushed it off at, for
+    /// ever. The panes went 240 → 320 → 160 → 120 → 240 columns, two of those
+    /// widths belonging to no display, and the card's transcript came back cut
+    /// differently.
+    ///
+    /// Red gate: return `true` unconditionally from `may_cut_a_grid` and the
+    /// announcement buys nothing; return `false` unconditionally from `due` and
+    /// a maximized window whose own display changed scale — the one case that
+    /// produces no `Resized` at all — keeps the grid it had for ever.
+    #[test]
+    fn a_scale_change_owes_a_rectangle_and_is_paid_by_the_first_one_to_arrive() {
+        // A window nobody has moved cuts grids exactly as it always did.
+        let mut rectangle = DpiRectangle::default();
+        assert!(rectangle.may_cut_a_grid());
+        assert!(!rectangle.due(), "nothing is owed before a scale changes");
+
+        // The scale arrives without its rectangle. Nothing is cut until one does.
+        rectangle.announced();
+        assert!(!rectangle.may_cut_a_grid());
+        rectangle.announced();
+        assert!(
+            !rectangle.may_cut_a_grid(),
+            "a seam that changes its mind twice still owes one rectangle"
+        );
+
+        // The `Resized` Windows sends alongside the scale change: the debt is
+        // paid by the event itself, so the turn after it owes nothing.
+        rectangle.arrived();
+        assert!(rectangle.may_cut_a_grid());
+        assert!(
+            !rectangle.due(),
+            "the rectangle arrived; nothing is deferred"
+        );
+
+        // And the case that sends no `Resized` at all — a maximized window whose
+        // own display's scale changed, every physical pixel where it was. One
+        // payment, on the first turn, and the turn after it is quiet.
+        rectangle.announced();
+        assert!(
+            rectangle.due(),
+            "the grids are owed to the rectangle in hand"
+        );
+        assert!(rectangle.may_cut_a_grid());
+        assert!(!rectangle.due(), "and owed once");
+        assert_eq!(rectangle, DpiRectangle::default());
+
+        // A rectangle that arrives when none was owed is not a payment waiting
+        // to be spent: it clears nothing and leaves nothing behind.
+        rectangle.arrived();
+        assert!(!rectangle.due());
+        assert!(rectangle.may_cut_a_grid());
     }
 
     /// **RED (shape) — the two halves of a DPI change are on either side of the
