@@ -1,5 +1,6 @@
-//! **The delegate selectors winit's own application delegate does not
-//! implement** (ticket M3-1, probe X-4; the fifth is T-MAC-DOCKMENU's).
+//! **The selectors winit's own application delegate does not implement**
+//! (ticket M3-1, probe X-4; the fifth is T-MAC-DOCKMENU's and the last two are
+//! T-MAC-EDIT-CLIPBOARD's).
 //!
 //! The AppKit half of [`app_delegate`](crate::app_delegate): everything here is
 //! the route into the delegate methods, and everything about what Folio *does*
@@ -12,6 +13,20 @@
 //! one of the five that **answers with an object** rather than with a flag or
 //! with nothing. What it answers with is [`crate::macos_menu::dock_menu`]'s,
 //! which is where the menu and its ownership rule live.
+//!
+//! **The last two are not delegate methods at all** (T-MAC-EDIT-CLIPBOARD,
+//! `docs/DESIGN.md` §13.26 ⑨). `copy:` and `paste:` are Cocoa **actions**, and
+//! they are added to this same class for one reason: `NSApp`'s delegate is the
+//! **last rung of the responder chain**, so a nil-target action that nothing
+//! above it answered arrives here and nowhere else. The Edit menu's two
+//! clipboard rows are sent with no target precisely so that a real text
+//! responder — a page in a web pane, a field in a sheet — answers first; what
+//! these two add is a floor under the walk, for the surfaces AppKit has never
+//! heard of, which on this platform is every pane Folio draws itself. They are
+//! added by the same route on the same measurement (`class_getInstanceMethod`
+//! is null for both — `copy` and `copy:` are different selectors, and
+//! `NSObject` has only the first), and the rows that send them carry **no key
+//! equivalent**, so `Cmd+C` and `Cmd+V` never come this way.
 //!
 //! # The finding, and winit's own documentation is wrong about it
 //!
@@ -85,6 +100,7 @@ use crate::app_delegate::{
     path_from_file_url,
 };
 use crate::macos_impl::off_the_window_thread;
+use crate::menu::AppMenuAction;
 
 // ── the raw runtime, declared here because objc2 does not lend it out ───────
 
@@ -262,6 +278,36 @@ extern "C-unwind" fn dock_menu(
     crate::macos_menu::dock_menu()
 }
 
+/// `copy:` (T-MAC-EDIT-CLIPBOARD, `docs/DESIGN.md` §13.26 ⑨)
+///
+/// **Not a delegate method at all — a responder of last resort.** The Edit
+/// menu's Copy row is sent with no target, so AppKit walks the key window's
+/// responder chain looking for something that implements this selector and
+/// tries `NSApp`'s delegate **last**. Everything that should win still wins by
+/// standing earlier in that walk: a page in a web pane, a field in a sheet, an
+/// open panel's search box. What is fixed by being here is the end of the walk
+/// — over a terminal pane it used to find nothing at all, because Folio's grid
+/// is drawn by this process on a winit view and no responder under it answers
+/// `copy:`.
+///
+/// **It claims no key.** The row carries no key equivalent (`bt_app::menubar`),
+/// so `Cmd+C` never comes this way: it reaches `keyDown:` and
+/// `input::should_copy_selection` exactly as it did before this ticket, which
+/// is the one thing a menu must not take off the terminal.
+///
+/// The sender is `NSMenuItem` or nil or anything else; it is not read, because
+/// what the choice means does not depend on which object asked. Like every
+/// other implementation in this file it only **parks**.
+extern "C-unwind" fn edit_menu_copy(_this: &AnyObject, _cmd: Sel, _sender: *mut AnyObject) {
+    crate::macos_menu::the_chain_declined(AppMenuAction::CopySelection);
+}
+
+/// `paste:` — [`edit_menu_copy`]'s other half, by the same route and with the
+/// same claim on no key at all.
+extern "C-unwind" fn edit_menu_paste(_this: &AnyObject, _cmd: Sel, _sender: *mut AnyObject) {
+    crate::macos_menu::the_chain_declined(AppMenuAction::PasteIntoFocus);
+}
+
 // ── the injection ──────────────────────────────────────────────────────────
 
 /// One selector, its implementation and the type encoding AppKit reads it by.
@@ -270,6 +316,12 @@ extern "C-unwind" fn dock_menu(
 /// an `NSApplicationTerminateReply` is, `v` is void, `@` an object and `:` a
 /// selector. Getting one wrong is not a compile error, which is why they are
 /// written beside the signature they describe and pinned by a test.
+///
+/// **Not all of them are delegate methods.** The last two are Cocoa actions
+/// added to the same class because that object is the last rung of the
+/// responder chain (T-MAC-EDIT-CLIPBOARD); nothing else about them differs,
+/// which is why they are entries in this one list rather than a route of their
+/// own.
 struct Injection {
     selector: Sel,
     imp: *const c_void,
@@ -322,6 +374,21 @@ pub(crate) fn add_the_delegate_selectors(outbox: Arc<Outbox>) -> Result<(), Stri
             selector: sel!(applicationDockMenu:),
             imp: dock_menu as *const c_void,
             encoding: c"@@:@",
+        },
+        // T-MAC-EDIT-CLIPBOARD's two, and they are **actions rather than
+        // delegate methods**: AppKit sends them down the responder chain and
+        // this object is the last rung of it. `v@:@` is the encoding of every
+        // Cocoa action — nothing back, the object and the selector, then the
+        // sender.
+        Injection {
+            selector: sel!(copy:),
+            imp: edit_menu_copy as *const c_void,
+            encoding: c"v@:@",
+        },
+        Injection {
+            selector: sel!(paste:),
+            imp: edit_menu_paste as *const c_void,
+            encoding: c"v@:@",
         },
     ];
     // The channel before the methods, or a delivery could land in the gap.
@@ -421,6 +488,30 @@ pub fn winit_delegate_already_answers_the_dock_menu() -> Option<bool> {
     Some(!already.is_null())
 }
 
+/// Whether the delegate object AppKit holds answers `copy:` and `paste:`
+/// (T-MAC-EDIT-CLIPBOARD).
+///
+/// [`delegate_answers_the_dock_menu`]'s footing exactly, and the reading that
+/// matters for this route rather than a second spelling of this module's
+/// bookkeeping: `respondsToSelector:` is what `-[NSApplication
+/// targetForAction:]` itself consults on the last rung of the responder chain,
+/// so an object that answers `false` here is an `Edit ▸ Copy` that reaches
+/// nobody however carefully the injection above was written.
+#[must_use]
+pub fn delegate_answers_the_edit_menus_clipboard_rows() -> bool {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return false;
+    };
+    let Some(delegate) = NSApplication::sharedApplication(mtm).delegate() else {
+        return false;
+    };
+    [sel!(copy:), sel!(paste:)].into_iter().all(|selector| {
+        // SAFETY: `respondsToSelector:` is `NSObject`'s and takes a selector.
+        let answers: bool = unsafe { msg_send![&*delegate, respondsToSelector: selector] };
+        answers
+    })
+}
+
 /// Whether the delegate object AppKit holds answers `applicationDockMenu:`
 /// (T-MAC-DOCKMENU).
 ///
@@ -492,6 +583,12 @@ mod tests {
             // way round from the one above: `v@:@`, the encoding of a method
             // that answers nothing, on the one method that answers an object.
             ("applicationDockMenu:", "@@:@"),
+            // T-MAC-EDIT-CLIPBOARD's two, and the plausible mistake is `@@:@`
+            // caught off the entry directly above: an action answers nothing,
+            // and a `v` read as an `@` is a menu row whose return register is
+            // read as an object nobody allocated.
+            ("copy:", "v@:@"),
+            ("paste:", "v@:@"),
         ] {
             let at = SOURCE
                 .find(&format!("selector: sel!({selector})"))

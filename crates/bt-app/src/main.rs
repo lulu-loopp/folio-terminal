@@ -4390,6 +4390,26 @@ fn markdown_run(
             font_scale: 1.0,
             inline_box_px: None,
         },
+        // **A picture from the web, standing in the line it was written in**
+        // (user report 2026-09-14; §7.1.3k ⑬). The words are the label the
+        // parser settled ([`preview::image_chip_label`]) and nothing here
+        // re-decides them; the ground under them is laid after the shaper has
+        // said where this run came to rest ([`markdown_chip_ground`]), because
+        // a box measured any other way is a box somewhere else than the letters.
+        //
+        // The accent, because the chip answers a press: what it stands for is
+        // the *address*, which is the very run the block card already opened
+        // (§7.1.3k ④). The sentence that card printed beside it is on the chip's
+        // hover card ([`markdown_chip_tip`]).
+        preview::SpanStyle::ImageChip => bt_render::PreviewRun {
+            text: span.text.clone(),
+            color: palette.accent,
+            mono: false,
+            bold: false,
+            italic: false,
+            font_scale: 1.0,
+            inline_box_px: None,
+        },
         preview::SpanStyle::Bold => bt_render::PreviewRun {
             text: span.text.clone(),
             color: palette.preview_body_text,
@@ -4524,6 +4544,17 @@ struct PreviewLinkSite {
     paragraph: usize,
     run: usize,
     target: String,
+    /// **What a hover over this run says**, for the one run in a document that
+    /// says anything: a remote picture's chip ([`markdown_chip_tip`]).
+    ///
+    /// `None` for every ordinary link, and that is a ruling rather than an
+    /// omission — where a link points is not something this window puts on a
+    /// card, because the words of a link are the author's description of it and
+    /// a card repeating the address over them is the browser status bar moved
+    /// into the middle of the page. A chip has no author's description: the
+    /// document asked for a *picture* there, and the two facts standing in for
+    /// it have nowhere else to be said.
+    chip: Option<String>,
 }
 
 /// **A run of a paragraph whose shaped text is not the document's own.**
@@ -4689,9 +4720,38 @@ struct PreviewTextBox {
 /// A markdown link, boxed where it was actually drawn.
 #[derive(Clone, Debug, PartialEq)]
 struct PreviewLink {
+    /// Where a press lands on it — a run's own box, and for a chip the **pill**
+    /// that was drawn round that run ([`markdown_chip_ground`]), so the padding
+    /// a reader can see is padding a reader can hit.
     rect: [f32; 4],
     target: String,
+    /// The chip this link is, if it is one — see [`PreviewLinkSite::chip`].
+    chip: Option<PreviewChipTip>,
 }
+
+/// **A chip's hover card**: what it says, and which chip is saying it.
+#[derive(Clone, Debug, PartialEq)]
+struct PreviewChipTip {
+    at: PreviewChipAt,
+    text: String,
+}
+
+/// **Where a chip stands in a laid-out page** — `(block, paragraph, run)`, the
+/// identity its tip is held up by
+/// (`tooltip::TooltipAnchorId::PreviewImageChip`), with `block` the scrolling
+/// region it stands in or `None` for the page itself.
+///
+/// The run's own address in the page rather than its index among this frame's
+/// chips, for [`tooltip::TooltipAnchorId::PreviewHex`]'s stated reason one face
+/// over: an index renumbers under a hand that has not moved — a picture arriving
+/// above adds a block, a fold closes one — while "the third run of the second
+/// paragraph of that block" is the same run until the document itself changes,
+/// which is exactly when a tip about it should be taken down.
+///
+/// The same three numbers a [`PreviewLinkSite`] is addressed by, and an alias
+/// rather than a struct of its own because that is all it is: a subscript the
+/// tip host compares and nobody takes apart.
+pub(crate) type PreviewChipAt = (Option<usize>, usize, usize);
 
 /// Everything one pass over a rendered document produces.
 ///
@@ -4804,6 +4864,12 @@ fn note_link_sites(
         // making them answer a press would put an unmarked hotspot in the middle
         // of a sentence — a run drawn in the body's own ink that opens a file
         // when it is touched.
+        //
+        // **A chip is**, and that is the same ruling rather than an exception to
+        // it: what a chip stands for is an address this window will never fetch
+        // a picture from, drawn in the accent and boxed, and the press it
+        // answers is the press the block card's own address line has answered
+        // since §7.1.3k ④.
         if span.style == preview::SpanStyle::Image {
             return None;
         }
@@ -4812,8 +4878,22 @@ fn note_link_sites(
             paragraph,
             run: first_run + index,
             target: target.clone(),
+            chip: (span.style == preview::SpanStyle::ImageChip).then(|| markdown_chip_tip(target)),
         })
     }));
+}
+
+/// **What a chip's hover card says** — the sentence the block card prints, and
+/// the address under it (§7.1.3k ⑬).
+///
+/// One door for both faces of the same two facts: the card sets them into the
+/// page ([`markdown_image_card`]) because it has a page-wide box to set them in,
+/// and the chip hands them to the window's one tip host because it is the width
+/// of a word. The *sentence* is the same string in both, taken from the same
+/// [`i18n::Text`], so a document cannot be told two different things about why
+/// there is no picture.
+fn markdown_chip_tip(url: &str) -> String {
+    format!("{}\n{url}", i18n::Text::MarkdownImageRemote.text())
 }
 
 /// **Note the piece of the document a paragraph of spans is about to set.**
@@ -6359,6 +6439,9 @@ fn build_preview_markdown_body(
                                     paragraph: paragraphs.len(),
                                     run: card.note.len().saturating_sub(1),
                                     target,
+                                    // The card **prints** both facts, so it has
+                                    // nothing left to say on a hover.
+                                    chip: None,
                                 });
                             }
                             paragraphs.push(bt_render::PreviewParagraph {
@@ -7241,11 +7324,17 @@ fn preview_press_opens_its_link(latch: &DragLatch) -> bool {
 /// across two lines comes back as the two boxes it is drawn as — a hit test
 /// given one box spanning both would claim the margin between them, which is
 /// the empty half of the pane on the right of a short last line.
+///
+/// **A chip comes back as its pill rather than as its letters** (§7.1.3k ⑬):
+/// the ground drawn round it is what a reader sees and therefore what a reader
+/// aims at, and one rectangle answering the paint, the press and the hover card
+/// is the same discipline [`markdown_image_extent`] states for a picture.
 fn measure_preview_links(
     gpu: &mut GpuContext,
     renderer: &mut WindowRenderer,
     body: &bt_render::PreviewBody,
     sites: &[PreviewLinkSite],
+    scale: f32,
 ) -> Vec<PreviewLink> {
     let mut links = Vec::new();
     for site in sites {
@@ -7266,19 +7355,88 @@ fn measure_preview_links(
             Some(block) => body.blocks[block].clip,
             None => body.clip,
         };
+        // Every run's box and not only this site's, because a chip's pill is
+        // measured against what stands beside it on the same row — see
+        // [`markdown_chip_ground`].
+        let boxes = renderer.measure_preview_run_boxes(gpu, paragraph);
+        let at: PreviewChipAt = (site.block, site.paragraph, site.run);
         links.extend(
-            renderer
-                .measure_preview_run_boxes(gpu, paragraph)
-                .into_iter()
+            boxes
+                .iter()
                 .filter(|boxed| boxed.run == site.run)
-                .filter_map(|boxed| bt_render::crop_to(boxed.rect, window))
+                .map(|boxed| match &site.chip {
+                    Some(_) => markdown_chip_ground(boxed.rect, &boxes, scale),
+                    None => boxed.rect,
+                })
+                .filter_map(|rect| bt_render::crop_to(rect, window))
                 .map(|rect| PreviewLink {
                     rect,
                     target: site.target.clone(),
+                    chip: site.chip.as_ref().map(|text| PreviewChipTip {
+                        at,
+                        text: text.clone(),
+                    }),
                 }),
         );
     }
     links
+}
+
+/// **How much air a chip's pill takes on either side of its label**, and how
+/// much shorter than the line it is drawn (§7.1.3k ⑬).
+///
+/// Logical pixels, scaled where they are spent. Small numbers deliberately: a
+/// chip is a word with a ground under it, not a button, and the report is about
+/// four of them fitting on one line.
+const MARKDOWN_CHIP_PADDING_LOGICAL_PX: f32 = 4.0;
+const MARKDOWN_CHIP_INSET_LOGICAL_PX: f32 = 1.0;
+/// `border-radius` on that pill — the corner a chip is recognised by.
+const MARKDOWN_CHIP_RADIUS_LOGICAL_PX: f32 = 4.0;
+
+/// **The box a chip's ground is laid in**: the run's own line box, inset so the
+/// pill stands inside the leading rather than filling it, and grown sideways
+/// into at most a third of whatever the document left between this run and the
+/// run beside it.
+///
+/// **The third is what keeps four badges four badges.** A chip reserves no width
+/// of its own — it is a run of text, wrapped by the paragraph's own shaper, and
+/// the padding is painted round it afterwards rather than measured into it. So
+/// the only thing standing between two of them is the space the author wrote,
+/// and two pills each helping themselves to half of it would meet in the middle
+/// and read as one. A third leaves a third, at every size, in every face,
+/// without this function knowing how wide a space is in any of them.
+///
+/// Where nothing stands beside the chip at all — the beginning of a row, the end
+/// of one — there is nothing to share with and it takes the whole padding.
+fn markdown_chip_ground(
+    box_: [f32; 4],
+    boxes: &[bt_render::PreviewRunBox],
+    scale: f32,
+) -> [f32; 4] {
+    // The same half-pixel the shaper's own row test uses (`preview_run_boxes`),
+    // so "the same row" means the same thing on both sides of that call.
+    let same_row = |other: &bt_render::PreviewRunBox| (other.rect[1] - box_[1]).abs() < 0.5;
+    let gap_left = boxes
+        .iter()
+        .filter(|&other| same_row(other) && other.rect[2] <= box_[0] + 0.5)
+        .map(|other| box_[0] - other.rect[2])
+        .fold(f32::INFINITY, f32::min);
+    let gap_right = boxes
+        .iter()
+        .filter(|&other| same_row(other) && other.rect[0] >= box_[2] - 0.5)
+        .map(|other| other.rect[0] - box_[2])
+        .fold(f32::INFINITY, f32::min);
+    let padding = (MARKDOWN_CHIP_PADDING_LOGICAL_PX * scale)
+        .min(gap_left / 3.0)
+        .min(gap_right / 3.0)
+        .max(0.0);
+    let inset = MARKDOWN_CHIP_INSET_LOGICAL_PX * scale;
+    [
+        box_[0] - padding,
+        box_[1] + inset,
+        box_[2] + padding,
+        box_[3] - inset,
+    ]
 }
 
 /// Lay each inline formula's picture into the gap its paragraph left for it.
@@ -37795,7 +37953,7 @@ impl Runtime<'_> {
     /// window has been on the glass at least once — which is what the first
     /// visible present's dpi check reads — and a hidden window is not a window
     /// that was never shown.
-    fn hide_quake_window(&mut self) -> Option<bt_platform::NativeWindow> {
+    fn hide_quake_window(&mut self) -> Option<bt_platform::hotkey::Foreground> {
         self.window.window.set_visible(false);
         self.app.quake.hidden()
     }
@@ -39288,6 +39446,11 @@ impl Runtime<'_> {
         // press then lands on the row that was drawn, because it *is* the row
         // that was drawn.
         self.window.git_pages_shown = git_pages.clone();
+        // And the hover healed against that very list, before anything is drawn
+        // from it: the map above has just been rebuilt under a pointer that did
+        // not move, and the hover is an index into it. See
+        // [`Self::heal_git_hover`] — `heal_files_scroll`'s twin, one state along.
+        self.heal_git_hover(scale);
         let git_graphs = self.git_graphs(scale);
         // Kept for the hit test, for `git_pages_shown`'s reason exactly.
         //
@@ -39737,6 +39900,12 @@ impl Runtime<'_> {
                     tree: tab.seats.tree(),
                     focused: tab.focused_leaf,
                     seats: self.window.focus_thumbs.seats(tab.id)?,
+                    // The grid those rows are drawn on, which is the grid they
+                    // were cut to — see [`seats::FocusThumbnail::mono_cell`].
+                    // Measured a few lines up, on this window's own face at this
+                    // window's own scale, which is the face and the scale every
+                    // card in this column is about to be shaped in.
+                    mono_cell: focus_mini_advance,
                 })
             })
             .collect();
@@ -39777,6 +39946,14 @@ impl Runtime<'_> {
                     tree: &pane.tree,
                     focused: pane.focused,
                     seats: &pane.seats,
+                    // **This window's cell, for a projection the other window
+                    // cut.** The rows crossed the broker as text; the grid is a
+                    // fact about the face they are about to be *drawn* in, and
+                    // that face is this window's. A visitor's card whose columns
+                    // were cut wider than this card holds is clipped at this
+                    // card's edge exactly as it was before — that half is the
+                    // clip's, and it is unchanged.
+                    mono_cell: focus_mini_advance,
                 }),
                 None => stand_in_pane.as_ref().and_then(|(leaf, tree)| {
                     Some(seats::FocusThumbnail {
@@ -39785,6 +39962,7 @@ impl Runtime<'_> {
                         // that tab this pane is the one holding the keyboard.
                         focused: leaf.seat,
                         seats: self.window.focus_thumbs.seats(leaf.tab)?,
+                        mono_cell: focus_mini_advance,
                     })
                 }),
             };
@@ -40324,10 +40502,12 @@ impl Runtime<'_> {
             anchors.push_faced(id, host, text, face);
         }
         // The colour under the pointer, on the pointer's own 380ms and the
-        // tip's own surface (§7.1.6c-4c). Pushed last of the content anchors and
-        // therefore outermost of them, which is right: it is the innermost thing
-        // on screen that is not a popup, and nothing else registers a box inside
-        // a preview's body.
+        // tip's own surface (§7.1.6c-4c). Pushed after every other content
+        // anchor, which is right: it is the innermost thing on screen that is
+        // not a popup. The chip below is the only other box registered inside a
+        // preview's body, and the two cannot overlap — this one is a token in a
+        // source file and that one is a run of a rendered page, which are two
+        // faces the same pane is never showing at once.
         if self.window.drag.is_none()
             && let Some(hover) = self.window.preview_hex_hover.as_ref()
         {
@@ -40336,6 +40516,27 @@ impl Runtime<'_> {
                 hover.host,
                 hover.text.clone(),
                 tooltip::TipFace::Swatch { rgba: hover.rgba },
+            );
+        }
+        // **A chip's hover card** (§7.1.3k ⑬), on the same host and the same
+        // clock as the colour card above it — the pointer is resting inside a
+        // document in both, and a second mechanism for the second one would be
+        // two ways for this window to say something about a run. In the plain
+        // tip face rather than the colour card's swatch: what it has to show is
+        // two lines of words.
+        //
+        // Read off the link the pointer is already over
+        // ([`Runtime::note_preview_link_hover`]) rather than hit-tested again
+        // here, so the pill that lights and the card that comes up cannot come
+        // to disagree about which chip the hand is on.
+        if self.window.drag.is_none()
+            && let Some((surface, link)) = self.preview_link_hover.as_ref()
+            && let Some(chip) = link.chip.as_ref()
+        {
+            anchors.push(
+                tooltip::TooltipAnchorId::PreviewImageChip(*surface, chip.at),
+                link.rect,
+                chip.text.clone(),
             );
         }
         // A tip whose subject has left the strip has nothing left to say — and a
@@ -62117,10 +62318,9 @@ impl Runtime<'_> {
         // which used to be excluded from this whole paragraph by name — now
         // takes exactly the same path through this function as the other two,
         // and hangs the same phrase on the same side of its own foot.
-        // The links last, because measuring one asks the shaper where a
-        // paragraph landed and that answer is only true of the body as it now
-        // stands. The hover's rule is drawn from the same boxes, so the line
-        // under a link cannot be anywhere but under it.
+        // The links after the body and never before it, because measuring one
+        // asks the shaper where a paragraph landed and that answer is only true
+        // of the body as it now stands.
         // The formulas ride with the links, and for the identical reason: both
         // are answers about where a run of an already-built body came to rest,
         // and both stop being true the moment the body is rebuilt.
@@ -62130,9 +62330,40 @@ impl Runtime<'_> {
             &mut built,
             &math_sites,
         );
-        // **The selection before the links, because it is under them**: the
-        // bands are fills and go out in the pass that draws every fill, and the
-        // one thing that must be over them is the rule under a hovered link.
+        // **The links are measured here, before the fills that stand under
+        // them** (§7.1.3k ⑬). They were measured at the foot of this function
+        // until a chip needed a ground: the *paragraphs* are final from the
+        // builder on and nothing below moves one, so a box measured here is the
+        // same box measured there — but a pill painted after the selection
+        // bands would be a pill painted **over** them, and a selected badge
+        // would lose its highlight to its own ground.
+        let links = measure_preview_links(
+            &mut self.app.gpu,
+            &mut self.window.renderer,
+            &built,
+            &sites,
+            scale,
+        );
+        // Every chip's pill, in the fence's own ground so that a chip reads as
+        // the card it replaced, composited into the body it stands on —
+        // `bt_render::rounded_preview_fill` says why a rounded fill in a body is
+        // spent as colour rather than as alpha.
+        let chip_grounds: Vec<bt_render::PreviewQuad> = links
+            .iter()
+            .filter(|link| link.chip.is_some())
+            .flat_map(|link| {
+                bt_render::rounded_preview_fill(
+                    link.rect,
+                    MARKDOWN_CHIP_RADIUS_LOGICAL_PX * scale,
+                    palette.preview_code_ground,
+                    palette.seat_body,
+                )
+            })
+            .collect();
+        built.quads.extend(chip_grounds);
+        // **The selection under the rule a hovered link wears**: the bands are
+        // fills and go out in the pass that draws every fill, and the one thing
+        // that must be over them is that rule — which is struck last, below.
         //
         // Pushed here rather than inside the builder for the reason the links
         // are measured here: which glass a range of a document covers is a
@@ -62244,8 +62475,9 @@ impl Runtime<'_> {
             }
         }
         self.preview_pane_mut(surface).md_prose = prose;
-        let links =
-            measure_preview_links(&mut self.app.gpu, &mut self.window.renderer, &built, &sites);
+        // The hover's rule is drawn from the boxes measured above, so the line
+        // under a link cannot be anywhere but under it — and it is struck here,
+        // last of the fills, so that nothing else is laid over it.
         if let Some((hovered_surface, hovered)) = self.preview_link_hover.as_ref()
             && *hovered_surface == surface
             && links.iter().any(|link| link.rect == hovered.rect)
@@ -80614,6 +80846,62 @@ impl Runtime<'_> {
         }
     }
 
+    /// Ask again what the pointer is on, when the Git page it was on has been
+    /// rebuilt under it (user report, 2026-09-14).
+    ///
+    /// [`Self::heal_files_scroll`]'s twin, and it is owed for the same reason
+    /// one state along: **a number that was true when it was written stops being
+    /// true when the list changes under it.** The hover this window keeps is a
+    /// [`seats::ChromeTarget::GitRow`], and a `GitRow` is an *index* — the very
+    /// thing [`git_panel::GitRowPeek`] refuses to be keyed by, in a doc that
+    /// says why: an index is stale the moment a group above it grows a file.
+    /// Nothing but a pointer event wrote the hover, so a wheel notch over the
+    /// column, a `git add` the watcher picked up, or a commit turning over all
+    /// moved the rows under a hand that never moved — and whatever row inherited
+    /// the old number lit up under a pointer that was somewhere else. The
+    /// reported picture was `REMOTES (5)` wearing a hover it had never been
+    /// given (`git_panel::GitRow::wears_ground` has the other half of that
+    /// report, the half a wash on a *header* was).
+    ///
+    /// **Re-derived, not cleared.** The state's law is "the hover is what the
+    /// pointer is on", and clearing it would be a second, weaker law — the row
+    /// genuinely under the hand would go dark for as long as the reader held
+    /// still. This asks [`seats::hit_git_panel`] the question the pointer's own
+    /// handler asks, against the pages this pass is about to draw, so the answer
+    /// is right whether the rows moved, changed or went away entirely. `None` is
+    /// then a fact and not a reset: the pointer is over no row of this page.
+    ///
+    /// **Only when the stored hover is already this page's.** Everything else
+    /// the pointer can be on is chrome whose geometry this pass did not rebuild,
+    /// and re-running the whole router here would be this function answering for
+    /// surfaces it knows nothing about — including a float's, which is opaque to
+    /// the docked hit test and is what the 2026-09-12 ruling put in
+    /// [`Self::pointer_target_at`].
+    ///
+    /// The floating host has the same two wheels and already re-asks on both
+    /// (`scroll_float_tree`, `scroll_float_git_page`); its pages are rebuilt in
+    /// `float_layer`, which runs after this and does its own asking.
+    fn heal_git_hover(&mut self, scale: f32) {
+        let Some(seats::ChromeTarget::GitRow { .. } | seats::ChromeTarget::GitAct { .. }) =
+            self.window.seat_pointer.hover
+        else {
+            return;
+        };
+        // No pointer in this window at all: `pointer_left` has already taken the
+        // hover with it, and a page rebuilt after that has nothing to heal.
+        let Some(position) = self.window.pointer_position else {
+            return;
+        };
+        let healed = seats::hit_git_panel(
+            &self.seat_layout,
+            &self.window.git_pages_shown,
+            scale,
+            position.x,
+            position.y,
+        );
+        self.window.seat_pointer.hover = healed;
+    }
+
     /// **Measure the open name editor into the tree row it is drawn in** (0.3).
     ///
     /// `dress_preview_name_editor`'s job one surface over, and the same
@@ -95167,6 +95455,110 @@ impl Runtime<'_> {
         )
     }
 
+    /// **One row of the application menu that is this product's and has no row
+    /// in the shortcut table** (M3-2; the clipboard pair is
+    /// T-MAC-EDIT-CLIPBOARD, `docs/DESIGN.md` §13.26 ⑨).
+    ///
+    /// Help leaves through the same door every other address in this window
+    /// leaves through, and it is a **row** — pressed with a target of Folio's
+    /// own, like every verb row.
+    ///
+    /// The other two are not rows at all. They reach this window through the
+    /// application delegate's `copy:` / `paste:`, which is the **last** rung of
+    /// AppKit's responder chain — so everything that is a real text responder
+    /// has already had the press and kept it: the page in a web pane answers
+    /// with WebKit's own copy, a field in a sheet with the field's. What is left
+    /// is a surface AppKit has never heard of, which on this platform is every
+    /// pane Folio draws itself, and [`menubar::clipboard_seat`] is the one place
+    /// that decides which.
+    ///
+    /// **Each clipboard arm is the door the keystroke already uses**, never a
+    /// second one: a second copy path would be a second answer to what a
+    /// selection is worth on the pasteboard, and a second paste path would be a
+    /// second place for the sanitising, the bracketing and the multi-line policy
+    /// to be decided.
+    fn run_an_application_menu_verb(
+        &mut self,
+        action: bt_platform::menu::AppMenuAction,
+    ) -> Result<()> {
+        let copying = match action {
+            bt_platform::menu::AppMenuAction::Help => {
+                // The address is a constant of this build and always navigable;
+                // the hand-off's `false` is for a typed address and is not a
+                // verdict on this one (this is what the landing arm did before
+                // the verbs moved here).
+                self.hand_url_to_the_browser(update::RELEASES_PAGE)?;
+                return Ok(());
+            }
+            bt_platform::menu::AppMenuAction::CopySelection => true,
+            bt_platform::menu::AppMenuAction::PasteIntoFocus => false,
+        };
+        match menubar::clipboard_seat(self.clipboard_focus()) {
+            // A surface of this window's is holding the keyboard and answers
+            // its own keys; see `ClipboardSeat::Nobody` for why doing nothing
+            // is the answer rather than the absence of one.
+            menubar::ClipboardSeat::Nobody => Ok(()),
+            menubar::ClipboardSeat::PreviewDocument => {
+                if copying {
+                    self.copy_preview_selection();
+                    Ok(())
+                } else {
+                    self.paste_into_preview()
+                }
+            }
+            menubar::ClipboardSeat::Terminal => {
+                if copying {
+                    self.copy_selection()
+                } else {
+                    self.paste_from_clipboard()
+                }
+            }
+        }
+    }
+
+    /// **What the window looks like to the Edit menu's clipboard rows**
+    /// (T-MAC-EDIT-CLIPBOARD).
+    ///
+    /// The two questions [`Runtime::keyboard_input`] asks before it lets a
+    /// `Cmd+C` reach the terminal, asked again in the same words — which is what
+    /// `every_surface_the_menu_defers_to_stands_above_the_clipboard_rung` holds
+    /// the two functions to.
+    fn clipboard_focus(&mut self) -> menubar::ClipboardFocus {
+        menubar::ClipboardFocus {
+            swallowing: self.a_surface_above_the_clipboard_rung_holds_the_keyboard(),
+            preview_edit: self.preview_edit_focus().is_some(),
+        }
+    }
+
+    /// **Every surface whose rung in [`Runtime::keyboard_input`] stands above
+    /// the clipboard's**, asked as one question (T-MAC-EDIT-CLIPBOARD).
+    ///
+    /// Four cards, the modal, the name editor and the five popups that own the
+    /// keyboard outright. None of them is an oversight to be filled in later: a
+    /// `Cmd+V` typed in any one of these states does not reach a shell either,
+    /// so a *menu* row that did would be the leak the ladder refuses arriving by
+    /// a second door.
+    ///
+    /// The three menus that are **not** here — the profile, root and preview
+    /// switchers, and the graph's branch filter — are not an omission either.
+    /// "A popup is not a modal, so it owns exactly one key: the one that puts it
+    /// away", and the ladder duly lets a clipboard chord past them to the pane
+    /// underneath. This answers the same way because it is the same sentence.
+    fn a_surface_above_the_clipboard_rung_holds_the_keyboard(&mut self) -> bool {
+        self.app.quit.as_ref().is_some_and(quit::Quit::is_asking)
+            || self.window.dirty_gate.is_open()
+            || self.window.first_run.is_open()
+            || self.window.psreadline_invite.is_open()
+            || self.settings_layout().is_some()
+            || self.window.rename.is_some()
+            || self.window.git_menu.is_some()
+            || self.window.term_menu.is_some()
+            || self.window.file_menu.is_some()
+            || self.window.pane_menu.is_some()
+            || self.window.tab_menu.is_some()
+            || self.window.palette.is_some()
+    }
+
     /// `Ctrl+V` / `Shift+Insert` — the keyboard's paste, into the shell the
     /// keyboard is in.
     fn paste_from_clipboard(&mut self) -> Result<()> {
@@ -100150,6 +100542,82 @@ mod key_hint_spend_tests {
         assert!(
             text.contains("if let Some(position) = router_position"),
             "and routes from that answer and from nothing else:\n{text}"
+        );
+    }
+}
+
+/// **The Git page's hover is healed against the page that is drawn** (user
+/// report, 2026-09-14).
+///
+/// A source pin, and for [`key_hint_spend_tests`]' reason: the defect is a
+/// *wiring* one — the hover is a row index, the rows are rebuilt every pass, and
+/// nothing but a pointer event was re-asking — and what a machine can hold about
+/// a fix like that is that the re-asking happens in the one funnel every rebuild
+/// goes through, and that it re-derives rather than resets. Whether the answer
+/// is right is [`crate::seats`]' own pin,
+/// `the_git_pages_hover_is_asked_of_the_page_that_is_drawn`; whether the picture
+/// is right is `git_panel`'s.
+///
+/// RED GATE: it was red the day it was written. `refresh_chrome` published the
+/// new pages and said nothing about the hover, and `scroll_git_panel` — alone
+/// among the three wheels that move a list under a still pointer — re-asked
+/// nothing either.
+#[cfg(test)]
+mod git_hover_heal_tests {
+    /// This file, read as text.
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The text of one method, from its signature to the next method's.
+    fn body(signature: &str) -> &'static str {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        let end = rest.find("\n    fn ").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// The heal stands in `refresh_chrome`, **after** the pages it heals against
+    /// have been published and before anything is drawn from them.
+    #[test]
+    fn the_git_pages_hover_is_healed_against_the_page_it_is_drawn_from() {
+        let text = body("    fn refresh_chrome(&mut self) -> bool {");
+        let published = text
+            .find("self.window.git_pages_shown = git_pages.clone();")
+            .expect("`refresh_chrome` publishes the pages the hit test reads");
+        let healed = text
+            .find("self.heal_git_hover(scale);")
+            .expect("`refresh_chrome` heals the Git page's hover");
+        assert!(
+            published < healed,
+            "the hover is healed against last pass's rows:\n{text}"
+        );
+    }
+
+    /// And it heals by **asking the page again**, never by blanking the state:
+    /// a reader holding still over a row that is still there must keep it.
+    #[test]
+    fn the_heal_re_derives_the_hover_and_does_not_clear_it() {
+        let text = body("    fn heal_git_hover(&mut self, scale: f32) {");
+        assert!(
+            text.contains("seats::hit_git_panel("),
+            "the heal asks the same question the pointer's own handler asks:\n{text}"
+        );
+        assert!(
+            text.contains("self.window.seat_pointer.hover = healed;"),
+            "and writes that answer back:\n{text}"
+        );
+        assert!(
+            !text.contains("hover = None"),
+            "a heal that clears is a second, weaker law:\n{text}"
+        );
+        // And it only speaks for this page: every other surface's geometry is
+        // somebody else's to answer for — a float's above all, which is opaque
+        // to the docked hit test (2026-09-12).
+        assert!(
+            text.contains("seats::ChromeTarget::GitRow { .. }")
+                && text.contains("seats::ChromeTarget::GitAct { .. }"),
+            "the heal is entered only for a hover that is already this page's:\n{text}"
         );
     }
 }
@@ -106269,12 +106737,17 @@ impl FolioApp {
                     runtime.run_shortcut(action)?;
                 }
             }
-            // The one row of the bar that is this product's and has no row in
-            // the shortcut table. It leaves through the same door every other
-            // address in this window leaves through.
-            bt_platform::menu::MenuChoice::Application(bt_platform::menu::AppMenuAction::Help) => {
+            // **The verbs of this product's that have no row in the shortcut
+            // table**: Help, and — since T-MAC-EDIT-CLIPBOARD (§13.26 ⑨) — the
+            // Edit menu's Copy and Paste once AppKit's responder chain has
+            // declined them. Those two are not rows of the bar at all; they are
+            // AppKit's own selectors sent with no target, and they arrive here
+            // only after every real text responder in the key window has had
+            // them and refused. So the window is the one with the keyboard,
+            // exactly as it is for a verb row.
+            bt_platform::menu::MenuChoice::Application(action) => {
                 if let Some(mut runtime) = self.runtime(id) {
-                    runtime.hand_url_to_the_browser(update::RELEASES_PAGE)?;
+                    runtime.run_an_application_menu_verb(action)?;
                 }
             }
         }
@@ -106758,7 +107231,7 @@ impl FolioApp {
         let Some(id) = self.app.as_ref().and_then(|app| app.quake.window()) else {
             return Ok(());
         };
-        let previous = bt_platform::hotkey::foreground_window();
+        let previous = bt_platform::hotkey::foreground_holder();
         let Some(mut runtime) = self.runtime(id) else {
             return Ok(());
         };
@@ -106769,7 +107242,14 @@ impl FolioApp {
             // this one: a summon pressed while the window already had the
             // keyboard would otherwise record the window it is about to hide as
             // the window it owes the keyboard to.
-            let previous = previous.filter(|before| Some(*before) != native);
+            //
+            // **Asked of the holder rather than compared to it** (M4-8). On
+            // Windows it is the same handle comparison it always was; on macOS
+            // the holder is an application, this same case is refused one step
+            // earlier by `foreground_holder` answering `None` for ourselves, and
+            // `Foreground::is_window` says so.
+            let previous =
+                previous.filter(|before| !native.is_some_and(|window| before.is_window(window)));
             app.quake.shown_over(previous);
         }
         if let Some(native) = native
@@ -106813,9 +107293,11 @@ impl FolioApp {
         let owed = runtime.hide_quake_window();
         // **After the window is off the screen, never before.** Windows gives the
         // foreground to *something* the moment a foreground window is hidden, and
-        // a handover made first would be undone by that.
-        if let Some(native) = owed
-            && !bt_platform::hotkey::give_foreground_to(native)
+        // a handover made first would be undone by that. macOS does the same
+        // thing by another road — hiding the key window makes some other window
+        // key — so the order is the order on both.
+        if let Some(holder) = owed
+            && !bt_platform::hotkey::hand_back_to(holder)
         {
             eprintln!("BT_QUAKE the keyboard could not be handed back");
         }
@@ -111713,8 +112195,7 @@ mod floated_page_tests {
         );
     }
 
-    /// RED (§7.54) — **the two Win32 orders a summon depends on cannot be
-    /// reversed.**
+    /// RED (§7.54) — **the two orders a summon depends on cannot be reversed.**
     ///
     /// Showing reads the foreground **before** the window goes up, because after
     /// it there is nothing left to read — the window *is* the foreground.
@@ -111722,15 +112203,22 @@ mod floated_page_tests {
     /// because Windows gives the foreground to something the moment a foreground
     /// window is hidden and a handover made first would be undone by that.
     ///
-    /// MUTATIONS: move `foreground_window()` below `show_quake_window()` and every
-    /// dismissal hands the keyboard to the summon itself. Move
-    /// `give_foreground_to` above `hide_quake_window()` and the window the reader
-    /// came from never comes back to the front.
+    /// **Both desktops, since M4-8** (§13.51 ⑧). The sentence above was written
+    /// about Win32 and is true word for word on macOS: hiding the key window
+    /// makes some other window key, by another road and with the same
+    /// consequence. What changed is the two names — `foreground_holder` and
+    /// `hand_back_to` — because the thing remembered there is an application
+    /// rather than a window.
+    ///
+    /// MUTATIONS: move `foreground_holder()` below `show_quake_window()` and
+    /// every dismissal hands the keyboard to the summon itself. Move
+    /// `hand_back_to` above `hide_quake_window()` and the window the reader came
+    /// from never comes back to the front.
     #[test]
     fn the_foreground_is_read_before_the_summon_and_handed_back_after_it() {
         let up = fn_body(concat!("    fn ", "summon_quake("));
         let read = up
-            .find("foreground_window()")
+            .find("foreground_holder()")
             .expect("the summon reads who had the keyboard");
         let show = up
             .find("show_quake_window()")
@@ -111745,7 +112233,7 @@ mod floated_page_tests {
             .find("hide_quake_window()")
             .expect("the dismissal hides the window");
         let hand = down
-            .find("give_foreground_to(")
+            .find("hand_back_to(")
             .expect("the dismissal hands the keyboard back");
         assert!(
             hide < hand,
@@ -114410,16 +114898,25 @@ fn main() -> Result<()> {
     // `unsafe` and this crate is under the workspace's `unsafe_code = "deny"`.
     // What is written here is the one thing the hook is allowed to do.
     let mut builder = EventLoop::<AppEvent>::with_user_event();
+    // **What a summon does, and it is said once for every platform** (M4-8).
+    //
+    // The two delivery roads have nothing in common — the message hook below on
+    // Windows, a Carbon event handler `bt_platform::hotkey::register` installs on
+    // macOS — and only one of them has a caller here to hand a closure to. So the
+    // *statement* moved to `bt_platform::hotkey::summons_wake`, which both roads
+    // end at, and what is left under the `cfg` is the one thing that really is a
+    // fact about Windows: winit's message pump has a door and its builder
+    // extension trait exists only there.
+    bt_platform::hotkey::summons_wake(|| {
+        if let Some(proxy) = SUMMON_PROXY.get() {
+            let _ = proxy.send_event(AppEvent::QuakeSummoned);
+        }
+    });
     #[cfg(windows)]
     {
         use winit::platform::windows::EventLoopBuilderExtWindows;
         builder.with_msg_hook(bt_platform::hotkey::summon_message_hook(
             quake::SUMMON_HOTKEY_ID,
-            || {
-                if let Some(proxy) = SUMMON_PROXY.get() {
-                    let _ = proxy.send_event(AppEvent::QuakeSummoned);
-                }
-            },
         ));
     }
     // **`Cmd+Q` is this product's `quit` row and not AppKit's menu item**
@@ -142606,6 +143103,133 @@ mod tests {
         );
     }
 
+    /// RED GATE (user report 2026-09-14, the badge row; §7.1.3k ⑬) — **a chip
+    /// is drawn as a word and says the rest on a hover.**
+    ///
+    /// The card prints two facts beside the alt text — why there is no picture,
+    /// and the address — and both of them are why it is three lines tall. A chip
+    /// has one line and it is sharing it, so the two facts move to the window's
+    /// own tip host, which is where a fact about a run belongs once the run is
+    /// the size of a word. Both of them, and in the card's own words: a second
+    /// wording would be this window explaining the same policy twice.
+    ///
+    /// It is also the gate on the chip being *pressable*: a site with a target
+    /// is what makes the pointing finger, the underline and the press
+    /// ([`note_link_sites`]), and a chip that said its address on a card nobody
+    /// could act on would be worse than the card it replaced.
+    ///
+    /// MUTATIONS: leave the sentence out of [`markdown_chip_tip`] and the chip
+    /// says an address with no reason beside it; let [`note_link_sites`] refuse
+    /// a chip as it refuses a picture and there is no site to hang either on.
+    #[test]
+    fn a_chips_hover_card_carries_the_sentence_and_the_address() {
+        let blocks = preview::parse_markdown(
+            "[![Build](https://img.example/build.svg)](https://ci.example) \
+             [![Release](https://img.example/release.svg)](https://ci.example/releases)\n",
+        );
+        assert!(
+            matches!(blocks.as_slice(), [preview::MarkdownBlock::Paragraph(_)]),
+            "two badges on one line are one paragraph: {blocks:#?}",
+        );
+        let metrics = seats::preview_markdown_metrics(1.0);
+        let rendered = build_preview_markdown_body(
+            [0.0, 0.0, 400.0, 400.0],
+            metrics,
+            [0.0, 0.0],
+            rested_bars(&[]),
+            MarkdownPage {
+                blocks: &blocks,
+                intrinsic: &[],
+                layout: &preview_viewport::Layout::from([MarkdownBlockLayout::solid(
+                    metrics.line_height,
+                )]),
+                live: MarkdownLive::default(),
+            },
+            &bt_render::chrome_palette(),
+            PageArt {
+                math: &DocumentMath::default(),
+                pictures: &DocumentPictures::default(),
+                theme: bt_render::Theme::Dark,
+            },
+        );
+        assert_eq!(
+            card_text(&rendered),
+            vec!["Build Release"],
+            "the page is one line of two words and no card at all",
+        );
+        let chips: Vec<(&str, &str)> = rendered
+            .links
+            .iter()
+            .filter_map(|site| Some((site.target.as_str(), site.chip.as_deref()?)))
+            .collect();
+        assert_eq!(
+            chips.len(),
+            2,
+            "both badges answer a press and both carry a card: {:#?}",
+            rendered.links,
+        );
+        let sentence = i18n::Text::MarkdownImageRemote.text();
+        for (target, tip) in chips {
+            assert!(
+                tip.starts_with(sentence) && tip.contains(target),
+                "the card says why, and then the address: {tip:?}",
+            );
+        }
+    }
+
+    /// RED GATE (same report; §7.1.3k ⑬) — **a chip's ground never takes more
+    /// than a third of the gap beside it.**
+    ///
+    /// A chip reserves no width of its own: it is a run of text wrapped by the
+    /// paragraph's own shaper, and its pill is painted round the box the shaper
+    /// reports. So the only thing between two badges is the space the document
+    /// wrote, and two pills each taking half of it would meet in the middle and
+    /// read as one segmented control. A third leaves a third standing, at every
+    /// size and in every face, without this arithmetic knowing how wide a space
+    /// is in any of them.
+    ///
+    /// MUTATION: pad unconditionally and the two grounds below overlap by two
+    /// pixels; pad by half the gap and they touch exactly.
+    #[test]
+    fn a_chips_ground_leaves_a_gap_between_two_badges() {
+        let boxed = |run: usize, left: f32, right: f32| bt_render::PreviewRunBox {
+            run,
+            rect: [left, 100.0, right, 120.0],
+            baseline_px: 115.0,
+        };
+        // Two labels nine pixels apart on one row, with the space between them a
+        // run of its own — which is exactly what the shaper reports for a badge
+        // row, the space being the join's own between two source lines.
+        let boxes = [
+            boxed(0, 10.0, 60.0),
+            boxed(1, 63.0, 66.0),
+            boxed(2, 69.0, 120.0),
+        ];
+        let first = markdown_chip_ground(boxes[0].rect, &boxes, 1.0);
+        let second = markdown_chip_ground(boxes[2].rect, &boxes, 1.0);
+        assert!(
+            first[2] < second[0],
+            "two badges keep a gap: {first:?} then {second:?}",
+        );
+        assert!(
+            (first[2] - 61.0).abs() < 0.01 && (second[0] - 68.0).abs() < 0.01,
+            "each takes a third of its own three pixels of space and leaves the \
+             rest: {first:?} then {second:?}",
+        );
+        assert!(
+            first[1] > boxes[0].rect[1] && first[3] < boxes[0].rect[3],
+            "the pill stands inside the line rather than filling it: {first:?}",
+        );
+        // With nothing beside it there is nothing to share with.
+        let lone = [boxed(0, 10.0, 60.0)];
+        let ground = markdown_chip_ground(lone[0].rect, &lone, 1.0);
+        assert!(
+            (ground[0] - (10.0 - MARKDOWN_CHIP_PADDING_LOGICAL_PX)).abs() < 0.01
+                && (ground[2] - (60.0 + MARKDOWN_CHIP_PADDING_LOGICAL_PX)).abs() < 0.01,
+            "a chip alone on its row takes the whole padding: {ground:?}",
+        );
+    }
+
     /// RED GATE (same report) — **a picture that will not decode says so where
     /// it stands**: the alt text, and one line under it.
     ///
@@ -162667,6 +163291,165 @@ mod palette_wiring_tests {
             assert!(
                 !PERSIST.contains(name),
                 "`{name}` has no business in what outlives the process"
+            );
+        }
+    }
+}
+
+/// **Edit ▸ Copy and Edit ▸ Paste, once AppKit's responder chain has declined
+/// them** (T-MAC-EDIT-CLIPBOARD, `docs/DESIGN.md` §13.26 ⑨).
+///
+/// The decision itself is pure and lives in [`menubar::clipboard_seat`], where
+/// it is checked state by state. What is checked here is the wiring on either
+/// side of it, which is exactly the half a value cannot carry: that the window
+/// facts the menu reads are the same facts the keyboard ladder reads, in the
+/// same order, and that each arm ends in the door a keystroke already uses.
+#[cfg(test)]
+mod edit_menu_clipboard_tests {
+    /// This file, read as text.
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The text of one method, from its signature to the next method's.
+    fn body(signature: &str) -> &'static str {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        let end = rest.find("\n    fn ").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// The keyboard's own ladder.
+    fn ladder() -> &'static str {
+        body("fn keyboard_input(&mut self, event: &KeyEvent, is_synthetic: bool) -> Result<()> {")
+    }
+
+    /// PIN — **every surface the menu defers to has a rung above the clipboard
+    /// rung**, and the two lists are one list.
+    ///
+    /// The claim that makes `ClipboardSeat::Nobody` honest rather than lazy: a
+    /// `Cmd+V` typed with any one of these up does not reach a shell, so a menu
+    /// row that pasted into one would be the very leak
+    /// `nothing_leaks_past_the_palette_to_the_shell` refuses, arriving by a
+    /// second door. Read off the two function bodies because the agreement is
+    /// between two pieces of control flow and no value passes between them.
+    ///
+    /// MUTATIONS:
+    /// (1) drop a surface from `a_surface_above_the_clipboard_rung_holds_the_keyboard`
+    ///     — its first assertion goes red;
+    /// (2) move the clipboard rung in `keyboard_input` above any one of those
+    ///     rungs — the second goes red, and the ladder and the menu now
+    ///     disagree about who owns the keyboard.
+    #[test]
+    fn every_surface_the_menu_defers_to_stands_above_the_clipboard_rung() {
+        let ladder = ladder();
+        let defers = body(
+            "    fn a_surface_above_the_clipboard_rung_holds_the_keyboard(&mut self) -> bool {",
+        );
+        let rung = ladder
+            .find("self.copy_selection()?;")
+            .expect("the clipboard rung is still a way out of `keyboard_input`");
+        for surface in [
+            "self.app.quit.as_ref().is_some_and(quit::Quit::is_asking)",
+            "self.window.dirty_gate.is_open()",
+            "self.window.first_run.is_open()",
+            "self.window.psreadline_invite.is_open()",
+            "self.settings_layout().is_some()",
+            "self.window.rename.is_some()",
+            "self.window.git_menu.is_some()",
+            "self.window.term_menu.is_some()",
+            "self.window.file_menu.is_some()",
+            "self.window.pane_menu.is_some()",
+            "self.window.tab_menu.is_some()",
+            "self.window.palette.is_some()",
+        ] {
+            assert!(
+                defers.contains(surface),
+                "`{surface}` owns the keyboard in the ladder and the menu does not defer to it"
+            );
+            let at = ladder.find(surface).unwrap_or_else(|| {
+                panic!("`{surface}` is no longer a rung of `keyboard_input` at all")
+            });
+            assert!(
+                at < rung,
+                "`{surface}` stands below the clipboard rung, so the menu defers to a surface \
+                 the keyboard does not"
+            );
+        }
+    }
+
+    /// PIN — **each arm is the door the keystroke already uses**, and the verb
+    /// reaches the clipboard through none of its own.
+    ///
+    /// A second copy path would be a second answer to what a selection is worth
+    /// on the pasteboard; a second paste path would be a second place for the
+    /// sanitising, the bracketing and the multi-line policy to be decided. The
+    /// four doors named here are the four the two key handlers name.
+    ///
+    /// MUTATION: read the pasteboard in `run_an_application_menu_verb` and
+    /// write the bytes itself — the last two assertions go red.
+    #[test]
+    fn the_edit_menus_clipboard_verbs_go_through_the_keystrokes_own_doors() {
+        let verb = body("    fn run_an_application_menu_verb(");
+        let editor = body("    fn preview_key(&mut self, event: &KeyEvent) -> Result<bool> {");
+        let ladder = ladder();
+        for (door, other, whose) in [
+            (
+                "self.copy_preview_selection()",
+                editor,
+                "the preview editor",
+            ),
+            ("self.paste_into_preview()", editor, "the preview editor"),
+            ("self.copy_selection()", ladder, "the terminal"),
+            ("self.paste_from_clipboard()", ladder, "the terminal"),
+        ] {
+            assert!(
+                verb.contains(door),
+                "the Edit menu does not reach `{door}`, which is {whose}'s own door"
+            );
+            assert!(
+                other.contains(door),
+                "`{door}` is no longer what {whose} answers its own chord with"
+            );
+        }
+        for its_own in [
+            "write_terminal_clipboard_text",
+            "bt_platform::clipboard_text",
+        ] {
+            assert!(
+                !verb.contains(its_own),
+                "the Edit menu touches the pasteboard itself through `{its_own}` instead of \
+                 going through the door the keystroke uses"
+            );
+        }
+    }
+
+    /// PIN — **a declined clipboard row runs on the window that has the
+    /// keyboard**, through the same landing every other menu press lands at.
+    ///
+    /// The two verbs arrive on M3-1's channel like any other choice, so nothing
+    /// about the window, the buffering or the ordering is theirs; what is theirs
+    /// is one arm inside the one verb runner. A second landing would be a second
+    /// answer to which window a menu press belongs to.
+    ///
+    /// MUTATION: answer either verb from the delegate's own stack instead of
+    /// the landing and the arm named here disappears.
+    #[test]
+    fn a_declined_clipboard_row_lands_where_every_other_menu_row_lands() {
+        let landing = body("    fn answer_a_menu_row(");
+        assert!(
+            landing.contains("runtime.run_an_application_menu_verb(action)?;"),
+            "the landing answers a menu verb somewhere other than the window's own runtime"
+        );
+        let verbs = body("    fn run_an_application_menu_verb(");
+        for verb in [
+            "AppMenuAction::Help",
+            "AppMenuAction::CopySelection",
+            "AppMenuAction::PasteIntoFocus",
+        ] {
+            assert!(
+                verbs.contains(verb),
+                "`{verb}` has no arm in the application menu's verb runner"
             );
         }
     }

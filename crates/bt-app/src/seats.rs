@@ -55,6 +55,11 @@ pub(crate) const FOLIO_BAR: PlatformChrome = PlatformChrome::FOLIO_DRAWS_THE_WHO
 pub(crate) fn folio_band_device_px(scale_ppm: u32) -> u32 {
     chrome_band_device_px(scale_ppm, FOLIO_BAR)
 }
+// The gear's margin stopped being a runtime input of the strip once the hover
+// wash took shape F (T-MAC-GEAR-HOVER); the pins that measure the gear's
+// place still read it.
+#[cfg(test)]
+use bt_render::WINDOW_CAPTION_GEAR_MARGIN_LOGICAL_PX;
 use bt_render::{
     ChromeLabel, ChromeLabelWeight, ChromePalette, ChromeQuad,
     DEFAULT_FOCUS_MINI_HEIGHT_LOGICAL_PX, FOCUS_CARD_BORDER_LOGICAL_PX,
@@ -67,21 +72,22 @@ use bt_render::{
     FOCUS_MINI_FILES_INDENT_LOGICAL_PX, FOCUS_MINI_FILES_ROW_GAP_LOGICAL_PX,
     FOCUS_MINI_GAP_LOGICAL_PX, FOCUS_MINI_PADDING_LOGICAL_PX, FOCUS_MINI_RADIUS_LOGICAL_PX,
     FOCUS_MINI_ROW_PADDING_BOTTOM_LOGICAL_PX, FOCUS_MINI_ROW_PADDING_TOP_LOGICAL_PX,
-    FOCUS_MINI_ROW_PADDING_X_LOGICAL_PX, FOCUS_MINI_SEAM_LOGICAL_PX, OverlayQuad,
-    PANE_HEAD_FILE_MARK_LOGICAL_PX, PANE_HEAD_FOLDER_MARK_LOGICAL_PX,
-    PANE_HEAD_PROFILE_MARK_LOGICAL_PX, RAIL_BORDER_LOGICAL_PX, RAIL_GAP_LOGICAL_PX,
-    RAIL_LABEL_FONT_LOGICAL_PX, RAIL_LABEL_LINE_LOGICAL_PX, RAIL_LABEL_PADDING_BOTTOM_LOGICAL_PX,
-    RAIL_LABEL_PADDING_TOP_LOGICAL_PX, RAIL_LABEL_PADDING_X_LOGICAL_PX, RAIL_LABEL_TRACKING_EM,
-    RAIL_NEW_CHEVRON_BOX_LOGICAL_PX, RAIL_NEW_GAP_LOGICAL_PX, RAIL_NEW_MAIN_PADDING_X_LOGICAL_PX,
-    RAIL_NEW_MARGIN_TOP_LOGICAL_PX, RAIL_NEW_STICKY_PADDING_BOTTOM_LOGICAL_PX,
-    RAIL_PADDING_TOP_LOGICAL_PX, RAIL_PADDING_X_LOGICAL_PX, RAIL_PARK_LOGICAL_PX,
-    RAIL_SEAM_INSET_X_LOGICAL_PX, RAIL_SEAM_MARGIN_Y_LOGICAL_PX, RAIL_SEAM_THICKNESS_LOGICAL_PX,
-    RAIL_SHADE_WIDTH_LOGICAL_PX, RAIL_TAB_FONT_LOGICAL_PX, RAIL_TAB_GAP_LOGICAL_PX,
-    RAIL_TAB_HEIGHT_LOGICAL_PX, RAIL_TAB_PADDING_LEFT_LOGICAL_PX,
-    RAIL_TAB_PADDING_RIGHT_LOGICAL_PX, RAIL_TAB_PARKED_PADDING_X_LOGICAL_PX,
-    RAIL_TAB_RADIUS_LOGICAL_PX, RAIL_WIDTH_LOGICAL_PX, SEAT_DIVIDER_GRIP_LENGTH_LOGICAL_PX,
-    SEAT_DIVIDER_GRIP_RADIUS_LOGICAL_PX, SEAT_DIVIDER_GRIP_THICKNESS_LOGICAL_PX,
-    SEAT_DIVIDER_HIT_LOGICAL_PX, SEAT_PANE_CLOSE_BOX_LOGICAL_PX, SEAT_PANE_CLOSE_RADIUS_LOGICAL_PX,
+    FOCUS_MINI_ROW_PADDING_X_LOGICAL_PX, FOCUS_MINI_SEAM_LOGICAL_PX,
+    MAC_WINDOW_CORNER_RADIUS_LOGICAL_PX, OverlayQuad, PANE_HEAD_FILE_MARK_LOGICAL_PX,
+    PANE_HEAD_FOLDER_MARK_LOGICAL_PX, PANE_HEAD_PROFILE_MARK_LOGICAL_PX, RAIL_BORDER_LOGICAL_PX,
+    RAIL_GAP_LOGICAL_PX, RAIL_LABEL_FONT_LOGICAL_PX, RAIL_LABEL_LINE_LOGICAL_PX,
+    RAIL_LABEL_PADDING_BOTTOM_LOGICAL_PX, RAIL_LABEL_PADDING_TOP_LOGICAL_PX,
+    RAIL_LABEL_PADDING_X_LOGICAL_PX, RAIL_LABEL_TRACKING_EM, RAIL_NEW_CHEVRON_BOX_LOGICAL_PX,
+    RAIL_NEW_GAP_LOGICAL_PX, RAIL_NEW_MAIN_PADDING_X_LOGICAL_PX, RAIL_NEW_MARGIN_TOP_LOGICAL_PX,
+    RAIL_NEW_STICKY_PADDING_BOTTOM_LOGICAL_PX, RAIL_PADDING_TOP_LOGICAL_PX,
+    RAIL_PADDING_X_LOGICAL_PX, RAIL_PARK_LOGICAL_PX, RAIL_SEAM_INSET_X_LOGICAL_PX,
+    RAIL_SEAM_MARGIN_Y_LOGICAL_PX, RAIL_SEAM_THICKNESS_LOGICAL_PX, RAIL_SHADE_WIDTH_LOGICAL_PX,
+    RAIL_TAB_FONT_LOGICAL_PX, RAIL_TAB_GAP_LOGICAL_PX, RAIL_TAB_HEIGHT_LOGICAL_PX,
+    RAIL_TAB_PADDING_LEFT_LOGICAL_PX, RAIL_TAB_PADDING_RIGHT_LOGICAL_PX,
+    RAIL_TAB_PARKED_PADDING_X_LOGICAL_PX, RAIL_TAB_RADIUS_LOGICAL_PX, RAIL_WIDTH_LOGICAL_PX,
+    SEAT_DIVIDER_GRIP_LENGTH_LOGICAL_PX, SEAT_DIVIDER_GRIP_RADIUS_LOGICAL_PX,
+    SEAT_DIVIDER_GRIP_THICKNESS_LOGICAL_PX, SEAT_DIVIDER_HIT_LOGICAL_PX,
+    SEAT_PANE_CLOSE_BOX_LOGICAL_PX, SEAT_PANE_CLOSE_RADIUS_LOGICAL_PX,
     SEAT_RESIZING_CARD_MARGIN_LOGICAL_PX, SEAT_RESIZING_CARD_RADIUS_LOGICAL_PX,
     SEAT_TITLE_BAR_LOGICAL_PX, SEAT_TITLE_EDGE_LOGICAL_PX, SEAT_TITLE_FONT_LOGICAL_PX,
     SEAT_TITLE_GAP_LOGICAL_PX, SEAT_TITLE_PADDING_LOGICAL_PX,
@@ -106,7 +112,7 @@ use bt_render::{
     WINDOW_TITLE_BAR_DRAG_RESERVE_LOGICAL_PX, WINDOW_TITLE_BAR_LOGICAL_PX, chrome_palette,
 };
 
-use crate::focus_thumb::MiniMetrics;
+use crate::focus_thumb::{MiniMetrics, grid_runs};
 // **A width is only worth having if it was taken wearing what the paint wears**
 // — the doctrine and the type both live on [`crate::git_panel::MeasureFace`],
 // where the Git page's own instance of this bug wrote them down. It is a fact
@@ -3277,8 +3283,32 @@ pub fn tab_strip_geometry(
     // other reader of it does.
     let title = window_band_px(scale, chrome);
     let radius = (WINDOW_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0);
-    let caption = WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale;
-    let run_left = (width - 4.0 * caption).max(0.0);
+    // **What the caption run costs the strip is asked of the caption run**
+    // (owner report 2026-09-13, §13.48 ⑩). This used to be `width - 4 * 46`
+    // written out: the count of the run a Windows window carries, said as a
+    // number in the one place that never looks at which run this window has.
+    // On a window whose buttons are the platform's there is no run of four —
+    // [`caption_targets`] has already answered that it carries one box, the
+    // gear — so the strip was handing three slots of its own width, 138 points,
+    // to buttons that are not drawn, and seven tabs that should have stood in
+    // the Tight tier stood squeezed to their marks with a quarter of the bar
+    // empty behind them.
+    //
+    // [`caption_run_left`] is the function written off that list, so the
+    // reservation is now what the run actually takes: four slots where Folio
+    // draws the whole bar, one where the platform draws its own. **No fourth
+    // read of the capability**: the branch is `caption_targets`' and this is
+    // its answer, which is what `the_caption_run_is_decided_by_one_capability_read`
+    // holds this module to.
+    //
+    // `summoned` is `false` and not this window's own state, deliberately — the
+    // summoned terminal draws two of the four and the strip goes on reserving
+    // the resting run's width, which is the trade `caption_run_left`'s own note
+    // records: a tab-strip geometry that answered differently on one window is
+    // one more thing that can disagree between the paint and the hit test.
+    // Handing it the window's `summoned` would be that change, and it is not
+    // this one.
+    let run_left = caption_run_left(width, scale, chrome, false);
     // **The drag reserve** (user ruling 2026-09-09): the strip stops this far
     // short of the app's buttons and never crosses the line, so the band between
     // the two is `HTCAPTION` however many tabs are open. It is taken out here,
@@ -5749,6 +5779,27 @@ pub struct FocusThumbnail<'a> {
     /// Which seat of **this tab** holds its keyboard — `.fc-cell.focused`.
     pub focused: SeatId,
     pub seats: &'a BTreeMap<SeatId, MiniSeatContent>,
+    /// **One column of the terminal's face at the mini size, in physical
+    /// pixels** — the grid a mono row is laid on (§7.1.6b′ ⑤).
+    ///
+    /// The very number the cut was measured against
+    /// (`WindowRuntime::focus_mini_advance`, which
+    /// [`focus_thumb::mini_columns`] divides this seat's width by), carried down
+    /// beside the rows rather than re-derived, so the column a row was *cut* at
+    /// and the column it is *drawn* at cannot come from two measurements. A card
+    /// is a terminal set smaller, and a terminal is a grid: a row is placed
+    /// column by column at this advance and never at its own shaped one — see
+    /// [`focus_thumb::grid_runs`] for the report that made the difference
+    /// visible.
+    ///
+    /// Zero — a face nobody has measured yet — is the same answer
+    /// [`focus_thumb::mini_columns`] gives it: no columns, and so nothing to
+    /// draw. It needs no branch of its own here, because a grid of zero-wide
+    /// cells gives every run an empty box and an empty box is not drawn.
+    ///
+    /// [`focus_thumb::mini_columns`]: crate::focus_thumb::mini_columns
+    /// [`focus_thumb::grid_runs`]: crate::focus_thumb::grid_runs
+    pub mono_cell: f32,
 }
 
 /// Which part of the focus column is under this point.
@@ -6439,12 +6490,19 @@ pub fn caption_targets(chrome: PlatformChrome, summoned: bool) -> &'static [Chro
 
 /// **Where the drawn caption run begins**, which is not where the *reserved* one does.
 ///
-/// The strip goes on reserving four slots on every window ([`tab_strip_geometry`]), and the
-/// summoned terminal draws two of them — so on that window there are two slots of title bar
-/// between the tab strip's own end and the gear. That is deliberate and it is the cheap half of
-/// the trade: those pixels are drag handle, which every short strip already leaves, and the
-/// alternative is a tab-strip geometry that answers differently on one window — one more thing
-/// that can disagree between the paint and the hit test, over 92 logical pixels.
+/// The strip reserves this same run ([`tab_strip_geometry`] calls it with `summoned: false`), and
+/// the summoned terminal draws two of the four slots a Windows window's run has — so on that
+/// window there are two slots of title bar between the tab strip's own end and the gear. That is
+/// deliberate and it is the cheap half of the trade: those pixels are drag handle, which every
+/// short strip already leaves, and the alternative is a tab-strip geometry that answers
+/// differently on one window — one more thing that can disagree between the paint and the hit
+/// test, over 92 logical pixels.
+///
+/// **What the strip reserves is the run this window has, and not always four** (owner report
+/// 2026-09-13, §13.48 ⑩). The count was written out as a literal `4` inside the solver while this
+/// function asked [`caption_targets`] for it, so on a window whose buttons are the platform's —
+/// one box up here, the gear — the strip paid for three slots nothing draws. It now asks here,
+/// which is why the two numbers cannot part again.
 #[must_use]
 pub fn caption_run_left(width: f32, scale: f32, chrome: PlatformChrome, summoned: bool) -> f32 {
     let button = WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale;
@@ -6488,8 +6546,22 @@ pub fn window_caption_boxes(
         // are: it is shorter than the bar and rides its middle. Read off the
         // band rather than off a constant, so the gear stands on the axis of
         // whatever is beside it on a window whose header is not Folio's own 40.
-        let side = (WINDOW_CAPTION_GEAR_BOX_LOGICAL_PX * scale).round();
-        let top = ((title - side) / 2.0).round().max(0.0);
+        //
+        // **The margin is what is rounded, and the side follows from it**
+        // (T-MAC-GEAR-HOVER). The ruling states the box three ways at once — 34
+        // square, three points of margin, centre 20 — and on Folio's 40 those are
+        // the same statement. In *device* pixels they stop being the same as soon
+        // as the scale is fractional: `34 × 1.5` is 51, an odd side on an even
+        // 60-pixel band, and a box that cannot be centred on a whole pixel is a
+        // box whose centre is half a pixel off the mirror §13.48 ② derived. So
+        // the margin is taken first and the side is what is left of the band,
+        // which puts the ink's centre exactly on the ruling's at every scale and
+        // costs at most one physical pixel of the side.
+        let margin = ((title - WINDOW_CAPTION_GEAR_BOX_LOGICAL_PX * scale) / 2.0)
+            .round()
+            .max(0.0);
+        let side = (title - 2.0 * margin).max(1.0);
+        let top = margin;
         // The ruling is about a *centre*, so the run is hung off one: the last
         // box's centre stands `WINDOW_CAPTION_GEAR_INSET_LOGICAL_PX` in from the
         // trailing edge and the boxes abut leftward from there. On this window
@@ -10968,12 +11040,15 @@ fn window_chrome(
         palette.title_bar,
     ));
 
-    let button = WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale;
-    // **Where the app's own content stops** is still four slots in from the edge on
-    // every window, because that is what the strip reserves — see
-    // `caption_run_left`, which is where the two runs differ and why they are
-    // allowed to.
-    let run_left = (width - 4.0 * button).max(0.0);
+    // **Where the app's own content stops** is where this window's caption run
+    // begins, asked of [`caption_run_left`] — the same sentence, from the same
+    // function, that [`tab_strip_geometry`] is given. It was the literal
+    // `width - 4 * 46` here too, and on a window carrying one box up here that
+    // cropped the program's name 138 points early against three slots nothing
+    // draws (owner report 2026-09-13, §13.48 ⑩). `summoned: false` for the
+    // solver's reason: the strip and the name stop at the resting run's edge on
+    // every window, so neither moves when a window is summoned.
+    let run_left = caption_run_left(width, scale, chrome, false);
     // The two layouts share this bar and split what stands in it. `.tabs-inline`
     // lives here only in the horizontal one; in the vertical one the tab list is
     // the rail, and what fills the space it left is the program's own name —
@@ -11108,16 +11183,27 @@ fn window_chrome(
             // **The wash is the shape of the box, and the box says which shape
             // that is.** A caption box as tall as the bar is a slot in a run and
             // wears the run's own square wash — abutting slots are what makes a
-            // run read as a run. A box that is inset in the bar is a control
-            // standing in it, and every control inset in this bar wears the same
-            // rounded pill: the panel toggle's own note says why, and the `+` is
-            // the other one. So this is read off the rectangle rather than asked
-            // of the window a second time.
+            // run read as a run. A box that is inset in the bar is the one
+            // control that stands alone in the window's own corner, and **it
+            // takes the corner's curvature**: a rounded square at
+            // [`MAC_WINDOW_CORNER_RADIUS_LOGICAL_PX`], the 12.1 points
+            // R-MAC-CORNERS measured off the shipping window (owner ruling
+            // 2026-09-13, T-MAC-GEAR-HOVER, §13.48 ⑩). §13.48 ③ had given it the
+            // strip's own 6-point pill on the argument that every control inset
+            // in this bar wears one, and named that as a judgement call for one
+            // line to overrule; the line overruled it, because the argument for
+            // the strip's pill is about a row of controls and this control is
+            // not in a row — it is in a corner, and Folio has no circular
+            // controls to make it a circle instead. Which of the two this is is
+            // still read off the rectangle rather than asked of the window a
+            // second time, and the rectangle is the very one the press is
+            // answered on, so the wash cannot be wider than what it lights up.
             if rect[3] - rect[1] < title {
                 sprites.push(ChromeSprite::new(
                     ChromeMark::ControlPill {
-                        radius_px: (WINDOW_NEW_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0)
-                            as u32,
+                        radius_px: (MAC_WINDOW_CORNER_RADIUS_LOGICAL_PX * scale)
+                            .round()
+                            .max(1.0) as u32,
                     },
                     pixel_snapped(rect),
                     wash,
@@ -14107,6 +14193,7 @@ fn focus_card_mini_chrome(
                 inner,
                 viewport,
                 scale,
+                thumbnail.mono_cell,
                 palette,
                 nudge_rows,
                 (labels, sprites, images),
@@ -14163,11 +14250,24 @@ fn focus_mini_seam_quads(seat: [f32; 4], stroke: f32, scale: f32) -> Vec<[f32; 4
 /// the line height that count was measured with — the same expression, from the
 /// same table (`focus_thumb::MiniMetrics`), so a row cannot be counted at one
 /// height and drawn at another.
+///
+/// **Nor how wide a column is.** `cell` is the advance the cut was measured
+/// against ([`FocusThumbnail::mono_cell`]), and a mono row is laid out *on* it
+/// rather than at its own shaped advance — the horizontal twin of the sentence
+/// above, and for the same reason: a row cut at one column and drawn at another
+/// is a picture of a grid that is not the one the pane holds.
+// One argument over clippy's taste, and it is the one that keeps the card's
+// columns and the terminal's columns the same columns: `cell` cannot be derived
+// from the rectangle, because it is a property of the *face* and only the
+// renderer has measured it. The other seven are already the minimum the two
+// halves of a cell need — see `collapse_bar_contents` for the same judgement.
+#[allow(clippy::too_many_arguments)]
 fn focus_mini_seat_content(
     content: &MiniSeatContent,
     inner: [f32; 4],
     viewport: [f32; 2],
     scale: f32,
+    cell: f32,
     palette: ChromePalette,
     nudge_rows: f32,
     output: (
@@ -14237,14 +14337,14 @@ fn focus_mini_seat_content(
                 if row[3] <= inner[1] {
                     continue;
                 }
-                mini_row_label(
+                mini_grid_row_labels(
                     labels,
-                    text.clone(),
+                    text,
                     row,
                     clip_to_list([row[0], row[1].max(inner[1]), row[2], row[3].min(inner[3])]),
                     metrics.font_logical_px * scale,
                     palette.focus_mini_text,
-                    metrics.mono,
+                    cell,
                 );
             }
         }
@@ -14267,15 +14367,40 @@ fn focus_mini_seat_content(
                 if row[1] >= inner[3] {
                     break;
                 }
-                mini_row_label(
-                    labels,
-                    text.clone(),
-                    row,
-                    clip_to_list([row[0], row[1], row[2], row[3].min(inner[3])]),
-                    metrics.font_logical_px * scale,
-                    palette.focus_mini_text,
-                    metrics.mono,
-                );
+                let clip = clip_to_list([row[0], row[1], row[2], row[3].min(inner[3])]);
+                let size = metrics.font_logical_px * scale;
+                // **A file of code is on the grid too, and a page of prose is
+                // not** (§7.1.6b′ ⑤). `mono` is already this seat's answer to
+                // "were these bytes written in a grid" — it is why the face is
+                // the terminal's — so it is the same answer to "may one glyph
+                // decide where the next one goes". A page of prose is set in the
+                // window's proportional face, where the running advance *is* the
+                // right answer and a grid would be a table nobody wrote.
+                //
+                // Read off the same table the face was chosen from, so that the
+                // seat cannot be *set* in one face and *placed* as if it were in
+                // the other.
+                if metrics.mono {
+                    mini_grid_row_labels(
+                        labels,
+                        text,
+                        row,
+                        clip,
+                        size,
+                        palette.focus_mini_text,
+                        cell,
+                    );
+                } else {
+                    mini_row_label(
+                        labels,
+                        text.clone(),
+                        row,
+                        clip,
+                        size,
+                        palette.focus_mini_text,
+                        false,
+                    );
+                }
             }
         }
         MiniSeatContent::Files(rows) => {
@@ -14471,7 +14596,12 @@ fn mini_row_label(
     color: [u8; 3],
     mono: bool,
 ) {
-    if text.is_empty() || rect[2] <= rect[0] || clip[3] <= clip[1] {
+    // The horizontal refusal is the vertical one's twin and arrived with
+    // [`mini_grid_row_labels`], which is the first caller that can hand this a
+    // box off the side of its seat: a run whose columns all lie past the cell's
+    // right edge. Every other caller's clip spans the whole row, so the test is
+    // free for them and the two edges are now refused by the same line.
+    if text.is_empty() || rect[2] <= rect[0] || clip[3] <= clip[1] || clip[2] <= clip[0] {
         return;
     }
     labels.push(ChromeLabel {
@@ -14493,6 +14623,55 @@ fn mini_row_label(
         tabular_numerals: false,
         mono,
     });
+}
+
+/// **One mini row of grid text, laid out column by column** (owner's report
+/// 2026-09-13, `docs/DESIGN.md` §7.1.6b′ ⑤).
+///
+/// The row arrives as one string and leaves as one label per *run*
+/// ([`grid_runs`], which owns the question of where a run ends).
+/// Each run is put down at `rect[0] + column × cell` — the card's spelling of
+/// the pane's own `frame_cell_bounds_px`, where a cell's pixel is its column's
+/// and never the running advance of the glyphs before it.
+///
+/// **A run is also clipped to the columns it owns**, which is the second half of
+/// "the grid wins": a glyph drawn from a fallback face can be wider than the
+/// columns the grid gave it — a CJK ideograph at 7.5px is one em where two mini
+/// columns are 1.1 — and this is what stops it from being *seen* outside them,
+/// now that pinning has already stopped it from *pushing* the rest of the row.
+/// The clip is the seat's own row clip narrowed to the run, so the cell's right
+/// edge still cuts the line exactly where it cut it before, and a run that
+/// begins past that edge is never built.
+///
+/// Nothing else about the row changes: same face, same size, same box, same
+/// baseline. What changes is only which x each piece is put at.
+fn mini_grid_row_labels(
+    labels: &mut Vec<ChromeLabel>,
+    text: &str,
+    rect: [f32; 4],
+    clip: [f32; 4],
+    font_size_px: f32,
+    color: [u8; 3],
+    cell: f32,
+) {
+    // **A column's pixel is a function of the column**, written once: a run's
+    // right edge is the column *after* its last one, not its left edge plus its
+    // width. The two are the same number in arithmetic and not always the same
+    // f32, and a border whose two neighbours disagreed about where their shared
+    // column is would be the seam this whole ruling is about, one ulp wide.
+    let edge = |column: usize| rect[0] + column as f32 * cell;
+    for run in grid_runs(text) {
+        let (left, right) = (edge(run.column), edge(run.column + run.columns));
+        mini_row_label(
+            labels,
+            run.text,
+            [left, rect[1], right, rect[3]],
+            [clip[0].max(left), clip[1], clip[2].min(right), clip[3]],
+            font_size_px,
+            color,
+            true,
+        );
+    }
 }
 
 /// A collapsed seat's bar carries its name and its state icon (§2.6.3) — except
@@ -26673,9 +26852,10 @@ mod tests {",
         let (width, scale) = (960.0_f32, 1.0_f32);
         let rail = RailState::default();
         let reserve = WINDOW_TITLE_BAR_DRAG_RESERVE_LOGICAL_PX * scale;
-        // The gear leads the caption run, and the strip reserves that run's four
-        // slots on every window (see `caption_run_left`), so this is the edge the
-        // band is measured back from.
+        // The gear leads the caption run, and the strip reserves exactly that
+        // run — four slots on this window, which is the one whose whole bar is
+        // Folio's (see `caption_run_left`) — so this is the edge the band is
+        // measured back from.
         let gear_left = window_caption_boxes(width, scale, FOLIO_BAR, false)[0].1[0];
 
         // The dozen the report was made with — a strip pressed flat against the
@@ -26885,20 +27065,35 @@ mod tests {",
             );
 
             // The band is taken out of the run and not clamped onto the answers:
-            // the same window with no platform chrome draws wider tabs and ends
-            // its strip in the same place.
-            let folio = tab_strip_geometry(width, scale, FOLIO_BAR, &resting(4), 0, 0.0);
+            // **the very same window with its lights withdrawn** draws wider
+            // tabs and ends its strip in the same place. The comparison is
+            // against this window in full screen and not against a
+            // `FOLIO_DRAWS_THE_WHOLE_BAR` one, because since §13.48 ⑩ the two
+            // windows no longer reserve the same caption run — one box against
+            // four — and a comparison that changed two things at once could not
+            // say which of them moved the tabs. Here only the lights differ.
+            let dark = tab_strip_geometry(
+                width,
+                scale,
+                PlatformChrome {
+                    strip_left_px: 0,
+                    ..mac
+                },
+                &resting(4),
+                0,
+                0.0,
+            );
             assert_eq!(
-                strip.viewport[1], folio.viewport[1],
+                strip.viewport[1], dark.viewport[1],
                 "the right edge is the caption run's and is not moved by the inset"
             );
             let body =
                 |geometry: &TabStripGeometry| geometry.tabs[0].body[2] - geometry.tabs[0].body[0];
             assert!(
-                body(&strip) < body(&folio),
+                body(&strip) < body(&dark),
                 "the inset comes out of the tabs' width: {} against {}",
                 body(&strip),
-                body(&folio)
+                body(&dark)
             );
 
             // And nothing in the strip answers a press inside the band.
@@ -26923,6 +27118,193 @@ mod tests {",
                 toggle[0] >= inset,
                 "the sidebar toggle stands at {} with the lights ending at {inset}",
                 toggle[0]
+            );
+        }
+    }
+
+    /// RED — **the strip is given every point the window's own caption run
+    /// leaves, and on a window whose buttons are the platform's that run is one
+    /// slot** (owner report 2026-09-13, §13.48 ⑩).
+    ///
+    /// The window the owner photographed: 934 logical points wide, seven tabs,
+    /// the lights ending at 73. The seven pills came out **71.57** points each
+    /// — under the 90 of `WINDOW_TAB_SQUEEZED_LOGICAL_PX`, so every one of them
+    /// was a bare profile mark with no word on it — and **246** points of bar
+    /// stood empty between the `˅` and the gear. The solver was reserving
+    /// `4 × 46` for a caption run this window does not have: three of those
+    /// slots are minimise, zoom and close, which AppKit draws at the *other* end
+    /// of this bar, and the 138 points came out of the tabs.
+    ///
+    /// Asked of the run instead: `934 − 46` leaves 888, the drag reserve takes
+    /// 96 down to 792, the lights and their twelve take 85, the `+`/`˅` pair
+    /// and its margin take 62 and the six gaps take 6 — so the seven tabs share
+    /// **639** and stand **91.29** wide, in the Tight tier, with their titles
+    /// back. What is left behind the `˅` is 108: the drag reserve, plus the air
+    /// the 28-point gear leaves inside the 46 §13.48 ③ keeps reserving for it.
+    /// Both halves are asserted, because a run that grew and a band that did
+    /// not shrink would mean the strip had simply been allowed to overrun the
+    /// gear.
+    ///
+    /// The three windows are compared against each other and not against struck
+    /// numbers, so a product that moves its lights or its reserve moves all
+    /// three together: this window, this window in full screen, and the window
+    /// whose whole bar is Folio's — which goes on reserving its four, and whose
+    /// share is exactly the number this one used to get.
+    ///
+    /// MUTATION: reserve four slots on a window whose buttons are the
+    /// platform's and the seven tabs fall back to 71.57 and Squeezed, which the
+    /// tier assertion and the title box name at both scales; reserve one on the
+    /// window that draws its own four and the Windows half names it; drop the
+    /// drag reserve on either and the band behind the `˅` names that.
+    #[test]
+    fn the_mac_strip_is_given_every_point_the_one_gear_leaves() {
+        const TABS: usize = 7;
+        for scale in [1.0_f32, 2.0] {
+            let width = 934.0 * scale;
+            let mac = mac_bar(scale);
+            // The very same window in full screen, which is the third of the
+            // three: macOS takes its buttons off it and leaves the header.
+            let dark = PlatformChrome {
+                strip_left_px: 0,
+                ..mac
+            };
+            let slot = WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale;
+            let reserve = WINDOW_TITLE_BAR_DRAG_RESERVE_LOGICAL_PX * scale;
+            let lights = mac.strip_left_px as f32;
+            let after_lights = WINDOW_TAB_FLOAT_LEAD_IN_LOGICAL_PX * scale;
+            let skirt = (WINDOW_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0);
+            // The pair at the end of the run: one margin and two boxes, which
+            // is what the solver takes out for them.
+            let controls = WINDOW_NEW_TAB_MARGIN_LEFT_LOGICAL_PX * scale
+                + 2.0 * WINDOW_NEW_TAB_BOX_LOGICAL_PX * scale;
+            let gaps = WINDOW_TAB_GAP_BETWEEN_LOGICAL_PX * scale * (TABS - 1) as f32;
+            // The whole solver, written out: what the caption run leaves, less
+            // the drag reserve, the platform's own band, the lead-in, the pair
+            // and the gaps — shared equally.
+            let share = |slots: f32, band: f32, lead_in: f32| {
+                (width - slots * slot - reserve - band - lead_in - controls - gaps) / TABS as f32
+            };
+            let close_enough = |got: f32, want: f32, what: &str| {
+                assert!(
+                    (got - want).abs() <= 0.01 * scale,
+                    "{what}: {got} against {want} ({scale}x)"
+                );
+            };
+
+            let strip = tab_strip_geometry(width, scale, mac, &resting(TABS), 0, 0.0);
+            // ① The run itself: one slot, not four.
+            close_enough(
+                caption_run_left(width, scale, mac, false),
+                width - slot,
+                "the caption run this window has is the gear's one slot",
+            );
+            close_enough(
+                strip.viewport[1],
+                width - slot - reserve,
+                "and the strip runs up to it, less the drag reserve",
+            );
+
+            // ② The tabs, which is what the owner was looking at.
+            let want = share(1.0, lights, after_lights);
+            for (index, tab) in strip.tabs.iter().enumerate() {
+                close_enough(
+                    tab.body[2] - tab.body[0],
+                    want,
+                    &format!("tab {index} takes its full share of the run"),
+                );
+                assert_eq!(
+                    tab.tier,
+                    TabWidthTier::Tight,
+                    "tab {index} is {} wide and the squeezed floor is {} ({scale}x)",
+                    tab.body[2] - tab.body[0],
+                    WINDOW_TAB_SQUEEZED_LOGICAL_PX * scale
+                );
+                assert!(
+                    tab_title_box(tab, 1, 0.0, scale).is_some(),
+                    "tab {index} has room for its own title again ({scale}x)"
+                );
+            }
+            // The mutation, stated as arithmetic rather than left to the
+            // mutant: the four-slot reservation is under the squeezed floor at
+            // this width, which is exactly what the owner saw.
+            assert!(
+                share(4.0, lights, after_lights) < WINDOW_TAB_SQUEEZED_LOGICAL_PX * scale,
+                "the four-slot reservation would squeeze them to {} ({scale}x)",
+                share(4.0, lights, after_lights)
+            );
+
+            // ③ Nothing is left over inside the strip: at this width the tabs
+            // are nowhere near the 200 cap, so the run ends on its own wall and
+            // the `˅` ends with it.
+            close_enough(
+                strip.new_tab_menu[2],
+                strip.viewport[1],
+                "the `˅` ends where the run does — no band inside the strip",
+            );
+            close_enough(strip.max_scroll, 0.0, "and nothing is scrolled out");
+
+            // ④ The band behind the `˅` is the drag reserve and the gear's own
+            // air, and not a point more. On the window that draws its own four
+            // the same band is the reserve alone, because there the run's boxes
+            // fill their slots.
+            let gear = window_caption_boxes(width, scale, mac, false)[0].1;
+            let side = (WINDOW_CAPTION_GEAR_BOX_LOGICAL_PX * scale).round();
+            // Written from the constants and not from `gear[0]`, so this says
+            // something rather than restating its own operand: the slot is 46,
+            // the square in it is 28, and §13.48 ③ hangs that square's centre
+            // 20 in from the trailing edge — which leaves six points behind it
+            // and twelve in front, and those twelve are all the strip gives up
+            // beyond the drag reserve.
+            let air_in_front_of_the_gear =
+                slot - side - (WINDOW_CAPTION_GEAR_INSET_LOGICAL_PX * scale - side / 2.0);
+            close_enough(
+                gear[0] - strip.viewport[1],
+                reserve + air_in_front_of_the_gear,
+                "the band behind the `˅` is the reserve plus the gear's own air",
+            );
+
+            // ⑤ The window whose whole bar is Folio's reserves its four, and
+            // its share is the very number this window used to be given.
+            let folio = tab_strip_geometry(width, scale, FOLIO_BAR, &resting(TABS), 0, 0.0);
+            close_enough(
+                caption_run_left(width, scale, FOLIO_BAR, false),
+                width - 4.0 * slot,
+                "the Windows run is still four slots wide",
+            );
+            for (index, tab) in folio.tabs.iter().enumerate() {
+                close_enough(
+                    tab.body[2] - tab.body[0],
+                    share(4.0, 0.0, skirt),
+                    &format!("Windows tab {index} is untouched"),
+                );
+            }
+            let windows_gear = window_caption_boxes(width, scale, FOLIO_BAR, false)[0].1;
+            close_enough(
+                windows_gear[0] - folio.viewport[1],
+                reserve,
+                "and the band in front of its run is the drag reserve alone",
+            );
+
+            // ⑥ Full screen shares the same run correctly: the lights and their
+            // twelve are gone, the skirt's lead-in is back, and every point of
+            // the difference lands on the seven tabs.
+            let full = tab_strip_geometry(width, scale, dark, &resting(TABS), 0, 0.0);
+            close_enough(
+                full.viewport[1],
+                strip.viewport[1],
+                "full screen moves the head of the run and not its end",
+            );
+            for (index, tab) in full.tabs.iter().enumerate() {
+                close_enough(
+                    tab.body[2] - tab.body[0],
+                    share(1.0, 0.0, skirt),
+                    &format!("full-screen tab {index} takes its full share"),
+                );
+            }
+            close_enough(
+                full.tabs[0].body[2] - full.tabs[0].body[0] - want,
+                (lights + after_lights - skirt) / TABS as f32,
+                "and what the lights gave back was shared out equally",
             );
         }
     }
@@ -27536,15 +27918,24 @@ mod tests {",
     ///
     /// The gear is asserted beside the height because the two are one box. It is
     /// no longer a slot in a run — there is no run on this window — but a square
-    /// centred 16 points in from the trailing edge, mirroring the centre macOS
-    /// gives the close button at the leading one, and on the header's own centre
-    /// line. It stays inside the 46 the strip goes on reserving, which is what
-    /// keeps the drag band and the strip's own right edge where they were.
+    /// centred 20 points in from the trailing edge, mirroring the centre the red
+    /// light stands on at the leading one, and on the header's own centre line.
+    /// It stays inside the 46 the strip goes on reserving, which is what keeps
+    /// the drag band and the strip's own right edge where they were.
+    ///
+    /// **The square is 34 since T-MAC-GEAR-HOVER** (owner ruling 2026-09-13,
+    /// §13.48 ⑩), which widened the box so the hover wash could take the
+    /// window's own corner radius. The ruling's own arithmetic is asserted here
+    /// rather than assumed, because it is what makes the widening safe: the box
+    /// is the 40-point band less three points of margin at the top, at the foot
+    /// and at the window's trailing edge, and `34 / 2 + 3 = 20` — so §13.48 ②'s
+    /// mirror is exactly where it was and nothing about the ink moves.
     ///
     /// MUTATION: give a vertical layout the platform's 32 and the first
     /// assertion names it; hang the gear off the run's left edge again and its
     /// centre goes red at every scale; centre it on the window instead of on the
-    /// band and the next one does.
+    /// band and the next one does; round the box's side instead of its margin
+    /// and the 1.5x pass loses the centre by half a pixel.
     #[test]
     fn every_layout_wears_folios_own_header_and_the_gear_mirrors_the_leading_light() {
         let width = 1600.0_f32;
@@ -27582,11 +27973,36 @@ mod tests {",
                     folios / 2.0,
                     "and stands on the header's own centre line ({scale}x)"
                 );
-                let side = (WINDOW_CAPTION_GEAR_BOX_LOGICAL_PX * scale).round();
+                // **The ruling's arithmetic, spelled out** (§13.48 ⑩): a margin
+                // of three points at the top, at the foot and at the trailing
+                // edge, leaving a 34 square — and `34 / 2 + 3 = 20`, which is the
+                // mirror the two assertions above just checked. The margin is
+                // the rounded quantity, so the side is what the band has left
+                // after it and the centre is exact at every scale; at 1.5x that
+                // is 50 physical pixels rather than the 51 a rounded side would
+                // have given, and 51 on a 60-pixel band cannot be centred.
+                let margin = ((folios - WINDOW_CAPTION_GEAR_BOX_LOGICAL_PX * scale) / 2.0).round();
+                assert_eq!(
+                    margin,
+                    (WINDOW_CAPTION_GEAR_MARGIN_LOGICAL_PX * scale).round(),
+                    "the box is the band less three points, {what} ({scale}x)"
+                );
+                let side = folios - 2.0 * margin;
                 assert_eq!(
                     (gear[2] - gear[0], gear[3] - gear[1]),
                     (side, side),
                     "in a square, not a caption slot ({scale}x)"
+                );
+                assert_eq!(
+                    (gear[1], width - gear[2], folios - gear[3]),
+                    (margin, margin, margin),
+                    "and the same margin stands above it, behind it and below it \
+                     ({what}, {scale}x)"
+                );
+                assert_eq!(
+                    side / 2.0 + margin,
+                    WINDOW_CAPTION_GEAR_INSET_LOGICAL_PX * scale,
+                    "which is the mirror said as `34 / 2 + 3 = 20` ({scale}x)"
                 );
                 assert!(
                     gear[0] >= width - WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale && gear[2] <= width,
@@ -27610,13 +28026,222 @@ mod tests {",
         }
     }
 
+    /// RED — **the gear in the corner wears the corner's own round, on exactly
+    /// the rectangle that answers the press** (owner ruling 2026-09-13,
+    /// T-MAC-GEAR-HOVER, §13.48 ⑩).
+    ///
+    /// §13.48 ③ left the shape of this wash as a judgement call — a
+    /// [`ChromeMark::ControlPill`] at the strip's own 6, on the argument that
+    /// every control inset in this bar wears one — and said in as many words
+    /// that one line from the owner would overrule it. The line came out of a
+    /// four-way mock, and it says: a rounded square at the **window's** corner
+    /// radius, because Folio has no circular controls of its own and a control
+    /// standing in the corner should share the corner's curvature. Both
+    /// rejected shapes are worth stating in a test, because each is a thing the
+    /// drawing could quietly become: a **circle** (`radius = side / 2`), and the
+    /// **12 on the old 28 box**, which is not concentric with the arc behind it.
+    ///
+    /// Three claims, and the third is the one that makes a hover honest:
+    ///
+    /// * the wash is a rounded square at
+    ///   [`MAC_WINDOW_CORNER_RADIUS_LOGICAL_PX`] — 12.1 measured on the shipping
+    ///   window (R-MAC-CORNERS), drawn at 12;
+    /// * it is not a circle and not a round on a 28 box;
+    /// * **it is the hit target**, the same rectangle
+    ///   [`window_caption_boxes`] answers the press on, snapped to whole pixels
+    ///   for the fill. A wash wider than what can be clicked is a button that
+    ///   lights up where it does not work, which is precisely the failure the
+    ///   paint's own note says walking the boxes exists to prevent.
+    ///
+    /// MUTATION: leave the radius at the strip's 6 and the first assertion names
+    /// it; make it `side / 2` and the circle guard does; draw the wash on the
+    /// band's full height, or on the 28 the box used to be, and the rectangle
+    /// assertion goes red at every scale.
+    #[test]
+    fn the_corner_gear_washes_a_rounded_square_at_the_windows_own_radius() {
+        let palette = chrome_palette();
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let mac = mac_bar(scale);
+            let width = 960.0 * scale;
+            let titles = strip_titles(2);
+            let gear = window_caption_boxes(width, scale, mac, false)[0].1;
+            let radius = (MAC_WINDOW_CORNER_RADIUS_LOGICAL_PX * scale)
+                .round()
+                .max(1.0) as u32;
+
+            let (rest_quads, _, rest_sprites) = strip_chrome_on(mac, scale, &titles, 0, None);
+            assert!(
+                !rest_sprites
+                    .iter()
+                    .any(|sprite| sprite.rect == pixel_snapped(gear)),
+                "scale {scale}: the gear has no ground at all until the pointer arrives"
+            );
+            assert!(
+                !rest_quads
+                    .iter()
+                    .any(|quad| quad.rect == gear || quad.rect == pixel_snapped(gear)),
+                "scale {scale}: and no rectangle stands in for one"
+            );
+
+            let (hover_quads, _, hover_sprites) =
+                strip_chrome_on(mac, scale, &titles, 0, Some(ChromeTarget::Settings));
+            let grounds = hover_sprites
+                .iter()
+                .filter(|sprite| sprite.color == palette.caption_hover)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                grounds.len(),
+                1,
+                "scale {scale}: one control is hovered, so one control has a ground"
+            );
+            assert_eq!(
+                grounds[0].mark,
+                ChromeMark::ControlPill { radius_px: radius },
+                "scale {scale}: the wash takes the window's own corner radius"
+            );
+            assert_eq!(
+                grounds[0].rect,
+                pixel_snapped(gear),
+                "scale {scale}: and it is the hit target, not a shape beside it"
+            );
+            // The two rejected shapes, each named rather than merely excluded by
+            // the number above: a circle is `side / 2`, and the old 28 box would
+            // have left four points of flat on each side of a 12 round.
+            let side = gear[3] - gear[1];
+            assert!(
+                radius as f32 * 2.0 < side,
+                "scale {scale}: a circle was the shape the owner turned down"
+            );
+            assert_eq!(
+                side,
+                (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round()
+                    - 2.0 * (WINDOW_CAPTION_GEAR_MARGIN_LOGICAL_PX * scale).round(),
+                "scale {scale}: on the 34 the round is concentric with the corner; \
+                 on the old 28 it would have left flats"
+            );
+            assert!(
+                !hover_quads
+                    .iter()
+                    .any(|quad| quad.rect == gear || quad.rect == pixel_snapped(gear)),
+                "scale {scale}: a rectangle is what this ruling deletes from the corner"
+            );
+        }
+    }
+
+    /// PIN — **the window's corner radius and the strip's pill radius are two
+    /// numbers and may not converge** (T-MAC-GEAR-HOVER).
+    ///
+    /// The gear took the window's 12 because it stands in the window's corner.
+    /// Everything else inset in this bar — the `+`, the `˅`, the panel toggle —
+    /// stands in the *strip*, and keeps [`WINDOW_NEW_TAB_RADIUS_LOGICAL_PX`]'s
+    /// 6. The failure this pins is the tidy-up that notices two radii doing the
+    /// same job and makes them one: they are not the same job, and the day macOS
+    /// changes its corner exactly one of them moves.
+    ///
+    /// MUTATION: set either constant to the other's value and the first
+    /// assertion names it; give the `+` the corner's radius and the pills below
+    /// do.
+    #[test]
+    fn the_windows_corner_and_the_strips_pill_are_two_radii() {
+        assert_ne!(
+            MAC_WINDOW_CORNER_RADIUS_LOGICAL_PX, WINDOW_NEW_TAB_RADIUS_LOGICAL_PX,
+            "the corner's round and the strip's round answer different questions"
+        );
+        let palette = chrome_palette();
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let mac = mac_bar(scale);
+            let strip_radius = (WINDOW_NEW_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32;
+            let titles = strip_titles(2);
+            let geometry = tab_strip_geometry(960.0 * scale, scale, mac, &resting(2), 0, 0.0);
+            for (what, target, rect) in [
+                ("the `+`", ChromeTarget::NewTab, geometry.new_tab),
+                ("the `˅`", ChromeTarget::NewTabMenu, geometry.new_tab_menu),
+            ] {
+                let (_, _, sprites) = strip_chrome_on(mac, scale, &titles, 0, Some(target));
+                let pill = sprites
+                    .iter()
+                    .find(|sprite| sprite.rect == pixel_snapped(rect))
+                    .unwrap_or_else(|| panic!("scale {scale}: {what} must fill its box on hover"));
+                assert_eq!(
+                    pill.mark,
+                    ChromeMark::ControlPill {
+                        radius_px: strip_radius
+                    },
+                    "scale {scale}: {what} keeps the strip's own 6 on the window the \
+                     gear took the corner's 12 on"
+                );
+                assert_eq!(pill.color, palette.caption_hover);
+            }
+        }
+    }
+
+    /// PIN — **Windows is the window it was: a 46x40 caption slot and a square
+    /// wash** (T-MAC-GEAR-HOVER).
+    ///
+    /// The ruling is about the control that stands in a *corner of macOS's own
+    /// shape*. On the window whose whole bar is Folio's the gear is the first
+    /// slot of a four-button run under Windows 11's own corner, it is as tall as
+    /// the bar, and its hover fill is the run's square — because abutting slots
+    /// are what makes a run read as a run, and a rounded wash inside one would
+    /// leave four gaps of bar between the four buttons.
+    ///
+    /// The platform decision is the existing capability read and no `cfg`: this
+    /// asks the same functions with the other `PlatformChrome` and gets the
+    /// other answer.
+    ///
+    /// MUTATION: widen the Windows gear to the mac box, or give its wash any
+    /// radius at all, and this names it at every scale.
+    #[test]
+    fn the_windows_gear_keeps_its_caption_slot_and_its_square_wash() {
+        let palette = chrome_palette();
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let width = 960.0 * scale;
+            let band = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
+            let run = window_caption_boxes(width, scale, FOLIO_BAR, false);
+            assert_eq!(run.len(), 4, "scale {scale}: four buttons, as ever");
+            let gear = run[0].1;
+            assert_eq!(run[0].0, ChromeTarget::Settings);
+            assert_eq!(
+                (gear[1], gear[3]),
+                (0.0, band),
+                "scale {scale}: the slot is as tall as the bar"
+            );
+            assert_eq!(
+                gear[2] - gear[0],
+                WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale,
+                "scale {scale}: and 46 wide"
+            );
+
+            let titles = strip_titles(2);
+            let (quads, _, sprites) =
+                strip_chrome(scale, &titles, 0, Some(ChromeTarget::Settings), false);
+            assert!(
+                quads
+                    .iter()
+                    .any(|quad| quad.rect == gear && quad.color == palette.caption_hover),
+                "scale {scale}: the wash is the slot itself, with square corners"
+            );
+            assert!(
+                !sprites.iter().any(
+                    |sprite| matches!(sprite.mark, ChromeMark::ControlPill { .. })
+                        && sprite.rect == pixel_snapped(gear)
+                ),
+                "scale {scale}: nothing rounds the Windows caption slot"
+            );
+        }
+    }
+
     /// RED — **on the header, every pixel that is not one of Folio's own boxes
     /// is a window-drag handle** (owner ruling 2026-09-13, §13.11 ⑥).
     ///
-    /// The ruling was made on the band §13.48 ③ left behind: the gear stands in
-    /// a 28-point square inside the 46 the strip still reserves, so sixteen
-    /// points of bar in front of it and six behind it answered nothing at all —
-    /// neither the gear's, nor the window's. §13.19 ⑤ had already named the same
+    /// The ruling was made on the band §13.48 ③ left behind: the gear stood in a
+    /// 28-point square inside the 46 the strip still reserves, so sixteen points
+    /// of bar in front of it and six behind it answered nothing at all —
+    /// neither the gear's, nor the window's. (§13.48 ⑩ has since widened that
+    /// square to 34, which narrows the same band without changing a word of
+    /// this: the boxes are asked of the functions that lay them out, so the
+    /// handle is whatever the complement of them happens to be.) §13.19 ⑤ had
+    /// already named the same
     /// gap on the other axis (the five points of strip above and below a pill)
     /// and left it for a ruling rather than a patch. This is that ruling, and it
     /// is one sentence for both axes and both hosts.
@@ -27992,9 +28617,10 @@ mod tests {",
                     "nor the gear's own box"
                 );
                 // **And the band the gear's box does not fill is the window's**
-                // (owner ruling 2026-09-13, §13.11 ⑥): the 28-point square
-                // stands inside the 46 the strip reserves, and both the strip of
-                // bar in front of it and the points behind it drag.
+                // (owner ruling 2026-09-13, §13.11 ⑥): the square stands inside
+                // the 46 the strip reserves — 34 of it since §13.48 ⑩, which is
+                // why neither pixel below is named as a number — and both the
+                // strip of bar in front of it and the points behind it drag.
                 assert!(
                     handle(gear[0] - 1.0, header / 2.0),
                     "the band in front of the gear's box ({scale}x)"
@@ -40268,6 +40894,16 @@ mod tests {",
     /// A window tall enough for four cards with their bodies — see
     /// [`focus_of_in`].
     const TALL_FIXTURE_HEIGHT: f32 = 1200.0;
+    /// **One mini column, at the fixtures' scale of 1** —
+    /// [`FocusThumbnail::mono_cell`], which the renderer measures off the
+    /// terminal's own face and no fixture can ask for.
+    ///
+    /// The real value, not a round stand-in: §7.1.6b′'s width ruling pinned the
+    /// default face's advance on the machine at **0.5498em**, so 7.5px of
+    /// Consolas is 4.1235 physical pixels here. The grid tests below assert on
+    /// multiples of it, which is the point — a card's columns are this number
+    /// times an integer, and nothing else.
+    const MINI_CELL: f32 = 4.1235;
 
     /// One card's worth of tab, with whatever it has to report.
     fn card_tab(title: &str, pane_count: usize, mark: TabMarkState, pinned: bool) -> TabContent {
@@ -43173,6 +43809,7 @@ mod tests {",
                     tree: &tree,
                     focused: SeatId(1),
                     seats: &seats,
+                    mono_cell: MINI_CELL,
                 });
             }
             let column = window_chrome_with_thumbnails_in(
@@ -43882,6 +44519,7 @@ mod tests {",
             tree: &tree,
             focused: SeatId(1),
             seats: &seats,
+            mono_cell: MINI_CELL,
         })];
         let state = focus_rail(TabLayoutMode::Vertical);
         let column = window_chrome_with_thumbnails_in(
@@ -43978,6 +44616,133 @@ mod tests {",
             cell[3] - rows[held - 1].rect[3] < line,
             "with less than a whole row of slack under it, which is what \
              『填满』 means when the count is floored"
+        );
+    }
+
+    /// The owner's table (2026-09-13): a header row of ASCII, a body row whose
+    /// second cell holds ideographs, and the separator under them. Every row
+    /// carries a vertical border in columns 0, 5 and 12.
+    const TABLE: [&str; 3] = ["│ ID │ Name │", "│ 42 │ 名字 │", "├────┼──────┤"];
+
+    /// Where the vertical borders of one projected row are actually drawn, in
+    /// physical pixels — read off the labels the card emits, which is where a
+    /// glyph's x is decided.
+    fn border_x(rows: &[ChromeLabel], cell: [f32; 4], row: usize) -> Vec<f32> {
+        let top = cell[1] + row as f32 * crate::focus_thumb::MiniMetrics::TERM.line_px(1.0);
+        rows.iter()
+            .filter(|label| {
+                label.rect[1] == top && matches!(label.text.as_str(), "│" | "├" | "┼" | "┤")
+            })
+            .map(|label| label.rect[0])
+            .collect()
+    }
+
+    /// **A table projected onto a card is the same table** (owner's report,
+    /// 2026-09-13; §7.1.6b′ ⑤).
+    ///
+    /// The report was a screenshot: a box-drawing table whose cells hold Chinese
+    /// text, square in the pane and crooked on the card — the `│` of a row
+    /// carrying ideographs standing somewhere else than the `│` of the header
+    /// above it. The cause is one row shaped as one **string**: a CJK glyph
+    /// comes from a fallback face whose advance at 7.5px is not two mini
+    /// columns, so every ideograph in a row shortens the rest of that row, and
+    /// no two rows with different mixes drift alike.
+    ///
+    /// So the assertion is in the unit the grid is in: every border lands at the
+    /// cell's left edge plus its **column** times the advance the row was cut
+    /// at, on all three rows — not near it, on it.
+    ///
+    /// Red gate, and it is the mutation: hand the row to `mini_row_label` whole
+    /// and there is no label whose text is a border at all, so all three rows
+    /// answer with an empty list.
+    #[test]
+    fn a_table_projected_onto_a_card_keeps_its_columns() {
+        let (rows, cell) = transcript_rows_of(TABLE.iter().map(|&row| row.to_owned()).collect());
+        let wanted: Vec<f32> = [0.0, 5.0, 12.0]
+            .into_iter()
+            .map(|column: f32| cell[0] + column * MINI_CELL)
+            .collect();
+        for row in 0..TABLE.len() {
+            assert_eq!(
+                border_x(&rows, cell, row),
+                wanted,
+                "row {row} draws its borders on the grid's columns and not at \
+                 the running advance of the glyphs before them"
+            );
+        }
+    }
+
+    /// **A wide glyph is cut by its columns rather than allowed to shove them**
+    /// — the second half of "the grid wins".
+    ///
+    /// Pinning stops an ideograph from pushing the border after it; this stops
+    /// one drawn wider than the two columns it owns from being *seen* past
+    /// them. The clip on an ideograph's run is exactly two columns wide, which
+    /// is the same thing the pane does to its own wide cells.
+    ///
+    /// Red gate: clip a run to the whole row, as a row label is clipped, and the
+    /// width answered is the rest of the cell instead of two columns.
+    #[test]
+    fn a_wide_glyph_is_clipped_to_the_two_columns_it_owns() {
+        let (rows, cell) = transcript_rows_of(vec![TABLE[1].to_owned()]);
+        let ideograph = rows
+            .iter()
+            .find(|label| label.text == "名")
+            .expect("the ideograph is a run of its own");
+        assert_eq!(
+            ideograph.rect[0],
+            cell[0] + 7.0 * MINI_CELL,
+            "and it stands in the column the grid gave it"
+        );
+        let clip = ideograph.clip.expect("a mini row is clipped to its seat");
+        assert_eq!(
+            [clip[0], clip[2]],
+            [cell[0] + 7.0 * MINI_CELL, cell[0] + 9.0 * MINI_CELL],
+            "an ideograph is shown in its two columns and nowhere else — a \
+             glyph wider than they are is cut by them"
+        );
+    }
+
+    /// **A border immediately after a wide character stands in column two** —
+    /// the drift, isolated to one cluster and read off the card.
+    ///
+    /// Two rows differing only in what fills the first two columns: two Latin
+    /// letters, or one ideograph. On the screen the two rows' borders are one
+    /// pixel apart in x — the ideograph's face is not the row's face and its
+    /// advance is not two cells — and that single difference, repeated per cell,
+    /// is the whole of the crooked table. The card now answers the grid's
+    /// column for both.
+    ///
+    /// Red gate: shape either row as one string and there is no border label to
+    /// find at all.
+    #[test]
+    fn a_border_after_a_wide_character_stands_in_its_own_column() {
+        let (rows, cell) = transcript_rows_of(vec!["ab│".to_owned(), "名│".to_owned()]);
+        let wanted = vec![cell[0] + 2.0 * MINI_CELL];
+        assert_eq!(border_x(&rows, cell, 0), wanted, "after two Latin letters");
+        assert_eq!(border_x(&rows, cell, 1), wanted, "and after one ideograph");
+    }
+
+    /// **A row with nothing but Latin on it is drawn exactly as it was** — the
+    /// cost half of the same ruling.
+    ///
+    /// The face is monospaced and the cell is its own advance, so a stretch of
+    /// ASCII is one run: the card that was right stays one label a row, and the
+    /// only card that pays for the grid is the card that needed it.
+    #[test]
+    fn a_latin_row_is_still_one_label() {
+        let (rows, cell) =
+            transcript_rows_of(vec!["> cargo build".to_owned(), "  Compiling".to_owned()]);
+        assert_eq!(
+            rows.iter()
+                .map(|label| label.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["> cargo build", "  Compiling"],
+            "one label a row, whole"
+        );
+        assert!(
+            rows.iter().all(|label| label.rect[0] == cell[0]),
+            "each beginning at column zero, which is the cell's own left edge"
         );
     }
 
@@ -44156,16 +44921,19 @@ mod tests {",
                 tree: &terminal,
                 focused: SeatId(1),
                 seats: &tail,
+                mono_cell: MINI_CELL,
             }),
             Some(FocusThumbnail {
                 tree: &files,
                 focused: SeatId(1),
                 seats: &rows,
+                mono_cell: MINI_CELL,
             }),
             Some(FocusThumbnail {
                 tree: &preview,
                 focused: SeatId(1),
                 seats: &face,
+                mono_cell: MINI_CELL,
             }),
         ];
         let state = focus_rail(TabLayoutMode::Vertical);
@@ -44308,6 +45076,7 @@ mod tests {",
                 tree: &tree,
                 focused: SeatId(1),
                 seats: &page,
+                mono_cell: MINI_CELL,
             })],
             FocusFrame::SETTLED,
         )
@@ -44362,6 +45131,7 @@ mod tests {",
                 tree: &tree,
                 focused: SeatId(1),
                 seats: &face,
+                mono_cell: MINI_CELL,
             })],
             FocusFrame::SETTLED,
         )
@@ -44426,6 +45196,7 @@ mod tests {",
                 tree: &tree,
                 focused: SeatId(1),
                 seats: &shown,
+                mono_cell: MINI_CELL,
             })],
             FocusFrame::SETTLED,
         )
@@ -44497,6 +45268,7 @@ mod tests {",
                 tree: &tree,
                 focused: SeatId(1),
                 seats: &face,
+                mono_cell: MINI_CELL,
             })],
             FocusFrame::SETTLED,
         )
@@ -44556,11 +45328,13 @@ mod tests {",
                 tree: &preview,
                 focused: SeatId(1),
                 seats: &code,
+                mono_cell: MINI_CELL,
             }),
             Some(FocusThumbnail {
                 tree: &preview,
                 focused: SeatId(1),
                 seats: &prose,
+                mono_cell: MINI_CELL,
             }),
         ];
         let state = focus_rail(TabLayoutMode::Vertical);
@@ -44768,6 +45542,7 @@ mod tests {",
                 tree: &tree,
                 focused: SeatId(1),
                 seats: &content,
+                mono_cell: MINI_CELL,
             }),
             None,
         ];
@@ -44822,6 +45597,7 @@ mod tests {",
                 tree: &tree,
                 focused: SeatId(2),
                 seats: &content,
+                mono_cell: MINI_CELL,
             }),
         ];
         let state = focus_rail(TabLayoutMode::Vertical);
@@ -46796,6 +47572,88 @@ mod tests {",
                 view: FilesView::Files,
             }),
             "and with it on, the half under the pointer answers by name"
+        );
+    }
+
+    /// PIN (user report, 2026-09-14) — **the Git page's hover is a question
+    /// about a point, and it answers `None` off the list.**
+    ///
+    /// This is the function [`crate::Runtime::heal_git_hover`] re-asks when the
+    /// rows have been rebuilt under a pointer that did not move, so the healing
+    /// is only as good as the two answers pinned here: the row a point is really
+    /// in, and *nothing* for a point the list does not reach. Without the second
+    /// one, "the pointer left the panel" would have no way to be said and the
+    /// last row the hand touched would stay lit.
+    #[test]
+    fn the_git_pages_hover_is_asked_of_the_page_that_is_drawn() {
+        let seats = term_beside_files();
+        let column = seats.files().first().copied().expect("a files column");
+        let metrics = seat_metrics(1_000);
+        let layout = solved(&seats, viewport_of(1_600, 900, 1_000), &metrics);
+        let rect = files_pane_rect(&layout, column).expect("the column is placed");
+        let body = files_pane_geometry(rect, 1.0, true).body;
+        let page = crate::git_panel::sample_page_for_tests();
+        let mut pages = BTreeMap::new();
+        pages.insert(column, page.clone());
+        let geometry = crate::git_panel::git_panel_geometry(body, &page, 1.0);
+
+        // Two different rows, each asked at its own leading edge — away from the
+        // verbs in the trailing corner, which are a question of their own.
+        let rows: Vec<usize> = (0..page.rows.len())
+            .filter(|index| {
+                let row = geometry.row_rect(*index);
+                row[3] > row[1] && row[3] <= body[3]
+            })
+            .take(2)
+            .collect();
+        assert_eq!(rows.len(), 2, "the fixture page has rows on screen");
+        for index in rows {
+            let row = geometry.row_rect(index);
+            assert_eq!(
+                hit_git_panel(
+                    &layout,
+                    &pages,
+                    1.0,
+                    f64::from(row[0] + 1.0),
+                    f64::from((row[1] + row[3]) / 2.0),
+                ),
+                Some(ChromeTarget::GitRow {
+                    seat: column,
+                    index,
+                }),
+                "the point inside row {index} names row {index}"
+            );
+        }
+
+        // And a point the list does not reach is on no row at all — which is how
+        // a hover that has left the panel comes back `None` rather than staying
+        // on whatever it last touched.
+        let last = geometry.row_rect(page.rows.len() - 1);
+        assert!(
+            last[3] + 2.0 < body[3],
+            "the fixture page is shorter than the column it is drawn in"
+        );
+        assert_eq!(
+            hit_git_panel(
+                &layout,
+                &pages,
+                1.0,
+                f64::from(last[0] + 1.0),
+                f64::from(last[3] + 2.0),
+            ),
+            None,
+            "below the last row the page answers nothing"
+        );
+        assert_eq!(
+            hit_git_panel(
+                &layout,
+                &pages,
+                1.0,
+                f64::from(body[0] - 4.0),
+                f64::from((last[1] + last[3]) / 2.0)
+            ),
+            None,
+            "and so does a point outside the column"
         );
     }
 

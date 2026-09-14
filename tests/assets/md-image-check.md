@@ -58,3 +58,21 @@ Folio has no network client, so this one is the alt text and a link.
 ![not a picture either](x.png)
 <img src="nor-this.png" alt="">
 ```
+
+## 10. Badges on one line are chips, not cards (§7.1.3k ⑬)
+
+Four pictures from the web in one paragraph, which is how a README opens. They
+stand in a row, wrap like words, and each says its alt text — the last one has
+none, so it says the last segment of its address. Resting on one says why there
+is no picture and shows the address; pressing it opens the address.
+
+[![License](https://img.shields.io/badge/license-MIT-green)](#)
+[![Build](https://img.shields.io/badge/build-passing-brightgreen.svg)](#)
+[![Release](https://img.shields.io/badge/release-v0.3.0-blue)](#)
+[![](https://img.shields.io/badge/no-alt-lightgrey.svg)](#)
+
+And one inside a sentence: the chip for ![a logo](https://img.shields.io/badge/logo-here-orange) sits on this line, between these words.
+
+## 11. A picture from the web alone in its paragraph still gets its card
+
+![A badge standing on its own](https://img.shields.io/badge/alone-yes-purple.svg)

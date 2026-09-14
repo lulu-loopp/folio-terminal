@@ -65,6 +65,17 @@
 //! whole graph at once, items and target together, so there is no window in
 //! which AppKit holds a pointer to an object this module has let go of.
 //!
+//! # The third door: a clipboard row the responder chain declined
+//!
+//! [`the_chain_declined`] is what the application delegate's `copy:` and
+//! `paste:` reach (T-MAC-EDIT-CLIPBOARD, `docs/DESIGN.md` §13.26 ⑨). It builds
+//! nothing and retains nothing; it is one statement on the very sender the two
+//! surfaces above share, for the reason they share it. What makes it a door of
+//! this module rather than of [`crate::app_delegate`] is that the press it
+//! reports **is a press on this bar** — the Edit menu's Copy row, sent with no
+//! target — and the only difference from `folioMenuChosen:` is how far AppKit
+//! had to walk before Folio was the one left to answer.
+//!
 //! # What an action is allowed to do
 //!
 //! One statement: hand the choice to the sender. See [`crate::menu`]'s header
@@ -93,8 +104,8 @@ use objc2_foundation::NSString;
 
 use crate::macos_impl::window_thread;
 use crate::menu::{
-    MenuAction, MenuChoice, MenuChord, MenuEntry, MenuKey, MenuList, MenuPlan, MenuRole,
-    MenuSender, MenuSurface, StandardMenuAction,
+    AppMenuAction, MenuAction, MenuChoice, MenuChord, MenuEntry, MenuKey, MenuList, MenuPlan,
+    MenuRole, MenuSender, MenuSurface, StandardMenuAction,
 };
 
 // ── the target AppKit sends to ─────────────────────────────────────────────
@@ -462,6 +473,39 @@ pub(crate) fn dock_menu() -> *mut NSMenu {
     })
 }
 
+/// **A clipboard row of the Edit menu that reached the end of the responder
+/// chain** (T-MAC-EDIT-CLIPBOARD, `docs/DESIGN.md` §13.26 ⑨).
+///
+/// Called from the `copy:` and `paste:` the application delegate now answers —
+/// `macos_app` — and from nothing else. AppKit sends a
+/// [`MenuAction::Standard`] row with **no target**, walks the key window's
+/// responder chain for something that implements the selector, and tries the
+/// application delegate last of all. So being here is a fact and not a guess:
+/// **no text responder answered**, and whatever the reader is looking at is one
+/// of Folio's own surfaces.
+///
+/// It goes out on the installed `send` rather than on a channel of its own,
+/// which is this module's rule one surface along: the press came off the menu
+/// bar a millisecond ago, and a second inbox would be a second order for two
+/// presses a reader made in one gesture. The surface is [`MenuSurface::Bar`]
+/// because that is where it was pressed — a Dock menu carries no Edit rows and
+/// has no responder chain to decline them.
+///
+/// Silent in the two states that are not faults: while the graph is borrowed,
+/// which is a press arriving during an install, and before [`install`] has been
+/// through at all, which is a press against a bar that does not exist.
+pub(crate) fn the_chain_declined(action: AppMenuAction) {
+    INSTALLED.with(|cell| {
+        let Ok(borrowed) = cell.try_borrow() else {
+            return;
+        };
+        let Some(installed) = borrowed.as_ref() else {
+            return;
+        };
+        (installed.send)(MenuSurface::Bar, MenuChoice::Application(action));
+    });
+}
+
 /// The holder item on the bar, and the menu hanging off it.
 ///
 /// A menu on the bar is two objects: an `NSMenuItem` with no action at all, and
@@ -600,6 +644,40 @@ mod tests {
         assert_eq!(
             choice_of(MenuAction::Standard(StandardMenuAction::Copy)),
             None
+        );
+    }
+
+    /// PIN (T-MAC-EDIT-CLIPBOARD) — **the clipboard floor speaks on the bar's
+    /// own sender, and says the press came from the bar.**
+    ///
+    /// The two halves that a second channel would break, asserted in the source
+    /// text because the sender is only reachable with a real `NSMenu` installed
+    /// on a real `NSApplication` — which is `tests/macos_menu_bar.rs`' whole
+    /// reason for existing, and where the live half is measured.
+    ///
+    /// MUTATIONS: post the choice through a channel of this function's own —
+    /// the first assertion goes red, and a Copy chosen a millisecond after
+    /// `New window` can overtake it; report it as `MenuSurface::Dock` — the
+    /// second goes red, and `bt-app` would raise the window the reader was last
+    /// in for a press made in the window they are looking at.
+    #[test]
+    fn a_declined_clipboard_row_comes_back_on_the_bars_own_sender() {
+        let source = include_str!("macos_menu.rs");
+        let (_, body) = source
+            .split_once("pub(crate) fn the_chain_declined(action: AppMenuAction) {")
+            .expect("the floor under the responder chain is this module's");
+        let (body, _) = body.split_once("\n}\n").expect("and it is one function");
+        assert!(
+            body.contains("(installed.send)("),
+            "a declined clipboard row is parked somewhere other than the menu's own inbox"
+        );
+        assert!(
+            body.contains("MenuSurface::Bar"),
+            "a row of the menu bar is reported as coming from somewhere else"
+        );
+        assert!(
+            body.contains("MenuChoice::Application(action)"),
+            "the verb is rewritten on the way out instead of being carried"
         );
     }
 

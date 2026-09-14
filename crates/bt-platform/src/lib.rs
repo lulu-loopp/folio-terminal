@@ -124,6 +124,17 @@ impl NativeWindow {
         windows::Win32::Foundation::HWND(self.handle.get() as *mut std::ffi::c_void)
     }
 
+    /// The number behind the handle, for this crate and nothing above it.
+    ///
+    /// `pub(crate)` for [`NativeWindow::as_hwnd`]'s reason: what the door exists
+    /// to hide is the number, and a public reader would hand it back. Its one
+    /// caller is [`hotkey::Foreground`], which on this platform remembers a
+    /// window and on macOS remembers a process — one field, two currencies, and
+    /// this is how the Windows one gets in.
+    pub(crate) const fn as_handle(self) -> NonZeroIsize {
+        self.handle
+    }
+
     /// The window an `HWND` this crate received from Win32 names, or `None` for
     /// the null handle every failing Win32 call answers with.
     pub(crate) fn from_hwnd(hwnd: windows::Win32::Foundation::HWND) -> Option<Self> {
@@ -3117,6 +3128,20 @@ pub mod attention_pipe;
 #[cfg(all(not(windows), not(unix)))]
 #[path = "attention_pipe_portable.rs"]
 pub mod attention_pipe;
+
+/// **Who is at the other end of a connected Unix socket** — the one question
+/// both Unix doors in this crate ask, in the one place the platforms spell it
+/// differently (T-CI-PORTABLE).
+///
+/// The doorbell above and the launch door below each refuse a peer whose uid is
+/// not this process's own, and the launch door asks one thing more, the peer's
+/// process id. `getpeereid` answers the first on Darwin and **does not exist on
+/// Linux**, where `getsockopt(SO_PEERCRED)` answers both at once; a copy of that
+/// difference in each door is two places for one platform fact to be wrong in,
+/// which is what this module is instead of.
+#[cfg(unix)]
+#[path = "peer_unix.rs"]
+pub(crate) mod peer;
 
 /// **The second launch's door into the first** — one well-known named pipe per data directory
 /// (`docs/DESIGN.md` §7.59).
@@ -10975,6 +11000,18 @@ pub use macos_app::delegate_answers_the_four_selectors;
 #[cfg(target_os = "macos")]
 pub use macos_app::{delegate_answers_the_dock_menu, winit_delegate_already_answers_the_dock_menu};
 
+/// **Whether AppKit's delegate answers the Edit menu's two clipboard rows**
+/// (T-MAC-EDIT-CLIPBOARD).
+///
+/// On [`delegate_answers_the_dock_menu`]' footing, for the same proof and
+/// against the same object. `copy:` and `paste:` are sent with **no target**,
+/// so `-[NSApplication targetForAction:]` walks the responder chain and tries
+/// this object last; a delegate that does not answer them is an `Edit ▸ Copy`
+/// over a terminal pane that reaches nobody, which is exactly the defect this
+/// ticket was raised for.
+#[cfg(target_os = "macos")]
+pub use macos_app::delegate_answers_the_edit_menus_clipboard_rows;
+
 /// **The Services provider object — Finder's *Services ▸ Open in Folio***
 /// (M4-9).
 ///
@@ -17260,6 +17297,11 @@ mod macos_attention_signature_tests {
     /// doors rather than between two platforms.
     const LAUNCH_UNIX: &str = include_str!("launch_pipe_unix.rs");
 
+    /// **The module both Unix doors take their peer's credentials from**
+    /// (T-CI-PORTABLE) — the one place the kernel is asked who is at the other
+    /// end, and therefore the one place `getpeereid` is written.
+    const PEER: &str = include_str!("peer_unix.rs");
+
     /// The fields of a struct, with its documentation and its blank lines taken
     /// out — what a caller can actually name.
     fn fields(source: &str, item: &str) -> Vec<String> {
@@ -17428,19 +17470,36 @@ mod macos_attention_signature_tests {
     /// door next to it would refuse every real caller this one has — which is a
     /// failure that looks exactly like "hooks are not installed".
     ///
-    /// MUTATION: paste `vet_executable` into the attention arm and the second
-    /// assertion names it.
+    /// **The call itself moved and the claim did not** (T-CI-PORTABLE):
+    /// `getpeereid` is Darwin's and does not exist on Linux, so both doors now
+    /// take their peer off `crate::peer`, which has an arm for each. What the
+    /// doorbell asks that module for is still the *narrow* door — the uid alone
+    /// — because a door that asked the kernel for a process id it will never
+    /// look anything up about is a door whose next reader has every reason to
+    /// start using it.
+    ///
+    /// MUTATION: paste `vet_executable` into the attention arm, or point it at
+    /// `crate::peer::credentials`, and the last assertion names it.
     #[test]
     fn the_doorbell_asks_who_you_are_and_not_what_you_are_running() {
         assert!(
-            UNIX_ARM.contains("libc::getpeereid("),
+            UNIX_ARM.contains("crate::peer::uid(&stream)"),
             "the peer's user is asked of the kernel, not read out of a frame"
+        );
+        assert!(
+            PEER.contains("libc::getpeereid(") && PEER.contains("libc::SO_PEERCRED"),
+            "the shared door no longer asks both kernels for the user off the socket"
         );
         assert!(
             LAUNCH_UNIX.contains("fn vet_executable("),
             "the launch door still checks the image it is talking to"
         );
-        for absent in ["proc_pidpath", "current_exe", "LOCAL_PEERPID"] {
+        for absent in [
+            "proc_pidpath",
+            "current_exe",
+            "LOCAL_PEERPID",
+            "crate::peer::credentials",
+        ] {
             assert!(
                 !UNIX_ARM.contains(absent),
                 "the doorbell looked up its peer's image (`{absent}`), which would refuse \

@@ -48,7 +48,7 @@ Every key here can be changed on the Shortcuts page in Settings. Changing one wr
 | Ctrl+L | Cmd+L | Address | On a page | `web-address` |
 | Ctrl+Shift+L | Shift+Cmd+L | Open an address in a new preview |  | `window-address` |
 | F12 | Shift+Cmd+I | Developer tools | On a page | `web-devtools` |
-| Win+` | Not set | Summon the terminal |  | `summon-quake` |
+| Win+` | Ctrl+` | Summon the terminal |  | `summon-quake` |
 
 ## 中文
 
@@ -94,4 +94,4 @@ Every key here can be changed on the Shortcuts page in Settings. Changing one wr
 | Ctrl+L | Cmd+L | 地址 | 在网页里时 | `web-address` |
 | Ctrl+Shift+L | Shift+Cmd+L | 打开地址 |  | `window-address` |
 | F12 | Shift+Cmd+I | 开发者工具 | 在网页里时 | `web-devtools` |
-| Win+` | 未设置 | 唤出终端 |  | `summon-quake` |
+| Win+` | Ctrl+` | 唤出终端 |  | `summon-quake` |
