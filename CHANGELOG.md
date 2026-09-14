@@ -177,7 +177,19 @@ Nothing yet.
   and under the pointer the word and its triangle brighten to the colour a row
   of the files column takes under your hand, with no block at any time. The
   whole row is still what you press.
-- Keep focus cards on the same content when resizing, and make Alt+wheel respond immediately when reversing at the oldest content.
+- **A focus card keeps its place while you resize the window, and comes back to
+  it when you resize the window back.** A card you have scrolled back through a
+  shell's output holds on to the line at its bottom edge, the way the shell
+  itself holds on to its prompt: make the window shorter and the card loses
+  lines off its top, make it taller and it gains them there, and that bottom
+  line stays where it is either way. So a resize and its exact reverse leave the
+  card showing exactly what it was showing before — dragging a window out and
+  back no longer drops the card at the newest line. A long line the pane has
+  become wide enough to draw whole is counted as the one line it is, so the card
+  lands on the same content at either width. A card you have not scrolled back
+  goes on following the newest line, whatever the window does. And Alt+wheel
+  moves the card by whole lines after any resize, reversing at once at the
+  oldest content.
 - **On a Mac, tabs now take the whole width of the title bar.** The tab strip was setting aside room for four window buttons on a window that carries one — macOS draws minimise, zoom and close at the other end of the bar — so the tabs were squeezed to their profile marks, their names hidden, with a wide empty band before the settings gear. Seven tabs in a 934-point window now stand 91 points wide with their names showing instead of 72 without.
 - **Every picker in Settings that offers profiles now shows their marks.** The
   summoned terminal's `Profile for new tabs` listed its profiles as bare words,

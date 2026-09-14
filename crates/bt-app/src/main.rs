@@ -153850,6 +153850,19 @@ mod tests {
         focus_thumb::transcript_tail(&leaf.session, 40, 4, leaf.card.skip()).0[0].clone()
     }
 
+    /// The line at the card's **bottom** edge — the one it is anchored by
+    /// (T-CARD-ANCHOR-BOTTOM; §7.1.6b′ ④). A card is a picture of a terminal
+    /// and a terminal's own anchor is its bottom, so this is the line a resize
+    /// is answerable for, and the line these tests read a resize by.
+    fn card_anchor_bottom(leaf: &mut LeafSession) -> String {
+        leaf.card.prepare(&mut leaf.session, 4);
+        let window = focus_thumb::transcript_tail(&leaf.session, 40, 4, leaf.card.skip()).0;
+        window
+            .last()
+            .expect("a card of four rows over a transcript this deep draws four")
+            .clone()
+    }
+
     fn card_anchor_widen(leaf: &mut LeafSession) {
         schedule_leaf_grid_change(
             leaf,
@@ -153876,6 +153889,10 @@ mod tests {
     /// R=4, maximum=116: H007 becomes H001. These three tests independently
     /// inspect projection output; replacing anchor resolution with raw skip
     /// must fail preservation, upward movement, and reversal.
+    ///
+    /// The anchored line is H010, at the card's bottom edge
+    /// (T-CARD-ANCHOR-BOTTOM); H007 is what a four-row card standing on it
+    /// draws at its top, and the reflow answers for both.
     #[test]
     fn card_anchor_preserves_h007_across_reflow() {
         let mut leaf = card_anchor_fixture();
@@ -153971,31 +153988,42 @@ mod tests {
     /// Removing canonical reseating strands a live card in the preceding
     /// generation. Removing within-line preservation loses the second fragment
     /// when widening and narrowing through a line with the same source text.
+    ///
+    /// **Read at the bottom edge** (T-CARD-ANCHOR-BOTTOM): `L013` is the line
+    /// the card is anchored by, drawn in pieces at ten columns and whole at
+    /// forty. The first and last assertions are the same assertion — the width
+    /// went out and came back, and so did the card.
     #[test]
     fn card_anchor_live_offset_survives_local_and_canonical_reflow() {
         let mut leaf = card_anchor_fixture();
         leaf.card = focus_thumb::CardPosition::new(15);
+        assert_eq!(card_anchor_bottom(&mut leaf), "L013:abcde");
         assert_eq!(card_anchor_first(&mut leaf), "fghijk");
         card_anchor_widen(&mut leaf);
-        assert_eq!(card_anchor_first(&mut leaf), "L011:abcdefghijk");
+        assert_eq!(card_anchor_bottom(&mut leaf), "L013:abcdefghijk");
         card_anchor_settle(&mut leaf);
-        assert_eq!(card_anchor_first(&mut leaf), "L011:abcdefghijk");
+        assert_eq!(card_anchor_bottom(&mut leaf), "L013:abcdefghijk");
         card_anchor_resize(&mut leaf, 10, 40, LeafOnStage::Shown);
+        assert_eq!(card_anchor_bottom(&mut leaf), "L013:abcde");
         assert_eq!(card_anchor_first(&mut leaf), "fghijk");
         card_anchor_settle(&mut leaf);
-        assert_eq!(card_anchor_first(&mut leaf), "fghijk");
+        assert_eq!(card_anchor_bottom(&mut leaf), "L013:abcde");
     }
 
     #[test]
     fn card_anchor_height_only_change_preserves_live_content() {
         let mut leaf = card_anchor_fixture();
         leaf.card = focus_thumb::CardPosition::new(16);
+        assert_eq!(card_anchor_bottom(&mut leaf), "fghijk");
         assert_eq!(card_anchor_first(&mut leaf), "L011:abcde");
         card_anchor_resize(&mut leaf, 10, 10, LeafOnStage::Shown);
+        assert_eq!(card_anchor_bottom(&mut leaf), "fghijk");
         assert_eq!(card_anchor_first(&mut leaf), "L011:abcde");
         card_anchor_settle(&mut leaf);
-        // Finalizing displaced wrapped fragments joins them into a frozen line.
-        assert!(card_anchor_first(&mut leaf).starts_with("L011:"));
+        // Finalizing displaced wrapped fragments joins them into a frozen line,
+        // and the card's bottom edge is that line: the anchored tail of `L012`
+        // is now inside it, and what stands at the edge is the whole of it.
+        assert_eq!(card_anchor_bottom(&mut leaf), "L012:abcdefghijk");
     }
 
     #[test]
@@ -154062,7 +154090,9 @@ mod tests {
     }
 
     /// A newer equal-text line without any registered anchors must not steal
-    /// the older card's occurrence. The following distinct row proves identity.
+    /// the older card's occurrence. The distinct row above the card's anchored
+    /// bottom edge proves identity: `L004` stands over the fifth line and
+    /// `L014` over the fifteenth, and the two `same:` lines are one text.
     #[test]
     fn card_anchor_keeps_older_duplicate_occurrence() {
         let mut leaf = leaf_saying("");
@@ -154083,16 +154113,16 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\r\n");
         leaf.session.feed(text.as_bytes()).unwrap();
-        leaf.card = focus_thumb::CardPosition::new(28);
-        assert_eq!(card_anchor_first(&mut leaf), "same:abcde");
+        leaf.card = focus_thumb::CardPosition::new(31);
+        assert_eq!(card_anchor_bottom(&mut leaf), "same:abcde");
         card_anchor_resize(&mut leaf, 40, 40, LeafOnStage::Shown);
-        assert_eq!(card_anchor_first(&mut leaf), "same:abcdefghijk");
+        assert_eq!(card_anchor_bottom(&mut leaf), "same:abcdefghijk");
         let projected = focus_thumb::transcript_tail(&leaf.session, 40, 4, leaf.card.skip()).0;
-        assert_eq!(projected[1], "L006:abcdefghijk");
+        assert_eq!(projected[2], "L004:abcdefghijk");
         card_anchor_settle(&mut leaf);
-        assert_eq!(card_anchor_first(&mut leaf), "same:abcdefghijk");
+        assert_eq!(card_anchor_bottom(&mut leaf), "same:abcdefghijk");
         let projected = focus_thumb::transcript_tail(&leaf.session, 40, 4, leaf.card.skip()).0;
-        assert_eq!(projected[1], "L006:abcdefghijk");
+        assert_eq!(projected[2], "L004:abcdefghijk");
     }
 
     /// One shell with a word in it that no other shell in the test has.
