@@ -150,6 +150,8 @@ Nothing yet.
 
 ### Fixed
 
+- A terminal showing formulas no longer stops when the window leaves full screen or changes display.
+
 - **On a Mac, the candidate list follows the caret onto a second display.**
   Typing Chinese in a terminal pane on a display other than the main one left
   the list of candidates floating in the middle of the window instead of
