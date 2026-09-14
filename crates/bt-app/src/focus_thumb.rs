@@ -1042,6 +1042,26 @@ struct CardRow {
 }
 
 impl CardRow {
+    /// The position to register when **this line is the card's bottom edge**.
+    ///
+    /// **The line's last carrier and not its first.** The walk climbs from the
+    /// screen's bottom upwards and prepends each carrier it joins, so `sources`
+    /// reads top-to-bottom: `sources[0]` is where the line begins and
+    /// `sources.last()` is where it ends. While the two are one drawn row they
+    /// are interchangeable, and at a width that breaks the line apart again
+    /// they are two rows with everything between them — so anchoring a bottom
+    /// edge to `sources[0]` would, on every narrowing, push the rest of the
+    /// line off the bottom of the card and the card would come back short.
+    ///
+    /// The end of the line is the edge the card is drawn to, so the end of the
+    /// line is what the card is anchored by.
+    fn bottom_source(&self) -> ContentAnchor {
+        self.sources
+            .last()
+            .expect("a card line is assembled out of at least one captured row")
+            .clone()
+    }
+
     fn contains(&self, anchor: &ContentAnchor) -> bool {
         self.sources.iter().any(|source| match (source, anchor) {
             (
@@ -1188,6 +1208,41 @@ fn card_climb(
 /// The card owns one registered source position, independently of the pane's
 /// viewport. `skip` is only a derived projection coordinate (or an old session
 /// file's numeric fallback until the first nonempty projection).
+///
+/// **The anchor is the line at the card's bottom edge** (owner's ruling,
+/// 2026-09-14; §7.1.6b′ ④). A terminal's own anchor is its bottom — that is
+/// where the prompt is, that is where new output arrives, and that is the edge
+/// a reader is looking at — and it is also the only anchor a resize cannot
+/// quietly spend. Anchoring the top row made the card's position mean *the
+/// first line shown*, and a window that grows taller then asks for more lines
+/// **below** a line that is already close to the newest one: the ask runs past
+/// the live bottom, the offset is clamped at zero, and with it the registered
+/// anchor is dropped ([`Self::prepare`] only keeps one while `skip > 0`). The
+/// reverse resize then has nothing left to return to, and the card that came
+/// back from a size round trip was showing the tail rather than the reader's
+/// place in it.
+///
+/// Anchored at the bottom the offset is a distance from the newest line, which
+/// no height can clamp: a shorter card drops rows off its top, a taller one
+/// adds them there, and neither touches the line the card is anchored by. So
+/// the three properties hold together —
+///
+/// 1. a resize keeps the same content in view, measured at the bottom edge;
+/// 2. `Alt`+wheel keeps moving the card by whole rows after any resize;
+/// 3. **a resize and its exact reverse leave the card showing exactly what it
+///    showed before**, because nothing in between was thrown away.
+///
+/// The offset is re-derived from the anchor through [`card_climb`] every time
+/// the width changes, so a line that re-wraps — joined at a width the pane has
+/// grown into, in pieces again at a width it has not — is counted in the rows
+/// the pane is drawing now and not the rows it drew then.
+///
+/// **An anchored card is never clamped.** An anchor that ends up higher than a
+/// grown card can reach keeps its true offset, and [`transcript_tail`] draws
+/// the clamped window; clamping what is *stored* would be the same loss again,
+/// one resize later. Only the numeric fallback of a restored session is clamped
+/// on arrival, because there is no anchor behind it to keep a distance this
+/// transcript cannot honour.
 #[derive(Debug)]
 pub(crate) struct CardPosition {
     anchor: Option<AnchorId>,
@@ -1230,10 +1285,18 @@ impl CardPosition {
             },
             anchor,
         );
+        // **The anchor's own distance from the newest line**, and no arithmetic
+        // on the card's height: the anchored line is the card's bottom edge, so
+        // the index the walk found it at *is* the skip. A card whose anchor has
+        // fallen out of scrollback altogether has nothing left to be anchored
+        // by and rests on the tail, which is where `prepare` then unregisters
+        // it. The numeric fallback of a restored session is tail-relative in the
+        // same units, and is clamped because there is no anchor behind it to
+        // keep a distance the transcript cannot honour.
         let skip = if self.anchor.is_some() {
             anchor
                 .and_then(|anchor| climb.iter().position(|row| row.contains(anchor)))
-                .map_or(0, |index| (index + 1).saturating_sub(rows))
+                .unwrap_or(0)
         } else {
             self.skip.min(climb.len().saturating_sub(rows))
         };
@@ -1270,18 +1333,21 @@ impl CardPosition {
             return;
         } // A restored numeric fallback awaits content.
         self.skip = skip;
-        let first = &climb[(skip + rows).min(climb.len()) - 1];
+        // `skip` came out of the walk above — either as the index the anchor
+        // was found at, or clamped inside a nonempty climb — so the card's
+        // bottom edge is a row this climb has.
+        let bottom = &climb[skip];
         let retained = self
             .anchor
             .and_then(|id| session.anchor(id).ok())
-            .is_some_and(|anchor| first.contains(anchor));
+            .is_some_and(|anchor| bottom.contains(anchor));
         if !retained {
-            self.set_anchor(session, (skip > 0).then(|| first.sources[0].clone()));
+            self.set_anchor(session, (skip > 0).then(|| bottom.bottom_source()));
         }
     }
 
     /// Whole detents select adjacent CURRENT rows. Clamp before registering the
-    /// reachable first row, so overflow cannot survive and delay a reversal.
+    /// reachable bottom row, so overflow cannot survive and delay a reversal.
     pub(crate) fn aim(&mut self, session: &mut DualPlaneSession, rows: usize, steps: i32) -> bool {
         self.prepare(session, rows);
         if rows == 0 || steps == 0 {
@@ -1296,13 +1362,22 @@ impl CardPosition {
         let aimed = requested.min(climb.len().saturating_sub(rows));
         let changed = aimed != self.skip;
         self.skip = aimed;
-        let anchor = (aimed > 0).then(|| climb[aimed + rows - 1].sources[0].clone());
+        // The row the aim put at the card's **bottom** edge. A card aimed back
+        // onto the tail registers nothing: resting on the newest line is not a
+        // distance from it, and an anchor there would stop the card following
+        // the output the way every card that was never aimed does.
+        let anchor = (aimed > 0).then(|| climb[aimed].bottom_source());
         self.set_anchor(session, anchor);
         changed
     }
 
     /// Keep the existing on-disk u32. Source IDs belong to this session's
     /// document, so save the resolved tail-relative fallback, not those IDs.
+    ///
+    /// The number is the anchored line's own distance from the newest one, in
+    /// the rows this pane is drawing at the width it has now — the same
+    /// coordinate a restored session hands back to [`Self::new`], and no longer
+    /// one that has to be read together with the card's height.
     pub(crate) fn persisted_skip(&self, session: &DualPlaneSession) -> u32 {
         let skip = if self.anchor.is_some() {
             self.resolved(session, self.rows).1
@@ -2714,6 +2789,222 @@ mod tests {
             transcript_tail(&shell, 40, 1, position.skip()).0,
             ["abcdefghijklmnop"]
         );
+    }
+
+    /// A shell whose scrollback is **wrapped at the width it was captured on**,
+    /// and whose live screen holds nothing any of these widths re-wraps.
+    ///
+    /// Born twelve columns wide and printing twenty-eight-column lines, so each
+    /// `H..` line covered three rows of the grid it was printed on; the staging
+    /// quota of one row is what freezes it as two pieces rather than one whole
+    /// line (`enforce_staging_quota` splits the candidate the moment a second
+    /// row joins it, and marks the head `wrap_split`). At twenty-four columns
+    /// the join walk draws the pieces as one line again; back at twelve they
+    /// are two. That is the round trip the four tests below make, and the
+    /// reason a card's offset cannot be a number carried across a resize.
+    ///
+    /// **Nothing is left where a resize could rewrite it.** Every `H..` line is
+    /// frozen before the first resize — the third row of each completes its
+    /// candidate, so staging is empty — and frozen lines keep the geometry they
+    /// were captured on for ever. What is left on the screen is three blank
+    /// rows and a four-column word, which every width below re-wraps into
+    /// itself. So the transcript is the same transcript at every width these
+    /// tests visit, and the only things moving are the two the card is a
+    /// function of: the pane's width, and the card's own height.
+    fn a_wrapped_shell() -> DualPlaneSession {
+        let mut shell = DualPlaneSession::with_quotas(
+            NonZeroU32::new(12).expect("12 is not zero"),
+            NonZeroU32::new(4).expect("4 is not zero"),
+            std::num::NonZeroUsize::new(1).expect("1 is not zero"),
+            std::num::NonZeroUsize::new(200).expect("200 is not zero"),
+        );
+        for number in 1..=12 {
+            shell
+                .feed(format!("H{number:02}:abcdefghijklmnopqrstuvwx\r\n").as_bytes())
+                .expect("a shell takes its own output");
+        }
+        // Three more rows, so that the last line printed is off the screen with
+        // the rest of them and what is left on it is blank but for `tail`.
+        shell
+            .feed(b"\r\n\r\n\r\ntail")
+            .expect("a shell takes its own output");
+        let lines = card_lines(&shell);
+        assert_eq!(
+            // `transcript_tail` hands its window back the way a card draws it,
+            // oldest first, so the newest line of the transcript is its last.
+            lines.last().map(String::as_str),
+            Some("tail"),
+            "the fixture's newest card line: {lines:?}"
+        );
+        assert!(
+            lines.len() > 20,
+            "the fixture must give the cards something to be aimed at: {lines:?}"
+        );
+        shell
+    }
+
+    fn resize_shell(shell: &mut DualPlaneSession, columns: u32) {
+        shell
+            .resize(
+                NonZeroU32::new(columns).expect("the tests resize to real widths"),
+                NonZeroU32::new(4).expect("4 is not zero"),
+            )
+            .expect("a pane is resized when its window is");
+    }
+
+    /// Every line the card could draw at the width the pane has now.
+    fn card_lines(shell: &DualPlaneSession) -> Vec<String> {
+        transcript_tail(shell, 80, 500, 0).0
+    }
+
+    /// T-CARD-ANCHOR-BOTTOM (i), owner's 2026-09-14 report: **a resize and its
+    /// exact reverse leave the card showing exactly what it showed before** —
+    /// here the shrink, whose narrower pane puts every line the wider one had
+    /// joined back into pieces.
+    ///
+    /// Mutation: resolve the offset once and carry the number across the two
+    /// widths instead of deriving it from the anchor through [`card_climb`]
+    /// each time. The card comes back at the twelve-column distance from a
+    /// twenty-four-column tail — around half as far up the transcript as it
+    /// was — and both assertions at the end fail.
+    #[test]
+    fn a_card_comes_back_from_a_shrink_and_a_grow_showing_what_it_showed() {
+        let mut shell = a_wrapped_shell();
+        resize_shell(&mut shell, 24);
+        let joined = card_lines(&shell);
+        let mut position = CardPosition::new(9);
+        position.prepare(&mut shell, 5);
+        let skip = position.persisted_skip(&shell);
+        let seen = transcript_tail(&shell, 40, 5, position.skip()).0;
+        assert_eq!(seen.len(), 5, "the fixture must fill the card: {seen:?}");
+        assert!(skip > 0, "the card must be standing off the tail: {seen:?}");
+
+        // Narrower, and the card shorter with it.
+        resize_shell(&mut shell, 12);
+        position.prepare(&mut shell, 3);
+        let split = card_lines(&shell);
+        assert_ne!(
+            split.len(),
+            joined.len(),
+            "the narrow pane must break the lines the wide one joined"
+        );
+
+        // And back to exactly the size it was.
+        resize_shell(&mut shell, 24);
+        position.prepare(&mut shell, 5);
+        assert_eq!(
+            card_lines(&shell),
+            joined,
+            "the transcript itself did not come back: nothing below can be read"
+        );
+        assert_eq!(position.persisted_skip(&shell), skip);
+        assert_eq!(transcript_tail(&shell, 40, 5, position.skip()).0, seen);
+    }
+
+    /// T-CARD-ANCHOR-BOTTOM (ii): the same round trip the other way about, and
+    /// **the one the owner reported**. A card grown taller is asked for more
+    /// lines; anchored at its top row it asked for them *below* the line it was
+    /// holding, ran past the newest line, and was clamped onto the tail — which
+    /// [`CardPosition::prepare`] answers by dropping the anchor, so the shrink
+    /// back had nothing left to return to.
+    ///
+    /// Mutation: anchor the card's top row again — register
+    /// `climb[skip + rows - 1]` and resolve `skip` as `index + 1 - rows` — and
+    /// the card comes back resting on the tail with its offset at zero.
+    #[test]
+    fn a_card_comes_back_from_a_grow_and_a_shrink_showing_what_it_showed() {
+        let mut shell = a_wrapped_shell();
+        let mut position = CardPosition::new(9);
+        position.prepare(&mut shell, 3);
+        let skip = position.persisted_skip(&shell);
+        let seen = transcript_tail(&shell, 40, 3, position.skip()).0;
+        assert_eq!(seen.len(), 3, "the fixture must fill the card: {seen:?}");
+        assert!(skip > 0, "the card must be standing off the tail: {seen:?}");
+
+        // Wider, and tall enough that the anchored line is nearer the newest
+        // line than the card is tall — the shape that spent the anchor.
+        resize_shell(&mut shell, 24);
+        position.prepare(&mut shell, 13);
+        assert!(
+            position.persisted_skip(&shell) > 0,
+            "a card grown taller is still standing off the tail"
+        );
+
+        // And back to exactly the size it was.
+        resize_shell(&mut shell, 12);
+        position.prepare(&mut shell, 3);
+        assert_eq!(position.persisted_skip(&shell), skip);
+        assert_eq!(transcript_tail(&shell, 40, 3, position.skip()).0, seen);
+    }
+
+    /// T-CARD-ANCHOR-BOTTOM (iii): a card nobody has aimed rests on the newest
+    /// line, and no resize moves it off — nor quietly nails it to the line that
+    /// happened to be newest while the window was being dragged.
+    ///
+    /// Mutation: anchor a resting card too — drop `prepare`'s `skip > 0`
+    /// condition and the early return above it. The offset still reads zero all
+    /// the way down the resizes, and the last assertion is what fails: the card
+    /// holds the line that was newest at the last resize while the shell prints
+    /// past it.
+    #[test]
+    fn a_card_resting_on_the_tail_stays_there_through_every_resize() {
+        let mut shell = a_wrapped_shell();
+        let mut position = CardPosition::new(0);
+        position.prepare(&mut shell, 5);
+        assert_eq!(position.persisted_skip(&shell), 0);
+        for (columns, rows) in [(24, 13), (6, 2), (12, 5)] {
+            resize_shell(&mut shell, columns);
+            position.prepare(&mut shell, rows);
+            assert_eq!(
+                position.persisted_skip(&shell),
+                0,
+                "{columns} columns, {rows} rows"
+            );
+            assert_eq!(position.skip(), 0, "{columns} columns, {rows} rows");
+        }
+        shell
+            .feed(b"\r\nnewest")
+            .expect("a shell takes its own output");
+        position.prepare(&mut shell, 5);
+        assert_eq!(position.persisted_skip(&shell), 0);
+        assert_eq!(
+            transcript_tail(&shell, 40, 1, position.skip()).0,
+            ["newest"]
+        );
+    }
+
+    /// T-CARD-ANCHOR-BOTTOM (iv): `Alt`+wheel keeps moving the card **by whole
+    /// rows** after a resize, in both directions and at either width — the
+    /// first property T-CARD-ANCHOR was raised for, and the one a bottom anchor
+    /// must not cost.
+    ///
+    /// Mutation: register the aimed anchor at `climb[aimed + rows - 1]` again.
+    /// The detent still moves the card, but the offset it resolves to is the
+    /// card's height away from the one it was aimed at, so every assertion
+    /// below fails by that many rows.
+    #[test]
+    fn a_card_still_moves_by_whole_rows_after_a_resize() {
+        let mut shell = a_wrapped_shell();
+        let mut position = CardPosition::new(0);
+        position.prepare(&mut shell, 5);
+        resize_shell(&mut shell, 24);
+        position.prepare(&mut shell, 4);
+
+        assert!(position.aim(&mut shell, 4, 6));
+        assert_eq!(position.persisted_skip(&shell), 6);
+        assert!(position.aim(&mut shell, 4, 1));
+        assert_eq!(position.persisted_skip(&shell), 7);
+
+        // Narrower again: the anchored line stands a different number of rows
+        // off the newest one when the lines under it are in pieces, and a
+        // detent is still one of whatever rows the card is drawing now.
+        resize_shell(&mut shell, 12);
+        position.prepare(&mut shell, 4);
+        let narrow = position.persisted_skip(&shell);
+        assert!(position.aim(&mut shell, 4, 1));
+        assert_eq!(position.persisted_skip(&shell), narrow + 1);
+        assert!(position.aim(&mut shell, 4, -2));
+        assert_eq!(position.persisted_skip(&shell), narrow - 1);
     }
 
     #[test]

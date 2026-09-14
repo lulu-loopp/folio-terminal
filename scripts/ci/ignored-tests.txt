@@ -10,7 +10,7 @@
 #     cargo test --workspace --locked -- --ignored --list
 #
 # Why any of them are ignored at all — the policy this list exists to state.
-# Twenty-six of the twenty-eight are **probes**, not regressions:
+# Twenty-seven of the twenty-nine are **probes**, not regressions:
 #
 #   * nineteen in `bt-pty` drive real ConPTY sessions against a real PowerShell
 #     and read what comes back. Their assertions are about host timing and about
@@ -27,6 +27,10 @@
 #     The fourth is the loading-worker diagnostic (T-MD-LOADING-STATE): nine timed
 #     samples of an 8 MiB whole read through the real serial worker, read by a
 #     person; the byte budgets it proves are asserted in the normal suite.
+#   * one in `bt-math` (`minus_probe`, tests/unary_minus.rs) prints, for a handful of
+#     formulas, every run the typesetter set on this machine -- face, glyph ids,
+#     advances -- to be diffed against another machine when a glyph goes missing
+#     there (T-MATH-MAC-MINUS); the pins beside it run in the normal suite.
 #   * one in `bt-platform` opens a real page in a real WebView2 and reads back
 #     what the page says loaded. It needs a runtime, a window and a message
 #     pump, which is the same "what does this machine do" question the ConPTY
@@ -53,6 +57,7 @@
 # by nothing else. If a runner with a real adapter ever becomes available, these
 # two come off this list first.
 
+minus_probe
 marks::tests::the_symbol_sheet_is_written_for_a_person_to_look_at
 paths::tests::a_scrollback_relative_reference_keeps_the_directory_it_was_printed_under
 paths::tests::an_unquoted_path_cut_at_a_space_does_not_link_its_prefix

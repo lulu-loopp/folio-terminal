@@ -504,6 +504,20 @@ pub struct MathBlockPlacement {
     /// without re-deriving the projection. Zero for a wholly-matched block.
     pub clipped_top_rows: u32,
     pub clipped_bottom_rows: u32,
+    /// **The selection's own spans over the rows this block stands on**, in this frame's
+    /// presentation-row coordinates — the wash a reader's drag lays on the picture
+    /// (`docs/DESIGN.md` §7.1.6c-4g).
+    ///
+    /// Beside [`ViewportFrame::selection_spans`] rather than inside it, because the two are painted
+    /// in different lanes. That list is the **cell band**: it goes down with the grid's own fills,
+    /// under everything the seat draws afterwards, and a rendered display block's rows are taken
+    /// out of it altogether because a picture is standing on those cells. These are the same spans,
+    /// decided from the same cell anchors, carried to the lane that paints *over* the picture — so
+    /// what the reader copies is what the reader can see is selected.
+    ///
+    /// Empty whenever no cell this block stands on is selected, and empty for a block showing its
+    /// source: there is no picture then, and the ordinary band paints the text as it always did.
+    pub selection_spans: Vec<SelectionSpan>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -657,6 +671,14 @@ impl ViewportFrame {
             .iter()
             .chain(&self.search_spans)
             .chain(&self.current_search_spans)
+            // A block's wash spans are drawn with the same row-map arithmetic the band uses, so
+            // they answer to the same invariant: a span whose row this frame cannot place is a
+            // span nobody may ask for pixels.
+            .chain(
+                self.math_blocks
+                    .iter()
+                    .flat_map(|block| block.selection_spans.iter()),
+            )
         {
             self.selection_span_vertical_interval(span)?;
         }
@@ -2791,6 +2813,9 @@ impl ViewportProjection {
                             frozen_prefix_rows: 0,
                             clipped_top_rows: 0,
                             clipped_bottom_rows: 0,
+                            // The selection is not this layer's to know: the session fills these
+                            // in once every placement of the frame exists (`decorate_math_frame`).
+                            selection_spans: Vec::new(),
                         });
                         (
                             (0..line_rows)
@@ -2933,6 +2958,7 @@ impl ViewportProjection {
                                 frozen_prefix_rows: 0,
                                 clipped_top_rows: 0,
                                 clipped_bottom_rows: 0,
+                                selection_spans: Vec::new(),
                             });
                             image_top = image_top.saturating_add(artifact.height_subpixels);
                         }
@@ -3168,6 +3194,7 @@ impl ViewportProjection {
                     frozen_prefix_rows: frozen_rows,
                     clipped_top_rows: live_math.clipped_top_rows,
                     clipped_bottom_rows: live_math.clipped_bottom_rows,
+                    selection_spans: Vec::new(),
                 });
 
                 if matches!(
@@ -5570,6 +5597,7 @@ mod tests {
         LayoutKey {
             width_cells: nz32(width_cells),
             dpi_milli: nz32(1000),
+            font_size_subpixels: 16 * 1024,
             font_rev: 1,
             theme_rev: 1,
             lang_rev: 0,

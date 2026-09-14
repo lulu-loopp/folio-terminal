@@ -6,7 +6,22 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+Nothing yet.
+
+## 0.4.0-preview — 2026-09-14
+
 ### Added
+
+- **Folio runs on macOS.** It is the same program, built for Apple silicon and
+  asking for macOS 14 or newer. A pane runs a native shell, and the files
+  column, the Git page and the preview pane — a Markdown document you can edit
+  where it is shown, pictures, video, typeset formulas — are the ones that were
+  already there; several windows come back where they were left, and a
+  background agent still says when it has finished. Where the two systems
+  differ, this one follows the system it is on: the chords are Command chords
+  and the Shortcuts page lists them that way, the window wears the three buttons
+  macOS draws instead of its own, and the menu bar is a real one. A settings
+  file written on either machine is read by both.
 
 - **On a Mac, a key summons the terminal from anywhere.** Press `Ctrl` and the
   backtick key — the one to the left of `1` — and the quick terminal comes down
@@ -23,11 +38,46 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
-- Markdown files up to 8 MB open complete and editable; the 64 KB read-only head is gone.
+- **Moving the caret and typing in a very large Markdown document no longer
+  waits on the whole document.** Each keystroke used to copy the text, rescan
+  every line for the widest one and rebuild the caret's map of lines from
+  scratch; on a three-megabyte document that was a visible pause on every key.
+  The document is now shared rather than copied, undo is derived from the edit
+  itself, and the line index and widths are kept up to date incrementally. On
+  that same document a caret move inside a paragraph went from a few
+  milliseconds to nothing measurable; opening it is still slow, and that is the
+  next change.
 
-- Realize large Markdown documents around the viewport and preserve the reading position while estimated heights change.
+- **A typeset formula in a terminal pane now looks like the rest of the
+  window.** Resting on one lays down the same rounded panel a fenced code block
+  stands on, instead of the flat dark rectangle it used to get. The two buttons
+  beside it have become ordinary Folio icons: nothing at rest, fading in as your
+  pointer reaches the formula, lit in a soft pill under the pointer and a darker
+  one while you hold the button down. The first one now shows where it takes you
+  — angle brackets on a typeset formula, an eye on one showing its source — and
+  the second turns into a tick for a moment once the LaTeX is on your clipboard.
+  Both are a little larger than before, and right-clicking a formula still
+  offers `Copy LaTeX`.
 
-- Reduce typing and caret-movement delays in large Markdown documents.
+- **Opening a very large Markdown document is immediate.** The preview used to
+  lay out every block of a document before it could show the first one; on a
+  three-megabyte file that was a three-second freeze, and a resize or a scale
+  change paid it again. It now measures only the blocks near the viewport and
+  estimates the rest from their line counts, correcting each estimate as it
+  scrolls into view; an anchor keeps the text under your eye where it is while
+  the heights above it settle, so the page does not jump. On that same file
+  the open went from about 3.4 seconds to a tenth of one, and a keystroke
+  from 143 to 66 milliseconds.
+
+- **A Markdown file opens complete, and is editable at once.** The preview
+  used to read the first 64 KB of a file, show that much under a
+  `Read-only · 64 KB` badge, and fetch the rest only when you entered edit,
+  which made an editable file look read-only. It now reads the whole file on
+  the first open, up to the 8 MB editing ceiling: the document scrolls to its
+  end and the caret can go in immediately. A file over the ceiling keeps a head
+  on screen and the badge says its real size. Text, CSV and diffs keep their
+  bounded first read.
+
 - **Badges in a Markdown preview now stand in a row instead of one under
   another.** Folio does not fetch pictures from the web, and it used to say so
   in a full-width card three lines tall for every one of them — so the four
@@ -45,19 +95,6 @@ All notable changes to Folio are recorded here. The format follows
   changes on Windows, where the row still stands and still reports when a
   version of Windows has no blur to offer; and your settings file keeps the
   value either way, so a Windows machine sharing that file reads it as before.
-- **On a Mac, resting on the settings gear lights a rounded square that matches
-  the window's own corner.** The wash used to be a smaller pill; it is now the
-  same shape and the same curve as the corner it sits in, and the gear itself
-  has not moved.
-- **Moving the caret and typing in a very large Markdown document no longer
-  waits on the whole document.** Each keystroke used to copy the text, rescan
-  every line for the widest one and rebuild the caret's map of lines from
-  scratch; on a three-megabyte document that was a visible pause on every key.
-  The document is now shared rather than copied, undo is derived from the edit
-  itself, and the line index and widths are kept up to date incrementally. On
-  that same document a caret move inside a paragraph went from a few
-  milliseconds to nothing measurable; opening it is still slow, and that is the
-  next change.
 - **A changed file in the Git page says what happened to it in words.** Resting
   on a row used to give you its path and the name of the group it stands in,
   leaving git's two letters to be read off the badges: `UU` on a row meant
@@ -74,9 +111,103 @@ All notable changes to Folio are recorded here. The format follows
   growing. The wait before it appears is unchanged, it still leaves the instant
   you move away, and if you have asked your system for reduced motion it appears
   and leaves instantly as before.
+- **The top bar takes the hand anywhere it is not a button.** Dragging the window
+  by its top bar used to work only in the stretch between the last tab and the
+  buttons in the corner; the space between two tabs, the strip above them and the
+  gaps around the settings button did nothing at all. Every part of that bar that
+  is not one of this window's own buttons now picks the window up, and
+  double-clicking it still does what it did.
+- **A quit keeps every tab a window was holding.** Quitting with a page still
+  closing down could write the session out again on the way out, with the tabs
+  that had already gone missing from it; the document a quit writes is the one
+  the next launch reads, so it is no longer written over by the teardown.
+- **The preview's bottom line appears only when it has something to say.** Every
+  preview — a document, a Markdown page, a picture, a PDF, a recording, in a pane
+  or in a window you have torn off — used to keep a strip along its bottom edge
+  whether or not there was anything in it, and most of the time there was not.
+  The page now runs all the way to the bottom of what is showing it. When there
+  is news — `Saved`, `Revealed`, or a file that changed on disk under your edits
+  — it floats over the bottom of the page for as long as it has something to say,
+  and moves nothing while it comes and goes; `Changed on disk` still waits there
+  with `Reload` and `Keep my edits` until you answer it. A file you cannot edit
+  shows a small padlock at the end of the path row instead, which says why when
+  you point at it — and says it out loud, for two seconds, the moment you click
+  into the page or type at it, with `Open in default app` beside it. What a
+  picture is — `PNG · 670 KB`, `6000 × 4000 · shown at 41%` — has moved up to
+  that same row, and the video controls sit on the bottom edge of the picture
+  with the recording's format and size at their right end.
+- **A file the preview cannot show offers to open it in the default app, like an
+  executable does.** A picture Folio declines — one with too many pixels, a file
+  too large to read, a picture that would not load — used to say so in the middle
+  of an empty pane and leave you there. It now wears the card an unknown file
+  type has always worn: the same sentence, and under it the same
+  `Open in default app` button, which hands the file to whatever the system has
+  registered for it. The same goes for a picture Folio could not draw, a pane too
+  small to draw one in, and a recording in a format this machine cannot play. It
+  is the same card in a torn-off window as in a pane. A file the disk itself
+  refused to read still says only what happened, because another program would
+  be refused in the same way.
 
 ### Fixed
 
+- **On a Mac, the candidate list follows the caret onto a second display.**
+  Typing Chinese in a terminal pane on a display other than the main one left
+  the list of candidates floating in the middle of the window instead of
+  standing under the line you were typing into; on the main display it was
+  correct. macOS remembers where a window's caret is in screen coordinates and
+  only asks again when it is told the answer is stale, and moving a window
+  between displays never told it. Folio now says it again on every move, so the
+  list stands under the caret on any display, and dragging a window costs no
+  more than typing in it.
+- **On a Mac, the sentence under `Option key sends Alt` is shown whole.** The
+  row's description is the one deliberately longer than the rest, and on the
+  General page — whose pickers take their half of the row — it ran past the
+  three lines a row would draw and lost its ending to an ellipsis: the fourth
+  line in Chinese, the fourth through sixth in English. A settings row now grows
+  to hold every line its sentence needs, and the row, the page's scrolling and
+  where you can click all follow the taller row. Every other description is
+  unchanged, and none of them got longer.
+- **A formula no longer loses a symbol without saying so.** A sign that the
+  fonts on your computer cannot draw used to vanish from a typeset formula
+  silently — not as a box or a blank, but gone, with the symbols either side of
+  it closed up as though the author had never written it. Folio now asks your
+  font list for every character a formula needs, not only for Chinese, Japanese
+  and Korean ones, and names every installed family that can draw one the maths
+  font cannot; a character nothing on the machine can draw stops the formula and
+  leaves the source on the page, which is the answer that is at least true. (On
+  a Mac, this is being read against a report that the minus sign in front of a
+  fraction was not drawn where Windows drew it.)
+  The picture of the formula was also being laid on the screen half a pixel off
+  and smeared across two rows at half strength; a picture shown at its own size
+  is now laid on whole pixels and copied untouched.
+
+- **A table on a focus card lines up again, and a symbol on one is drawn whole.** A card showing a box-drawing table whose cells hold Chinese text drew its borders in a different place on every row, while the same table in the pane beside it was square. A card's rows are now laid out column by column, as the pane's own grid is, so a wide character takes exactly two columns and a border stands in the same place on every row. Laying them out that way then cut a symbol off at its column's edge — a shell printing `○` showed a clean circle in the pane and a large arc on the card — so a card now draws a symbol from the same font the pane draws it from, and sets a character that is still wider than the columns it stands in a little smaller until it fits them, instead of cutting it.
+- **A formula you have selected now looks selected.** Dragging across a typeset
+  formula in a terminal pane copied it correctly — the formula's own source,
+  right where the picture stands — but nothing on screen said so: the selection
+  coloured the text on either side and stopped at the picture. It now washes the
+  picture too, in the same colour, for a formula set in a line and for one
+  standing in a block of its own, on the live screen and back through the
+  scrollback. What it washes is what it copies: cross part of a formula and only
+  that part is washed.
+- Keep rendering later formulas when an incomplete macro definition fails during conversion.
+- Refuse recursive macros and excessive macro expansion before they can stall formula rendering.
+- Preserve prose and later headings after display formulas, empty delimiters, and unfinished math blocks.
+- Inline integrals and sums now match the terminal font size and fit within their line on shorter line spacing.
+- **Two formulas on one line no longer take each other's place away when the
+  window is narrow.** A line carrying `$…$` twice was typeset whole at a wide
+  window and printed as source at a narrow one: the two formulas are worked out
+  together, as one picture, and a picture cannot straddle the place where the
+  line folds — so as soon as the fold fell between them, neither was drawn.
+  Each formula now stands on the row its own `$` stands on, and how wide the
+  window is decides nothing about whether either of them is set.
+- **A one-column matrix keeps its rows.** `\begin{pmatrix} x \\ y \end{pmatrix}`
+  came out as the single row `(x y)` beside a 2×2 on the line above that came
+  out right. Both had had their row separators shortened to one backslash before
+  Folio ever saw them, and Folio's repair for that read the row from the `&`
+  between its cells — which a one-column row has not got. It now reads a
+  one-column row too, and still leaves `\,`, `\;`, `\:`, `\!` and real commands
+  such as `\frac` alone.
 - **A table on a focus card lines up again.** A card showing a box-drawing table whose cells hold Chinese text drew its borders in a different place on every row, while the same table in the pane beside it was square. A card's rows are now laid out column by column, as the pane's own grid is, so a wide character takes exactly two columns and a border stands in the same place on every row.
 - **On a Mac, `Edit ▸ Copy` and `Edit ▸ Paste` now act on the pane you are
   looking at.** Over a terminal they did nothing at all — the selection never
@@ -92,11 +223,24 @@ All notable changes to Folio are recorded here. The format follows
   after the pointer had gone — it was the keyboard's own highlight, which a
   header should never have worn, and the pointer's could land on the wrong row
   besides, because the list is rebuilt as the repository changes while your hand
-  holds still. Group headers now say the same thing the `Files | Git` switch
-  above the column says: dim at rest, the word and its triangle brightening
-  under the pointer, and no block at any time. The whole row is still what you
-  press.
-- Keep focus cards on the same content when resizing, and make Alt+wheel respond immediately when reversing at the oldest content.
+  holds still. At rest `REMOTES` is now exactly one of the section headers —
+  the same size, weight and ink as `BRANCHES` and `COMMITS` above and below it —
+  and under the pointer the word and its triangle brighten to the colour a row
+  of the files column takes under your hand, with no block at any time. The
+  whole row is still what you press.
+- **A focus card keeps its place while you resize the window, and comes back to
+  it when you resize the window back.** A card you have scrolled back through a
+  shell's output holds on to the line at its bottom edge, the way the shell
+  itself holds on to its prompt: make the window shorter and the card loses
+  lines off its top, make it taller and it gains them there, and that bottom
+  line stays where it is either way. So a resize and its exact reverse leave the
+  card showing exactly what it was showing before — dragging a window out and
+  back no longer drops the card at the newest line. A long line the pane has
+  become wide enough to draw whole is counted as the one line it is, so the card
+  lands on the same content at either width. A card you have not scrolled back
+  goes on following the newest line, whatever the window does. And Alt+wheel
+  moves the card by whole lines after any resize, reversing at once at the
+  oldest content.
 - **On a Mac, tabs now take the whole width of the title bar.** The tab strip was setting aside room for four window buttons on a window that carries one — macOS draws minimise, zoom and close at the other end of the bar — so the tabs were squeezed to their profile marks, their names hidden, with a wide empty band before the settings gear. Seven tabs in a 934-point window now stand 91 points wide with their names showing instead of 72 without.
 - **Every picker in Settings that offers profiles now shows their marks.** The
   summoned terminal's `Profile for new tabs` listed its profiles as bare words,
@@ -158,45 +302,6 @@ All notable changes to Folio are recorded here. The format follows
   With the caret in the command palette, the search box, a name being edited, the
   branch prompt, the commit graph's search or a document being edited, `Win+C`
   typed a `c`. A chord is not text, and none of these take one now.
-
-### Changed
-
-- **The top bar takes the hand anywhere it is not a button.** Dragging the window
-  by its top bar used to work only in the stretch between the last tab and the
-  buttons in the corner; the space between two tabs, the strip above them and the
-  gaps around the settings button did nothing at all. Every part of that bar that
-  is not one of this window's own buttons now picks the window up, and
-  double-clicking it still does what it did.
-- **A quit keeps every tab a window was holding.** Quitting with a page still
-  closing down could write the session out again on the way out, with the tabs
-  that had already gone missing from it; the document a quit writes is the one
-  the next launch reads, so it is no longer written over by the teardown.
-- **The preview's bottom line appears only when it has something to say.** Every
-  preview — a document, a Markdown page, a picture, a PDF, a recording, in a pane
-  or in a window you have torn off — used to keep a strip along its bottom edge
-  whether or not there was anything in it, and most of the time there was not.
-  The page now runs all the way to the bottom of what is showing it. When there
-  is news — `Saved`, `Revealed`, or a file that changed on disk under your edits
-  — it floats over the bottom of the page for as long as it has something to say,
-  and moves nothing while it comes and goes; `Changed on disk` still waits there
-  with `Reload` and `Keep my edits` until you answer it. A file you cannot edit
-  shows a small padlock at the end of the path row instead, which says why when
-  you point at it — and says it out loud, for two seconds, the moment you click
-  into the page or type at it, with `Open in default app` beside it. What a
-  picture is — `PNG · 670 KB`, `6000 × 4000 · shown at 41%` — has moved up to
-  that same row, and the video controls sit on the bottom edge of the picture
-  with the recording's format and size at their right end.
-- **A file the preview cannot show offers to open it in the default app, like an
-  executable does.** A picture Folio declines — one with too many pixels, a file
-  too large to read, a picture that would not load — used to say so in the middle
-  of an empty pane and leave you there. It now wears the card an unknown file
-  type has always worn: the same sentence, and under it the same
-  `Open in default app` button, which hands the file to whatever the system has
-  registered for it. The same goes for a picture Folio could not draw, a pane too
-  small to draw one in, and a recording in a format this machine cannot play. It
-  is the same card in a torn-off window as in a pane. A file the disk itself
-  refused to read still says only what happened, because another program would
-  be refused in the same way.
 
 ## 0.3.0-preview — 2026-09-12
 

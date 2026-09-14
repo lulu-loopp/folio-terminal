@@ -851,6 +851,50 @@ pub struct ChromePalette {
     /// `.panehead .pane-close:hover { color: var(--ink) }`, standing on
     /// [`Self::pane_close_pill`] and never on the bare head.
     pub pane_close_glyph_on_pill: [u8; 3],
+
+    // ── a formula band's two marks, and the pill under them ───────────────
+    //
+    // `.math-tools button` (mock-up 2117-2126): a glyph on the terminal's own
+    // surface with `border: none; background: none` at rest, a wash under the
+    // pointer, and `--ink` once it is the subject. The marks stand *beside* the
+    // band and not inside it (`.math` is a row holding `.mbox` and
+    // `.math-tools`, mock-up 2000-2012), so their ground is `--termbg` and not
+    // [`Self::preview_code_ground`] — which is why none of these four is the
+    // fence's ink even though the band beside them now wears the fence's floor.
+    //
+    // Numerically three of them are the pane head's own three and the files
+    // column's hover, because all four inks are the same ladder over the same
+    // `--termbg`. Named apart on [`Self::pane_close_glyph`]'s own precedent:
+    // two declarations, either of which could be re-struck without the other.
+    /// `.math-tools button { color: var(--ink3) }` over `--termbg` — a mark the
+    /// band's hover has revealed but the pointer has not reached.
+    pub formula_tool_glyph: [u8; 3],
+    /// `.math-tools button:hover { background: var(--hover) }` over `--termbg`.
+    ///
+    /// `--hover` and not `--active`: this is the strip's control-pill wash (the
+    /// `+`/`˅` pair's [`Self::caption_hover`], read on the terminal's surface
+    /// instead of the bar's), and the darker `--active` is spent below on the
+    /// press — a control that spends its darker wash on hover has nothing left
+    /// to say with when it is actually held.
+    pub formula_tool_pill: [u8; 3],
+    /// The same pill held down: `--active` over `--termbg`.
+    ///
+    /// The mock-up draws no pressed state for these two (owner's ruling
+    /// 2026-09-14 adds it), so the ink is the one the rest of this window
+    /// already spends on "held": `--active`, one level darker than the wash
+    /// above it.
+    pub formula_tool_pill_pressed: [u8; 3],
+    /// `.math-tools button:hover { color: var(--ink) }`, standing on
+    /// [`Self::formula_tool_pill`] — and on
+    /// [`Self::formula_tool_pill_pressed`] too.
+    ///
+    /// **One field and not two, and this is measured rather than assumed.**
+    /// `--ink` over the two pills is `0xe3` and `0xe4` on the dark canvas — one
+    /// level — and the identical `#37352F` on the light one, where `--ink` is
+    /// opaque. A second field would be a name for a number that is the same
+    /// number, which is the opposite of the reason the four grounds of the
+    /// tab's `×` are four fields.
+    pub formula_tool_glyph_on_pill: [u8; 3],
     /// `.termhost { background: var(--panel) }` (mock-up 1022-1023).
     ///
     /// The one surface in the seat layer that is *chrome* rather than terminal,
@@ -1427,6 +1471,12 @@ pub const FLOAT_TAG_MINIMUM_CONTRAST: f64 = CHROME_TEXT_MINIMUM_CONTRAST;
 /// slab with the light scheme's near-black ink on it: the reported bug, and
 /// literally invisible text.
 ///
+/// **One of those two has since left the family** (owner's ruling 2026-09-14):
+/// a formula block's verbs are house marks on a pill, not chips, so the status
+/// overlay is the only tag this renderer floats. The paragraph above is kept
+/// because it is the reason this type exists, and the reason holds whether the
+/// family has two members or one.
+///
 /// A constant cannot be given a theme, so the fix is not a second constant. It
 /// is this: **one place that answers "what does a floating tag wear", derived
 /// from the palette in force**, which every member of the family asks. A chip
@@ -1641,6 +1691,13 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     pane_close_pill: [0x30, 0x30, 0x30],
     // `--ink` (white .87) over that pill: 47.5 + 207.5×.87 = 228.0.
     pane_close_glyph_on_pill: [0xe4, 0xe4, 0xe4],
+    // The formula band's marks, on that same `--termbg`: `--ink3` at rest,
+    // `--hover` (white .055) = 27 + 228×.055 = 39.5 for the wash, `--active`
+    // for the press, and `--ink` over the wash = 39.5 + 215.5×.87 = 227.0.
+    formula_tool_glyph: [0x72, 0x72, 0x72],
+    formula_tool_pill: [0x28, 0x28, 0x28],
+    formula_tool_pill_pressed: [0x30, 0x30, 0x30],
+    formula_tool_glyph_on_pill: [0xe3, 0xe3, 0xe3],
     termhost: [0x25, 0x25, 0x25],
     pane_head_edge: [0x29, 0x29, 0x29],
     // `--ink3` over `--termbg #1B1B1B`, not over `--win #202020`: the pane head
@@ -1913,6 +1970,12 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     pane_close_pill: [0xed, 0xed, 0xec],
     // `--ink` #37352F is opaque on this canvas, so the lit `×` is that literal.
     pane_close_glyph_on_pill: [0x37, 0x35, 0x2f],
+    // The formula band's marks on the same white: `--ink3`, `--hover` (the ink
+    // at .055), `--active` (at .09), and the opaque `--ink` on either pill.
+    formula_tool_glyph: [0xa5, 0xa4, 0xa1],
+    formula_tool_pill: [0xf4, 0xf4, 0xf4],
+    formula_tool_pill_pressed: [0xed, 0xed, 0xec],
+    formula_tool_glyph_on_pill: [0x37, 0x35, 0x2f],
     termhost: [0xf7, 0xf7, 0xf5],
     pane_head_edge: [0xf1, 0xf1, 0xf1],
     pane_title: [0xa5, 0xa4, 0xa1],
@@ -2287,63 +2350,15 @@ pub const WINDOW_CAPTION_GEAR_GLYPH_LOGICAL_PX: f32 = 14.0;
 /// other end, and it is written as its own constant because the day the bar or
 /// the diagonal moves, one of them is a design decision and the other is not.
 pub const WINDOW_CAPTION_GEAR_INSET_LOGICAL_PX: f32 = 20.0;
-/// **And how big the box around that centre is** — a square of **34**, which is
-/// the 40-point strip with three points of margin cut from its top, its foot and
-/// the window's trailing edge (owner ruling 2026-09-13, T-MAC-GEAR-HOVER,
-/// §13.48 ⑩).
+/// **And how big the box around that centre is** — a square, the `+`'s own 28.
 ///
 /// The gear keeps its glyph, its ink and its verb; what it loses on this window
 /// is the 46x40 caption slot, which is the shape of a *run* of buttons and there
-/// is no run here. §13.48 ③ first gave it the `+`'s own 28 — the box every other
-/// control inset in this bar is given — and named the hover wash that followed
-/// from that box as a judgement call for the owner to overrule in one line. The
-/// line came: the box is 34 and its wash is the window's own corner
-/// ([`MAC_WINDOW_CORNER_RADIUS_LOGICAL_PX`]), because the control standing in
-/// the corner should share the corner's curvature, and a 12-point round on a 28
-/// box leaves four points of flat on each side and is not concentric with the
-/// arc behind it.
-///
-/// **The mirror does not move**: `34 / 2 + 3 = 20`, so the ink's centre is the
-/// [`WINDOW_CAPTION_GEAR_INSET_LOGICAL_PX`] §13.48 ② derived, said with a wider
-/// box around it. What grows is the hit target and the wash — which are the same
-/// rectangle, and have to be: a wash wider than what answers the press is a
-/// button that lights up where it cannot be clicked.
-pub const WINDOW_CAPTION_GEAR_BOX_LOGICAL_PX: f32 = 34.0;
-/// **The air the gear's box leaves on the three edges it has one on** — three
-/// points above it, below it and between it and the window's trailing edge
-/// (owner ruling 2026-09-13, T-MAC-GEAR-HOVER).
-///
-/// Written down because it is the half of the ruling the arithmetic runs
-/// through: the box is not placed by its side, it is placed by this margin, and
-/// the side is whatever the band has left. On a fractional scale those are
-/// different boxes — `34 × 1.5` is an odd 51 on an even 60-pixel band, and a box
-/// that cannot be centred on a whole physical pixel is a box whose ink has left
-/// the mirror §13.48 ② derived. Taking the margin first costs at most one
-/// physical pixel of the side and keeps the centre exact.
-///
-/// Not an independent number: `40 - 2 × 3 = 34` is the same statement as
-/// [`WINDOW_CAPTION_GEAR_BOX_LOGICAL_PX`] on Folio's own
-/// [`WINDOW_TITLE_BAR_LOGICAL_PX`] band, and the test beside §13.48 asserts that
-/// the three agree rather than trusting that they do.
-pub const WINDOW_CAPTION_GEAR_MARGIN_LOGICAL_PX: f32 = 3.0;
-/// **A macOS window's own corner radius**, in logical points — the round the
-/// gear's hover wash takes, and the only place in this product that asks for it.
-///
-/// Measured rather than assumed: `docs/plans/port/corners-2026-09-13.md`
-/// (R-MAC-CORNERS) photographed the **shipping** window on macOS 26 and read
-/// **12.1 points** off the arc — the memo's own correction to a first reading of
-/// 16.2, which had been taken from the probe window, whose *style* gives it a
-/// different corner. Twelve is that measurement with the tenth dropped, because
-/// a radius is drawn on whole physical pixels and the tenth cannot survive the
-/// rounding at any scale this product runs at.
-///
-/// It is a number about the **window**, not about the strip, which is why it is
-/// not [`WINDOW_NEW_TAB_RADIUS_LOGICAL_PX`] and must not drift into it: the `+`,
-/// the `˅`, the panel toggle and every other control inset in the bar wear the
-/// strip's 6, and only the one control that stands inside the window's own
-/// corner wears this. The day macOS changes the corner, this is the constant
-/// that moves and the other one does not.
-pub const MAC_WINDOW_CORNER_RADIUS_LOGICAL_PX: f32 = 12.0;
+/// is no run here. Twenty-eight is not a new number: it is
+/// [`WINDOW_NEW_TAB_BOX_LOGICAL_PX`], the box every other control that stands
+/// inset in this bar is given, and it fits inside the 40-point strip and the
+/// platform's own 32-point band alike.
+pub const WINDOW_CAPTION_GEAR_BOX_LOGICAL_PX: f32 = WINDOW_NEW_TAB_BOX_LOGICAL_PX;
 /// The active horizontal tab's height (`.tab { height: 34px }`).
 pub const WINDOW_TAB_HEIGHT_LOGICAL_PX: f32 = 34.0;
 /// **The floating pill's height** (`mock-mac-strict.html` `--pill-h: 30px`,
@@ -3207,6 +3222,19 @@ pub const DOCK_DASH_RATIO: f32 = 3.0;
 /// pixels. Skipped entirely when the body is too small to afford it, because a
 /// margin that eats the picture serves nobody.
 pub const PREVIEW_BODY_INSET_LOGICAL_PX: f32 = 12.0;
+
+/// **The corner every ground struck in [`ChromePalette::preview_code_ground`]
+/// wears** — `.md-code { border-radius: 7px }` and `.math .mbox {
+/// border-radius: 7px }` (mock-up 1284 and 2017), which are one number in the
+/// design and are one number here.
+///
+/// It lived in `bt_app::preview` as `PREVIEW_MD_CODE_RADIUS_LOGICAL_PX` while
+/// the only reader was the markdown fence, and moved down here on 2026-09-14
+/// when a terminal pane's formula band took the same floor: the band is drawn
+/// by this crate and the fence by the one above it, and two crates reading one
+/// design token is exactly the case a shared constant is for. `preview` still
+/// spells its own name for it and that name now *is* this one.
+pub const PREVIEW_CODE_GROUND_RADIUS_LOGICAL_PX: f32 = 7.0;
 
 /// The two built-in runtime themes. Theme choice is process-wide because the Win32 class brush is
 /// process-class state and every renderer/worker must agree on default terminal colors.

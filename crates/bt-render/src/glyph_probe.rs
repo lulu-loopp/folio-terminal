@@ -316,6 +316,7 @@ impl GlyphFixture {
             layout_key: bt_doc::LayoutKey {
                 width_cells: NonZeroU32::new(columns).expect("the fixture has columns"),
                 dpi_milli: metrics.dpi_milli(),
+                font_size_subpixels: 16 * 1024,
                 font_rev: 1,
                 theme_rev: 1,
                 lang_rev: 0,

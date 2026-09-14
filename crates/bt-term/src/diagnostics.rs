@@ -306,6 +306,7 @@ mod tests {
             layout_key: LayoutKey {
                 width_cells: columns,
                 dpi_milli: NonZeroU32::new(1000).unwrap(),
+                font_size_subpixels: 16 * 1024,
                 font_rev: 1,
                 theme_rev: 1,
                 lang_rev: 0,
@@ -389,6 +390,7 @@ mod tests {
             frozen_prefix_rows: 0,
             clipped_top_rows: 0,
             clipped_bottom_rows: 0,
+            selection_spans: Vec::new(),
         });
         frame
     }

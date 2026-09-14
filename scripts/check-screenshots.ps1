@@ -12,9 +12,11 @@
 #     the picture is a resampled one: a screenshot of a terminal scaled by a
 #     resampler is a screenshot of the resampler. A file that measures 1600 x
 #     1000 is one of the earlier 100% pass, not a retake.
-#   * a picture either README references that the table does not list. The table
-#     is what says how a shot was taken and what it is of; an image that appears
-#     on the page without a row in it is one nobody can retake.
+#   * a picture any of the public documents references that the table does not
+#     list - the two front pages and the `features` and `install` documents
+#     beside them. The table is what says how a shot was taken and what it is
+#     of; an image that appears on a page without a row in it is one nobody can
+#     retake.
 #
 # The size is read out of the PNG header rather than by decoding the file: the
 # first chunk of a PNG is `IHDR`, and its width and height are the two big-endian
@@ -100,15 +102,24 @@ foreach ($name in $listed) {
     }
 }
 
-# What the two READMEs actually put on the page.
-foreach ($readme in @("README.md", "README.zh-CN.md")) {
-    $path = Join-Path $repo $readme
+# What the public documents actually put on the page. The two front pages are
+# not the whole of it any more: `docs/features.*` and `docs/install.*` carry the
+# sections that used to stand in them, and a picture with no row in the list is
+# one nobody can retake wherever it is shown. The address is matched from
+# `screenshots/` rather than from `docs/screenshots/`, because a document inside
+# `docs/` reaches the folder by the shorter path and both spellings name the
+# same file.
+$pages = @("README.md", "README.zh-CN.md",
+           "docs/features.md", "docs/features.zh-CN.md",
+           "docs/install.md", "docs/install.zh-CN.md")
+foreach ($page in $pages) {
+    $path = Join-Path $repo $page
     if (-not (Test-Path -LiteralPath $path)) { continue }
     $text = [IO.File]::ReadAllText($path)
-    foreach ($m in [regex]::Matches($text, 'docs/screenshots/([A-Za-z0-9._@-]+\.png)')) {
+    foreach ($m in [regex]::Matches($text, '(?<![A-Za-z0-9._@-])screenshots/([A-Za-z0-9._@-]+\.png)')) {
         $name = $m.Groups[1].Value
         if ($listed -notcontains $name) {
-            $problems.Add("$readme shows $name, which docs/screenshots/README.md does not list")
+            $problems.Add("$page shows $name, which docs/screenshots/README.md does not list")
         }
     }
 }
@@ -119,4 +130,4 @@ if ($problems.Count -gt 0) {
         [Environment]::NewLine + ($unique -join [Environment]::NewLine))
 }
 
-Write-Host "$($listed.Count) screenshots listed, all present at the size their row claims; both READMEs link only listed files"
+Write-Host "$($listed.Count) screenshots listed, all present at the size their row claims; $($pages.Count) public documents link only listed files"

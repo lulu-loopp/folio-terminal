@@ -99,9 +99,9 @@ pub use theme::{
     FOCUS_MINI_ROW_PADDING_X_LOGICAL_PX, FOCUS_MINI_SEAM_ALPHA, FOCUS_MINI_SEAM_LOGICAL_PX,
     FOCUS_MINI_TERM_FONT_LOGICAL_PX, FOCUS_MINI_TERM_LINE_HEIGHT, FloatTagInk, GRAPH_LANE_COUNT,
     HEAD_TITLE_FONT_LOGICAL_PX, HEAD_TITLE_TRACKING_EM, HEAD_TITLE_WEIGHT, LIGHT_BACKGROUND_RGB,
-    LIGHT_CHROME, MAC_WINDOW_CORNER_RADIUS_LOGICAL_PX, PANE_HEAD_FILE_MARK_LOGICAL_PX,
-    PANE_HEAD_FOLDER_MARK_LOGICAL_PX, PANE_HEAD_PROFILE_MARK_LOGICAL_PX,
-    PREVIEW_BODY_INSET_LOGICAL_PX, RAIL_BORDER_LOGICAL_PX, RAIL_GAP_LOGICAL_PX,
+    LIGHT_CHROME, PANE_HEAD_FILE_MARK_LOGICAL_PX, PANE_HEAD_FOLDER_MARK_LOGICAL_PX,
+    PANE_HEAD_PROFILE_MARK_LOGICAL_PX, PREVIEW_BODY_INSET_LOGICAL_PX,
+    PREVIEW_CODE_GROUND_RADIUS_LOGICAL_PX, RAIL_BORDER_LOGICAL_PX, RAIL_GAP_LOGICAL_PX,
     RAIL_LABEL_FONT_LOGICAL_PX, RAIL_LABEL_LINE_LOGICAL_PX, RAIL_LABEL_PADDING_BOTTOM_LOGICAL_PX,
     RAIL_LABEL_PADDING_TOP_LOGICAL_PX, RAIL_LABEL_PADDING_X_LOGICAL_PX, RAIL_LABEL_TRACKING_EM,
     RAIL_NEW_CHEVRON_BOX_LOGICAL_PX, RAIL_NEW_GAP_LOGICAL_PX, RAIL_NEW_MAIN_PADDING_X_LOGICAL_PX,
@@ -121,29 +121,28 @@ pub use theme::{
     SEAT_TITLE_TRAILING_PADDING_LOGICAL_PX, TERMINAL_SCROLL_LANE_LOGICAL_PX, Theme, ThemeChange,
     WINDOW_CAPTION_BUTTON_LOGICAL_PX, WINDOW_CAPTION_GEAR_BOX_LOGICAL_PX,
     WINDOW_CAPTION_GEAR_GLYPH_LOGICAL_PX, WINDOW_CAPTION_GEAR_INSET_LOGICAL_PX,
-    WINDOW_CAPTION_GEAR_MARGIN_LOGICAL_PX, WINDOW_CAPTION_GLYPH_LOGICAL_PX,
-    WINDOW_NEW_TAB_BOX_LOGICAL_PX, WINDOW_NEW_TAB_CHEVRON_HEIGHT_LOGICAL_PX,
-    WINDOW_NEW_TAB_CHEVRON_WIDTH_LOGICAL_PX, WINDOW_NEW_TAB_GLYPH_LOGICAL_PX,
-    WINDOW_NEW_TAB_MARGIN_BOTTOM_LOGICAL_PX, WINDOW_NEW_TAB_MARGIN_LEFT_LOGICAL_PX,
-    WINDOW_NEW_TAB_RADIUS_LOGICAL_PX, WINDOW_TAB_BADGE_FONT_LOGICAL_PX,
-    WINDOW_TAB_BADGE_HEIGHT_LOGICAL_PX, WINDOW_TAB_BADGE_MIN_WIDTH_LOGICAL_PX,
-    WINDOW_TAB_BADGE_PADDING_X_LOGICAL_PX, WINDOW_TAB_BADGE_RADIUS_LOGICAL_PX,
-    WINDOW_TAB_BREATHE_MIN_OPACITY, WINDOW_TAB_BREATHE_REDUCED_OPACITY,
-    WINDOW_TAB_CLOSE_BOX_LOGICAL_PX, WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX,
-    WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX, WINDOW_TAB_DEAD_MARK_OPACITY,
-    WINDOW_TAB_FLOAT_HEIGHT_LOGICAL_PX, WINDOW_TAB_FLOAT_LEAD_IN_LOGICAL_PX,
-    WINDOW_TAB_FONT_LOGICAL_PX, WINDOW_TAB_GAP_BETWEEN_LOGICAL_PX, WINDOW_TAB_GAP_LOGICAL_PX,
-    WINDOW_TAB_HEIGHT_LOGICAL_PX, WINDOW_TAB_MARK_LOGICAL_PX, WINDOW_TAB_MAX_WIDTH_LOGICAL_PX,
-    WINDOW_TAB_MIN_WIDTH_LOGICAL_PX, WINDOW_TAB_PADDING_LEFT_LOGICAL_PX,
-    WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX, WINDOW_TAB_RADIUS_LOGICAL_PX,
-    WINDOW_TAB_RING_INDETERMINATE_TURNS, WINDOW_TAB_RING_RADIUS_LOGICAL_PX,
-    WINDOW_TAB_RING_STROKE_LOGICAL_PX, WINDOW_TAB_SQUEEZED_LOGICAL_PX,
-    WINDOW_TAB_SQUEEZED_PADDING_LOGICAL_PX, WINDOW_TAB_STATUS_DOT_LOGICAL_PX,
-    WINDOW_TAB_STATUS_DOT_RIGHT_LOGICAL_PX, WINDOW_TAB_STATUS_DOT_RING_STROKE_LOGICAL_PX,
-    WINDOW_TAB_STATUS_DOT_TOP_LOGICAL_PX, WINDOW_TAB_TIGHT_LOGICAL_PX,
-    WINDOW_TITLE_BAR_DRAG_RESERVE_LOGICAL_PX, WINDOW_TITLE_BAR_LOGICAL_PX, background_rgb,
-    chrome_palette, current_cursor_style, current_theme, foreground_rgb, ink_over,
-    set_cursor_style, set_theme, theme_revision,
+    WINDOW_CAPTION_GLYPH_LOGICAL_PX, WINDOW_NEW_TAB_BOX_LOGICAL_PX,
+    WINDOW_NEW_TAB_CHEVRON_HEIGHT_LOGICAL_PX, WINDOW_NEW_TAB_CHEVRON_WIDTH_LOGICAL_PX,
+    WINDOW_NEW_TAB_GLYPH_LOGICAL_PX, WINDOW_NEW_TAB_MARGIN_BOTTOM_LOGICAL_PX,
+    WINDOW_NEW_TAB_MARGIN_LEFT_LOGICAL_PX, WINDOW_NEW_TAB_RADIUS_LOGICAL_PX,
+    WINDOW_TAB_BADGE_FONT_LOGICAL_PX, WINDOW_TAB_BADGE_HEIGHT_LOGICAL_PX,
+    WINDOW_TAB_BADGE_MIN_WIDTH_LOGICAL_PX, WINDOW_TAB_BADGE_PADDING_X_LOGICAL_PX,
+    WINDOW_TAB_BADGE_RADIUS_LOGICAL_PX, WINDOW_TAB_BREATHE_MIN_OPACITY,
+    WINDOW_TAB_BREATHE_REDUCED_OPACITY, WINDOW_TAB_CLOSE_BOX_LOGICAL_PX,
+    WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX, WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX,
+    WINDOW_TAB_DEAD_MARK_OPACITY, WINDOW_TAB_FLOAT_HEIGHT_LOGICAL_PX,
+    WINDOW_TAB_FLOAT_LEAD_IN_LOGICAL_PX, WINDOW_TAB_FONT_LOGICAL_PX,
+    WINDOW_TAB_GAP_BETWEEN_LOGICAL_PX, WINDOW_TAB_GAP_LOGICAL_PX, WINDOW_TAB_HEIGHT_LOGICAL_PX,
+    WINDOW_TAB_MARK_LOGICAL_PX, WINDOW_TAB_MAX_WIDTH_LOGICAL_PX, WINDOW_TAB_MIN_WIDTH_LOGICAL_PX,
+    WINDOW_TAB_PADDING_LEFT_LOGICAL_PX, WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX,
+    WINDOW_TAB_RADIUS_LOGICAL_PX, WINDOW_TAB_RING_INDETERMINATE_TURNS,
+    WINDOW_TAB_RING_RADIUS_LOGICAL_PX, WINDOW_TAB_RING_STROKE_LOGICAL_PX,
+    WINDOW_TAB_SQUEEZED_LOGICAL_PX, WINDOW_TAB_SQUEEZED_PADDING_LOGICAL_PX,
+    WINDOW_TAB_STATUS_DOT_LOGICAL_PX, WINDOW_TAB_STATUS_DOT_RIGHT_LOGICAL_PX,
+    WINDOW_TAB_STATUS_DOT_RING_STROKE_LOGICAL_PX, WINDOW_TAB_STATUS_DOT_TOP_LOGICAL_PX,
+    WINDOW_TAB_TIGHT_LOGICAL_PX, WINDOW_TITLE_BAR_DRAG_RESERVE_LOGICAL_PX,
+    WINDOW_TITLE_BAR_LOGICAL_PX, background_rgb, chrome_palette, current_cursor_style,
+    current_theme, foreground_rgb, ink_over, set_cursor_style, set_theme, theme_revision,
 };
 use theme::{
     CURSOR_UNDERLINE_HEIGHT_LOGICAL_PX, DEFAULT_DIM_FOREGROUND_RGB, ansi_16_rgb, cursor_rgb,
@@ -181,8 +180,29 @@ const PADDING_LOGICAL_PX: f32 = 8.0;
 const NARROW_SHAPING_CACHE_BUDGET_BYTES: usize = 8 * 1024 * 1024;
 const WIDE_SHAPING_CACHE_BUDGET_BYTES: usize = 16 * 1024 * 1024;
 const COMPOSED_ROW_CACHE_BUDGET_BYTES: usize = 32 * 1024 * 1024;
-const MATH_TOOL_BUTTON_LOGICAL_PX: f32 = 22.0;
+/// `.math-tools button { width: 24px; height: 24px }` (mock-up 2127-2129).
+///
+/// **24 and not the 22 this drew until 2026-09-14.** The old number was this
+/// file's own, from the milestone when the two verbs were small bordered chips;
+/// the mock-up's box is the house's, it is the box the strip's own controls
+/// stand in, and it is *larger* than what it replaces — which is the one
+/// direction a hit box is allowed to move (owner's ruling 2026-09-14 ③).
+const MATH_TOOL_BUTTON_LOGICAL_PX: f32 = 24.0;
+/// `.math-tools { gap: 2px }` (mock-up 2117).
 const MATH_TOOL_GAP_LOGICAL_PX: f32 = 2.0;
+/// `.math-tools button { border-radius: 5px }` (mock-up 2129) — the pill a
+/// hovered or pressed mark wears.
+///
+/// Its own number and not [`WINDOW_NEW_TAB_RADIUS_LOGICAL_PX`]: the strip's
+/// controls are 6 in a taller box, and §7.1.6's rule about two radii doing "the
+/// same thing" cuts the other way here — these are two boxes of two sizes and
+/// the design struck a corner for each.
+///
+/// Public because the pill is drawn a crate up: the two marks are house marks
+/// and house marks are rasterized in `bt_app::marks`, so this file gives the
+/// boxes ([`WindowRenderer::math_tool_boxes`]) and `bt_app` puts the drawings
+/// in them.
+pub const MATH_TOOL_PILL_RADIUS_LOGICAL_PX: f32 = 5.0;
 /// A rendered formula's raster is cropped tight to its ink, so its glyphs would touch the pane
 /// edge while a text row's characters sit inside their cell with natural left bearing. This small
 /// indent gives the ink the same visual left edge as the text above it (user report 2026-07-20).
@@ -194,6 +214,39 @@ fn math_toolbar_vertical_bounds(visible_top: f32, visible_bottom: f32, scale: f3
     let button = (MATH_TOOL_BUTTON_LOGICAL_PX * scale).min(band_height);
     let top = visible_top + (band_height - button) / 2.0;
     (top, top + button)
+}
+
+/// **Where a band's two marks stand** — the toggle-source box and the copy box,
+/// in that order, in the pane body's own pixels.
+///
+/// `band` is `[the band's right edge, its visible top, its visible bottom]` and
+/// `pane` is `[the pane's left edge, its right edge]`.
+///
+/// **Beside the band and not inside it**, which is the mock-up's own placement
+/// and its own reasoning (2010-2012: *"The fill is the formula's region alone —
+/// the tools sit beside it, not in it"*, and 1989-1998 for why they are
+/// nevertheless inside the region the pointer has to be in). The owner's ruling
+/// of 2026-09-14 ② says "inside the block's top-right corner"; the same ruling
+/// names the mock-up the visual authority and asks for the formula block to be
+/// found in it, and the mock-up both has one and is explicit here — a mark laid
+/// over the corner of a band would be a mark laid over the formula's own ink,
+/// which is alpha-tight and runs the whole width of the band.
+///
+/// Pulled out of `math_block_geometry` on the same day so the arithmetic can be
+/// pinned without a GPU, which is the arrangement `math_horizontal_bounds` and
+/// `math_toolbar_vertical_bounds` beside it already keep.
+fn math_tool_boxes_px(band: [f32; 3], pane: [f32; 2], scale: f32) -> ([f32; 4], [f32; 4]) {
+    let [visible_right, visible_top, visible_bottom] = band;
+    let [pane_left, pane_right] = pane;
+    let (top, bottom) = math_toolbar_vertical_bounds(visible_top, visible_bottom, scale);
+    let button = bottom - top;
+    let gap = MATH_TOOL_GAP_LOGICAL_PX * scale;
+    let total = button * 2.0 + gap;
+    let left = visible_right.min(pane_right - total).max(pane_left);
+    (
+        [left, top, left + button, bottom],
+        [left + button + gap, top, left + total, bottom],
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -208,6 +261,31 @@ pub enum MathHitTarget {
 pub struct MathHit {
     pub anchor: MathBlockAnchor,
     pub target: MathHitTarget,
+}
+
+/// **One hovered formula band's boxes**, in the pane body's own pixels — see
+/// [`WindowRenderer::math_tool_boxes`].
+///
+/// Deliberately geometry and identity only, with no state in it: whether a mark
+/// is lit, held or showing a tick is `bt_app`'s answer, and a field here would
+/// be this crate holding an opinion about a gesture it never sees.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MathToolBoxes {
+    /// Which block these belong to — the same anchor a press on one of them
+    /// would carry.
+    pub anchor: MathBlockAnchor,
+    /// Which face the block is wearing, which is what decides whether the first
+    /// mark is `#i-code` or `#i-eye`: the mock-up's own rule is that the mark
+    /// names the view you are going *to*, not the one you are in (mock-up
+    /// 2170-2171, `bt_app::marks::ChromeMark::{Code, Eye}`).
+    pub display: MathBlockDisplay,
+    /// `[left, top, right, bottom]` of the band itself — the box the ground is
+    /// drawn under and the box the pointer has to be inside for these to be up.
+    pub block: [f32; 4],
+    /// The toggle-source mark's box.
+    pub source: [f32; 4],
+    /// The copy mark's box, one [`MATH_TOOL_GAP_LOGICAL_PX`] to its right.
+    pub copy: [f32; 4],
 }
 
 /// Which inline run of this placement the pointer is on.
@@ -328,6 +406,86 @@ fn math_overflow_fade_slabs(
                 ],
                 coverage,
             ));
+        }
+    }
+    slabs
+}
+
+/// **How strongly a selection washes a formula's picture** (`docs/DESIGN.md` §7.1.6c-4g).
+///
+/// The band under ordinary text is opaque and the glyphs are printed on it; a picture cannot be
+/// printed on anything, so the selection's colour has to go on top of it — and on top at alpha 1
+/// it would not wash the formula, it would erase it. This is the one number that says how much of
+/// the picture the reader keeps.
+///
+/// It is the block family's own scrim strength (the hover dim is `0.45` of `modal_scrim` over the
+/// same rectangle) rather than a fresh invention, and it lands in the same place every other
+/// renderer puts a selected image: unmistakably coloured, and still a formula you can read. The
+/// colour is the selection's own, so where the picture is *also* standing on the band — an inline
+/// composite sharing its row with text — the two are the same colour and the wash leaves no seam
+/// across the row; only the ink inside the picture takes the tint.
+const MATH_SELECTION_WASH_ALPHA: f32 = 0.45;
+
+/// **The wash a selection lays over one block's picture**: one rectangle per selected span, in the
+/// seat's pixel coordinates, to be struck in the selection's own colour above the raster.
+///
+/// Split out from the renderer for the reason the fades above are, and asserted without a GPU.
+///
+/// # What decides how much of the picture is washed
+///
+/// The spans are the selection's own, over the rows this block stands on, decided from the very
+/// cell anchors the copy reads (`bt_term::DualPlaneSession::selection_text` walks the same cells).
+/// So the rule is not chosen here — it is inherited, and it is inherited on both axes:
+///
+/// - **Across.** A span covers the cells the copy takes. A frozen line's cells all address that
+///   whole line, so touching one of them selects the line and the span is the row: the picture is
+///   washed whole, exactly as the copy takes the whole source. A live block's cells address
+///   themselves one by one, so a half-covered band gives a half-wide span and the wash stops
+///   where the copied bytes stop.
+/// - **Down.** A display block owns whole rows and its rows tile it, so the spans' own row
+///   intervals say which part of the picture the selection reached — a block the drag stopped
+///   half-way down is washed half-way down. An inline composite is the other way round: it stands
+///   on **one** row and hangs above and below that row's box by however much its own ascent and
+///   descent ask for, so its wash takes the picture's own vertical extent. Clipping it to the row
+///   would leave the top of a fraction unwashed inside a selection that has taken it.
+fn math_selection_wash_slabs(
+    metrics: CellMetrics,
+    frame: &ViewportFrame,
+    placement: &MathBlockPlacement,
+    geometry: &MathBlockGeometry,
+) -> Vec<[f32; 4]> {
+    if placement.display != MathBlockDisplay::Rendered || placement.selection_spans.is_empty() {
+        return Vec::new();
+    }
+    let [block_left, block_top, block_right, block_bottom] = geometry.block;
+    if block_right <= block_left || block_bottom <= block_top {
+        return Vec::new();
+    }
+    let columns = frame.columns.get();
+    let inline = placement.artifact.mode == MathMode::Inline;
+    let mut slabs = Vec::with_capacity(placement.selection_spans.len());
+    for span in &placement.selection_spans {
+        let start = span.start_column.min(columns) as usize;
+        let end = span.end_column.min(columns) as usize;
+        if end <= start {
+            continue;
+        }
+        // A span whose row this frame cannot place asks for no pixels rather than panicking:
+        // `validate_shape` already refuses such a frame, and a renderer is not the place to
+        // discover it a second time.
+        if frame.selection_span_vertical_interval(span).is_err() {
+            continue;
+        }
+        let bounds = selection_span_bounds_px(metrics, frame, span, start, end - start);
+        let left = bounds[0].max(block_left);
+        let right = bounds[2].min(block_right);
+        let (top, bottom) = if inline {
+            (block_top, block_bottom)
+        } else {
+            (bounds[1].max(block_top), bounds[3].min(block_bottom))
+        };
+        if right > left && bottom > top {
+            slabs.push([left, top, right, bottom]);
         }
     }
     slabs
@@ -512,6 +670,12 @@ impl CellMetrics {
     pub fn cell_width_subpixels(&self) -> NonZeroI64 {
         let value = (self.cell_width_px * SUBPIXELS_PER_PX as f32).round() as i64;
         NonZeroI64::new(value.max(1)).expect("cell width is clamped above zero")
+    }
+
+    /// The measured pane em in physical subpixels; DPI has already been applied.
+    pub fn font_size_subpixels(&self) -> NonZeroI64 {
+        let value = (self.font_size_px * SUBPIXELS_PER_PX as f32).round() as i64;
+        NonZeroI64::new(value.max(1)).expect("font size is clamped above zero")
     }
 
     pub fn ascii_baseline_subpixels(&self) -> NonZeroI64 {
@@ -1153,12 +1317,175 @@ struct BackgroundVertex {
     image_opacity: f32,
 }
 
+/// **How a raster meets the glass: at its own size, or at some other one.**
+///
+/// # The rule
+///
+/// *A raster presented at its own size is presented on the pixel grid.* When a
+/// textured quad is exactly as wide and as tall as the raster behind it, its
+/// origin is rounded to whole device pixels — **after** every offset that moves
+/// it, the scroll included — and it is sampled with `Nearest`. Every device
+/// pixel it covers then lands on the centre of exactly one texel, and the raster
+/// reaches the glass as the pixels the rasteriser produced. When the quad is
+/// *not* its raster's size nothing is snapped and `Linear` does the resample.
+///
+/// # Why it exists (user report, 2026-09-14, macOS at 1× scale)
+///
+/// The unary minus of `\exp\!\left(-\frac{…}{…}\right)` was invisible on a Mac
+/// while the binary minus of `x-\mu` beside it showed, and both showed on
+/// Windows at a higher scale. A probe on that machine proved the typesetter drew
+/// **both** into the raster, so the loss was here, between the raster and the
+/// glass: a minus at 1× is one device pixel of ink, the quad's top edge stood at
+/// a fractional `y` (a preview scrolls by pixels — see `wheel_travel`'s
+/// `PixelDelta` arm — and an inline formula is placed on a shaped baseline), and
+/// a `Linear` sampler therefore spread that one row of ink over two rows at half
+/// strength each. Half strength against the page's ground is below the threshold
+/// at which a hairline reads as a mark at all, while the fraction bar and the
+/// letters either side of it — two, three, four pixels thick — merely softened.
+/// The horizontal was already right: `preview::markdown_measure_box` rounds the
+/// column's inset for exactly this reason ("an odd number of leftover pixels
+/// would otherwise put the column half a pixel left of centre and blur every
+/// glyph on it"), and what the report is, is the same sentence never written for
+/// `y`.
+///
+/// # Why it is here and not at the four placements
+///
+/// Four lanes place a raster — a display formula in a markdown block, an inline
+/// formula on a shaped baseline, a terminal math band, a picture in a preview
+/// pane — and each computes its own origin from its own arithmetic. The rule is
+/// not about any of those arithmetics; it is about the last step all four share,
+/// which is this one. Stated once here it cannot be forgotten by the fifth lane.
+///
+/// # Snapping after the scroll, not before
+///
+/// The origin is rounded in **device** space, with the scroll offset already
+/// subtracted, so that whatever the offset is the formula still sits on whole
+/// pixels. The cost is that scrolling a preview by fractions moves a raster in
+/// whole-pixel steps while the prose around it moves continuously — the same
+/// trade every hinted text renderer makes, and the only alternative is a
+/// document-space snap that leaves the on-screen `y` fractional again, which is
+/// the bug. The terminal scrolls by whole rows and its row pitch need not be a
+/// whole number of pixels, so its bands take the same rounding for the same
+/// reason.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Blit {
+    /// The quad is the raster's own size. Snapped, and sampled `Nearest`.
+    OneToOne,
+    /// The quad is some other size: a preview zoomed past 100%, a band fitted to
+    /// a row while fresh pixels are typeset, a picture scaled to its pane.
+    /// Placed where the layout asked, and sampled `Linear`.
+    Scaled,
+}
+
+impl Blit {
+    /// Both, in the order [`Self::index`] numbers them — the order the per-tile
+    /// bind groups and [`MathSamplers`] are built in, so that an index and a
+    /// blit cannot come apart.
+    const ALL: [Self; 2] = [Self::OneToOne, Self::Scaled];
+
+    /// Which blit a presentation is, from the scale it asks for on each axis.
+    ///
+    /// Exact equality and no tolerance: every 1:1 caller either carries the
+    /// raster's own `u32` size into the rectangle verbatim or multiplies by a
+    /// scale that *is* `1.0` (`render_scale_milli == 1000`), so the division
+    /// below is exact. A tolerance here would be an invitation to snap a quad
+    /// that really is scaled, which shifts a picture by half a pixel for nothing.
+    fn of(scale_x: f32, scale_y: f32) -> Self {
+        if scale_x == 1.0 && scale_y == 1.0 {
+            Self::OneToOne
+        } else {
+            Self::Scaled
+        }
+    }
+
+    /// Where this raster's top-left corner goes, given where the layout put it.
+    fn origin(self, left: f32, top: f32) -> (f32, f32) {
+        match self {
+            // `round` and not `floor`, to agree with the horizontal inset
+            // `preview::markdown_measure_box` already rounds: a raster goes to
+            // the nearest grid line, so it never moves further than half a pixel
+            // from where the layout asked for it.
+            Self::OneToOne => (left.round(), top.round()),
+            Self::Scaled => (left, top),
+        }
+    }
+
+    /// The filter a quad of this kind is sampled through.
+    fn filter(self) -> wgpu::FilterMode {
+        match self {
+            // A 1:1 quad snapped by `origin` samples texel centres, where the two
+            // filters agree bit for bit; `Nearest` is what makes that a property
+            // of the pipeline rather than of the arithmetic staying correct.
+            Self::OneToOne => wgpu::FilterMode::Nearest,
+            Self::Scaled => wgpu::FilterMode::Linear,
+        }
+    }
+
+    /// This blit's slot in [`Self::ALL`], in a tile's bind groups and in
+    /// [`MathSamplers`].
+    fn index(self) -> usize {
+        match self {
+            Self::OneToOne => 0,
+            Self::Scaled => 1,
+        }
+    }
+}
+
+/// The whole presentation of one raster: the blit it gets, and the rectangle it
+/// is actually drawn in.
+///
+/// The size is carried across untouched — `origin + the size that was asked
+/// for` — so a 1:1 quad still measures exactly the raster and a scaled quad
+/// still measures exactly what its lane scaled it to. Only the corner moves.
+fn presented_raster(rect: [f32; 4], width_px: u32, height_px: u32) -> (Blit, [f32; 4]) {
+    let (width, height) = (rect[2] - rect[0], rect[3] - rect[1]);
+    let blit = Blit::of(
+        width / width_px.max(1) as f32,
+        height / height_px.max(1) as f32,
+    );
+    let (left, top) = blit.origin(rect[0], rect[1]);
+    (blit, [left, top, left + width, top + height])
+}
+
+/// The samplers a math quad may be drawn through, one per [`Blit`].
+///
+/// Two samplers and one pipeline: the filter is the only thing that differs, and
+/// a sampler is a bind-group entry rather than pipeline state, so the choice is
+/// made when a tile is bound and costs the pass nothing.
+struct MathSamplers([wgpu::Sampler; 2]);
+
+impl MathSamplers {
+    fn create(device: &wgpu::Device) -> Self {
+        Self(Blit::ALL.map(|blit| {
+            device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("math block sampler"),
+                mag_filter: blit.filter(),
+                min_filter: blit.filter(),
+                ..Default::default()
+            })
+        }))
+    }
+
+    fn get(&self, blit: Blit) -> &wgpu::Sampler {
+        &self.0[blit.index()]
+    }
+}
+
 struct MathTextureTile {
-    bind_group: wgpu::BindGroup,
+    /// One bind group per [`Blit`], built together with the texture: the view is
+    /// the same in both and only the sampler differs, so a draw picks its filter
+    /// by binding rather than by re-recording anything.
+    bind_groups: [wgpu::BindGroup; 2],
     x_px: u32,
     y_px: u32,
     width_px: u32,
     height_px: u32,
+}
+
+impl MathTextureTile {
+    fn bind_group(&self, blit: Blit) -> &wgpu::BindGroup {
+        &self.bind_groups[blit.index()]
+    }
 }
 
 /// **The tiles are shared, and that is what keeps a prepared frame drawable.**
@@ -1260,6 +1587,10 @@ struct MathDraw {
     /// The tile this draw binds — the resource itself and not a key to look it
     /// up by, for [`CachedMathTexture`]'s reason.
     tile: Arc<MathTextureTile>,
+    /// Which of the tile's two bind groups to draw it through — see [`Blit`].
+    /// Decided where the quad's geometry is decided, because it *is* the
+    /// geometry: a quad that was snapped is a quad that must not be resampled.
+    blit: Blit,
     first_vertex: u32,
 }
 
@@ -3404,7 +3735,7 @@ pub struct GpuContext {
     ground_fade_rect_pipeline: wgpu::RenderPipeline,
     math_pipeline: wgpu::RenderPipeline,
     math_bind_group_layout: wgpu::BindGroupLayout,
-    math_sampler: wgpu::Sampler,
+    math_samplers: MathSamplers,
     background_pipeline: wgpu::RenderPipeline,
     background_bind_group_layout: wgpu::BindGroupLayout,
     background_sampler: wgpu::Sampler,
@@ -5085,7 +5416,7 @@ struct DeviceResources {
     ground_fade_rect_pipeline: wgpu::RenderPipeline,
     math_pipeline: wgpu::RenderPipeline,
     math_bind_group_layout: wgpu::BindGroupLayout,
-    math_sampler: wgpu::Sampler,
+    math_samplers: MathSamplers,
     background_pipeline: wgpu::RenderPipeline,
     background_bind_group_layout: wgpu::BindGroupLayout,
     background_sampler: wgpu::Sampler,
@@ -5119,7 +5450,7 @@ impl DeviceResources {
         let rect_pipeline = create_rect_pipeline(device, format);
         let ground_rect_pipeline = create_ground_rect_pipeline(device, format);
         let ground_fade_rect_pipeline = create_ground_fade_rect_pipeline(device, format);
-        let (math_pipeline, math_bind_group_layout, math_sampler) =
+        let (math_pipeline, math_bind_group_layout, math_samplers) =
             create_math_pipeline(device, format);
         let (background_pipeline, background_bind_group_layout, background_sampler) =
             create_background_pipeline(device, format);
@@ -5136,7 +5467,7 @@ impl DeviceResources {
             ground_fade_rect_pipeline,
             math_pipeline,
             math_bind_group_layout,
-            math_sampler,
+            math_samplers,
             background_pipeline,
             background_bind_group_layout,
             background_sampler,
@@ -5369,7 +5700,7 @@ impl GpuContext {
             ground_fade_rect_pipeline,
             math_pipeline,
             math_bind_group_layout,
-            math_sampler,
+            math_samplers,
             background_pipeline,
             background_bind_group_layout,
             background_sampler,
@@ -5394,7 +5725,7 @@ impl GpuContext {
         self.ground_fade_rect_pipeline = ground_fade_rect_pipeline;
         self.math_pipeline = math_pipeline;
         self.math_bind_group_layout = math_bind_group_layout;
-        self.math_sampler = math_sampler;
+        self.math_samplers = math_samplers;
         self.background_pipeline = background_pipeline;
         self.background_bind_group_layout = background_bind_group_layout;
         self.background_sampler = background_sampler;
@@ -5582,7 +5913,7 @@ impl GpuContext {
             ground_fade_rect_pipeline,
             math_pipeline,
             math_bind_group_layout,
-            math_sampler,
+            math_samplers,
             background_pipeline,
             background_bind_group_layout,
             background_sampler,
@@ -5612,7 +5943,7 @@ impl GpuContext {
             ground_fade_rect_pipeline,
             math_pipeline,
             math_bind_group_layout,
-            math_sampler,
+            math_samplers,
             background_pipeline,
             background_bind_group_layout,
             background_sampler,
@@ -6078,22 +6409,28 @@ impl GpuContext {
                     &bytes,
                 );
                 let view = texture.create_view(&Default::default());
-                let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("math block texture bind group"),
-                    layout: &self.math_bind_group_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&self.math_sampler),
-                        },
-                    ],
+                // One group per blit, built here where the view is: see
+                // [`MathTextureTile::bind_groups`].
+                let bind_groups = Blit::ALL.map(|blit| {
+                    self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("math block texture bind group"),
+                        layout: &self.math_bind_group_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(&view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::Sampler(
+                                    self.math_samplers.get(blit),
+                                ),
+                            },
+                        ],
+                    })
                 });
                 tiles.push(Arc::new(MathTextureTile {
-                    bind_group,
+                    bind_groups,
                     x_px: x,
                     y_px: y,
                     width_px: width,
@@ -6566,6 +6903,39 @@ impl WindowRenderer {
 
     pub fn ime_cursor_area(&self, frame: &ViewportFrame) -> ImeCursorArea {
         ime_cursor_area_for_metrics(self.metrics, frame)
+    }
+
+    /// **Where the hovered band's floor and its two marks stand**, in the pane
+    /// body's own pixels — the drawing half of what [`Self::math_hit_test`]
+    /// answers for the pointer.
+    ///
+    /// One band or none: `toolbar_visible` is written to exactly one shell and
+    /// there is one pointer, so at most one block in a frame is wearing its
+    /// tools. The caller (`bt_app`) is the one that rasterizes house marks, and
+    /// it reads these boxes out of the same `math_block_geometry` that
+    /// `math_hit_test` reads — which is what keeps the box you can press and the
+    /// box you can see from being two boxes.
+    ///
+    /// Returns `None` for a band that is off screen, for a band with no tools up
+    /// and for a table (`RgbaArtifactKind::Table`), matching `math_hit_test`'s
+    /// own reading of the same list.
+    #[must_use]
+    pub fn math_tool_boxes(&self, frame: &ViewportFrame) -> Option<MathToolBoxes> {
+        frame.math_blocks.iter().rev().find_map(|placement| {
+            if placement.artifact.kind != bt_viewport::RgbaArtifactKind::Math
+                || !placement.toolbar_visible
+            {
+                return None;
+            }
+            let geometry = self.math_block_geometry(frame, placement)?;
+            Some(MathToolBoxes {
+                anchor: placement.anchor.clone(),
+                display: placement.display,
+                block: geometry.block,
+                source: geometry.eye?,
+                copy: geometry.copy?,
+            })
+        })
     }
 
     pub fn math_hit_test(&self, frame: &ViewportFrame, x: f64, y: f64) -> Option<MathHit> {
@@ -7820,7 +8190,11 @@ impl WindowRenderer {
                         contents: bytemuck::cast_slice(status_rect_data),
                         usage: wgpu::BufferUsages::VERTEX,
                     });
-            let math_overlays = self.math_overlay_rectangles(frame);
+            // The wash first, the block's own chrome after it: see
+            // [`Self::math_selection_wash_rectangles`] for why this buffer's order is the
+            // z-order that matters here.
+            let mut math_overlays = self.math_selection_wash_rectangles(frame);
+            math_overlays.extend(self.math_overlay_rectangles(frame));
             let overlay_data = if math_overlays.is_empty() {
                 empty_rect.as_slice()
             } else {
@@ -8538,7 +8912,7 @@ impl WindowRenderer {
                     pass.set_pipeline(&gpu.math_pipeline);
                     pass.set_vertex_buffer(0, vertex_buffer.slice(..));
                     for draw in &seat.math_draws {
-                        pass.set_bind_group(0, &draw.tile.bind_group, &[]);
+                        pass.set_bind_group(0, draw.tile.bind_group(draw.blit), &[]);
                         pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
                     }
                 }
@@ -8608,7 +8982,7 @@ impl WindowRenderer {
                     pass.set_pipeline(&gpu.math_pipeline);
                     pass.set_vertex_buffer(0, buffer.slice(..));
                     for draw in &chrome_icon_draws {
-                        pass.set_bind_group(0, &draw.tile.bind_group, &[]);
+                        pass.set_bind_group(0, draw.tile.bind_group(draw.blit), &[]);
                         pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
                     }
                 }
@@ -8626,7 +9000,7 @@ impl WindowRenderer {
                     pass.set_pipeline(&gpu.math_pipeline);
                     pass.set_vertex_buffer(0, buffer.slice(..));
                     for draw in &chrome_over_draws {
-                        pass.set_bind_group(0, &draw.tile.bind_group, &[]);
+                        pass.set_bind_group(0, draw.tile.bind_group(draw.blit), &[]);
                         pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
                     }
                 }
@@ -8661,7 +9035,7 @@ impl WindowRenderer {
                         pass.set_pipeline(&gpu.math_pipeline);
                         pass.set_vertex_buffer(0, vertex_buffer.slice(..));
                         for draw in &stage.draws {
-                            pass.set_bind_group(0, &draw.tile.bind_group, &[]);
+                            pass.set_bind_group(0, draw.tile.bind_group(draw.blit), &[]);
                             pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
                         }
                     }
@@ -8734,7 +9108,7 @@ impl WindowRenderer {
                     pass.set_pipeline(&gpu.math_pipeline);
                     pass.set_vertex_buffer(0, buffer.slice(..));
                     for draw in &preview_raster_draws {
-                        pass.set_bind_group(0, &draw.tile.bind_group, &[]);
+                        pass.set_bind_group(0, draw.tile.bind_group(draw.blit), &[]);
                         pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
                     }
                 }
@@ -8793,7 +9167,7 @@ impl WindowRenderer {
                     pass.set_pipeline(&gpu.math_pipeline);
                     pass.set_vertex_buffer(0, vertex_buffer.slice(..));
                     for draw in &peek_draws {
-                        pass.set_bind_group(0, &draw.tile.bind_group, &[]);
+                        pass.set_bind_group(0, draw.tile.bind_group(draw.blit), &[]);
                         pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
                     }
                 }
@@ -8878,7 +9252,7 @@ impl WindowRenderer {
                         pass.set_pipeline(&gpu.math_pipeline);
                         pass.set_vertex_buffer(0, buffer.slice(..));
                         for draw in &layer.icon_draws {
-                            pass.set_bind_group(0, &draw.tile.bind_group, &[]);
+                            pass.set_bind_group(0, draw.tile.bind_group(draw.blit), &[]);
                             pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
                         }
                     }
@@ -9048,16 +9422,29 @@ impl WindowRenderer {
                         as f32
                         / SUBPIXELS_PER_PX as f32
             };
+            let block_left_px = math_block_left_px(
+                self.metrics,
+                placement.left_subpixels,
+                placement.display == MathBlockDisplay::Rendered,
+            );
+            let block_left = block_left_px - placement.horizontal_scroll_px as f32;
+            let block_top = block_top - placement.vertical_scroll_px as f32;
+            // The band's own corner, on the grid when it is drawn at its own size
+            // — see [`Blit`]. Taken here, outside the tile loop and after both
+            // scroll offsets, because it is the *block* that is snapped: a tile's
+            // offset inside it is a whole number of raster pixels, so snapping
+            // the corner snaps every tile and cannot pull two of them apart.
+            // Neither subpixel top is a whole pixel in general — a row's height in
+            // subpixels need not divide by `SUBPIXELS_PER_PX`, and an inline
+            // formula sits on the ASCII baseline, which is a fraction the font
+            // chose.
+            let blit = Blit::of(scale, scale);
+            let (block_left, block_top) = blit.origin(block_left, block_top);
             for tile in tile_geometry {
                 let (tile_x, tile_y, tile_width, tile_height) =
                     (tile.x_px, tile.y_px, tile.width_px, tile.height_px);
-                let left = math_block_left_px(
-                    self.metrics,
-                    placement.left_subpixels,
-                    placement.display == MathBlockDisplay::Rendered,
-                ) + tile_x as f32 * scale
-                    - placement.horizontal_scroll_px as f32;
-                let top = block_top + tile_y as f32 * scale - placement.vertical_scroll_px as f32;
+                let left = block_left + tile_x as f32 * scale;
+                let top = block_top + tile_y as f32 * scale;
                 let right = left + tile_width as f32 * scale;
                 let bottom = top + tile_height as f32 * scale;
                 let visible_left = left.max(geometry.clip[0]).max(pane_left);
@@ -9085,7 +9472,11 @@ impl WindowRenderer {
                     self.seat.height,
                     1.0,
                 ));
-                draws.push(MathDraw { tile, first_vertex });
+                draws.push(MathDraw {
+                    tile,
+                    blit,
+                    first_vertex,
+                });
             }
         }
         MathDrawBatch {
@@ -9167,13 +9558,17 @@ impl WindowRenderer {
         };
         let rects = self.peek_box_rects(&layout);
         let fit = (layout.image[2] - layout.image[0]) / overlay.width_px as f32;
+        // A flyout small enough to be shown whole is shown on the grid; one the
+        // box had to shrink is resampled — see [`Blit`].
+        let blit = Blit::of(fit, fit);
+        let (image_left, image_top) = blit.origin(layout.image[0], layout.image[1]);
         let mut draws = Vec::new();
         let mut vertices = Vec::new();
         for tile in tile_geometry {
             let (tile_x, tile_y, tile_width, tile_height) =
                 (tile.x_px, tile.y_px, tile.width_px, tile.height_px);
-            let left = layout.image[0] + tile_x as f32 * fit;
-            let top = layout.image[1] + tile_y as f32 * fit;
+            let left = image_left + tile_x as f32 * fit;
+            let top = image_top + tile_y as f32 * fit;
             let right = left + tile_width as f32 * fit;
             let bottom = top + tile_height as f32 * fit;
             let first_vertex = vertices.len() as u32;
@@ -9190,7 +9585,11 @@ impl WindowRenderer {
                 self.config.height,
                 1.0,
             ));
-            draws.push(MathDraw { tile, first_vertex });
+            draws.push(MathDraw {
+                tile,
+                blit,
+                first_vertex,
+            });
         }
         (rects, draws, vertices)
     }
@@ -9267,13 +9666,20 @@ impl WindowRenderer {
             else {
                 continue;
             };
-            let scale_x = (icon.rect[2] - icon.rect[0]) / icon.width_px.max(1) as f32;
-            let scale_y = (icon.rect[3] - icon.rect[1]) / icon.height_px.max(1) as f32;
+            // **This is the lane a display formula reaches the glass through**,
+            // and where the 2026-09-14 report's minus sign was lost: the block
+            // hands its rectangle down with the raster's own width and height in
+            // it and a top that carries the page's scroll, so the quad is 1:1 and
+            // its `y` is whatever the scroll left behind. [`presented_raster`]
+            // puts that corner back on the grid and says how to sample it.
+            let (blit, rect) = presented_raster(icon.rect, icon.width_px, icon.height_px);
+            let scale_x = (rect[2] - rect[0]) / icon.width_px.max(1) as f32;
+            let scale_y = (rect[3] - rect[1]) / icon.height_px.max(1) as f32;
             for tile in tile_geometry {
                 let (tile_x, tile_y, tile_width, tile_height) =
                     (tile.x_px, tile.y_px, tile.width_px, tile.height_px);
-                let left = icon.rect[0] + tile_x as f32 * scale_x;
-                let top = icon.rect[1] + tile_y as f32 * scale_y;
+                let left = rect[0] + tile_x as f32 * scale_x;
+                let top = rect[1] + tile_y as f32 * scale_y;
                 let tile_rect = [
                     left,
                     top,
@@ -9297,7 +9703,11 @@ impl WindowRenderer {
                     surface_height,
                     icon.opacity,
                 ));
-                draws.push(MathDraw { tile, first_vertex });
+                draws.push(MathDraw {
+                    tile,
+                    blit,
+                    first_vertex,
+                });
             }
         }
         (draws, vertices)
@@ -9359,6 +9769,11 @@ impl WindowRenderer {
                 + image.pan_px[1];
             let scale_x = image.display_width_px as f32 / image.width_px as f32;
             let scale_y = image.display_height_px as f32 / image.height_px as f32;
+            // A picture shown at 100% is shown on the grid — the pan is a float
+            // and would otherwise leave it half a pixel off after a drag. A
+            // zoomed one is resampled, which is what a zoom is. See [`Blit`].
+            let blit = Blit::of(scale_x, scale_y);
+            let (left_inset, top_inset) = blit.origin(left_inset, top_inset);
             let mut draws = Vec::new();
             for tile in tile_geometry {
                 let (tile_x, tile_y, tile_width, tile_height) =
@@ -9379,7 +9794,11 @@ impl WindowRenderer {
                     image.seat.height,
                     1.0,
                 ));
-                draws.push(MathDraw { tile, first_vertex });
+                draws.push(MathDraw {
+                    tile,
+                    blit,
+                    first_vertex,
+                });
             }
             stages.push(PreviewImageStage {
                 seat: image.seat,
@@ -9561,22 +9980,12 @@ impl WindowRenderer {
             "math scissor crops the raster: clip={clip:?} block={block:?}"
         );
         let (eye, copy) = if placement.toolbar_visible {
-            let scale = self.metrics.scale_factor as f32;
-            let (toolbar_top, toolbar_bottom) =
-                math_toolbar_vertical_bounds(visible_top, visible_bottom, scale);
-            let button = toolbar_bottom - toolbar_top;
-            let gap = MATH_TOOL_GAP_LOGICAL_PX * scale;
-            let total = button * 2.0 + gap;
-            let left = visible_right.min(pane_right - total).max(pane_left);
-            (
-                Some([left, toolbar_top, left + button, toolbar_bottom]),
-                Some([
-                    left + button + gap,
-                    toolbar_top,
-                    left + total,
-                    toolbar_bottom,
-                ]),
-            )
+            let (source, copy) = math_tool_boxes_px(
+                [visible_right, visible_top, visible_bottom],
+                [pane_left, pane_right],
+                self.metrics.scale_factor as f32,
+            );
+            (Some(source), Some(copy))
         } else {
             (None, None)
         };
@@ -9934,26 +10343,49 @@ impl WindowRenderer {
                 ));
             }
         }
+        // **The band's floor is the fence's floor** (owner's ruling 2026-09-14
+        // ①; `.math:hover .mbox { background: var(--panel) }`, mock-up 2025,
+        // against `.md-code { background: var(--panel) }` at 2141).
+        //
+        // Until this ruling the band wore `modal_scrim` at .45 — a *scrim*, and
+        // the mock-up's own comment says why that was the wrong noun: a fill, a
+        // border and a rule "all do the same perceptual job", so one fill is how
+        // this window says "this is a region", and a scrim is the absence of a
+        // surface rather than one. A formula band and a markdown fence are the
+        // same kind of object — a block of not-prose standing in a run of prose
+        // — and they now stand on one token at one corner
+        // ([`PREVIEW_CODE_GROUND_RADIUS_LOGICAL_PX`]).
+        //
+        // **No hairline to go with it**, and that is the same sentence: the
+        // fence draws a border because it is laid on a document's own paper,
+        // and this is laid on the terminal's, where `--panel` against `--termbg`
+        // is already the whole of the figure. Drawing both would be the one
+        // instruction repeated twice.
+        //
+        // Drawn here, in the ink lane, which runs *before* the math pipeline —
+        // so this is genuinely under the formula's own pixels and not a wash
+        // over them. That was already true of the scrim it replaces; it matters
+        // far more now that the fill is opaque.
+        let ground_radius =
+            (PREVIEW_CODE_GROUND_RADIUS_LOGICAL_PX * self.metrics.scale_factor as f32).max(0.0);
         for (index, placement) in frame.math_blocks.iter().enumerate() {
-            if math_block_dim_is_drawn(placement, drawn_math_blocks.contains(&index))
+            if math_block_ground_is_drawn(placement, drawn_math_blocks.contains(&index))
                 && let Some(geometry) = self.math_block_geometry(frame, placement)
             {
-                // **The palette's one scrim, not the status chip's face.** This
-                // wash shared `#333333` with the two chips above until
-                // 2026-08-27 and is not one: a chip is a surface with words on
-                // it and a scrim is the absence of a surface, which is exactly
-                // why `modal_scrim` is the single entry the palette declares
-                // once for both canvases. Sharing the chips' constant also made
-                // the doc line above ("the dim darkens a block") false on the
-                // dark canvas, where `#333333` is *lighter* than `--termbg`.
-                rects.push(self.pixel_rect_with_coverage(
-                    geometry.block[0],
-                    geometry.block[1],
-                    geometry.block[2],
-                    geometry.block[3],
-                    chrome_palette().modal_scrim,
-                    0.45,
-                ));
+                rects.extend(
+                    rounded_rect_coverage(geometry.block, ground_radius)
+                        .into_iter()
+                        .map(|entry| {
+                            self.pixel_rect_with_coverage(
+                                entry.rect[0],
+                                entry.rect[1],
+                                entry.rect[2],
+                                entry.rect[3],
+                                chrome_palette().preview_code_ground,
+                                entry.coverage,
+                            )
+                        }),
+                );
             }
         }
         for failure in &frame.math_failures {
@@ -10110,75 +10542,77 @@ impl WindowRenderer {
             .collect()
     }
 
+    /// **The selection, said again over the pictures** (`docs/DESIGN.md` §7.1.6c-4g).
+    ///
+    /// A drag across a typeset formula copies the formula's source — that has always worked — and
+    /// until this lane existed it copied it invisibly: the band is a grid fill, it goes down with
+    /// the cell backgrounds before anything else a seat draws, and a picture standing on those
+    /// cells is drawn over it. On a display block the band was not even emitted. So the reader
+    /// dragged across a formula, let go, pasted it, and nothing on screen had ever said it was
+    /// taken.
+    ///
+    /// These rectangles ride in the overlay buffer, which is issued **after** the math draws, so
+    /// the wash is on top of the raster rather than behind it. They are placed at the *head* of
+    /// that buffer on purpose: the block's own overflow fades and its two toolbar buttons are the
+    /// rest of it, and both of those belong over the wash — a fade that a selection had covered
+    /// would stop saying the formula continues, and a button the reader is about to press must
+    /// not be tinted by a drag that happens to have crossed it.
+    fn math_selection_wash_rectangles(&self, frame: &ViewportFrame) -> Vec<RectInstance> {
+        // Read once per frame from the same atomic word the band reads, for the band's own
+        // reason: a theme switch must never leave one half of a selection wearing the previous
+        // canvas's fill while the other half wears the new one.
+        let selection_background = selection_background_rgb();
+        let mut rects = Vec::new();
+        for placement in &frame.math_blocks {
+            if placement.selection_spans.is_empty() {
+                continue;
+            }
+            let Some(geometry) = self.math_block_geometry(frame, placement) else {
+                continue;
+            };
+            rects.extend(
+                math_selection_wash_slabs(self.metrics, frame, placement, &geometry)
+                    .into_iter()
+                    .map(|rect| {
+                        self.pixel_rect_with_coverage(
+                            rect[0],
+                            rect[1],
+                            rect[2],
+                            rect[3],
+                            selection_background,
+                            MATH_SELECTION_WASH_ALPHA,
+                        )
+                    }),
+            );
+        }
+        rects
+    }
+
+    /// **What this lane still draws over a formula band: the overflow fades,
+    /// and nothing else** (owner's ruling 2026-09-14 ②).
+    ///
+    /// It used to draw the two verbs as well — each a small square chip
+    /// ([`Self::float_tag_rects`]) with an eye or a pair of sheets struck inside
+    /// it out of five and eight hand-placed rectangles. Two things were wrong
+    /// with that and only one of them was the look. The look: a bordered chip is
+    /// this window's *floating tag* — the thing a tooltip and a hover-address
+    /// bubble are — and a verb you press is not one of those; it is a control,
+    /// and every other control in this window is a house mark on a pill. The
+    /// other: those rectangles were a second drawing of two marks the house
+    /// already owns (`#i-code`, `#i-eye`, `#i-copy`), which is the exact thing
+    /// `bt_app::marks`'s own header forbids — "a mark drawn twice is two marks
+    /// that drift, and the second one is the one nobody looks at".
+    ///
+    /// So the marks moved up a crate, to where marks are rasterized, and this
+    /// file kept the half only it can answer: *where* they stand
+    /// ([`WindowRenderer::math_tool_boxes`]).
     fn math_overlay_rectangles(&self, frame: &ViewportFrame) -> Vec<RectInstance> {
         let mut rects = Vec::new();
-        // The eye and the copy glyph are drawn *on a chip*, not on the canvas,
-        // so they take the chip's ink and not the terminal's. Before 2026-08-27
-        // they took `foreground_rgb()` — the scheme's default ink, chosen to
-        // read against the canvas — and stood on a hard-coded `#333333`: the
-        // status overlay's defect, in a second place, for the same reason.
-        let ink = chrome_palette().float_tag().ink;
-        let unit = self.metrics.scale_factor as f32;
         for placement in &frame.math_blocks {
             let Some(geometry) = self.math_block_geometry(frame, placement) else {
                 continue;
             };
-            // Before the toolbar, so the buttons stay crisp on top of it.
             rects.extend(self.math_overflow_fade_rectangles(placement, &geometry));
-            let (Some(eye), Some(copy)) = (geometry.eye, geometry.copy) else {
-                continue;
-            };
-            for button in [eye, copy] {
-                rects.extend(self.float_tag_rects(button));
-            }
-            let eye_mid_x = (eye[0] + eye[2]) / 2.0;
-            let eye_mid_y = (eye[1] + eye[3]) / 2.0;
-            let eye_half_w = (eye[2] - eye[0]) * 0.29;
-            let eye_half_h = (eye[3] - eye[1]) * 0.18;
-            rects.extend([
-                self.pixel_rect(
-                    eye_mid_x - eye_half_w,
-                    eye_mid_y - eye_half_h,
-                    eye_mid_x + eye_half_w,
-                    eye_mid_y - eye_half_h + unit,
-                    ink,
-                ),
-                self.pixel_rect(
-                    eye_mid_x - eye_half_w,
-                    eye_mid_y + eye_half_h - unit,
-                    eye_mid_x + eye_half_w,
-                    eye_mid_y + eye_half_h,
-                    ink,
-                ),
-                self.pixel_rect(
-                    eye_mid_x - unit,
-                    eye_mid_y - unit,
-                    eye_mid_x + unit,
-                    eye_mid_y + unit,
-                    ink,
-                ),
-            ]);
-            let copy_inset = (copy[2] - copy[0]) * 0.27;
-            let first = [
-                copy[0] + copy_inset - 2.0 * unit,
-                copy[1] + copy_inset - 2.0 * unit,
-                copy[2] - copy_inset,
-                copy[3] - copy_inset,
-            ];
-            let second = [
-                copy[0] + copy_inset,
-                copy[1] + copy_inset,
-                copy[2] - copy_inset + 2.0 * unit,
-                copy[3] - copy_inset + 2.0 * unit,
-            ];
-            for outline in [first, second] {
-                rects.extend([
-                    self.pixel_rect(outline[0], outline[1], outline[2], outline[1] + unit, ink),
-                    self.pixel_rect(outline[0], outline[3] - unit, outline[2], outline[3], ink),
-                    self.pixel_rect(outline[0], outline[1], outline[0] + unit, outline[3], ink),
-                    self.pixel_rect(outline[2] - unit, outline[1], outline[2], outline[3], ink),
-                ]);
-            }
         }
         rects
     }
@@ -10724,6 +11158,200 @@ fn chrome_label_attrs(
     attrs
 }
 
+/// **The face one cluster of grid text is drawn from** — the pane's own answer,
+/// asked from the chrome so that a card gets the same one (owner's report
+/// 2026-09-14, `docs/DESIGN.md` §7.1.6b′ ⑤).
+///
+/// [`ChromeLabel::mono`] says "this line is a document written in a grid", and
+/// until this function it said it in one word: `Family::Monospace`. That word
+/// resolves to the family the grid is actually set in — [`primary_font_family`],
+/// which [`GpuContext::set_terminal_font`] moves whenever the reader picks a
+/// terminal font — so the *primary* face was never the difference. What was left
+/// over is every code point that face does not cover: `Family::Monospace` hands
+/// those to cosmic-text's generic fallback, and the pane hands them to
+/// [`font_presentation_route`], which is a different question with a different
+/// answer.
+///
+/// That divergence is the whole of the report. A shell printed `○` (U+25CB); the
+/// pane drew a clean hollow circle, because the route sends a geometric shape to
+/// [`TEXT_SYMBOL_FONT_FAMILY`], and the card drew a large arc, because the
+/// fallback chain found some other installed face whose circle is wider than the
+/// one mini column the grid had given it, and the column cut it.
+///
+/// **ASCII is answered without asking.** The primary face is a monospaced face
+/// chosen to draw a terminal; it covers ASCII by construction — it is the very
+/// face a mini column's advance is measured on — and asking the route would
+/// spend a database query and a charmap walk per cluster to arrive at
+/// `TerminalText`. Nearly every mono label this chrome draws is ASCII from one
+/// end to the other.
+///
+/// The colour arm takes the pane's *preference order* and not the pane's trial:
+/// [`shape_narrow_buffer_for_key`] shapes the cluster in both emoji faces and
+/// measures which one really drew it in colour inside the cell, because it is
+/// also deciding how large to draw the answer. A chrome label decides no such
+/// thing, so it asks the cheap half of the question and leaves the expensive
+/// half where the size policy that needs it lives.
+fn mono_cluster_family(cluster: &str, font_system: &mut FontSystem) -> Family<'static> {
+    if cluster.is_ascii() {
+        return Family::Monospace;
+    }
+    match font_presentation_route(cluster, font_system) {
+        PresentationRoute::TerminalText => Family::Monospace,
+        PresentationRoute::TextSymbol => Family::Name(TEXT_SYMBOL_FONT_FAMILY),
+        PresentationRoute::ColorEmoji => {
+            if font_family_available(font_system, SEGOE_COLOR_EMOJI_FONT_FAMILY) {
+                Family::Name(SEGOE_COLOR_EMOJI_FONT_FAMILY)
+            } else {
+                Family::Name(COLOR_EMOJI_FONT_FAMILY)
+            }
+        }
+    }
+}
+
+/// **One mono chrome label's text, cut into the spans its faces divide it into**
+/// — maximal, so a row of ASCII with one symbol in it is three spans and not one
+/// per character.
+///
+/// `None` means "every cluster is on the grid's own face", which is the ordinary
+/// case and is answered with the single unstyled span the shaper was handed
+/// before this existed. It is also what keeps the route from *widening* its
+/// reach: [`font_presentation_route`] reads the whole string it is given with
+/// `chars().any(..)`, so asking it about a line rather than about a cluster would
+/// move a whole row of Latin onto the symbol face because one arrow stood at the
+/// end of it. The pane asks per cell; this asks per cluster, which is the same
+/// grain.
+fn mono_label_spans(
+    text: &str,
+    font_system: &mut FontSystem,
+) -> Option<Vec<(Range<usize>, Family<'static>)>> {
+    let mut spans: Vec<(Range<usize>, Family<'static>)> = Vec::new();
+    let mut routed = false;
+    let mut at = 0usize;
+    for cluster in bt_unicode::graphemes(text) {
+        let range = at..at + cluster.len();
+        at = range.end;
+        let family = mono_cluster_family(cluster, font_system);
+        routed |= !matches!(family, Family::Monospace);
+        match spans.last_mut() {
+            Some((last, standing)) if *standing == family => last.end = range.end,
+            _ => spans.push((range, family)),
+        }
+    }
+    routed.then_some(spans)
+}
+
+/// Put one chrome label's text into its buffer, in the face or faces it is drawn
+/// from.
+///
+/// The chrome's own labels are one face by definition — the window talking about
+/// itself — so they take the path they always took. A `mono` label is a document
+/// quoted out of a grid, and a grid's faces are per cluster
+/// ([`mono_label_spans`]).
+fn set_chrome_label_text(
+    buffer: &mut Buffer,
+    font_system: &mut FontSystem,
+    text: &str,
+    attrs: &Attrs<'static>,
+    mono: bool,
+) {
+    match mono.then(|| mono_label_spans(text, font_system)).flatten() {
+        Some(spans) => buffer.set_rich_text(
+            spans.iter().map(|(range, family)| {
+                let mut span = attrs.clone();
+                span.family = *family;
+                (&text[range.clone()], span)
+            }),
+            attrs,
+            Shaping::Advanced,
+            None,
+        ),
+        None => buffer.set_text(text, attrs, Shaping::Advanced, None),
+    }
+}
+
+/// How wide one shaped chrome label came out, in physical pixels.
+///
+/// A chrome label is one line — `Wrap::None`, and a one-line field's text has had
+/// its newlines taken out long before it reaches here — so the widest of the
+/// buffer's runs is the label's width.
+fn shaped_line_width(buffer: &Buffer) -> f32 {
+    buffer
+        .layout_runs()
+        .map(|run| run.line_w)
+        .fold(0.0_f32, f32::max)
+}
+
+/// **The size a grid cell is re-set at so that it fits the columns it owns** —
+/// `None` for a label that already fits, which is every label but the rare one
+/// this exists for.
+///
+/// # Why a cell and not a label
+///
+/// A `mono` label carrying exactly one cluster **is** a cell of a grid: that is
+/// what `focus_thumb::grid_runs` emits for every non-ASCII cluster of a projected
+/// row, and `seats::mini_grid_row_labels` gives it a box that is precisely the
+/// columns the grid counted for it. A mono label of several clusters is a *line*
+/// — a run of ASCII, a quoted source line — whose box is a layout box and whose
+/// overflow is a cut, exactly as `overflow: hidden` has always cut it.
+///
+/// # Why fitted and not cut
+///
+/// Because the pane fits it. A too-wide narrow cluster is not clipped in the
+/// terminal either: `NarrowShapingCache::get_or_shape` re-shapes it at
+/// [`narrow_fallback_em_scale`] (or, for a text-coordinated symbol,
+/// [`text_coordinated_symbol_em_scale`]) so the ink lands inside its cell, and
+/// the grid keeps both of its promises — the glyph is whole, and the next column
+/// still begins where the column count says it does. A card that cut the same
+/// glyph instead would be the one place in this window where the grid is bought
+/// with half a symbol; the owner's screenshot of a circle drawn as an arc is what
+/// that looks like.
+///
+/// The ratio is the shaped **advance** against the box, which is the measurement
+/// a label has: advance is linear in font size for a given face, so one re-set at
+/// `size × box / advance` lands the run on its columns rather than iterating
+/// toward them. The pane's own scales are ink-box ratios instead, because a cell
+/// is aligned on its ink; a chrome label is placed by its advance and cropped by
+/// its box, so the advance is the honest number here.
+///
+/// # What counts as overflowing
+///
+/// **The clip's own pixel grid, and not the box's exact edge.** A crop is applied
+/// as [`TextBounds`], whose right edge is `clip[2].ceil()` — rounded *outward* —
+/// so ink that overhangs its box by less than the pixel it stands in is not cut
+/// by anything, and nothing about it needs re-setting. The distinction is not
+/// cosmetic: a single-character ASCII cell's advance is its column by
+/// construction, and the two are computed by different arithmetic
+/// (`origin + (n+1) × cell` minus `origin + n × cell`, against the shaper's own
+/// sum), so they part company in the last bits of an `f32`. Without this every
+/// one-character cell on a card would be re-shaped a millionth smaller, for a
+/// cut that could not have happened.
+///
+/// Floored at one physical pixel, for [`Buffer::set_metrics`]' own refusal: a box
+/// squeezed to nothing would otherwise ask for a zero-sized face, and a cell that
+/// small has no picture to keep whole anyway.
+fn grid_cell_fit_font_size_px(label: &ChromeLabel, shaped_width: f32) -> Option<f32> {
+    let box_width = label.rect[2] - label.rect[0];
+    if !label.mono || box_width <= 0.0 || !shaped_width.is_finite() {
+        return None;
+    }
+    // Both edges, and the second is the one a cell at the seat's own right edge
+    // turns on: a cluster the *card* is cutting in half is being cut by the end of
+    // the row and not by its columns, exactly as the terminal's last column cuts a
+    // line, and shrinking it to the sliver still on screen would be the card
+    // inventing a size out of how much of the seat is left.
+    let room = label.clip.unwrap_or(label.rect)[2].ceil() - label.rect[0];
+    if shaped_width <= box_width || shaped_width <= room {
+        return None;
+    }
+    let one_cluster = bt_unicode::graphemes(&label.text)
+        .next()
+        .is_some_and(|cluster| cluster.len() == label.text.len());
+    if !one_cluster {
+        return None;
+    }
+    Some((label.font_size_px * box_width / shaped_width).max(1.0))
+}
+
 /// **Where every character boundary of one shaped run falls**, in physical
 /// pixels from the run's start.
 ///
@@ -10929,7 +11557,9 @@ fn shape_chrome_measurement(
     // No width bound at all: this asks what the text *wants*, not what it would
     // be squeezed into.
     buffer.set_size(None, Some(line_height));
-    buffer.set_text(
+    set_chrome_label_text(
+        &mut buffer,
+        font_system,
         text,
         // **Tabular figures are a parameter, and they were not** (user report,
         // 2026-08-17). The note that stood here said they could only ever make a
@@ -10942,8 +11572,7 @@ fn shape_chrome_measurement(
         // and runs off the right of it, where the clip cuts the last glyph in
         // half. That is what the Git page's meta column was doing at every width.
         &chrome_label_attrs(weight, letter_spacing_em, tabular_numerals, mono),
-        Shaping::Advanced,
-        None,
+        mono,
     );
     buffer.shape_until_scroll(font_system, false);
     Some(buffer)
@@ -11007,12 +11636,19 @@ fn shape_chrome_labels(
                 label.tabular_numerals,
                 label.mono,
             );
-            buffer.set_text(&label.text, &attrs, Shaping::Advanced, None);
+            set_chrome_label_text(&mut buffer, font_system, &label.text, &attrs, label.mono);
             buffer.shape_until_scroll(font_system, false);
-            let text_width = buffer
-                .layout_runs()
-                .map(|run| run.line_w)
-                .fold(0.0_f32, f32::max);
+            let mut text_width = shaped_line_width(&buffer);
+            // **A cell of a grid is fitted to its columns and never cut by them**
+            // (owner's report 2026-09-14, §7.1.6b′ ⑤) — the pane's own size
+            // policy, said once here for the one label shape that is a cell. See
+            // [`grid_cell_fit_font_size_px`] for which labels those are and why
+            // the ratio is the advance's.
+            if let Some(fitted) = grid_cell_fit_font_size_px(label, text_width) {
+                buffer.set_metrics(Metrics::new(fitted, line_height));
+                buffer.shape_until_scroll(font_system, false);
+                text_width = shaped_line_width(&buffer);
+            }
             let left = if label.align_center {
                 (label.rect[0] + (width - text_width) / 2.0).max(label.rect[0])
             } else if label.align_right {
@@ -14173,7 +14809,7 @@ fn video_quad_vertices(
 fn create_math_pipeline(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
-) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout, wgpu::Sampler) {
+) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout, MathSamplers) {
     let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("math block texture layout"),
         entries: &[
@@ -14195,15 +14831,12 @@ fn create_math_pipeline(
             },
         ],
     });
-    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("math block scaled sampler"),
-        // Live row-band fitting and same-content DPI relayout both deliberately scale an existing
-        // raster. Linear filtering makes that brief/adaptive preview readable until fresh pixels
-        // atomically replace it.
-        mag_filter: wgpu::FilterMode::Linear,
-        min_filter: wgpu::FilterMode::Linear,
-        ..Default::default()
-    });
+    // Two, not one — see [`Blit`]. Live row-band fitting and same-content DPI relayout both
+    // deliberately scale an existing raster, and linear filtering makes that brief/adaptive
+    // preview readable until fresh pixels atomically replace it. A raster presented at its own
+    // size is not that case and must not be resampled at all, which is what the nearest one is
+    // for.
+    let samplers = MathSamplers::create(device);
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("math block shader"),
         source: wgpu::ShaderSource::Wgsl(include_str!("math.wgsl").into()),
@@ -14261,7 +14894,7 @@ fn create_math_pipeline(
         multiview_mask: None,
         cache: None,
     });
-    (pipeline, bind_group_layout, sampler)
+    (pipeline, bind_group_layout, samplers)
 }
 
 /// One tile of a [`ChromeIcon`], cut down to the box it may be seen in.
@@ -14551,14 +15184,22 @@ fn default_background() -> [u8; 3] {
     background_rgb()
 }
 
-/// Whether a block's hover dim scrim is drawn.
+/// Whether a block's ground is drawn.
 ///
-/// The dim darkens a block so its toolbar reads against it. A Rendered block's substance is its
-/// texture: if that texture did not draw, the scrim would be the only thing on screen where the
-/// picture belongs — the bare grey rectangle. A Source block draws as terminal text and owns no
-/// texture, so its hover dim is unconditional (projection deliberately allows a Source block to
-/// carry `toolbar_visible`; see `crates/bt-term/src/session.rs`).
-fn math_block_dim_is_drawn(placement: &MathBlockPlacement, textured: bool) -> bool {
+/// The ground is the fence's floor (`--panel`), laid under a block while the pointer is on it so
+/// the band reads as a region — `.math:hover .mbox { background: var(--panel) }`, which is the
+/// mock-up's own rule and the reason this is a *hover* fact rather than a permanent one: a formula
+/// is the program's own line of output, and a floor under every one of them all the time would be
+/// furniture the reader never asked for. A Rendered block's substance is its texture: if that
+/// texture did not draw, the ground would be the only thing on screen where the picture belongs —
+/// a bare rounded rectangle. A Source block draws as terminal text and owns no texture, so its
+/// ground is unconditional (projection deliberately allows a Source block to carry
+/// `toolbar_visible`; see `crates/bt-term/src/session.rs`).
+///
+/// Named for the ground since 2026-09-14. It answered for a *scrim* until then, and a scrim and a
+/// ground are opposites — one is the absence of a surface and the other is a surface — so the two
+/// could not go on sharing a name once the ruling turned the first into the second.
+fn math_block_ground_is_drawn(placement: &MathBlockPlacement, textured: bool) -> bool {
     placement.toolbar_visible && (placement.display == MathBlockDisplay::Source || textured)
 }
 
@@ -15514,6 +16155,7 @@ mod tests {
             frozen_prefix_rows: 0,
             clipped_top_rows: 0,
             clipped_bottom_rows: 0,
+            selection_spans: Vec::new(),
         }
     }
 
@@ -15808,8 +16450,10 @@ mod tests {
     /// renderer floats over a body takes its face, its hairline and its ink from
     /// [`ChromePalette::float_tag`], and nothing else.**
     ///
-    /// The two chips are the terminal's status overlay (a hovered link's target,
-    /// the `N rows above` count) and a formula block's toolbar buttons. Both
+    /// The two chips *were* the terminal's status overlay (a hovered link's
+    /// target, the `N rows above` count) and a formula block's toolbar buttons;
+    /// since 2026-09-14 the second is a pair of house marks and the status
+    /// overlay stands alone. Both
     /// stood on one hard-coded `#333333` with the *scheme's* default ink on top
     /// — an ink resolved for contrast against the terminal canvas, printed on
     /// something that was not the terminal canvas. On the dark canvas the
@@ -15822,9 +16466,15 @@ mod tests {
     ///    floor downstream is finally handed the pair that is on the glass;
     /// 2. the chip is five boxes and every one of them is a `float_tag` field;
     /// 3. the chip helper's name, followed by an open paren, occurs exactly
-    ///    three times in this file — one definition and two call sites — so a
-    ///    third chip that struck its own colours drops this gate rather than
-    ///    shipping.
+    ///    twice in this file — one definition and one call site — so a second
+    ///    chip that struck its own colours drops this gate rather than shipping.
+    ///
+    /// **The count fell from three to two on 2026-09-14** and the sentence above
+    /// it is now half history: a formula band's two verbs stopped being chips
+    /// that day and became house marks on a pill (owner's ruling ②), so the
+    /// status overlay is the only chip this renderer floats. The gate is kept at
+    /// its new number rather than retired, because "there is one way to strike a
+    /// chip" is the claim, not "there are two of them".
     #[test]
     fn every_chip_the_renderer_floats_over_a_body_is_struck_from_the_palette() {
         for palette in [DARK_CHROME, LIGHT_CHROME] {
@@ -15879,9 +16529,9 @@ mod tests {
         // Spelled in two halves so this line is not itself a fourth occurrence.
         assert_eq!(
             source.matches(concat!("float_tag_rects", "(")).count(),
-            3,
-            "one definition and two call sites — a chip that struck its own \
-             colours would be a fourth"
+            2,
+            "one definition and one call site — a chip that struck its own \
+             colours would be a third"
         );
     }
 
@@ -16134,9 +16784,110 @@ mod tests {
         }
         assert_eq!(
             math_toolbar_vertical_bounds(5.0, 35.0, 1.0),
-            (9.0, 31.0),
-            "a taller block keeps the intended 22px control"
+            (8.0, 32.0),
+            "a taller block keeps the intended 24px control"
         );
+    }
+
+    /// PIN (owner's ruling 2026-09-14 ①): **a formula band stands on the code
+    /// fence's floor, at the code fence's corner.**
+    ///
+    /// The band used to wear `modal_scrim` at .45 coverage on four square
+    /// corners. Three claims, and each is a separate way the restyle could be
+    /// half-done: the token, the corner, and the fact that the corner is a
+    /// *round* and not a note in a doc comment.
+    ///
+    /// MUTATIONS: put `modal_scrim` back → ①; pass `0.0` for the radius → ②
+    /// (one full-coverage slab, no ramp); round from the logical number without
+    /// the scale → ③.
+    #[test]
+    fn a_formula_bands_ground_is_the_fences_token_at_the_fences_corner() {
+        // ① The token is the fence's, on both canvases, and is never the scrim.
+        for palette in [DARK_CHROME, LIGHT_CHROME] {
+            assert_ne!(
+                palette.preview_code_ground, palette.modal_scrim,
+                "a ground and a scrim are opposites; the band wears the ground"
+            );
+        }
+
+        // ② The corner is one number shared with the markdown fence, and it is
+        //    really drawn: a rounded box comes back as a ramp of coverages with
+        //    partial slabs at the ends, a square one as a single solid slab.
+        assert_eq!(PREVIEW_CODE_GROUND_RADIUS_LOGICAL_PX, 7.0);
+        let block = [40.0, 10.0, 240.0, 70.0];
+        let rounded = rounded_rect_coverage(block, PREVIEW_CODE_GROUND_RADIUS_LOGICAL_PX);
+        assert!(
+            rounded.len() > 1 && rounded.iter().any(|entry| entry.coverage < 1.0),
+            "a 7px round is a ramp, not one square slab: {rounded:?}"
+        );
+        assert!(
+            rounded.iter().all(|entry| entry.rect[0] >= block[0] - 0.5
+                && entry.rect[2] <= block[2] + 0.5
+                && entry.rect[1] >= block[1] - 0.5
+                && entry.rect[3] <= block[3] + 0.5),
+            "the ground never reaches past the band it is the floor of"
+        );
+
+        // ③ And it grows with the display, like every other logical radius in
+        //    this window: at ×2 the corner is twice as deep.
+        let deep = rounded_rect_coverage(block, PREVIEW_CODE_GROUND_RADIUS_LOGICAL_PX * 2.0);
+        assert!(
+            deep.len() > rounded.len(),
+            "a radius that ignored the scale would give the same ramp at ×2"
+        );
+    }
+
+    /// PIN (owner's ruling 2026-09-14 ②/③): **the two marks stand beside the
+    /// band, in the band's own row, in a box no smaller than the one they
+    /// replace.**
+    ///
+    /// The mock-up is the authority on the placement (`.math` is a row holding
+    /// `.mbox` and `.math-tools`, 2000-2012) and on the two numbers (24px box,
+    /// 2px gap, 2117-2129). The ruling's own third clause is the last assertion:
+    /// a hit box may only ever grow.
+    ///
+    /// MUTATIONS: swap the two boxes → ②; drop the `pane_right - total` clamp →
+    /// ④; put 22 back in `MATH_TOOL_BUTTON_LOGICAL_PX` → ⑤.
+    // A restyle may not shrink a control the reader can already hit (a
+    // compile-time pin: the number is a constant).
+    const _: () = assert!(
+        MATH_TOOL_BUTTON_LOGICAL_PX >= 22.0,
+        "a restyle may not shrink a control the reader can already hit"
+    );
+
+    #[test]
+    fn the_two_marks_stand_beside_the_band_and_their_boxes_only_grew() {
+        // ① Side by side, in the band's own row, at the band's right edge.
+        let (source, copy) = math_tool_boxes_px([200.0, 10.0, 70.0], [8.0, 600.0], 1.0);
+        assert_eq!(
+            source[0], 200.0,
+            "the first mark starts where the band ends"
+        );
+        assert_eq!(source[3] - source[1], MATH_TOOL_BUTTON_LOGICAL_PX);
+        assert_eq!(copy[3] - copy[1], MATH_TOOL_BUTTON_LOGICAL_PX);
+        assert_eq!(source[1], copy[1], "one row, not two");
+
+        // ② Order, and the gap between them.
+        assert_eq!(copy[0] - source[2], MATH_TOOL_GAP_LOGICAL_PX);
+
+        // ③ Centred in the band rather than hung from its top.
+        assert_eq!((source[1] + source[3]) / 2.0, (10.0 + 70.0) / 2.0);
+
+        // ④ Neither reaches past the pane, however far right the band ends.
+        let (_, clamped) = math_tool_boxes_px([2_000.0, 10.0, 70.0], [8.0, 600.0], 1.0);
+        assert!(
+            clamped[2] <= 600.0,
+            "the pair ran to {}, past the pane's own edge",
+            clamped[2]
+        );
+
+        // ⑤ And the box only ever grew: 24 against the 22 of the bordered chips
+        //    this replaced (owner's ruling ③ — "hit boxes stay at least the
+        //    current size").
+
+        // ⑥ And it is logical pixels, so the boxes double with the display.
+        let (retina, _) = math_tool_boxes_px([200.0, 20.0, 140.0], [16.0, 1_200.0], 2.0);
+        assert_eq!(retina[3] - retina[1], MATH_TOOL_BUTTON_LOGICAL_PX * 2.0);
     }
 
     #[test]
@@ -17327,6 +18078,23 @@ mod tests {
             [1, 3, 5, 7],
             "only the four rendered band rows may be suppressed"
         );
+        // **And what the band gives up, the wash takes over** (`docs/DESIGN.md` §7.1.6c-4g,
+        // ruling of 2026-09-14). The four band rows leave `selection_spans` because a picture is
+        // standing on those cells and a fill under it would never be seen; they arrive on the
+        // placements instead, for the lane that paints over the picture. Before this they were
+        // simply dropped, and a reader who copied these four formulas was never shown that they
+        // had been taken.
+        let mut washed = selected
+            .math_blocks
+            .iter()
+            .flat_map(|block| block.selection_spans.iter().map(|span| span.row))
+            .collect::<Vec<_>>();
+        washed.sort_unstable();
+        assert_eq!(
+            washed,
+            [0, 2, 4, 6],
+            "every row the band dropped is a row the wash was handed"
+        );
         let metrics = CellMetrics {
             cell_width_px: 8.0,
             cell_height_px: 18.0,
@@ -17488,40 +18256,42 @@ mod tests {
         assert_eq!(blank_digest.last_text_row, -1);
     }
 
-    /// PIN (grey-band root fix, 2026-08-02): the hover dim never outlives the raster it dims.
+    /// PIN (grey-band root fix, 2026-08-02): the ground never outlives the raster it stands under.
     ///
-    /// A rendered block whose texture did not draw must not draw its scrim either: the scrim alone
-    /// over background IS the bare grey rectangle the user reported. Source blocks are unaffected
+    /// A rendered block whose texture did not draw must not draw its floor either: the floor alone
+    /// over background IS the bare rectangle the user reported. Source blocks are unaffected
     /// — they draw as terminal text, own no texture, and projection deliberately lets them carry
-    /// `toolbar_visible`.
+    /// `toolbar_visible`. The predicate outlived the scrim it was written for (2026-09-14) because
+    /// it was never about the scrim: it is about whether there is a block on screen to stand
+    /// anything under.
     #[test]
-    fn the_hover_dim_is_drawn_only_over_a_block_that_put_pixels_on_screen() {
+    fn the_ground_is_drawn_only_under_a_block_that_put_pixels_on_screen() {
         let mut rendered = test_math_placement("k", 0, 20 * SUBPIXELS_PER_PX, 16);
         let mut source = rendered.clone();
         source.display = MathBlockDisplay::Source;
 
         assert!(
-            !math_block_dim_is_drawn(&rendered, true),
-            "no hover, no dim"
+            !math_block_ground_is_drawn(&rendered, true),
+            "no hover, no ground"
         );
         assert!(
-            !math_block_dim_is_drawn(&source, true),
-            "no hover, no dim for a source block either",
+            !math_block_ground_is_drawn(&source, true),
+            "no hover, no ground for a source block either",
         );
 
         rendered.toolbar_visible = true;
         source.toolbar_visible = true;
         assert!(
-            math_block_dim_is_drawn(&rendered, true),
-            "a hovered block that drew its raster dims it",
+            math_block_ground_is_drawn(&rendered, true),
+            "a hovered block that drew its raster stands on its floor",
         );
         assert!(
-            !math_block_dim_is_drawn(&rendered, false),
-            "a hovered block whose texture never drew must not paint a bare scrim",
+            !math_block_ground_is_drawn(&rendered, false),
+            "a hovered block whose texture never drew must not paint a bare floor",
         );
         assert!(
-            math_block_dim_is_drawn(&source, false),
-            "a source block owns no texture; its hover dim is over its own text",
+            math_block_ground_is_drawn(&source, false),
+            "a source block owns no texture; its ground is under its own text",
         );
     }
 
@@ -17808,6 +18578,7 @@ mod tests {
         bt_doc::LayoutKey {
             width_cells: NonZeroU32::new(width_cells).unwrap(),
             dpi_milli: NonZeroU32::new(1000).unwrap(),
+            font_size_subpixels: 16 * 1024,
             font_rev: 1,
             theme_rev: 1,
             lang_rev: 0,
@@ -22397,6 +23168,214 @@ mod tests {
         assert!(opaque.iter().all(|vertex| vertex.opacity == 1.0));
     }
 
+    /// Where the centre of every device-pixel row a quad covers lands inside the
+    /// texture, measured in texels, read back out of the vertices the pass
+    /// actually uploads.
+    ///
+    /// The round trip through NDC is the point: this is the arithmetic the GPU
+    /// does, so a rule that holds here holds on the glass. A texel coordinate
+    /// ending in `.5` is a texel *centre* — the sample returns that texel and
+    /// nothing else, whichever filter is bound. One ending in `.0` is the seam
+    /// between two texels, where a bilinear sampler returns half of each.
+    fn texel_rows(rect: [f32; 4], height_px: u32, viewport: (u32, u32)) -> Vec<f32> {
+        let vertices = math_quad_vertices(
+            rect[0], rect[1], rect[2], rect[3], 0.0, 0.0, 1.0, 1.0, viewport.0, viewport.1, 1.0,
+        );
+        let device_y = |ndc: f32| (1.0 - ndc) / 2.0 * viewport.1 as f32;
+        // `math_quad_vertices` emits the top-left corner first and the
+        // bottom-left second — see its own body.
+        let (top, bottom) = (
+            device_y(vertices[0].position[1]),
+            device_y(vertices[1].position[1]),
+        );
+        let (v_top, v_bottom) = (vertices[0].uv[1], vertices[1].uv[1]);
+        let mut rows = Vec::new();
+        let mut row = top.floor() as i64;
+        loop {
+            let centre = row as f32 + 0.5;
+            if centre >= bottom {
+                break;
+            }
+            if centre > top {
+                let along = (centre - top) / (bottom - top);
+                rows.push((v_top + along * (v_bottom - v_top)) * height_px as f32);
+            }
+            row += 1;
+        }
+        rows
+    }
+
+    /// PIN (T-MATH-BLIT-SNAP): **a raster shown at its own size is shown on the
+    /// pixel grid**, wherever the fractional `y` came from.
+    ///
+    /// The 2026-09-14 report: in a display formula on a Mac at 1× the unary
+    /// minus of `\exp\!\left(-\frac{(x-\mu)^2}{2\sigma^2}\right)` was not on the
+    /// glass while the binary minus of `x-\mu` was, and both were on Windows at a
+    /// higher scale. A probe on that machine proved the typesetter drew both into
+    /// the raster, so the loss was in the blit: at 1× a minus is one device pixel
+    /// of ink, and one pixel of ink resampled across a half-pixel offset is two
+    /// rows at half strength, which against the page's ground is nothing. The
+    /// fraction bar and the letters survived because they are several pixels
+    /// thick and lose only their edges.
+    ///
+    /// MUTATIONS: return the rectangle unrounded from [`Blit::origin`] and the
+    /// quarter- and half-pixel cases come back; round the size as well as the
+    /// corner and a raster one pixel wider than itself stretches; snap the
+    /// scaled case too and a zoomed preview jumps half a pixel on every frame
+    /// of the zoom.
+    #[test]
+    fn a_formula_shown_at_its_own_size_is_placed_on_the_pixel_grid() {
+        let (width_px, height_px) = (317_u32, 42_u32);
+        for fraction in [0.0_f32, 0.25, 0.5, 0.75] {
+            // Where the block's arithmetic put it: a column inset that is already
+            // rounded (`preview::markdown_measure_box`) and a top carrying the
+            // page's scroll, which is not.
+            let top = 340.0 + fraction;
+            let asked = [96.0, top, 96.0 + width_px as f32, top + height_px as f32];
+            let (blit, rect) = presented_raster(asked, width_px, height_px);
+            assert_eq!(
+                blit,
+                Blit::OneToOne,
+                "the quad measures the raster, so it is a 1:1 blit at y={top}"
+            );
+            assert_eq!(rect[0], rect[0].round(), "x on the grid at y={top}");
+            assert_eq!(rect[1], rect[1].round(), "y on the grid at y={top}");
+            assert!(
+                (rect[1] - top).abs() <= 0.5,
+                "and never further than half a pixel from where the layout asked: {} vs {top}",
+                rect[1],
+            );
+            assert_eq!(
+                (rect[2] - rect[0], rect[3] - rect[1]),
+                (width_px as f32, height_px as f32),
+                "the size is the raster's own, untouched, at y={top}",
+            );
+        }
+    }
+
+    /// The other half of the rule: a quad that is **not** its raster's size is
+    /// left exactly where its lane put it and keeps the size that lane chose.
+    /// Snapping it would be this renderer overruling a zoom, and a scaled blit
+    /// is being resampled anyway.
+    #[test]
+    fn a_scaled_formula_keeps_the_size_its_lane_asked_for() {
+        let (width_px, height_px) = (200_u32, 30_u32);
+        let asked = [12.5, 340.25, 12.5 + 300.0, 340.25 + 45.0];
+        let (blit, rect) = presented_raster(asked, width_px, height_px);
+        assert_eq!(blit, Blit::Scaled, "1.5× is a resample");
+        assert_eq!(
+            rect, asked,
+            "and a resample is drawn where it was asked for"
+        );
+        assert_eq!(
+            (rect[2] - rect[0], rect[3] - rect[1]),
+            (300.0, 45.0),
+            "at the size the zoom asked for, not the raster's",
+        );
+    }
+
+    /// PIN: **a one-pixel stroke through the 1:1 path keeps all of its ink.**
+    ///
+    /// Read off the vertices the pass uploads: every device-pixel row the snapped
+    /// quad covers lands on a texel *centre*, so each row of the raster is
+    /// returned by exactly one row of device pixels at full strength — a minus
+    /// sign one texel tall arrives one pixel tall and opaque. The same
+    /// arithmetic on the rectangle the layout asked for puts every row on a
+    /// texel *seam*, where a bilinear sampler mixes two texels half and half:
+    /// that is the report, computed.
+    #[test]
+    fn a_one_to_one_blit_samples_texel_centres() {
+        let (width_px, height_px) = (317_u32, 42_u32);
+        let viewport = (1280_u32, 800_u32);
+        let asked = [
+            96.0,
+            340.5,
+            96.0 + width_px as f32,
+            340.5 + height_px as f32,
+        ];
+        let (_, snapped) = presented_raster(asked, width_px, height_px);
+
+        let rows = texel_rows(snapped, height_px, viewport);
+        assert_eq!(
+            rows.len(),
+            height_px as usize,
+            "one device row per texel row"
+        );
+        for (index, texel) in rows.iter().enumerate() {
+            let offset = texel - (index as f32 + 0.5);
+            assert!(
+                offset.abs() < 1e-3,
+                "row {index} samples texel {texel}, which is {offset} off the centre it must hit",
+            );
+        }
+
+        let blurred = texel_rows(asked, height_px, viewport);
+        assert!(!blurred.is_empty());
+        for texel in &blurred {
+            assert!(
+                (texel - texel.round()).abs() < 1e-3,
+                "the half-pixel placement the report was made on puts every row on a texel seam, \
+                 where one row of ink comes out as two at half strength — but {texel} is not one",
+            );
+        }
+    }
+
+    /// The snap is taken in **device** space, after the scroll has been spent —
+    /// so a preview scrolled by fractions of a pixel (`wheel_travel`'s
+    /// `PixelDelta` arm, which is every macOS trackpad) never leaves a formula
+    /// resampled. The raster steps a whole pixel at a time while the prose around
+    /// it slides continuously; the alternative is a document-space snap, which is
+    /// a fractional `y` on the glass again and the bug back.
+    #[test]
+    fn scrolling_by_fractions_never_takes_a_formula_off_the_grid() {
+        let (width_px, height_px) = (317_u32, 42_u32);
+        let document_top = 940.0_f32;
+        let mut previous: Option<f32> = None;
+        for step in 0..17 {
+            let scroll = step as f32 * 0.125;
+            let top = document_top - scroll;
+            let asked = [96.0, top, 96.0 + width_px as f32, top + height_px as f32];
+            let (blit, rect) = presented_raster(asked, width_px, height_px);
+            assert_eq!(blit, Blit::OneToOne);
+            assert_eq!(rect[1], rect[1].round(), "on the grid at scroll {scroll}");
+            assert_eq!(
+                rect[3] - rect[1],
+                height_px as f32,
+                "and the same height at every offset, so nothing squashes as it travels",
+            );
+            if let Some(previous) = previous {
+                assert!(
+                    previous - rect[1] <= 1.0 && rect[1] <= previous,
+                    "a formula scrolled up moves up, by whole pixels: {previous} then {}",
+                    rect[1],
+                );
+            }
+            previous = Some(rect[1]);
+        }
+    }
+
+    /// The sampler that goes with each blit, and the index the tile's two bind
+    /// groups and [`MathSamplers`] are both built and read by. One table: an
+    /// index that means one thing when the groups are made and another when they
+    /// are bound is a formula drawn through the wrong filter with nothing on
+    /// screen to say so.
+    #[test]
+    fn each_blit_picks_its_own_filter() {
+        assert_eq!(
+            Blit::OneToOne.filter(),
+            wgpu::FilterMode::Nearest,
+            "a raster on the grid is not resampled at all",
+        );
+        assert_eq!(
+            Blit::Scaled.filter(),
+            wgpu::FilterMode::Linear,
+            "and a resample is smooth, which is what the scaled case was always for",
+        );
+        for blit in Blit::ALL {
+            assert_eq!(Blit::ALL[blit.index()], blit, "{blit:?} indexes itself");
+        }
+    }
+
     /// The advance of each glyph of `text`, shaped the way the chrome shapes it.
     #[cfg(target_os = "windows")]
     fn glyph_advances(
@@ -22722,6 +23701,198 @@ mod tests {
                  nobody chose"
             );
         }
+    }
+
+    /// One mini transcript row's label, at the size and in the box a focus card
+    /// gives it: `column` columns wide, standing at column zero of its row.
+    ///
+    /// The column is *measured* rather than written down, exactly as the app
+    /// measures it (`WindowRuntime::focus_mini_advance` asks
+    /// [`GpuContext::measure_chrome_mono_text`] for `"0"`), so the box this test
+    /// argues about is the box the card actually draws.
+    #[cfg(target_os = "windows")]
+    fn mini_grid_cell_label(font_system: &mut FontSystem, text: &str, columns: f32) -> ChromeLabel {
+        let size = theme::FOCUS_MINI_TERM_FONT_LOGICAL_PX;
+        let cell = measure_chrome_label(
+            font_system,
+            "0",
+            size,
+            ChromeLabelWeight::Regular,
+            0.0,
+            false,
+            true,
+        );
+        ChromeLabel {
+            mono: true,
+            text: text.to_owned(),
+            rect: [0.0, 0.0, columns * cell, size * 1.4],
+            font_size_px: size,
+            color: [255, 255, 255],
+            align_right: false,
+            align_center: false,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+            clip: None,
+        }
+    }
+
+    /// RED (T-CARD-GRID-SYMBOL-CLIP, owner's report 2026-09-14; §7.1.6b′ ⑤) —
+    /// **a symbol on a card's mini grid row is drawn from the face the pane draws
+    /// it from.**
+    ///
+    /// The report was two screenshots of one row: a shell printing
+    /// `○ general-purpose`, a clean hollow circle in the pane, a large cut arc in
+    /// the focus card's projection of the same row. Two faces, one code point.
+    /// The pane routes U+25CB through [`font_presentation_route`] to
+    /// [`TEXT_SYMBOL_FONT_FAMILY`]; the card asked for `Family::Monospace`, and
+    /// what Consolas does not carry cosmic-text's generic fallback answered from
+    /// whichever loaded face has it — SimSun or the sans, whose circle is most of
+    /// an em where a mini column is 0.55 of one.
+    ///
+    /// Both halves are asserted, and the second has the teeth: it is not enough
+    /// that the glyph resolves, it has to resolve in the *pane's* face.
+    ///
+    /// Red gate: hand the label `Family::Monospace` — the one word this label
+    /// carried before [`mono_cluster_family`] — and the circle comes back in a
+    /// face that is not the symbol face.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_grid_symbol_on_a_card_shapes_in_the_face_the_pane_routes_it_to() {
+        const CIRCLE: &str = "○";
+        let mut font_system = terminal_font_system();
+        assert!(
+            font_family_available(&font_system, TEXT_SYMBOL_FONT_FAMILY),
+            "the symbol face is part of this renderer's own startup list, and the \
+             pane's route is written on the assumption that it loaded"
+        );
+        assert_eq!(
+            font_presentation_route(CIRCLE, &mut font_system),
+            PresentationRoute::TextSymbol,
+            "the pane sends a geometric shape to the symbol face — this is the \
+             answer the card is being made to agree with"
+        );
+        let label = mini_grid_cell_label(&mut font_system, CIRCLE, 1.0);
+        let layouts = shape_chrome_labels(&mut font_system, std::slice::from_ref(&label), 0.7, 1.0);
+        let run = layouts[0]
+            .buffer
+            .layout_runs()
+            .next()
+            .expect("the label shapes");
+        let glyph = run.glyphs.first().expect("the circle gets a glyph");
+        assert_ne!(
+            glyph.glyph_id, 0,
+            "the circle came back as .notdef — no face on the chain has it"
+        );
+        assert_eq!(
+            glyph_family(&font_system, glyph),
+            TEXT_SYMBOL_FONT_FAMILY,
+            "a mini row's symbol must come out of the face the pane drew it from, \
+             not out of whatever the generic fallback reaches first"
+        );
+        // And the other half of the report: whichever width that face gives the
+        // circle, the card draws all of it. The crop is `TextBounds`, whose right
+        // edge is `clip[2].ceil()`, so "nothing is cut" is exactly "the advance
+        // stands inside that pixel" — reached either because the face already fits
+        // the column or because [`grid_cell_fit_font_size_px`] set it smaller until
+        // it did.
+        let room = label.rect[2].ceil() - label.rect[0];
+        let drawn = shaped_line_width(&layouts[0].buffer);
+        assert!(
+            drawn <= room + 0.01,
+            "the circle is {drawn}px wide inside a column that is cut at {room}px — \
+             that overhang is the arc in the owner's screenshot"
+        );
+    }
+
+    /// RED (T-CARD-GRID-SYMBOL-CLIP) — **a grid cell wider than the columns it
+    /// owns is fitted to them and never cut by them.**
+    ///
+    /// The clip that T-CARD-GRID-ALIGN put on every pinned run is what made the
+    /// circle an arc: the run is placed at `column × cell` and shown in its own
+    /// columns, so a glyph whose advance is wider than them lost its right-hand
+    /// side at a vertical edge. The pane does not cut it either —
+    /// `NarrowShapingCache::get_or_shape` re-shapes a too-wide narrow cluster at
+    /// [`text_coordinated_symbol_em_scale`] so the ink lands inside its cell — and
+    /// this is that rule, in the measurement a chrome label has.
+    ///
+    /// The cluster is an ideograph in a **one**-column box rather than the
+    /// report's own circle, and deliberately: the rule has to hold for any cluster
+    /// a fallback face draws too wide, and a CJK face's em at 7.5px is wider than
+    /// one mini column on every machine — where a symbol face's circle might
+    /// happen to fit, which would make this test green for a reason that has
+    /// nothing to do with the fix. The circle's own row is pinned in
+    /// [`a_grid_symbol_on_a_card_shapes_in_the_face_the_pane_routes_it_to`].
+    ///
+    /// Red gate: drop [`grid_cell_fit_font_size_px`] and the shaped advance is the
+    /// premise's number — wider than the box, which is the cut.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_grid_cell_wider_than_its_columns_is_fitted_to_them() {
+        const IDEOGRAPH: &str = "名";
+        let mut font_system = terminal_font_system();
+        let label = mini_grid_cell_label(&mut font_system, IDEOGRAPH, 1.0);
+        let column = label.rect[2] - label.rect[0];
+        let unfitted = measure_chrome_label(
+            &mut font_system,
+            IDEOGRAPH,
+            label.font_size_px,
+            ChromeLabelWeight::Regular,
+            0.0,
+            false,
+            true,
+        );
+        assert!(
+            unfitted > label.rect[2].ceil() - label.rect[0],
+            "the premise: at {}px this cluster shapes {unfitted}px wide against a \
+             {column}px column — that overhang is what a card's clip cuts",
+            label.font_size_px
+        );
+        let layouts = shape_chrome_labels(&mut font_system, std::slice::from_ref(&label), 0.7, 1.0);
+        let fitted = shaped_line_width(&layouts[0].buffer);
+        assert!(
+            fitted <= column + 0.01,
+            "the cell is set smaller until it stands inside its own column — \
+             {fitted}px in a {column}px column"
+        );
+        assert!(
+            fitted > column * 0.5,
+            "and only as small as it has to be: fitting is a scale to the box, not \
+             a retreat from it"
+        );
+    }
+
+    /// **A mini row of ASCII is shaped exactly as it was** — the cost half of the
+    /// same ticket, and the guard on [`mono_label_spans`]' fast path.
+    ///
+    /// Every cluster on this row is on the grid's own face, so the label is handed
+    /// to the shaper as the one plain span it always was, no route is asked, and a
+    /// stretch of ASCII still advances by whole columns. The width test is the one
+    /// that would catch a regression of substance: a mono row that stopped
+    /// measuring `n` columns for `n` characters would take the whole grid with it.
+    ///
+    /// Red gate: route a cluster the primary face covers to the symbol face and
+    /// the row is no longer `n` columns wide.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_mini_row_of_ascii_is_still_whole_columns_wide() {
+        const ROW: &str = "> cargo build";
+        let mut font_system = terminal_font_system();
+        assert!(
+            mono_label_spans(ROW, &mut font_system).is_none(),
+            "a row on the grid's own face is one span and asks the route nothing"
+        );
+        let label = mini_grid_cell_label(&mut font_system, ROW, ROW.len() as f32);
+        let columns = label.rect[2] - label.rect[0];
+        let layouts = shape_chrome_labels(&mut font_system, std::slice::from_ref(&label), 0.7, 1.0);
+        let width = shaped_line_width(&layouts[0].buffer);
+        assert!(
+            (width - columns).abs() < 0.01,
+            "{} characters of a monospaced face advance {} columns — saw {width}px \
+             against {columns}px",
+            ROW.len(),
+            ROW.len()
+        );
     }
 
     /// RED — **the database this renderer shapes with holds no face with no
@@ -23705,6 +24876,200 @@ mod tests {
         );
         assert!(outermost.1 <= 1.0 && innermost.1 >= 0.0);
         assert!((outermost.0[2] - right).abs() <= 0.01);
+    }
+
+    /// A bare grid of blank cells at [`fade_metrics`], `rows` tall, for reading a wash out of.
+    fn wash_frame(columns: u32, rows: u32) -> ViewportFrame {
+        let metrics = fade_metrics();
+        let cells = (columns * rows) as usize;
+        ViewportFrame {
+            columns: NonZeroU32::new(columns).unwrap(),
+            horizontal: HorizontalProjection::unscrolled(columns),
+            grid_rows: NonZeroU32::new(rows).unwrap(),
+            rows: NonZeroU32::new(rows).unwrap(),
+            presentation_offset_subpixels: 0,
+            cells: vec![CapturedCell::plain(""); cells],
+            cursor: bt_viewport::GridCursor {
+                row: 0,
+                column: 0,
+                visible: false,
+            },
+            cell_anchors: test_cell_anchors(cells),
+            row_map: test_row_map_for_metrics(rows, metrics),
+            selection_spans: Vec::new(),
+            search_spans: Vec::new(),
+            current_search_spans: Vec::new(),
+            math_blocks: Vec::new(),
+            math_failures: Vec::new(),
+            status_text: None,
+            viewport_origin: FrameViewportOrigin::Bottom,
+            scroll_offset_rows: 0,
+            layout_key: bt_doc_layout_key(columns),
+            view_generation: bt_doc::ViewGeneration(1),
+        }
+    }
+
+    fn wash_span(row: u32, start_column: u32, end_column: u32) -> bt_viewport::SelectionSpan {
+        bt_viewport::SelectionSpan {
+            row,
+            start_column,
+            end_column,
+        }
+    }
+
+    fn wash_geometry(block: [f32; 4]) -> MathBlockGeometry {
+        MathBlockGeometry {
+            block,
+            clip: block,
+            eye: None,
+            copy: None,
+        }
+    }
+
+    /// PIN (owner's report and ruling 2026-09-14; `docs/DESIGN.md` §7.1.6c-4g) — **a drag across
+    /// an inline formula washes the picture, all of it.**
+    ///
+    /// The reader dragged across a row carrying a `$…$` picture, copied, and got the formula's
+    /// source in place — correctly — while the screen had said nothing: the band paints the cells
+    /// and the picture is drawn over them.
+    ///
+    /// Two claims in one assertion, and the second is why this is not the display test with
+    /// different numbers. **Across**, the wash is the selected cells cut to the picture: the drag
+    /// here starts three columns before the run and ends three past it, and the wash stops at the
+    /// picture's own edges. **Down**, it is the picture's own extent and not the row's: an inline
+    /// composite hangs above and below its line box by whatever its ascent and descent ask for,
+    /// and a wash clipped to the row would leave the top of a fraction bare inside a selection
+    /// that has taken the whole thing.
+    #[test]
+    fn a_selection_across_an_inline_formula_washes_the_whole_picture() {
+        let mut frame = wash_frame(20, 1);
+        let mut placement = test_math_placement("inline", 0, 20 * SUBPIXELS_PER_PX, 4);
+        placement.artifact.mode = MathMode::Inline;
+        placement.selection_spans = vec![wash_span(0, 3, 12)];
+        // Columns 5..9, and taller than the 20 px row it stands on.
+        let picture = [58.0, 2.0, 98.0, 34.0];
+        frame.math_blocks.push(placement.clone());
+
+        let slabs =
+            math_selection_wash_slabs(fade_metrics(), &frame, &placement, &wash_geometry(picture));
+
+        assert_eq!(
+            slabs,
+            vec![picture],
+            "an inline picture inside the drag is washed whole"
+        );
+    }
+
+    /// PIN (same ruling) — **a display block the drag only partly covers is washed only where the
+    /// copy takes it.**
+    ///
+    /// The rule is inherited rather than invented: the spans are the selection's own over this
+    /// block's rows, decided from the cell anchors `selection_text` walks, so the wash and the
+    /// clipboard are answering the same question. The fixture states both halves of it — a block
+    /// two rows tall whose first row the drag crossed in full and whose second it crossed for
+    /// five columns only.
+    ///
+    /// MUTATION — take the picture's own vertical extent for a display block, as the inline arm
+    /// does, and the first slab grows to the block's full height: a drag that stopped half-way
+    /// down would claim the whole formula.
+    #[test]
+    fn a_partly_selected_display_block_is_washed_only_where_the_copy_reached() {
+        let mut frame = wash_frame(20, 2);
+        let mut placement = test_math_placement("display", 0, 40 * SUBPIXELS_PER_PX, 4);
+        placement.artifact.mode = MathMode::Display;
+        placement.selection_spans = vec![wash_span(0, 0, 20), wash_span(1, 0, 5)];
+        // The two rows of the frame, from the pane's left padding across twenty cells.
+        let picture = [8.0, 8.0, 208.0, 48.0];
+        frame.math_blocks.push(placement.clone());
+
+        let slabs =
+            math_selection_wash_slabs(fade_metrics(), &frame, &placement, &wash_geometry(picture));
+
+        assert_eq!(
+            slabs,
+            vec![[8.0, 8.0, 208.0, 28.0], [8.0, 28.0, 58.0, 48.0]],
+            "the wash stops where the copied cells stop, on both axes"
+        );
+    }
+
+    /// PIN (same ruling) — **nothing is washed when nothing is selected**, and nothing is washed
+    /// over a block showing its source.
+    ///
+    /// The second half matters as much as the first: a source block is terminal text, the
+    /// ordinary band paints it, and a wash there would be the selection said twice.
+    #[test]
+    fn a_formula_outside_the_selection_is_not_washed() {
+        let mut frame = wash_frame(20, 1);
+        let picture = [8.0, 8.0, 108.0, 28.0];
+
+        let untouched = test_math_placement("quiet", 0, 20 * SUBPIXELS_PER_PX, 4);
+        frame.math_blocks.push(untouched.clone());
+        assert!(
+            math_selection_wash_slabs(fade_metrics(), &frame, &untouched, &wash_geometry(picture))
+                .is_empty(),
+            "a formula no drag has reached wears no wash"
+        );
+
+        let mut source = test_math_placement("source", 0, 20 * SUBPIXELS_PER_PX, 4);
+        source.display = MathBlockDisplay::Source;
+        source.selection_spans = vec![wash_span(0, 0, 20)];
+        assert!(
+            math_selection_wash_slabs(fade_metrics(), &frame, &source, &wash_geometry(picture))
+                .is_empty(),
+            "a block showing its source is text, and the cell band is already on it"
+        );
+    }
+
+    /// PIN (same ruling) — **the wash is issued after the picture and before the block's own
+    /// chrome.**
+    ///
+    /// There is no way to ask a render pass what order it issued its draws in after the fact, so
+    /// the order is held here, in the source that issues it — the idiom
+    /// `a_layers_own_hole_is_punched_after_the_face_that_layer_draws` established.
+    ///
+    /// Two claims. The wash is composed at the **head** of the overlay buffer, so the overflow
+    /// fades and the two toolbar buttons — the rest of that buffer — stay on top of it: a fade a
+    /// selection had covered would stop saying the formula continues, and a button the reader is
+    /// about to press must not be tinted by a drag that crossed it. And that buffer is struck
+    /// **after** the math tiles: issued before them the wash would be behind the picture, which is
+    /// exactly where the cell band already is and why none of this was visible.
+    ///
+    /// MUTATIONS: ① extend the wash onto the end of the overlay list instead of the front — the
+    /// first assertion goes red; ② move the wash into `rectangles()` — the second goes red, and
+    /// the picture is painted straight back over the selection.
+    #[test]
+    fn the_wash_is_struck_over_the_picture_and_under_the_blocks_own_chrome() {
+        let source: String = include_str!("lib.rs")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        let wash = source
+            .find(concat!("self.math_selection_wash_", "rectangles(frame);"))
+            .expect("the wash's own list");
+        let chrome = source
+            .find(concat!(
+                "math_overlays.extend(self.math_overlay_",
+                "rectangles(frame));"
+            ))
+            .expect("the block's chrome joining the same list");
+        let tiles = source
+            .find(concat!("fordrawin&seat.", "math_draws{"))
+            .expect("the seat's math tile draws");
+        let overlay = source
+            .find(concat!(
+                "pass.draw(0..6,0..seat.",
+                "math_overlay_countasu32);"
+            ))
+            .expect("the overlay buffer's draw");
+        assert!(
+            wash < chrome,
+            "the wash goes in first, so the fades and the buttons stand over it"
+        );
+        assert!(
+            tiles < overlay,
+            "the overlay buffer is struck after the pictures, which is what puts the \
+             wash on top of one"
+        );
     }
 
     /// Source view is plain text the pane already wraps and scrolls by its own rules; the band

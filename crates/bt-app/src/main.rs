@@ -60,6 +60,7 @@ mod files_watch;
 mod first_run;
 mod float;
 mod focus_thumb;
+mod formula_tools;
 mod git;
 mod git_graph;
 mod git_panel;
@@ -1407,135 +1408,9 @@ impl MathWorker {
             "bt-math-worker",
             bt_platform::ThreadPriority::BelowNormal,
             move || {
-                let engine = MathEngine::new();
-                let mut image_decoder = InlineImageDecoder::default();
-                while let Ok(work) = task_rx.recv() {
-                    let completion = match work {
-                        MathWorkerRequest::Math {
-                            leaf,
-                            task,
-                            foreground_rgb,
-                        } => (
-                            leaf,
-                            match *task {
-                                SessionMathTask::Frozen(mut task) => {
-                                    let result =
-                                        render_detection_task(&engine, &mut task, foreground_rgb);
-                                    DecorationWorkerCompletion::Math {
-                                        task: Box::new(SessionMathTask::Frozen(task)),
-                                        result,
-                                    }
-                                }
-                                SessionMathTask::Live(mut task) => {
-                                    let result = render_live_detection_task(
-                                        &engine,
-                                        &mut task,
-                                        foreground_rgb,
-                                    );
-                                    DecorationWorkerCompletion::Math {
-                                        task: Box::new(SessionMathTask::Live(task)),
-                                        result,
-                                    }
-                                }
-                            },
-                        ),
-                        MathWorkerRequest::InlineImage { leaf, task } => {
-                            let result = image_decoder.decode(task.clone());
-                            (
-                                leaf,
-                                DecorationWorkerCompletion::InlineImage { task, result },
-                            )
-                        }
-                        MathWorkerRequest::PreviewMath { leaf, key } => {
-                            let result = bt_math::key_for_em_px(
-                                key.em_milli_px as f32 / 1000.0,
-                                key.foreground_rgb,
-                                key.mode,
-                            )
-                            .ok_or(MathRenderError::InvalidDimensions)
-                            .and_then(|render_key| engine.render(&key.source, render_key));
-                            (
-                                leaf,
-                                DecorationWorkerCompletion::PreviewMath { key, result },
-                            )
-                        }
-                        MathWorkerRequest::VerifyPath { leaf, path } => {
-                            let exists = bt_term::path_exists(&path);
-                            (
-                                leaf,
-                                DecorationWorkerCompletion::VerifiedPath { path, exists },
-                            )
-                        }
-                        MathWorkerRequest::PeekImage { leaf, path } => {
-                            let result = peek_pixels(&mut image_decoder, &path);
-                            (leaf, DecorationWorkerCompletion::PeekImage { path, result })
-                        }
-                        MathWorkerRequest::PeekVideoFrame { leaf, path } => {
-                            let glance = read_video_glance(&path);
-                            (
-                                leaf,
-                                DecorationWorkerCompletion::PeekVideoFrame { path, glance },
-                            )
-                        }
-                        MathWorkerRequest::PeekAnimation { leaf, path } => {
-                            let frames = animation::decode(&path);
-                            (
-                                leaf,
-                                DecorationWorkerCompletion::PeekAnimation { path, frames },
-                            )
-                        }
-                        // **This is the thread `AnimationCursor::next_frames`
-                        // exists for.** Composing a frame is the whole logical
-                        // screen, and the window has one thread that must not
-                        // spend that.
-                        MathWorkerRequest::AnimationFill {
-                            leaf,
-                            path,
-                            serial,
-                            mut cursor,
-                            want,
-                        } => {
-                            let frames = cursor.next_frames(want);
-                            (
-                                leaf,
-                                DecorationWorkerCompletion::AnimationFill {
-                                    path,
-                                    serial,
-                                    cursor,
-                                    frames,
-                                },
-                            )
-                        }
-                        MathWorkerRequest::PeekPage {
-                            leaf,
-                            path,
-                            page,
-                            fit,
-                            known,
-                        } => {
-                            let outcome = raster_peek_page(&path, page, fit, known);
-                            (
-                                leaf,
-                                DecorationWorkerCompletion::PeekPage {
-                                    path,
-                                    page,
-                                    fit,
-                                    outcome,
-                                },
-                            )
-                        }
-                    };
-                    if result_tx
-                        .send(MathWorkerResult {
-                            leaf: completion.0,
-                            completion: completion.1,
-                        })
-                        .is_err()
-                    {
-                        break;
-                    }
+                run_decoration_worker(task_rx, result_tx, || {
                     let _ = proxy.send_event(AppEvent::MathReady);
-                }
+                });
             },
         )
         .context("spawn math rendering worker")?;
@@ -1544,6 +1419,138 @@ impl MathWorker {
             scale_tasks: scale_tx,
             results: result_rx,
         })
+    }
+}
+
+/// The production decoration queue, also exercised without a window by regression tests.
+fn run_decoration_worker(
+    task_rx: mpsc::Receiver<MathWorkerRequest>,
+    result_tx: mpsc::Sender<MathWorkerResult>,
+    mut wake: impl FnMut(),
+) {
+    let engine = MathEngine::new();
+    let mut image_decoder = InlineImageDecoder::default();
+    while let Ok(work) = task_rx.recv() {
+        let completion = match work {
+            MathWorkerRequest::Math {
+                leaf,
+                task,
+                foreground_rgb,
+            } => (
+                leaf,
+                match *task {
+                    SessionMathTask::Frozen(mut task) => {
+                        let result = render_detection_task(&engine, &mut task, foreground_rgb);
+                        DecorationWorkerCompletion::Math {
+                            task: Box::new(SessionMathTask::Frozen(task)),
+                            result,
+                        }
+                    }
+                    SessionMathTask::Live(mut task) => {
+                        let result = render_live_detection_task(&engine, &mut task, foreground_rgb);
+                        DecorationWorkerCompletion::Math {
+                            task: Box::new(SessionMathTask::Live(task)),
+                            result,
+                        }
+                    }
+                },
+            ),
+            MathWorkerRequest::InlineImage { leaf, task } => {
+                let result = image_decoder.decode(task.clone());
+                (
+                    leaf,
+                    DecorationWorkerCompletion::InlineImage { task, result },
+                )
+            }
+            MathWorkerRequest::PreviewMath { leaf, key } => {
+                let result = bt_math::key_for_em_px(
+                    key.em_milli_px as f32 / 1000.0,
+                    key.foreground_rgb,
+                    key.mode,
+                )
+                .ok_or(MathRenderError::InvalidDimensions)
+                .and_then(|render_key| engine.render(&key.source, render_key));
+                (
+                    leaf,
+                    DecorationWorkerCompletion::PreviewMath { key, result },
+                )
+            }
+            MathWorkerRequest::VerifyPath { leaf, path } => {
+                let exists = bt_term::path_exists(&path);
+                (
+                    leaf,
+                    DecorationWorkerCompletion::VerifiedPath { path, exists },
+                )
+            }
+            MathWorkerRequest::PeekImage { leaf, path } => {
+                let result = peek_pixels(&mut image_decoder, &path);
+                (leaf, DecorationWorkerCompletion::PeekImage { path, result })
+            }
+            MathWorkerRequest::PeekVideoFrame { leaf, path } => {
+                let glance = read_video_glance(&path);
+                (
+                    leaf,
+                    DecorationWorkerCompletion::PeekVideoFrame { path, glance },
+                )
+            }
+            MathWorkerRequest::PeekAnimation { leaf, path } => {
+                let frames = animation::decode(&path);
+                (
+                    leaf,
+                    DecorationWorkerCompletion::PeekAnimation { path, frames },
+                )
+            }
+            // **This is the thread `AnimationCursor::next_frames`
+            // exists for.** Composing a frame is the whole logical
+            // screen, and the window has one thread that must not
+            // spend that.
+            MathWorkerRequest::AnimationFill {
+                leaf,
+                path,
+                serial,
+                mut cursor,
+                want,
+            } => {
+                let frames = cursor.next_frames(want);
+                (
+                    leaf,
+                    DecorationWorkerCompletion::AnimationFill {
+                        path,
+                        serial,
+                        cursor,
+                        frames,
+                    },
+                )
+            }
+            MathWorkerRequest::PeekPage {
+                leaf,
+                path,
+                page,
+                fit,
+                known,
+            } => {
+                let outcome = raster_peek_page(&path, page, fit, known);
+                (
+                    leaf,
+                    DecorationWorkerCompletion::PeekPage {
+                        path,
+                        page,
+                        fit,
+                        outcome,
+                    },
+                )
+            }
+        };
+        if result_tx
+            .send(MathWorkerResult {
+                leaf: completion.0,
+                completion: completion.1,
+            })
+            .is_err()
+        {
+            break;
+        }
+        wake();
     }
 }
 
@@ -12560,6 +12567,35 @@ struct WindowRuntime {
     peek_thumbnail_pending: Option<PeekThumbnailTarget>,
     math_hover_anchor: Option<MathBlockAnchor>,
     math_hover_clear_at: Option<Instant>,
+    /// **When the hovered band's two marks began to arrive** (owner's ruling
+    /// 2026-09-14 ②).
+    ///
+    /// The marks are not drawn at rest and fade in over
+    /// [`tooltip::TOOLTIP_FADE`] once the pointer is on a band — the tip's own
+    /// ninety milliseconds, which is the one duration this window spends on
+    /// everything a hover reveals, and which the glance card was ruled onto the
+    /// day before this. It is set beside [`Self::math_hover_anchor`] and dies
+    /// with it, so a pointer crossing from one formula to the next starts the
+    /// second band's fade rather than inheriting the first band's.
+    ///
+    /// `None` is "no band has its tools up", which is the same fact
+    /// `math_hover_anchor` states — two fields because one is *which* and one is
+    /// *when*, and the pair is never half-set: every write below sets both.
+    math_tools_since: Option<Instant>,
+    /// **The mark a button is being held down on**, with the band it belongs to.
+    ///
+    /// The band is carried because a press latches `MouseRoute::MathBlock` and
+    /// the release that ends it can arrive after the pointer has left — an ink
+    /// keyed on "whichever band is hovered" would light the wrong one.
+    math_tool_pressed: Option<(MathBlockAnchor, formula_tools::FormulaTool)>,
+    /// **The band whose LaTeX just reached the clipboard, and when.**
+    ///
+    /// A copy's whole effect is somewhere the reader cannot see, so the mark
+    /// acknowledges it in its own slot for [`FOOT_REVEAL_FEEDBACK`] — the same
+    /// 1300ms and the same `#i-check` the files foot spends on "Revealed",
+    /// which ruling 6 (2026-08-12) collapsed every acknowledgement in this
+    /// window onto.
+    math_copied: Option<(MathBlockAnchor, Instant)>,
     pending_math_context_anchor: Option<MathBlockAnchor>,
     /// The layout tree this window hosts. A lone terminal leaf by default, which
     /// is today's window written down.
@@ -23441,6 +23477,30 @@ impl ImeCursorThrottle {
         self.pending = None;
     }
 
+    /// The rectangle the platform is currently working from, if it has been
+    /// told one at all.
+    fn last_sent(&self) -> Option<ImeCursorArea> {
+        self.last_sent_area
+    }
+
+    /// **Forget *what* the platform was last told without forgetting *when***
+    /// (user report 2026-09-14, `docs/DESIGN.md` §13.16 ⑥).
+    ///
+    /// [`Self::offer`] drops an area equal to the one already sent, and while a
+    /// caret sits still that is the whole of its work. A window that *moves*
+    /// keeps the very same window-relative rectangle and lands somewhere else on
+    /// the screen, so there the suppression is exactly backwards: the answer the
+    /// platform has cached is a **screen** rectangle, it is now stale, and
+    /// nothing else in this process is going to say so.
+    ///
+    /// Only the area is forgotten. [`Self::reset`] drops the clock with it,
+    /// which is right when a composition ends and wrong here: a drag emits a
+    /// move per frame, and re-arming must not turn one drag into a call per
+    /// move.
+    fn rearm(&mut self) {
+        self.last_sent_area = None;
+    }
+
     fn reset(&mut self) {
         *self = Self::default();
     }
@@ -27510,6 +27570,24 @@ struct OverlayStack {
     /// between them is bookkeeping. The jump's row flash rides here too: it is a
     /// band across one pane's own rows, drawn by the gesture that scrolled them.
     command_rail: Vec<marks::OverlayLayer>,
+    /// **A hovered formula band's two marks** (owner's ruling 2026-09-14 ②) —
+    /// `#i-code`/`#i-eye` and `#i-copy`, on the pill a pointer or a press lays
+    /// under them.
+    ///
+    /// Beside the thumb above it and on the same argument: it belongs *to* a
+    /// pane, it moves with that pane, and every surface above is entitled to
+    /// cover it. It is in the overlay at all for a reason of its own and a
+    /// sharper one — the band it stands beside is drawn by `bt_render` in the
+    /// seats' own pass, and these are **marks**, which only `bt_app` can
+    /// rasterize. The renderer answers where they go
+    /// ([`bt_render::WindowRenderer::math_tool_boxes`]) and this lane draws
+    /// them.
+    ///
+    /// Above the command rail rather than below it because the two can overlap:
+    /// a band runs to the pane's right edge and the rail is a column down it, so
+    /// a mark clamped against that edge would otherwise have a tick printed
+    /// through it.
+    formula_tools: Vec<marks::OverlayLayer>,
     /// `.rail { z-index: 15 }` — chrome that floats over the panes and over
     /// nothing else. Every surface below is entitled to cover it.
     rail: Vec<marks::OverlayLayer>,
@@ -27776,6 +27854,7 @@ impl OverlayStack {
             + self.video_bars.len()
             + self.terminal_bars.len()
             + self.command_rail.len()
+            + self.formula_tools.len()
             + self.rail.len()
             + self.flight.len()
             + self.ground.len()
@@ -27791,6 +27870,7 @@ impl OverlayStack {
             video_bars,
             terminal_bars,
             command_rail,
+            formula_tools,
             rail,
             flight,
             ground,
@@ -27819,6 +27899,7 @@ impl OverlayStack {
             video_bars,
             terminal_bars,
             command_rail,
+            formula_tools,
             rail,
             flight,
             ground,
@@ -33906,6 +33987,7 @@ fn create_leaf_session(
     );
     session.set_cell_width_subpixels(cell_width_subpixels(renderer.metrics()));
     session.set_ascii_baseline_subpixels(renderer.metrics().ascii_baseline_subpixels());
+    session.set_font_size_subpixels(renderer.metrics().font_size_subpixels());
     session.set_math_layout_options(MathLayoutOptions {
         detect_image_paths: true,
         block_max_height_px: block_max_height_px(formulas.max_height),
@@ -33919,6 +34001,7 @@ fn create_leaf_session(
     session.set_layout_key(window_layout_key(
         columns,
         renderer.metrics().dpi_milli(),
+        renderer.metrics().font_size_subpixels(),
         1,
         line_wrapping,
     ));
@@ -36046,6 +36129,9 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         peek_thumbnail_pending: None,
         math_hover_anchor: None,
         math_hover_clear_at: None,
+        math_tools_since: None,
+        math_tool_pressed: None,
+        math_copied: None,
         pending_math_context_anchor: None,
         seat_pointer: seats::ChromePointer::default(),
         tooltip: tooltip::TooltipHost::default(),
@@ -44336,6 +44422,11 @@ impl Runtime<'_> {
             video_bars: self.preview_seat_video_bars(),
             terminal_bars: self.terminal_bar_layers(),
             command_rail: self.command_rail_layers(),
+            // **The hovered formula band's two marks**, above the command rail
+            // and below everything a menu can drop over a pane (owner's ruling
+            // 2026-09-14 ②). Empty on every frame no pointer is on a formula,
+            // which is almost all of them.
+            formula_tools: self.formula_tool_layers(now),
             rail: self.rail_overlay_layers(),
             // **Directly above the list it came out of** (§7.1.6b″). At full
             // opacity and never at the rail's fold: the fold is what a panel
@@ -51341,6 +51432,8 @@ impl Runtime<'_> {
                     .set_cell_width_subpixels(cell_width_subpixels(metrics));
                 leaf.session
                     .set_ascii_baseline_subpixels(metrics.ascii_baseline_subpixels());
+                leaf.session
+                    .set_font_size_subpixels(metrics.font_size_subpixels());
             }
         }
         let physical = self.window.window.inner_size();
@@ -81522,6 +81615,42 @@ impl Runtime<'_> {
         }
     }
 
+    /// **Say the caret's rectangle again, unchanged, because the window moved
+    /// out from under the answer** (user report 2026-09-14; `docs/DESIGN.md`
+    /// §13.16 ⑥).
+    ///
+    /// Everything this program computes for the input method is **window**
+    /// pixels ([`Self::apply_ime_cursor_area`]), and that is the contract on
+    /// both platforms. What the platform *stores* is not: AppKit's
+    /// `firstRectForCharacterRange:` must answer in **screen** coordinates, so
+    /// winit converts through the window at the moment it is asked
+    /// (`convertRect:toView:nil` then `-[NSWindow convertRectToScreen:]`, which
+    /// is right on any display), and `NSTextInputContext` then **caches** that
+    /// answer. Apple's own instruction for the cache is
+    /// `invalidateCharacterCoordinates`, and the one thing in this process that
+    /// reaches it is `Window::set_ime_cursor_area` — which is called only when
+    /// the *window-relative* rectangle changes.
+    ///
+    /// A window carried to a second display changes none of it. The prompt is
+    /// still the same number of pixels from the same window's top-left, so the
+    /// throttle drops the offer, the context is never invalidated, and the next
+    /// composition is placed off the screen rectangle computed while the window
+    /// was somewhere else — the candidate list stranded mid-window, which is the
+    /// report. The correction is not arithmetic: the arithmetic was right both
+    /// times. It is telling the platform to ask again.
+    ///
+    /// Not `reset`: that is a composition ending. This keeps the 60Hz cadence,
+    /// so a drag across the seam costs the same as a caret moving.
+    fn reoffer_ime_cursor_area(&mut self) {
+        let Some(area) = self.window.ime_cursor_throttle.last_sent() else {
+            return;
+        };
+        self.window.ime_cursor_throttle.rearm();
+        if let Some(area) = self.window.ime_cursor_throttle.offer(area, Instant::now()) {
+            self.apply_ime_cursor_area(area);
+        }
+    }
+
     /// **Do what the ledger's answer says**, for every interruption it allowed this turn
     /// (`attention` plan §11.7, slice C3).
     ///
@@ -84516,6 +84645,14 @@ impl Runtime<'_> {
             self.window.math_hover_clear_at = None;
             if self.window.math_hover_anchor.as_ref() != Some(&hit.anchor) {
                 self.window.math_hover_anchor = Some(hit.anchor.clone());
+                // **The marks' fade starts with the band, not with the window**
+                // (owner's ruling 2026-09-14 ②). Written here and nowhere else:
+                // this is the one place a band becomes the hovered one, and a
+                // clock set anywhere else would be a second opinion about when
+                // "now" was. Crossing straight from one formula to the next is a
+                // change of anchor, so the second band's marks arrive the same
+                // way the first band's did rather than simply appearing.
+                self.window.math_tools_since = Some(now);
                 if self.set_hovered_math(Some(hit.anchor.clone())) {
                     self.repaint_hovered_pane()?;
                 }
@@ -84526,6 +84663,107 @@ impl Runtime<'_> {
             self.window.math_hover_clear_at = Some(now + Duration::from_millis(500));
         }
         Ok(hit)
+    }
+
+    /// **How far the hovered band's marks have come up**, `0.0 ..= 1.0`.
+    ///
+    /// [`tooltip::hover_fade_opacity`] and not a curve of its own: the tip, the
+    /// glance card and these read one fade, so the day any of them moves all
+    /// three move (owner's ruling 2026-09-13 ⑭, and its own "一条规矩,两个时钟"
+    /// — the curve is shared, the clocks are each surface's own).
+    ///
+    /// `0.0` with no band hovered, which is the ruling's "at rest they are NOT
+    /// drawn" said in the one place that decides it.
+    fn math_tools_opacity(&self, now: Instant) -> f32 {
+        self.window.math_tools_since.map_or(0.0, |since| {
+            tooltip::hover_fade_opacity(now.saturating_duration_since(since), self.app.motion)
+        })
+    }
+
+    /// The frames that fade owes, and nothing once it has landed.
+    ///
+    /// A band standing still under a still pointer costs no wake-ups at all —
+    /// the same silence §7.29 promises for every other hover in this window.
+    fn math_tools_deadline(&self, now: Instant) -> Option<Instant> {
+        let since = self.window.math_tools_since?;
+        tooltip::hover_fade_owes_frames(now.saturating_duration_since(since), self.app.motion)
+            .then(|| since + tooltip::TOOLTIP_FADE)
+    }
+
+    /// **Whether this band's copy is still inside its acknowledgement window.**
+    ///
+    /// Keyed on the anchor as well as the clock: a tick left standing on the
+    /// next formula the pointer walked onto would be this window confirming
+    /// something about a block nobody copied.
+    fn math_copy_is_fresh(&self, anchor: &MathBlockAnchor, now: Instant) -> bool {
+        self.window.math_copied.as_ref().is_some_and(|(said, at)| {
+            said == anchor && now.saturating_duration_since(*at) < FOOT_REVEAL_FEEDBACK
+        })
+    }
+
+    /// **The hovered formula band's two marks**, as one overlay layer.
+    ///
+    /// The renderer answers where they stand, in the pane body's own pixels,
+    /// through exactly the arithmetic [`Self::math_hit`] is answered from — so
+    /// the box you can press and the box you can see are one box by construction
+    /// rather than by two call sites agreeing. This moves them to that body's
+    /// corner and hands them to [`formula_tools::sprites`].
+    ///
+    /// **The band is found from the shells and not from the pointer**, which is
+    /// the one thing here that is not obvious. `toolbar_visible` is written to
+    /// exactly one shell (`Self::set_hovered_math` sweeps the rest), and it
+    /// outlives the pointer by the 500ms grace above — so a pointer that has
+    /// left the *pane* leaves a band still wearing its ground for half a second,
+    /// and marks that went looking for the pointer's own pane would have
+    /// vanished a beat before the floor they stand beside. The pointer still
+    /// decides which mark is *lit*, which is the only question it is the
+    /// authority on.
+    ///
+    /// One layer or none: there is one pointer, so at most one band.
+    fn formula_tool_layers(&self, now: Instant) -> Vec<marks::OverlayLayer> {
+        let opacity = self.math_tools_opacity(now);
+        if opacity <= 0.0 {
+            return Vec::new();
+        }
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let Some((seat, mut boxes)) = self.sessions.iter().find_map(|(seat, leaf)| {
+            let frame = leaf.last_presented_frame.as_ref()?;
+            Some((*seat, self.window.renderer.math_tool_boxes(frame)?))
+        }) else {
+            return Vec::new();
+        };
+        let Some(body) = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)
+        else {
+            return Vec::new();
+        };
+        let (dx, dy) = (body.x as f32, body.y as f32);
+        for rect in [&mut boxes.block, &mut boxes.source, &mut boxes.copy] {
+            *rect = [rect[0] + dx, rect[1] + dy, rect[2] + dx, rect[3] + dy];
+        }
+        let hit = self.math_hit();
+        let state = formula_tools::FormulaToolState {
+            hovered: hit.as_ref().and_then(|hit| match hit.target {
+                MathHitTarget::ToggleSource => Some(formula_tools::FormulaTool::ToggleSource),
+                MathHitTarget::CopyLatex => Some(formula_tools::FormulaTool::CopyLatex),
+                MathHitTarget::Block | MathHitTarget::Failure => None,
+            }),
+            pressed: self
+                .window
+                .math_tool_pressed
+                .as_ref()
+                .filter(|(anchor, _)| anchor == &boxes.anchor)
+                .map(|(_, verb)| *verb),
+            copied: self.math_copy_is_fresh(&boxes.anchor, now),
+        };
+        let sprites =
+            formula_tools::sprites(&boxes, state, &bt_render::chrome_palette(), scale, opacity);
+        if sprites.is_empty() {
+            return Vec::new();
+        }
+        vec![marks::OverlayLayer {
+            sprites,
+            ..marks::OverlayLayer::default()
+        }]
     }
 
     /// Set the hovered formula on the pane the pointer is in, and clear it everywhere else.
@@ -84558,6 +84796,17 @@ impl Runtime<'_> {
         }
         self.window.math_hover_clear_at = None;
         self.window.math_hover_anchor = None;
+        // **The marks leave with the band, and they leave at once.**
+        //
+        // The 500ms above is the grace — the mock-up's own `transition-delay:
+        // .5s` on leaving, which forgives a pointer clipping the corner of a
+        // mark on its way to it — and when it runs out the ground and the marks
+        // go together, in one frame, with no fade out. That asymmetry is the
+        // glance card's ruling read here (owner, 2026-09-13 ⑭): a fade in is ink
+        // arriving, and there is nothing for a fade out to say that the surface
+        // being gone does not say better.
+        self.window.math_tools_since = None;
+        self.window.math_tool_pressed = None;
         if self.set_hovered_math(None) {
             self.repaint_hovered_pane()?;
         }
@@ -84577,7 +84826,13 @@ impl Runtime<'_> {
         let result = bt_platform::set_clipboard_text(source)
             .map_err(|error| anyhow!(error))
             .context("copy original LaTeX source to clipboard");
-        recoverable_clipboard_write(result, "formula copy");
+        // **Only a copy that landed says it landed** (owner's ruling 2026-09-14
+        // ②). The bool this helper already returned was being thrown away, and
+        // a tick on a clipboard the window could not reach would be the one
+        // acknowledgement in this product that confirms nothing.
+        if recoverable_clipboard_write(result, "formula copy") {
+            self.window.math_copied = Some((anchor.clone(), Instant::now()));
+        }
     }
 
     fn apply_math_context_menu_result(&mut self) {
@@ -91034,6 +91289,12 @@ impl Runtime<'_> {
             && matches!(self.window.mouse_route, Some(MouseRoute::MathBlock))
         {
             self.window.mouse_route = None;
+            // The press ink comes off with the button, wherever it comes up —
+            // the gesture belongs to the mark it began on (owner's ruling
+            // 2026-09-14 ②).
+            if self.window.math_tool_pressed.take().is_some() {
+                self.repaint_hovered_pane()?;
+            }
             return Ok(());
         }
         if state == ElementState::Pressed
@@ -91044,6 +91305,23 @@ impl Runtime<'_> {
             // complete press/release pair intentionally prevents half-source selections and keeps
             // both local selection and application mouse reporting from seeing synthetic cells.
             self.window.mouse_route = Some(MouseRoute::MathBlock);
+            // **A mark that is being held says so** (owner's ruling 2026-09-14
+            // ②), and it says so before the verb runs: toggling the source
+            // republishes this pane's frame from inside the arm below, and a
+            // press ink written afterwards would miss that very frame.
+            if button == MouseButton::Left {
+                self.window.math_tool_pressed = match math_hit.target {
+                    MathHitTarget::ToggleSource => Some((
+                        math_hit.anchor.clone(),
+                        formula_tools::FormulaTool::ToggleSource,
+                    )),
+                    MathHitTarget::CopyLatex => Some((
+                        math_hit.anchor.clone(),
+                        formula_tools::FormulaTool::CopyLatex,
+                    )),
+                    MathHitTarget::Block | MathHitTarget::Failure => None,
+                };
+            }
             match (button, math_hit.target) {
                 (MouseButton::Left, MathHitTarget::ToggleSource) => {
                     // `math_hit()` answered, so a shell drew the block that was
@@ -91059,6 +91337,10 @@ impl Runtime<'_> {
                 }
                 (MouseButton::Left, MathHitTarget::CopyLatex) => {
                     self.copy_math_latex(&math_hit.anchor);
+                    // The tick has to reach the glass: nothing else in this
+                    // gesture asks for a frame, so without this the
+                    // acknowledgement would wait for the next thing to twitch.
+                    self.repaint_hovered_pane()?;
                 }
                 (MouseButton::Right, _) => match self.window.math_context_menu.request() {
                     Ok(true) => {
@@ -96035,6 +96317,12 @@ impl Runtime<'_> {
     /// which is not a reason to fail a window move.
     fn window_moved(&mut self) -> Result<()> {
         self.remember_summoned_arrangement();
+        // The input method's copy of the caret rectangle is in screen
+        // coordinates and this is the event that invalidated it
+        // (`reoffer_ime_cursor_area`). Unconditional, because "the window is on
+        // a different display now" is not a question this program can answer
+        // more cheaply than the platform can re-derive the rectangle.
+        self.reoffer_ime_cursor_area();
         for web in self.window.web.values() {
             if let Err(error) = web.parent_window_moved() {
                 eprintln!("BT_WEB {error}");
@@ -96245,6 +96533,7 @@ impl Runtime<'_> {
                 leaf.session.set_layout_key(window_layout_key(
                     nonzero_u32(leaf.grid.columns.get()),
                     dpi_milli,
+                    self.window.renderer.metrics().font_size_subpixels(),
                     font_rev,
                     line_wrapping,
                 ));
@@ -96278,6 +96567,8 @@ impl Runtime<'_> {
                     .set_cell_width_subpixels(cell_width_subpixels(metrics));
                 leaf.session
                     .set_ascii_baseline_subpixels(metrics.ascii_baseline_subpixels());
+                leaf.session
+                    .set_font_size_subpixels(metrics.font_size_subpixels());
             }
         }
         // **And every page this window hosts** (§7.8 ⑨). The same sentence, said
@@ -99380,6 +99671,17 @@ impl Runtime<'_> {
             self.window.hyperlink_hover.show_at,
             self.window.peek_hover.show_at,
             self.window.math_hover_clear_at,
+            // The band's marks while their ninety milliseconds is still
+            // climbing, and nothing once it has landed — a pointer resting on a
+            // formula costs no wake-ups at all (owner's ruling 2026-09-14 ②).
+            self.math_tools_deadline(now),
+            // And the copy tick's one wake-up: the instant it is due to turn
+            // back into a pair of sheets. One entry because there is one
+            // clipboard and one clock.
+            self.window
+                .math_copied
+                .as_ref()
+                .map(|(_, at)| *at + FOOT_REVEAL_FEEDBACK),
             self.preview_resample_deadline(),
             application_clocks
                 .then(|| self.app.session_store.deadline())
@@ -110586,12 +110888,14 @@ fn no_program_banner(requested: usize) -> String {
 fn window_layout_key(
     width_cells: NonZeroU32,
     dpi_milli: NonZeroU32,
+    font_size_subpixels: NonZeroI64,
     font_rev: u64,
     line_wrapping: bool,
 ) -> LayoutKey {
     LayoutKey {
         width_cells,
         dpi_milli,
+        font_size_subpixels: font_size_subpixels.get(),
         font_rev,
         theme_rev: theme_revision(),
         lang_rev: i18n::lang_revision(),
@@ -111870,6 +112174,7 @@ mod floated_page_tests {
             video_bars: mark(0.011),
             terminal_bars: mark(0.02),
             command_rail: mark(0.03),
+            formula_tools: mark(0.035),
             rail: mark(0.04),
             flight: mark(0.05),
             ground: mark(0.06),
@@ -112748,7 +113053,7 @@ mod floated_page_tests {
         // that closes the process, so a second fault in the same second cannot
         // take the first one's message box off the screen.
         assert!(
-            hook.contains("if !announce_panic(&path) {"),
+            hook.contains("if !announce_panic(path) {"),
             "every panic now ends the process, so two faults in one second race \
              to cut each other's alert off:\n{hook}"
         );
@@ -114525,6 +114830,23 @@ fn probe_input(value: Option<std::ffi::OsString>) -> Result<Option<Vec<u8>>> {
 /// the one that closes the process, and any other returns and lets its own
 /// thread unwind into the moment or two it has left.
 fn install_panic_log_hook() {
+    install_panic_log_hook_at(panic_log_path(), |path| {
+        if !announce_panic(path) {
+            return;
+        }
+        bt_platform::hide_every_window_of_this_process();
+        eprintln!(
+            "{}",
+            diagnostics::run_footer(
+                &hang_watch::utc_timestamp(std::time::SystemTime::now()),
+                PANIC_EXIT_CODE
+            )
+        );
+        bt_platform::leave_process(PANIC_EXIT_CODE)
+    });
+}
+
+fn install_panic_log_hook_at(path: PathBuf, fatal: impl Fn(&Path) + Send + Sync + 'static) {
     let previous = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
         let timestamp_ms = SystemTime::now()
@@ -114538,23 +114860,16 @@ fn install_panic_log_hook() {
             &info.to_string(),
             &Backtrace::force_capture().to_string(),
         );
-        let path = panic_log_path();
         if let Err(error) = append_panic_report(&path, &report) {
             eprintln!("failed to write panic report {}: {error}", path.display());
         }
-        previous(info);
-        if !announce_panic(&path) {
+        // A pure MiTeX conversion has its own unwind boundary. Its diagnostic
+        // belongs in the log above, never in a fatal dialog or process exit.
+        if bt_math::conversion_panic_is_contained() {
             return;
         }
-        bt_platform::hide_every_window_of_this_process();
-        eprintln!(
-            "{}",
-            diagnostics::run_footer(
-                &hang_watch::utc_timestamp(std::time::SystemTime::now()),
-                PANIC_EXIT_CODE
-            )
-        );
-        bt_platform::leave_process(PANIC_EXIT_CODE)
+        previous(info);
+        fatal(&path);
     }));
 }
 
@@ -115032,6 +115347,128 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// Runs the actual production queue in a disposable process. The watchdog
+    /// kills only this test's child if a regression makes conversion infinite.
+    #[test]
+    fn hostile_math_is_refused_and_the_real_decoration_worker_survives() {
+        const CHILD: &str = "BT_MATH_ROBUSTNESS_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::hostile_math_is_refused_and_the_real_decoration_worker_survives",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .spawn()
+                .unwrap();
+            let started = Instant::now();
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    assert!(status.success(), "worker regression child: {status}");
+                    return;
+                }
+                if started.elapsed() > Duration::from_secs(60) {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!("decoration worker exceeded the process watchdog");
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        let log = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/math-robustness-panic-test.log");
+        std::fs::write(&log, "").unwrap();
+        let fatal_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls = fatal_calls.clone();
+        // Use the production logging/containment hook, with only the final
+        // dialog/exit action replaced. Even a failing test opens no UI.
+        install_panic_log_hook_at(log.clone(), move |_| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        let (tasks, requests) = mpsc::channel();
+        let (results, completions) = mpsc::channel();
+        let worker = std::thread::spawn(move || run_decoration_worker(requests, results, || {}));
+        let leaf = probe_leaf();
+        let render = |source: &str, budget| {
+            tasks
+                .send(MathWorkerRequest::PreviewMath {
+                    leaf,
+                    key: Box::new(PreviewMathKey {
+                        source: source.to_owned(),
+                        mode: MathMode::Display,
+                        em_milli_px: 16_000,
+                        foreground_rgb: [220, 220, 220],
+                    }),
+                })
+                .unwrap();
+            let completion = completions
+                .recv_timeout(budget)
+                .expect("worker must answer within budget");
+            let DecorationWorkerCompletion::PreviewMath { result, .. } = completion.completion
+            else {
+                panic!("expected formula completion");
+            };
+            result
+        };
+        // Warm up fonts/Typst independently of the refusal-time measurement.
+        assert!(render("x+1", Duration::from_secs(30)).is_ok());
+        let mut exponential = String::new();
+        for (name, next) in ('a'..='y').zip('b'..='z') {
+            exponential.push_str(&format!(r"\newcommand{{\{name}}}{{\{next}\{next}}}"));
+        }
+        exponential.push_str(r"\newcommand{\z}{x}\a");
+        for (source, expected) in [
+            (r"\newcommand{\a}{#}", MathRenderError::ConversionPanic),
+            (r"\newcommand{\a}{\a}\a", MathRenderError::MacroCycle),
+            (exponential.as_str(), MathRenderError::MacroExpansionLimit),
+        ] {
+            // Start at Markdown delimiters, then submit the resulting source to
+            // the very same PreviewMath branch the UI uses.
+            let blocks = preview::parse_markdown(&format!("$${source}$$"));
+            let preview::MarkdownBlock::Math { source } = &blocks[0] else {
+                panic!("display formula must be detected");
+            };
+            let seconds = if expected == MathRenderError::ConversionPanic {
+                5
+            } else {
+                1
+            };
+            assert_eq!(
+                render(source, Duration::from_secs(seconds)).unwrap_err(),
+                expected
+            );
+            assert!(render("x+1", Duration::from_secs(10)).is_ok());
+        }
+        assert!(
+            render(
+                r"\newcommand{\a}{\b}\newcommand{\b}{\c}\newcommand{\c}{x+1}\a",
+                Duration::from_secs(10)
+            )
+            .is_ok()
+        );
+        tasks
+            .send(MathWorkerRequest::VerifyPath {
+                leaf,
+                path: log.clone(),
+            })
+            .unwrap();
+        assert!(matches!(
+            completions
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+                .completion,
+            DecorationWorkerCompletion::VerifiedPath { exists: true, .. }
+        ));
+        assert!(std::fs::read_to_string(log).unwrap().contains("unwrap"));
+        assert_eq!(fatal_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(!bt_math::conversion_panic_is_contained());
+        drop(tasks);
+        worker.join().unwrap();
+        assert!(panic::catch_unwind(|| panic!("ordinary panic hook regression probe")).is_err());
+        assert_eq!(fatal_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
     /// A preview surface on one tab, spelled the way a test means it (§7.12 ⓑ).
     ///
     /// Every one of these used to be `PreviewSurface::Seat(SeatId(n))`, which
@@ -115162,12 +115599,14 @@ mod tests {
         let key = super::window_layout_key(
             NonZeroU32::new(80).unwrap(),
             NonZeroU32::new(1000).unwrap(),
+            NonZeroI64::new(20 * 1024).unwrap(),
             7,
             true,
         );
         assert_eq!(key.width_cells.get(), 80);
         assert_eq!(key.dpi_milli.get(), 1000);
         assert_eq!(key.font_rev, 7);
+        assert_eq!(key.font_size_subpixels, 20 * 1024);
         assert_eq!(key.theme_rev, bt_render::theme_revision());
         assert_eq!(key.lang_rev, i18n::lang_revision());
     }
@@ -115343,6 +115782,10 @@ mod tests {
             video_bars: mark(24),
             terminal_bars: mark(16),
             command_rail: mark(13),
+            // 26 and not 25: every number below is spoken for, and a marker
+            // shared by two families would make this whole assertion pass while
+            // the two swapped places.
+            formula_tools: mark(26),
             rail: mark(1),
             flight: mark(19),
             ground: mark(2),
@@ -115381,12 +115824,12 @@ mod tests {
         assert_eq!(
             order,
             vec![
-                0, 24, 16, 13, 1, 19, 2, 14, 17, 18, 3, 4, 5, 6, 7, 12, 15, 22, 25, 8, 20, 23, 9,
-                10, 11, 21
+                0, 24, 16, 13, 26, 1, 19, 2, 14, 17, 18, 3, 4, 5, 6, 7, 12, 15, 22, 25, 8, 20, 23,
+                9, 10, 11, 21
             ],
-            "bottom to top: pane bars, video bars, terminal thumbs, command rails, rail, flight, \
-             ground, search capsule, integration strips, download sheet, schematic, float, modal, \
-             file menu, pane menu, git menu, terminal menu, tab menu, command \
+            "bottom to top: pane bars, video bars, terminal thumbs, command rails, formula marks, \
+             rail, flight, ground, search capsule, integration strips, download sheet, schematic, \
+             float, modal, file menu, pane menu, git menu, terminal menu, tab menu, command \
              palette, notices, key hint, Cards bubble, tip, glance, ghost, window ring"
         );
         let at = |tag: u8| {
@@ -128666,6 +129109,7 @@ mod tests {
         harness.session.set_layout_key(bt_doc::LayoutKey {
             width_cells: NonZeroU32::new(52).unwrap(),
             dpi_milli: NonZeroU32::new(800).unwrap(),
+            font_size_subpixels: 16 * 1024,
             font_rev: 1,
             theme_rev: harness.session.layout_key().theme_rev,
             lang_rev: harness.session.layout_key().lang_rev,
@@ -130232,10 +130676,10 @@ mod tests {
             "this window builds more than one picture decoder"
         );
         let worker = production
-            .find(r#""bt-math-worker""#)
+            .find("fn run_decoration_worker(")
             .expect("the decoration worker is spawned in this file");
         let ends = production
-            .find(r#".context("spawn math rendering worker")"#)
+            .find("/// What a press on one node of a files tree")
             .expect("and its spawn is checked");
         for (what, needle) in [
             (
@@ -130610,6 +131054,188 @@ mod tests {
             Some(latest)
         );
         assert_eq!(throttle.deadline(), None);
+    }
+
+    /// The caret a pane hands the input method, from the one cell it stands on.
+    ///
+    /// Window pixels all the way: the renderer measures the cell off its own
+    /// padding and metrics in the **seat's** axis, [`window_ime_cursor_area`]
+    /// carries it to the window's, and [`ime_cursor_area_of`] rounds the line
+    /// box to the whole-pixel origin-and-size pair the platform takes. Nothing
+    /// on this path knows which display the window is on, and nothing on it
+    /// should — that is the contract, and §13.16 ⑥ is about what the platform
+    /// does with the answer afterwards.
+    ///
+    /// Red gate: measure the caret's own hairline instead of the line box and
+    /// the height stops being the row's.
+    #[test]
+    fn a_caret_in_a_pane_reaches_winit_as_window_pixels_from_the_cell_it_stands_on() {
+        // Row 29, column 7 of a seat whose cells are 9x22 device pixels behind
+        // 8 pixels of padding — the grid's own arithmetic, spelled out so the
+        // expectation is not the code under test written twice.
+        let left = 8.0 + 7.0 * 9.0;
+        let top = 8.0 + 29.0 * 22.0;
+        let line = [left, top, left + 9.0, top + 22.0];
+        let seat = SeatViewport {
+            x: 976,
+            y: 40,
+            width: 944,
+            height: 1160,
+        };
+        assert_eq!(
+            window_ime_cursor_area(seat, ime_cursor_area_of(line)),
+            ImeCursorArea {
+                x: 976 + 71,
+                y: 40 + 646,
+                width: 9,
+                height: 22,
+            },
+            "the window's axis, and the size is the row rather than the caret",
+        );
+    }
+
+    /// AppKit's own conversion, written down: a caret rectangle in **window**
+    /// points — top-left origin, y down, because winit's view is flipped — to
+    /// the **screen** rectangle `firstRectForCharacterRange:` has to answer
+    /// with, whose origin is the *bottom* left and whose y grows upwards from
+    /// the zero screen's bottom-left corner.
+    ///
+    /// `window_origin` is the window content's bottom-left in that same global
+    /// space, which is what `-[NSWindow convertRectToScreen:]` adds. No screen's
+    /// height appears in it, and that is the point of the test below.
+    fn caret_screen_origin(
+        window_origin: (f64, f64),
+        content_height_pt: f64,
+        scale: f64,
+        area: ImeCursorArea,
+    ) -> (f64, f64) {
+        let left_pt = f64::from(area.x) / scale;
+        let top_pt = f64::from(area.y) / scale;
+        let height_pt = f64::from(area.height) / scale;
+        (
+            window_origin.0 + left_pt,
+            window_origin.1 + (content_height_pt - (top_pt + height_pt)),
+        )
+    }
+
+    /// The same rectangle read the way a screenshot reads it: down from the
+    /// **zero** screen's top-left. The flip constant is `NSScreen.screens[0]`'s
+    /// height and never the window's own screen's — the same constant
+    /// `macos_impl::flip_height` is built on.
+    fn screenshot_top(zero_screen_height_pt: f64, screen_origin_y: f64, height_pt: f64) -> f64 {
+        zero_screen_height_pt - (screen_origin_y + height_pt)
+    }
+
+    /// **Why a window that moved has to be told, even though nothing it computes
+    /// changed** (user report 2026-09-14, `docs/DESIGN.md` §13.16 ⑥).
+    ///
+    /// One caret, one window-relative rectangle, two displays: the zero screen,
+    /// and a second one whose origin is not `(0, 0)` and whose height is not the
+    /// zero screen's. The window-relative answer is a single number in both
+    /// places — that is the contract [`Runtime::apply_ime_cursor_area`] keeps —
+    /// and the **screen** rectangle the input method has to be given differs by
+    /// the whole of the move. So an answer cached while the window stood on one
+    /// display is wrong by that difference on the other, and re-deriving it is
+    /// not something this program can do by arithmetic: it can only ask the
+    /// platform to ask again.
+    ///
+    /// Red gate: flip with the window's own screen height instead of the zero
+    /// screen's and the last assertion moves by the difference between them —
+    /// the candidate list stranded mid-window, which is the report.
+    #[test]
+    fn the_same_caret_is_two_screen_rectangles_on_two_displays() {
+        let area = ImeCursorArea {
+            x: 976 + 71,
+            y: 40 + 646,
+            width: 9,
+            height: 22,
+        };
+        let scale = 2.0;
+        let content_height_pt = 600.0;
+
+        // Zero screen: 1512x982 points, origin (0, 0) by definition.
+        let zero_screen_height = 982.0;
+        let on_the_zero_screen =
+            caret_screen_origin((100.0, 200.0), content_height_pt, scale, area);
+        assert_eq!(on_the_zero_screen, (100.0 + 523.5, 200.0 + (600.0 - 354.0)));
+
+        // A second display of a different size, parked to the right and hanging
+        // below the zero screen's bottom edge: 2560x1440 points with its origin
+        // at (1512, -458). The window is carried to it unchanged.
+        let on_the_second_screen = caret_screen_origin(
+            (1512.0 + 100.0, -458.0 + 200.0),
+            content_height_pt,
+            scale,
+            area,
+        );
+        assert_eq!(
+            (
+                on_the_second_screen.0 - on_the_zero_screen.0,
+                on_the_second_screen.1 - on_the_zero_screen.1,
+            ),
+            (1512.0, -458.0),
+            "the caret moved by exactly the window's move and by nothing else",
+        );
+
+        // And read back the way the screen reads it, the flip is the **zero**
+        // screen's height at both stops — the second display's 1440 never enters
+        // the arithmetic, however tall it is.
+        assert_eq!(
+            screenshot_top(zero_screen_height, on_the_second_screen.1, 11.0),
+            zero_screen_height + 458.0 - 200.0 - 246.0 - 11.0,
+        );
+    }
+
+    /// **A move re-arms the rectangle the input method cached, and keeps the
+    /// clock** (user report 2026-09-14).
+    ///
+    /// The suppression in [`ImeCursorThrottle::offer`] is what makes a still
+    /// caret free, and it is exactly what has to be lifted when the window
+    /// itself moves: the area is equal, the screen rectangle it converts to is
+    /// not. [`ImeCursorThrottle::rearm`] forgets the area alone, so a drag —
+    /// which emits a move per frame — still costs at most one call per 60Hz
+    /// slot rather than one per move.
+    ///
+    /// Red gate: use `reset` instead and the last assertion fails, because a
+    /// dropped clock lets every move of a drag through.
+    #[test]
+    fn a_window_move_re_arms_the_caret_rectangle_without_dropping_the_clock() {
+        let start = Instant::now();
+        let area = ImeCursorArea {
+            x: 1047,
+            y: 686,
+            width: 9,
+            height: 22,
+        };
+        let mut throttle = ImeCursorThrottle::default();
+
+        assert_eq!(throttle.offer(area, start), Some(area));
+        assert_eq!(throttle.last_sent(), Some(area));
+        assert_eq!(
+            throttle.offer(area, start + IME_CURSOR_AREA_INTERVAL),
+            None,
+            "a caret that has not moved is not worth a call",
+        );
+
+        // The window is dragged to the second display. Same rectangle, and it
+        // has to reach the platform anyway.
+        throttle.rearm();
+        assert_eq!(
+            throttle.offer(area, start + IME_CURSOR_AREA_INTERVAL),
+            Some(area),
+        );
+
+        // The rest of the drag is one move per frame, and the clock is still
+        // standing: they coalesce into the one flush the interval allows.
+        let moved_again = start + IME_CURSOR_AREA_INTERVAL + Duration::from_millis(3);
+        throttle.rearm();
+        assert_eq!(throttle.offer(area, moved_again), None);
+        throttle.rearm();
+        assert_eq!(throttle.offer(area, moved_again), None);
+        assert_eq!(
+            throttle.flush_due(start + IME_CURSOR_AREA_INTERVAL * 2),
+            Some(area),
+        );
     }
 
     #[test]
@@ -147549,6 +148175,11 @@ mod tests {
     /// 64 KiB of this repository's Chinese front page and 64 KiB of a page
     /// written in both scripts, against the same one-frame budget.
     ///
+    /// **The reported document is two documents now** (2026-09-14). The front
+    /// page was cut down to a summary and its feature sections moved to
+    /// `docs/features.zh-CN.md`, so the Chinese prose the report was about is
+    /// mostly in the second file; both are padded to 64 KiB and both are asked.
+    ///
     /// **Mixed text is here beside pure Chinese because it is not the same
     /// document** to this parser. A run of ideographs never reaches the flanking
     /// rule, the link scanner or the code-span scanner at all; `**中文**english`
@@ -147583,6 +148214,7 @@ mod tests {
     fn a_page_written_in_chinese_rebuilds_inside_the_frame_budget() {
         for (name, one) in [
             ("Chinese", preview::CHINESE_PAGE),
+            ("Chinese, the long half", preview::CHINESE_FEATURE_PAGE),
             ("Chinese and English", preview::MIXED_SCRIPT_PAGE),
         ] {
             let mut document = String::new();
@@ -147593,7 +148225,12 @@ mod tests {
             let mut cache = MarkdownIntrinsicCache::default();
             rebuild_cost(&document, &mut cache);
             let mut typed = document.clone();
-            let at = typed.len() / 2;
+            // The midpoint of a page written in Chinese may fall inside a
+            // character; step back to the boundary before slicing.
+            let at = (0..=typed.len() / 2)
+                .rev()
+                .find(|&i| typed.is_char_boundary(i))
+                .unwrap_or(0);
             let at = typed[..at].rfind('\n').map_or(0, |line| line + 1);
             typed.insert(at, 'x');
             let (blocks, parse, intrinsics, laid) = rebuild_cost(&typed, &mut cache);
@@ -153600,6 +154237,19 @@ mod tests {
         focus_thumb::transcript_tail(&leaf.session, 40, 4, leaf.card.skip()).0[0].clone()
     }
 
+    /// The line at the card's **bottom** edge — the one it is anchored by
+    /// (T-CARD-ANCHOR-BOTTOM; §7.1.6b′ ④). A card is a picture of a terminal
+    /// and a terminal's own anchor is its bottom, so this is the line a resize
+    /// is answerable for, and the line these tests read a resize by.
+    fn card_anchor_bottom(leaf: &mut LeafSession) -> String {
+        leaf.card.prepare(&mut leaf.session, 4);
+        let window = focus_thumb::transcript_tail(&leaf.session, 40, 4, leaf.card.skip()).0;
+        window
+            .last()
+            .expect("a card of four rows over a transcript this deep draws four")
+            .clone()
+    }
+
     fn card_anchor_widen(leaf: &mut LeafSession) {
         schedule_leaf_grid_change(
             leaf,
@@ -153626,6 +154276,10 @@ mod tests {
     /// R=4, maximum=116: H007 becomes H001. These three tests independently
     /// inspect projection output; replacing anchor resolution with raw skip
     /// must fail preservation, upward movement, and reversal.
+    ///
+    /// The anchored line is H010, at the card's bottom edge
+    /// (T-CARD-ANCHOR-BOTTOM); H007 is what a four-row card standing on it
+    /// draws at its top, and the reflow answers for both.
     #[test]
     fn card_anchor_preserves_h007_across_reflow() {
         let mut leaf = card_anchor_fixture();
@@ -153721,31 +154375,42 @@ mod tests {
     /// Removing canonical reseating strands a live card in the preceding
     /// generation. Removing within-line preservation loses the second fragment
     /// when widening and narrowing through a line with the same source text.
+    ///
+    /// **Read at the bottom edge** (T-CARD-ANCHOR-BOTTOM): `L013` is the line
+    /// the card is anchored by, drawn in pieces at ten columns and whole at
+    /// forty. The first and last assertions are the same assertion — the width
+    /// went out and came back, and so did the card.
     #[test]
     fn card_anchor_live_offset_survives_local_and_canonical_reflow() {
         let mut leaf = card_anchor_fixture();
         leaf.card = focus_thumb::CardPosition::new(15);
+        assert_eq!(card_anchor_bottom(&mut leaf), "L013:abcde");
         assert_eq!(card_anchor_first(&mut leaf), "fghijk");
         card_anchor_widen(&mut leaf);
-        assert_eq!(card_anchor_first(&mut leaf), "L011:abcdefghijk");
+        assert_eq!(card_anchor_bottom(&mut leaf), "L013:abcdefghijk");
         card_anchor_settle(&mut leaf);
-        assert_eq!(card_anchor_first(&mut leaf), "L011:abcdefghijk");
+        assert_eq!(card_anchor_bottom(&mut leaf), "L013:abcdefghijk");
         card_anchor_resize(&mut leaf, 10, 40, LeafOnStage::Shown);
+        assert_eq!(card_anchor_bottom(&mut leaf), "L013:abcde");
         assert_eq!(card_anchor_first(&mut leaf), "fghijk");
         card_anchor_settle(&mut leaf);
-        assert_eq!(card_anchor_first(&mut leaf), "fghijk");
+        assert_eq!(card_anchor_bottom(&mut leaf), "L013:abcde");
     }
 
     #[test]
     fn card_anchor_height_only_change_preserves_live_content() {
         let mut leaf = card_anchor_fixture();
         leaf.card = focus_thumb::CardPosition::new(16);
+        assert_eq!(card_anchor_bottom(&mut leaf), "fghijk");
         assert_eq!(card_anchor_first(&mut leaf), "L011:abcde");
         card_anchor_resize(&mut leaf, 10, 10, LeafOnStage::Shown);
+        assert_eq!(card_anchor_bottom(&mut leaf), "fghijk");
         assert_eq!(card_anchor_first(&mut leaf), "L011:abcde");
         card_anchor_settle(&mut leaf);
-        // Finalizing displaced wrapped fragments joins them into a frozen line.
-        assert!(card_anchor_first(&mut leaf).starts_with("L011:"));
+        // Finalizing displaced wrapped fragments joins them into a frozen line,
+        // and the card's bottom edge is that line: the anchored tail of `L012`
+        // is now inside it, and what stands at the edge is the whole of it.
+        assert_eq!(card_anchor_bottom(&mut leaf), "L012:abcdefghijk");
     }
 
     #[test]
@@ -153812,7 +154477,9 @@ mod tests {
     }
 
     /// A newer equal-text line without any registered anchors must not steal
-    /// the older card's occurrence. The following distinct row proves identity.
+    /// the older card's occurrence. The distinct row above the card's anchored
+    /// bottom edge proves identity: `L004` stands over the fifth line and
+    /// `L014` over the fifteenth, and the two `same:` lines are one text.
     #[test]
     fn card_anchor_keeps_older_duplicate_occurrence() {
         let mut leaf = leaf_saying("");
@@ -153833,16 +154500,16 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\r\n");
         leaf.session.feed(text.as_bytes()).unwrap();
-        leaf.card = focus_thumb::CardPosition::new(28);
-        assert_eq!(card_anchor_first(&mut leaf), "same:abcde");
+        leaf.card = focus_thumb::CardPosition::new(31);
+        assert_eq!(card_anchor_bottom(&mut leaf), "same:abcde");
         card_anchor_resize(&mut leaf, 40, 40, LeafOnStage::Shown);
-        assert_eq!(card_anchor_first(&mut leaf), "same:abcdefghijk");
+        assert_eq!(card_anchor_bottom(&mut leaf), "same:abcdefghijk");
         let projected = focus_thumb::transcript_tail(&leaf.session, 40, 4, leaf.card.skip()).0;
-        assert_eq!(projected[1], "L006:abcdefghijk");
+        assert_eq!(projected[2], "L004:abcdefghijk");
         card_anchor_settle(&mut leaf);
-        assert_eq!(card_anchor_first(&mut leaf), "same:abcdefghijk");
+        assert_eq!(card_anchor_bottom(&mut leaf), "same:abcdefghijk");
         let projected = focus_thumb::transcript_tail(&leaf.session, 40, 4, leaf.card.skip()).0;
-        assert_eq!(projected[1], "L006:abcdefghijk");
+        assert_eq!(projected[2], "L004:abcdefghijk");
     }
 
     /// One shell with a word in it that no other shell in the test has.

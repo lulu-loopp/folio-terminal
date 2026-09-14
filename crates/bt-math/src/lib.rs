@@ -11,8 +11,40 @@ use typst_library::{
     World,
     foundations::{Array, Dict, IntoValue, Str, Value},
     layout::{Frame, FrameItem, Point, Transform},
-    text::FontBook,
+    text::{FontBook, FontInfo, FontStyle},
 };
+
+mod macro_budget;
+
+thread_local! {
+    static CONVERTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The app's panic hook must log these panics, then return to the unwind boundary
+/// instead of showing its fatal-error dialog or exiting the process.
+pub fn conversion_panic_is_contained() -> bool {
+    CONVERTING.get()
+}
+
+fn convert_math(source: &str) -> Result<String, MathRenderError> {
+    struct ConversionGuard(bool);
+    impl Drop for ConversionGuard {
+        fn drop(&mut self) {
+            CONVERTING.set(self.0);
+        }
+    }
+    let source = source.to_owned();
+    // MiTeX is a pure conversion over owned input and a cloned immutable spec.
+    // No MathEngine, locks, or caller state enter this closure; unwinding drops
+    // all partial conversion state, so AssertUnwindSafe cannot hide a poisoned
+    // shared invariant. The process hook retains the diagnostic in its log.
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _guard = ConversionGuard(CONVERTING.replace(true));
+        mitex::convert_math(&source, Some(DEFAULT_SPEC.clone()))
+    }))
+    .map_err(|_| MathRenderError::ConversionPanic)?
+    .map_err(|error| MathRenderError::Convert(error.to_string()))
+}
 
 pub const MAX_SOURCE_BYTES: usize = 8 * 1024;
 pub const VERTICAL_PADDING_LOGICAL_PX: u32 = 8;
@@ -25,12 +57,13 @@ const TYPST_TEMPLATE: &str = r#"
 #set page(width: auto, height: auto, margin: (x: 0pt, y: sys.inputs.font_size * 1pt), fill: none)
 #set text(size: sys.inputs.font_size * 1pt, fill: rgb(sys.inputs.red, sys.inputs.green, sys.inputs.blue))
 // The math font, and behind it the installed families this particular source's
-// CJK characters were found in (see `covering_cjk_families`). Typst's equation
+// remaining characters were found in (see `covering_families`). Typst's equation
 // element show-sets the math font alone; naming it again here keeps it first —
-// every Latin letter, operator and symbol still comes from it — and appends the
-// faces that answer for the ideographs it does not carry. The list is empty for
-// a source with no CJK in it, which is then byte-for-byte the Typst default.
-#show math.equation: set text(font: ("New Computer Modern Math",) + sys.inputs.cjk_fonts)
+// every letter, operator and symbol the math font carries still comes from it —
+// and appends the faces that answer for the characters it does not carry. The
+// list is empty for a source the math font answers for whole, which is then
+// byte-for-byte the Typst default.
+#show math.equation: set text(font: ("New Computer Modern Math",) + sys.inputs.fallback_fonts)
 #let mitex-scope = base-mitex-scope + (
   diff: math.partial,
   sect: math.inter,
@@ -43,6 +76,24 @@ const TYPST_TEMPLATE: &str = r#"
 }
 #eval(source, scope: mitex-scope)
 "#;
+
+/// The family every mathematical character is set in, named once.
+///
+/// It is the face typst-assets embeds, so it is present on every machine Folio
+/// runs on and it is the *first* family the book knows under this name — the
+/// engine adds the embedded faces before it scans the system. Everything the
+/// engine asks the machine for is measured against this: a character this family
+/// carries is never a question about the reader's computer, and a character it
+/// does not carry is exactly the question [`covering_families`] answers.
+///
+/// The template below names the same string; the test
+/// `the_math_family_is_the_one_the_template_names` keeps the two from drifting.
+#[cfg(test)]
+const MATH_FAMILY: &str = "New Computer Modern Math";
+
+/// The font book's own key for [`MATH_FAMILY`]. `FontBook` lowercases the names
+/// it indexes by, so a lookup has to be lowercased too.
+const MATH_FAMILY_KEY: &str = "new computer modern math";
 
 /// CSS pixels one typographic point is worth. Both of this crate's two scale
 /// factors are this number, which is why it is named once.
@@ -73,11 +124,8 @@ pub fn device_px_per_pt(dpi_milli: NonZeroU32) -> f32 {
 
 /// A key that sets its mathematics at `em_device_px` **device pixels**.
 ///
-/// The terminal asks for a point size because its cells come from a point size.
-/// A document does not: the markdown preview knows only that its prose is being
-/// drawn at so many device pixels and that a formula standing in that prose must
-/// match it. Rather than have that caller carry this crate's two conversions
-/// around, it says the size it means and this inverts [`device_px_per_pt`].
+/// Terminal inline runs and Markdown formulas know their surrounding text's physical em.
+/// This inverts [`device_px_per_pt`] with a normalized DPI, so device scaling is applied once.
 ///
 /// `None` when the requested size rounds to nothing, which is the only way the
 /// point size can fail to be positive.
@@ -137,6 +185,14 @@ pub enum MathRenderError {
     UnsafeCommand,
     #[error("math source nesting exceeds 256")]
     NestingTooDeep,
+    #[error("math macro definitions contain a cycle")]
+    MacroCycle,
+    #[error("math macro expansion exceeds the work limit")]
+    MacroExpansionLimit,
+    #[error("math macro definition cannot be bounded safely")]
+    UnboundedMacro,
+    #[error("math conversion could not complete")]
+    ConversionPanic,
     #[error("MiTeX conversion failed: {0}")]
     Convert(String),
     #[error("Typst compilation failed: {0}")]
@@ -151,6 +207,15 @@ pub enum MathRenderError {
     InlineGeometry,
     #[error("no installed font provides every requested CJK glyph")]
     MissingCjkGlyph,
+    /// A character the formula asked to see drawn came back `.notdef` — the
+    /// page drew a blank or a box where a symbol belongs.
+    ///
+    /// This is [`Self::MissingCjkGlyph`]'s rule applied to the characters that
+    /// rule used to walk past. A formula whose minus sign is not drawn is not a
+    /// formula with a cosmetic flaw in it; it is a *different* formula, and
+    /// showing the reader the source is the only honest answer left.
+    #[error("no installed font provides a glyph for {0:?}")]
+    MissingGlyph(char),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -163,14 +228,20 @@ pub enum MathFailureStage {
 impl MathRenderError {
     pub fn failure_stage(&self) -> Option<MathFailureStage> {
         match self {
-            Self::SourceTooLong | Self::UnsafeCommand | Self::NestingTooDeep => {
-                Some(MathFailureStage::Validate)
-            }
-            Self::Convert(_) => Some(MathFailureStage::Convert),
+            Self::SourceTooLong
+            | Self::UnsafeCommand
+            | Self::NestingTooDeep
+            | Self::MacroCycle
+            | Self::MacroExpansionLimit
+            | Self::UnboundedMacro => Some(MathFailureStage::Validate),
+            Self::Convert(_) | Self::ConversionPanic => Some(MathFailureStage::Convert),
             Self::Compile(_) | Self::NoPage | Self::Svg(_) | Self::InvalidDimensions => {
                 Some(MathFailureStage::Compile)
             }
-            Self::NotDetected | Self::InlineGeometry | Self::MissingCjkGlyph => None,
+            Self::NotDetected
+            | Self::InlineGeometry
+            | Self::MissingCjkGlyph
+            | Self::MissingGlyph(_) => None,
         }
     }
 }
@@ -212,13 +283,40 @@ impl MathEngine {
 
     pub fn render(&self, source: &str, key: MathRenderKey) -> Result<MathRaster, MathRenderError> {
         let started = std::time::Instant::now();
+        let document = self.typeset(source, key)?;
+        let page = document.pages().first().ok_or(MathRenderError::NoPage)?;
+        if let Some(character) = frame_undrawn_character(&page.frame) {
+            return Err(if is_cjk_character(character) {
+                MathRenderError::MissingCjkGlyph
+            } else {
+                MathRenderError::MissingGlyph(character)
+            });
+        }
+        let svg = typst_svg::svg(page, &Default::default());
+        // The same number the template turned into `margin.y`, which is what makes the page's
+        // content box — and therefore its baseline — recoverable from the page frame alone.
+        let margin_pt = f64::from(key.font_milli_pt.get()) / 1000.0;
+        let metrics = find_math_metrics(&page.frame)
+            .or_else(|| fallback_math_metrics(&page.frame, margin_pt))
+            .ok_or(MathRenderError::InvalidDimensions)?;
+        rasterize_svg(&svg, key, metrics, started.elapsed())
+    }
+
+    /// Typeset the source and stop at the laid-out page, before anything is
+    /// drawn.
+    ///
+    /// [`Self::render`] and [`Self::typeset_runs`] are the same compilation
+    /// asked two different questions — what the formula *looks* like, and what
+    /// the typesetter *did* — so they share one body rather than two that can
+    /// drift apart. A reference measured on one machine is only worth anything
+    /// while it is measuring the same document the reader gets.
+    fn typeset(&self, source: &str, key: MathRenderKey) -> Result<PagedDocument, MathRenderError> {
         validate_source(source)?;
-        let converted = mitex::convert_math(source, Some(DEFAULT_SPEC.clone()))
-            .map_err(|error| MathRenderError::Convert(error.to_string()))?;
+        let converted = convert_math(source)?;
         let mut inputs = Dict::new();
         inputs.insert(
-            "cjk_fonts".into(),
-            Value::Array(self.cjk_families_for(&converted)),
+            "fallback_fonts".into(),
+            Value::Array(self.families_for(&converted)),
         );
         inputs.insert("source".into(), Value::Str(Str::from(converted)));
         inputs.insert(
@@ -232,27 +330,41 @@ impl MathEngine {
             "display".into(),
             matches!(key.mode, MathMode::Display).into_value(),
         );
-        let compiled = self.engine.compile_with_input::<_, PagedDocument>(inputs);
-        let document = compiled
+        self.engine
+            .compile_with_input::<_, PagedDocument>(inputs)
             .output
-            .map_err(|error| MathRenderError::Compile(error.to_string()))?;
-        let page = document.pages().first().ok_or(MathRenderError::NoPage)?;
-        if frame_has_missing_cjk_glyph(&page.frame) {
-            return Err(MathRenderError::MissingCjkGlyph);
-        }
-        let svg = typst_svg::svg(page, &Default::default());
-        // The same number the template turned into `margin.y`, which is what makes the page's
-        // content box — and therefore its baseline — recoverable from the page frame alone.
-        let margin_pt = f64::from(key.font_milli_pt.get()) / 1000.0;
-        let metrics = find_math_metrics(&page.frame)
-            .or_else(|| fallback_math_metrics(&page.frame, margin_pt))
-            .ok_or(MathRenderError::InvalidDimensions)?;
-        rasterize_svg(&svg, key, metrics, started.elapsed())
+            .map_err(|error| MathRenderError::Compile(error.to_string()))
     }
 
-    /// Every installed family that claims one of this source's ideographs, in
-    /// the order Typst should read them. Empty when the source has no CJK in it,
-    /// and empty when nothing installed claims any of it.
+    /// What the typesetter actually drew for this formula: every shaped run on
+    /// the page, in page order, with the face it was drawn from.
+    ///
+    /// **A raster cannot say which of two machines is wrong.** Two pictures that
+    /// differ tell you they differ; this says *why* — the characters that
+    /// reached the page, the family, style and weight that answered for each of
+    /// them, and the glyph ids and advances that came back. It is the reference
+    /// DESIGN §13.40 ⑥ compares two machines on, made specific enough to name a
+    /// culprit rather than only to disagree, and it is the only way a character
+    /// the typesetter dropped on the floor can be seen at all: a character no
+    /// family could shape is not drawn *and not spaced*, so it leaves no mark on
+    /// the picture to find (`typst-layout`'s `math::text::layout_glyph` pushes
+    /// nothing when `GlyphFragment::new` comes back `None`).
+    pub fn typeset_runs(
+        &self,
+        source: &str,
+        key: MathRenderKey,
+    ) -> Result<Vec<TypesetRun>, MathRenderError> {
+        let document = self.typeset(source, key)?;
+        let page = document.pages().first().ok_or(MathRenderError::NoPage)?;
+        let mut runs = Vec::new();
+        collect_typeset_runs(&page.frame, &mut runs);
+        Ok(runs)
+    }
+
+    /// Every installed family that claims a character of this source the math
+    /// font itself cannot draw, in the order Typst should read them. Empty when
+    /// [`MATH_FAMILY`] answers for the whole source — which is the ordinary
+    /// case, and is then byte-for-byte what Typst does unaided.
     ///
     /// **This is what makes [`MathRenderError::MissingCjkGlyph`] mean what it
     /// says.** The error itself is still read off the finished page — a `.notdef`
@@ -280,15 +392,36 @@ impl MathEngine {
     /// missing because no `cmap` claims it. The page is still the judge, so a
     /// character the source names and the document never typesets cannot fail a
     /// render that does not draw it.
-    fn cjk_families_for(&self, source: &str) -> Array {
-        let requested = requested_cjk_characters(source);
-        if requested.is_empty() {
-            return Array::new();
-        }
+    ///
+    /// **The question this asks is "can the math font draw it", not "is it
+    /// Chinese".** It was written for ideographs and read the request through a
+    /// list of CJK code blocks, which made every other character the math font
+    /// happens to lack somebody else's problem — and that somebody is
+    /// `select_fallback`, the one-attempt, name-similarity scoring the paragraph
+    /// above is the whole record of. Worse than a wrong face: when the scoring
+    /// finds nothing at all, `typst-layout` does not draw a `.notdef` for the
+    /// character, it drops the character — `math::text::layout_glyph` pushes a
+    /// fragment only `if let Some(glyph) = GlyphFragment::new(…)`, and a
+    /// character that never becomes a fragment takes no room and leaves no ink,
+    /// so the formula silently loses a symbol and every check that looks at the
+    /// picture says it is fine. Asking the book directly, for every character,
+    /// takes that path out of the engine's way: a character some installed face
+    /// can draw is named to a family that can draw it, and one no face can draw
+    /// is what [`frame_undrawn_character`] now reports for any character rather
+    /// than for ideographs alone.
+    fn families_for(&self, source: &str) -> Array {
         self.engine
             // The only way building a world fails is injecting inputs into the
             // library, and this one is asked for the font book alone.
-            .with_world(|world| covering_cjk_families(world.book(), &requested))
+            .with_world(|world| {
+                let book = world.book();
+                let requested = characters_the_math_font_lacks(book, source);
+                if requested.is_empty() {
+                    Vec::new()
+                } else {
+                    covering_families(book, &requested)
+                }
+            })
             .expect("a world built with no inputs")
             .into_iter()
             .map(|family| Value::Str(Str::from(family)))
@@ -296,9 +429,34 @@ impl MathEngine {
     }
 }
 
-/// The CJK characters a Typst source asks to see drawn.
-fn requested_cjk_characters(source: &str) -> BTreeSet<char> {
-    source.chars().filter(|c| is_cjk_character(*c)).collect()
+/// The characters a Typst source asks to see drawn that [`MATH_FAMILY`] itself
+/// does not carry.
+///
+/// Whitespace and control characters are not drawn by anybody, and a character
+/// the math family claims needs no second opinion — naming another family for it
+/// could only take it away from the face the mathematics is set in. What is left
+/// is exactly the request the machine has to answer: the ideographs of a
+/// `\text{…}`, an author's emoji, a symbol from a corner of Unicode this face
+/// never covered.
+///
+/// A book with no [`MATH_FAMILY`] in it at all cannot be argued with — every
+/// character is then unanswered — and that is the honest reading: on such a
+/// machine the mathematics is being set in whatever the fallback finds, and
+/// naming the claimants is the most that can be done for it.
+fn characters_the_math_font_lacks(book: &FontBook, source: &str) -> BTreeSet<char> {
+    let math_faces = book
+        .select_family(MATH_FAMILY_KEY)
+        .filter_map(|face| book.info(face))
+        .collect::<Vec<&FontInfo>>();
+    source
+        .chars()
+        .filter(|c| !c.is_whitespace() && !c.is_control())
+        .filter(|c| {
+            !math_faces
+                .iter()
+                .any(|info| info.coverage.contains(*c as u32))
+        })
+        .collect()
 }
 
 /// Every installed family that claims a character of `requested`, ordered so
@@ -334,7 +492,16 @@ fn requested_cjk_characters(source: &str) -> BTreeSet<char> {
 /// this is not the place it gets answered; what this owes the reader is that the
 /// characters appear at all, drawn by whichever installed face can draw them,
 /// with no font embedded or redistributed to make that true.
-fn covering_cjk_families(book: &FontBook, requested: &BTreeSet<char>) -> Vec<String> {
+///
+/// **The measurements above are about ideographs and the reasoning is not.**
+/// Nothing in this function looks at a code block: it is handed the characters
+/// [`MATH_FAMILY`] cannot draw, whatever they turn out to be, and every word of
+/// the argument — a `cmap` is a claim rather than a promise, Typst gets one
+/// attempt per character from `select_fallback`, a font list is walked per tofu
+/// run — is true of a rare operator or an emoji exactly as it was of 活.
+/// Restricting it to CJK was the shape of the defect that was under
+/// investigation, not a property of the remedy.
+fn covering_families(book: &FontBook, requested: &BTreeSet<char>) -> Vec<String> {
     // Every family the book knows, in the book's own order, each with the
     // characters of the request it claims. A family's faces are pooled: what
     // reaches Typst is a family *name*, and it picks the variant itself, so a
@@ -418,7 +585,7 @@ fn validate_source(source: &str) -> Result<(), MathRenderError> {
             _ => {}
         }
     }
-    Ok(())
+    macro_budget::validate(source)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -488,23 +655,114 @@ fn fallback_math_metrics(frame: &Frame, margin_pt: f64) -> Option<MathMetrics> {
     })
 }
 
-/// The backstop behind [`MathEngine::cjk_fonts_for`]: a page that still drew a
-/// `.notdef` where an ideograph belongs.
+/// The backstop behind [`MathEngine::families_for`]: the first character this
+/// page drew as `.notdef`, if it drew one.
 ///
-/// This is no longer how the question is decided — see that method for why a
+/// This is no longer how the *question* is decided — see that method for why a
 /// shaping outcome is not a fact about the machine — and after the covering
 /// families reach the template it can only fire for a font whose `cmap` claims a
 /// character it cannot actually shape. That is still a machine that cannot draw
-/// the formula, so it is still `MissingCjkGlyph`; it is just no longer the thing
-/// that decides whether the machine has the font.
-fn frame_has_missing_cjk_glyph(frame: &Frame) -> bool {
-    frame.items().any(|(_, item)| match item {
-        FrameItem::Text(text) => {
-            text.text.chars().any(is_cjk_character) && text.glyphs.iter().any(|glyph| glyph.id == 0)
+/// the formula, so it is still a refusal; it is just no longer the thing that
+/// decides whether the machine has the font.
+///
+/// **It reads every character, not the ideographs.** Restricting it to CJK was
+/// never a rule about mathematics, it was the shape of the defect that happened
+/// to be under investigation, and the cost of that restriction is a class of
+/// silently *wrong* formulas: a page missing an operator is not a page with a
+/// blemish, it says something the author did not write, and until this looked at
+/// the rest of Unicode nothing in the pipeline could tell that from a page that
+/// is right. The character comes back with the answer so the refusal can name
+/// it.
+fn frame_undrawn_character(frame: &Frame) -> Option<char> {
+    for (_, item) in frame.items() {
+        match item {
+            FrameItem::Text(text) => {
+                for glyph in text.glyphs.iter().filter(|glyph| glyph.id == 0) {
+                    // The glyph's range indexes its own item's text. A range a
+                    // shaper left inconsistent is not worth a panic on a reading
+                    // surface, so an unreadable one is reported as the item's
+                    // first character instead.
+                    if let Some(character) = text
+                        .text
+                        .get(glyph.range())
+                        .and_then(|covered| covered.chars().next())
+                        .or_else(|| text.text.chars().next())
+                    {
+                        return Some(character);
+                    }
+                }
+            }
+            FrameItem::Group(group) => {
+                if let Some(character) = frame_undrawn_character(&group.frame) {
+                    return Some(character);
+                }
+            }
+            _ => {}
         }
-        FrameItem::Group(group) => frame_has_missing_cjk_glyph(&group.frame),
-        _ => false,
-    })
+    }
+    None
+}
+
+/// One shaped run as it stands on a finished page.
+///
+/// The unit is the typesetter's, not the reader's: mathematics is laid out one
+/// fragment at a time, so a formula arrives as many short runs rather than one
+/// long one, and that is the point — each run carries the face that answered for
+/// *it*.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TypesetRun {
+    /// The characters of the run, as the typesetter shaped them. This is what a
+    /// code-point assertion reads: Typst's math shorthands have already been
+    /// applied here, so a source `-` arrives as `−` (U+2212 MINUS SIGN).
+    pub text: String,
+    /// The family that answered for the run.
+    pub family: String,
+    /// Whether the face is an italic or oblique one.
+    pub italic: bool,
+    /// The face's weight, 100–900.
+    pub weight: u16,
+    /// The size the run is set at, in typographic points.
+    pub size_pt: f64,
+    /// The glyph ids the shaper returned. A zero is `.notdef`.
+    pub glyph_ids: Vec<u16>,
+    /// Each glyph's advance, in thousandths of an em. A run that is drawn but
+    /// takes no room is as invisible as one that was dropped, and this is where
+    /// that shows.
+    pub advances_milli_em: Vec<i32>,
+}
+
+impl TypesetRun {
+    /// Whether any glyph of the run came back `.notdef`.
+    #[must_use]
+    pub fn has_notdef(&self) -> bool {
+        self.glyph_ids.contains(&0)
+    }
+}
+
+/// Every text run of a page, in page order, with the groups walked in place.
+fn collect_typeset_runs(frame: &Frame, runs: &mut Vec<TypesetRun>) {
+    for (_, item) in frame.items() {
+        match item {
+            FrameItem::Text(text) => runs.push(TypesetRun {
+                text: text.text.to_string(),
+                family: text.font.font().info().family.clone(),
+                italic: matches!(
+                    text.font.font().info().variant.style,
+                    FontStyle::Italic | FontStyle::Oblique
+                ),
+                weight: text.font.font().info().variant.weight.to_number(),
+                size_pt: text.size.to_pt(),
+                glyph_ids: text.glyphs.iter().map(|glyph| glyph.id).collect(),
+                advances_milli_em: text
+                    .glyphs
+                    .iter()
+                    .map(|glyph| (glyph.x_advance.get() * 1000.0).round() as i32)
+                    .collect(),
+            }),
+            FrameItem::Group(group) => collect_typeset_runs(&group.frame, runs),
+            _ => {}
+        }
+    }
 }
 
 fn is_cjk_character(character: char) -> bool {
@@ -725,6 +983,25 @@ fn unpremultiply_srgb_rgba(rgba: &mut [u8]) {
 mod tests {
     use super::*;
     use serde::Deserialize;
+
+    #[test]
+    fn a_conversion_panic_is_a_neutral_refusal_and_clears_its_guard() {
+        assert_eq!(
+            convert_math(r"\newcommand{\a}{#}"),
+            Err(MathRenderError::ConversionPanic)
+        );
+        assert!(!conversion_panic_is_contained());
+        assert_eq!(
+            MathRenderError::ConversionPanic.failure_stage(),
+            Some(MathFailureStage::Convert)
+        );
+        assert!(
+            !MathRenderError::ConversionPanic
+                .to_string()
+                .contains("unwrap")
+        );
+        assert!(convert_math("x+1").is_ok());
+    }
 
     fn key() -> MathRenderKey {
         MathRenderKey {
@@ -960,7 +1237,7 @@ mod tests {
 
         // The runner's shape: the face that gets tried first carries half of it.
         let split = book_of(&[("PartialFront", "死中文"), ("WholeBehind", "死活中文")]);
-        let families = covering_cjk_families(&split, &requested);
+        let families = covering_families(&split, &requested);
         assert!(
             families.iter().any(|f| f == "WholeBehind"),
             "the family that draws 活 has to be named, whatever is in front of it: {families:?}"
@@ -979,13 +1256,13 @@ mod tests {
         // No one face covers the request; two between them do, and both are named.
         let shared = book_of(&[("DeadOnly", "死"), ("LivingOnly", "活")]);
         assert_eq!(
-            covering_cjk_families(&shared, &requested),
+            covering_families(&shared, &requested),
             vec!["DeadOnly".to_owned(), "LivingOnly".to_owned()],
         );
 
         // One face answering for everything is one family, and it is named once.
         assert_eq!(
-            covering_cjk_families(&book_of(&[("Whole", "死活中文")]), &requested),
+            covering_families(&book_of(&[("Whole", "死活中文")]), &requested),
             vec!["Whole".to_owned()],
         );
 
@@ -996,13 +1273,13 @@ mod tests {
         // Alphabetical, because these two are tied on what they answer and the
         // book's own order is how ties are broken.
         assert_eq!(
-            covering_cjk_families(
+            covering_families(
                 &book_of(&[("DeadOnly", "死"), ("AlsoDeadOnly", "死")]),
                 &requested
             ),
             vec!["AlsoDeadOnly".to_owned(), "DeadOnly".to_owned()],
         );
-        assert!(covering_cjk_families(&book_of(&[]), &requested).is_empty());
+        assert!(covering_families(&book_of(&[]), &requested).is_empty());
     }
 
     /// The families this machine's own book offers for a request draw all of it
@@ -1014,7 +1291,7 @@ mod tests {
         let requested = BTreeSet::from(['死', '活', '中', '文', '项', '目', '数']);
         let names = engine
             .engine
-            .with_world(|world| covering_cjk_families(world.book(), &requested))
+            .with_world(|world| covering_families(world.book(), &requested))
             .unwrap();
         engine
             .engine
@@ -1031,6 +1308,59 @@ mod tests {
                 }
             })
             .unwrap();
+    }
+
+    /// The family the cover measures against is the family the template sets
+    /// the mathematics in. Two strings saying the same thing is exactly how a
+    /// cover quietly starts answering a question nobody asked.
+    #[test]
+    fn the_math_family_is_the_one_the_template_names() {
+        assert!(
+            TYPST_TEMPLATE.contains(&format!("({MATH_FAMILY:?},)")),
+            "the template must set the equation in {MATH_FAMILY}"
+        );
+    }
+
+    /// PIN — **an ordinary formula asks the machine for nothing.**
+    ///
+    /// The cover exists for the characters the math font does not carry, and a
+    /// formula made of mathematics has none: the list it produces is empty, the
+    /// template's font list is then the math family alone, and the page is
+    /// byte-for-byte what Typst draws unaided. That is what lets DESIGN §13.40
+    /// ⑥'s two machines print the same digest at all, and it is what keeps this
+    /// crate from having a taste in fonts it has no business having.
+    ///
+    /// MUTATION: let the filter keep characters the math family *does* claim and
+    /// every Latin letter of every formula drags the whole book in behind it.
+    #[test]
+    fn a_formula_the_math_font_answers_for_names_no_other_family() {
+        let engine = MathEngine::new();
+        engine
+            .engine
+            .with_world(|world| {
+                for source in [
+                    r"-x",
+                    r"x-y",
+                    "lr((-frac((x - mu)^2, 2 sigma^2)))",
+                    "exp negthinspace lr((-frac(1, sqrt(2 pi sigma^2))))",
+                    "integral_0^1 x dif x",
+                    "partial / (partial t) Psi = planck.reduce omega",
+                ] {
+                    assert!(
+                        characters_the_math_font_lacks(world.book(), source).is_empty(),
+                        "{source} asks for nothing {MATH_FAMILY} cannot draw, so no \
+                         other family may be named for it: {:?}",
+                        characters_the_math_font_lacks(world.book(), source)
+                    );
+                }
+                // And a character it genuinely does not carry is still asked
+                // about — this is the CJK case, arrived at by the general road.
+                assert_eq!(
+                    characters_the_math_font_lacks(world.book(), r#"text("死活")"#),
+                    BTreeSet::from(['死', '活']),
+                );
+            })
+            .expect("a world built with no inputs");
     }
 
     #[test]
