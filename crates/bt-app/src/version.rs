@@ -87,7 +87,7 @@ mod tests {
     /// PIN — **one version, in four places, from one line.**
     ///
     /// The manifest, `--version`, the PE resource, and the header of every
-    /// diagnostic file. Red gate: write `0.1.0` into any one of the four by hand
+    /// diagnostic file. Red gate: write `0.4.0` into any one of the four by hand
     /// and this passes until the next release moves the other three, which is
     /// precisely when nobody is looking. It has happened to this repository
     /// already in a smaller way — see the `Cargo.toml` note the workspace
@@ -178,7 +178,7 @@ mod tests {
     /// template is on no list of places carrying a version because it carries
     /// none; this test is what keeps that true.
     ///
-    /// Red gate: write `0.3.0` into either field of the template by hand. The
+    /// Red gate: write `0.4.0` into either field of the template by hand. The
     /// bundle then agrees with the manifest exactly until the next release
     /// moves the manifest, which is the same failure the sibling test above was
     /// written for and is invisible for exactly as long. The failure names the
