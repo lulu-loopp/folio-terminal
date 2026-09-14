@@ -147546,6 +147546,11 @@ mod tests {
     /// 64 KiB of this repository's Chinese front page and 64 KiB of a page
     /// written in both scripts, against the same one-frame budget.
     ///
+    /// **The reported document is two documents now** (2026-09-14). The front
+    /// page was cut down to a summary and its feature sections moved to
+    /// `docs/features.zh-CN.md`, so the Chinese prose the report was about is
+    /// mostly in the second file; both are padded to 64 KiB and both are asked.
+    ///
     /// **Mixed text is here beside pure Chinese because it is not the same
     /// document** to this parser. A run of ideographs never reaches the flanking
     /// rule, the link scanner or the code-span scanner at all; `**中文**english`
@@ -147580,6 +147585,7 @@ mod tests {
     fn a_page_written_in_chinese_rebuilds_inside_the_frame_budget() {
         for (name, one) in [
             ("Chinese", preview::CHINESE_PAGE),
+            ("Chinese, the long half", preview::CHINESE_FEATURE_PAGE),
             ("Chinese and English", preview::MIXED_SCRIPT_PAGE),
         ] {
             let mut document = String::new();

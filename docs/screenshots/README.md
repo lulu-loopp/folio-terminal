@@ -1,6 +1,8 @@
 # Screenshots
 
-The images `README.md` and `README.zh-CN.md` point at. They are taken on a real
+The images the two front pages and the public documents beside them point at —
+`README.md`, `README.zh-CN.md`, `docs/features.md`, `docs/features.zh-CN.md`,
+`docs/install.md` and `docs/install.zh-CN.md`. They are taken on a real
 machine, from a real build, and committed here. Nothing regenerates them from
 this repository: if one is wrong, somebody takes it again.
 

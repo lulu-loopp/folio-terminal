@@ -15,16 +15,18 @@ has been tagged that way over a manifest with no suffix — `v0.1.0-preview` ove
 for, not what it is. The manifest does not carry it; nothing in the archive
 carries it; only the tag and the release page do.
 
-**Bump the versioned download links in both READMEs at release-prep time.**
-`README.md` and `README.zh-CN.md` each name **two** assets in the Download
-section — `folio-<version>-windows-x64.zip` and
-`Folio-<version>-macos-arm64.dmg` — and link each at
-`/releases/download/v<version>-preview/<asset>`, which is the same claim as the
-tag and the manifest and goes stale the same way. Both move together: a release
-page with one of the two versions a release behind is worse than one with
-neither, because the stale link works and hands somebody an old build.
-`/releases/latest` is not a way out of bumping them: it answers 404 on a
-repository whose releases are all pre-releases.
+**No public document carries a versioned download link, and that is deliberate.**
+`README.md`, `README.zh-CN.md` and the two `docs/install` documents send a
+reader to `/releases` and name the assets as
+`folio-<version>-windows-x64.zip` and `Folio-<version>-macos-arm64.dmg`, with
+the angle brackets standing where a number used to. A link to
+`/releases/download/v<version>-preview/<asset>` was a second copy of the claim
+the tag and the manifest already make, it went stale the same way, and a stale
+one is worse than none because it works and hands somebody an old build.
+`/releases/latest` was never the way out either: it answers 404 on a repository
+whose releases are all pre-releases. So there is nothing to bump at
+release-prep time — check instead that no document has grown a versioned link
+back.
 
 ## The workflow
 

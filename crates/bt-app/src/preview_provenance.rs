@@ -551,6 +551,16 @@ mod tests {
                 "this repository's front page",
                 include_str!("../../../README.md").to_owned(),
             ),
+            // **And the document that front page hands its sections to**
+            // (2026-09-14). The page was cut down to a summary and a set of
+            // links; the sections it used to carry — the tables, the fenced
+            // examples, the long bulleted prose — are `docs/features.md` now,
+            // and a round trip that only read the shortened page would be asked
+            // less than it was asked the day before the move.
+            (
+                "the document the front page hands off to",
+                include_str!("../../../docs/features.md").to_owned(),
+            ),
             // **The two this set was missing** (2026-09-10). Every document
             // above is written in English, which is the one script whose bytes
             // and whose characters are the same count and whose words are spaced
@@ -559,6 +569,10 @@ mod tests {
             (
                 "this repository's front page in Chinese",
                 crate::preview::CHINESE_PAGE.to_owned(),
+            ),
+            (
+                "the Chinese document that front page hands off to",
+                crate::preview::CHINESE_FEATURE_PAGE.to_owned(),
             ),
             (
                 "Chinese and English in one page",

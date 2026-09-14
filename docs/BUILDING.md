@@ -1,7 +1,11 @@
 # Building Folio from source
 
-`README.md` is for people who download the archive. This file is for people who
-build it.
+[`install.md`](install.md) is for people who download a build. This file is for
+people who make one.
+
+How a change gets proposed is [`CONTRIBUTING.md`](../CONTRIBUTING.md); a
+security problem does not go in an issue, and [`SECURITY.md`](../SECURITY.md)
+has the private channel for it.
 
 ## What you need
 

@@ -7903,6 +7903,18 @@ pub fn scroll_dragged_to(bar: &ScrollBar, along: f32, grab: f32) -> f32 {
 #[cfg(test)]
 pub const CHINESE_PAGE: &str = include_str!("../../../README.zh-CN.md");
 
+/// **The long Chinese document the front page hands off to** (2026-09-14).
+///
+/// The front page above used to carry every feature section; it now carries a
+/// summary and a link, and the sections themselves — the same Chinese prose,
+/// the same pictures, the same mixed runs of ideographs and `code spans` — moved
+/// to `docs/features.zh-CN.md`. Reading only the front page after that move
+/// would ask this parser a shorter question than it was asked before, so the
+/// document that received the prose is a fixture beside the one that gave it
+/// away.
+#[cfg(test)]
+pub const CHINESE_FEATURE_PAGE: &str = include_str!("../../../docs/features.zh-CN.md");
+
 /// **A page written in both**, which is the shape the product's own Chinese
 /// actually takes and is not covered by either language alone.
 ///
@@ -13331,13 +13343,20 @@ mod tests {
                 "two pictures on one line",
                 "![one](one.png) ![two](two.png)\n".to_owned(),
             ),
-            // Two documents nobody wrote for this test: the product's own front
-            // page, which is markdown with pictures, tables, fences and an HTML
-            // `<picture>` in it, and this file, which is not markdown at all and
-            // is therefore the walk asked about text it was never shaped for.
+            // Three documents nobody wrote for this test: this repository's own
+            // front page, which is markdown with pictures, bullets and an HTML
+            // `<picture>` in it; the document that front page hands its feature
+            // sections to, which is where the tables and the fenced examples
+            // went when the page was cut down (2026-09-14); and this file, which
+            // is not markdown at all and is therefore the walk asked about text
+            // it was never shaped for.
             (
                 "this repository's front page",
                 include_str!("../../../README.md").to_owned(),
+            ),
+            (
+                "the document the front page hands off to",
+                include_str!("../../../docs/features.md").to_owned(),
             ),
             (
                 "this file's own source",
