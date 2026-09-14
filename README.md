@@ -81,6 +81,8 @@ the first run asks, and what to do if the system puts a panel in front of you.
 - [System integration](docs/features.md#windows-integration) — the Explorer and Finder right-click menus, and VS Code's external terminal.
 - [English and Chinese](docs/features.md#english-and-chinese) — every string in both, switched from one row in Settings.
 
+Every feature is described in full, with the rules it follows, in [docs/features.md](docs/features.md).
+
 ## Privacy
 
 Folio collects nothing: no telemetry, no analytics, no crash reporting. Two

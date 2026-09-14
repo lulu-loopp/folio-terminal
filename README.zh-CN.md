@@ -71,6 +71,8 @@ brew install --cask lulu-loopp/folio/folio
 - [系统集成](docs/features.zh-CN.md#windows-集成)——资源管理器和 Finder 的右键菜单，以及 VS Code 的外部终端。
 - [中英双语](docs/features.zh-CN.md#中英双语)——所有界面文字均有中英两种语言，在设置中一行切换。
 
+每项功能的完整说明和它遵循的规则，都在 [docs/features.zh-CN.md](docs/features.zh-CN.md)。
+
 ## 隐私
 
 Folio 不收集任何数据：没有遥测，没有统计，没有崩溃上报。联网的只有两件事——网页预览里打开的页面，以及更新检查，向 `https://api.github.com/repos/lulu-loopp/folio-terminal/releases` 发一次 `GET`，不携带版本号和标识符，在**设置 > 通用 > 检查更新**或 `"update_check": false` 关闭。设置、配置和会话留在本机，不发往任何地方；[`docs/PRIVACY.md`](docs/PRIVACY.md) 列出每个文件的内容。
