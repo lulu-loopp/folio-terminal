@@ -77,6 +77,17 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **A thin stroke in a typeset formula no longer fades out.** On a display
+  where one pixel is one pixel — a Mac at 100%, or any screen at 100% — the
+  minus sign in front of a fraction could be missing from a formula that was
+  drawn correctly, because the picture of the formula was being laid on the
+  screen half a pixel off and smeared across two rows of pixels at half
+  strength. A stroke one pixel thick disappeared; a fraction bar, being
+  thicker, only softened. A picture shown at its own size — a formula, and a
+  photograph at 100% — is now laid on whole pixels and copied to the screen
+  untouched, so the thinnest stroke arrives at full strength. Scrolling keeps it
+  there. A picture you have zoomed is still scaled smoothly, as before.
+
 - **A table on a focus card lines up again.** A card showing a box-drawing table whose cells hold Chinese text drew its borders in a different place on every row, while the same table in the pane beside it was square. A card's rows are now laid out column by column, as the pane's own grid is, so a wide character takes exactly two columns and a border stands in the same place on every row.
 - **On a Mac, `Edit ▸ Copy` and `Edit ▸ Paste` now act on the pane you are
   looking at.** Over a terminal they did nothing at all — the selection never
