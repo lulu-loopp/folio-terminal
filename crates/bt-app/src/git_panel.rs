@@ -1218,7 +1218,11 @@ impl GitRow {
     ///    selection on the row under the hand before it asks what the press
     ///    *means*, so opening the sub-group selected it; and a selection is a
     ///    number that outlives the gesture, so the block stayed after the
-    ///    pointer had gone. That is the picture the reader photographed.
+    ///    pointer had gone. That is the picture the reader photographed. (The
+    ///    press no longer seats the keyboard *here* at all — see
+    ///    [`Self::seats_the_keyboard`], which is the same report a day's reading
+    ///    further on — but this predicate is what makes that an argument about
+    ///    the keyboard's number rather than the only thing holding the card off.)
     /// 2. **The pointer's**, which can land on the wrong row: the hover is an
     ///    index into a list this window rebuilds under a still pointer. See
     ///    [`crate::Runtime::heal_git_hover`], which is where that half is
@@ -1231,6 +1235,46 @@ impl GitRow {
     /// See [`push_remotes_heading`].
     #[must_use]
     pub fn wears_ground(&self) -> bool {
+        !self.is_furniture() && !matches!(self, Self::Remotes { .. })
+    }
+
+    /// Whether a press **with the pointer** leaves the keyboard standing on this
+    /// row (user report, 2026-09-14: the header brightened once and never
+    /// again).
+    ///
+    /// "The selection follows the hand" is [`crate::Runtime::press_git_row`]'s
+    /// own first line and it is right about *items*: after clicking a file, `↑`
+    /// should step from the file you clicked and not from the top of the list.
+    /// It was guarded by [`Self::is_furniture`] alone, and that guard had to let
+    /// [`Self::Remotes`] through — a press is the whole of what this row is for
+    /// ([`row_toggles_remotes`]). So opening the sub-group wrote the keyboard's
+    /// number onto its own header, and a selection is a number that outlives the
+    /// gesture.
+    ///
+    /// **That is what took the hover away.** The header wears no ground, so its
+    /// selection and its hover are the one picture — `hovered || selected`, by
+    /// the same 2026-09-14 ruling — and with the number sitting there the
+    /// pointer could no longer change anything: leaving did not dim it, coming
+    /// back did not light it. The reader saw it brighten once, under the first
+    /// hover, and never again.
+    ///
+    /// **The keyboard may still stand here**; it simply has to walk. `↓` reaches
+    /// this row ([`clamp_git_selection`] steps over furniture and this is not
+    /// furniture), `Enter` on it opens the sub-group, and a header the arrows are
+    /// standing on is lit — the ruling is untouched. What is refused is the
+    /// *pointer* installing that state as a side effect of pressing a button,
+    /// which is the 2026-08-25 argument one row along: a click on the word
+    /// `BRANCHES` moved the keyboard onto it, and the picture that outlived the
+    /// click was the bug. A press that lands here leaves the arrows where they
+    /// already were.
+    ///
+    /// The fourth question about a row kind and therefore the fourth predicate,
+    /// on this family's own precedent: what answers a press
+    /// ([`Self::is_furniture`]), what may wear a card ([`Self::wears_ground`]),
+    /// what a hover lights ([`Self::ground_lit`]), and now what a press seats the
+    /// keyboard on.
+    #[must_use]
+    pub fn seats_the_keyboard(&self) -> bool {
         !self.is_furniture() && !matches!(self, Self::Remotes { .. })
     }
 
@@ -7219,6 +7263,12 @@ mod tests {
     /// photographed with the pointer elsewhere was therefore never a hover at
     /// all, and clearing hovers more often would not have touched it.
     ///
+    /// The press has since stopped seating the keyboard on this row
+    /// ([`GitRow::seats_the_keyboard`], user report 2026-09-14: the ink the card
+    /// gave way to was stuck for the same reason the card had been). This test
+    /// puts the selection there directly, which is what the arrow keys still do
+    /// — so what it pins is the picture and not the road the number took.
+    ///
     /// The selection is still *there* — `Enter` on this row toggles the
     /// sub-group, so the keyboard must be able to stand on it — and what it
     /// looks like is the header's lit ink, which is also what the pointer's
@@ -7368,6 +7418,216 @@ mod tests {
             shut.rows[below],
             open.rows[below]
         );
+    }
+
+    /// What a press with the pointer does to this page's keyboard — the one
+    /// line of [`crate::Runtime::press_git_row`] the sequences below turn on,
+    /// written here so the sequence can be run without a window.
+    ///
+    /// That the hosts really do ask this is `main.rs`'s own source pin,
+    /// `git_header_selection_tests`.
+    fn press_with_the_pointer(page: &mut GitPanelContent, row: usize) {
+        if page.rows[row].seats_the_keyboard() {
+            page.selected = clamp_git_selection(&page.rows, Some(row));
+        }
+    }
+
+    /// The header's ink and the plain heading's, in one glass: what `REMOTES
+    /// (2)` is drawn in with the pointer on `hover`, and what a header nobody is
+    /// on looks like in the very same frame.
+    fn header_ink(page: &GitPanelContent, height: f32, hover: Option<usize>) -> ([u8; 3], [u8; 3]) {
+        let glass = painted_at(
+            page,
+            240.0,
+            height,
+            GitHover {
+                row: hover,
+                act: None,
+            },
+        );
+        (
+            ink_of(&glass, &remotes_word()),
+            ink_of(&glass, &branches_word()),
+        )
+    }
+
+    /// **The header brightens every time the pointer comes back to it** (user
+    /// report, 2026-09-14: it brightened the *first* time only).
+    ///
+    /// The reported sequence, end to end: hover the header, leave it, hover it
+    /// again — and then the same three with the press the header exists for in
+    /// the middle of them, which is what the reader had done between the hover
+    /// that worked and the hovers that did nothing.
+    ///
+    /// RED GATE: the press was the whole of it. `press_git_row` put the
+    /// keyboard's number on the row under the hand before it asked what the
+    /// press *meant*, and the guard in front of that line was `is_furniture`,
+    /// which this row is deliberately not. A header has one picture for the
+    /// keyboard and the pointer alike (`hovered || selected`, the same day's
+    /// ruling), so from that press on the header was lit for ever: leaving could
+    /// not dim it and returning could not light it.
+    #[test]
+    fn the_header_lights_every_time_the_pointer_comes_back_to_it() {
+        let under_the_hand = files_row_hover_ink(&bt_render::chrome_palette());
+        let mut content = with_remotes();
+        let index = remotes_row(&content);
+        let height = 4_000.0;
+        let elsewhere = content
+            .rows
+            .iter()
+            .position(|row| matches!(row, GitRow::Branch(_)))
+            .expect("the fixture has branch rows");
+        assert_ne!(elsewhere, index);
+
+        // Hover, away, hover — twice round, because "the first time only" is a
+        // claim about the second.
+        for turn in 0..2 {
+            let (lit, at_rest) = header_ink(&content, height, Some(index));
+            assert_eq!(lit, under_the_hand, "turn {turn}: the pointer arrives");
+            assert_ne!(lit, at_rest, "turn {turn}: and that is a visible change");
+            let (dim, at_rest) = header_ink(&content, height, Some(elsewhere));
+            assert_eq!(
+                dim, at_rest,
+                "turn {turn}: the pointer moves to another row"
+            );
+            let (dim, at_rest) = header_ink(&content, height, None);
+            assert_eq!(dim, at_rest, "turn {turn}: and off the page altogether");
+        }
+
+        // And now the press the header is there to answer, in the middle of the
+        // sequence. It opens the sub-group and it leaves the arrows where they
+        // were — so the three states are still three.
+        press_with_the_pointer(&mut content, index);
+        assert_eq!(
+            content.selected, None,
+            "a press on a header does not seat the keyboard on it"
+        );
+        for turn in 0..2 {
+            let (lit, at_rest) = header_ink(&content, height, Some(index));
+            assert_eq!(lit, under_the_hand, "after the press, turn {turn}");
+            assert_ne!(lit, at_rest, "after the press, turn {turn}: still a change");
+            let (dim, at_rest) = header_ink(&content, height, None);
+            assert_eq!(
+                dim, at_rest,
+                "after the press, turn {turn}: and back to rest"
+            );
+        }
+    }
+
+    /// **A press with the pointer seats the keyboard on an item, never on a
+    /// header** — and on every other row kind it still does, because "the
+    /// selection follows the hand" is what makes `↑` after a click step from the
+    /// row you clicked.
+    ///
+    /// The selection the press declines to move is left exactly where it was: a
+    /// button you pressed is not a reason for the arrows to jump.
+    #[test]
+    fn a_press_on_the_sub_group_header_leaves_the_arrows_where_they_were() {
+        let content = with_remotes();
+        let header = remotes_row(&content);
+        assert!(
+            !content.rows[header].seats_the_keyboard(),
+            "the sub-group header is the row a press does not seat the keyboard on"
+        );
+        assert!(
+            !content.rows[header].is_furniture(),
+            "and it is still a control: the press itself must reach it"
+        );
+        assert_eq!(
+            clamp_git_selection(&content.rows, Some(header)),
+            Some(header),
+            "the keyboard may still *walk* onto it, so `Enter` can open it"
+        );
+
+        // Every row kind on the page at once: the rows a press seats the
+        // keyboard on are the places the arrows can stand, less this one header
+        // — furniture takes no press at all, and the header takes the press
+        // without the selection that would have come with it.
+        let seated: Vec<usize> = content
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.seats_the_keyboard())
+            .map(|(index, _)| index)
+            .collect();
+        let places: Vec<usize> = place_rows(&content)
+            .into_iter()
+            .filter(|place| *place != header)
+            .collect();
+        assert_eq!(seated, places, "rows: {:?}", content.rows);
+
+        // Standing on a file, pressing the header: the arrows have not moved.
+        let a_file = content
+            .rows
+            .iter()
+            .position(|row| matches!(row, GitRow::Change(_)))
+            .expect("the fixture has changed files");
+        let mut page = content.clone();
+        page.selected = Some(a_file);
+        press_with_the_pointer(&mut page, header);
+        assert_eq!(
+            page.selected,
+            Some(a_file),
+            "the press on the header moved the keyboard"
+        );
+        // And a press on an item still carries it.
+        let another = place_rows(&content)
+            .into_iter()
+            .find(|place| *place != a_file && *place != header)
+            .expect("the fixture has a second item");
+        press_with_the_pointer(&mut page, another);
+        assert_eq!(
+            page.selected,
+            Some(another),
+            "the selection still follows the hand onto an item"
+        );
+    }
+
+    /// **And across the rebuild the press causes** (the third sequence).
+    ///
+    /// The press opens the sub-group, so the page the next frame draws is not
+    /// the page the hover was taken on — this is the list moving under a still
+    /// pointer that [`crate::Runtime::heal_git_hover`] exists for. Asked here in
+    /// the terms the heal asks it in: the same pointer, put back to the same
+    /// place, against the rebuilt page's own geometry.
+    #[test]
+    fn the_header_keeps_its_hover_when_the_press_rebuilds_the_list_under_it() {
+        let under_the_hand = files_row_hover_ink(&bt_render::chrome_palette());
+        let cache = with_branches(
+            answered(PORCELAIN, vec![commit("aaaaaaa", "first", 1)], false),
+            vec![
+                branch("main", true, 0, 0),
+                reference(crate::git::GitRefKind::Remote, "origin/main", false, 0, 0),
+                reference(crate::git::GitRefKind::Remote, "origin/side", false, 0, 0),
+            ],
+        );
+        let body = [0.0, 0.0, 240.0, 4_000.0];
+        let shut = rows_of(&cache);
+        let index = remotes_row(&shut);
+        // The pointer, once, in the middle of the header — and never moved again.
+        let rect = git_panel_geometry(body, &shut, 1.0).row_rect(index);
+        let (x, y) = ((rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0);
+
+        let mut page = shut.clone();
+        press_with_the_pointer(&mut page, index);
+        let open = {
+            let mut open = rows_with_remotes_open(&cache);
+            open.selected = page.selected;
+            open
+        };
+        // What the heal would derive on the rebuilt page, from the pointer that
+        // did not move.
+        let healed = git_panel_geometry(body, &open, 1.0).row_at(x, y);
+        assert_eq!(
+            healed,
+            Some(index),
+            "the hand is still on the header the press turned over"
+        );
+        let (lit, at_rest) = header_ink(&open, body[3], healed);
+        assert_eq!(lit, under_the_hand, "and the header is lit under it");
+        assert_ne!(lit, at_rest, "which is a change from the headers beside it");
+        let (dim, at_rest) = header_ink(&open, body[3], None);
+        assert_eq!(dim, at_rest, "and the pointer leaving still dims it");
     }
 
     /// **The keyboard walks the page's rows and steps over its furniture.**

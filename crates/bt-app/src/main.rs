@@ -65548,7 +65548,23 @@ impl Runtime<'_> {
         // also mean and whether or not the row has a verb — the graph's own
         // first line (`press_graph_row`), and it is what makes `↑` after a click
         // step from the row you clicked instead of from the top of the list.
-        self.select_git_row(seat, index);
+        //
+        // **Onto an item, and not onto a header** (user report, 2026-09-14) —
+        // `git_panel::GitRow::seats_the_keyboard`, which is where that report is
+        // answered and why. The guard above lets the sub-group header through,
+        // because a press is the whole of what that row is for; unguarded here,
+        // the press left the keyboard's own number on the header, and a header
+        // has one picture for the keyboard and the pointer alike — so the hover
+        // brightened it once and could never move it again.
+        if self
+            .window
+            .git_pages_shown
+            .get(&seat)
+            .and_then(|page| page.rows.get(index))
+            .is_some_and(git_panel::GitRow::seats_the_keyboard)
+        {
+            self.select_git_row(seat, index);
+        }
         let active = self.window.active_tab;
         // The rows as they are **on screen**, and the root as the *cache* has
         // it: a document opened against a root the column has since left would
@@ -65806,7 +65822,9 @@ impl Runtime<'_> {
             // Enter is the row's own press, minus the pointer: whatever a click
             // on it would have done, through the same door — so a changed file
             // opens its diff and a commit turns over, and neither gesture had to
-            // be written twice. `press_git_row` moves the selection itself.
+            // be written twice. `press_git_row` moves the selection itself —
+            // and on the one row it declines to move it onto, the sub-group
+            // header, the arrows that got here are already standing on it.
             git_graph::GraphKeyAction::Toggle(row) => {
                 self.press_git_row(seat, row)?;
                 return Ok(true);
@@ -77516,8 +77534,20 @@ impl Runtime<'_> {
             return Ok(());
         }
         // The selection follows the hand, before anything else this press could
-        // mean — the docked page's own first line.
-        self.select_float_git_row(id, index);
+        // mean — the docked page's own first line, **and onto an item rather
+        // than onto a header** for the docked page's own reason (user report,
+        // 2026-09-14): a window's `REMOTES (n)` is the same control wearing the
+        // same one picture for the keyboard and the pointer, so a press that
+        // seated the keyboard on it would take its hover away here too.
+        if self
+            .window
+            .float_git_pages_shown
+            .get(&id)
+            .and_then(|page| page.rows.get(index))
+            .is_some_and(git_panel::GitRow::seats_the_keyboard)
+        {
+            self.select_float_git_row(id, index);
+        }
         let Some(root) = self
             .window
             .float
@@ -100921,6 +100951,75 @@ mod git_hover_heal_tests {
                 && text.contains("seats::ChromeTarget::GitAct { .. }"),
             "the heal is entered only for a hover that is already this page's:\n{text}"
         );
+    }
+}
+
+/// **A press with the pointer does not seat the keyboard on a header** (user
+/// report, 2026-09-14: the sub-group header brightened the first time only).
+///
+/// A source pin, and for the module above's reason: what a machine can hold
+/// about this fix is that *both* hosts ask the question, and that they ask it in
+/// front of the line that writes the selection rather than somewhere after it.
+/// What the answer means for the picture is `git_panel`'s own pin,
+/// `the_header_lights_every_time_the_pointer_comes_back_to_it`.
+///
+/// RED GATE: it was red the day it was written. Both handlers wrote the
+/// selection unconditionally, guarded only by `is_furniture` — which this row is
+/// deliberately not, because a press is the whole of what it is for.
+#[cfg(test)]
+mod git_header_selection_tests {
+    /// This file, read as text.
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The text of one method, from its signature to the next method's.
+    fn body(signature: &str) -> &'static str {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        let end = rest.find("\n    fn ").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// Each host asks `seats_the_keyboard` before it writes the selection, and
+    /// writes it nowhere else in the press.
+    #[test]
+    fn neither_host_seats_the_keyboard_on_the_row_a_press_may_not_land_it_on() {
+        for (signature, writer) in [
+            ("    fn press_git_row(", "self.select_git_row(seat, index);"),
+            (
+                "    fn press_float_git_row(",
+                "self.select_float_git_row(id, index);",
+            ),
+        ] {
+            let text = body(signature);
+            let asked = text
+                .find("git_panel::GitRow::seats_the_keyboard")
+                .unwrap_or_else(|| {
+                    panic!("{signature} asks which rows take the selection:\n{text}")
+                });
+            let wrote = text
+                .find(writer)
+                .unwrap_or_else(|| panic!("{signature} still moves the selection:\n{text}"));
+            assert!(
+                asked < wrote,
+                "the guard stands in front of the write, or it is not a guard:\n{text}"
+            );
+            assert_eq!(
+                text.matches(writer).count(),
+                1,
+                "one door onto the selection, or the guard is beside it:\n{text}"
+            );
+            // And the older guard is still there in front of both: a press does
+            // not reach the page's furniture at all (2026-08-25).
+            let furniture = text
+                .find("git_panel::GitRow::is_furniture")
+                .unwrap_or_else(|| panic!("{signature} still turns furniture away:\n{text}"));
+            assert!(
+                furniture < asked,
+                "furniture is refused before the selection is decided:\n{text}"
+            );
+        }
     }
 }
 

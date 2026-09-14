@@ -235,7 +235,13 @@ Nothing yet.
   the same size, weight and ink as `BRANCHES` and `COMMITS` above and below it —
   and under the pointer the word and its triangle brighten to the colour a row
   of the files column takes under your hand, with no block at any time. The
-  whole row is still what you press.
+  whole row is still what you press — and it now brightens every time your
+  pointer comes back to it. Opening or closing the sub-group used to leave the
+  keyboard standing on the header, which lights it in the same way a hover does,
+  so from your first press on it the word stayed bright and moving the pointer
+  on and off it changed nothing. A press with the pointer now leaves the
+  keyboard where it already was; the arrow keys still reach the header, and
+  Enter on it still opens and closes the group.
 - **A focus card keeps its place while you resize the window, and comes back to
   it when you resize the window back.** A card you have scrolled back through a
   shell's output holds on to the line at its bottom edge, the way the shell
