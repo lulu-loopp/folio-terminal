@@ -10485,7 +10485,10 @@ three were refused, and the refusals are the useful part of this section.
   globally asks for the Accessibility permission and hands the grant back every
   time the application is signed again. The README now heads that section
   *Windows only so far* and says why, rather than describing a window a Mac
-  reader cannot summon.
+  reader cannot summon. *Overtaken on 2026-09-13 by M4-8 (§13.51): the summon is on a Mac
+  now — `⌃`` through Carbon `RegisterEventHotKey`, which asks for no Accessibility
+  permission — and the install and feature pages say so; this bullet stands as the
+  record of what M5-6 shipped.*
 - **`Ctrl`+click still hands a path to the machine, on both platforms.** The
   keyboard's application modifier became Command on a Mac in M1-7
   (`input::is_command_chord`), but the pointer's did not: the two call sites
