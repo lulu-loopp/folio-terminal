@@ -111,6 +111,8 @@ pub struct DetectionRevision(pub u64);
 pub struct LayoutKey {
     pub width_cells: NonZeroU32,
     pub dpi_milli: NonZeroU32,
+    /// Pane font em in physical subpixels, already measured at the pane DPI.
+    pub font_size_subpixels: i64,
     pub font_rev: u64,
     pub theme_rev: u64,
     /// How many times the window's **language** has moved (§7.1.6c-3c).
@@ -201,6 +203,7 @@ mod tests {
         let base = LayoutKey {
             width_cells: NonZeroU32::new(80).unwrap(),
             dpi_milli: NonZeroU32::new(1000).unwrap(),
+            font_size_subpixels: 16 * 1024,
             font_rev: 1,
             theme_rev: 1,
             lang_rev: 0,
@@ -241,6 +244,7 @@ mod tests {
         let base = LayoutKey {
             width_cells: NonZeroU32::new(80).unwrap(),
             dpi_milli: NonZeroU32::new(1000).unwrap(),
+            font_size_subpixels: 16 * 1024,
             font_rev: 1,
             theme_rev: 1,
             lang_rev: 0,
@@ -283,6 +287,7 @@ mod tests {
         let base = LayoutKey {
             width_cells: NonZeroU32::new(80).unwrap(),
             dpi_milli: NonZeroU32::new(1000).unwrap(),
+            font_size_subpixels: 16 * 1024,
             font_rev: 1,
             theme_rev: 1,
             lang_rev: 0,

@@ -13,6 +13,7 @@ fn key(width_cells: u32) -> LayoutKey {
     LayoutKey {
         width_cells: nz(width_cells),
         dpi_milli: nz(1000),
+        font_size_subpixels: 16 * 1024,
         font_rev: 1,
         theme_rev: 1,
         lang_rev: 0,

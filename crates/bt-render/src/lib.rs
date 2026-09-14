@@ -672,6 +672,12 @@ impl CellMetrics {
         NonZeroI64::new(value.max(1)).expect("cell width is clamped above zero")
     }
 
+    /// The measured pane em in physical subpixels; DPI has already been applied.
+    pub fn font_size_subpixels(&self) -> NonZeroI64 {
+        let value = (self.font_size_px * SUBPIXELS_PER_PX as f32).round() as i64;
+        NonZeroI64::new(value.max(1)).expect("font size is clamped above zero")
+    }
+
     pub fn ascii_baseline_subpixels(&self) -> NonZeroI64 {
         let value = (self.ascii_baseline_px * SUBPIXELS_PER_PX as f32).round() as i64;
         NonZeroI64::new(value.max(1)).expect("measured ASCII baseline is above zero")
@@ -18569,6 +18575,7 @@ mod tests {
         bt_doc::LayoutKey {
             width_cells: NonZeroU32::new(width_cells).unwrap(),
             dpi_milli: NonZeroU32::new(1000).unwrap(),
+            font_size_subpixels: 16 * 1024,
             font_rev: 1,
             theme_rev: 1,
             lang_rev: 0,

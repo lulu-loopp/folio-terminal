@@ -1290,6 +1290,7 @@ mod tests {
             LayoutKey {
                 width_cells: NonZeroU32::new(20).unwrap(),
                 dpi_milli: NonZeroU32::new(1000).unwrap(),
+                font_size_subpixels: 16 * 1024,
                 font_rev: 1,
                 theme_rev: 1,
                 lang_rev: 0,

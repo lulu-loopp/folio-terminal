@@ -261,6 +261,7 @@ fn run_zoom_sample(
     session.set_cell_height_subpixels(metrics.cell_height_subpixels());
     session.set_cell_width_subpixels(metrics.cell_width_subpixels());
     session.set_ascii_baseline_subpixels(metrics.ascii_baseline_subpixels());
+    session.set_font_size_subpixels(metrics.font_size_subpixels());
     let metric_push = started.elapsed();
 
     let started = Instant::now();
@@ -271,6 +272,7 @@ fn run_zoom_sample(
     session.set_layout_key(LayoutKey {
         width_cells: dimensions.0,
         dpi_milli: metrics.dpi_milli(),
+        font_size_subpixels: metrics.font_size_subpixels().get(),
         font_rev: 1,
         theme_rev: session.layout_key().theme_rev,
         lang_rev: session.layout_key().lang_rev,

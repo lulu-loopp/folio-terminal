@@ -385,6 +385,7 @@ fn flattened_key(width_cells: u32) -> LayoutKey {
     LayoutKey {
         width_cells: NonZeroU32::new(width_cells).unwrap(),
         dpi_milli: NonZeroU32::new(1000).unwrap(),
+        font_size_subpixels: 16 * 1024,
         font_rev: 1,
         theme_rev: 1,
         lang_rev: 0,

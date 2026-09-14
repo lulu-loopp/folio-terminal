@@ -193,6 +193,21 @@ Nothing yet.
 - Keep rendering later formulas when an incomplete macro definition fails during conversion.
 - Refuse recursive macros and excessive macro expansion before they can stall formula rendering.
 - Preserve prose and later headings after display formulas, empty delimiters, and unfinished math blocks.
+- Inline integrals and sums now match the terminal font size and fit within their line on shorter line spacing.
+- **Two formulas on one line no longer take each other's place away when the
+  window is narrow.** A line carrying `$…$` twice was typeset whole at a wide
+  window and printed as source at a narrow one: the two formulas are worked out
+  together, as one picture, and a picture cannot straddle the place where the
+  line folds — so as soon as the fold fell between them, neither was drawn.
+  Each formula now stands on the row its own `$` stands on, and how wide the
+  window is decides nothing about whether either of them is set.
+- **A one-column matrix keeps its rows.** `\begin{pmatrix} x \\ y \end{pmatrix}`
+  came out as the single row `(x y)` beside a 2×2 on the line above that came
+  out right. Both had had their row separators shortened to one backslash before
+  Folio ever saw them, and Folio's repair for that read the row from the `&`
+  between its cells — which a one-column row has not got. It now reads a
+  one-column row too, and still leaves `\,`, `\;`, `\:`, `\!` and real commands
+  such as `\frac` alone.
 - **A table on a focus card lines up again.** A card showing a box-drawing table whose cells hold Chinese text drew its borders in a different place on every row, while the same table in the pane beside it was square. A card's rows are now laid out column by column, as the pane's own grid is, so a wide character takes exactly two columns and a border stands in the same place on every row.
 - **On a Mac, `Edit ▸ Copy` and `Edit ▸ Paste` now act on the pane you are
   looking at.** Over a terminal they did nothing at all — the selection never

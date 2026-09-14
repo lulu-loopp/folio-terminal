@@ -123,11 +123,8 @@ pub fn device_px_per_pt(dpi_milli: NonZeroU32) -> f32 {
 
 /// A key that sets its mathematics at `em_device_px` **device pixels**.
 ///
-/// The terminal asks for a point size because its cells come from a point size.
-/// A document does not: the markdown preview knows only that its prose is being
-/// drawn at so many device pixels and that a formula standing in that prose must
-/// match it. Rather than have that caller carry this crate's two conversions
-/// around, it says the size it means and this inverts [`device_px_per_pt`].
+/// Terminal inline runs and Markdown formulas know their surrounding text's physical em.
+/// This inverts [`device_px_per_pt`] with a normalized DPI, so device scaling is applied once.
 ///
 /// `None` when the requested size rounds to nothing, which is the only way the
 /// point size can fail to be positive.
