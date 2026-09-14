@@ -332,6 +332,86 @@ fn math_overflow_fade_slabs(
     slabs
 }
 
+/// **How strongly a selection washes a formula's picture** (`docs/DESIGN.md` §7.1.6c-4g).
+///
+/// The band under ordinary text is opaque and the glyphs are printed on it; a picture cannot be
+/// printed on anything, so the selection's colour has to go on top of it — and on top at alpha 1
+/// it would not wash the formula, it would erase it. This is the one number that says how much of
+/// the picture the reader keeps.
+///
+/// It is the block family's own scrim strength (the hover dim is `0.45` of `modal_scrim` over the
+/// same rectangle) rather than a fresh invention, and it lands in the same place every other
+/// renderer puts a selected image: unmistakably coloured, and still a formula you can read. The
+/// colour is the selection's own, so where the picture is *also* standing on the band — an inline
+/// composite sharing its row with text — the two are the same colour and the wash leaves no seam
+/// across the row; only the ink inside the picture takes the tint.
+const MATH_SELECTION_WASH_ALPHA: f32 = 0.45;
+
+/// **The wash a selection lays over one block's picture**: one rectangle per selected span, in the
+/// seat's pixel coordinates, to be struck in the selection's own colour above the raster.
+///
+/// Split out from the renderer for the reason the fades above are, and asserted without a GPU.
+///
+/// # What decides how much of the picture is washed
+///
+/// The spans are the selection's own, over the rows this block stands on, decided from the very
+/// cell anchors the copy reads (`bt_term::DualPlaneSession::selection_text` walks the same cells).
+/// So the rule is not chosen here — it is inherited, and it is inherited on both axes:
+///
+/// - **Across.** A span covers the cells the copy takes. A frozen line's cells all address that
+///   whole line, so touching one of them selects the line and the span is the row: the picture is
+///   washed whole, exactly as the copy takes the whole source. A live block's cells address
+///   themselves one by one, so a half-covered band gives a half-wide span and the wash stops
+///   where the copied bytes stop.
+/// - **Down.** A display block owns whole rows and its rows tile it, so the spans' own row
+///   intervals say which part of the picture the selection reached — a block the drag stopped
+///   half-way down is washed half-way down. An inline composite is the other way round: it stands
+///   on **one** row and hangs above and below that row's box by however much its own ascent and
+///   descent ask for, so its wash takes the picture's own vertical extent. Clipping it to the row
+///   would leave the top of a fraction unwashed inside a selection that has taken it.
+fn math_selection_wash_slabs(
+    metrics: CellMetrics,
+    frame: &ViewportFrame,
+    placement: &MathBlockPlacement,
+    geometry: &MathBlockGeometry,
+) -> Vec<[f32; 4]> {
+    if placement.display != MathBlockDisplay::Rendered || placement.selection_spans.is_empty() {
+        return Vec::new();
+    }
+    let [block_left, block_top, block_right, block_bottom] = geometry.block;
+    if block_right <= block_left || block_bottom <= block_top {
+        return Vec::new();
+    }
+    let columns = frame.columns.get();
+    let inline = placement.artifact.mode == MathMode::Inline;
+    let mut slabs = Vec::with_capacity(placement.selection_spans.len());
+    for span in &placement.selection_spans {
+        let start = span.start_column.min(columns) as usize;
+        let end = span.end_column.min(columns) as usize;
+        if end <= start {
+            continue;
+        }
+        // A span whose row this frame cannot place asks for no pixels rather than panicking:
+        // `validate_shape` already refuses such a frame, and a renderer is not the place to
+        // discover it a second time.
+        if frame.selection_span_vertical_interval(span).is_err() {
+            continue;
+        }
+        let bounds = selection_span_bounds_px(metrics, frame, span, start, end - start);
+        let left = bounds[0].max(block_left);
+        let right = bounds[2].min(block_right);
+        let (top, bottom) = if inline {
+            (block_top, block_bottom)
+        } else {
+            (bounds[1].max(block_top), bounds[3].min(block_bottom))
+        };
+        if right > left && bottom > top {
+            slabs.push([left, top, right, bottom]);
+        }
+    }
+    slabs
+}
+
 /// The family the grid is drawn in when nothing has chosen one, and the family
 /// this renderer's fixed startup file list actually loads.
 ///
@@ -7992,7 +8072,11 @@ impl WindowRenderer {
                         contents: bytemuck::cast_slice(status_rect_data),
                         usage: wgpu::BufferUsages::VERTEX,
                     });
-            let math_overlays = self.math_overlay_rectangles(frame);
+            // The wash first, the block's own chrome after it: see
+            // [`Self::math_selection_wash_rectangles`] for why this buffer's order is the
+            // z-order that matters here.
+            let mut math_overlays = self.math_selection_wash_rectangles(frame);
+            math_overlays.extend(self.math_overlay_rectangles(frame));
             let overlay_data = if math_overlays.is_empty() {
                 empty_rect.as_slice()
             } else {
@@ -10325,6 +10409,52 @@ impl WindowRenderer {
                 )
             })
             .collect()
+    }
+
+    /// **The selection, said again over the pictures** (`docs/DESIGN.md` §7.1.6c-4g).
+    ///
+    /// A drag across a typeset formula copies the formula's source — that has always worked — and
+    /// until this lane existed it copied it invisibly: the band is a grid fill, it goes down with
+    /// the cell backgrounds before anything else a seat draws, and a picture standing on those
+    /// cells is drawn over it. On a display block the band was not even emitted. So the reader
+    /// dragged across a formula, let go, pasted it, and nothing on screen had ever said it was
+    /// taken.
+    ///
+    /// These rectangles ride in the overlay buffer, which is issued **after** the math draws, so
+    /// the wash is on top of the raster rather than behind it. They are placed at the *head* of
+    /// that buffer on purpose: the block's own overflow fades and its two toolbar buttons are the
+    /// rest of it, and both of those belong over the wash — a fade that a selection had covered
+    /// would stop saying the formula continues, and a button the reader is about to press must
+    /// not be tinted by a drag that happens to have crossed it.
+    fn math_selection_wash_rectangles(&self, frame: &ViewportFrame) -> Vec<RectInstance> {
+        // Read once per frame from the same atomic word the band reads, for the band's own
+        // reason: a theme switch must never leave one half of a selection wearing the previous
+        // canvas's fill while the other half wears the new one.
+        let selection_background = selection_background_rgb();
+        let mut rects = Vec::new();
+        for placement in &frame.math_blocks {
+            if placement.selection_spans.is_empty() {
+                continue;
+            }
+            let Some(geometry) = self.math_block_geometry(frame, placement) else {
+                continue;
+            };
+            rects.extend(
+                math_selection_wash_slabs(self.metrics, frame, placement, &geometry)
+                    .into_iter()
+                    .map(|rect| {
+                        self.pixel_rect_with_coverage(
+                            rect[0],
+                            rect[1],
+                            rect[2],
+                            rect[3],
+                            selection_background,
+                            MATH_SELECTION_WASH_ALPHA,
+                        )
+                    }),
+            );
+        }
+        rects
     }
 
     fn math_overlay_rectangles(&self, frame: &ViewportFrame) -> Vec<RectInstance> {
@@ -15930,6 +16060,7 @@ mod tests {
             frozen_prefix_rows: 0,
             clipped_top_rows: 0,
             clipped_bottom_rows: 0,
+            selection_spans: Vec::new(),
         }
     }
 
@@ -17742,6 +17873,23 @@ mod tests {
                 .collect::<Vec<_>>(),
             [1, 3, 5, 7],
             "only the four rendered band rows may be suppressed"
+        );
+        // **And what the band gives up, the wash takes over** (`docs/DESIGN.md` §7.1.6c-4g,
+        // ruling of 2026-09-14). The four band rows leave `selection_spans` because a picture is
+        // standing on those cells and a fill under it would never be seen; they arrive on the
+        // placements instead, for the lane that paints over the picture. Before this they were
+        // simply dropped, and a reader who copied these four formulas was never shown that they
+        // had been taken.
+        let mut washed = selected
+            .math_blocks
+            .iter()
+            .flat_map(|block| block.selection_spans.iter().map(|span| span.row))
+            .collect::<Vec<_>>();
+        washed.sort_unstable();
+        assert_eq!(
+            washed,
+            [0, 2, 4, 6],
+            "every row the band dropped is a row the wash was handed"
         );
         let metrics = CellMetrics {
             cell_width_px: 8.0,
@@ -24521,6 +24669,200 @@ mod tests {
         );
         assert!(outermost.1 <= 1.0 && innermost.1 >= 0.0);
         assert!((outermost.0[2] - right).abs() <= 0.01);
+    }
+
+    /// A bare grid of blank cells at [`fade_metrics`], `rows` tall, for reading a wash out of.
+    fn wash_frame(columns: u32, rows: u32) -> ViewportFrame {
+        let metrics = fade_metrics();
+        let cells = (columns * rows) as usize;
+        ViewportFrame {
+            columns: NonZeroU32::new(columns).unwrap(),
+            horizontal: HorizontalProjection::unscrolled(columns),
+            grid_rows: NonZeroU32::new(rows).unwrap(),
+            rows: NonZeroU32::new(rows).unwrap(),
+            presentation_offset_subpixels: 0,
+            cells: vec![CapturedCell::plain(""); cells],
+            cursor: bt_viewport::GridCursor {
+                row: 0,
+                column: 0,
+                visible: false,
+            },
+            cell_anchors: test_cell_anchors(cells),
+            row_map: test_row_map_for_metrics(rows, metrics),
+            selection_spans: Vec::new(),
+            search_spans: Vec::new(),
+            current_search_spans: Vec::new(),
+            math_blocks: Vec::new(),
+            math_failures: Vec::new(),
+            status_text: None,
+            viewport_origin: FrameViewportOrigin::Bottom,
+            scroll_offset_rows: 0,
+            layout_key: bt_doc_layout_key(columns),
+            view_generation: bt_doc::ViewGeneration(1),
+        }
+    }
+
+    fn wash_span(row: u32, start_column: u32, end_column: u32) -> bt_viewport::SelectionSpan {
+        bt_viewport::SelectionSpan {
+            row,
+            start_column,
+            end_column,
+        }
+    }
+
+    fn wash_geometry(block: [f32; 4]) -> MathBlockGeometry {
+        MathBlockGeometry {
+            block,
+            clip: block,
+            eye: None,
+            copy: None,
+        }
+    }
+
+    /// PIN (owner's report and ruling 2026-09-14; `docs/DESIGN.md` §7.1.6c-4g) — **a drag across
+    /// an inline formula washes the picture, all of it.**
+    ///
+    /// The reader dragged across a row carrying a `$…$` picture, copied, and got the formula's
+    /// source in place — correctly — while the screen had said nothing: the band paints the cells
+    /// and the picture is drawn over them.
+    ///
+    /// Two claims in one assertion, and the second is why this is not the display test with
+    /// different numbers. **Across**, the wash is the selected cells cut to the picture: the drag
+    /// here starts three columns before the run and ends three past it, and the wash stops at the
+    /// picture's own edges. **Down**, it is the picture's own extent and not the row's: an inline
+    /// composite hangs above and below its line box by whatever its ascent and descent ask for,
+    /// and a wash clipped to the row would leave the top of a fraction bare inside a selection
+    /// that has taken the whole thing.
+    #[test]
+    fn a_selection_across_an_inline_formula_washes_the_whole_picture() {
+        let mut frame = wash_frame(20, 1);
+        let mut placement = test_math_placement("inline", 0, 20 * SUBPIXELS_PER_PX, 4);
+        placement.artifact.mode = MathMode::Inline;
+        placement.selection_spans = vec![wash_span(0, 3, 12)];
+        // Columns 5..9, and taller than the 20 px row it stands on.
+        let picture = [58.0, 2.0, 98.0, 34.0];
+        frame.math_blocks.push(placement.clone());
+
+        let slabs =
+            math_selection_wash_slabs(fade_metrics(), &frame, &placement, &wash_geometry(picture));
+
+        assert_eq!(
+            slabs,
+            vec![picture],
+            "an inline picture inside the drag is washed whole"
+        );
+    }
+
+    /// PIN (same ruling) — **a display block the drag only partly covers is washed only where the
+    /// copy takes it.**
+    ///
+    /// The rule is inherited rather than invented: the spans are the selection's own over this
+    /// block's rows, decided from the cell anchors `selection_text` walks, so the wash and the
+    /// clipboard are answering the same question. The fixture states both halves of it — a block
+    /// two rows tall whose first row the drag crossed in full and whose second it crossed for
+    /// five columns only.
+    ///
+    /// MUTATION — take the picture's own vertical extent for a display block, as the inline arm
+    /// does, and the first slab grows to the block's full height: a drag that stopped half-way
+    /// down would claim the whole formula.
+    #[test]
+    fn a_partly_selected_display_block_is_washed_only_where_the_copy_reached() {
+        let mut frame = wash_frame(20, 2);
+        let mut placement = test_math_placement("display", 0, 40 * SUBPIXELS_PER_PX, 4);
+        placement.artifact.mode = MathMode::Display;
+        placement.selection_spans = vec![wash_span(0, 0, 20), wash_span(1, 0, 5)];
+        // The two rows of the frame, from the pane's left padding across twenty cells.
+        let picture = [8.0, 8.0, 208.0, 48.0];
+        frame.math_blocks.push(placement.clone());
+
+        let slabs =
+            math_selection_wash_slabs(fade_metrics(), &frame, &placement, &wash_geometry(picture));
+
+        assert_eq!(
+            slabs,
+            vec![[8.0, 8.0, 208.0, 28.0], [8.0, 28.0, 58.0, 48.0]],
+            "the wash stops where the copied cells stop, on both axes"
+        );
+    }
+
+    /// PIN (same ruling) — **nothing is washed when nothing is selected**, and nothing is washed
+    /// over a block showing its source.
+    ///
+    /// The second half matters as much as the first: a source block is terminal text, the
+    /// ordinary band paints it, and a wash there would be the selection said twice.
+    #[test]
+    fn a_formula_outside_the_selection_is_not_washed() {
+        let mut frame = wash_frame(20, 1);
+        let picture = [8.0, 8.0, 108.0, 28.0];
+
+        let untouched = test_math_placement("quiet", 0, 20 * SUBPIXELS_PER_PX, 4);
+        frame.math_blocks.push(untouched.clone());
+        assert!(
+            math_selection_wash_slabs(fade_metrics(), &frame, &untouched, &wash_geometry(picture))
+                .is_empty(),
+            "a formula no drag has reached wears no wash"
+        );
+
+        let mut source = test_math_placement("source", 0, 20 * SUBPIXELS_PER_PX, 4);
+        source.display = MathBlockDisplay::Source;
+        source.selection_spans = vec![wash_span(0, 0, 20)];
+        assert!(
+            math_selection_wash_slabs(fade_metrics(), &frame, &source, &wash_geometry(picture))
+                .is_empty(),
+            "a block showing its source is text, and the cell band is already on it"
+        );
+    }
+
+    /// PIN (same ruling) — **the wash is issued after the picture and before the block's own
+    /// chrome.**
+    ///
+    /// There is no way to ask a render pass what order it issued its draws in after the fact, so
+    /// the order is held here, in the source that issues it — the idiom
+    /// `a_layers_own_hole_is_punched_after_the_face_that_layer_draws` established.
+    ///
+    /// Two claims. The wash is composed at the **head** of the overlay buffer, so the overflow
+    /// fades and the two toolbar buttons — the rest of that buffer — stay on top of it: a fade a
+    /// selection had covered would stop saying the formula continues, and a button the reader is
+    /// about to press must not be tinted by a drag that crossed it. And that buffer is struck
+    /// **after** the math tiles: issued before them the wash would be behind the picture, which is
+    /// exactly where the cell band already is and why none of this was visible.
+    ///
+    /// MUTATIONS: ① extend the wash onto the end of the overlay list instead of the front — the
+    /// first assertion goes red; ② move the wash into `rectangles()` — the second goes red, and
+    /// the picture is painted straight back over the selection.
+    #[test]
+    fn the_wash_is_struck_over_the_picture_and_under_the_blocks_own_chrome() {
+        let source: String = include_str!("lib.rs")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        let wash = source
+            .find(concat!("self.math_selection_wash_", "rectangles(frame);"))
+            .expect("the wash's own list");
+        let chrome = source
+            .find(concat!(
+                "math_overlays.extend(self.math_overlay_",
+                "rectangles(frame));"
+            ))
+            .expect("the block's chrome joining the same list");
+        let tiles = source
+            .find(concat!("fordrawin&seat.", "math_draws{"))
+            .expect("the seat's math tile draws");
+        let overlay = source
+            .find(concat!(
+                "pass.draw(0..6,0..seat.",
+                "math_overlay_countasu32);"
+            ))
+            .expect("the overlay buffer's draw");
+        assert!(
+            wash < chrome,
+            "the wash goes in first, so the fades and the buttons stand over it"
+        );
+        assert!(
+            tiles < overlay,
+            "the overlay buffer is struck after the pictures, which is what puts the \
+             wash on top of one"
+        );
     }
 
     /// Source view is plain text the pane already wraps and scrolls by its own rules; the band

@@ -171,6 +171,14 @@ Nothing yet.
   is now laid on whole pixels and copied untouched.
 
 - **A table on a focus card lines up again, and a symbol on one is drawn whole.** A card showing a box-drawing table whose cells hold Chinese text drew its borders in a different place on every row, while the same table in the pane beside it was square. A card's rows are now laid out column by column, as the pane's own grid is, so a wide character takes exactly two columns and a border stands in the same place on every row. Laying them out that way then cut a symbol off at its column's edge — a shell printing `○` showed a clean circle in the pane and a large arc on the card — so a card now draws a symbol from the same font the pane draws it from, and sets a character that is still wider than the columns it stands in a little smaller until it fits them, instead of cutting it.
+- **A formula you have selected now looks selected.** Dragging across a typeset
+  formula in a terminal pane copied it correctly — the formula's own source,
+  right where the picture stands — but nothing on screen said so: the selection
+  coloured the text on either side and stopped at the picture. It now washes the
+  picture too, in the same colour, for a formula set in a line and for one
+  standing in a block of its own, on the live screen and back through the
+  scrollback. What it washes is what it copies: cross part of a formula and only
+  that part is washed.
 - **A table on a focus card lines up again.** A card showing a box-drawing table whose cells hold Chinese text drew its borders in a different place on every row, while the same table in the pane beside it was square. A card's rows are now laid out column by column, as the pane's own grid is, so a wide character takes exactly two columns and a border stands in the same place on every row.
 - **On a Mac, `Edit ▸ Copy` and `Edit ▸ Paste` now act on the pane you are
   looking at.** Over a terminal they did nothing at all — the selection never

@@ -36,8 +36,8 @@ use bt_transcript::{
 use bt_viewport::{
     BlockOverflowOwner, FrameProjectionError, FrameViewportOrigin, GridCursor,
     LiveMathOccurrenceId, MathBlockAnchor, MathBlockDisplay, MathBlockPlacement,
-    MathFailurePlacement, ProjectedLiveMathArtifact, ProjectedMathArtifact, ViewSelection,
-    ViewportFrame, ViewportProjection,
+    MathFailurePlacement, ProjectedLiveMathArtifact, ProjectedMathArtifact, SelectionSpan,
+    ViewSelection, ViewportFrame, ViewportProjection,
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -8715,6 +8715,8 @@ impl DualPlaneSession {
                 frozen_prefix_rows: 0,
                 clipped_top_rows: 0,
                 clipped_bottom_rows: 0,
+                // Filled in for every placement at once, after the last of them exists.
+                selection_spans: Vec::new(),
             });
         }
 
@@ -8787,6 +8789,8 @@ impl DualPlaneSession {
                 frozen_prefix_rows: 0,
                 clipped_top_rows: 0,
                 clipped_bottom_rows: 0,
+                // Filled in for every placement at once, after the last of them exists.
+                selection_spans: Vec::new(),
             });
         }
 
@@ -8857,6 +8861,8 @@ impl DualPlaneSession {
                 frozen_prefix_rows: 0,
                 clipped_top_rows: 0,
                 clipped_bottom_rows: 0,
+                // Filled in for every placement at once, after the last of them exists.
+                selection_spans: Vec::new(),
             });
         }
 
@@ -8927,6 +8933,8 @@ impl DualPlaneSession {
                 frozen_prefix_rows: 0,
                 clipped_top_rows: 0,
                 clipped_bottom_rows: 0,
+                // Filled in for every placement at once, after the last of them exists.
+                selection_spans: Vec::new(),
             });
         }
 
@@ -9004,24 +9012,36 @@ impl DualPlaneSession {
                 frame.status_text = Some(format!("Formula not rendered: {reason}"));
             }
         }
-        let mut rendered_rows = BTreeSet::new();
-        for placement in frame.math_blocks.iter().filter(|placement| {
-            placement.display == MathBlockDisplay::Rendered
-                && placement.artifact.mode == MathMode::Display
-        }) {
-            match placement.anchor {
-                MathBlockAnchor::History { start, end, .. } => {
-                    rendered_rows.extend((0..drawable_frame_row_count(frame)).filter(|row| {
-                        frame_row_history_id(frame, *row).is_some_and(|id| start <= id && id <= end)
-                    }));
+        // **Which presentation rows each rendered block stands on** — asked once per placement,
+        // because two different questions want the same answer.
+        //
+        // A block showing its source stands on no rows in this sense: it *is* terminal text, the
+        // ordinary cell band paints it, and there is no picture anywhere near it.
+        let block_rows = frame
+            .math_blocks
+            .iter()
+            .map(|placement| {
+                if placement.display != MathBlockDisplay::Rendered {
+                    return BTreeSet::new();
                 }
-                MathBlockAnchor::Live {
-                    band_start_row,
-                    band_end_row,
-                    ..
-                } => {
-                    rendered_rows.extend(frame.row_map.iter().enumerate().filter_map(
-                        |(frame_row, mapped)| {
+                match placement.anchor {
+                    MathBlockAnchor::History { start, end, .. } => {
+                        (0..drawable_frame_row_count(frame))
+                            .filter(|row| {
+                                frame_row_history_id(frame, *row)
+                                    .is_some_and(|id| start <= id && id <= end)
+                            })
+                            .collect()
+                    }
+                    MathBlockAnchor::Live {
+                        band_start_row,
+                        band_end_row,
+                        ..
+                    } => frame
+                        .row_map
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(frame_row, mapped)| {
                             mapped
                                 .live_grid_row
                                 .is_some_and(|live_row| {
@@ -9029,9 +9049,39 @@ impl DualPlaneSession {
                                 })
                                 .then(|| u32::try_from(frame_row).ok())
                                 .flatten()
-                        },
-                    ));
+                        })
+                        .collect(),
                 }
+            })
+            .collect::<Vec<BTreeSet<u32>>>();
+        // **The selection is given to the block, and a display block's rows leave the band**
+        // (`docs/DESIGN.md` §7.1.6c-4g, ruling of 2026-09-14: what you copy must look selected).
+        //
+        // The band is the grid's own fill and goes down before anything a seat draws afterwards,
+        // so on a display block's rows it would paint under a picture that owns the whole row and
+        // never be seen — which is why those rows are taken out of it, and were taken out of it
+        // before this ruling with nothing put in their place. What goes in their place is the
+        // same spans, decided from the same cell anchors the copy reads, carried on the placement
+        // to the lane that paints over the picture.
+        //
+        // **Every rendered block is given them, inline included.** An inline composite keeps its
+        // band (it shares its row with ordinary text, which has to stay washed), and the wash over
+        // its picture is what makes the formula itself read as selected rather than as a picture
+        // sitting in a selected row.
+        let mut rendered_rows = BTreeSet::new();
+        for (index, rows) in block_rows.into_iter().enumerate() {
+            let spans = frame
+                .selection_spans
+                .iter()
+                .filter(|span| rows.contains(&span.row))
+                .copied()
+                .collect::<Vec<SelectionSpan>>();
+            let placement = &mut frame.math_blocks[index];
+            placement.selection_spans = spans;
+            if placement.display == MathBlockDisplay::Rendered
+                && placement.artifact.mode == MathMode::Display
+            {
+                rendered_rows.extend(rows);
             }
         }
         frame
