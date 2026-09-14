@@ -249,28 +249,10 @@ Nothing yet.
   on and off it changed nothing. A press with the pointer now leaves the
   keyboard where it already was; the arrow keys still reach the header, and
   Enter on it still opens and closes the group.
-- **A focus card keeps its place while you resize the window, and comes back to
-  it when you resize the window back.** A card you have scrolled back through a
-  shell's output holds on to the line at its bottom edge, the way the shell
-  itself holds on to its prompt: make the window shorter and the card loses
-  lines off its top, make it taller and it gains them there, and that bottom
-  line stays where it is either way. So a resize and its exact reverse leave the
-  card showing exactly what it was showing before — dragging a window out and
-  back no longer drops the card at the newest line. A long line the pane has
-  become wide enough to draw whole is counted as the one line it is, so the card
-  lands on the same content at either width. A card you have not scrolled back
-  goes on following the newest line, whatever the window does. And Alt+wheel
-  moves the card by whole lines after any resize, reversing at once at the
-  oldest content. **Carrying the window to a display that draws at a different
-  size, and carrying it back, is the same round trip and now ends the same way.**
-  It used to come back showing something else: a change of display reaches Folio
-  as two separate pieces of news — the size everything is drawn at, and the
-  window's new shape — and every pane was being rebuilt from the first of them
-  while the window still had its old shape, at a width belonging to neither
-  display. Rebuilding a pane re-wraps its output for good, so the card's own
-  lines came back cut differently and there was nothing left to come back to. A
-  pane is now rebuilt only once the shape that goes with the new size is in
-  hand, whichever of the two arrives first.
+- **A focus card shows what it showed across a resize or a display move
+  again.** A resting card keeps following the newest output. Alt+wheel moves
+  by whole lines and stops at the top without debt: the first downward notch
+  moves immediately, even after a taller card reduces how far back it can go.
 - **On a Mac, tabs now take the whole width of the title bar.** The tab strip was setting aside room for four window buttons on a window that carries one — macOS draws minimise, zoom and close at the other end of the bar — so the tabs were squeezed to their profile marks, their names hidden, with a wide empty band before the settings gear. Seven tabs in a 934-point window now stand 91 points wide with their names showing instead of 72 without.
 - **Every picker in Settings that offers profiles now shows their marks.** The
   summoned terminal's `Profile for new tabs` listed its profiles as bare words,
