@@ -48,7 +48,24 @@ Nothing yet.
   milliseconds to nothing measurable; opening it is still slow, and that is the
   next change.
 
-- Realize large Markdown documents around the viewport and preserve the reading position while estimated heights change.
+- **Opening a very large Markdown document is immediate.** The preview used to
+  lay out every block of a document before it could show the first one; on a
+  three-megabyte file that was a three-second freeze, and a resize or a scale
+  change paid it again. It now measures only the blocks near the viewport and
+  estimates the rest from their line counts, correcting each estimate as it
+  scrolls into view; an anchor keeps the text under your eye where it is while
+  the heights above it settle, so the page does not jump. On that same file
+  the open went from about 3.4 seconds to a tenth of one, and a keystroke
+  from 143 to 66 milliseconds.
+
+- **A Markdown file opens complete, and is editable at once.** The preview
+  used to read the first 64 KB of a file, show that much under a
+  `Read-only · 64 KB` badge, and fetch the rest only when you entered edit,
+  which made an editable file look read-only. It now reads the whole file on
+  the first open, up to the 8 MB editing ceiling: the document scrolls to its
+  end and the caret can go in immediately. A file over the ceiling keeps a head
+  on screen and the badge says its real size. Text, CSV and diffs keep their
+  bounded first read.
 
 - **Badges in a Markdown preview now stand in a row instead of one under
   another.** Folio does not fetch pictures from the web, and it used to say so

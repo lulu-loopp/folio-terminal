@@ -87,7 +87,7 @@ mod tests {
     /// PIN — **one version, in four places, from one line.**
     ///
     /// The manifest, `--version`, the PE resource, and the header of every
-    /// diagnostic file. Red gate: write `0.1.0` into any one of the four by hand
+    /// diagnostic file. Red gate: write `0.4.0` into any one of the four by hand
     /// and this passes until the next release moves the other three, which is
     /// precisely when nobody is looking. It has happened to this repository
     /// already in a smaller way — see the `Cargo.toml` note the workspace
