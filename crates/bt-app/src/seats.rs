@@ -42871,6 +42871,170 @@ mod tests {",
         );
     }
 
+    /// PIN (§7.1.6b′; `docs/design/ui-mockup.html` `.ticon` / `.pring`) — **the
+    /// card head's mark is the strip's own fifteen-point slot, and every state
+    /// this tab can be in is said inside it.**
+    ///
+    /// A card head is the tab's second face (user ruling 2026-08-27), so the
+    /// mock-up hands it `tabIcon(w)` — the very run the strip draws — inside
+    /// `.ticon { width: 15px; height: 15px }`. Three claims, written down
+    /// because the owner's 2026-09-14 report was read as the card head's mark
+    /// having grown and there was no pin anywhere saying how big that slot is or
+    /// which drawing stands in it:
+    ///
+    /// * **Idle** — the tab's own `mark_kind`, at the slot exactly, at full
+    ///   strength.
+    /// * **A claim** — the *same* drawing. §7.1.5b's ladder is said in the dot
+    ///   and, on a card, in the halo along its edge; it never swaps the artwork.
+    ///   The dot is the status dot's own six against the slot's fifteen, hung
+    ///   off its top-right corner exactly as `.unreaddot` is.
+    /// * **A run in flight** — and only then — the progress ring takes the slot
+    ///   whole. `.ticon-wrap:has(.pring) .ticon { visibility: hidden }` is
+    ///   replacement and not superposition (ruling 2026-08-08), and the ring's
+    ///   outer edge is the slot's own edge (`r 6.5 + 2/2 = 7.5`) — which is why
+    ///   a ring reads *bigger* than a mark, whose artwork carries the house
+    ///   family's air inside the same box. That difference is a state and not a
+    ///   size change, and this is where that is written down.
+    ///
+    /// Red gate: draw the mark at any box but `card.mark`, hand a state a glyph
+    /// of its own, or let the ring sit over the mark instead of replacing it,
+    /// and one of these goes red.
+    #[test]
+    fn the_card_heads_mark_is_one_fifteen_point_slot_and_every_state_is_said_inside_it() {
+        let state = focus_rail(TabLayoutMode::Vertical);
+        let geometry = focus_of(state, 1);
+        let card = &geometry.cards[0];
+        assert_eq!(
+            [card.mark[2] - card.mark[0], card.mark[3] - card.mark[1]],
+            [WINDOW_TAB_MARK_LOGICAL_PX, WINDOW_TAB_MARK_LOGICAL_PX],
+            "`.ticon` is 15 square on a card head exactly as it is on a tab chip"
+        );
+        assert!(
+            card.mark[1] >= card.head[1] && card.mark[3] <= card.head[3],
+            "and it is centred in the HEAD rather than in the card (§7.1.6b′ F2)"
+        );
+        assert!(
+            card.mark[2] <= card.title[0],
+            "the slot stands before the name, which is what makes it the mark \
+             drawn *before* a card's title"
+        );
+
+        let in_slot = |chrome: &ChromeGroup| -> Vec<ChromeSprite> {
+            chrome
+                .sprites
+                .iter()
+                .filter(|sprite| sprite.rect == card.mark)
+                .copied()
+                .collect()
+        };
+
+        // ── idle: the tab's own mark, and nothing else in the box ──
+        let idle = [card_tab("build", 1, TabMarkState::default(), false)];
+        let resting = window_chrome_with_rail(&idle, 0, state, None).rail;
+        let resting_slot = in_slot(&resting);
+        assert_eq!(
+            resting_slot.len(),
+            1,
+            "one drawing stands in the slot of a card with nothing to report"
+        );
+        assert_eq!(
+            resting_slot[0].mark,
+            ChromeMark::ProfilePowerShell,
+            "and it is the tab's own mark, not a state glyph"
+        );
+        assert_eq!(
+            resting_slot[0].opacity, 1.0,
+            "at full strength — a resting card does not breathe"
+        );
+
+        // ── a claim: the same drawing, plus the six-point dot ──
+        let claiming = [card_tab(
+            "build",
+            1,
+            TabMarkState {
+                dot: Some(crate::StatusDot {
+                    ink: [9, 9, 9],
+                    hollow: false,
+                }),
+                ..TabMarkState::default()
+            },
+            false,
+        )];
+        let claimed = window_chrome_with_rail(&claiming, 0, state, None).rail;
+        assert_eq!(
+            in_slot(&claimed)
+                .iter()
+                .map(|sprite| sprite.mark)
+                .collect::<Vec<_>>(),
+            vec![ChromeMark::ProfilePowerShell],
+            "a claim never changes the glyph — the ladder is said beside it"
+        );
+        let dot = claimed
+            .sprites
+            .iter()
+            .find(|sprite| sprite.color == [9, 9, 9])
+            .expect("and the dot is drawn");
+        assert_eq!(
+            dot.rect[2] - dot.rect[0],
+            WINDOW_TAB_STATUS_DOT_LOGICAL_PX,
+            "the dot is the status dot's own six and never a second mark's size"
+        );
+        assert!(
+            dot.rect[0] > card.mark[0] && dot.rect[1] < card.mark[1],
+            "hung off the slot's top-right corner, as `.unreaddot` is"
+        );
+
+        // ── a run in flight: the ring takes the slot whole ──
+        let running = [card_tab(
+            "build",
+            1,
+            TabMarkState {
+                ring: Some(TabRing {
+                    arc: [1, 2, 3],
+                    start_milliturns: 0,
+                    sweep_milliturns: 400,
+                }),
+                ..TabMarkState::default()
+            },
+            false,
+        )];
+        let ringed = window_chrome_with_rail(&running, 0, state, None).rail;
+        assert!(
+            !ringed
+                .sprites
+                .iter()
+                .any(|sprite| sprite.mark == ChromeMark::ProfilePowerShell),
+            "the ring REPLACES the mark — the `.ticon` is hidden, not overlaid"
+        );
+        let rings = in_slot(&ringed);
+        assert_eq!(
+            rings.len(),
+            2,
+            "a ring is its track and its arc, and both stand in the mark's box"
+        );
+        assert!(
+            rings
+                .iter()
+                .all(|ring| matches!(ring.mark, ChromeMark::ProgressRing { .. })),
+            "and nothing else is in the box with them"
+        );
+        assert!(
+            matches!(
+                rings[0].mark,
+                ChromeMark::ProgressRing {
+                    sweep_milliturns: 1000,
+                    ..
+                }
+            ),
+            "the track is a full turn and is drawn first"
+        );
+        assert_eq!(rings[1].color, [1, 2, 3], "the arc wears the state's colour");
+        assert_ne!(
+            rings[0].color, rings[1].color,
+            "a track the colour of its arc is not a track"
+        );
+    }
+
     /// PIN (§7.1.6b′ ①, ② and ④) — **the card column takes a tab reorder, both
     /// of a pane's offers, and — since ③ went on 2026-08-30 — a file row's two
     /// as well. It turns nothing away.**
