@@ -14753,6 +14753,18 @@ pub fn measure_preview_paragraph_width(
         .fold(0.0_f32, f32::max)
 }
 
+/// Font environment shared by CPU-only preview measurement diagnostics.
+pub type PreviewMeasureFontSystem = FontSystem;
+
+/// CPU-only access to the renderer's text rows for Markdown anchor tests and
+/// diagnostics. Uses the same shaping and seam affinity as the window renderer.
+pub fn measure_preview_text_rows(
+    fonts: &mut FontSystem,
+    paragraph: &PreviewParagraph,
+) -> Vec<PreviewTextRow> {
+    preview_text_rows(fonts, paragraph)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

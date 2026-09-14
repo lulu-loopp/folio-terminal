@@ -15,8 +15,31 @@ thread_local! {
 pub(crate) fn count(name: &'static str, amount: usize) {
     WORK.with_borrow_mut(|w| *w.entry(name).or_default() += amount);
 }
-fn work(name: &'static str) -> usize {
+pub(super) fn work(name: &'static str) -> usize {
     WORK.with_borrow(|w| w.get(name).copied().unwrap_or_default())
+}
+
+pub(super) fn reset_work() {
+    WORK.with_borrow_mut(BTreeMap::clear);
+}
+
+/// Mutation: cold layout shapes the whole document before admitting a viewport.
+#[test]
+fn viewport_open_bounds_prose_work() {
+    let mut h = preview_viewport::tests::Harness::default();
+    reset_work();
+    h.rebuild(
+        (0..12000)
+            .map(|i| format!("Paragraph {i} ordinary words.\n\n"))
+            .collect(),
+        None,
+        None,
+    );
+    assert!(
+        work("wrapped blocks") <= 80,
+        "cold open shaped {} blocks",
+        work("wrapped blocks")
+    );
 }
 
 /// Mutation: restore a String clone for the snapshot used by caret/rebuild.
@@ -94,7 +117,7 @@ fn buffer(text: String) -> preview::PreviewBuffer {
     buffer
 }
 
-fn source_at(
+pub(super) fn source_at(
     content: &str,
     blocks: &[preview::MarkdownBlock],
     ranges: &[std::ops::Range<usize>],
@@ -125,7 +148,7 @@ fn source_at(
 /// Real CPU shaping, parsing, highlighting, intrinsics and cached layout. No GPU present.
 #[test]
 #[ignore = "wall-clock diagnostic; reads docs/DESIGN.md at run time"]
-fn md_typing_path_benchmark() {
+fn md_typing_path_eager_benchmark() {
     TIMING.with(|timing| timing.set(true));
     let real =
         std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/DESIGN.md"))
@@ -166,7 +189,7 @@ fn md_typing_path_benchmark() {
             "| action | edit copy | undo diff | width/index | caret copy | caret scan | rebuild copy | parse | intrinsic | layout | other | total | shaper calls | parsed bytes | wrapped blocks |"
         );
         println!("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
-        for action in ["open", "within", "across", "insert", "delete"] {
+        for action in ["open", "scroll", "within", "across", "insert", "delete"] {
             TIMES.with_borrow_mut(BTreeMap::clear);
             WORK.with_borrow_mut(BTreeMap::clear);
             if action == "open" {
@@ -211,7 +234,7 @@ fn md_typing_path_benchmark() {
                 });
             }
             let mut calls = 0;
-            if action != "within" {
+            if !matches!(action, "within" | "scroll") {
                 let clock = Timer::new("layout");
                 let mut pass = wraps.prepare(&doc, true, preview_wrap::Frame::new(1000.0, 1.0, 0));
                 drop(clock);
@@ -490,6 +513,128 @@ fn typing_indexes_match_full_scans_through_edits_undo_and_redo() {
                 preview_edit::move_caret(content, &mut expected, motion, true, 3);
                 assert_eq!(actual, expected);
             }
+        }
+    }
+}
+
+/// Viewport counterpart to the retained eager reference diagnostic.
+#[test]
+#[ignore = "wall-clock diagnostic; reads docs/DESIGN.md at run time"]
+fn md_typing_path_benchmark() {
+    TIMING.with(|t| t.set(true));
+    let real =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/DESIGN.md"))
+            .unwrap();
+    let synthetic: String = (0..12000).map(|i| format!("Paragraph {i}: **bold text** with `inline code` and enough ordinary words to wrap. {}\n\n", "prose ".repeat(32))).collect();
+    for (name, text) in [("DESIGN", real), ("synthetic", synthetic)] {
+        let bytes = text.len();
+        TIMES.with_borrow_mut(BTreeMap::clear);
+        let accepted = Instant::now();
+        let mut buffer = buffer(text);
+        let accepted = accepted.elapsed();
+        let opening_width =
+            TIMES.with_borrow(|t| t.get("width/index").copied().unwrap_or_default());
+        let mut h = preview_viewport::tests::Harness::default();
+        h.width = 1000.0;
+        let (blocks, ranges, _) =
+            preview::parse_markdown_mapped(buffer.content.as_deref().unwrap());
+        let index = blocks
+            .iter()
+            .zip(&ranges)
+            .enumerate()
+            .filter(|(_, (b, r))| r.start >= bytes / 2 && markdown_prose_face(b).is_some())
+            .nth(1)
+            .map(|(index, _)| index)
+            .unwrap();
+        let mut caret = preview_edit::EditCaret::default();
+        caret.place(
+            buffer.content.as_deref().unwrap(),
+            ranges[index].start,
+            false,
+        );
+        println!(
+            "\n{name}: {bytes} bytes, {} blocks; viewport 1000 x 600, scale 1; milliseconds",
+            blocks.len()
+        );
+        println!(
+            "| action | edit/undo | width/index | parse | formula discovery | intrinsic | layout | other | total | shaper calls | parsed bytes | wrapped blocks | recipes | realized blocks | intrinsic blocks |"
+        );
+        println!("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
+        for action in ["open", "scroll", "insert", "delete"] {
+            // Match the eager benchmark's already active raw prose block for the edit.
+            if action == "insert" {
+                h.rebuild_borrowed(
+                    buffer.content.as_deref().unwrap(),
+                    Some(&[]),
+                    Some(caret.caret),
+                );
+            }
+            TIMES.with_borrow_mut(BTreeMap::clear);
+            reset_work();
+            if action == "open" {
+                TIMES.with_borrow_mut(|t| {
+                    t.insert("width/index", opening_width);
+                });
+            }
+            let start = Instant::now();
+            match action {
+                "open" => h.rebuild_borrowed(buffer.content.as_deref().unwrap(), None, None),
+                "scroll" => {
+                    let timer = Timer::new("layout");
+                    h.scroll_bytes(
+                        h.layout().get(index).unwrap().top + h.view.padding,
+                        false,
+                        buffer.content.as_deref().unwrap(),
+                    );
+                    drop(timer);
+                }
+                _ => {
+                    let revision = buffer.revision;
+                    buffer.edit_by_caret(&mut caret, |text, caret| {
+                        if action == "insert" {
+                            preview_edit::insert(text, caret, "x")
+                        } else {
+                            preview_edit::backspace(text, caret)
+                        }
+                    });
+                    let edits = buffer.viewport_edits_since(revision).unwrap();
+                    h.rebuild_borrowed(
+                        buffer.content.as_deref().unwrap(),
+                        Some(&edits),
+                        Some(caret.caret),
+                    );
+                }
+            }
+            let total = (start.elapsed()
+                + if action == "open" {
+                    accepted
+                } else {
+                    Duration::ZERO
+                })
+            .as_secs_f64()
+                * 1000.0;
+            let ms = |name| {
+                TIMES
+                    .with_borrow(|t| t.get(name).copied().unwrap_or_default())
+                    .as_secs_f64()
+                    * 1000.0
+            };
+            let edit = ms("edit copy") + ms("undo diff");
+            let width = ms("width/index");
+            let parse = ms("parse");
+            let formula = ms("formula discovery");
+            let intrinsic = ms("intrinsic");
+            let layout = (ms("layout") - intrinsic).max(0.0);
+            let other = total - edit - width - parse - formula - intrinsic - layout;
+            println!(
+                "| {action} | {edit:.3} | {width:.3} | {parse:.3} | {formula:.3} | {intrinsic:.3} | {layout:.3} | {other:.3} | {total:.3} | {} | {} | {} | {} | {} | {} |",
+                work("shaper calls"),
+                work("parsed bytes"),
+                work("wrapped blocks"),
+                work("wrap recipes"),
+                work("realized blocks"),
+                work("intrinsic blocks")
+            );
         }
     }
 }

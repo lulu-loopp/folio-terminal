@@ -4827,6 +4827,8 @@ pub struct PreviewBuffer {
     /// swapping one letter for another left the cache convinced it was still
     /// looking at the old text.
     pub revision: u64,
+    /// Coordinate-only edit history for pane-local occurrence remapping.
+    viewport_edits: std::collections::VecDeque<(u64, crate::preview_viewport::Edit)>,
     /// **Which buffer this is**, told apart from every other buffer this process
     /// has ever made (ticket T-EDIT-DISK, 2026-09-11).
     ///
@@ -5117,6 +5119,7 @@ impl PreviewBuffer {
             truncated: false,
             dirty: false,
             revision: 0,
+            viewport_edits: std::collections::VecDeque::new(),
             incarnation: next_incarnation(),
             edited_here: false,
             disk_mtime: None,
@@ -5710,6 +5713,35 @@ impl PreviewBuffer {
         true
     }
 
+    pub(crate) fn viewport_edits_since(
+        &self,
+        revision: u64,
+    ) -> Option<Vec<crate::preview_viewport::Edit>> {
+        if revision == self.revision {
+            return Some(Vec::new());
+        }
+        let mut expected = revision.checked_add(1)?;
+        let mut edits = Vec::new();
+        let recent: Vec<_> = self
+            .viewport_edits
+            .iter()
+            .rev()
+            .take_while(|(at_revision, _)| *at_revision > revision)
+            .copied()
+            .collect();
+        for (at_revision, edit) in recent.into_iter().rev() {
+            if at_revision < expected {
+                continue;
+            }
+            if at_revision != expected {
+                return None;
+            }
+            edits.push(edit);
+            expected += 1;
+        }
+        (expected == self.revision + 1).then_some(edits)
+    }
+
     pub fn line_starts(&self) -> &[usize] {
         &self.line_index.starts
     }
@@ -5759,6 +5791,21 @@ impl PreviewBuffer {
     }
 
     fn update_line_index(&mut self, change: &crate::preview_undo::Change) {
+        if self
+            .viewport_edits
+            .back()
+            .is_some_and(|(revision, _)| *revision != self.revision)
+        {
+            self.viewport_edits.clear();
+        }
+        self.viewport_edits.push_back((
+            self.revision + 1,
+            crate::preview_viewport::Edit {
+                at: change.at,
+                removed: change.removed.len(),
+                inserted: change.inserted.len(),
+            },
+        ));
         self.line_index.replace(
             self.content.as_deref().unwrap_or_default(),
             change.at,
@@ -5774,6 +5821,20 @@ impl PreviewBuffer {
     /// cache is keyed on, and the dirty bit — and an undo owes exactly the same
     /// three, because an undo is a change to the body like any other.
     fn settle_after_a_change(&mut self) {
+        if self
+            .viewport_edits
+            .back()
+            .is_none_or(|(revision, _)| *revision != self.revision + 1)
+        {
+            self.viewport_edits.push_back((
+                self.revision + 1,
+                crate::preview_viewport::Edit {
+                    at: 0,
+                    removed: 0,
+                    inserted: 0,
+                },
+            ));
+        }
         self.max_columns = self.line_index.max_columns();
         self.revision += 1;
         self.dirty = self.undo.is_dirty();

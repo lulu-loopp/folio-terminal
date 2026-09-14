@@ -23,6 +23,9 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- Realize large Markdown documents around the viewport and preserve the reading position while estimated heights change.
+
+- Reduce typing and caret-movement delays in large Markdown documents.
 - **Badges in a Markdown preview now stand in a row instead of one under
   another.** Folio does not fetch pictures from the web, and it used to say so
   in a full-width card three lines tall for every one of them — so the four
