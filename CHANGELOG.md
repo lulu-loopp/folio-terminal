@@ -77,6 +77,15 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **A formula you have selected now looks selected.** Dragging across a typeset
+  formula in a terminal pane copied it correctly — the formula's own source,
+  right where the picture stands — but nothing on screen said so: the selection
+  coloured the text on either side and stopped at the picture. It now washes the
+  picture too, in the same colour, for a formula set in a line and for one
+  standing in a block of its own, on the live screen and back through the
+  scrollback. What it washes is what it copies: cross part of a formula and only
+  that part is washed.
+
 - **A table on a focus card lines up again.** A card showing a box-drawing table whose cells hold Chinese text drew its borders in a different place on every row, while the same table in the pane beside it was square. A card's rows are now laid out column by column, as the pane's own grid is, so a wide character takes exactly two columns and a border stands in the same place on every row.
 - **On a Mac, `Edit ▸ Copy` and `Edit ▸ Paste` now act on the pane you are
   looking at.** Over a terminal they did nothing at all — the selection never
