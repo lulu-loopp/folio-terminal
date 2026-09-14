@@ -1225,9 +1225,10 @@ impl GitRow {
     ///    answered.
     ///
     /// Closing one would have left the other, so this predicate is asked of both
-    /// — and what a header says instead is ink: it brightens under the pointer
-    /// and under the keyboard, the way the `Files | Git` switch above the column
-    /// brightens. See [`push_remotes_heading`].
+    /// — and what a header says instead is ink: at rest it is one of the section
+    /// headers and nothing more, and under the pointer or the keyboard it
+    /// brightens the way a row of the files column brightens under the hand.
+    /// See [`push_remotes_heading`].
     #[must_use]
     pub fn wears_ground(&self) -> bool {
         !self.is_furniture() && !matches!(self, Self::Remotes { .. })
@@ -3546,6 +3547,49 @@ fn push_branch(
     });
 }
 
+/// The band a section header's word sits in: the *bottom* of its box, because
+/// the box's 14px of top padding is the gap between two sections and not
+/// leading. `(top, bottom)`, and the line box between them is what the sub-group
+/// centres its triangle against.
+fn heading_band(rect: [f32; 4], scale: f32) -> (f32, f32) {
+    let line = (GIT_LABEL_LINE_LOGICAL_PX * scale).round();
+    let bottom_pad = (GIT_LABEL_PADDING_BOTTOM_LOGICAL_PX * scale).round();
+    (rect[3] - bottom_pad - line, rect[3] - bottom_pad)
+}
+
+/// One section header's word, as this page draws every one of them.
+///
+/// The three things that make a section header read as a section header — its
+/// size, its weight and its tracking — are chosen here and nowhere else, so that
+/// the one header that is also a control ([`push_remotes_heading`]) cannot drift
+/// from the plain ones ([`push_heading`]) through an edit to only one of the two
+/// (user ruling, 2026-09-14: `REMOTES (4)` must be indistinguishable from
+/// `BRANCHES (9)` at rest). The ink is the caller's, because that is the one
+/// thing they may differ in: a plain heading has one and the sub-group's has a
+/// lit one as well.
+fn push_heading_word(
+    text: String,
+    text_rect: [f32; 4],
+    ink: [u8; 3],
+    scale: f32,
+    labels: &mut Vec<ChromeLabel>,
+    crop: &dyn Fn([f32; 4]) -> [f32; 4],
+) {
+    labels.push(ChromeLabel {
+        mono: false,
+        text,
+        rect: text_rect,
+        font_size_px: GIT_LABEL_FONT_LOGICAL_PX * scale,
+        color: ink,
+        align_right: false,
+        align_center: false,
+        letter_spacing_em: GIT_LABEL_TRACKING_EM,
+        weight: ChromeLabelWeight::SemiBold,
+        tabular_numerals: false,
+        clip: Some(crop(text_rect)),
+    });
+}
+
 fn push_heading(
     label: &str,
     count: usize,
@@ -3555,29 +3599,16 @@ fn push_heading(
     labels: &mut Vec<ChromeLabel>,
     crop: &dyn Fn([f32; 4]) -> [f32; 4],
 ) {
-    // The heading's text sits at the *bottom* of its box, because the box's 14px
-    // of top padding is the gap between two sections and not leading.
-    let line = (GIT_LABEL_LINE_LOGICAL_PX * scale).round();
-    let bottom_pad = (GIT_LABEL_PADDING_BOTTOM_LOGICAL_PX * scale).round();
-    let text_rect = [
-        rect[0],
-        rect[3] - bottom_pad - line,
-        rect[2],
-        rect[3] - bottom_pad,
-    ];
-    labels.push(ChromeLabel {
-        mono: false,
-        text: format!("{label} ({count})"),
-        rect: text_rect,
-        font_size_px: GIT_LABEL_FONT_LOGICAL_PX * scale,
-        color: palette.git_head_muted,
-        align_right: false,
-        align_center: false,
-        letter_spacing_em: GIT_LABEL_TRACKING_EM,
-        weight: ChromeLabelWeight::SemiBold,
-        tabular_numerals: false,
-        clip: Some(crop(text_rect)),
-    });
+    let (top, bottom) = heading_band(rect, scale);
+    let text_rect = [rect[0], top, rect[2], bottom];
+    push_heading_word(
+        format!("{label} ({count})"),
+        text_rect,
+        palette.git_head_muted,
+        scale,
+        labels,
+        crop,
+    );
 }
 
 /// The REMOTES sub-group's own row (T9): a disclosure triangle and a heading.
@@ -3591,16 +3622,27 @@ fn push_heading(
 ///
 /// **`lit` is the header's hover, and it is ink** (user ruling, 2026-09-14).
 /// The reported picture was this row under a full-width rounded wash — see
-/// [`GitRow::wears_ground`] for where that came from and what took it away —
-/// and the ruling that replaced it names the control this window already has
-/// for "a word you may press": the `Files | Git` switch at the top of the same
-/// column ([`crate::seats::push_files_seg`]). That switch says its three states
-/// in three inks and nothing else, and these are the first two of them,
-/// **the same two tokens**: [`ChromePalette::git_head_muted`] at rest,
-/// [`ChromePalette::files_row_text`] under the hand. Its third — `git_head_text`
-/// at 600 with two accent pixels under it — is the page you are *on*, which is
-/// not a state a sub-group has; what this header has instead of an underline is
-/// a triangle that has turned.
+/// [`GitRow::wears_ground`] for where that came from and what took it away.
+///
+/// **At rest it is one of the section headers and nothing else** (user ruling,
+/// 2026-09-14, on the screenshot of `REMOTES (4)`): the same size, the same
+/// weight, the same tracking and the same ink as `BRANCHES (9)` and `COMMITS
+/// (50)` standing above and below it — [`push_heading`]'s own
+/// [`GIT_LABEL_FONT_LOGICAL_PX`] at [`ChromeLabelWeight::SemiBold`] with
+/// [`GIT_LABEL_TRACKING_EM`], drawn in [`ChromePalette::git_head_muted`].
+/// A header that answers a press is still a header, and with nobody pressing it
+/// there is nothing to tell: a heavier or brighter `REMOTES` would be the page
+/// claiming this group matters more than the two beside it.
+///
+/// **Under the hand it changes the way a files row changes.** This header lives
+/// in the files column's body, among rows, and that body has exactly one answer
+/// to "the pointer is on this": [`ChromePalette::files_row_text_hover`], which
+/// is the ink [`crate::seats::push_files_tree`] gives a hovered row — the
+/// `text_hover` of [`crate::seats::FilesRowInk::on_pane_body`]. The first pass
+/// took `files_row_text` instead, off the `Files | Git` switch at the top of the
+/// column ([`crate::seats::push_files_seg`]), because a switch is the nearest
+/// thing this window has to "a word you may press"; the ruling that followed
+/// picked the rows, which are what this header is actually standing among.
 ///
 /// The triangle brightens with the word because they are one control and half a
 /// control lighting up is a header that looks broken.
@@ -3618,41 +3660,30 @@ fn push_remotes_heading(
     let (labels, sprites) = out;
     // One ink for the word and the triangle, chosen once.
     let ink = if lit {
-        palette.files_row_text
+        palette.files_row_text_hover
     } else {
         palette.git_head_muted
     };
-    let line = (GIT_LABEL_LINE_LOGICAL_PX * scale).round();
-    let bottom_pad = (GIT_LABEL_PADDING_BOTTOM_LOGICAL_PX * scale).round();
+    // The same band a plain heading's word sits in, asked of the same function,
+    // so the two words share a baseline as well as a face.
+    let (top, bottom) = heading_band(rect, scale);
     let mark = (GIT_REMOTES_MARK_LOGICAL_PX * scale).round().max(1.0);
     let gap = (GIT_REMOTES_MARK_GAP_LOGICAL_PX * scale).round();
-    let baseline_top = rect[3] - bottom_pad - line;
-    let mark_top = (baseline_top + (line - mark) / 2.0).round();
+    let mark_top = (top + (bottom - top - mark) / 2.0).round();
     let mark_rect = [rect[0], mark_top, rect[0] + mark, mark_top + mark];
     sprites.push(ChromeSprite::new(
         crate::marks::tree_disclosure(if open { 1.0 } else { 0.0 }),
         crop(mark_rect),
         ink,
     ));
-    let text_rect = [
-        mark_rect[2] + gap,
-        baseline_top,
-        rect[2],
-        rect[3] - bottom_pad,
-    ];
-    labels.push(ChromeLabel {
-        mono: false,
-        text: format!("{} ({count})", git_remotes_heading()),
-        rect: text_rect,
-        font_size_px: GIT_LABEL_FONT_LOGICAL_PX * scale,
-        color: ink,
-        align_right: false,
-        align_center: false,
-        letter_spacing_em: GIT_LABEL_TRACKING_EM,
-        weight: ChromeLabelWeight::SemiBold,
-        tabular_numerals: false,
-        clip: Some(crop(text_rect)),
-    });
+    push_heading_word(
+        format!("{} ({count})", git_remotes_heading()),
+        [mark_rect[2] + gap, top, rect[2], bottom],
+        ink,
+        scale,
+        labels,
+        crop,
+    );
 }
 
 /// One changed file: its status letters, and its path.
@@ -7022,46 +7053,43 @@ mod tests {
         format!("{} (2)", git_remotes_heading())
     }
 
-    /// **The two inks the column's own `Files | Git` switch says its states in**
-    /// — asked of the switch itself rather than copied out of it, which is the
-    /// whole of "the two agree": a palette change or a redesign that moves the
-    /// switch moves the header with it, and a header that drifted would fail
-    /// here rather than on a reader's screen.
-    ///
-    /// The `Files` half is read while the column is on `Git`, so the two answers
-    /// are the switch's *inactive* pair — at rest and under the pointer. Its
-    /// third ink is for the page you are on, and a sub-group is not a page.
-    fn seg_inks(palette: &ChromePalette) -> ([u8; 3], [u8; 3]) {
-        let geometry = crate::seats::files_seg_geometry([0.0, 0.0, 240.0, 28.0], [30.0, 18.0], 1.0);
-        let ink = |hovered: Option<crate::seats::FilesView>| {
-            let mut quads = Vec::new();
-            let mut labels = Vec::new();
-            let mut sprites = Vec::new();
-            crate::seats::push_files_seg(
-                &geometry,
-                crate::seats::FilesView::Git,
-                hovered,
-                1.0,
-                palette,
-                (&mut quads, &mut labels, &mut sprites),
-            );
-            labels
-                .iter()
-                .find(|label| label.text == crate::seats::FilesView::Files.label())
-                .expect("the switch draws both of its words")
-                .color
-        };
-        (ink(None), ink(Some(crate::seats::FilesView::Files)))
+    /// The word a plain section header is drawn with, at this fixture's one
+    /// local branch — the `BRANCHES (9)` of the report, two rows up.
+    fn branches_word() -> String {
+        format!("{} (1)", git_branches_heading())
     }
 
-    /// What one label was drawn in.
-    fn ink_of(painted: &Painted, text: &str) -> [u8; 3] {
+    /// **What a files row brightens to under the pointer** (user ruling,
+    /// 2026-09-14) — asked of the files column's own ink set rather than copied
+    /// out of it, so a palette change moves the header with the rows it stands
+    /// among. This is the `text_hover` [`crate::seats::push_files_tree`] reads
+    /// for the row under the pointer when it is handed a docked column's inks.
+    ///
+    /// Deliberately **not** the `Files | Git` switch's hover, which is a
+    /// different token (`files_row_text`) and is what this header wore for one
+    /// pass before the ruling named the rows instead.
+    fn files_row_hover_ink(palette: &ChromePalette) -> [u8; 3] {
+        crate::seats::FilesRowInk::on_pane_body(palette).text_hover
+    }
+
+    /// One label, as it was drawn.
+    fn label_of<'a>(painted: &'a Painted, text: &str) -> &'a ChromeLabel {
         painted
             .labels
             .iter()
             .find(|label| label.text == text)
             .unwrap_or_else(|| panic!("`{text}` was drawn"))
-            .color
+    }
+
+    /// The three things that make a word look like a section header: how big,
+    /// how heavy, how far apart.
+    fn face(label: &ChromeLabel) -> (f32, ChromeLabelWeight, f32) {
+        (label.font_size_px, label.weight, label.letter_spacing_em)
+    }
+
+    /// What one label was drawn in.
+    fn ink_of(painted: &Painted, text: &str) -> [u8; 3] {
+        label_of(painted, text).color
     }
 
     /// The disclosure triangle drawn inside one row, by its mark.
@@ -7080,25 +7108,25 @@ mod tests {
     /// **A group header's hover is its ink and never a ground** (user ruling,
     /// 2026-09-14).
     ///
-    /// The report was a screenshot of `REMOTES (5)` under a full-width rounded
+    /// The report was a screenshot of `REMOTES (4)` under a full-width rounded
     /// wash with the pointer elsewhere, and the ruling on the look is that the
-    /// wash was never the right picture in the first place: a header that can be
-    /// pressed says so the way the `Files | Git` switch at the top of the same
-    /// column says it — dim at rest, the foreground ink under the hand, and no
-    /// quad at all. The chevron goes with the word, because half a control
-    /// lighting up is a header that looks broken.
+    /// wash was never the right picture in the first place. What replaced it has
+    /// two halves, and both are asked here:
     ///
-    /// The inks are read out of [`crate::seats::push_files_seg`] itself rather
-    /// than named here, so "the two agree" is a fact this test keeps rather than
-    /// a sentence a comment claims.
+    /// 1. **At rest it is one of the section headers.** Size, weight, tracking
+    ///    and ink are read off `BRANCHES (1)` in the very same glass — not named
+    ///    as tokens, because the ruling is that the two are the same header while
+    ///    nobody is pressing either, and a token copied into a test is a claim
+    ///    rather than a check.
+    /// 2. **Under the hand it changes the way a files row changes** — the ink a
+    ///    hovered row of the files column wears, asked of that column's own ink
+    ///    set (see [`files_row_hover_ink`]) — and no quad at all. The chevron
+    ///    goes with the word, because half a control lighting up is a header that
+    ///    looks broken.
     #[test]
     fn a_group_headers_hover_is_ink_and_paints_no_ground() {
         let palette = bt_render::chrome_palette();
-        let (at_rest, under_the_hand) = seg_inks(&palette);
-        assert_ne!(
-            at_rest, under_the_hand,
-            "a switch whose two inks were equal would make this test vacuous"
-        );
+        let under_the_hand = files_row_hover_ink(&palette);
         let content = with_remotes();
         let index = remotes_row(&content);
         let body = [0.0, 0.0, 240.0, 4_000.0];
@@ -7106,10 +7134,21 @@ mod tests {
         let word = remotes_word();
 
         let resting = painted_at(&content, 240.0, body[3], GitHover::default());
+        let section = label_of(&resting, &branches_word());
+        let header = label_of(&resting, &word);
         assert_eq!(
-            ink_of(&resting, &word),
-            at_rest,
-            "at rest the header wears the switch's dim ink"
+            face(header),
+            face(section),
+            "at rest the sub-group's word is the section headers' word: same size, weight and tracking"
+        );
+        assert_eq!(
+            header.color, section.color,
+            "and the same ink — a pressable header is still a header"
+        );
+        let at_rest = section.color;
+        assert_ne!(
+            at_rest, under_the_hand,
+            "a header whose two inks were equal would make this test vacuous"
         );
         assert_eq!(
             chevron_in(&resting, rect).color,
@@ -7129,7 +7168,12 @@ mod tests {
         assert_eq!(
             ink_of(&lit, &word),
             under_the_hand,
-            "under the pointer it brightens to the switch's hovered ink"
+            "under the pointer it brightens to a hovered files row's ink"
+        );
+        assert_eq!(
+            ink_of(&lit, &branches_word()),
+            at_rest,
+            "and the plain heading beside it does not move"
         );
         assert_eq!(
             chevron_in(&lit, rect).color,
@@ -7182,7 +7226,7 @@ mod tests {
     #[test]
     fn the_keyboard_standing_on_a_header_lights_its_ink_and_lays_no_card() {
         let palette = bt_render::chrome_palette();
-        let (at_rest, under_the_hand) = seg_inks(&palette);
+        let under_the_hand = files_row_hover_ink(&palette);
         let mut content = with_remotes();
         let index = remotes_row(&content);
         let body = [0.0, 0.0, 240.0, 4_000.0];
@@ -7220,7 +7264,8 @@ mod tests {
         }
 
         // And a selection somewhere else leaves this header dim, so the lit ink
-        // means *this row* and not "the page has a selection".
+        // means *this row* and not "the page has a selection". Dim is the plain
+        // headings' own ink, read off one of them in the same glass.
         let a_file = content
             .rows
             .iter()
@@ -7228,13 +7273,11 @@ mod tests {
         let elsewhere = clamp_git_selection(&content.rows, a_file);
         assert!(elsewhere.is_some(), "the fixture has changed files");
         content.selected = elsewhere;
+        let glass = painted_at(&content, 240.0, body[3], GitHover::default());
         assert_eq!(
-            ink_of(
-                &painted_at(&content, 240.0, body[3], GitHover::default()),
-                &remotes_word()
-            ),
-            at_rest,
-            "a header nobody is on is dim"
+            ink_of(&glass, &remotes_word()),
+            ink_of(&glass, &branches_word()),
+            "a header nobody is on is a plain heading again"
         );
     }
 
@@ -7252,8 +7295,6 @@ mod tests {
     /// and `main::tests::the_git_pages_hover_is_healed_against_the_page_it_is_drawn_from`.
     #[test]
     fn a_header_goes_dim_when_the_pointer_leaves_it() {
-        let palette = bt_render::chrome_palette();
-        let (at_rest, _) = seg_inks(&palette);
         let content = with_remotes();
         let index = remotes_row(&content);
         let body = [0.0, 0.0, 240.0, 4_000.0];
@@ -7273,6 +7314,7 @@ mod tests {
             },
         ] {
             let glass = painted_at(&content, 240.0, body[3], hover);
+            let at_rest = ink_of(&glass, &branches_word());
             assert_eq!(
                 ink_of(&glass, &remotes_word()),
                 at_rest,

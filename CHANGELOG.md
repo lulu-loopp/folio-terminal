@@ -164,10 +164,11 @@ Nothing yet.
   after the pointer had gone — it was the keyboard's own highlight, which a
   header should never have worn, and the pointer's could land on the wrong row
   besides, because the list is rebuilt as the repository changes while your hand
-  holds still. Group headers now say the same thing the `Files | Git` switch
-  above the column says: dim at rest, the word and its triangle brightening
-  under the pointer, and no block at any time. The whole row is still what you
-  press.
+  holds still. At rest `REMOTES` is now exactly one of the section headers —
+  the same size, weight and ink as `BRANCHES` and `COMMITS` above and below it —
+  and under the pointer the word and its triangle brighten to the colour a row
+  of the files column takes under your hand, with no block at any time. The
+  whole row is still what you press.
 - Keep focus cards on the same content when resizing, and make Alt+wheel respond immediately when reversing at the oldest content.
 - **On a Mac, tabs now take the whole width of the title bar.** The tab strip was setting aside room for four window buttons on a window that carries one — macOS draws minimise, zoom and close at the other end of the bar — so the tabs were squeezed to their profile marks, their names hidden, with a wide empty band before the settings gear. Seven tabs in a 934-point window now stand 91 points wide with their names showing instead of 72 without.
 - **Every picker in Settings that offers profiles now shows their marks.** The
