@@ -148225,7 +148225,12 @@ mod tests {
             let mut cache = MarkdownIntrinsicCache::default();
             rebuild_cost(&document, &mut cache);
             let mut typed = document.clone();
-            let at = typed.len() / 2;
+            // The midpoint of a page written in Chinese may fall inside a
+            // character; step back to the boundary before slicing.
+            let at = (0..=typed.len() / 2)
+                .rev()
+                .find(|&i| typed.is_char_boundary(i))
+                .unwrap_or(0);
             let at = typed[..at].rfind('\n').map_or(0, |line| line + 1);
             typed.insert(at, 'x');
             let (blocks, parse, intrinsics, laid) = rebuild_cost(&typed, &mut cache);
