@@ -1152,12 +1152,175 @@ struct BackgroundVertex {
     image_opacity: f32,
 }
 
+/// **How a raster meets the glass: at its own size, or at some other one.**
+///
+/// # The rule
+///
+/// *A raster presented at its own size is presented on the pixel grid.* When a
+/// textured quad is exactly as wide and as tall as the raster behind it, its
+/// origin is rounded to whole device pixels — **after** every offset that moves
+/// it, the scroll included — and it is sampled with `Nearest`. Every device
+/// pixel it covers then lands on the centre of exactly one texel, and the raster
+/// reaches the glass as the pixels the rasteriser produced. When the quad is
+/// *not* its raster's size nothing is snapped and `Linear` does the resample.
+///
+/// # Why it exists (user report, 2026-09-14, macOS at 1× scale)
+///
+/// The unary minus of `\exp\!\left(-\frac{…}{…}\right)` was invisible on a Mac
+/// while the binary minus of `x-\mu` beside it showed, and both showed on
+/// Windows at a higher scale. A probe on that machine proved the typesetter drew
+/// **both** into the raster, so the loss was here, between the raster and the
+/// glass: a minus at 1× is one device pixel of ink, the quad's top edge stood at
+/// a fractional `y` (a preview scrolls by pixels — see `wheel_travel`'s
+/// `PixelDelta` arm — and an inline formula is placed on a shaped baseline), and
+/// a `Linear` sampler therefore spread that one row of ink over two rows at half
+/// strength each. Half strength against the page's ground is below the threshold
+/// at which a hairline reads as a mark at all, while the fraction bar and the
+/// letters either side of it — two, three, four pixels thick — merely softened.
+/// The horizontal was already right: `preview::markdown_measure_box` rounds the
+/// column's inset for exactly this reason ("an odd number of leftover pixels
+/// would otherwise put the column half a pixel left of centre and blur every
+/// glyph on it"), and what the report is, is the same sentence never written for
+/// `y`.
+///
+/// # Why it is here and not at the four placements
+///
+/// Four lanes place a raster — a display formula in a markdown block, an inline
+/// formula on a shaped baseline, a terminal math band, a picture in a preview
+/// pane — and each computes its own origin from its own arithmetic. The rule is
+/// not about any of those arithmetics; it is about the last step all four share,
+/// which is this one. Stated once here it cannot be forgotten by the fifth lane.
+///
+/// # Snapping after the scroll, not before
+///
+/// The origin is rounded in **device** space, with the scroll offset already
+/// subtracted, so that whatever the offset is the formula still sits on whole
+/// pixels. The cost is that scrolling a preview by fractions moves a raster in
+/// whole-pixel steps while the prose around it moves continuously — the same
+/// trade every hinted text renderer makes, and the only alternative is a
+/// document-space snap that leaves the on-screen `y` fractional again, which is
+/// the bug. The terminal scrolls by whole rows and its row pitch need not be a
+/// whole number of pixels, so its bands take the same rounding for the same
+/// reason.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Blit {
+    /// The quad is the raster's own size. Snapped, and sampled `Nearest`.
+    OneToOne,
+    /// The quad is some other size: a preview zoomed past 100%, a band fitted to
+    /// a row while fresh pixels are typeset, a picture scaled to its pane.
+    /// Placed where the layout asked, and sampled `Linear`.
+    Scaled,
+}
+
+impl Blit {
+    /// Both, in the order [`Self::index`] numbers them — the order the per-tile
+    /// bind groups and [`MathSamplers`] are built in, so that an index and a
+    /// blit cannot come apart.
+    const ALL: [Self; 2] = [Self::OneToOne, Self::Scaled];
+
+    /// Which blit a presentation is, from the scale it asks for on each axis.
+    ///
+    /// Exact equality and no tolerance: every 1:1 caller either carries the
+    /// raster's own `u32` size into the rectangle verbatim or multiplies by a
+    /// scale that *is* `1.0` (`render_scale_milli == 1000`), so the division
+    /// below is exact. A tolerance here would be an invitation to snap a quad
+    /// that really is scaled, which shifts a picture by half a pixel for nothing.
+    fn of(scale_x: f32, scale_y: f32) -> Self {
+        if scale_x == 1.0 && scale_y == 1.0 {
+            Self::OneToOne
+        } else {
+            Self::Scaled
+        }
+    }
+
+    /// Where this raster's top-left corner goes, given where the layout put it.
+    fn origin(self, left: f32, top: f32) -> (f32, f32) {
+        match self {
+            // `round` and not `floor`, to agree with the horizontal inset
+            // `preview::markdown_measure_box` already rounds: a raster goes to
+            // the nearest grid line, so it never moves further than half a pixel
+            // from where the layout asked for it.
+            Self::OneToOne => (left.round(), top.round()),
+            Self::Scaled => (left, top),
+        }
+    }
+
+    /// The filter a quad of this kind is sampled through.
+    fn filter(self) -> wgpu::FilterMode {
+        match self {
+            // A 1:1 quad snapped by `origin` samples texel centres, where the two
+            // filters agree bit for bit; `Nearest` is what makes that a property
+            // of the pipeline rather than of the arithmetic staying correct.
+            Self::OneToOne => wgpu::FilterMode::Nearest,
+            Self::Scaled => wgpu::FilterMode::Linear,
+        }
+    }
+
+    /// This blit's slot in [`Self::ALL`], in a tile's bind groups and in
+    /// [`MathSamplers`].
+    fn index(self) -> usize {
+        match self {
+            Self::OneToOne => 0,
+            Self::Scaled => 1,
+        }
+    }
+}
+
+/// The whole presentation of one raster: the blit it gets, and the rectangle it
+/// is actually drawn in.
+///
+/// The size is carried across untouched — `origin + the size that was asked
+/// for` — so a 1:1 quad still measures exactly the raster and a scaled quad
+/// still measures exactly what its lane scaled it to. Only the corner moves.
+fn presented_raster(rect: [f32; 4], width_px: u32, height_px: u32) -> (Blit, [f32; 4]) {
+    let (width, height) = (rect[2] - rect[0], rect[3] - rect[1]);
+    let blit = Blit::of(
+        width / width_px.max(1) as f32,
+        height / height_px.max(1) as f32,
+    );
+    let (left, top) = blit.origin(rect[0], rect[1]);
+    (blit, [left, top, left + width, top + height])
+}
+
+/// The samplers a math quad may be drawn through, one per [`Blit`].
+///
+/// Two samplers and one pipeline: the filter is the only thing that differs, and
+/// a sampler is a bind-group entry rather than pipeline state, so the choice is
+/// made when a tile is bound and costs the pass nothing.
+struct MathSamplers([wgpu::Sampler; 2]);
+
+impl MathSamplers {
+    fn create(device: &wgpu::Device) -> Self {
+        Self(Blit::ALL.map(|blit| {
+            device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("math block sampler"),
+                mag_filter: blit.filter(),
+                min_filter: blit.filter(),
+                ..Default::default()
+            })
+        }))
+    }
+
+    fn get(&self, blit: Blit) -> &wgpu::Sampler {
+        &self.0[blit.index()]
+    }
+}
+
 struct MathTextureTile {
-    bind_group: wgpu::BindGroup,
+    /// One bind group per [`Blit`], built together with the texture: the view is
+    /// the same in both and only the sampler differs, so a draw picks its filter
+    /// by binding rather than by re-recording anything.
+    bind_groups: [wgpu::BindGroup; 2],
     x_px: u32,
     y_px: u32,
     width_px: u32,
     height_px: u32,
+}
+
+impl MathTextureTile {
+    fn bind_group(&self, blit: Blit) -> &wgpu::BindGroup {
+        &self.bind_groups[blit.index()]
+    }
 }
 
 /// **The tiles are shared, and that is what keeps a prepared frame drawable.**
@@ -1259,6 +1422,10 @@ struct MathDraw {
     /// The tile this draw binds — the resource itself and not a key to look it
     /// up by, for [`CachedMathTexture`]'s reason.
     tile: Arc<MathTextureTile>,
+    /// Which of the tile's two bind groups to draw it through — see [`Blit`].
+    /// Decided where the quad's geometry is decided, because it *is* the
+    /// geometry: a quad that was snapped is a quad that must not be resampled.
+    blit: Blit,
     first_vertex: u32,
 }
 
@@ -3403,7 +3570,7 @@ pub struct GpuContext {
     ground_fade_rect_pipeline: wgpu::RenderPipeline,
     math_pipeline: wgpu::RenderPipeline,
     math_bind_group_layout: wgpu::BindGroupLayout,
-    math_sampler: wgpu::Sampler,
+    math_samplers: MathSamplers,
     background_pipeline: wgpu::RenderPipeline,
     background_bind_group_layout: wgpu::BindGroupLayout,
     background_sampler: wgpu::Sampler,
@@ -5084,7 +5251,7 @@ struct DeviceResources {
     ground_fade_rect_pipeline: wgpu::RenderPipeline,
     math_pipeline: wgpu::RenderPipeline,
     math_bind_group_layout: wgpu::BindGroupLayout,
-    math_sampler: wgpu::Sampler,
+    math_samplers: MathSamplers,
     background_pipeline: wgpu::RenderPipeline,
     background_bind_group_layout: wgpu::BindGroupLayout,
     background_sampler: wgpu::Sampler,
@@ -5118,7 +5285,7 @@ impl DeviceResources {
         let rect_pipeline = create_rect_pipeline(device, format);
         let ground_rect_pipeline = create_ground_rect_pipeline(device, format);
         let ground_fade_rect_pipeline = create_ground_fade_rect_pipeline(device, format);
-        let (math_pipeline, math_bind_group_layout, math_sampler) =
+        let (math_pipeline, math_bind_group_layout, math_samplers) =
             create_math_pipeline(device, format);
         let (background_pipeline, background_bind_group_layout, background_sampler) =
             create_background_pipeline(device, format);
@@ -5135,7 +5302,7 @@ impl DeviceResources {
             ground_fade_rect_pipeline,
             math_pipeline,
             math_bind_group_layout,
-            math_sampler,
+            math_samplers,
             background_pipeline,
             background_bind_group_layout,
             background_sampler,
@@ -5368,7 +5535,7 @@ impl GpuContext {
             ground_fade_rect_pipeline,
             math_pipeline,
             math_bind_group_layout,
-            math_sampler,
+            math_samplers,
             background_pipeline,
             background_bind_group_layout,
             background_sampler,
@@ -5393,7 +5560,7 @@ impl GpuContext {
         self.ground_fade_rect_pipeline = ground_fade_rect_pipeline;
         self.math_pipeline = math_pipeline;
         self.math_bind_group_layout = math_bind_group_layout;
-        self.math_sampler = math_sampler;
+        self.math_samplers = math_samplers;
         self.background_pipeline = background_pipeline;
         self.background_bind_group_layout = background_bind_group_layout;
         self.background_sampler = background_sampler;
@@ -5581,7 +5748,7 @@ impl GpuContext {
             ground_fade_rect_pipeline,
             math_pipeline,
             math_bind_group_layout,
-            math_sampler,
+            math_samplers,
             background_pipeline,
             background_bind_group_layout,
             background_sampler,
@@ -5611,7 +5778,7 @@ impl GpuContext {
             ground_fade_rect_pipeline,
             math_pipeline,
             math_bind_group_layout,
-            math_sampler,
+            math_samplers,
             background_pipeline,
             background_bind_group_layout,
             background_sampler,
@@ -6077,22 +6244,28 @@ impl GpuContext {
                     &bytes,
                 );
                 let view = texture.create_view(&Default::default());
-                let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("math block texture bind group"),
-                    layout: &self.math_bind_group_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&self.math_sampler),
-                        },
-                    ],
+                // One group per blit, built here where the view is: see
+                // [`MathTextureTile::bind_groups`].
+                let bind_groups = Blit::ALL.map(|blit| {
+                    self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("math block texture bind group"),
+                        layout: &self.math_bind_group_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(&view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::Sampler(
+                                    self.math_samplers.get(blit),
+                                ),
+                            },
+                        ],
+                    })
                 });
                 tiles.push(Arc::new(MathTextureTile {
-                    bind_group,
+                    bind_groups,
                     x_px: x,
                     y_px: y,
                     width_px: width,
@@ -8537,7 +8710,7 @@ impl WindowRenderer {
                     pass.set_pipeline(&gpu.math_pipeline);
                     pass.set_vertex_buffer(0, vertex_buffer.slice(..));
                     for draw in &seat.math_draws {
-                        pass.set_bind_group(0, &draw.tile.bind_group, &[]);
+                        pass.set_bind_group(0, draw.tile.bind_group(draw.blit), &[]);
                         pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
                     }
                 }
@@ -8607,7 +8780,7 @@ impl WindowRenderer {
                     pass.set_pipeline(&gpu.math_pipeline);
                     pass.set_vertex_buffer(0, buffer.slice(..));
                     for draw in &chrome_icon_draws {
-                        pass.set_bind_group(0, &draw.tile.bind_group, &[]);
+                        pass.set_bind_group(0, draw.tile.bind_group(draw.blit), &[]);
                         pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
                     }
                 }
@@ -8625,7 +8798,7 @@ impl WindowRenderer {
                     pass.set_pipeline(&gpu.math_pipeline);
                     pass.set_vertex_buffer(0, buffer.slice(..));
                     for draw in &chrome_over_draws {
-                        pass.set_bind_group(0, &draw.tile.bind_group, &[]);
+                        pass.set_bind_group(0, draw.tile.bind_group(draw.blit), &[]);
                         pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
                     }
                 }
@@ -8660,7 +8833,7 @@ impl WindowRenderer {
                         pass.set_pipeline(&gpu.math_pipeline);
                         pass.set_vertex_buffer(0, vertex_buffer.slice(..));
                         for draw in &stage.draws {
-                            pass.set_bind_group(0, &draw.tile.bind_group, &[]);
+                            pass.set_bind_group(0, draw.tile.bind_group(draw.blit), &[]);
                             pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
                         }
                     }
@@ -8733,7 +8906,7 @@ impl WindowRenderer {
                     pass.set_pipeline(&gpu.math_pipeline);
                     pass.set_vertex_buffer(0, buffer.slice(..));
                     for draw in &preview_raster_draws {
-                        pass.set_bind_group(0, &draw.tile.bind_group, &[]);
+                        pass.set_bind_group(0, draw.tile.bind_group(draw.blit), &[]);
                         pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
                     }
                 }
@@ -8792,7 +8965,7 @@ impl WindowRenderer {
                     pass.set_pipeline(&gpu.math_pipeline);
                     pass.set_vertex_buffer(0, vertex_buffer.slice(..));
                     for draw in &peek_draws {
-                        pass.set_bind_group(0, &draw.tile.bind_group, &[]);
+                        pass.set_bind_group(0, draw.tile.bind_group(draw.blit), &[]);
                         pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
                     }
                 }
@@ -8877,7 +9050,7 @@ impl WindowRenderer {
                         pass.set_pipeline(&gpu.math_pipeline);
                         pass.set_vertex_buffer(0, buffer.slice(..));
                         for draw in &layer.icon_draws {
-                            pass.set_bind_group(0, &draw.tile.bind_group, &[]);
+                            pass.set_bind_group(0, draw.tile.bind_group(draw.blit), &[]);
                             pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
                         }
                     }
@@ -9047,16 +9220,29 @@ impl WindowRenderer {
                         as f32
                         / SUBPIXELS_PER_PX as f32
             };
+            let block_left_px = math_block_left_px(
+                self.metrics,
+                placement.left_subpixels,
+                placement.display == MathBlockDisplay::Rendered,
+            );
+            let block_left = block_left_px - placement.horizontal_scroll_px as f32;
+            let block_top = block_top - placement.vertical_scroll_px as f32;
+            // The band's own corner, on the grid when it is drawn at its own size
+            // — see [`Blit`]. Taken here, outside the tile loop and after both
+            // scroll offsets, because it is the *block* that is snapped: a tile's
+            // offset inside it is a whole number of raster pixels, so snapping
+            // the corner snaps every tile and cannot pull two of them apart.
+            // Neither subpixel top is a whole pixel in general — a row's height in
+            // subpixels need not divide by `SUBPIXELS_PER_PX`, and an inline
+            // formula sits on the ASCII baseline, which is a fraction the font
+            // chose.
+            let blit = Blit::of(scale, scale);
+            let (block_left, block_top) = blit.origin(block_left, block_top);
             for tile in tile_geometry {
                 let (tile_x, tile_y, tile_width, tile_height) =
                     (tile.x_px, tile.y_px, tile.width_px, tile.height_px);
-                let left = math_block_left_px(
-                    self.metrics,
-                    placement.left_subpixels,
-                    placement.display == MathBlockDisplay::Rendered,
-                ) + tile_x as f32 * scale
-                    - placement.horizontal_scroll_px as f32;
-                let top = block_top + tile_y as f32 * scale - placement.vertical_scroll_px as f32;
+                let left = block_left + tile_x as f32 * scale;
+                let top = block_top + tile_y as f32 * scale;
                 let right = left + tile_width as f32 * scale;
                 let bottom = top + tile_height as f32 * scale;
                 let visible_left = left.max(geometry.clip[0]).max(pane_left);
@@ -9084,7 +9270,11 @@ impl WindowRenderer {
                     self.seat.height,
                     1.0,
                 ));
-                draws.push(MathDraw { tile, first_vertex });
+                draws.push(MathDraw {
+                    tile,
+                    blit,
+                    first_vertex,
+                });
             }
         }
         MathDrawBatch {
@@ -9166,13 +9356,17 @@ impl WindowRenderer {
         };
         let rects = self.peek_box_rects(&layout);
         let fit = (layout.image[2] - layout.image[0]) / overlay.width_px as f32;
+        // A flyout small enough to be shown whole is shown on the grid; one the
+        // box had to shrink is resampled — see [`Blit`].
+        let blit = Blit::of(fit, fit);
+        let (image_left, image_top) = blit.origin(layout.image[0], layout.image[1]);
         let mut draws = Vec::new();
         let mut vertices = Vec::new();
         for tile in tile_geometry {
             let (tile_x, tile_y, tile_width, tile_height) =
                 (tile.x_px, tile.y_px, tile.width_px, tile.height_px);
-            let left = layout.image[0] + tile_x as f32 * fit;
-            let top = layout.image[1] + tile_y as f32 * fit;
+            let left = image_left + tile_x as f32 * fit;
+            let top = image_top + tile_y as f32 * fit;
             let right = left + tile_width as f32 * fit;
             let bottom = top + tile_height as f32 * fit;
             let first_vertex = vertices.len() as u32;
@@ -9189,7 +9383,11 @@ impl WindowRenderer {
                 self.config.height,
                 1.0,
             ));
-            draws.push(MathDraw { tile, first_vertex });
+            draws.push(MathDraw {
+                tile,
+                blit,
+                first_vertex,
+            });
         }
         (rects, draws, vertices)
     }
@@ -9266,13 +9464,20 @@ impl WindowRenderer {
             else {
                 continue;
             };
-            let scale_x = (icon.rect[2] - icon.rect[0]) / icon.width_px.max(1) as f32;
-            let scale_y = (icon.rect[3] - icon.rect[1]) / icon.height_px.max(1) as f32;
+            // **This is the lane a display formula reaches the glass through**,
+            // and where the 2026-09-14 report's minus sign was lost: the block
+            // hands its rectangle down with the raster's own width and height in
+            // it and a top that carries the page's scroll, so the quad is 1:1 and
+            // its `y` is whatever the scroll left behind. [`presented_raster`]
+            // puts that corner back on the grid and says how to sample it.
+            let (blit, rect) = presented_raster(icon.rect, icon.width_px, icon.height_px);
+            let scale_x = (rect[2] - rect[0]) / icon.width_px.max(1) as f32;
+            let scale_y = (rect[3] - rect[1]) / icon.height_px.max(1) as f32;
             for tile in tile_geometry {
                 let (tile_x, tile_y, tile_width, tile_height) =
                     (tile.x_px, tile.y_px, tile.width_px, tile.height_px);
-                let left = icon.rect[0] + tile_x as f32 * scale_x;
-                let top = icon.rect[1] + tile_y as f32 * scale_y;
+                let left = rect[0] + tile_x as f32 * scale_x;
+                let top = rect[1] + tile_y as f32 * scale_y;
                 let tile_rect = [
                     left,
                     top,
@@ -9296,7 +9501,11 @@ impl WindowRenderer {
                     surface_height,
                     icon.opacity,
                 ));
-                draws.push(MathDraw { tile, first_vertex });
+                draws.push(MathDraw {
+                    tile,
+                    blit,
+                    first_vertex,
+                });
             }
         }
         (draws, vertices)
@@ -9358,6 +9567,11 @@ impl WindowRenderer {
                 + image.pan_px[1];
             let scale_x = image.display_width_px as f32 / image.width_px as f32;
             let scale_y = image.display_height_px as f32 / image.height_px as f32;
+            // A picture shown at 100% is shown on the grid — the pan is a float
+            // and would otherwise leave it half a pixel off after a drag. A
+            // zoomed one is resampled, which is what a zoom is. See [`Blit`].
+            let blit = Blit::of(scale_x, scale_y);
+            let (left_inset, top_inset) = blit.origin(left_inset, top_inset);
             let mut draws = Vec::new();
             for tile in tile_geometry {
                 let (tile_x, tile_y, tile_width, tile_height) =
@@ -9378,7 +9592,11 @@ impl WindowRenderer {
                     image.seat.height,
                     1.0,
                 ));
-                draws.push(MathDraw { tile, first_vertex });
+                draws.push(MathDraw {
+                    tile,
+                    blit,
+                    first_vertex,
+                });
             }
             stages.push(PreviewImageStage {
                 seat: image.seat,
@@ -14374,7 +14592,7 @@ fn video_quad_vertices(
 fn create_math_pipeline(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
-) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout, wgpu::Sampler) {
+) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout, MathSamplers) {
     let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("math block texture layout"),
         entries: &[
@@ -14396,15 +14614,12 @@ fn create_math_pipeline(
             },
         ],
     });
-    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("math block scaled sampler"),
-        // Live row-band fitting and same-content DPI relayout both deliberately scale an existing
-        // raster. Linear filtering makes that brief/adaptive preview readable until fresh pixels
-        // atomically replace it.
-        mag_filter: wgpu::FilterMode::Linear,
-        min_filter: wgpu::FilterMode::Linear,
-        ..Default::default()
-    });
+    // Two, not one — see [`Blit`]. Live row-band fitting and same-content DPI relayout both
+    // deliberately scale an existing raster, and linear filtering makes that brief/adaptive
+    // preview readable until fresh pixels atomically replace it. A raster presented at its own
+    // size is not that case and must not be resampled at all, which is what the nearest one is
+    // for.
+    let samplers = MathSamplers::create(device);
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("math block shader"),
         source: wgpu::ShaderSource::Wgsl(include_str!("math.wgsl").into()),
@@ -14613,7 +14828,7 @@ fn create_background_pipeline(
         multiview_mask: None,
         cache: None,
     });
-    (pipeline, bind_group_layout, sampler)
+    (pipeline, bind_group_layout, samplers)
 }
 
 /// The six vertices of the ground quad, covering the whole surface.
@@ -22596,6 +22811,214 @@ mod tests {
         // the raster's own alpha and nothing else.
         let opaque = math_quad_vertices(0.0, 0.0, 10.0, 10.0, 0.0, 0.0, 1.0, 1.0, 100, 100, 1.0);
         assert!(opaque.iter().all(|vertex| vertex.opacity == 1.0));
+    }
+
+    /// Where the centre of every device-pixel row a quad covers lands inside the
+    /// texture, measured in texels, read back out of the vertices the pass
+    /// actually uploads.
+    ///
+    /// The round trip through NDC is the point: this is the arithmetic the GPU
+    /// does, so a rule that holds here holds on the glass. A texel coordinate
+    /// ending in `.5` is a texel *centre* — the sample returns that texel and
+    /// nothing else, whichever filter is bound. One ending in `.0` is the seam
+    /// between two texels, where a bilinear sampler returns half of each.
+    fn texel_rows(rect: [f32; 4], height_px: u32, viewport: (u32, u32)) -> Vec<f32> {
+        let vertices = math_quad_vertices(
+            rect[0], rect[1], rect[2], rect[3], 0.0, 0.0, 1.0, 1.0, viewport.0, viewport.1, 1.0,
+        );
+        let device_y = |ndc: f32| (1.0 - ndc) / 2.0 * viewport.1 as f32;
+        // `math_quad_vertices` emits the top-left corner first and the
+        // bottom-left second — see its own body.
+        let (top, bottom) = (
+            device_y(vertices[0].position[1]),
+            device_y(vertices[1].position[1]),
+        );
+        let (v_top, v_bottom) = (vertices[0].uv[1], vertices[1].uv[1]);
+        let mut rows = Vec::new();
+        let mut row = top.floor() as i64;
+        loop {
+            let centre = row as f32 + 0.5;
+            if centre >= bottom {
+                break;
+            }
+            if centre > top {
+                let along = (centre - top) / (bottom - top);
+                rows.push((v_top + along * (v_bottom - v_top)) * height_px as f32);
+            }
+            row += 1;
+        }
+        rows
+    }
+
+    /// PIN (T-MATH-BLIT-SNAP): **a raster shown at its own size is shown on the
+    /// pixel grid**, wherever the fractional `y` came from.
+    ///
+    /// The 2026-09-14 report: in a display formula on a Mac at 1× the unary
+    /// minus of `\exp\!\left(-\frac{(x-\mu)^2}{2\sigma^2}\right)` was not on the
+    /// glass while the binary minus of `x-\mu` was, and both were on Windows at a
+    /// higher scale. A probe on that machine proved the typesetter drew both into
+    /// the raster, so the loss was in the blit: at 1× a minus is one device pixel
+    /// of ink, and one pixel of ink resampled across a half-pixel offset is two
+    /// rows at half strength, which against the page's ground is nothing. The
+    /// fraction bar and the letters survived because they are several pixels
+    /// thick and lose only their edges.
+    ///
+    /// MUTATIONS: return the rectangle unrounded from [`Blit::origin`] and the
+    /// quarter- and half-pixel cases come back; round the size as well as the
+    /// corner and a raster one pixel wider than itself stretches; snap the
+    /// scaled case too and a zoomed preview jumps half a pixel on every frame
+    /// of the zoom.
+    #[test]
+    fn a_formula_shown_at_its_own_size_is_placed_on_the_pixel_grid() {
+        let (width_px, height_px) = (317_u32, 42_u32);
+        for fraction in [0.0_f32, 0.25, 0.5, 0.75] {
+            // Where the block's arithmetic put it: a column inset that is already
+            // rounded (`preview::markdown_measure_box`) and a top carrying the
+            // page's scroll, which is not.
+            let top = 340.0 + fraction;
+            let asked = [96.0, top, 96.0 + width_px as f32, top + height_px as f32];
+            let (blit, rect) = presented_raster(asked, width_px, height_px);
+            assert_eq!(
+                blit,
+                Blit::OneToOne,
+                "the quad measures the raster, so it is a 1:1 blit at y={top}"
+            );
+            assert_eq!(rect[0], rect[0].round(), "x on the grid at y={top}");
+            assert_eq!(rect[1], rect[1].round(), "y on the grid at y={top}");
+            assert!(
+                (rect[1] - top).abs() <= 0.5,
+                "and never further than half a pixel from where the layout asked: {} vs {top}",
+                rect[1],
+            );
+            assert_eq!(
+                (rect[2] - rect[0], rect[3] - rect[1]),
+                (width_px as f32, height_px as f32),
+                "the size is the raster's own, untouched, at y={top}",
+            );
+        }
+    }
+
+    /// The other half of the rule: a quad that is **not** its raster's size is
+    /// left exactly where its lane put it and keeps the size that lane chose.
+    /// Snapping it would be this renderer overruling a zoom, and a scaled blit
+    /// is being resampled anyway.
+    #[test]
+    fn a_scaled_formula_keeps_the_size_its_lane_asked_for() {
+        let (width_px, height_px) = (200_u32, 30_u32);
+        let asked = [12.5, 340.25, 12.5 + 300.0, 340.25 + 45.0];
+        let (blit, rect) = presented_raster(asked, width_px, height_px);
+        assert_eq!(blit, Blit::Scaled, "1.5× is a resample");
+        assert_eq!(
+            rect, asked,
+            "and a resample is drawn where it was asked for"
+        );
+        assert_eq!(
+            (rect[2] - rect[0], rect[3] - rect[1]),
+            (300.0, 45.0),
+            "at the size the zoom asked for, not the raster's",
+        );
+    }
+
+    /// PIN: **a one-pixel stroke through the 1:1 path keeps all of its ink.**
+    ///
+    /// Read off the vertices the pass uploads: every device-pixel row the snapped
+    /// quad covers lands on a texel *centre*, so each row of the raster is
+    /// returned by exactly one row of device pixels at full strength — a minus
+    /// sign one texel tall arrives one pixel tall and opaque. The same
+    /// arithmetic on the rectangle the layout asked for puts every row on a
+    /// texel *seam*, where a bilinear sampler mixes two texels half and half:
+    /// that is the report, computed.
+    #[test]
+    fn a_one_to_one_blit_samples_texel_centres() {
+        let (width_px, height_px) = (317_u32, 42_u32);
+        let viewport = (1280_u32, 800_u32);
+        let asked = [
+            96.0,
+            340.5,
+            96.0 + width_px as f32,
+            340.5 + height_px as f32,
+        ];
+        let (_, snapped) = presented_raster(asked, width_px, height_px);
+
+        let rows = texel_rows(snapped, height_px, viewport);
+        assert_eq!(
+            rows.len(),
+            height_px as usize,
+            "one device row per texel row"
+        );
+        for (index, texel) in rows.iter().enumerate() {
+            let offset = texel - (index as f32 + 0.5);
+            assert!(
+                offset.abs() < 1e-3,
+                "row {index} samples texel {texel}, which is {offset} off the centre it must hit",
+            );
+        }
+
+        let blurred = texel_rows(asked, height_px, viewport);
+        assert!(!blurred.is_empty());
+        for texel in &blurred {
+            assert!(
+                (texel - texel.round()).abs() < 1e-3,
+                "the half-pixel placement the report was made on puts every row on a texel seam, \
+                 where one row of ink comes out as two at half strength — but {texel} is not one",
+            );
+        }
+    }
+
+    /// The snap is taken in **device** space, after the scroll has been spent —
+    /// so a preview scrolled by fractions of a pixel (`wheel_travel`'s
+    /// `PixelDelta` arm, which is every macOS trackpad) never leaves a formula
+    /// resampled. The raster steps a whole pixel at a time while the prose around
+    /// it slides continuously; the alternative is a document-space snap, which is
+    /// a fractional `y` on the glass again and the bug back.
+    #[test]
+    fn scrolling_by_fractions_never_takes_a_formula_off_the_grid() {
+        let (width_px, height_px) = (317_u32, 42_u32);
+        let document_top = 940.0_f32;
+        let mut previous: Option<f32> = None;
+        for step in 0..17 {
+            let scroll = step as f32 * 0.125;
+            let top = document_top - scroll;
+            let asked = [96.0, top, 96.0 + width_px as f32, top + height_px as f32];
+            let (blit, rect) = presented_raster(asked, width_px, height_px);
+            assert_eq!(blit, Blit::OneToOne);
+            assert_eq!(rect[1], rect[1].round(), "on the grid at scroll {scroll}");
+            assert_eq!(
+                rect[3] - rect[1],
+                height_px as f32,
+                "and the same height at every offset, so nothing squashes as it travels",
+            );
+            if let Some(previous) = previous {
+                assert!(
+                    previous - rect[1] <= 1.0 && rect[1] <= previous,
+                    "a formula scrolled up moves up, by whole pixels: {previous} then {}",
+                    rect[1],
+                );
+            }
+            previous = Some(rect[1]);
+        }
+    }
+
+    /// The sampler that goes with each blit, and the index the tile's two bind
+    /// groups and [`MathSamplers`] are both built and read by. One table: an
+    /// index that means one thing when the groups are made and another when they
+    /// are bound is a formula drawn through the wrong filter with nothing on
+    /// screen to say so.
+    #[test]
+    fn each_blit_picks_its_own_filter() {
+        assert_eq!(
+            Blit::OneToOne.filter(),
+            wgpu::FilterMode::Nearest,
+            "a raster on the grid is not resampled at all",
+        );
+        assert_eq!(
+            Blit::Scaled.filter(),
+            wgpu::FilterMode::Linear,
+            "and a resample is smooth, which is what the scaled case was always for",
+        );
+        for blit in Blit::ALL {
+            assert_eq!(Blit::ALL[blit.index()], blit, "{blit:?} indexes itself");
+        }
     }
 
     /// The advance of each glyph of `text`, shaped the way the chrome shapes it.
