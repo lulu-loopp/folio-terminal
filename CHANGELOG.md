@@ -77,6 +77,8 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- Inline integrals and sums now match the terminal font size and fit within their line on shorter line spacing.
+
 - **Two formulas on one line no longer take each other's place away when the
   window is narrow.** A line carrying `$…$` twice was typeset whole at a wide
   window and printed as source at a narrow one: the two formulas are worked out

@@ -3164,6 +3164,7 @@ mod tests {
             layout: LayoutKey {
                 width_cells: nz32(80),
                 dpi_milli: nz32(1000),
+                font_size_subpixels: 16 * 1024,
                 font_rev: 1,
                 theme_rev: 1,
                 lang_rev: 0,

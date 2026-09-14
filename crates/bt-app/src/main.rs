@@ -33906,6 +33906,7 @@ fn create_leaf_session(
     );
     session.set_cell_width_subpixels(cell_width_subpixels(renderer.metrics()));
     session.set_ascii_baseline_subpixels(renderer.metrics().ascii_baseline_subpixels());
+    session.set_font_size_subpixels(renderer.metrics().font_size_subpixels());
     session.set_math_layout_options(MathLayoutOptions {
         detect_image_paths: true,
         block_max_height_px: block_max_height_px(formulas.max_height),
@@ -33919,6 +33920,7 @@ fn create_leaf_session(
     session.set_layout_key(window_layout_key(
         columns,
         renderer.metrics().dpi_milli(),
+        renderer.metrics().font_size_subpixels(),
         1,
         line_wrapping,
     ));
@@ -51341,6 +51343,8 @@ impl Runtime<'_> {
                     .set_cell_width_subpixels(cell_width_subpixels(metrics));
                 leaf.session
                     .set_ascii_baseline_subpixels(metrics.ascii_baseline_subpixels());
+                leaf.session
+                    .set_font_size_subpixels(metrics.font_size_subpixels());
             }
         }
         let physical = self.window.window.inner_size();
@@ -96245,6 +96249,7 @@ impl Runtime<'_> {
                 leaf.session.set_layout_key(window_layout_key(
                     nonzero_u32(leaf.grid.columns.get()),
                     dpi_milli,
+                    self.window.renderer.metrics().font_size_subpixels(),
                     font_rev,
                     line_wrapping,
                 ));
@@ -96278,6 +96283,8 @@ impl Runtime<'_> {
                     .set_cell_width_subpixels(cell_width_subpixels(metrics));
                 leaf.session
                     .set_ascii_baseline_subpixels(metrics.ascii_baseline_subpixels());
+                leaf.session
+                    .set_font_size_subpixels(metrics.font_size_subpixels());
             }
         }
         // **And every page this window hosts** (§7.8 ⑨). The same sentence, said
@@ -110586,12 +110593,14 @@ fn no_program_banner(requested: usize) -> String {
 fn window_layout_key(
     width_cells: NonZeroU32,
     dpi_milli: NonZeroU32,
+    font_size_subpixels: NonZeroI64,
     font_rev: u64,
     line_wrapping: bool,
 ) -> LayoutKey {
     LayoutKey {
         width_cells,
         dpi_milli,
+        font_size_subpixels: font_size_subpixels.get(),
         font_rev,
         theme_rev: theme_revision(),
         lang_rev: i18n::lang_revision(),
@@ -115162,12 +115171,14 @@ mod tests {
         let key = super::window_layout_key(
             NonZeroU32::new(80).unwrap(),
             NonZeroU32::new(1000).unwrap(),
+            NonZeroI64::new(20 * 1024).unwrap(),
             7,
             true,
         );
         assert_eq!(key.width_cells.get(), 80);
         assert_eq!(key.dpi_milli.get(), 1000);
         assert_eq!(key.font_rev, 7);
+        assert_eq!(key.font_size_subpixels, 20 * 1024);
         assert_eq!(key.theme_rev, bt_render::theme_revision());
         assert_eq!(key.lang_rev, i18n::lang_revision());
     }
@@ -128666,6 +128677,7 @@ mod tests {
         harness.session.set_layout_key(bt_doc::LayoutKey {
             width_cells: NonZeroU32::new(52).unwrap(),
             dpi_milli: NonZeroU32::new(800).unwrap(),
+            font_size_subpixels: 16 * 1024,
             font_rev: 1,
             theme_rev: harness.session.layout_key().theme_rev,
             lang_rev: harness.session.layout_key().lang_rev,

@@ -1664,6 +1664,7 @@ impl DualPlaneSession {
             layout_key: LayoutKey {
                 width_cells: columns,
                 dpi_milli: NonZeroU32::new(1000).unwrap(),
+                font_size_subpixels: 16 * 1024,
                 font_rev: 1,
                 theme_rev: 1,
                 lang_rev: 0,
@@ -2024,6 +2025,14 @@ impl DualPlaneSession {
 
     pub fn set_cell_width_subpixels(&mut self, cell_width_subpixels: NonZeroI64) {
         self.cell_width_subpixels = cell_width_subpixels;
+    }
+
+    /// Change the physical pane em and invalidate both resident and in-flight math layouts.
+    pub fn set_font_size_subpixels(&mut self, font_size_subpixels: NonZeroI64) {
+        self.set_layout_key(LayoutKey {
+            font_size_subpixels: font_size_subpixels.get(),
+            ..self.layout_key
+        });
     }
 
     fn display_math_left_inset_subpixels(&self) -> i64 {
@@ -11279,12 +11288,7 @@ pub fn render_detection_task(
             cell_height_subpixels: task.cell_height_subpixels,
             ascii_baseline_subpixels: task.ascii_baseline_subpixels,
         },
-        MathRenderKey {
-            dpi_milli: task.versions.layout.dpi_milli,
-            font_milli_pt: NonZeroU32::new(12_000).expect("12 pt is non-zero"),
-            foreground_rgb,
-            mode: task.span.mode,
-        },
+        terminal_math_render_key(task.versions.layout, foreground_rgb, task.span.mode)?,
     )
 }
 
@@ -11325,13 +11329,31 @@ pub fn render_live_detection_task(
             cell_height_subpixels: task.cell_height_subpixels,
             ascii_baseline_subpixels: task.ascii_baseline_subpixels,
         },
-        MathRenderKey {
-            dpi_milli: task.layout.dpi_milli,
+        terminal_math_render_key(task.layout, foreground_rgb, task.span.mode)?,
+    )
+}
+
+/// Inline mathematics shares the pane's physical em. Display keeps its band-scaled 12 pt.
+fn terminal_math_render_key(
+    layout: LayoutKey,
+    foreground_rgb: [u8; 3],
+    mode: MathMode,
+) -> Result<MathRenderKey, MathRenderError> {
+    if mode == MathMode::Inline {
+        bt_math::key_for_em_px(
+            layout.font_size_subpixels as f32 / SUBPIXELS_PER_PX as f32,
+            foreground_rgb,
+            mode,
+        )
+        .ok_or(MathRenderError::InlineGeometry)
+    } else {
+        Ok(MathRenderKey {
+            dpi_milli: layout.dpi_milli,
             font_milli_pt: NonZeroU32::new(12_000).expect("12 pt is non-zero"),
             foreground_rgb,
-            mode: task.span.mode,
-        },
-    )
+            mode,
+        })
+    }
 }
 
 /// A proven table's answer from the worker: the block, and no picture.
@@ -11363,8 +11385,8 @@ fn unrendered_table_raster() -> MathRaster {
 
 /// The grid a run is being typeset into: the width its line folds at, and the box one cell is.
 ///
-/// One value because they are one fact and are always read together — an inline picture sits on
-/// the text baseline of a cell of this size, on a row this many columns wide.
+/// One value because they are one fact and are always read together: the row owns the ink box,
+/// and its ASCII baseline supplies the preferred alignment and the composite anchor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct InlineGridGeometry {
     pane_columns: u32,
@@ -11419,7 +11441,8 @@ fn render_task_math(
     // An *engine* error is deliberately not per-run: a source that does not compile is a fact
     // worth telling the user about, and it surfaces as this record's failure reason.
     let mut rendered = Vec::with_capacity(span.inline_runs.len());
-    let mut baseline_px = 0_u32;
+    let baseline_px = (terminal_baseline_subpixels / SUBPIXELS_PER_PX) as u32;
+    let row_height_px = baseline_px + (terminal_descent_subpixels / SUBPIXELS_PER_PX) as u32;
     let mut render_time = Duration::ZERO;
     let pane_columns = pane_columns.max(1) as usize;
     for (index, run) in span.inline_runs.iter().enumerate() {
@@ -11451,7 +11474,7 @@ fn render_task_math(
         if raster.width_px > available_px.max(1) {
             continue;
         }
-        baseline_px = baseline_px.max(raster.baseline_px.ceil().max(0.0) as u32);
+
         render_time = render_time.saturating_add(raster.render_time);
         let x = (column as f32 * cell_width_px).round().max(0.0) as u32;
         let run_index = u32::try_from(index).map_err(|_| MathRenderError::InlineGeometry)?;
@@ -11467,9 +11490,7 @@ fn render_task_math(
     let height_px = rendered
         .iter()
         .map(|(_, _, raster)| {
-            baseline_px
-                .saturating_sub(raster.baseline_px.ceil().max(0.0) as u32)
-                .saturating_add(raster.height_px)
+            inline_run_top(raster, baseline_px, row_height_px).saturating_add(raster.height_px)
         })
         .max()
         .ok_or(MathRenderError::InlineGeometry)?;
@@ -11488,7 +11509,7 @@ fn render_task_math(
     let mut rgba = vec![0_u8; len];
     let mut inline_runs = Vec::with_capacity(rendered.len());
     for (run, x, raster) in rendered {
-        let y = baseline_px.saturating_sub(raster.baseline_px.ceil().max(0.0) as u32);
+        let y = inline_run_top(&raster, baseline_px, row_height_px);
         for row in 0..raster.height_px {
             let source_start = row as usize * raster.width_px as usize * 4;
             let source_end = source_start + raster.width_px as usize * 4;
@@ -11515,83 +11536,51 @@ fn render_task_math(
     })
 }
 
-/// How far an inline run may be shrunk to sit on the text baseline before shrinking stops helping.
+/// How far an inline run may shrink from the pane em to fit its row before readability is lost.
 ///
 /// The same half-size floor display math stops at, and for the same reason: past it the formula is
 /// no longer being made to fit, it is being made unreadable, and unreadable typesetting is worth
 /// less than the honest source text the run falls back to.
 const INLINE_READABLE_FLOOR_MILLI: u32 = 500;
 
-/// The ascent and descent a run actually contributes to a composite, in whole pixels.
+/// The whole-pixel ascent and descent of an already positioned composite.
 ///
-/// A raster is blitted at an integer row offset — there is no such thing as half a row of pixels —
-/// so the composite aligns every run on a *whole-pixel* baseline, its own baseline rounded up.
-/// That rounded value, not the fractional one Typst reports, is the ascent the run occupies and the
-/// number every fit decision has to be made against.
-///
-/// Measuring the fit against the fractional baseline and then assembling against the rounded one is
-/// not a rounding nicety, it is a contradiction, and it had a very specific symptom: a fit that
-/// shrinks a run to land exactly on its ascent budget produces a baseline like 29.67 against a
-/// budget of 29, `ceil` takes it to 30, and the composite rejects the run for overflowing a box the
-/// run had just been fitted into. On a real 192-DPI window that silently cost every formula whose
-/// ascent was the binding constraint — `$E = mc^2$`, `$x^2$`, `$\hat{m}_t$`, `$\int_0^1$` and a
-/// whole line's `$\alpha+\beta$` and `$\rho$` with it — while the descent-bound `$\frac{a}{b}$` and
-/// `$\sum_i$` beside them rendered perfectly. One function now answers the question for the fit and
-/// for the assembly alike, so the two cannot disagree again.
+/// The renderer aligns this anchor with its measured ASCII baseline. Round ascent upward here
+/// so accepting the box cannot later place a fractional pixel outside the row. Individual runs
+/// are positioned within that box by `inline_run_top` before this final containment check.
 fn inline_run_box(height_px: u32, baseline_px: f32) -> (u32, u32) {
     let ascent_px = baseline_px.ceil().max(0.0) as u32;
     (ascent_px, height_px.saturating_sub(ascent_px))
 }
 
-/// The font scale, in per-mille, at which this raster's ink would sit inside the line box.
-///
-/// Both halves of the box are budgeted separately because the run is *baseline-anchored*: whatever
-/// is above the baseline has the row's ascent to live in and whatever is below has its descent, and
-/// there is no trading one for the other without the formula ceasing to sit on the same line as the
-/// text around it. The binding constraint is whichever half is tighter, and for real mathematics it
-/// is almost always the descent — a `\frac` puts a third of its ink below the baseline where a line
-/// of text keeps barely a fifth of its height.
+/// Keep the ASCII baseline when possible, otherwise move the ink just enough to stay in its row.
+fn inline_run_top(raster: &MathRaster, baseline_px: u32, row_height_px: u32) -> u32 {
+    baseline_px
+        .saturating_sub(raster.baseline_px.ceil().max(0.0) as u32)
+        .min(row_height_px.saturating_sub(raster.height_px))
+}
+
+/// Fit the complete ink height into the row. The baseline split is a placement preference,
+/// not a reason to shrink: a subscript may borrow unused ascent without crossing a row boundary.
+/// Whole-pixel budgets match the compositor, including fractional ASCII baseline measurements.
 fn inline_fit_milli(
     raster: &MathRaster,
     terminal_ascent_subpixels: i64,
     terminal_descent_subpixels: i64,
 ) -> u32 {
-    // The budgets are whole pixels because the composite's baseline is whole pixels: a run's ascent
-    // inside it is `ceil(baseline)`, so the largest ascent that can fit a budget is that budget's
-    // floor. Asking for anything finer is asking for a precision the assembly does not have.
-    let budget_px = |subpixels: i64| (subpixels.max(0) / SUBPIXELS_PER_PX) as f32;
-    // The *current* metrics are read fractionally rather than rounded, and that asymmetry is the
-    // point. Comparing a rounded 30 against a budget of 29 says "shrink by 3%", and 3% of a raster
-    // whose true baseline is 29.81 leaves it at 28.9 — which is right, but only by luck. Comparing
-    // the rounded value when the true one is 29.05 says the same 3% and lands at 28.2, overshooting
-    // badly; and where the overshoot is genuinely under a pixel the rounded comparison can ask for
-    // a shrink so small that `ceil` does not move at all, which is exactly how `$\hat{m}_t$` and
-    // `$\int_0^1$` crawled through every attempt they were given and fell back to source text on a
-    // 192-DPI screen while every formula around them typeset. Aiming the fractional baseline at the
-    // integer budget aims *past* the rounding instead of into it.
-    let ratio = |ink_px: f32, budget_px: f32| -> f32 {
-        if ink_px <= 0.0 {
-            1.0
-        } else {
-            budget_px / ink_px
-        }
-    };
-    let ascent_px = raster.baseline_px.max(0.0);
-    let descent_px = (raster.height_px as f32 - raster.baseline_px).max(0.0);
-    let factor = ratio(ascent_px, budget_px(terminal_ascent_subpixels))
-        .min(ratio(descent_px, budget_px(terminal_descent_subpixels)))
-        .min(1.0);
-    ((factor * 1000.0).floor() as i64).clamp(0, 1000) as u32
+    let height_px = terminal_ascent_subpixels.max(0) / SUBPIXELS_PER_PX
+        + terminal_descent_subpixels.max(0) / SUBPIXELS_PER_PX;
+    (height_px.saturating_mul(1000) / i64::from(raster.height_px.max(1))).clamp(0, 1000) as u32
 }
 
-/// Render one inline run at the largest size that still lets it sit on the text baseline.
+/// Render one inline run at the largest size that fits the full row, down to half the pane em.
 ///
 /// Shrinking rather than rejecting is the whole point. The gate this replaces was a straight
 /// accept-or-fall-back on the natural size, which meant every construction taller than a line box —
 /// `\frac`, `\sum_i`, `\hat{m}_t`, anything with a subscript under a descender — silently stayed
 /// source text no matter how nearly it fit. Shrinking to the line box is the inline sibling of the
 /// readable scaling display math already does to fit its band; the only difference is what the
-/// budget is made of, a width there and the row's own ascent and descent here.
+/// budget is made of, a width there and the row's full height here.
 ///
 /// The size is re-rendered rather than the raster resampled, because a formula scaled by the
 /// rasterizer is a formula whose stems and fraction bars land between pixels. Typst is asked for
@@ -11623,12 +11612,11 @@ fn render_inline_run_fitted(
     /// are kept together because one bounds the work and the other aims it.
     const MIN_STEP_MILLI: u32 = 20;
     let fits = |raster: &MathRaster| {
-        baseline_box_fits(
-            raster.height_px,
-            raster.baseline_px,
+        inline_fit_milli(
+            raster,
             terminal_ascent_subpixels,
             terminal_descent_subpixels,
-        )
+        ) == 1000
     };
     let mut raster = engine.render(source, key)?;
     let mut applied_milli = 1000_u32;
@@ -15033,6 +15021,7 @@ mod tests {
         let layout = LayoutKey {
             width_cells: nz(80),
             dpi_milli: nz(1000),
+            font_size_subpixels: 16 * 1024,
             font_rev: 1,
             theme_rev: 1,
             lang_rev: 0,
@@ -15075,10 +15064,11 @@ mod tests {
     }
 
     #[test]
-    fn inline_fit_uses_the_terminal_baseline_not_total_ink_height() {
+    fn an_inline_composite_anchor_must_fit_the_terminal_baseline_split() {
         let height_px = 18;
         let math_baseline_px = 14.0;
-        // Total ink exactly fits the 18 px row, so the old height-only check accepted it.
+        // Once composited, the anchor is fixed: a height-only check cannot validate it.
+        // Individual runs may shift before assembly; the assembled picture may not overflow.
         assert!(!baseline_box_fits(
             height_px,
             math_baseline_px,
@@ -15487,6 +15477,7 @@ mod tests {
         session.set_layout_key(LayoutKey {
             width_cells: columns,
             dpi_milli,
+            font_size_subpixels: 16 * 1024,
             font_rev: 1,
             theme_rev,
             lang_rev,
@@ -15923,6 +15914,7 @@ mod tests {
         session.set_layout_key(LayoutKey {
             width_cells: nz(52),
             dpi_milli: nz(800),
+            font_size_subpixels: 16 * 1024,
             font_rev: 1,
             theme_rev: session.layout_key().theme_rev,
             lang_rev: session.layout_key().lang_rev,
@@ -16007,6 +15999,7 @@ mod tests {
             session.set_layout_key(LayoutKey {
                 width_cells: nz(40),
                 dpi_milli: start_dpi,
+                font_size_subpixels: 16 * 1024,
                 font_rev: 1,
                 theme_rev: session.layout_key().theme_rev,
                 lang_rev: session.layout_key().lang_rev,
@@ -16102,6 +16095,7 @@ mod tests {
             session.set_layout_key(LayoutKey {
                 width_cells: nz(40),
                 dpi_milli: start_dpi,
+                font_size_subpixels: 16 * 1024,
                 font_rev: 1,
                 theme_rev: session.layout_key().theme_rev,
                 lang_rev: session.layout_key().lang_rev,
@@ -27264,10 +27258,11 @@ mod tests {
     }
 
     /// Terminal cell metrics an inline formula can actually be placed in: a 24 px line box with a
-    /// 19 px ASCII baseline and 12 px cells. Inline rendering is baseline-anchored and refuses
+    /// 19 px ASCII baseline, 12 px cells and an explicit 20 px pane em. Inline rendering refuses
     /// outright without a measured baseline, so a session left at the constructor's defaults can
     /// never produce an inline block whatever the detector proves.
     fn seat_inline_metrics(session: &mut DualPlaneSession) {
+        session.set_font_size_subpixels(NonZeroI64::new(20 * SUBPIXELS_PER_PX).unwrap());
         session.set_cell_height_subpixels(NonZeroI64::new(24 * SUBPIXELS_PER_PX).unwrap());
         session.set_cell_width_subpixels(NonZeroI64::new(12 * SUBPIXELS_PER_PX).unwrap());
         session.set_ascii_baseline_subpixels(NonZeroI64::new(19 * SUBPIXELS_PER_PX).unwrap());
@@ -27578,14 +27573,25 @@ mod tests {
         );
     }
 
-    /// PIN (§4.6c): the same sentence reads the same at every pane width.
+    /// Measure the unchanged formula on a wide pane, independently of any fold through its source.
+    /// Its opening delimiter is at column 39, and the fixture uses 12px cells and a 20px pane em.
+    fn wrapped_inline_minimum_columns() -> u32 {
+        let session = wrapped_inline_session(95);
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let blocks = rendered_inline_blocks(&frame);
+        assert_eq!(blocks.len(), 1, "the wide reference must typeset");
+        39 + blocks[0].artifact.width_px.div_ceil(12)
+    }
+
+    /// PIN (§4.6c): the same sentence reads the same at every pane width that holds its picture.
     ///
-    /// The band starts at 54 because that is where the picture stops fitting in the cells its own
-    /// source occupies on the row it is drawn on — the width rule doing its job, with the source
-    /// left standing. Above it there is no width at which this sentence is anything but a picture.
+    /// Retuned for T-MATH-INLINE-EM: the old 54-column cutoff was measured at an implicit 12pt
+    /// size. Read the actual 20px-em picture's width on a wide pane, then sweep every column from
+    /// its exact fit boundary through 95. A fold must not alter that picture or leave delimiters.
     #[test]
     fn a_wrapped_inline_run_is_a_picture_at_every_pane_width_that_can_hold_it() {
-        for columns in 54..=95u32 {
+        for columns in wrapped_inline_minimum_columns()..=95u32 {
             let session = wrapped_inline_session(columns);
             let mut projection = session.new_projection(session.layout_key());
             let frame = session.viewport_frame(&mut projection).unwrap();
@@ -27654,6 +27660,8 @@ mod tests {
 
     /// PIN (§4.6c): the fold cannot lend a picture room the pane has not got.
     ///
+    /// Retuned for T-MATH-INLINE-EM: also test the column immediately below the wide reference
+    /// picture's fit boundary at the explicit 20px em. Keep the original 50-column refusal too.
     /// At 50 columns the run begins at column 39 with eleven cells left on that row, and the
     /// picture is wider than that. Reading the whole source's width as the budget — which is right
     /// when nothing is folded and wrong the moment something is — would draw it over the pane's
@@ -27661,18 +27669,25 @@ mod tests {
     /// given.
     #[test]
     fn a_split_run_whose_picture_outgrows_its_own_row_keeps_its_source() {
-        let session = wrapped_inline_session(50);
-        let mut projection = session.new_projection(session.layout_key());
-        let frame = session.viewport_frame(&mut projection).unwrap();
+        let minimum = wrapped_inline_minimum_columns();
         assert!(
-            rendered_inline_blocks(&frame).is_empty(),
-            "a picture that does not fit the row it would be drawn on is not drawn"
+            minimum > 50,
+            "the original narrow fixture must still be too small"
         );
-        assert_eq!(
-            frame.cells.iter().filter(|cell| cell.text == "$").count(),
-            2,
-            "and its source is left standing, both delimiters included"
-        );
+        for columns in [50, minimum - 1] {
+            let session = wrapped_inline_session(columns);
+            let mut projection = session.new_projection(session.layout_key());
+            let frame = session.viewport_frame(&mut projection).unwrap();
+            assert!(
+                rendered_inline_blocks(&frame).is_empty(),
+                "a picture that does not fit the row it would be drawn on is not drawn"
+            );
+            assert_eq!(
+                frame.cells.iter().filter(|cell| cell.text == "$").count(),
+                2,
+                "and its source is left standing, both delimiters included"
+            );
+        }
     }
 
     /// Two formulas on one logical line, with text between them for the fold to fall in.
@@ -28286,36 +28301,224 @@ mod tests {
         );
     }
 
-    /// PIN: the fit converges on the geometry a real 192-DPI window actually has.
+    /// Physical em is independent of DPI metadata; display math retains its band key.
+    #[test]
+    fn terminal_inline_keys_use_physical_em_and_display_keys_keep_twelve_points() {
+        let session = DualPlaneSession::new(nz(80), nz(8));
+        for dpi in [1000, 1250, 2000] {
+            let layout = LayoutKey {
+                dpi_milli: nz(dpi),
+                font_size_subpixels: 26 * SUBPIXELS_PER_PX,
+                ..session.layout_key()
+            };
+            assert_eq!(
+                terminal_math_render_key(layout, [220; 3], MathMode::Inline).unwrap(),
+                bt_math::key_for_em_px(26.0, [220; 3], MathMode::Inline).unwrap()
+            );
+            let display = terminal_math_render_key(layout, [220; 3], MathMode::Display).unwrap();
+            assert_eq!(display.dpi_milli.get(), dpi);
+            assert_eq!(display.font_milli_pt.get(), 12_000);
+        }
+    }
+
+    /// An em change alone must queue a new raster and reject an answer for the previous em.
+    /// Cell dimensions, DPI, source bytes and font_rev stay fixed, so none can mask this test.
+    #[test]
+    fn a_pane_em_change_rekeys_live_and_frozen_inline_math() {
+        let started = Instant::now();
+        let engine = MathEngine::new();
+        let mut session = DualPlaneSession::new(nz(80), nz(8));
+        seat_inline_metrics(&mut session);
+        session.set_cell_height_subpixels(NonZeroI64::new(40 * SUBPIXELS_PER_PX).unwrap());
+        session.set_ascii_baseline_subpixels(NonZeroI64::new(30 * SUBPIXELS_PER_PX).unwrap());
+        session
+            .feed_at(
+                b"\x1b]133;A\x07>\x1b]133;B\x07show\x1b]133;C\x07\r\n$x$\r\n",
+                started,
+            )
+            .unwrap();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(complete_live_math_for_real(&mut session), 1);
+        let base_layout = session.layout_key();
+        session.set_font_size_subpixels(NonZeroI64::new(26 * SUBPIXELS_PER_PX).unwrap());
+        let mut stale = session
+            .take_live_worker_task()
+            .expect("em change queues live relayout");
+        assert_eq!(stale.layout.font_size_subpixels, 26 * SUBPIXELS_PER_PX);
+        let stale_result = render_live_detection_task(&engine, &mut stale, [220; 3]);
+        session.set_font_size_subpixels(NonZeroI64::new(20 * SUBPIXELS_PER_PX).unwrap());
+        assert!(!session.complete_live_worker_result(stale, stale_result));
+        assert_eq!(session.layout_key(), base_layout);
+        complete_live_math_for_real(&mut session);
+        session.set_font_size_subpixels(NonZeroI64::new(26 * SUBPIXELS_PER_PX).unwrap());
+        assert_eq!(complete_live_math_for_real(&mut session), 1);
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let blocks = rendered_inline_blocks(&frame);
+        assert_eq!(blocks.len(), 1);
+        let at_26 = engine
+            .render(
+                "x",
+                bt_math::key_for_em_px(26.0, [220; 3], MathMode::Inline).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(blocks[0].artifact.width_px, at_26.width_px);
+        let key_at_26 = blocks[0].artifact.key.clone();
+        session
+            .feed_at(b"p\r\np\r\np\r\np\r\np\r\np\r\np\r\np\r\n", started)
+            .unwrap();
+        complete_frozen_math_for_real(&mut session);
+        session.set_font_size_subpixels(NonZeroI64::new(20 * SUBPIXELS_PER_PX).unwrap());
+        assert!(complete_frozen_math_for_real(&mut session) >= 1);
+        let mut projection = session.new_projection(session.layout_key());
+        session.refresh_projection(&mut projection);
+        let _ = session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_to_top();
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let blocks = rendered_inline_blocks(&frame);
+        assert_eq!(blocks.len(), 1);
+        let at_20 = engine
+            .render(
+                "x",
+                bt_math::key_for_em_px(20.0, [220; 3], MathMode::Inline).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(blocks[0].artifact.width_px, at_20.width_px);
+        assert_ne!(at_20.width_px, at_26.width_px);
+        assert_ne!(blocks[0].artifact.key, key_at_26);
+        session.set_font_size_subpixels(NonZeroI64::new(20 * SUBPIXELS_PER_PX).unwrap());
+        assert!(
+            session.take_worker_task().is_none(),
+            "unchanged em does not requeue frozen math"
+        );
+    }
+
+    /// T-MATH-INLINE-EM: identical command bytes must typeset on both supplied line boxes.
+    /// The Mac trace has no terminal baseline; 26/32/25 is the ticket's fallback geometry.
+    #[test]
+    fn reported_inline_operators_typeset_at_each_panes_em() {
+        let engine = MathEngine::new();
+        let mut failures = Vec::new();
+        for (platform, em, height, baseline, dpi) in
+            [("Mac", 26, 32, 25, 2000), ("Windows", 20, 27, 21, 1250)]
+        {
+            for source in [
+                r"\int_{-\infty}^{\infty} e^{-x^2}\,dx = \sqrt{\pi}",
+                r"\sum_{n=1}^{\infty} \frac{1}{n^2} = \frac{\pi^2}{6}",
+            ] {
+                let old_key = MathRenderKey {
+                    dpi_milli: nz(dpi),
+                    font_milli_pt: nz(12_000),
+                    foreground_rgb: [220, 220, 220],
+                    mode: MathMode::Inline,
+                };
+                let em_key =
+                    bt_math::key_for_em_px(em as f32, [220, 220, 220], MathMode::Inline).unwrap();
+                for (label, key) in [("12pt", old_key), ("pane-em", em_key)] {
+                    let raster = engine.render(source, key).unwrap();
+                    let split = ((baseline as f32 / raster.baseline_px)
+                        .min(
+                            (height - baseline) as f32
+                                / (raster.height_px as f32 - raster.baseline_px),
+                        )
+                        .min(1.0)
+                        * 1000.0)
+                        .floor() as u32;
+                    println!(
+                        "EM-FIT {platform} {label} source={source} height={} baseline={:.3} split={split} full={}",
+                        raster.height_px,
+                        raster.baseline_px,
+                        (height * 1000 / raster.height_px).min(1000)
+                    );
+                }
+                let started = Instant::now();
+                let mut session = DualPlaneSession::new(nz(160), nz(8));
+                session.set_cell_height_subpixels(
+                    NonZeroI64::new(i64::from(height) * SUBPIXELS_PER_PX).unwrap(),
+                );
+                session.set_cell_width_subpixels(
+                    NonZeroI64::new(i64::from(em / 2) * SUBPIXELS_PER_PX).unwrap(),
+                );
+                session.set_ascii_baseline_subpixels(
+                    NonZeroI64::new(i64::from(baseline) * SUBPIXELS_PER_PX).unwrap(),
+                );
+                session.set_layout_key(LayoutKey {
+                    dpi_milli: nz(dpi),
+                    ..session.layout_key()
+                });
+                session.set_font_size_subpixels(
+                    NonZeroI64::new(i64::from(em) * SUBPIXELS_PER_PX).unwrap(),
+                );
+                let stream =
+                    format!("\x1b]133;A\x07>\x1b]133;B\x07show\x1b]133;C\x07\r\n${source}$\r\n");
+                session.feed_at(stream.as_bytes(), started).unwrap();
+                session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+                complete_live_math_for_real(&mut session);
+                let mut projection = session.new_projection(session.layout_key());
+                let frame = session.viewport_frame(&mut projection).unwrap();
+                let blocks = rendered_inline_blocks(&frame);
+                if blocks.len() != 1 {
+                    failures.push(format!("{platform}: {source}"));
+                }
+                for block in blocks {
+                    assert!(
+                        block.artifact.height_subpixels <= i64::from(height) * SUBPIXELS_PER_PX
+                    );
+                }
+                assert_eq!(
+                    frame.cells.iter().filter(|cell| cell.text == "$").count(),
+                    if rendered_inline_blocks(&frame).is_empty() {
+                        2
+                    } else {
+                        0
+                    }
+                );
+                session
+                    .feed_at(b"p\r\np\r\np\r\np\r\np\r\np\r\np\r\np\r\n", started)
+                    .unwrap();
+                assert!(
+                    session
+                        .document
+                        .entries()
+                        .values()
+                        .any(|entry| entry.line.text.contains(source))
+                );
+                complete_frozen_math_for_real(&mut session);
+                let mut projection = session.new_projection(session.layout_key());
+                session.refresh_projection(&mut projection);
+                let _ = session.viewport_frame(&mut projection).unwrap();
+                projection.scroll_to_top();
+                let frame = session.viewport_frame(&mut projection).unwrap();
+                if rendered_inline_blocks(&frame).len() != 1 {
+                    failures.push(format!("{platform} frozen: {source}"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "refused: {failures:?}");
+    }
+
+    /// A triple-decker denominator needs more than twice the row at the pane's own em.
+    #[test]
+    fn an_unreadable_triple_decker_inline_fraction_keeps_source() {
+        let engine = MathEngine::new();
+        for (em, height, baseline) in [(26, 32, 25), (20, 27, 21)] {
+            let key = bt_math::key_for_em_px(em as f32, [220, 220, 220], MathMode::Inline).unwrap();
+            assert!(render_inline_run_fitted(&engine,
+                r"\dfrac{\dfrac{\dfrac{a}{b}}{\dfrac{c}{d}}}{\dfrac{\dfrac{e}{f}}{\dfrac{g}{h}}}", key,
+                baseline * SUBPIXELS_PER_PX, (height - baseline) * SUBPIXELS_PER_PX).unwrap().is_none());
+        }
+    }
+
+    /// PIN: fitting converges against the measured 44px high-DPI row and fractional baseline.
     ///
-    /// Stated at the fitting function with the window's own numbers because that is where two
-    /// separate defects hid, and neither was visible at the 96-DPI metrics the other inline tests
-    /// use. A real high-DPI row is 44 pixels with a 29-pixel ascent and a 14-pixel descent, and
-    /// against those budgets:
-    ///
-    /// * `$E = mc^2$`, `$x^2$`, `$\hat{m}_t$` and `$\int_0^1$` fitted to *exactly* their ascent
-    ///   budget, whereupon `ceil` rounded the fractional baseline up past it and the composite
-    ///   rejected runs the fit had just accepted — every ascent-bound formula on the screen fell
-    ///   back to source while the descent-bound `$\frac{a}{b}$` and `$\sum_i$` beside them rendered.
-    /// * With that fixed, the ones overshooting by *under a pixel* asked for a shrink of about one
-    ///   percent, which is far too small to move a rounded-up baseline, so they spent every attempt
-    ///   crawling and still fell back.
-    ///
-    /// The budgets are the measured ones, to the subpixel, and that precision is the test. A row is
-    /// 45056 subpixels tall and its baseline sits at 30480 — 29.77 pixels, not 29 and not 30 — and
-    /// a *fractional* budget compared against a *rounded* ink height is what produced the crawl:
-    /// 29.766 over 30 asks for a 0.8% shrink, which cannot move a rounded baseline at all. Rounding
-    /// these numbers off in the fixture makes the old code pass, which is how this test read green
-    /// against a build the real window had already failed on.
+    /// Retuned for T-MATH-INLINE-EM: a 52px stress em replaces the implicit 12pt/2x size so tall
+    /// members still need shrink under the full-row rule. The measured 30480/14576 subpixel split
+    /// stays exact: flooring the two budgets reserves the fractional placement remainder. Assert
+    /// that shrinking really occurred and that every final run can be composited within the row.
     #[test]
     fn the_inline_fit_converges_for_tall_constructions_at_high_dpi() {
         let engine = MathEngine::new();
-        let key = MathRenderKey {
-            dpi_milli: NonZeroU32::new(2000).expect("2x is non-zero"),
-            font_milli_pt: NonZeroU32::new(12_000).expect("12 pt is non-zero"),
-            foreground_rgb: [220, 220, 220],
-            mode: MathMode::Inline,
-        };
+        let key = bt_math::key_for_em_px(52.0, [220, 220, 220], MathMode::Inline).unwrap();
         // Measured off a 192-DPI window: a 44px row whose ASCII baseline is 29.766px down it.
         let ascent_budget = 30_480;
         let descent_budget = 14_576;
@@ -28324,6 +28527,7 @@ mod tests {
             44 * SUBPIXELS_PER_PX,
             "the two halves must be the row, or the fixture is not a line box"
         );
+        let mut shrunk = 0;
         for source in [
             "x",
             "y",
@@ -28336,24 +28540,47 @@ mod tests {
             r"\hat{m}_t",
             r"\int_0^1",
         ] {
+            let natural = engine.render(source, key).unwrap();
             let fitted =
                 render_inline_run_fitted(&engine, source, key, ascent_budget, descent_budget)
                     .expect("the engine renders every one of these")
                     .unwrap_or_else(|| {
                         panic!("{source} found no size that sits on a 44px/29px/14px line box")
                     });
-            let (ascent_px, descent_px) = inline_run_box(fitted.height_px, fitted.baseline_px);
+            let baseline_px = (ascent_budget / SUBPIXELS_PER_PX) as u32;
+            let row_height_px = baseline_px + (descent_budget / SUBPIXELS_PER_PX) as u32;
+            let top = inline_run_top(&fitted, baseline_px, row_height_px);
             assert!(
-                i64::from(ascent_px) * SUBPIXELS_PER_PX <= ascent_budget
-                    && i64::from(descent_px) * SUBPIXELS_PER_PX <= descent_budget,
-                "{source} was returned as fitted at ascent {ascent_px}px / descent {descent_px}px, \
-                 which the composite will reject"
+                top + fitted.height_px <= row_height_px,
+                "{source} overflows its composite"
             );
+            assert!(
+                baseline_box_fits(
+                    top + fitted.height_px,
+                    baseline_px as f32,
+                    ascent_budget,
+                    descent_budget
+                ),
+                "{source} cannot be assembled"
+            );
+            if natural.height_px > row_height_px {
+                shrunk += 1;
+                assert!(
+                    fitted.height_px < natural.height_px,
+                    "{source} must really shrink"
+                );
+            }
         }
+        assert!(
+            shrunk > 0,
+            "the fixture must exercise convergence, not only the no-shrink path"
+        );
     }
 
     /// PIN: a construction taller than the line box is shrunk onto the baseline, not abandoned.
     ///
+    /// Retuned for T-MATH-INLINE-EM: explicit `\dfrac` at a 20px pane em is taller than the
+    /// full 24px row; the old plain fraction needed shrink only because of the ASCII split.
     /// `\frac` is the case the handoff named. Measured honestly it puts about a third of its ink
     /// below the baseline, where a line of text keeps barely a fifth of its height, so at its
     /// natural size it cannot sit on the row — and the rule it used to meet was a straight
@@ -28371,7 +28598,7 @@ mod tests {
         session
             .feed_at(
                 b"\x1b]133;A\x07PS> \x1b]133;B\x07show\x1b]133;C\x07\r\n\
-                  ratio $\\frac{a}{b}$ here\r\n",
+                  ratio $\\dfrac{a}{b}$ here\r\n",
                 started,
             )
             .unwrap();
@@ -28394,6 +28621,20 @@ mod tests {
                 .iter()
                 .map(|block| (block.artifact.mode, block.display))
                 .collect::<Vec<_>>()
+        );
+        let natural = MathEngine::new()
+            .render(
+                r"\dfrac{a}{b}",
+                bt_math::key_for_em_px(20.0, [220; 3], MathMode::Inline).unwrap(),
+            )
+            .unwrap();
+        assert!(
+            natural.height_px > 24,
+            "the unshrunk fraction must exceed the full row"
+        );
+        assert!(
+            blocks[0].artifact.width_px < natural.width_px,
+            "the picture was re-rendered smaller"
         );
         let cell_height_subpixels = 24 * SUBPIXELS_PER_PX;
         assert!(
