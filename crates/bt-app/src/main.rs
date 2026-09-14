@@ -60,6 +60,7 @@ mod files_watch;
 mod first_run;
 mod float;
 mod focus_thumb;
+mod formula_tools;
 mod git;
 mod git_graph;
 mod git_panel;
@@ -12560,6 +12561,35 @@ struct WindowRuntime {
     peek_thumbnail_pending: Option<PeekThumbnailTarget>,
     math_hover_anchor: Option<MathBlockAnchor>,
     math_hover_clear_at: Option<Instant>,
+    /// **When the hovered band's two marks began to arrive** (owner's ruling
+    /// 2026-09-14 ②).
+    ///
+    /// The marks are not drawn at rest and fade in over
+    /// [`tooltip::TOOLTIP_FADE`] once the pointer is on a band — the tip's own
+    /// ninety milliseconds, which is the one duration this window spends on
+    /// everything a hover reveals, and which the glance card was ruled onto the
+    /// day before this. It is set beside [`Self::math_hover_anchor`] and dies
+    /// with it, so a pointer crossing from one formula to the next starts the
+    /// second band's fade rather than inheriting the first band's.
+    ///
+    /// `None` is "no band has its tools up", which is the same fact
+    /// `math_hover_anchor` states — two fields because one is *which* and one is
+    /// *when*, and the pair is never half-set: every write below sets both.
+    math_tools_since: Option<Instant>,
+    /// **The mark a button is being held down on**, with the band it belongs to.
+    ///
+    /// The band is carried because a press latches `MouseRoute::MathBlock` and
+    /// the release that ends it can arrive after the pointer has left — an ink
+    /// keyed on "whichever band is hovered" would light the wrong one.
+    math_tool_pressed: Option<(MathBlockAnchor, formula_tools::FormulaTool)>,
+    /// **The band whose LaTeX just reached the clipboard, and when.**
+    ///
+    /// A copy's whole effect is somewhere the reader cannot see, so the mark
+    /// acknowledges it in its own slot for [`FOOT_REVEAL_FEEDBACK`] — the same
+    /// 1300ms and the same `#i-check` the files foot spends on "Revealed",
+    /// which ruling 6 (2026-08-12) collapsed every acknowledgement in this
+    /// window onto.
+    math_copied: Option<(MathBlockAnchor, Instant)>,
     pending_math_context_anchor: Option<MathBlockAnchor>,
     /// The layout tree this window hosts. A lone terminal leaf by default, which
     /// is today's window written down.
@@ -27534,6 +27564,24 @@ struct OverlayStack {
     /// between them is bookkeeping. The jump's row flash rides here too: it is a
     /// band across one pane's own rows, drawn by the gesture that scrolled them.
     command_rail: Vec<marks::OverlayLayer>,
+    /// **A hovered formula band's two marks** (owner's ruling 2026-09-14 ②) —
+    /// `#i-code`/`#i-eye` and `#i-copy`, on the pill a pointer or a press lays
+    /// under them.
+    ///
+    /// Beside the thumb above it and on the same argument: it belongs *to* a
+    /// pane, it moves with that pane, and every surface above is entitled to
+    /// cover it. It is in the overlay at all for a reason of its own and a
+    /// sharper one — the band it stands beside is drawn by `bt_render` in the
+    /// seats' own pass, and these are **marks**, which only `bt_app` can
+    /// rasterize. The renderer answers where they go
+    /// ([`bt_render::WindowRenderer::math_tool_boxes`]) and this lane draws
+    /// them.
+    ///
+    /// Above the command rail rather than below it because the two can overlap:
+    /// a band runs to the pane's right edge and the rail is a column down it, so
+    /// a mark clamped against that edge would otherwise have a tick printed
+    /// through it.
+    formula_tools: Vec<marks::OverlayLayer>,
     /// `.rail { z-index: 15 }` — chrome that floats over the panes and over
     /// nothing else. Every surface below is entitled to cover it.
     rail: Vec<marks::OverlayLayer>,
@@ -27800,6 +27848,7 @@ impl OverlayStack {
             + self.video_bars.len()
             + self.terminal_bars.len()
             + self.command_rail.len()
+            + self.formula_tools.len()
             + self.rail.len()
             + self.flight.len()
             + self.ground.len()
@@ -27815,6 +27864,7 @@ impl OverlayStack {
             video_bars,
             terminal_bars,
             command_rail,
+            formula_tools,
             rail,
             flight,
             ground,
@@ -27843,6 +27893,7 @@ impl OverlayStack {
             video_bars,
             terminal_bars,
             command_rail,
+            formula_tools,
             rail,
             flight,
             ground,
@@ -36070,6 +36121,9 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         peek_thumbnail_pending: None,
         math_hover_anchor: None,
         math_hover_clear_at: None,
+        math_tools_since: None,
+        math_tool_pressed: None,
+        math_copied: None,
         pending_math_context_anchor: None,
         seat_pointer: seats::ChromePointer::default(),
         tooltip: tooltip::TooltipHost::default(),
@@ -44360,6 +44414,11 @@ impl Runtime<'_> {
             video_bars: self.preview_seat_video_bars(),
             terminal_bars: self.terminal_bar_layers(),
             command_rail: self.command_rail_layers(),
+            // **The hovered formula band's two marks**, above the command rail
+            // and below everything a menu can drop over a pane (owner's ruling
+            // 2026-09-14 ②). Empty on every frame no pointer is on a formula,
+            // which is almost all of them.
+            formula_tools: self.formula_tool_layers(now),
             rail: self.rail_overlay_layers(),
             // **Directly above the list it came out of** (§7.1.6b″). At full
             // opacity and never at the rail's fold: the fold is what a panel
@@ -84576,6 +84635,14 @@ impl Runtime<'_> {
             self.window.math_hover_clear_at = None;
             if self.window.math_hover_anchor.as_ref() != Some(&hit.anchor) {
                 self.window.math_hover_anchor = Some(hit.anchor.clone());
+                // **The marks' fade starts with the band, not with the window**
+                // (owner's ruling 2026-09-14 ②). Written here and nowhere else:
+                // this is the one place a band becomes the hovered one, and a
+                // clock set anywhere else would be a second opinion about when
+                // "now" was. Crossing straight from one formula to the next is a
+                // change of anchor, so the second band's marks arrive the same
+                // way the first band's did rather than simply appearing.
+                self.window.math_tools_since = Some(now);
                 if self.set_hovered_math(Some(hit.anchor.clone())) {
                     self.repaint_hovered_pane()?;
                 }
@@ -84586,6 +84653,107 @@ impl Runtime<'_> {
             self.window.math_hover_clear_at = Some(now + Duration::from_millis(500));
         }
         Ok(hit)
+    }
+
+    /// **How far the hovered band's marks have come up**, `0.0 ..= 1.0`.
+    ///
+    /// [`tooltip::hover_fade_opacity`] and not a curve of its own: the tip, the
+    /// glance card and these read one fade, so the day any of them moves all
+    /// three move (owner's ruling 2026-09-13 ⑭, and its own "一条规矩,两个时钟"
+    /// — the curve is shared, the clocks are each surface's own).
+    ///
+    /// `0.0` with no band hovered, which is the ruling's "at rest they are NOT
+    /// drawn" said in the one place that decides it.
+    fn math_tools_opacity(&self, now: Instant) -> f32 {
+        self.window.math_tools_since.map_or(0.0, |since| {
+            tooltip::hover_fade_opacity(now.saturating_duration_since(since), self.app.motion)
+        })
+    }
+
+    /// The frames that fade owes, and nothing once it has landed.
+    ///
+    /// A band standing still under a still pointer costs no wake-ups at all —
+    /// the same silence §7.29 promises for every other hover in this window.
+    fn math_tools_deadline(&self, now: Instant) -> Option<Instant> {
+        let since = self.window.math_tools_since?;
+        tooltip::hover_fade_owes_frames(now.saturating_duration_since(since), self.app.motion)
+            .then(|| since + tooltip::TOOLTIP_FADE)
+    }
+
+    /// **Whether this band's copy is still inside its acknowledgement window.**
+    ///
+    /// Keyed on the anchor as well as the clock: a tick left standing on the
+    /// next formula the pointer walked onto would be this window confirming
+    /// something about a block nobody copied.
+    fn math_copy_is_fresh(&self, anchor: &MathBlockAnchor, now: Instant) -> bool {
+        self.window.math_copied.as_ref().is_some_and(|(said, at)| {
+            said == anchor && now.saturating_duration_since(*at) < FOOT_REVEAL_FEEDBACK
+        })
+    }
+
+    /// **The hovered formula band's two marks**, as one overlay layer.
+    ///
+    /// The renderer answers where they stand, in the pane body's own pixels,
+    /// through exactly the arithmetic [`Self::math_hit`] is answered from — so
+    /// the box you can press and the box you can see are one box by construction
+    /// rather than by two call sites agreeing. This moves them to that body's
+    /// corner and hands them to [`formula_tools::sprites`].
+    ///
+    /// **The band is found from the shells and not from the pointer**, which is
+    /// the one thing here that is not obvious. `toolbar_visible` is written to
+    /// exactly one shell (`Self::set_hovered_math` sweeps the rest), and it
+    /// outlives the pointer by the 500ms grace above — so a pointer that has
+    /// left the *pane* leaves a band still wearing its ground for half a second,
+    /// and marks that went looking for the pointer's own pane would have
+    /// vanished a beat before the floor they stand beside. The pointer still
+    /// decides which mark is *lit*, which is the only question it is the
+    /// authority on.
+    ///
+    /// One layer or none: there is one pointer, so at most one band.
+    fn formula_tool_layers(&self, now: Instant) -> Vec<marks::OverlayLayer> {
+        let opacity = self.math_tools_opacity(now);
+        if opacity <= 0.0 {
+            return Vec::new();
+        }
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let Some((seat, mut boxes)) = self.sessions.iter().find_map(|(seat, leaf)| {
+            let frame = leaf.last_presented_frame.as_ref()?;
+            Some((*seat, self.window.renderer.math_tool_boxes(frame)?))
+        }) else {
+            return Vec::new();
+        };
+        let Some(body) = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)
+        else {
+            return Vec::new();
+        };
+        let (dx, dy) = (body.x as f32, body.y as f32);
+        for rect in [&mut boxes.block, &mut boxes.source, &mut boxes.copy] {
+            *rect = [rect[0] + dx, rect[1] + dy, rect[2] + dx, rect[3] + dy];
+        }
+        let hit = self.math_hit();
+        let state = formula_tools::FormulaToolState {
+            hovered: hit.as_ref().and_then(|hit| match hit.target {
+                MathHitTarget::ToggleSource => Some(formula_tools::FormulaTool::ToggleSource),
+                MathHitTarget::CopyLatex => Some(formula_tools::FormulaTool::CopyLatex),
+                MathHitTarget::Block | MathHitTarget::Failure => None,
+            }),
+            pressed: self
+                .window
+                .math_tool_pressed
+                .as_ref()
+                .filter(|(anchor, _)| anchor == &boxes.anchor)
+                .map(|(_, verb)| *verb),
+            copied: self.math_copy_is_fresh(&boxes.anchor, now),
+        };
+        let sprites =
+            formula_tools::sprites(&boxes, state, &bt_render::chrome_palette(), scale, opacity);
+        if sprites.is_empty() {
+            return Vec::new();
+        }
+        vec![marks::OverlayLayer {
+            sprites,
+            ..marks::OverlayLayer::default()
+        }]
     }
 
     /// Set the hovered formula on the pane the pointer is in, and clear it everywhere else.
@@ -84618,6 +84786,17 @@ impl Runtime<'_> {
         }
         self.window.math_hover_clear_at = None;
         self.window.math_hover_anchor = None;
+        // **The marks leave with the band, and they leave at once.**
+        //
+        // The 500ms above is the grace — the mock-up's own `transition-delay:
+        // .5s` on leaving, which forgives a pointer clipping the corner of a
+        // mark on its way to it — and when it runs out the ground and the marks
+        // go together, in one frame, with no fade out. That asymmetry is the
+        // glance card's ruling read here (owner, 2026-09-13 ⑭): a fade in is ink
+        // arriving, and there is nothing for a fade out to say that the surface
+        // being gone does not say better.
+        self.window.math_tools_since = None;
+        self.window.math_tool_pressed = None;
         if self.set_hovered_math(None) {
             self.repaint_hovered_pane()?;
         }
@@ -84637,7 +84816,13 @@ impl Runtime<'_> {
         let result = bt_platform::set_clipboard_text(source)
             .map_err(|error| anyhow!(error))
             .context("copy original LaTeX source to clipboard");
-        recoverable_clipboard_write(result, "formula copy");
+        // **Only a copy that landed says it landed** (owner's ruling 2026-09-14
+        // ②). The bool this helper already returned was being thrown away, and
+        // a tick on a clipboard the window could not reach would be the one
+        // acknowledgement in this product that confirms nothing.
+        if recoverable_clipboard_write(result, "formula copy") {
+            self.window.math_copied = Some((anchor.clone(), Instant::now()));
+        }
     }
 
     fn apply_math_context_menu_result(&mut self) {
@@ -91094,6 +91279,12 @@ impl Runtime<'_> {
             && matches!(self.window.mouse_route, Some(MouseRoute::MathBlock))
         {
             self.window.mouse_route = None;
+            // The press ink comes off with the button, wherever it comes up —
+            // the gesture belongs to the mark it began on (owner's ruling
+            // 2026-09-14 ②).
+            if self.window.math_tool_pressed.take().is_some() {
+                self.repaint_hovered_pane()?;
+            }
             return Ok(());
         }
         if state == ElementState::Pressed
@@ -91104,6 +91295,23 @@ impl Runtime<'_> {
             // complete press/release pair intentionally prevents half-source selections and keeps
             // both local selection and application mouse reporting from seeing synthetic cells.
             self.window.mouse_route = Some(MouseRoute::MathBlock);
+            // **A mark that is being held says so** (owner's ruling 2026-09-14
+            // ②), and it says so before the verb runs: toggling the source
+            // republishes this pane's frame from inside the arm below, and a
+            // press ink written afterwards would miss that very frame.
+            if button == MouseButton::Left {
+                self.window.math_tool_pressed = match math_hit.target {
+                    MathHitTarget::ToggleSource => Some((
+                        math_hit.anchor.clone(),
+                        formula_tools::FormulaTool::ToggleSource,
+                    )),
+                    MathHitTarget::CopyLatex => Some((
+                        math_hit.anchor.clone(),
+                        formula_tools::FormulaTool::CopyLatex,
+                    )),
+                    MathHitTarget::Block | MathHitTarget::Failure => None,
+                };
+            }
             match (button, math_hit.target) {
                 (MouseButton::Left, MathHitTarget::ToggleSource) => {
                     // `math_hit()` answered, so a shell drew the block that was
@@ -91119,6 +91327,10 @@ impl Runtime<'_> {
                 }
                 (MouseButton::Left, MathHitTarget::CopyLatex) => {
                     self.copy_math_latex(&math_hit.anchor);
+                    // The tick has to reach the glass: nothing else in this
+                    // gesture asks for a frame, so without this the
+                    // acknowledgement would wait for the next thing to twitch.
+                    self.repaint_hovered_pane()?;
                 }
                 (MouseButton::Right, _) => match self.window.math_context_menu.request() {
                     Ok(true) => {
@@ -99446,6 +99658,17 @@ impl Runtime<'_> {
             self.window.hyperlink_hover.show_at,
             self.window.peek_hover.show_at,
             self.window.math_hover_clear_at,
+            // The band's marks while their ninety milliseconds is still
+            // climbing, and nothing once it has landed — a pointer resting on a
+            // formula costs no wake-ups at all (owner's ruling 2026-09-14 ②).
+            self.math_tools_deadline(now),
+            // And the copy tick's one wake-up: the instant it is due to turn
+            // back into a pair of sheets. One entry because there is one
+            // clipboard and one clock.
+            self.window
+                .math_copied
+                .as_ref()
+                .map(|(_, at)| *at + FOOT_REVEAL_FEEDBACK),
             self.preview_resample_deadline(),
             application_clocks
                 .then(|| self.app.session_store.deadline())
@@ -111936,6 +112159,7 @@ mod floated_page_tests {
             video_bars: mark(0.011),
             terminal_bars: mark(0.02),
             command_rail: mark(0.03),
+            formula_tools: mark(0.035),
             rail: mark(0.04),
             flight: mark(0.05),
             ground: mark(0.06),
@@ -115409,6 +115633,10 @@ mod tests {
             video_bars: mark(24),
             terminal_bars: mark(16),
             command_rail: mark(13),
+            // 26 and not 25: every number below is spoken for, and a marker
+            // shared by two families would make this whole assertion pass while
+            // the two swapped places.
+            formula_tools: mark(26),
             rail: mark(1),
             flight: mark(19),
             ground: mark(2),
@@ -115447,12 +115675,12 @@ mod tests {
         assert_eq!(
             order,
             vec![
-                0, 24, 16, 13, 1, 19, 2, 14, 17, 18, 3, 4, 5, 6, 7, 12, 15, 22, 25, 8, 20, 23, 9,
-                10, 11, 21
+                0, 24, 16, 13, 26, 1, 19, 2, 14, 17, 18, 3, 4, 5, 6, 7, 12, 15, 22, 25, 8, 20, 23,
+                9, 10, 11, 21
             ],
-            "bottom to top: pane bars, video bars, terminal thumbs, command rails, rail, flight, \
-             ground, search capsule, integration strips, download sheet, schematic, float, modal, \
-             file menu, pane menu, git menu, terminal menu, tab menu, command \
+            "bottom to top: pane bars, video bars, terminal thumbs, command rails, formula marks, \
+             rail, flight, ground, search capsule, integration strips, download sheet, schematic, \
+             float, modal, file menu, pane menu, git menu, terminal menu, tab menu, command \
              palette, notices, key hint, Cards bubble, tip, glance, ghost, window ring"
         );
         let at = |tag: u8| {

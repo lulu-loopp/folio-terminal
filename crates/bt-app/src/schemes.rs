@@ -1531,8 +1531,13 @@ mod tests {
     ///
     /// The tag family is every small card this window draws *over* a body: the
     /// terminal's status overlay (a hovered link's target and its `Ctrl+click`
-    /// clause), a page's hover tag, the `Saved`/`Revealed` corner confirmation,
-    /// a formula block's toolbar buttons. Ten schemes and not two canvases,
+    /// clause), a page's hover tag, the `Saved`/`Revealed` corner confirmation.
+    /// A formula block's two verbs were in it until 2026-09-14 and are not any
+    /// more: the owner's ruling that day made them house marks on a pill
+    /// (`crate::formula_tools`), which is a control and not a card floating
+    /// over a body — the family is defined by what a thing *is*, so leaving
+    /// them in the list would be this gate proving a fact about a surface that
+    /// no longer exists. Ten schemes and not two canvases,
     /// because a scheme is a pair of colours a **user** supplies: `DARK_CHROME`
     /// and `LIGHT_CHROME` are what Folio's own two derive to, and a rule proved
     /// only on those is a rule about the default install.

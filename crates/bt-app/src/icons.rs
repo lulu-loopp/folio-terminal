@@ -1074,6 +1074,24 @@ mod tests {
                 MarkSlot::CompactHead.mark_box_logical_px(mark),
             ));
         }
+        // A formula band's two verbs, on the same slot and for the head run's
+        // own reason: they are the tightest place this window puts a button,
+        // and they stand on a terminal surface rather than in a menu column
+        // (owner's ruling 2026-09-14 ②; `crate::formula_tools`). All four
+        // drawings, because the pair is two controls with two faces each — the
+        // flip's destination and the copy's acknowledgement.
+        for mark in [
+            ChromeMark::Code,
+            ChromeMark::Eye,
+            ChromeMark::Copy,
+            ChromeMark::Check,
+        ] {
+            sites.push((
+                "formula band",
+                mark,
+                MarkSlot::CompactHead.mark_box_logical_px(mark),
+            ));
+        }
         for mark in [
             ChromeMark::WindowMinimize,
             ChromeMark::WindowMaximize,

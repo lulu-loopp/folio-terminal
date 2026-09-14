@@ -48,6 +48,17 @@ Nothing yet.
   milliseconds to nothing measurable; opening it is still slow, and that is the
   next change.
 
+- **A typeset formula in a terminal pane now looks like the rest of the
+  window.** Resting on one lays down the same rounded panel a fenced code block
+  stands on, instead of the flat dark rectangle it used to get. The two buttons
+  beside it have become ordinary Folio icons: nothing at rest, fading in as your
+  pointer reaches the formula, lit in a soft pill under the pointer and a darker
+  one while you hold the button down. The first one now shows where it takes you
+  — angle brackets on a typeset formula, an eye on one showing its source — and
+  the second turns into a tick for a moment once the LaTeX is on your clipboard.
+  Both are a little larger than before, and right-clicking a formula still
+  offers `Copy LaTeX`.
+
 - **Opening a very large Markdown document is immediate.** The preview used to
   lay out every block of a document before it could show the first one; on a
   three-megabyte file that was a three-second freeze, and a resize or a scale

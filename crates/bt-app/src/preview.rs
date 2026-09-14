@@ -3827,7 +3827,12 @@ pub const PREVIEW_MD_CODE_PADDING_EM: f32 = 1.0;
 pub const PREVIEW_MD_CODE_MARGIN_EM: f32 = 1.0;
 /// `.md-code { border-radius: 7px }` (mock-up 1284), carried for the day the
 /// fill pass grows rounded corners; the fence is a square block today.
-pub const PREVIEW_MD_CODE_RADIUS_LOGICAL_PX: f32 = 7.0;
+///
+/// **The number itself lives in `bt_render`** since 2026-09-14: a terminal
+/// pane's formula band now stands on the same ground with the same corner, and
+/// the band is drawn a crate below this one. This name stays because this
+/// file's readers are markdown metrics, not terminal chrome.
+pub const PREVIEW_MD_CODE_RADIUS_LOGICAL_PX: f32 = bt_render::PREVIEW_CODE_GROUND_RADIUS_LOGICAL_PX;
 /// github.css: `hr { margin: 24px 0 }` — 1.5em, a heading's own top margin,
 /// because a rule and a heading are the same gesture at different volumes.
 pub const PREVIEW_MD_RULE_MARGIN_EM: f32 = 1.5;

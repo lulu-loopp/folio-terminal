@@ -100,16 +100,16 @@ pub use theme::{
     FOCUS_MINI_TERM_FONT_LOGICAL_PX, FOCUS_MINI_TERM_LINE_HEIGHT, FloatTagInk, GRAPH_LANE_COUNT,
     HEAD_TITLE_FONT_LOGICAL_PX, HEAD_TITLE_TRACKING_EM, HEAD_TITLE_WEIGHT, LIGHT_BACKGROUND_RGB,
     LIGHT_CHROME, PANE_HEAD_FILE_MARK_LOGICAL_PX, PANE_HEAD_FOLDER_MARK_LOGICAL_PX,
-    PANE_HEAD_PROFILE_MARK_LOGICAL_PX, PREVIEW_BODY_INSET_LOGICAL_PX, RAIL_BORDER_LOGICAL_PX,
-    RAIL_GAP_LOGICAL_PX, RAIL_LABEL_FONT_LOGICAL_PX, RAIL_LABEL_LINE_LOGICAL_PX,
-    RAIL_LABEL_PADDING_BOTTOM_LOGICAL_PX, RAIL_LABEL_PADDING_TOP_LOGICAL_PX,
-    RAIL_LABEL_PADDING_X_LOGICAL_PX, RAIL_LABEL_TRACKING_EM, RAIL_NEW_CHEVRON_BOX_LOGICAL_PX,
-    RAIL_NEW_GAP_LOGICAL_PX, RAIL_NEW_MAIN_PADDING_X_LOGICAL_PX, RAIL_NEW_MARGIN_TOP_LOGICAL_PX,
-    RAIL_NEW_STICKY_PADDING_BOTTOM_LOGICAL_PX, RAIL_PADDING_BOTTOM_LOGICAL_PX,
-    RAIL_PADDING_TOP_LOGICAL_PX, RAIL_PADDING_X_LOGICAL_PX, RAIL_PARK_LOGICAL_PX,
-    RAIL_SEAM_INSET_X_LOGICAL_PX, RAIL_SEAM_MARGIN_Y_LOGICAL_PX, RAIL_SEAM_THICKNESS_LOGICAL_PX,
-    RAIL_SHADE_WIDTH_LOGICAL_PX, RAIL_TAB_FONT_LOGICAL_PX, RAIL_TAB_GAP_LOGICAL_PX,
-    RAIL_TAB_HEIGHT_LOGICAL_PX, RAIL_TAB_PADDING_LEFT_LOGICAL_PX,
+    PANE_HEAD_PROFILE_MARK_LOGICAL_PX, PREVIEW_BODY_INSET_LOGICAL_PX,
+    PREVIEW_CODE_GROUND_RADIUS_LOGICAL_PX, RAIL_BORDER_LOGICAL_PX, RAIL_GAP_LOGICAL_PX,
+    RAIL_LABEL_FONT_LOGICAL_PX, RAIL_LABEL_LINE_LOGICAL_PX, RAIL_LABEL_PADDING_BOTTOM_LOGICAL_PX,
+    RAIL_LABEL_PADDING_TOP_LOGICAL_PX, RAIL_LABEL_PADDING_X_LOGICAL_PX, RAIL_LABEL_TRACKING_EM,
+    RAIL_NEW_CHEVRON_BOX_LOGICAL_PX, RAIL_NEW_GAP_LOGICAL_PX, RAIL_NEW_MAIN_PADDING_X_LOGICAL_PX,
+    RAIL_NEW_MARGIN_TOP_LOGICAL_PX, RAIL_NEW_STICKY_PADDING_BOTTOM_LOGICAL_PX,
+    RAIL_PADDING_BOTTOM_LOGICAL_PX, RAIL_PADDING_TOP_LOGICAL_PX, RAIL_PADDING_X_LOGICAL_PX,
+    RAIL_PARK_LOGICAL_PX, RAIL_SEAM_INSET_X_LOGICAL_PX, RAIL_SEAM_MARGIN_Y_LOGICAL_PX,
+    RAIL_SEAM_THICKNESS_LOGICAL_PX, RAIL_SHADE_WIDTH_LOGICAL_PX, RAIL_TAB_FONT_LOGICAL_PX,
+    RAIL_TAB_GAP_LOGICAL_PX, RAIL_TAB_HEIGHT_LOGICAL_PX, RAIL_TAB_PADDING_LEFT_LOGICAL_PX,
     RAIL_TAB_PADDING_RIGHT_LOGICAL_PX, RAIL_TAB_PARKED_PADDING_X_LOGICAL_PX,
     RAIL_TAB_RADIUS_LOGICAL_PX, RAIL_WIDTH_LOGICAL_PX, SEAT_DIVIDER_GRIP_LENGTH_LOGICAL_PX,
     SEAT_DIVIDER_GRIP_RADIUS_LOGICAL_PX, SEAT_DIVIDER_GRIP_THICKNESS_LOGICAL_PX,
@@ -180,8 +180,29 @@ const PADDING_LOGICAL_PX: f32 = 8.0;
 const NARROW_SHAPING_CACHE_BUDGET_BYTES: usize = 8 * 1024 * 1024;
 const WIDE_SHAPING_CACHE_BUDGET_BYTES: usize = 16 * 1024 * 1024;
 const COMPOSED_ROW_CACHE_BUDGET_BYTES: usize = 32 * 1024 * 1024;
-const MATH_TOOL_BUTTON_LOGICAL_PX: f32 = 22.0;
+/// `.math-tools button { width: 24px; height: 24px }` (mock-up 2127-2129).
+///
+/// **24 and not the 22 this drew until 2026-09-14.** The old number was this
+/// file's own, from the milestone when the two verbs were small bordered chips;
+/// the mock-up's box is the house's, it is the box the strip's own controls
+/// stand in, and it is *larger* than what it replaces — which is the one
+/// direction a hit box is allowed to move (owner's ruling 2026-09-14 ③).
+const MATH_TOOL_BUTTON_LOGICAL_PX: f32 = 24.0;
+/// `.math-tools { gap: 2px }` (mock-up 2117).
 const MATH_TOOL_GAP_LOGICAL_PX: f32 = 2.0;
+/// `.math-tools button { border-radius: 5px }` (mock-up 2129) — the pill a
+/// hovered or pressed mark wears.
+///
+/// Its own number and not [`WINDOW_NEW_TAB_RADIUS_LOGICAL_PX`]: the strip's
+/// controls are 6 in a taller box, and §7.1.6's rule about two radii doing "the
+/// same thing" cuts the other way here — these are two boxes of two sizes and
+/// the design struck a corner for each.
+///
+/// Public because the pill is drawn a crate up: the two marks are house marks
+/// and house marks are rasterized in `bt_app::marks`, so this file gives the
+/// boxes ([`WindowRenderer::math_tool_boxes`]) and `bt_app` puts the drawings
+/// in them.
+pub const MATH_TOOL_PILL_RADIUS_LOGICAL_PX: f32 = 5.0;
 /// A rendered formula's raster is cropped tight to its ink, so its glyphs would touch the pane
 /// edge while a text row's characters sit inside their cell with natural left bearing. This small
 /// indent gives the ink the same visual left edge as the text above it (user report 2026-07-20).
@@ -193,6 +214,39 @@ fn math_toolbar_vertical_bounds(visible_top: f32, visible_bottom: f32, scale: f3
     let button = (MATH_TOOL_BUTTON_LOGICAL_PX * scale).min(band_height);
     let top = visible_top + (band_height - button) / 2.0;
     (top, top + button)
+}
+
+/// **Where a band's two marks stand** — the toggle-source box and the copy box,
+/// in that order, in the pane body's own pixels.
+///
+/// `band` is `[the band's right edge, its visible top, its visible bottom]` and
+/// `pane` is `[the pane's left edge, its right edge]`.
+///
+/// **Beside the band and not inside it**, which is the mock-up's own placement
+/// and its own reasoning (2010-2012: *"The fill is the formula's region alone —
+/// the tools sit beside it, not in it"*, and 1989-1998 for why they are
+/// nevertheless inside the region the pointer has to be in). The owner's ruling
+/// of 2026-09-14 ② says "inside the block's top-right corner"; the same ruling
+/// names the mock-up the visual authority and asks for the formula block to be
+/// found in it, and the mock-up both has one and is explicit here — a mark laid
+/// over the corner of a band would be a mark laid over the formula's own ink,
+/// which is alpha-tight and runs the whole width of the band.
+///
+/// Pulled out of `math_block_geometry` on the same day so the arithmetic can be
+/// pinned without a GPU, which is the arrangement `math_horizontal_bounds` and
+/// `math_toolbar_vertical_bounds` beside it already keep.
+fn math_tool_boxes_px(band: [f32; 3], pane: [f32; 2], scale: f32) -> ([f32; 4], [f32; 4]) {
+    let [visible_right, visible_top, visible_bottom] = band;
+    let [pane_left, pane_right] = pane;
+    let (top, bottom) = math_toolbar_vertical_bounds(visible_top, visible_bottom, scale);
+    let button = bottom - top;
+    let gap = MATH_TOOL_GAP_LOGICAL_PX * scale;
+    let total = button * 2.0 + gap;
+    let left = visible_right.min(pane_right - total).max(pane_left);
+    (
+        [left, top, left + button, bottom],
+        [left + button + gap, top, left + total, bottom],
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -207,6 +261,31 @@ pub enum MathHitTarget {
 pub struct MathHit {
     pub anchor: MathBlockAnchor,
     pub target: MathHitTarget,
+}
+
+/// **One hovered formula band's boxes**, in the pane body's own pixels — see
+/// [`WindowRenderer::math_tool_boxes`].
+///
+/// Deliberately geometry and identity only, with no state in it: whether a mark
+/// is lit, held or showing a tick is `bt_app`'s answer, and a field here would
+/// be this crate holding an opinion about a gesture it never sees.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MathToolBoxes {
+    /// Which block these belong to — the same anchor a press on one of them
+    /// would carry.
+    pub anchor: MathBlockAnchor,
+    /// Which face the block is wearing, which is what decides whether the first
+    /// mark is `#i-code` or `#i-eye`: the mock-up's own rule is that the mark
+    /// names the view you are going *to*, not the one you are in (mock-up
+    /// 2170-2171, `bt_app::marks::ChromeMark::{Code, Eye}`).
+    pub display: MathBlockDisplay,
+    /// `[left, top, right, bottom]` of the band itself — the box the ground is
+    /// drawn under and the box the pointer has to be inside for these to be up.
+    pub block: [f32; 4],
+    /// The toggle-source mark's box.
+    pub source: [f32; 4],
+    /// The copy mark's box, one [`MATH_TOOL_GAP_LOGICAL_PX`] to its right.
+    pub copy: [f32; 4],
 }
 
 /// Which inline run of this placement the pointer is on.
@@ -6820,6 +6899,39 @@ impl WindowRenderer {
         ime_cursor_area_for_metrics(self.metrics, frame)
     }
 
+    /// **Where the hovered band's floor and its two marks stand**, in the pane
+    /// body's own pixels — the drawing half of what [`Self::math_hit_test`]
+    /// answers for the pointer.
+    ///
+    /// One band or none: `toolbar_visible` is written to exactly one shell and
+    /// there is one pointer, so at most one block in a frame is wearing its
+    /// tools. The caller (`bt_app`) is the one that rasterizes house marks, and
+    /// it reads these boxes out of the same `math_block_geometry` that
+    /// `math_hit_test` reads — which is what keeps the box you can press and the
+    /// box you can see from being two boxes.
+    ///
+    /// Returns `None` for a band that is off screen, for a band with no tools up
+    /// and for a table (`RgbaArtifactKind::Table`), matching `math_hit_test`'s
+    /// own reading of the same list.
+    #[must_use]
+    pub fn math_tool_boxes(&self, frame: &ViewportFrame) -> Option<MathToolBoxes> {
+        frame.math_blocks.iter().rev().find_map(|placement| {
+            if placement.artifact.kind != bt_viewport::RgbaArtifactKind::Math
+                || !placement.toolbar_visible
+            {
+                return None;
+            }
+            let geometry = self.math_block_geometry(frame, placement)?;
+            Some(MathToolBoxes {
+                anchor: placement.anchor.clone(),
+                display: placement.display,
+                block: geometry.block,
+                source: geometry.eye?,
+                copy: geometry.copy?,
+            })
+        })
+    }
+
     pub fn math_hit_test(&self, frame: &ViewportFrame, x: f64, y: f64) -> Option<MathHit> {
         let point = [x as f32, y as f32];
         if let Some(failure) = frame.math_failures.iter().rev().find(|failure| {
@@ -9862,22 +9974,12 @@ impl WindowRenderer {
             "math scissor crops the raster: clip={clip:?} block={block:?}"
         );
         let (eye, copy) = if placement.toolbar_visible {
-            let scale = self.metrics.scale_factor as f32;
-            let (toolbar_top, toolbar_bottom) =
-                math_toolbar_vertical_bounds(visible_top, visible_bottom, scale);
-            let button = toolbar_bottom - toolbar_top;
-            let gap = MATH_TOOL_GAP_LOGICAL_PX * scale;
-            let total = button * 2.0 + gap;
-            let left = visible_right.min(pane_right - total).max(pane_left);
-            (
-                Some([left, toolbar_top, left + button, toolbar_bottom]),
-                Some([
-                    left + button + gap,
-                    toolbar_top,
-                    left + total,
-                    toolbar_bottom,
-                ]),
-            )
+            let (source, copy) = math_tool_boxes_px(
+                [visible_right, visible_top, visible_bottom],
+                [pane_left, pane_right],
+                self.metrics.scale_factor as f32,
+            );
+            (Some(source), Some(copy))
         } else {
             (None, None)
         };
@@ -10235,26 +10337,49 @@ impl WindowRenderer {
                 ));
             }
         }
+        // **The band's floor is the fence's floor** (owner's ruling 2026-09-14
+        // ①; `.math:hover .mbox { background: var(--panel) }`, mock-up 2025,
+        // against `.md-code { background: var(--panel) }` at 2141).
+        //
+        // Until this ruling the band wore `modal_scrim` at .45 — a *scrim*, and
+        // the mock-up's own comment says why that was the wrong noun: a fill, a
+        // border and a rule "all do the same perceptual job", so one fill is how
+        // this window says "this is a region", and a scrim is the absence of a
+        // surface rather than one. A formula band and a markdown fence are the
+        // same kind of object — a block of not-prose standing in a run of prose
+        // — and they now stand on one token at one corner
+        // ([`PREVIEW_CODE_GROUND_RADIUS_LOGICAL_PX`]).
+        //
+        // **No hairline to go with it**, and that is the same sentence: the
+        // fence draws a border because it is laid on a document's own paper,
+        // and this is laid on the terminal's, where `--panel` against `--termbg`
+        // is already the whole of the figure. Drawing both would be the one
+        // instruction repeated twice.
+        //
+        // Drawn here, in the ink lane, which runs *before* the math pipeline —
+        // so this is genuinely under the formula's own pixels and not a wash
+        // over them. That was already true of the scrim it replaces; it matters
+        // far more now that the fill is opaque.
+        let ground_radius =
+            (PREVIEW_CODE_GROUND_RADIUS_LOGICAL_PX * self.metrics.scale_factor as f32).max(0.0);
         for (index, placement) in frame.math_blocks.iter().enumerate() {
-            if math_block_dim_is_drawn(placement, drawn_math_blocks.contains(&index))
+            if math_block_ground_is_drawn(placement, drawn_math_blocks.contains(&index))
                 && let Some(geometry) = self.math_block_geometry(frame, placement)
             {
-                // **The palette's one scrim, not the status chip's face.** This
-                // wash shared `#333333` with the two chips above until
-                // 2026-08-27 and is not one: a chip is a surface with words on
-                // it and a scrim is the absence of a surface, which is exactly
-                // why `modal_scrim` is the single entry the palette declares
-                // once for both canvases. Sharing the chips' constant also made
-                // the doc line above ("the dim darkens a block") false on the
-                // dark canvas, where `#333333` is *lighter* than `--termbg`.
-                rects.push(self.pixel_rect_with_coverage(
-                    geometry.block[0],
-                    geometry.block[1],
-                    geometry.block[2],
-                    geometry.block[3],
-                    chrome_palette().modal_scrim,
-                    0.45,
-                ));
+                rects.extend(
+                    rounded_rect_coverage(geometry.block, ground_radius)
+                        .into_iter()
+                        .map(|entry| {
+                            self.pixel_rect_with_coverage(
+                                entry.rect[0],
+                                entry.rect[1],
+                                entry.rect[2],
+                                entry.rect[3],
+                                chrome_palette().preview_code_ground,
+                                entry.coverage,
+                            )
+                        }),
+                );
             }
         }
         for failure in &frame.math_failures {
@@ -10457,75 +10582,31 @@ impl WindowRenderer {
         rects
     }
 
+    /// **What this lane still draws over a formula band: the overflow fades,
+    /// and nothing else** (owner's ruling 2026-09-14 ②).
+    ///
+    /// It used to draw the two verbs as well — each a small square chip
+    /// ([`Self::float_tag_rects`]) with an eye or a pair of sheets struck inside
+    /// it out of five and eight hand-placed rectangles. Two things were wrong
+    /// with that and only one of them was the look. The look: a bordered chip is
+    /// this window's *floating tag* — the thing a tooltip and a hover-address
+    /// bubble are — and a verb you press is not one of those; it is a control,
+    /// and every other control in this window is a house mark on a pill. The
+    /// other: those rectangles were a second drawing of two marks the house
+    /// already owns (`#i-code`, `#i-eye`, `#i-copy`), which is the exact thing
+    /// `bt_app::marks`'s own header forbids — "a mark drawn twice is two marks
+    /// that drift, and the second one is the one nobody looks at".
+    ///
+    /// So the marks moved up a crate, to where marks are rasterized, and this
+    /// file kept the half only it can answer: *where* they stand
+    /// ([`WindowRenderer::math_tool_boxes`]).
     fn math_overlay_rectangles(&self, frame: &ViewportFrame) -> Vec<RectInstance> {
         let mut rects = Vec::new();
-        // The eye and the copy glyph are drawn *on a chip*, not on the canvas,
-        // so they take the chip's ink and not the terminal's. Before 2026-08-27
-        // they took `foreground_rgb()` — the scheme's default ink, chosen to
-        // read against the canvas — and stood on a hard-coded `#333333`: the
-        // status overlay's defect, in a second place, for the same reason.
-        let ink = chrome_palette().float_tag().ink;
-        let unit = self.metrics.scale_factor as f32;
         for placement in &frame.math_blocks {
             let Some(geometry) = self.math_block_geometry(frame, placement) else {
                 continue;
             };
-            // Before the toolbar, so the buttons stay crisp on top of it.
             rects.extend(self.math_overflow_fade_rectangles(placement, &geometry));
-            let (Some(eye), Some(copy)) = (geometry.eye, geometry.copy) else {
-                continue;
-            };
-            for button in [eye, copy] {
-                rects.extend(self.float_tag_rects(button));
-            }
-            let eye_mid_x = (eye[0] + eye[2]) / 2.0;
-            let eye_mid_y = (eye[1] + eye[3]) / 2.0;
-            let eye_half_w = (eye[2] - eye[0]) * 0.29;
-            let eye_half_h = (eye[3] - eye[1]) * 0.18;
-            rects.extend([
-                self.pixel_rect(
-                    eye_mid_x - eye_half_w,
-                    eye_mid_y - eye_half_h,
-                    eye_mid_x + eye_half_w,
-                    eye_mid_y - eye_half_h + unit,
-                    ink,
-                ),
-                self.pixel_rect(
-                    eye_mid_x - eye_half_w,
-                    eye_mid_y + eye_half_h - unit,
-                    eye_mid_x + eye_half_w,
-                    eye_mid_y + eye_half_h,
-                    ink,
-                ),
-                self.pixel_rect(
-                    eye_mid_x - unit,
-                    eye_mid_y - unit,
-                    eye_mid_x + unit,
-                    eye_mid_y + unit,
-                    ink,
-                ),
-            ]);
-            let copy_inset = (copy[2] - copy[0]) * 0.27;
-            let first = [
-                copy[0] + copy_inset - 2.0 * unit,
-                copy[1] + copy_inset - 2.0 * unit,
-                copy[2] - copy_inset,
-                copy[3] - copy_inset,
-            ];
-            let second = [
-                copy[0] + copy_inset,
-                copy[1] + copy_inset,
-                copy[2] - copy_inset + 2.0 * unit,
-                copy[3] - copy_inset + 2.0 * unit,
-            ];
-            for outline in [first, second] {
-                rects.extend([
-                    self.pixel_rect(outline[0], outline[1], outline[2], outline[1] + unit, ink),
-                    self.pixel_rect(outline[0], outline[3] - unit, outline[2], outline[3], ink),
-                    self.pixel_rect(outline[0], outline[1], outline[0] + unit, outline[3], ink),
-                    self.pixel_rect(outline[2] - unit, outline[1], outline[2], outline[3], ink),
-                ]);
-            }
         }
         rects
     }
@@ -15097,14 +15178,22 @@ fn default_background() -> [u8; 3] {
     background_rgb()
 }
 
-/// Whether a block's hover dim scrim is drawn.
+/// Whether a block's ground is drawn.
 ///
-/// The dim darkens a block so its toolbar reads against it. A Rendered block's substance is its
-/// texture: if that texture did not draw, the scrim would be the only thing on screen where the
-/// picture belongs — the bare grey rectangle. A Source block draws as terminal text and owns no
-/// texture, so its hover dim is unconditional (projection deliberately allows a Source block to
-/// carry `toolbar_visible`; see `crates/bt-term/src/session.rs`).
-fn math_block_dim_is_drawn(placement: &MathBlockPlacement, textured: bool) -> bool {
+/// The ground is the fence's floor (`--panel`), laid under a block while the pointer is on it so
+/// the band reads as a region — `.math:hover .mbox { background: var(--panel) }`, which is the
+/// mock-up's own rule and the reason this is a *hover* fact rather than a permanent one: a formula
+/// is the program's own line of output, and a floor under every one of them all the time would be
+/// furniture the reader never asked for. A Rendered block's substance is its texture: if that
+/// texture did not draw, the ground would be the only thing on screen where the picture belongs —
+/// a bare rounded rectangle. A Source block draws as terminal text and owns no texture, so its
+/// ground is unconditional (projection deliberately allows a Source block to carry
+/// `toolbar_visible`; see `crates/bt-term/src/session.rs`).
+///
+/// Named for the ground since 2026-09-14. It answered for a *scrim* until then, and a scrim and a
+/// ground are opposites — one is the absence of a surface and the other is a surface — so the two
+/// could not go on sharing a name once the ruling turned the first into the second.
+fn math_block_ground_is_drawn(placement: &MathBlockPlacement, textured: bool) -> bool {
     placement.toolbar_visible && (placement.display == MathBlockDisplay::Source || textured)
 }
 
@@ -16355,8 +16444,10 @@ mod tests {
     /// renderer floats over a body takes its face, its hairline and its ink from
     /// [`ChromePalette::float_tag`], and nothing else.**
     ///
-    /// The two chips are the terminal's status overlay (a hovered link's target,
-    /// the `N rows above` count) and a formula block's toolbar buttons. Both
+    /// The two chips *were* the terminal's status overlay (a hovered link's
+    /// target, the `N rows above` count) and a formula block's toolbar buttons;
+    /// since 2026-09-14 the second is a pair of house marks and the status
+    /// overlay stands alone. Both
     /// stood on one hard-coded `#333333` with the *scheme's* default ink on top
     /// — an ink resolved for contrast against the terminal canvas, printed on
     /// something that was not the terminal canvas. On the dark canvas the
@@ -16369,9 +16460,15 @@ mod tests {
     ///    floor downstream is finally handed the pair that is on the glass;
     /// 2. the chip is five boxes and every one of them is a `float_tag` field;
     /// 3. the chip helper's name, followed by an open paren, occurs exactly
-    ///    three times in this file — one definition and two call sites — so a
-    ///    third chip that struck its own colours drops this gate rather than
-    ///    shipping.
+    ///    twice in this file — one definition and one call site — so a second
+    ///    chip that struck its own colours drops this gate rather than shipping.
+    ///
+    /// **The count fell from three to two on 2026-09-14** and the sentence above
+    /// it is now half history: a formula band's two verbs stopped being chips
+    /// that day and became house marks on a pill (owner's ruling ②), so the
+    /// status overlay is the only chip this renderer floats. The gate is kept at
+    /// its new number rather than retired, because "there is one way to strike a
+    /// chip" is the claim, not "there are two of them".
     #[test]
     fn every_chip_the_renderer_floats_over_a_body_is_struck_from_the_palette() {
         for palette in [DARK_CHROME, LIGHT_CHROME] {
@@ -16426,9 +16523,9 @@ mod tests {
         // Spelled in two halves so this line is not itself a fourth occurrence.
         assert_eq!(
             source.matches(concat!("float_tag_rects", "(")).count(),
-            3,
-            "one definition and two call sites — a chip that struck its own \
-             colours would be a fourth"
+            2,
+            "one definition and one call site — a chip that struck its own \
+             colours would be a third"
         );
     }
 
@@ -16681,9 +16778,107 @@ mod tests {
         }
         assert_eq!(
             math_toolbar_vertical_bounds(5.0, 35.0, 1.0),
-            (9.0, 31.0),
-            "a taller block keeps the intended 22px control"
+            (8.0, 32.0),
+            "a taller block keeps the intended 24px control"
         );
+    }
+
+    /// PIN (owner's ruling 2026-09-14 ①): **a formula band stands on the code
+    /// fence's floor, at the code fence's corner.**
+    ///
+    /// The band used to wear `modal_scrim` at .45 coverage on four square
+    /// corners. Three claims, and each is a separate way the restyle could be
+    /// half-done: the token, the corner, and the fact that the corner is a
+    /// *round* and not a note in a doc comment.
+    ///
+    /// MUTATIONS: put `modal_scrim` back → ①; pass `0.0` for the radius → ②
+    /// (one full-coverage slab, no ramp); round from the logical number without
+    /// the scale → ③.
+    #[test]
+    fn a_formula_bands_ground_is_the_fences_token_at_the_fences_corner() {
+        // ① The token is the fence's, on both canvases, and is never the scrim.
+        for palette in [DARK_CHROME, LIGHT_CHROME] {
+            assert_ne!(
+                palette.preview_code_ground, palette.modal_scrim,
+                "a ground and a scrim are opposites; the band wears the ground"
+            );
+        }
+
+        // ② The corner is one number shared with the markdown fence, and it is
+        //    really drawn: a rounded box comes back as a ramp of coverages with
+        //    partial slabs at the ends, a square one as a single solid slab.
+        assert_eq!(PREVIEW_CODE_GROUND_RADIUS_LOGICAL_PX, 7.0);
+        let block = [40.0, 10.0, 240.0, 70.0];
+        let rounded = rounded_rect_coverage(block, PREVIEW_CODE_GROUND_RADIUS_LOGICAL_PX);
+        assert!(
+            rounded.len() > 1 && rounded.iter().any(|entry| entry.coverage < 1.0),
+            "a 7px round is a ramp, not one square slab: {rounded:?}"
+        );
+        assert!(
+            rounded.iter().all(|entry| entry.rect[0] >= block[0] - 0.5
+                && entry.rect[2] <= block[2] + 0.5
+                && entry.rect[1] >= block[1] - 0.5
+                && entry.rect[3] <= block[3] + 0.5),
+            "the ground never reaches past the band it is the floor of"
+        );
+
+        // ③ And it grows with the display, like every other logical radius in
+        //    this window: at ×2 the corner is twice as deep.
+        let deep = rounded_rect_coverage(block, PREVIEW_CODE_GROUND_RADIUS_LOGICAL_PX * 2.0);
+        assert!(
+            deep.len() > rounded.len(),
+            "a radius that ignored the scale would give the same ramp at ×2"
+        );
+    }
+
+    /// PIN (owner's ruling 2026-09-14 ②/③): **the two marks stand beside the
+    /// band, in the band's own row, in a box no smaller than the one they
+    /// replace.**
+    ///
+    /// The mock-up is the authority on the placement (`.math` is a row holding
+    /// `.mbox` and `.math-tools`, 2000-2012) and on the two numbers (24px box,
+    /// 2px gap, 2117-2129). The ruling's own third clause is the last assertion:
+    /// a hit box may only ever grow.
+    ///
+    /// MUTATIONS: swap the two boxes → ②; drop the `pane_right - total` clamp →
+    /// ④; put 22 back in `MATH_TOOL_BUTTON_LOGICAL_PX` → ⑤.
+    #[test]
+    fn the_two_marks_stand_beside_the_band_and_their_boxes_only_grew() {
+        // ① Side by side, in the band's own row, at the band's right edge.
+        let (source, copy) = math_tool_boxes_px([200.0, 10.0, 70.0], [8.0, 600.0], 1.0);
+        assert_eq!(
+            source[0], 200.0,
+            "the first mark starts where the band ends"
+        );
+        assert_eq!(source[3] - source[1], MATH_TOOL_BUTTON_LOGICAL_PX);
+        assert_eq!(copy[3] - copy[1], MATH_TOOL_BUTTON_LOGICAL_PX);
+        assert_eq!(source[1], copy[1], "one row, not two");
+
+        // ② Order, and the gap between them.
+        assert_eq!(copy[0] - source[2], MATH_TOOL_GAP_LOGICAL_PX);
+
+        // ③ Centred in the band rather than hung from its top.
+        assert_eq!((source[1] + source[3]) / 2.0, (10.0 + 70.0) / 2.0);
+
+        // ④ Neither reaches past the pane, however far right the band ends.
+        let (_, clamped) = math_tool_boxes_px([2_000.0, 10.0, 70.0], [8.0, 600.0], 1.0);
+        assert!(
+            clamped[2] <= 600.0,
+            "the pair ran to {}, past the pane's own edge",
+            clamped[2]
+        );
+
+        // ⑤ And the box only ever grew: 24 against the 22 of the bordered chips
+        //    this replaced (owner's ruling ③ — "hit boxes stay at least the
+        //    current size").
+        assert!(
+            MATH_TOOL_BUTTON_LOGICAL_PX >= 22.0,
+            "a restyle may not shrink a control the reader can already hit"
+        );
+
+        // ⑥ And it is logical pixels, so the boxes double with the display.
+        let (retina, _) = math_tool_boxes_px([200.0, 20.0, 140.0], [16.0, 1_200.0], 2.0);
+        assert_eq!(retina[3] - retina[1], MATH_TOOL_BUTTON_LOGICAL_PX * 2.0);
     }
 
     #[test]
@@ -18052,40 +18247,42 @@ mod tests {
         assert_eq!(blank_digest.last_text_row, -1);
     }
 
-    /// PIN (grey-band root fix, 2026-08-02): the hover dim never outlives the raster it dims.
+    /// PIN (grey-band root fix, 2026-08-02): the ground never outlives the raster it stands under.
     ///
-    /// A rendered block whose texture did not draw must not draw its scrim either: the scrim alone
-    /// over background IS the bare grey rectangle the user reported. Source blocks are unaffected
+    /// A rendered block whose texture did not draw must not draw its floor either: the floor alone
+    /// over background IS the bare rectangle the user reported. Source blocks are unaffected
     /// — they draw as terminal text, own no texture, and projection deliberately lets them carry
-    /// `toolbar_visible`.
+    /// `toolbar_visible`. The predicate outlived the scrim it was written for (2026-09-14) because
+    /// it was never about the scrim: it is about whether there is a block on screen to stand
+    /// anything under.
     #[test]
-    fn the_hover_dim_is_drawn_only_over_a_block_that_put_pixels_on_screen() {
+    fn the_ground_is_drawn_only_under_a_block_that_put_pixels_on_screen() {
         let mut rendered = test_math_placement("k", 0, 20 * SUBPIXELS_PER_PX, 16);
         let mut source = rendered.clone();
         source.display = MathBlockDisplay::Source;
 
         assert!(
-            !math_block_dim_is_drawn(&rendered, true),
-            "no hover, no dim"
+            !math_block_ground_is_drawn(&rendered, true),
+            "no hover, no ground"
         );
         assert!(
-            !math_block_dim_is_drawn(&source, true),
-            "no hover, no dim for a source block either",
+            !math_block_ground_is_drawn(&source, true),
+            "no hover, no ground for a source block either",
         );
 
         rendered.toolbar_visible = true;
         source.toolbar_visible = true;
         assert!(
-            math_block_dim_is_drawn(&rendered, true),
-            "a hovered block that drew its raster dims it",
+            math_block_ground_is_drawn(&rendered, true),
+            "a hovered block that drew its raster stands on its floor",
         );
         assert!(
-            !math_block_dim_is_drawn(&rendered, false),
-            "a hovered block whose texture never drew must not paint a bare scrim",
+            !math_block_ground_is_drawn(&rendered, false),
+            "a hovered block whose texture never drew must not paint a bare floor",
         );
         assert!(
-            math_block_dim_is_drawn(&source, false),
-            "a source block owns no texture; its hover dim is over its own text",
+            math_block_ground_is_drawn(&source, false),
+            "a source block owns no texture; its ground is under its own text",
         );
     }
 
