@@ -148,6 +148,14 @@ Nothing yet.
   between displays never told it. Folio now says it again on every move, so the
   list stands under the caret on any display, and dragging a window costs no
   more than typing in it.
+- **On a Mac, the sentence under `Option key sends Alt` is shown whole.** The
+  row's description is the one deliberately longer than the rest, and on the
+  General page — whose pickers take their half of the row — it ran past the
+  three lines a row would draw and lost its ending to an ellipsis: the fourth
+  line in Chinese, the fourth through sixth in English. A settings row now grows
+  to hold every line its sentence needs, and the row, the page's scrolling and
+  where you can click all follow the taller row. Every other description is
+  unchanged, and none of them got longer.
 
 - **A table on a focus card lines up again.** A card showing a box-drawing table whose cells hold Chinese text drew its borders in a different place on every row, while the same table in the pane beside it was square. A card's rows are now laid out column by column, as the pane's own grid is, so a wide character takes exactly two columns and a border stands in the same place on every row.
 - **On a Mac, `Edit ▸ Copy` and `Edit ▸ Paste` now act on the pane you are
