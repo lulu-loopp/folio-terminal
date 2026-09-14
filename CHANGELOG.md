@@ -156,6 +156,16 @@ Nothing yet.
   to hold every line its sentence needs, and the row, the page's scrolling and
   where you can click all follow the taller row. Every other description is
   unchanged, and none of them got longer.
+- **A formula no longer loses a symbol without saying so.** A sign that the
+  fonts on your computer cannot draw used to vanish from a typeset formula
+  silently — not as a box or a blank, but gone, with the symbols either side of
+  it closed up as though the author had never written it. Folio now asks your
+  font list for every character a formula needs, not only for Chinese, Japanese
+  and Korean ones, and names every installed family that can draw one the maths
+  font cannot; a character nothing on the machine can draw stops the formula and
+  leaves the source on the page, which is the answer that is at least true. (On
+  a Mac, this is being read against a report that the minus sign in front of a
+  fraction was not drawn where Windows drew it.)
 
 - **A table on a focus card lines up again.** A card showing a box-drawing table whose cells hold Chinese text drew its borders in a different place on every row, while the same table in the pane beside it was square. A card's rows are now laid out column by column, as the pane's own grid is, so a wide character takes exactly two columns and a border stands in the same place on every row.
 - **On a Mac, `Edit ▸ Copy` and `Edit ▸ Paste` now act on the pane you are
