@@ -115353,7 +115353,7 @@ mod tests {
     fn hostile_math_is_refused_and_the_real_decoration_worker_survives() {
         const CHILD: &str = "BT_MATH_ROBUSTNESS_TEST_CHILD";
         if std::env::var_os(CHILD).is_none() {
-            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            let mut child = bt_platform::quiet_command(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
                     "tests::hostile_math_is_refused_and_the_real_decoration_worker_survives",
