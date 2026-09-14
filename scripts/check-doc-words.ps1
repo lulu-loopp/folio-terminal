@@ -19,9 +19,17 @@ $ErrorActionPreference = "Stop"
 
 $repo = Split-Path -Parent $PSScriptRoot
 
+# The documents a reader arrives at. `docs/features.*` and `docs/install.*` are
+# on this list for the same reason the two front pages are: they carry the
+# sections that used to stand in them, and prose does not stop being a reader's
+# first page by moving one directory down.
 $files = @(
     "README.md"
     "README.zh-CN.md"
+    "docs/features.md"
+    "docs/features.zh-CN.md"
+    "docs/install.md"
+    "docs/install.zh-CN.md"
     "CONTRIBUTING.md"
     "CHANGELOG.md"
     "docs/screenshots/README.md"

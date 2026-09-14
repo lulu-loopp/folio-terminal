@@ -4,9 +4,10 @@
 
 `v<version>` or `v<version>-preview`, and the version is the one in
 `[workspace.package]`. The workflow refuses anything else, because the tag and
-the manifest are one claim: the archive is `folio-<version>-windows-x64.zip` and
-`folio.exe --version` answers `<version>`, so a tag naming a version the tree
-does not carry would put three different numbers in front of the same reader.
+the manifest are one claim: the archive is `folio-<version>-windows-x64.zip`, the
+disk image is `Folio-<version>-macos-arm64.dmg`, and `folio --version` answers
+`<version>` out of either — so a tag naming a version the tree does not carry
+would put three different numbers in front of the same reader.
 
 **`-preview` is a release channel and not a second claim.** Every release so far
 has been tagged that way over a manifest with no suffix — `v0.1.0-preview` over
@@ -14,13 +15,18 @@ has been tagged that way over a manifest with no suffix — `v0.1.0-preview` ove
 for, not what it is. The manifest does not carry it; nothing in the archive
 carries it; only the tag and the release page do.
 
-**Bump the versioned download link in both READMEs at release-prep time.**
-`README.md` and `README.zh-CN.md` each name `folio-<version>-windows-x64.zip` in
-the Download section and link it at
-`/releases/download/v<version>-preview/folio-<version>-windows-x64.zip`, which is
-the same claim as the tag and the manifest and goes stale the same way.
-`/releases/latest` is not a way out of bumping it: it answers 404 on a repository
-whose releases are all pre-releases.
+**No public document carries a versioned download link, and that is deliberate.**
+`README.md`, `README.zh-CN.md` and the two `docs/install` documents send a
+reader to `/releases` and name the assets as
+`folio-<version>-windows-x64.zip` and `Folio-<version>-macos-arm64.dmg`, with
+the angle brackets standing where a number used to. A link to
+`/releases/download/v<version>-preview/<asset>` was a second copy of the claim
+the tag and the manifest already make, it went stale the same way, and a stale
+one is worse than none because it works and hands somebody an old build.
+`/releases/latest` was never the way out either: it answers 404 on a repository
+whose releases are all pre-releases. So there is nothing to bump at
+release-prep time — check instead that no document has grown a versioned link
+back.
 
 ## The workflow
 
@@ -125,9 +131,25 @@ build a zip of each shape rather than describing one. Run it after changing how
 Everything below is about the one step that is not in that workflow, because it
 needs a person: signing.
 
+## What signs what, on both platforms
+
+Two chains over the same source, operated in two places in this document — the
+Windows one immediately below, the macOS one in the macOS section further down.
+
+| | |
+| --- | --- |
+| **Windows** | `folio.exe` and `folio.msix`, signed through Microsoft's Artifact Signing service. The service holds the key, there is no `.pfx` in this project, and every signature carries a countersigned time stamp because the certificate is valid for three days. The subject is `CN=Weiyi Shi, O=Weiyi Shi, L=Ann Arbor, S=mi, C=US`, the same holder the executable's own `LegalCopyright` names. |
+| **macOS** | `Folio.app` and the disk image around it, signed with a **Developer ID Application** certificate issued to the same holder, with the hardened runtime, a secure timestamp and the entitlements in `packaging/macos/entitlements.plist` — every key in that file `false`, no exceptions taken. Both are then **notarized** by Apple and the ticket **stapled** to each, so a reader's machine can check the signature with the network off. `Folio.app.dSYM` is built beside the bundle and archived with the tag; it is not published and never goes inside the application. |
+
+Neither chain puts a key, a password or a team identifier in this repository.
+The Windows one holds the key in a service the owner signs in to; the macOS one
+holds it in a keychain on the owner's machine, and `packaging/macos/.gitignore`
+refuses a `.p12` and a `.p8` at the place they would land.
+
 ## Signing
 
-Folio is signed by Microsoft's **Artifact Signing** service — the service that
+**This section is the Windows chain.** Folio is signed by Microsoft's
+**Artifact Signing** service — the service that
 used to be called Trusted Signing. There is no `.pfx` anywhere in this project
 and there is not going to be one. The service holds the key, issues a
 certificate that is valid for **three days**, and signs on request for whoever
@@ -627,14 +649,186 @@ rehearsal and the release page is made by a person from the signed machine.
 
 ## macOS
 
-There is no macOS lane in `release.yml` yet — that is M5-4's. What exists is the
-four scripts a lane would call, which M5-1 wrote and proved on the Mac with an
-ad-hoc signature; the steps that need the Developer ID private key or Apple's
-notary service are the owner's, from a session with the login keychain open.
-They are written out in order in **`packaging/macos/README.md`**, which is the
-one place that sequence lives so that it cannot drift from the scripts beside
-it. The rest of this section is the version rule, which is P-2's and is what the
-bundle step rests on.
+A macOS release is four steps on the Mac and one of them needs a person: the
+Developer ID private key is in a keychain, and a keychain has to be opened by
+somebody who knows the password. Notarization is the half that does work
+headlessly, because it authenticates with a key file rather than a keychain.
+
+`scripts/release/macos/` holds the four steps, as POSIX `sh` scripts, and the
+order of this list is the order they run in.
+
+| | |
+| --- | --- |
+| `bundle.sh --out <dir>` | Assembles `Folio.app` from `target/release/folio` — the rendered plist, the icon built from `assets/app-icon/folio.ico`, `PkgInfo` — and runs `dsymutil` into `Folio.app.dSYM` **beside** the bundle, never inside it. |
+| `sign.sh --app <bundle> --identity <id>` | Signs with the hardened runtime, a secure timestamp and `packaging/macos/entitlements.plist`, inside out, then reads the signature back. `--identity` defaults to `-`, which is ad-hoc: that is how the script is exercised on a machine with no certificate. |
+| `notarize.sh --path <bundle or image>` | Submits, waits, keeps the notarization log beside the artifact, and staples the ticket to it. |
+| `dmg.sh --app <bundle> --out <dir> --identity <id>` | Stages the application beside a link to `/Applications`, writes the compressed read-only image, and signs, notarizes and staples that too. |
+
+`packaging/macos/README.md` carries the same sequence with every flag and what
+each step's output should say; it is beside the scripts so that the two cannot
+drift. What follows here is what that file does not decide: who unlocks the key,
+what the lane needs, what is kept, and what the owner has to see before the tag
+is published.
+
+### The one-time preparation, and the part only the owner can do
+
+1. **Point the developer tools at Xcode**, once per machine:
+   `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer` and
+   `sudo xcodebuild -license accept`. `xcode-select -p` must then print the
+   Xcode path.
+2. **Create the Developer ID Application certificate** — Xcode ▸ Settings ▸
+   Accounts ▸ the team ▸ Manage Certificates ▸ **+** ▸ Developer ID
+   Application. `security find-identity -v -p codesigning` must name a
+   `Developer ID Application: … (TEAMID)` line and end `1 valid identities
+   found`. The team id is read from that line at release time and is not
+   written into this repository.
+3. **Create the App Store Connect key** for notarization, and put it at
+   `~/.appstoreconnect/private_keys/AuthKey_<KEYID>.p8`, mode `600`, with the
+   key id and the issuer id beside it in
+   `~/.appstoreconnect/folio-notary.env`. Those two ids are identifiers rather
+   than secrets; the `.p8` is the secret. Nothing of this goes in the
+   repository, and `packaging/macos/.gitignore` refuses a `.p8` and a `.p12` at
+   the place they would land.
+
+**The signing session must have the keychain open, and an ssh session does not
+have one.** Measured: `xcrun notarytool history --keychain-profile folio` over a
+non-interactive ssh answers `keychainLocked`, and `codesign`'s reach for the
+private key fails the same way, with `errSecInternalComponent`. So the signing
+step is run at the machine, or from a session where the owner has unlocked a
+keychain for the duration of the release:
+
+```sh
+security unlock-keychain ~/Library/Keychains/folio-signing.keychain-db   # asks for the password
+security list-keychains -d user -s ~/Library/Keychains/folio-signing.keychain-db login.keychain-db
+# … the release …
+security lock-keychain ~/Library/Keychains/folio-signing.keychain-db
+```
+
+A dedicated signing keychain rather than the login one is what keeps the
+unlocked window the length of a release instead of the length of a login.
+
+### Every release
+
+```sh
+export RUSTUP_TOOLCHAIN=1.94.1-aarch64-apple-darwin     # docs/BUILDING.md says why
+cargo build --release -p bt-app
+scripts/release/macos/bundle.sh --out target/macos
+scripts/release/macos/sign.sh   --app target/macos/Folio.app \
+    --identity "Developer ID Application: … (TEAMID)"
+scripts/release/macos/notarize.sh --path target/macos/Folio.app
+scripts/release/macos/dmg.sh    --app target/macos/Folio.app --out target/macos \
+    --identity "Developer ID Application: … (TEAMID)"
+```
+
+`notarize.sh` and `dmg.sh` both take `--dry-run`, which prints every command
+with the real paths filled in and touches nothing.
+
+**The image is written as `Folio.dmg` and published as
+`Folio-<version>-macos-arm64.dmg`.** The script writes the short name because a
+script that built the long one would be a second reader of the version line;
+the rename happens on the way to the release page, in the lane below or by the
+person making the page. Both halves of the published name earn their place —
+the version, because the tag and the asset are one claim, and the architecture,
+because this preview is arm64 and an Intel Mac must be able to tell from the
+name that this is not for it.
+
+**Never sign anything again after it has been stapled.** The ticket lives inside
+the signed artifact and a second `codesign` throws it away, so
+`stapler validate` fails on a build that was notarized minutes earlier. That is
+also why the image is built from the stapled application rather than the other
+way round.
+
+### What must be seen before the tag is published
+
+In this order, on the Mac, against the artifacts that are actually going to be
+uploaded:
+
+```sh
+codesign --verify --deep --strict --verbose=2 target/macos/Folio.app
+spctl -a -vvv target/macos/Folio.app
+spctl -a -vvv -t open --context context:primary-signature target/macos/Folio.dmg
+xcrun stapler validate target/macos/Folio.app
+xcrun stapler validate target/macos/Folio.dmg
+```
+
+The second must say `accepted` **and** `source=Notarized Developer ID` — an
+`accepted` with any other source is a different claim. `stapler validate` passes
+on **both** the application and the image, and not on one of the two: a stapled
+image holding an unstapled application is a download that works until the reader
+is offline.
+
+Then the clean-user pass: from a second macOS account, fetch the image over the
+network rather than copying it, open it, drag Folio to Applications and launch
+it. The ordinary identified-developer confirmation is expected. An
+**unidentified developer** panel, a notarization failure, or **damaged and
+can't be opened** is a release that does not go out. Disconnect the network and
+launch once more, to see the stapled ticket used rather than a check that
+happened to reach Apple.
+
+### What is kept beside the artifact
+
+Two files, archived with the tag and **not** published:
+
+- **The notarization log**, `<artifact>.notarylog.json`, one per submission —
+  the application's and the image's. It is the only record of what the notary
+  service looked at, and Apple keeps it for a limited time.
+- **`Folio.app.dSYM`**, from `bundle.sh`. The release profile carries
+  line-tables-only debug information, which stays in the object files on Apple
+  targets, so this is the only thing that turns a crash report from a shipped
+  build back into file names and line numbers. It pairs with the binary by UUID
+  and exists only on the machine that linked it — lose it and every crash report
+  from that release is names without lines for ever.
+
+They are kept beside the artifact rather than inside it: the `.dSYM` is several
+times the download and would be signed for no reason, and a notarization log is
+nobody's business but the project's.
+
+### The lane, and its four secrets
+
+`.github/workflows/release.yml`'s macOS lane builds, bundles, signs, notarizes
+and packs the image on a macOS runner, and — like the Windows job — **publishes
+nothing**. It reads four repository secrets:
+
+| secret | what it holds |
+| --- | --- |
+| `MACOS_CERTIFICATE_P12` | The Developer ID Application identity exported as a `.p12`, base64-encoded. |
+| `MACOS_CERTIFICATE_PASSWORD` | The password that `.p12` was exported with. |
+| `MACOS_KEYCHAIN_PASSWORD` | The password the lane creates its throwaway keychain with, so that the identity is imported into a keychain that exists for the length of the job and is deleted at the end of it. |
+| `MACOS_NOTARY_KEY_P8` | The App Store Connect key file, base64-encoded. |
+
+**These four names are fixed here, and the lane reads exactly them.** A secret
+is the one kind of configuration nobody can read back to check, so a lane that
+spells one differently fails with an empty value and a message about a
+certificate rather than about a name — and the place that names are agreed on
+has to be the place a person looks, which is this document.
+
+The key id and the issuer id are **repository variables and not secrets**,
+`MACOS_NOTARY_KEY_ID` and `MACOS_NOTARY_ISSUER_ID`: they identify a key rather
+than open one, and a value that is not secret should not be stored as though it
+were, where nobody can read it back to check it.
+
+**Exporting the `.p12`.** On the machine that holds the identity:
+
+```sh
+security find-identity -v -p codesigning        # confirm there is exactly one
+# Keychain Access ▸ My Certificates ▸ the Developer ID Application row ▸
+# right-click ▸ Export… ▸ Personal Information Exchange (.p12), with a password
+base64 -i Folio-DeveloperID.p12 | pbcopy        # paste into the secret
+rm Folio-DeveloperID.p12                        # the keychain still has it
+```
+
+The export must be taken from **My Certificates** and not from Certificates: the
+second exports the certificate without the private key, and a `.p12` with no key
+imports without complaint and then fails at `codesign` with no certificate
+found. Export the `.p8` the same way — `base64 -i AuthKey_<KEYID>.p8` — and keep
+neither copy on disk afterwards.
+
+A lane cannot do the clean-user pass, and the signature it makes is the same
+signature the owner's machine makes. What it is for is the same thing the
+Windows job is for: proving that this commit builds and packages on a machine
+nobody has been working on.
+
+### The version in the bundle
 
 `packaging/macos/Info.plist.in` is a **template**, not a plist. Its
 `CFBundleShortVersionString` and `CFBundleVersion` are both the literal

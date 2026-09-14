@@ -116,9 +116,9 @@ half-width comma after a Chinese character as the defect it is.
 
 The same list covers the documents a reader arrives at first.
 `scripts/check-doc-words.ps1` reads the prose of `README.md`, its Chinese half,
-`CHANGELOG.md`, this file and the screenshot list, and leaves fenced examples,
-code spans and comments alone — a path is the reader's own word for a thing they
-will type.
+`docs/features.md` and `docs/install.md` with theirs, `CHANGELOG.md`, this file
+and the screenshot list, and leaves fenced examples, code spans and comments
+alone — a path is the reader's own word for a thing they will type.
 
 Both languages are edited together. Every string is in `crates/bt-app/src/i18n.rs`
 with its English and its Chinese side by side, so a new sentence arrives in two

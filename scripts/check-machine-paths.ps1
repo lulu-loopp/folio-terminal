@@ -23,6 +23,9 @@
 #     licence texts carry their own authors' names and addresses. Those addresses
 #     are the attribution; removing them is the breach, not the fix.
 #   * `docs/` — the internal planning record. Gate 7 decides what of it ships.
+#     Four files there are the exception and are scanned: `features.md`,
+#     `features.zh-CN.md`, `install.md` and `install.zh-CN.md` are the front
+#     page's own prose, filed one directory down rather than unpublished.
 #   * `tests/corpus/` — terminal recordings, cleaned on their own line, with
 #     their own gate.
 #   * this file — it has to spell the forbidden strings in order to forbid them,
@@ -40,6 +43,14 @@ try {
 
     $skipPaths = @("tests/corpus/", "docs/", "vendor/", "licenses/", "THIRD-PARTY-NOTICES.md",
                    "scripts/check-machine-paths.ps1")
+
+    # **Four documents inside `docs/` that are not the planning record** - they
+    # are the front page's own prose, which moved one directory down on
+    # 2026-09-14 when the READMEs were cut to a summary. A sentence does not
+    # stop being published by being filed, so these are scanned like the files
+    # at the root and the `docs/` skip above does not reach them.
+    $publicDocs = @("docs/features.md", "docs/features.zh-CN.md",
+                    "docs/install.md", "docs/install.zh-CN.md")
     $skipExt = @(".ttf", ".otf", ".pfb", ".icc", ".nupkg", ".zip", ".png", ".jpg",
                  ".jpeg", ".ico", ".pdf", ".dll", ".exe", ".recording", ".btcr",
                  ".woff", ".woff2", ".mp4", ".webm")
@@ -93,7 +104,8 @@ try {
     $problems = New-Object System.Collections.Generic.List[string]
 
     foreach ($rel in $tracked) {
-        if ($skipPaths | Where-Object { $rel.StartsWith($_) }) { continue }
+        if (($publicDocs -notcontains $rel) -and
+            ($skipPaths | Where-Object { $rel.StartsWith($_) })) { continue }
         if ($skipExt -contains [IO.Path]::GetExtension($rel).ToLowerInvariant()) { continue }
 
         $full = Join-Path $repo $rel
