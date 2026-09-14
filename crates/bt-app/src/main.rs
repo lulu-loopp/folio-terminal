@@ -23441,6 +23441,30 @@ impl ImeCursorThrottle {
         self.pending = None;
     }
 
+    /// The rectangle the platform is currently working from, if it has been
+    /// told one at all.
+    fn last_sent(&self) -> Option<ImeCursorArea> {
+        self.last_sent_area
+    }
+
+    /// **Forget *what* the platform was last told without forgetting *when***
+    /// (user report 2026-09-14, `docs/DESIGN.md` §13.16 ⑥).
+    ///
+    /// [`Self::offer`] drops an area equal to the one already sent, and while a
+    /// caret sits still that is the whole of its work. A window that *moves*
+    /// keeps the very same window-relative rectangle and lands somewhere else on
+    /// the screen, so there the suppression is exactly backwards: the answer the
+    /// platform has cached is a **screen** rectangle, it is now stale, and
+    /// nothing else in this process is going to say so.
+    ///
+    /// Only the area is forgotten. [`Self::reset`] drops the clock with it,
+    /// which is right when a composition ends and wrong here: a drag emits a
+    /// move per frame, and re-arming must not turn one drag into a call per
+    /// move.
+    fn rearm(&mut self) {
+        self.last_sent_area = None;
+    }
+
     fn reset(&mut self) {
         *self = Self::default();
     }
@@ -81522,6 +81546,42 @@ impl Runtime<'_> {
         }
     }
 
+    /// **Say the caret's rectangle again, unchanged, because the window moved
+    /// out from under the answer** (user report 2026-09-14; `docs/DESIGN.md`
+    /// §13.16 ⑥).
+    ///
+    /// Everything this program computes for the input method is **window**
+    /// pixels ([`Self::apply_ime_cursor_area`]), and that is the contract on
+    /// both platforms. What the platform *stores* is not: AppKit's
+    /// `firstRectForCharacterRange:` must answer in **screen** coordinates, so
+    /// winit converts through the window at the moment it is asked
+    /// (`convertRect:toView:nil` then `-[NSWindow convertRectToScreen:]`, which
+    /// is right on any display), and `NSTextInputContext` then **caches** that
+    /// answer. Apple's own instruction for the cache is
+    /// `invalidateCharacterCoordinates`, and the one thing in this process that
+    /// reaches it is `Window::set_ime_cursor_area` — which is called only when
+    /// the *window-relative* rectangle changes.
+    ///
+    /// A window carried to a second display changes none of it. The prompt is
+    /// still the same number of pixels from the same window's top-left, so the
+    /// throttle drops the offer, the context is never invalidated, and the next
+    /// composition is placed off the screen rectangle computed while the window
+    /// was somewhere else — the candidate list stranded mid-window, which is the
+    /// report. The correction is not arithmetic: the arithmetic was right both
+    /// times. It is telling the platform to ask again.
+    ///
+    /// Not `reset`: that is a composition ending. This keeps the 60Hz cadence,
+    /// so a drag across the seam costs the same as a caret moving.
+    fn reoffer_ime_cursor_area(&mut self) {
+        let Some(area) = self.window.ime_cursor_throttle.last_sent() else {
+            return;
+        };
+        self.window.ime_cursor_throttle.rearm();
+        if let Some(area) = self.window.ime_cursor_throttle.offer(area, Instant::now()) {
+            self.apply_ime_cursor_area(area);
+        }
+    }
+
     /// **Do what the ledger's answer says**, for every interruption it allowed this turn
     /// (`attention` plan §11.7, slice C3).
     ///
@@ -96035,6 +96095,12 @@ impl Runtime<'_> {
     /// which is not a reason to fail a window move.
     fn window_moved(&mut self) -> Result<()> {
         self.remember_summoned_arrangement();
+        // The input method's copy of the caret rectangle is in screen
+        // coordinates and this is the event that invalidated it
+        // (`reoffer_ime_cursor_area`). Unconditional, because "the window is on
+        // a different display now" is not a question this program can answer
+        // more cheaply than the platform can re-derive the rectangle.
+        self.reoffer_ime_cursor_area();
         for web in self.window.web.values() {
             if let Err(error) = web.parent_window_moved() {
                 eprintln!("BT_WEB {error}");
@@ -130610,6 +130676,184 @@ mod tests {
             Some(latest)
         );
         assert_eq!(throttle.deadline(), None);
+    }
+
+    /// The caret a pane hands the input method, from the one cell it stands on.
+    ///
+    /// Window pixels all the way: the renderer measures the cell off its own
+    /// padding and metrics in the **seat's** axis, [`window_ime_cursor_area`]
+    /// carries it to the window's, and [`ime_cursor_area_of`] rounds the line
+    /// box to the whole-pixel origin-and-size pair the platform takes. Nothing
+    /// on this path knows which display the window is on, and nothing on it
+    /// should — that is the contract, and §13.16 ⑥ is about what the platform
+    /// does with the answer afterwards.
+    ///
+    /// Red gate: measure the caret's own hairline instead of the line box and
+    /// the height stops being the row's.
+    #[test]
+    fn a_caret_in_a_pane_reaches_winit_as_window_pixels_from_the_cell_it_stands_on() {
+        // Row 29, column 7 of a seat whose cells are 9x22 device pixels behind
+        // 8 pixels of padding — the grid's own arithmetic, spelled out so the
+        // expectation is not the code under test written twice.
+        let left = 8.0 + 7.0 * 9.0;
+        let top = 8.0 + 29.0 * 22.0;
+        let line = [left, top, left + 9.0, top + 22.0];
+        let seat = SeatViewport {
+            x: 976,
+            y: 40,
+            width: 944,
+            height: 1160,
+        };
+        assert_eq!(
+            window_ime_cursor_area(seat, ime_cursor_area_of(line)),
+            ImeCursorArea {
+                x: 976 + 71,
+                y: 40 + 646,
+                width: 9,
+                height: 22,
+            },
+            "the window's axis, and the size is the row rather than the caret",
+        );
+    }
+
+    /// AppKit's own conversion, written down: a caret rectangle in **window**
+    /// points — top-left origin, y down, because winit's view is flipped — to
+    /// the **screen** rectangle `firstRectForCharacterRange:` has to answer
+    /// with, whose origin is the *bottom* left and whose y grows upwards from
+    /// the zero screen's bottom-left corner.
+    ///
+    /// `window_origin` is the window content's bottom-left in that same global
+    /// space, which is what `-[NSWindow convertRectToScreen:]` adds. No screen's
+    /// height appears in it, and that is the point of the test below.
+    fn caret_screen_origin(
+        window_origin: (f64, f64),
+        content_height_pt: f64,
+        scale: f64,
+        area: ImeCursorArea,
+    ) -> (f64, f64) {
+        let left_pt = f64::from(area.x) / scale;
+        let top_pt = f64::from(area.y) / scale;
+        let height_pt = f64::from(area.height) / scale;
+        (
+            window_origin.0 + left_pt,
+            window_origin.1 + (content_height_pt - (top_pt + height_pt)),
+        )
+    }
+
+    /// The same rectangle read the way a screenshot reads it: down from the
+    /// **zero** screen's top-left. The flip constant is `NSScreen.screens[0]`'s
+    /// height and never the window's own screen's — the same constant
+    /// `macos_impl::flip_height` is built on.
+    fn screenshot_top(zero_screen_height_pt: f64, screen_origin_y: f64, height_pt: f64) -> f64 {
+        zero_screen_height_pt - (screen_origin_y + height_pt)
+    }
+
+    /// **Why a window that moved has to be told, even though nothing it computes
+    /// changed** (user report 2026-09-14, `docs/DESIGN.md` §13.16 ⑥).
+    ///
+    /// One caret, one window-relative rectangle, two displays: the zero screen,
+    /// and a second one whose origin is not `(0, 0)` and whose height is not the
+    /// zero screen's. The window-relative answer is a single number in both
+    /// places — that is the contract [`Runtime::apply_ime_cursor_area`] keeps —
+    /// and the **screen** rectangle the input method has to be given differs by
+    /// the whole of the move. So an answer cached while the window stood on one
+    /// display is wrong by that difference on the other, and re-deriving it is
+    /// not something this program can do by arithmetic: it can only ask the
+    /// platform to ask again.
+    ///
+    /// Red gate: flip with the window's own screen height instead of the zero
+    /// screen's and the last assertion moves by the difference between them —
+    /// the candidate list stranded mid-window, which is the report.
+    #[test]
+    fn the_same_caret_is_two_screen_rectangles_on_two_displays() {
+        let area = ImeCursorArea {
+            x: 976 + 71,
+            y: 40 + 646,
+            width: 9,
+            height: 22,
+        };
+        let scale = 2.0;
+        let content_height_pt = 600.0;
+
+        // Zero screen: 1512x982 points, origin (0, 0) by definition.
+        let zero_screen_height = 982.0;
+        let on_the_zero_screen =
+            caret_screen_origin((100.0, 200.0), content_height_pt, scale, area);
+        assert_eq!(on_the_zero_screen, (100.0 + 523.5, 200.0 + (600.0 - 354.0)));
+
+        // A second display of a different size, parked to the right and hanging
+        // below the zero screen's bottom edge: 2560x1440 points with its origin
+        // at (1512, -458). The window is carried to it unchanged.
+        let on_the_second_screen =
+            caret_screen_origin((1512.0 + 100.0, -458.0 + 200.0), content_height_pt, scale, area);
+        assert_eq!(
+            (
+                on_the_second_screen.0 - on_the_zero_screen.0,
+                on_the_second_screen.1 - on_the_zero_screen.1,
+            ),
+            (1512.0, -458.0),
+            "the caret moved by exactly the window's move and by nothing else",
+        );
+
+        // And read back the way the screen reads it, the flip is the **zero**
+        // screen's height at both stops — the second display's 1440 never enters
+        // the arithmetic, however tall it is.
+        assert_eq!(
+            screenshot_top(zero_screen_height, on_the_second_screen.1, 11.0),
+            zero_screen_height + 458.0 - 200.0 - 246.0 - 11.0,
+        );
+    }
+
+    /// **A move re-arms the rectangle the input method cached, and keeps the
+    /// clock** (user report 2026-09-14).
+    ///
+    /// The suppression in [`ImeCursorThrottle::offer`] is what makes a still
+    /// caret free, and it is exactly what has to be lifted when the window
+    /// itself moves: the area is equal, the screen rectangle it converts to is
+    /// not. [`ImeCursorThrottle::rearm`] forgets the area alone, so a drag —
+    /// which emits a move per frame — still costs at most one call per 60Hz
+    /// slot rather than one per move.
+    ///
+    /// Red gate: use `reset` instead and the last assertion fails, because a
+    /// dropped clock lets every move of a drag through.
+    #[test]
+    fn a_window_move_re_arms_the_caret_rectangle_without_dropping_the_clock() {
+        let start = Instant::now();
+        let area = ImeCursorArea {
+            x: 1047,
+            y: 686,
+            width: 9,
+            height: 22,
+        };
+        let mut throttle = ImeCursorThrottle::default();
+
+        assert_eq!(throttle.offer(area, start), Some(area));
+        assert_eq!(throttle.last_sent(), Some(area));
+        assert_eq!(
+            throttle.offer(area, start + IME_CURSOR_AREA_INTERVAL),
+            None,
+            "a caret that has not moved is not worth a call",
+        );
+
+        // The window is dragged to the second display. Same rectangle, and it
+        // has to reach the platform anyway.
+        throttle.rearm();
+        assert_eq!(
+            throttle.offer(area, start + IME_CURSOR_AREA_INTERVAL),
+            Some(area),
+        );
+
+        // The rest of the drag is one move per frame, and the clock is still
+        // standing: they coalesce into the one flush the interval allows.
+        let moved_again = start + IME_CURSOR_AREA_INTERVAL + Duration::from_millis(3);
+        throttle.rearm();
+        assert_eq!(throttle.offer(area, moved_again), None);
+        throttle.rearm();
+        assert_eq!(throttle.offer(area, moved_again), None);
+        assert_eq!(
+            throttle.flush_due(start + IME_CURSOR_AREA_INTERVAL * 2),
+            Some(area),
+        );
     }
 
     #[test]
