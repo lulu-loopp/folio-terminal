@@ -88,6 +88,7 @@ const TYPST_TEMPLATE: &str = r#"
 ///
 /// The template below names the same string; the test
 /// `the_math_family_is_the_one_the_template_names` keeps the two from drifting.
+#[cfg(test)]
 const MATH_FAMILY: &str = "New Computer Modern Math";
 
 /// The font book's own key for [`MATH_FAMILY`]. `FontBook` lowercases the names
