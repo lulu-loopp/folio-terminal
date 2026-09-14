@@ -144,22 +144,6 @@ The full list is in `CHANGELOG.md` in the repository.
 
 ## Download and verify
 
-<!--
-  The coordinator fills the four `<sha256>` values at publish time, out of the
-  two checksum files in the signed build directory. Nothing here is recomputed
-  by hand.
-
-  Two names on this page are not yet what the lane writes, and the coordinator
-  settles both before publishing:
-   * the macOS lane writes its checksum file as `SHA256SUMS.txt`, which collides
-     with the Windows one on a single release page; this note calls the macOS one
-     `SHA256SUMS-macos.txt`, and `docs/install.md` on `readme-0.4` still says
-     `SHA256SUMS.txt` for macOS.
-   * `docs/RELEASING.md` and `.github/workflows/release.yml` both say the `.dSYM`
-     is archived with the tag and never published. The asset line below publishes
-     it. Either the policy changes or that line comes out.
--->
-
 ### Windows
 
 | asset | what it is |
@@ -185,9 +169,7 @@ winget yet.
 | asset | what it is |
 | --- | --- |
 | `Folio-0.4.0-macos-arm64.dmg` | the application, signed and notarized — `sha256:<sha256>` |
-| `SHA256SUMS-macos.txt` | the hash of the image and of the bill of materials beside it |
-| `Folio-0.4.0-macos-arm64.cdx.json` | the bill of materials for the crates this build is made of — `sha256:<sha256>` |
-| `Folio-0.4.0-macos-arm64.dSYM.zip` | the debug symbols, which turn a crash report from this build back into file names and line numbers — `sha256:<sha256>` |
+| `SHA256SUMS-macos.txt` | the hash of the disk image, in the format `shasum -a 256 -c` reads |
 
 Open the image and drag **Folio** to Applications. Needs an **Apple silicon Mac
 running macOS 14 or newer**; there is no Intel build in this preview. Or, with
