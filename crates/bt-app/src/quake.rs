@@ -1610,8 +1610,9 @@ mod tests {
 #[cfg(test)]
 mod summon_road_tests {
     use bt_platform::HostPlatform;
+    use bt_platform::hotkey::Hotkey;
 
-    use super::hotkey_for;
+    use super::{hotkey_for, summon_key};
     use crate::shortcuts::{Action, Shortcuts};
 
     const MAIN: &str = include_str!("main.rs");
@@ -1645,8 +1646,16 @@ mod summon_road_tests {
             !hotkey.alt && !hotkey.shift && !hotkey.win,
             "and nothing else — ⌘` is the system's window cycle and ⌥` is a dead key"
         );
+        // `summon_key_code` answers in the host's own numbers (a Win32 virtual key
+        // on a Windows workstation), so the Carbon half is asked through the pure
+        // table that answers the same on every host.
+        let grave = bt_platform::hotkey::carbon_key_code(summon_key(&chord.key).unwrap())
+            .expect("the backtick has a position on an ANSI keyboard");
         assert_eq!(
-            bt_platform::hotkey::carbon_registration_bits(hotkey),
+            bt_platform::hotkey::carbon_registration_bits(Hotkey {
+                virtual_key: grave,
+                ..hotkey
+            }),
             Some((0x1000, 0x32)),
             "controlKey and kVK_ANSI_Grave, which is what Carbon is handed"
         );
