@@ -742,7 +742,7 @@ pub enum Text {
     PreviewLossy,
     /// **Why a file past the editing ceiling stays read-only** (T2 ③,
     /// 2026-09-10). The size is generated from `PREVIEW_EDIT_BYTES` the way
-    /// [`Self::PreviewTruncated`]'s is generated from `PREVIEW_HEAD_BYTES`.
+    /// `{size}` names the actual file size; the head notice names `PREVIEW_HEAD_BYTES`.
     PreviewTooLargeToEdit,
     /// **Why an animated picture is standing on its first frame** (user report
     /// 2026-09-10): its frames are each too large for this window to keep two of
@@ -3204,8 +3204,8 @@ impl Text {
                 "Read-only · unreadable bytes",
                 "只读 · 部分内容无法读取",
             ),
-            // `8.0 MB` is a quantity, not a word, and it is generated.
-            Self::PreviewTooLargeToEdit => pick(lang, "Read-only · 8.0 MB", "只读 · 8.0 MB"),
+            // The file's actual size is substituted by the preview loader.
+            Self::PreviewTooLargeToEdit => pick(lang, "Read-only · {size}", "只读 · {size}"),
             // The state first and the reason second, which is this strip's own
             // shape. 「画面太大」 and not 「文件太大」 because the fact is about a
             // frame and not about a file: a 2000-square animation is a few

@@ -20,6 +20,11 @@ impl Deref for Text {
     }
 }
 impl Text {
+    #[cfg(test)]
+    pub(crate) fn weak(&self) -> std::sync::Weak<String> {
+        Arc::downgrade(&self.0)
+    }
+
     pub fn make_mut(&mut self) -> &mut String {
         #[cfg(test)]
         if Arc::strong_count(&self.0) > 1 {

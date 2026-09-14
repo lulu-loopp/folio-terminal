@@ -58310,9 +58310,8 @@ impl Runtime<'_> {
         self.preview_shows_live_markdown(surface) || self.preview_awaits_the_whole_file(surface)
     }
 
-    /// Whether this surface's body is the head of a Markdown file whose rest is
-    /// already on the worker — [`preview::PreviewBuffer::awaits_the_whole_file`]
-    /// asked of the face as well as of the buffer.
+    /// Whether this Markdown surface is still owed a complete load result —
+    /// [`preview::PreviewBuffer::awaits_the_whole_file`] asked of the face too.
     fn preview_awaits_the_whole_file(&self, surface: PreviewSurface) -> bool {
         if self.preview_md_source(surface) {
             return false;
@@ -80342,9 +80341,9 @@ impl Runtime<'_> {
     /// **Spend the press that could not have a caret yet** (T5 ①, §7.1.3t).
     ///
     /// [`Self::settle_preview_goto`]'s shape and its argument, one gesture over:
-    /// a press inside a page whose glance only bought the file's head asks for
-    /// the rest of it (T2 ③), and the rest of it arrives some frames later. The
-    /// offset the press named waits on the pane until it does, and is spent here
+    /// eligible Markdown is complete on first display and seats a caret at once.
+    /// A press during an outstanding load/recovery can still name an older body;
+    /// its byte waits on the pane until the result arrives and is spent here
     /// — as a caret, with the keyboard, exactly as if the body had been there
     /// when the button went down.
     ///
@@ -144881,7 +144880,9 @@ mod tests {
     /// copies exactly as before and takes no caret at all.
     #[test]
     fn a_page_this_window_will_not_edit_takes_no_caret_on_either_face() {
-        let whole = text_buffer("notes.md", "# head\n\nbody\n");
+        let mut whole = text_buffer("notes.md", "# head\n\nbody\n");
+        assert!(!whole.awaits_the_whole_file());
+        assert!(!whole.ask_for_the_whole_file(false));
         assert!(
             whole.is_editable(false) && whole.is_editable(true),
             "the ordinary Markdown file, both faces",
@@ -144901,9 +144902,10 @@ mod tests {
         });
         assert!(
             !truncated.is_editable(false),
-            "a head nobody has asked to edit is read-only on the page too",
+            "genuinely incomplete content remains read-only during whole-load recovery",
         );
 
+        assert!(truncated.awaits_the_whole_file());
         let mut lossy = preview::PreviewBuffer::new(
             preview::PreviewSource::file(r"C:\w\odd.md"),
             "odd.md".to_owned(),
@@ -144921,6 +144923,7 @@ mod tests {
             "and bytes this window invented a stand-in for are never written back",
         );
 
+        assert!(!lossy.awaits_the_whole_file());
         let table = text_buffer("cases.csv", "a,b\n1,2\n");
         assert!(!table.is_editable(false) && !table.is_editable(true));
         let diff = text_buffer("change.diff", "--- a\n+++ b\n");
@@ -163717,7 +163720,7 @@ mod live_markdown_edit_tests {
         );
         assert!(
             press.contains("self.ask_to_edit_preview_on(surface)"),
-            "and the press still buys the whole file first, on either face",
+            "explicit head upgrades still use one door; complete Markdown makes it a no-op",
         );
     }
 

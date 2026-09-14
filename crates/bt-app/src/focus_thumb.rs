@@ -1642,9 +1642,9 @@ fn files_head(
 
 /// **The first `rows` lines of a preview's body** (user ruling, 2026-08-20).
 ///
-/// The head of the head. [`PreviewBuffer::content`] is already only the first
-/// `PREVIEW_HEAD_BYTES` of the file — a preview *is* a head read — so what this
-/// takes is the top of a body that is in memory, and there is nothing behind it
+/// This card takes a bounded prefix of [`PreviewBuffer::content`], which may
+/// hold a complete Markdown file. It takes the top of a body already in memory,
+/// and there is nothing behind it
 /// to go and ask. That is the whole of how the ruling was satisfied without
 /// crossing §7.1.6b′'s red line: **a thumbnail must not put a question to the
 /// disk**, and a `take(rows)` over a `String` this window already holds asks
