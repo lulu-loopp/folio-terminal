@@ -669,7 +669,7 @@ fn frame_undrawn_character(frame: &Frame) -> Option<char> {
 /// fragment at a time, so a formula arrives as many short runs rather than one
 /// long one, and that is the point — each run carries the face that answered for
 /// *it*.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TypesetRun {
     /// The characters of the run, as the typesetter shaped them. This is what a
     /// code-point assertion reads: Typst's math shorthands have already been
