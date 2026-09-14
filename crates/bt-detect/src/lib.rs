@@ -1972,11 +1972,17 @@ fn restore_stripped_environment_newlines(
 
     // Claude Code also collapses a row separator inside a one-line environment, where there is no
     // logical-line boundary for the rule above to use. Recover only inside tabular math
-    // environments and only at a table-shaped boundary: the current row already has an `&`, the
-    // following cell reaches another `&`, and an apparent command after the slash is at most one
-    // bare cell character. This repairs `a&b\c&d` / `a & b \ c & d` without touching real commands
-    // such as `\frac`, `\cos`, or `\cdot`. As above, terminal/source bytes remain exact; the added
-    // slash exists only in renderer input and the workaround is controlled by the existing switch.
+    // environments and only at a row-shaped boundary, of which there are two. A **table row** is
+    // proven by its ampersands: the current row already has an `&`, the following cell reaches
+    // another `&`, and an apparent command after the slash is at most one bare cell character —
+    // this repairs `a&b\c&d` / `a & b \ c & d`. A **one-column row** has no ampersand anywhere to
+    // prove anything with, and is bounded instead by the slash standing on whitespace, or by one
+    // bare cell character behind it — this repairs `x \ y`, `x\y` and `ax + by \ cx + dy`, the
+    // column vectors that stood as single rows beside a 2x2 the first rule had already put right
+    // (user report 2026-09-14). Neither touches a real command such as `\frac`, `\cos`, `\cdot` or
+    // the `\,` `\;` `\:` `\!` spacing family. As above, terminal/source bytes remain exact; the
+    // added slash exists only in renderer input and the workaround is controlled by the existing
+    // switch.
     for environment in environments.iter().filter(|_| inline_enabled) {
         if !matches!(
             environment.name.as_str(),
@@ -2023,11 +2029,35 @@ fn restore_stripped_environment_newlines(
                 .find('\n')
                 .map_or(remaining, |newline| &remaining[..newline]);
             let trimmed_after = after.trim_start();
-            let Some(next_ampersand) = trimmed_after.find('&') else {
-                byte += 1;
-                continue;
+            // Which cell follows the slash, and what proves where it ends.
+            //
+            // A row carrying an `&` is a table row, and the next `&` bounds the cell after the
+            // slash — that is the boundary the rule above reads. A row with no `&` on either side
+            // of the slash is a **one-column** row, and there is no ampersand anywhere in it to
+            // read: `\begin{pmatrix} x \\ y \end{pmatrix}` is a column vector, and its cell runs to
+            // the end of the row. Refusing that shape is what left a collapsed column vector
+            // standing as a single row — `(x y)` where `(x / y)` was written — on the very screen
+            // whose `\begin{pmatrix} a & b \\ c & d \end{pmatrix}` was repaired and came out 2x2
+            // (user report 2026-09-14).
+            //
+            // The boundary such a row has instead is what a collapsed `\\` leaves behind: the slash
+            // stands on whitespace (`x \ y`), or — the spaceless form the table rule already
+            // accepts — what follows it is one bare cell character (`x\y`). That is what keeps the
+            // spacing family out of it: `\,`, `\;`, `\:` and `\!` carry their own character
+            // immediately behind the slash and leave more than one character of "cell" behind it,
+            // so none of them can be read here as a row break. A `\alpha` or a `\frac` is refused
+            // by the bare-cell test below, exactly as it is in a table row.
+            let one_column_row = !before.contains('&') && !trimmed_after.contains('&');
+            let next_cell = match trimmed_after.find('&') {
+                Some(ampersand) => trimmed_after[..ampersand].trim(),
+                None if one_column_row => trimmed_after.trim(),
+                None => {
+                    byte += 1;
+                    continue;
+                }
             };
-            let next_cell = trimmed_after[..next_ampersand].trim();
+            let one_column_boundary = one_column_row
+                && (after.starts_with(char::is_whitespace) || next_cell.chars().count() == 1);
             let command_len = after
                 .as_bytes()
                 .iter()
@@ -2035,7 +2065,7 @@ fn restore_stripped_environment_newlines(
                 .count();
             let single_bare_cell =
                 command_len <= 1 && (command_len == 0 || next_cell.chars().count() == 1);
-            if before.contains('&')
+            if (before.contains('&') || one_column_boundary)
                 && !next_cell.is_empty()
                 && single_bare_cell
                 && !next_cell.contains(['\\', '{', '}'])
@@ -4332,6 +4362,87 @@ abla f",
                 detected[0].span.render_source
             );
         }
+    }
+
+    /// RED GATE (user report 2026-09-14): a **one-column** matrix loses its rows.
+    ///
+    /// The screenshot carried three matrices on two lines of one display block. The 2x2 came out
+    /// 2x2 because its row separator was collapsed at a boundary this rule could read — an `&` on
+    /// either side of it. The two column vectors beside it came out as single rows, `(x y)` and
+    /// `(ax + by  cx + dy)`, because a one-column row has no ampersand anywhere and the recovery
+    /// asked for one before it would look: the surviving `\` stayed a control space, and a control
+    /// space joins cells rather than ending a row.
+    ///
+    /// MUTATIONS:
+    /// ① require an `&` before the slash again — both column vectors go back to one row;
+    /// ② drop the "slash stands on whitespace" bound — `x \, y` gains a row separator and the
+    ///    thin space becomes a row break;
+    /// ③ drop the bare-cell test — `\begin{pmatrix} x \alpha \end{pmatrix}` gains one too.
+    #[test]
+    fn a_one_column_row_separator_is_restored_without_an_ampersand_to_read_it_by() {
+        for (source, expected) in [
+            (
+                r"$$\begin{pmatrix} x \ y \end{pmatrix}$$",
+                r"\begin{pmatrix} x \\ y \end{pmatrix}",
+            ),
+            (
+                r"$$\begin{pmatrix} ax + by \ cx + dy \end{pmatrix}$$",
+                r"\begin{pmatrix} ax + by \\ cx + dy \end{pmatrix}",
+            ),
+            (
+                r"$$\begin{bmatrix}x\y\end{bmatrix}$$",
+                r"\begin{bmatrix}x\\y\end{bmatrix}",
+            ),
+        ] {
+            let detected = detect_math_blocks([(TranscriptId(1), source)]);
+            assert_eq!(detected.len(), 1, "{source}");
+            assert_eq!(
+                detected[0].span.original_source, source,
+                "copy/source presentation must retain the exact terminal bytes"
+            );
+            assert_eq!(
+                detected[0].span.render_source, expected,
+                "one-column row separator: {source}"
+            );
+        }
+
+        // What the whitespace bound and the bare-cell test are there to protect. A spacing command
+        // carries its own character right behind the slash, and a real command carries its name.
+        for source in [
+            r"$$\begin{pmatrix} x \, y \end{pmatrix}$$",
+            r"$$\begin{pmatrix} x \; y \end{pmatrix}$$",
+            r"$$\begin{pmatrix} x \alpha \end{pmatrix}$$",
+            r"$$\begin{pmatrix} x \ \frac{1}{2} \end{pmatrix}$$",
+        ] {
+            let detected = detect_math_blocks([(TranscriptId(1), source)]);
+            assert_eq!(detected.len(), 1, "{source}");
+            assert!(
+                !detected[0].span.render_source.contains(r"\\"),
+                "a command was mistaken for a stripped row separator in {source}: {}",
+                detected[0].span.render_source
+            );
+        }
+
+        // The 2x2 on the line above, unchanged: the two rules answer the same source the same way.
+        let detected = detect_math_blocks([(
+            TranscriptId(1),
+            r"$$\begin{pmatrix} a & b \ c & d \end{pmatrix}$$",
+        )]);
+        assert_eq!(
+            detected[0].span.render_source,
+            r"\begin{pmatrix} a & b \\ c & d \end{pmatrix}"
+        );
+
+        let restored = restore_stripped_environment_newlines(
+            r"\begin{pmatrix} x \ y \end{pmatrix}",
+            true,
+            true,
+        );
+        assert_eq!(
+            restore_stripped_environment_newlines(&restored, true, true),
+            restored,
+            "one-column recovery must be idempotent"
+        );
     }
 
     #[test]

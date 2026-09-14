@@ -8812,52 +8812,53 @@ impl DualPlaneSession {
                 continue;
             };
             let rendered_runs = artifact.inline_runs.clone();
-            let Some((row, left_column, cells)) =
-                inline_placement_geometry(span, &rendered_runs, |run| {
-                    frozen_inline_run_cells(frame, *start, &entry.line, run)
-                })
-            else {
-                continue;
-            };
-            let Some((top_subpixels, row_height_subpixels)) = frame
-                .row_map
-                .get(row as usize)
-                .map(|mapped| (mapped.top_subpixels, mapped.height_subpixels))
-            else {
-                continue;
-            };
-            for index in cells {
-                if let Some(cell) = frame.cells.get_mut(index) {
-                    cell.text.clear();
-                    cell.wide_spacer = false;
+            let placements = inline_placement_geometry(
+                span,
+                &rendered_runs,
+                |run| frozen_inline_run_cells(frame, *start, &entry.line, run),
+                artifact.width_px,
+            );
+            for placement in placements {
+                let Some((top_subpixels, row_height_subpixels)) = frame
+                    .row_map
+                    .get(placement.row as usize)
+                    .map(|mapped| (mapped.top_subpixels, mapped.height_subpixels))
+                else {
+                    continue;
+                };
+                for index in &placement.cells {
+                    if let Some(cell) = frame.cells.get_mut(*index) {
+                        cell.text.clear();
+                        cell.wide_spacer = false;
+                    }
                 }
-            }
-            frame.math_blocks.push(MathBlockPlacement {
-                start: *start,
-                anchor: MathBlockAnchor::History {
-                    run: None,
+                frame.math_blocks.push(MathBlockPlacement {
                     start: *start,
-                    end: *start,
-                },
-                source: span.original_source.clone(),
-                artifact,
-                top_subpixels,
-                left_subpixels: i64::from(left_column)
-                    .saturating_mul(self.cell_width_subpixels.get()),
-                content_offset_subpixels: 0,
-                clip_height_subpixels: row_height_subpixels,
-                display: MathBlockDisplay::Rendered,
-                horizontal_overflow: BlockOverflowOwner::Pane,
-                horizontal_scroll_px: 0,
-                vertical_scroll_px: 0,
-                toolbar_visible: false,
-                occluded_source_rows: 0,
-                occluded_visible_rows: Vec::new(),
-                live_occurrence_id: None,
-                frozen_prefix_rows: 0,
-                clipped_top_rows: 0,
-                clipped_bottom_rows: 0,
-            });
+                    anchor: MathBlockAnchor::History {
+                        run: None,
+                        start: *start,
+                        end: *start,
+                    },
+                    source: span.original_source.clone(),
+                    artifact: cropped_inline_artifact(&artifact, &placement),
+                    top_subpixels,
+                    left_subpixels: i64::from(placement.left_column)
+                        .saturating_mul(self.cell_width_subpixels.get()),
+                    content_offset_subpixels: 0,
+                    clip_height_subpixels: row_height_subpixels,
+                    display: MathBlockDisplay::Rendered,
+                    horizontal_overflow: BlockOverflowOwner::Pane,
+                    horizontal_scroll_px: 0,
+                    vertical_scroll_px: 0,
+                    toolbar_visible: false,
+                    occluded_source_rows: 0,
+                    occluded_visible_rows: Vec::new(),
+                    live_occurrence_id: None,
+                    frozen_prefix_rows: 0,
+                    clipped_top_rows: 0,
+                    clipped_bottom_rows: 0,
+                });
+            }
         }
 
         for record in self.live_decorations.values() {
@@ -8878,56 +8879,57 @@ impl DualPlaneSession {
                 continue;
             };
             let rendered_runs = artifact.inline_runs.clone();
-            let Some((row, left_column, cells)) =
-                inline_placement_geometry(&record.span, &rendered_runs, |run| {
-                    live_inline_run_cells(frame, &record.inputs, record.start.row, run)
-                })
-            else {
-                continue;
-            };
-            let Some((top_subpixels, row_height_subpixels)) = frame
-                .row_map
-                .get(row as usize)
-                .map(|mapped| (mapped.top_subpixels, mapped.height_subpixels))
-            else {
-                continue;
-            };
-            for index in cells {
-                if let Some(cell) = frame.cells.get_mut(index) {
-                    cell.text.clear();
-                    cell.wide_spacer = false;
+            let placements = inline_placement_geometry(
+                &record.span,
+                &rendered_runs,
+                |run| live_inline_run_cells(frame, &record.inputs, record.start.row, run),
+                artifact.width_px,
+            );
+            for placement in placements {
+                let Some((top_subpixels, row_height_subpixels)) = frame
+                    .row_map
+                    .get(placement.row as usize)
+                    .map(|mapped| (mapped.top_subpixels, mapped.height_subpixels))
+                else {
+                    continue;
+                };
+                for index in &placement.cells {
+                    if let Some(cell) = frame.cells.get_mut(*index) {
+                        cell.text.clear();
+                        cell.wide_spacer = false;
+                    }
                 }
+                frame.math_blocks.push(MathBlockPlacement {
+                    start: TranscriptId(0),
+                    anchor: MathBlockAnchor::Live {
+                        run: None,
+                        screen: record.screen,
+                        start: record.start,
+                        end: record.end,
+                        band_start_row: record.start.row,
+                        band_end_row: record.end.row,
+                        generation: record.generation,
+                    },
+                    source: record.span.original_source.clone(),
+                    artifact: cropped_inline_artifact(&artifact, &placement),
+                    top_subpixels,
+                    left_subpixels: i64::from(placement.left_column)
+                        .saturating_mul(self.cell_width_subpixels.get()),
+                    content_offset_subpixels: 0,
+                    clip_height_subpixels: row_height_subpixels,
+                    display: MathBlockDisplay::Rendered,
+                    horizontal_overflow: BlockOverflowOwner::Pane,
+                    horizontal_scroll_px: 0,
+                    vertical_scroll_px: 0,
+                    toolbar_visible: false,
+                    occluded_source_rows: 0,
+                    occluded_visible_rows: Vec::new(),
+                    live_occurrence_id: Some(record.identity.occurrence_id),
+                    frozen_prefix_rows: 0,
+                    clipped_top_rows: 0,
+                    clipped_bottom_rows: 0,
+                });
             }
-            frame.math_blocks.push(MathBlockPlacement {
-                start: TranscriptId(0),
-                anchor: MathBlockAnchor::Live {
-                    run: None,
-                    screen: record.screen,
-                    start: record.start,
-                    end: record.end,
-                    band_start_row: record.start.row,
-                    band_end_row: record.end.row,
-                    generation: record.generation,
-                },
-                source: record.span.original_source.clone(),
-                artifact,
-                top_subpixels,
-                left_subpixels: i64::from(left_column)
-                    .saturating_mul(self.cell_width_subpixels.get()),
-                content_offset_subpixels: 0,
-                clip_height_subpixels: row_height_subpixels,
-                display: MathBlockDisplay::Rendered,
-                horizontal_overflow: BlockOverflowOwner::Pane,
-                horizontal_scroll_px: 0,
-                vertical_scroll_px: 0,
-                toolbar_visible: false,
-                occluded_source_rows: 0,
-                occluded_visible_rows: Vec::new(),
-                live_occurrence_id: Some(record.identity.occurrence_id),
-                frozen_prefix_rows: 0,
-                clipped_top_rows: 0,
-                clipped_bottom_rows: 0,
-            });
         }
 
         for (start, record) in &self.decorations {
@@ -13702,31 +13704,144 @@ fn live_inline_run_cells(
     Some((row, left, cells))
 }
 
-/// Assemble one inline occurrence's presentation geometry from its per-run cell lookup.
+/// One physical row's share of an inline occurrence: where its picture stands, which cells it
+/// owns, and which slice of the line's composite it is a picture of.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct InlineRowPlacement {
+    /// Presentation row the picture is drawn on.
+    row: u32,
+    /// Column its left edge sits at — the column of the first run it contains.
+    left_column: u32,
+    /// Frame cell indices this row's runs own, which the placer clears.
+    cells: Vec<usize>,
+    /// Horizontal `[x0, x1)` window of the composite, in its own raster pixels. `None` when the
+    /// window is the whole image, which is every occurrence the fold did not spread.
+    crop_px: Option<(u32, u32)>,
+    /// The runs it contains, with their offsets rebased onto `crop_px`.
+    runs: Vec<InlineRunPlacement>,
+}
+
+/// Assemble one inline occurrence's presentation geometry from its per-run cell lookup — **one
+/// entry per physical row its rendered runs stand on**.
 ///
 /// `rendered` is the artifact's own account of which runs it contains — a run that fell back to
 /// source on width is absent, so its cells are not collected and its terminal text survives
 /// untouched beside its neighbours.
 ///
-/// The composite's left edge is run 0's column whether or not run 0 rendered, because that is the
-/// origin `render_task_math` measured every x offset from. A fallen-back leading run leaves
-/// transparent pixels over its own text, which is exactly what should be there.
+/// A logical line's `$…$` runs are detected, proven and rasterized together, as one occurrence
+/// carrying one composite (§4.6c). Where that line *folds* is the window's business and not the
+/// text's — and the fold is free to put two of those runs on two different rows. This used to
+/// refuse the occurrence whole the moment it did: a picture is one rectangle and cannot straddle
+/// two rows, so a second run one row down took the first run's picture down with it and the whole
+/// line fell back to source. `$x$     $y$` on an eight-column pane is the smallest case of it, and
+/// `Inline series: $\sum…$, and a limit $\lim…$` at the width that folds between the two is the
+/// one the user reported (2026-09-14): narrow the window and both formulas turn back into source,
+/// widen it and both are pictures again, with nothing about either formula having changed.
+///
+/// So the rows are separated here instead. Each row gets its own placement, standing at the column
+/// of the first run on it and carrying the window of the composite its own runs occupy — a formula
+/// stands where its own opening `$` stands, and one line's formulas can no longer suppress each
+/// other. A run the fold splits down the middle is untouched by any of this: it is one run, it
+/// belongs to one row, and it keeps the single-run answer it has always had (its picture stands
+/// where its source begins and must fit the cells left on that row).
+///
+/// Within a row the left edge is that row's first run, whether or not earlier runs rendered: the
+/// composite's own origin is run 0's column, so the window carries the offset back. A fallen-back
+/// leading run contributes transparent pixels and no cells, which is exactly what should be there.
 fn inline_placement_geometry(
     span: &MathSpan,
     rendered: &[InlineRunPlacement],
     mut run_cells: impl FnMut(&InlineMathRun) -> Option<(u32, u32, Vec<usize>)>,
-) -> Option<(u32, u32, Vec<usize>)> {
-    let (row, left, _) = run_cells(span.inline_runs.first()?)?;
-    let mut cells = Vec::new();
+    composite_width_px: u32,
+) -> Vec<InlineRowPlacement> {
+    let mut rows = Vec::<InlineRowPlacement>::new();
     for placement in rendered {
-        let run = span.inline_runs.get(placement.run as usize)?;
-        let (run_row, _, run_cell_indices) = run_cells(run)?;
-        if run_row != row {
-            return None;
+        let Some(run) = span.inline_runs.get(placement.run as usize) else {
+            continue;
+        };
+        let Some((run_row, run_column, run_cell_indices)) = run_cells(run) else {
+            continue;
+        };
+        if run_cell_indices.is_empty() {
+            continue;
         }
-        cells.extend(run_cell_indices);
+        match rows.iter_mut().find(|existing| existing.row == run_row) {
+            Some(existing) => {
+                existing.cells.extend(run_cell_indices);
+                existing.runs.push(*placement);
+            }
+            None => rows.push(InlineRowPlacement {
+                row: run_row,
+                left_column: run_column,
+                cells: run_cell_indices,
+                crop_px: None,
+                runs: vec![*placement],
+            }),
+        }
     }
-    (!cells.is_empty()).then_some((row, left, cells))
+    for row in &mut rows {
+        let x0 = row
+            .runs
+            .iter()
+            .map(|run| run.x_px)
+            .min()
+            .expect("a row is created with a run in it");
+        let x1 = row
+            .runs
+            .iter()
+            .map(|run| run.x_px.saturating_add(run.width_px))
+            .max()
+            .expect("a row is created with a run in it")
+            .min(composite_width_px);
+        if x1 <= x0 {
+            row.crop_px = None;
+            continue;
+        }
+        // The whole image is the common case — one row, its first run at the origin — and it keeps
+        // the artifact, and therefore the texture cache key, byte for byte as it was.
+        if x0 == 0 && x1 == composite_width_px {
+            row.crop_px = None;
+            continue;
+        }
+        row.crop_px = Some((x0, x1));
+        for run in &mut row.runs {
+            run.x_px = run.x_px.saturating_sub(x0);
+        }
+    }
+    rows.retain(|row| !row.cells.is_empty());
+    rows
+}
+
+/// The composite, narrowed to one row's window of it.
+///
+/// A horizontal crop rather than a second render: the runs were rasterized once, together, and
+/// what a row needs is the columns of that one image its own runs were drawn in. The key is
+/// narrowed with it, because two rows of one occurrence are two different pictures and a texture
+/// cache that keyed them the same would show one row the other row's ink.
+fn cropped_inline_artifact(
+    artifact: &ProjectedMathArtifact,
+    row: &InlineRowPlacement,
+) -> ProjectedMathArtifact {
+    let mut artifact = artifact.clone();
+    artifact.inline_runs = row.runs.clone();
+    let Some((x0, x1)) = row.crop_px else {
+        return artifact;
+    };
+    let source_width = artifact.width_px as usize;
+    let width = (x1 - x0) as usize;
+    let mut rgba = Vec::with_capacity(width * artifact.height_px as usize * 4);
+    for y in 0..artifact.height_px as usize {
+        let start = (y * source_width + x0 as usize) * 4;
+        let end = start + width * 4;
+        match artifact.rgba.get(start..end) {
+            Some(row_pixels) => rgba.extend_from_slice(row_pixels),
+            None => rgba.resize(rgba.len() + width * 4, 0),
+        }
+    }
+    artifact.key = format!("{}#x{x0}", artifact.key);
+    artifact.rgba = Arc::from(rgba);
+    artifact.width_px = x1 - x0;
+    artifact
 }
 
 fn frame_row_for_live_range(
@@ -27558,6 +27673,193 @@ mod tests {
             2,
             "and its source is left standing, both delimiters included"
         );
+    }
+
+    /// Two formulas on one logical line, with text between them for the fold to fall in.
+    ///
+    /// Eleven cells: `$x$` at columns 0..3 and `$y$` at columns 8..11. At sixteen columns they
+    /// share a row; at eight they do not, and neither of them is itself split — the fold falls
+    /// between them. Nothing about either formula changes with the width.
+    ///
+    /// The filler is spelled `a-b-` rather than blanks for two reasons that are both about proving
+    /// what this fixture claims to prove: a row that ends in written text cannot have its tail
+    /// mistaken for wrap padding, and the character in front of the second `$` must not be one a
+    /// shell could continue a variable name with, or the disambiguator reads that `$` as a sigil
+    /// and there is only ever one run to place.
+    const TWO_RUN_LINE: &str = "$x$ a-b-$y$";
+
+    fn two_run_session(columns: u32, alternate: bool) -> DualPlaneSession {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(columns), nz(20));
+        seat_inline_metrics(&mut session);
+        let layout = session.layout_key();
+        session.set_layout_key(LayoutKey {
+            width_cells: nz(columns),
+            ..layout
+        });
+        let mut stream = if alternate {
+            String::from("\x1b[?1049h")
+        } else {
+            String::from("\x1b]133;A\x07>\x1b]133;B\x07s\x1b]133;C\x07\r\n")
+        };
+        stream.push_str(TWO_RUN_LINE);
+        stream.push_str("\r\n");
+        if !alternate {
+            stream.push_str("\x1b]133;D;0\x07\x1b]133;A\x07>\x1b]133;B\x07");
+        }
+        session.feed_at(stream.as_bytes(), started).unwrap();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        complete_live_math_for_real(&mut session);
+        session
+    }
+
+    /// The rendered inline blocks of a frame, as `(presentation row, run indices)`.
+    fn inline_blocks_by_row(frame: &ViewportFrame) -> Vec<(i64, Vec<u32>)> {
+        let mut rows = rendered_inline_blocks(frame)
+            .iter()
+            .map(|block| {
+                (
+                    block.top_subpixels,
+                    block
+                        .artifact
+                        .inline_runs
+                        .iter()
+                        .map(|run| run.run)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        rows.sort();
+        rows
+    }
+
+    /// RED GATE (user report 2026-09-14, Codex review finding 4): one line's formulas must not
+    /// suppress each other when the fold separates them.
+    ///
+    /// A logical line's `$…$` runs are proven, grouped and rasterized as one occurrence carrying
+    /// one composite. The placer then asked every rendered run to begin on the row the first one
+    /// began on and refused the occurrence whole when one did not — so the moment the fold fell
+    /// between two formulas, **both** turned back into source text. That is the reported line:
+    /// `Inline series: $\sum…$, and a limit $\lim…$` is a picture at a wide window and source at a
+    /// narrow one, with the formulas themselves untouched. `$x$     $y$` is the same fact in
+    /// eleven cells.
+    ///
+    /// Both planes and both screens, because the placer says the same sentence three times: live
+    /// primary, the alternate screen an application owns, and the frozen line in scrollback.
+    ///
+    /// MUTATIONS:
+    /// ① refuse an occurrence whose runs land on two rows again — the eight-column half of every
+    ///    case goes to zero blocks and the grid keeps four `$`;
+    /// ② place both rows' pictures from the first run's row — the second formula is drawn on the
+    ///    first formula's row and `rows` shows two blocks at one `top_subpixels`;
+    /// ③ hand each row the whole composite instead of its own window of it — the second row draws
+    ///    the first row's ink beside its own, and the run indices per block go back to `[0, 1]`.
+    #[test]
+    fn two_formulas_the_fold_separates_are_both_typeset_on_their_own_rows() {
+        for alternate in [false, true] {
+            let wide = two_run_session(16, alternate);
+            let mut projection = wide.new_projection(wide.layout_key());
+            let frame = wide.viewport_frame(&mut projection).unwrap();
+            let rows = inline_blocks_by_row(&frame);
+            assert_eq!(
+                rows.len(),
+                1,
+                "alternate={alternate}: unfolded, the line is one composite: {rows:?}"
+            );
+            assert_eq!(
+                rows[0].1,
+                vec![0, 1],
+                "alternate={alternate}: carrying both runs"
+            );
+            assert_eq!(
+                frame.cells.iter().filter(|cell| cell.text == "$").count(),
+                0,
+                "alternate={alternate}: no delimiter is left on the grid at sixteen columns"
+            );
+
+            let narrow = two_run_session(8, alternate);
+            let mut projection = narrow.new_projection(narrow.layout_key());
+            let frame = narrow.viewport_frame(&mut projection).unwrap();
+            let rows = inline_blocks_by_row(&frame);
+            assert_eq!(
+                rows.len(),
+                2,
+                "alternate={alternate}: the fold between two formulas must cost neither of them \
+                 its picture: {rows:?}"
+            );
+            assert_eq!(
+                rows[0].1,
+                vec![0],
+                "alternate={alternate}: the upper row carries the first formula alone"
+            );
+            assert_eq!(
+                rows[1].1,
+                vec![1],
+                "alternate={alternate}: the lower row carries the second formula alone"
+            );
+            assert!(
+                rows[0].0 < rows[1].0,
+                "alternate={alternate}: and it stands on the row its own `$` stands on: {rows:?}"
+            );
+            assert_eq!(
+                frame.cells.iter().filter(|cell| cell.text == "$").count(),
+                0,
+                "alternate={alternate}: no delimiter is left on the grid at eight columns either"
+            );
+        }
+    }
+
+    /// The same claim once the line is scrollback, where the projection — not the grid — decides
+    /// how many visual rows a logical line takes.
+    #[test]
+    fn two_frozen_formulas_the_fold_separates_are_both_typeset_on_their_own_rows() {
+        for columns in [16u32, 8] {
+            let started = Instant::now();
+            let mut session = DualPlaneSession::new(nz(columns), nz(6));
+            seat_inline_metrics(&mut session);
+            let layout = session.layout_key();
+            session.set_layout_key(LayoutKey {
+                width_cells: nz(columns),
+                ..layout
+            });
+            let mut stream = String::from("\x1b]133;A\x07>\x1b]133;B\x07s\x1b]133;C\x07\r\n");
+            stream.push_str(TWO_RUN_LINE);
+            stream.push_str("\r\n");
+            session.feed_at(stream.as_bytes(), started).unwrap();
+            session
+                .feed_at(b"p\r\np\r\np\r\np\r\np\r\np\r\np\r\n", started)
+                .unwrap();
+            assert!(
+                session
+                    .document
+                    .entries()
+                    .values()
+                    .any(|entry| entry.line.text.contains(TWO_RUN_LINE)),
+                "{columns}: the fixture must actually freeze the formula line into history"
+            );
+            assert!(
+                complete_frozen_math_for_real(&mut session) >= 1,
+                "{columns}"
+            );
+
+            let mut projection = session.new_projection(session.layout_key());
+            session.refresh_projection(&mut projection);
+            let _ = session.viewport_frame(&mut projection).unwrap();
+            projection.scroll_to_top();
+            let frame = session.viewport_frame(&mut projection).unwrap();
+            let rows = inline_blocks_by_row(&frame);
+            let expected = if columns == 8 { 2 } else { 1 };
+            assert_eq!(
+                rows.len(),
+                expected,
+                "{columns}: a frozen line's formulas must not suppress each other: {rows:?}"
+            );
+            assert_eq!(
+                frame.cells.iter().filter(|cell| cell.text == "$").count(),
+                0,
+                "{columns}: no delimiter is left on the frozen line"
+            );
+        }
     }
 
     /// PIN (§4.6c), frozen plane: a folded run keeps its picture once the line is scrollback.
