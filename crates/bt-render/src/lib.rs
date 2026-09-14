@@ -16848,6 +16848,13 @@ mod tests {
     ///
     /// MUTATIONS: swap the two boxes → ②; drop the `pane_right - total` clamp →
     /// ④; put 22 back in `MATH_TOOL_BUTTON_LOGICAL_PX` → ⑤.
+    // A restyle may not shrink a control the reader can already hit (a
+    // compile-time pin: the number is a constant).
+    const _: () = assert!(
+        MATH_TOOL_BUTTON_LOGICAL_PX >= 22.0,
+        "a restyle may not shrink a control the reader can already hit"
+    );
+
     #[test]
     fn the_two_marks_stand_beside_the_band_and_their_boxes_only_grew() {
         // ① Side by side, in the band's own row, at the band's right edge.
@@ -16877,10 +16884,6 @@ mod tests {
         // ⑤ And the box only ever grew: 24 against the 22 of the bordered chips
         //    this replaced (owner's ruling ③ — "hit boxes stay at least the
         //    current size").
-        assert!(
-            MATH_TOOL_BUTTON_LOGICAL_PX >= 22.0,
-            "a restyle may not shrink a control the reader can already hit"
-        );
 
         // ⑥ And it is logical pixels, so the boxes double with the display.
         let (retina, _) = math_tool_boxes_px([200.0, 20.0, 140.0], [16.0, 1_200.0], 2.0);
