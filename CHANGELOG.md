@@ -23,6 +23,17 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- **A typeset formula in a terminal pane now looks like the rest of the
+  window.** Resting on one lays down the same rounded panel a fenced code block
+  stands on, instead of the flat dark rectangle it used to get. The two buttons
+  beside it have become ordinary Folio icons: nothing at rest, fading in as your
+  pointer reaches the formula, lit in a soft pill under the pointer and a darker
+  one while you hold the button down. The first one now shows where it takes you
+  — angle brackets on a typeset formula, an eye on one showing its source — and
+  the second turns into a tick for a moment once the LaTeX is on your clipboard.
+  Both are a little larger than before, and right-clicking a formula still
+  offers `Copy LaTeX`.
+
 - Markdown files up to 8 MB open complete and editable; the 64 KB read-only head is gone.
 
 - Realize large Markdown documents around the viewport and preserve the reading position while estimated heights change.
