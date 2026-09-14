@@ -1407,135 +1407,9 @@ impl MathWorker {
             "bt-math-worker",
             bt_platform::ThreadPriority::BelowNormal,
             move || {
-                let engine = MathEngine::new();
-                let mut image_decoder = InlineImageDecoder::default();
-                while let Ok(work) = task_rx.recv() {
-                    let completion = match work {
-                        MathWorkerRequest::Math {
-                            leaf,
-                            task,
-                            foreground_rgb,
-                        } => (
-                            leaf,
-                            match *task {
-                                SessionMathTask::Frozen(mut task) => {
-                                    let result =
-                                        render_detection_task(&engine, &mut task, foreground_rgb);
-                                    DecorationWorkerCompletion::Math {
-                                        task: Box::new(SessionMathTask::Frozen(task)),
-                                        result,
-                                    }
-                                }
-                                SessionMathTask::Live(mut task) => {
-                                    let result = render_live_detection_task(
-                                        &engine,
-                                        &mut task,
-                                        foreground_rgb,
-                                    );
-                                    DecorationWorkerCompletion::Math {
-                                        task: Box::new(SessionMathTask::Live(task)),
-                                        result,
-                                    }
-                                }
-                            },
-                        ),
-                        MathWorkerRequest::InlineImage { leaf, task } => {
-                            let result = image_decoder.decode(task.clone());
-                            (
-                                leaf,
-                                DecorationWorkerCompletion::InlineImage { task, result },
-                            )
-                        }
-                        MathWorkerRequest::PreviewMath { leaf, key } => {
-                            let result = bt_math::key_for_em_px(
-                                key.em_milli_px as f32 / 1000.0,
-                                key.foreground_rgb,
-                                key.mode,
-                            )
-                            .ok_or(MathRenderError::InvalidDimensions)
-                            .and_then(|render_key| engine.render(&key.source, render_key));
-                            (
-                                leaf,
-                                DecorationWorkerCompletion::PreviewMath { key, result },
-                            )
-                        }
-                        MathWorkerRequest::VerifyPath { leaf, path } => {
-                            let exists = bt_term::path_exists(&path);
-                            (
-                                leaf,
-                                DecorationWorkerCompletion::VerifiedPath { path, exists },
-                            )
-                        }
-                        MathWorkerRequest::PeekImage { leaf, path } => {
-                            let result = peek_pixels(&mut image_decoder, &path);
-                            (leaf, DecorationWorkerCompletion::PeekImage { path, result })
-                        }
-                        MathWorkerRequest::PeekVideoFrame { leaf, path } => {
-                            let glance = read_video_glance(&path);
-                            (
-                                leaf,
-                                DecorationWorkerCompletion::PeekVideoFrame { path, glance },
-                            )
-                        }
-                        MathWorkerRequest::PeekAnimation { leaf, path } => {
-                            let frames = animation::decode(&path);
-                            (
-                                leaf,
-                                DecorationWorkerCompletion::PeekAnimation { path, frames },
-                            )
-                        }
-                        // **This is the thread `AnimationCursor::next_frames`
-                        // exists for.** Composing a frame is the whole logical
-                        // screen, and the window has one thread that must not
-                        // spend that.
-                        MathWorkerRequest::AnimationFill {
-                            leaf,
-                            path,
-                            serial,
-                            mut cursor,
-                            want,
-                        } => {
-                            let frames = cursor.next_frames(want);
-                            (
-                                leaf,
-                                DecorationWorkerCompletion::AnimationFill {
-                                    path,
-                                    serial,
-                                    cursor,
-                                    frames,
-                                },
-                            )
-                        }
-                        MathWorkerRequest::PeekPage {
-                            leaf,
-                            path,
-                            page,
-                            fit,
-                            known,
-                        } => {
-                            let outcome = raster_peek_page(&path, page, fit, known);
-                            (
-                                leaf,
-                                DecorationWorkerCompletion::PeekPage {
-                                    path,
-                                    page,
-                                    fit,
-                                    outcome,
-                                },
-                            )
-                        }
-                    };
-                    if result_tx
-                        .send(MathWorkerResult {
-                            leaf: completion.0,
-                            completion: completion.1,
-                        })
-                        .is_err()
-                    {
-                        break;
-                    }
+                run_decoration_worker(task_rx, result_tx, || {
                     let _ = proxy.send_event(AppEvent::MathReady);
-                }
+                });
             },
         )
         .context("spawn math rendering worker")?;
@@ -1544,6 +1418,138 @@ impl MathWorker {
             scale_tasks: scale_tx,
             results: result_rx,
         })
+    }
+}
+
+/// The production decoration queue, also exercised without a window by regression tests.
+fn run_decoration_worker(
+    task_rx: mpsc::Receiver<MathWorkerRequest>,
+    result_tx: mpsc::Sender<MathWorkerResult>,
+    mut wake: impl FnMut(),
+) {
+    let engine = MathEngine::new();
+    let mut image_decoder = InlineImageDecoder::default();
+    while let Ok(work) = task_rx.recv() {
+        let completion = match work {
+            MathWorkerRequest::Math {
+                leaf,
+                task,
+                foreground_rgb,
+            } => (
+                leaf,
+                match *task {
+                    SessionMathTask::Frozen(mut task) => {
+                        let result = render_detection_task(&engine, &mut task, foreground_rgb);
+                        DecorationWorkerCompletion::Math {
+                            task: Box::new(SessionMathTask::Frozen(task)),
+                            result,
+                        }
+                    }
+                    SessionMathTask::Live(mut task) => {
+                        let result = render_live_detection_task(&engine, &mut task, foreground_rgb);
+                        DecorationWorkerCompletion::Math {
+                            task: Box::new(SessionMathTask::Live(task)),
+                            result,
+                        }
+                    }
+                },
+            ),
+            MathWorkerRequest::InlineImage { leaf, task } => {
+                let result = image_decoder.decode(task.clone());
+                (
+                    leaf,
+                    DecorationWorkerCompletion::InlineImage { task, result },
+                )
+            }
+            MathWorkerRequest::PreviewMath { leaf, key } => {
+                let result = bt_math::key_for_em_px(
+                    key.em_milli_px as f32 / 1000.0,
+                    key.foreground_rgb,
+                    key.mode,
+                )
+                .ok_or(MathRenderError::InvalidDimensions)
+                .and_then(|render_key| engine.render(&key.source, render_key));
+                (
+                    leaf,
+                    DecorationWorkerCompletion::PreviewMath { key, result },
+                )
+            }
+            MathWorkerRequest::VerifyPath { leaf, path } => {
+                let exists = bt_term::path_exists(&path);
+                (
+                    leaf,
+                    DecorationWorkerCompletion::VerifiedPath { path, exists },
+                )
+            }
+            MathWorkerRequest::PeekImage { leaf, path } => {
+                let result = peek_pixels(&mut image_decoder, &path);
+                (leaf, DecorationWorkerCompletion::PeekImage { path, result })
+            }
+            MathWorkerRequest::PeekVideoFrame { leaf, path } => {
+                let glance = read_video_glance(&path);
+                (
+                    leaf,
+                    DecorationWorkerCompletion::PeekVideoFrame { path, glance },
+                )
+            }
+            MathWorkerRequest::PeekAnimation { leaf, path } => {
+                let frames = animation::decode(&path);
+                (
+                    leaf,
+                    DecorationWorkerCompletion::PeekAnimation { path, frames },
+                )
+            }
+            // **This is the thread `AnimationCursor::next_frames`
+            // exists for.** Composing a frame is the whole logical
+            // screen, and the window has one thread that must not
+            // spend that.
+            MathWorkerRequest::AnimationFill {
+                leaf,
+                path,
+                serial,
+                mut cursor,
+                want,
+            } => {
+                let frames = cursor.next_frames(want);
+                (
+                    leaf,
+                    DecorationWorkerCompletion::AnimationFill {
+                        path,
+                        serial,
+                        cursor,
+                        frames,
+                    },
+                )
+            }
+            MathWorkerRequest::PeekPage {
+                leaf,
+                path,
+                page,
+                fit,
+                known,
+            } => {
+                let outcome = raster_peek_page(&path, page, fit, known);
+                (
+                    leaf,
+                    DecorationWorkerCompletion::PeekPage {
+                        path,
+                        page,
+                        fit,
+                        outcome,
+                    },
+                )
+            }
+        };
+        if result_tx
+            .send(MathWorkerResult {
+                leaf: completion.0,
+                completion: completion.1,
+            })
+            .is_err()
+        {
+            break;
+        }
+        wake();
     }
 }
 
@@ -114525,6 +114531,23 @@ fn probe_input(value: Option<std::ffi::OsString>) -> Result<Option<Vec<u8>>> {
 /// the one that closes the process, and any other returns and lets its own
 /// thread unwind into the moment or two it has left.
 fn install_panic_log_hook() {
+    install_panic_log_hook_at(panic_log_path(), |path| {
+        if !announce_panic(path) {
+            return;
+        }
+        bt_platform::hide_every_window_of_this_process();
+        eprintln!(
+            "{}",
+            diagnostics::run_footer(
+                &hang_watch::utc_timestamp(std::time::SystemTime::now()),
+                PANIC_EXIT_CODE
+            )
+        );
+        bt_platform::leave_process(PANIC_EXIT_CODE)
+    });
+}
+
+fn install_panic_log_hook_at(path: PathBuf, fatal: impl Fn(&Path) + Send + Sync + 'static) {
     let previous = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
         let timestamp_ms = SystemTime::now()
@@ -114538,23 +114561,16 @@ fn install_panic_log_hook() {
             &info.to_string(),
             &Backtrace::force_capture().to_string(),
         );
-        let path = panic_log_path();
         if let Err(error) = append_panic_report(&path, &report) {
             eprintln!("failed to write panic report {}: {error}", path.display());
         }
-        previous(info);
-        if !announce_panic(&path) {
+        // A pure MiTeX conversion has its own unwind boundary. Its diagnostic
+        // belongs in the log above, never in a fatal dialog or process exit.
+        if bt_math::conversion_panic_is_contained() {
             return;
         }
-        bt_platform::hide_every_window_of_this_process();
-        eprintln!(
-            "{}",
-            diagnostics::run_footer(
-                &hang_watch::utc_timestamp(std::time::SystemTime::now()),
-                PANIC_EXIT_CODE
-            )
-        );
-        bt_platform::leave_process(PANIC_EXIT_CODE)
+        previous(info);
+        fatal(&path);
     }));
 }
 
@@ -115032,6 +115048,128 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// Runs the actual production queue in a disposable process. The watchdog
+    /// kills only this test's child if a regression makes conversion infinite.
+    #[test]
+    fn hostile_math_is_refused_and_the_real_decoration_worker_survives() {
+        const CHILD: &str = "BT_MATH_ROBUSTNESS_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::hostile_math_is_refused_and_the_real_decoration_worker_survives",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .spawn()
+                .unwrap();
+            let started = Instant::now();
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    assert!(status.success(), "worker regression child: {status}");
+                    return;
+                }
+                if started.elapsed() > Duration::from_secs(60) {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!("decoration worker exceeded the process watchdog");
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        let log = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/math-robustness-panic-test.log");
+        std::fs::write(&log, "").unwrap();
+        let fatal_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls = fatal_calls.clone();
+        // Use the production logging/containment hook, with only the final
+        // dialog/exit action replaced. Even a failing test opens no UI.
+        install_panic_log_hook_at(log.clone(), move |_| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        let (tasks, requests) = mpsc::channel();
+        let (results, completions) = mpsc::channel();
+        let worker = std::thread::spawn(move || run_decoration_worker(requests, results, || {}));
+        let leaf = probe_leaf();
+        let render = |source: &str, budget| {
+            tasks
+                .send(MathWorkerRequest::PreviewMath {
+                    leaf,
+                    key: Box::new(PreviewMathKey {
+                        source: source.to_owned(),
+                        mode: MathMode::Display,
+                        em_milli_px: 16_000,
+                        foreground_rgb: [220, 220, 220],
+                    }),
+                })
+                .unwrap();
+            let completion = completions
+                .recv_timeout(budget)
+                .expect("worker must answer within budget");
+            let DecorationWorkerCompletion::PreviewMath { result, .. } = completion.completion
+            else {
+                panic!("expected formula completion");
+            };
+            result
+        };
+        // Warm up fonts/Typst independently of the refusal-time measurement.
+        assert!(render("x+1", Duration::from_secs(30)).is_ok());
+        let mut exponential = String::new();
+        for (name, next) in ('a'..='y').zip('b'..='z') {
+            exponential.push_str(&format!(r"\newcommand{{\{name}}}{{\{next}\{next}}}"));
+        }
+        exponential.push_str(r"\newcommand{\z}{x}\a");
+        for (source, expected) in [
+            (r"\newcommand{\a}{#}", MathRenderError::ConversionPanic),
+            (r"\newcommand{\a}{\a}\a", MathRenderError::MacroCycle),
+            (exponential.as_str(), MathRenderError::MacroExpansionLimit),
+        ] {
+            // Start at Markdown delimiters, then submit the resulting source to
+            // the very same PreviewMath branch the UI uses.
+            let blocks = preview::parse_markdown(&format!("$${source}$$"));
+            let preview::MarkdownBlock::Math { source } = &blocks[0] else {
+                panic!("display formula must be detected");
+            };
+            let seconds = if expected == MathRenderError::ConversionPanic {
+                5
+            } else {
+                1
+            };
+            assert_eq!(
+                render(source, Duration::from_secs(seconds)).unwrap_err(),
+                expected
+            );
+            assert!(render("x+1", Duration::from_secs(10)).is_ok());
+        }
+        assert!(
+            render(
+                r"\newcommand{\a}{\b}\newcommand{\b}{\c}\newcommand{\c}{x+1}\a",
+                Duration::from_secs(10)
+            )
+            .is_ok()
+        );
+        tasks
+            .send(MathWorkerRequest::VerifyPath {
+                leaf,
+                path: log.clone(),
+            })
+            .unwrap();
+        assert!(matches!(
+            completions
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+                .completion,
+            DecorationWorkerCompletion::VerifiedPath { exists: true, .. }
+        ));
+        assert!(std::fs::read_to_string(log).unwrap().contains("unwrap"));
+        assert_eq!(fatal_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(!bt_math::conversion_panic_is_contained());
+        drop(tasks);
+        worker.join().unwrap();
+        assert!(panic::catch_unwind(|| panic!("ordinary panic hook regression probe")).is_err());
+        assert_eq!(fatal_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
     /// A preview surface on one tab, spelled the way a test means it (§7.12 ⓑ).
     ///
     /// Every one of these used to be `PreviewSurface::Seat(SeatId(n))`, which
@@ -130232,10 +130370,10 @@ mod tests {
             "this window builds more than one picture decoder"
         );
         let worker = production
-            .find(r#""bt-math-worker""#)
+            .find("fn run_decoration_worker(")
             .expect("the decoration worker is spawned in this file");
         let ends = production
-            .find(r#".context("spawn math rendering worker")"#)
+            .find("/// What a press on one node of a files tree")
             .expect("and its spawn is checked");
         for (what, needle) in [
             (
