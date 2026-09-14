@@ -108968,6 +108968,11 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // chain, so acting here would be doing the work one statement early
             // and outside the order every other window verb is settled in.
             AppEvent::QuakeSummoned => {
+                // **The trace's last station** (T-MAC-SUMMON-DIAG): the loop's
+                // own turn has the press. A file that ends at `summons_wake
+                // called` says the proxy, and not the keyboard, is where the
+                // road stopped.
+                bt_platform::hotkey::trace(|| bt_platform::hotkey::TRACE_ANSWERED.to_owned());
                 if let Some(app) = self.app.as_mut() {
                     app.quake.press();
                 }
@@ -115223,6 +115228,12 @@ fn main() -> Result<()> {
     // fact about Windows: winit's message pump has a door and its builder
     // extension trait exists only there.
     bt_platform::hotkey::summons_wake(|| {
+        // **The trace's third station** (T-MAC-SUMMON-DIAG). It is written
+        // before the proxy is looked up rather than after, because "the press
+        // reached this closure and there was no loop yet" is one of the two
+        // states this line exists to separate — the other being that it never
+        // reached the closure at all.
+        bt_platform::hotkey::trace(|| bt_platform::hotkey::TRACE_WAKE.to_owned());
         if let Some(proxy) = SUMMON_PROXY.get() {
             let _ = proxy.send_event(AppEvent::QuakeSummoned);
         }

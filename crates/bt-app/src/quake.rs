@@ -682,6 +682,16 @@ impl Quake {
         if self.claimed_for.as_ref() == wanted {
             return;
         }
+        // **The trace's first station, and it is written here rather than at the
+        // caller** (T-MAC-SUMMON-DIAG, `docs/BT-ENVIRONMENT.md`). `settle_quake`
+        // calls this on every turn of the loop, thousands of times a minute; the
+        // line belongs *past* the guard above, so that the file holds one line
+        // per chord the summon actually moved to — which is the fact a reader is
+        // after — and not one line per frame.
+        bt_platform::hotkey::trace(|| match wanted {
+            Some(chord) => format!("reconcile wanted={}", crate::shortcuts::format_chord(chord)),
+            None => "reconcile wanted=none".to_owned(),
+        });
         // Dropped before the next is asked for, and that ordering is the whole of
         // it: a reader moving the summon between two chords that Windows
         // considers the same key would otherwise be refused their own claim.
@@ -1580,6 +1590,108 @@ mod tests {
             summoned_rect(area, 60, 50, 40, 192).top,
             180,
             "and the row is logical pixels, so it is the same seam at every scale"
+        );
+    }
+}
+
+/// **The road a summon press travels, pinned on a host that cannot press the
+/// key** (T-MAC-SUMMON-DIAG, `docs/DESIGN.md` §13.51).
+///
+/// A module of its own beside the geometry above because what it holds is not
+/// geometry: it is the answer to *is this claim even asked for on macOS*, which
+/// is the question the owner's report ("a physical `` ⌃` `` does nothing, and
+/// nothing is logged") opened and which no test in this tree had ever asked.
+///
+/// The Carbon half of the same road — the four-character codes, the modifier
+/// masks, `` ⌃` `` reaching `RegisterEventHotKey` as `(0x1000, 0x32)` — is
+/// pinned in `bt_platform::hotkey`'s own test module, for the reason
+/// `carbon_key_code` is written the way it is: the numbers are a fact about the
+/// other machine and are asserted on this one.
+#[cfg(test)]
+mod summon_road_tests {
+    use bt_platform::HostPlatform;
+
+    use super::hotkey_for;
+    use crate::shortcuts::{Action, Shortcuts};
+
+    const MAIN: &str = include_str!("main.rs");
+
+    /// RED (T-MAC-SUMMON-DIAG) — **the macOS build ships a summon chord, and it
+    /// is one `bt_platform::hotkey::register` can actually claim.**
+    ///
+    /// `Shortcuts::defaults_for` takes its platform as a value precisely so this
+    /// question can be asked here, and until this ticket nothing asked it about
+    /// this row: the shortcuts table's own tests read the Windows column, and
+    /// the macOS column's only reader was a Mac.
+    ///
+    /// MUTATION: take the `mac(CTRL, character("`"))` column off the
+    /// `summon-quake` row — the shape every *other* platform-specific row in
+    /// that table is allowed to have, and the shape that would make the summon
+    /// key simply not exist on macOS — and the first assertion names it. Leave
+    /// the chord and break the translation (`summon_key`, `summon_key_code`) and
+    /// the second does.
+    #[test]
+    fn the_macos_default_summon_is_a_chord_a_claim_can_be_made_on() {
+        let shortcuts = Shortcuts::defaults_for(HostPlatform::MacOs);
+        let chord = shortcuts
+            .rows()
+            .iter()
+            .find(|row| row.action == Action::SummonQuake)
+            .and_then(|row| row.chord.clone())
+            .expect("the macOS column of the summon row ships a chord");
+        let hotkey = hotkey_for(&chord).expect("and it is one this platform can claim");
+        assert!(hotkey.ctrl, "⌃");
+        assert!(
+            !hotkey.alt && !hotkey.shift && !hotkey.win,
+            "and nothing else — ⌘` is the system's window cycle and ⌥` is a dead key"
+        );
+        assert_eq!(
+            bt_platform::hotkey::carbon_registration_bits(hotkey),
+            Some((0x1000, 0x32)),
+            "controlKey and kVK_ANSI_Grave, which is what Carbon is handed"
+        );
+    }
+
+    /// RED (T-MAC-SUMMON-DIAG) — **the claim is reconciled on every platform, on
+    /// every turn, with no `cfg` between the loop and it.**
+    ///
+    /// This is the half of the owner's report that could not be ruled out by
+    /// reading `hotkey.rs`: a road that is correct from `register` onwards is
+    /// still a key that does nothing if `register` is never called, and the
+    /// summon was a Windows-only feature until M4-8 — exactly the history in
+    /// which a `#[cfg(windows)]` is left behind on the door.
+    ///
+    /// Source text rather than a run, for this file's own reason (`icons.rs`,
+    /// `diagnostics.rs`): the statement under test is one line of a method that
+    /// needs a live `ActiveEventLoop` and a window to call at all, and what is
+    /// being asserted about it is that **no condition stands in front of it**,
+    /// which is a fact about the text.
+    ///
+    /// MUTATION: wrap the `settle_quake` link of `about_to_wait_inner`'s chain
+    /// in `#[cfg(windows)]`, or put a `cfg!(windows) &&` in front of the
+    /// `reconcile` call, and this names the one that moved.
+    #[test]
+    fn the_summon_claim_is_asked_for_on_every_platform_at_every_turn() {
+        assert!(
+            MAIN.contains(".and_then(|()| self.settle_quake(event_loop))"),
+            "settle_quake is on about_to_wait_inner's chain"
+        );
+        let settle = MAIN
+            .split_once("fn settle_quake(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {")
+            .expect("settle_quake is declared in main.rs")
+            .1;
+        let claim = settle
+            .split_once("app.quake.reconcile(wanted.as_ref());")
+            .expect("and it reconciles the claim")
+            .0;
+        assert!(
+            !claim.contains("cfg"),
+            "nothing is asked about the platform between the turn and the claim"
+        );
+        assert!(
+            !claim.contains("self.windows"),
+            "and nothing is asked about a window either: a summon with no window \
+             open is the whole case this key exists for"
         );
     }
 }

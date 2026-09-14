@@ -150,6 +150,14 @@ Nothing yet.
 
 ### Fixed
 
+- **On a Mac, the key that summons the terminal works.** Pressing `Ctrl` and the
+  backtick key did nothing at all: no window came down, and nothing was written
+  anywhere that said why. Folio had claimed the chord from the system correctly
+  — which is why no other application saw it either — but the handler that
+  answers the press asked macOS for the wrong name for the one piece of
+  information that says *which* key was pressed, got nothing back, and threw the
+  press away. It now reads the right one, and the key does what the Shortcuts
+  page says it does. Windows was never affected.
 - **On a Mac, the candidate list follows the caret onto a second display.**
   Typing Chinese in a terminal pane on a display other than the main one left
   the list of candidates floating in the middle of the window instead of
