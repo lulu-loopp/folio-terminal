@@ -167,7 +167,7 @@ Nothing yet.
   a Mac, this is being read against a report that the minus sign in front of a
   fraction was not drawn where Windows drew it.)
 
-- **A table on a focus card lines up again.** A card showing a box-drawing table whose cells hold Chinese text drew its borders in a different place on every row, while the same table in the pane beside it was square. A card's rows are now laid out column by column, as the pane's own grid is, so a wide character takes exactly two columns and a border stands in the same place on every row.
+- **A table on a focus card lines up again, and a symbol on one is drawn whole.** A card showing a box-drawing table whose cells hold Chinese text drew its borders in a different place on every row, while the same table in the pane beside it was square. A card's rows are now laid out column by column, as the pane's own grid is, so a wide character takes exactly two columns and a border stands in the same place on every row. Laying them out that way then cut a symbol off at its column's edge — a shell printing `○` showed a clean circle in the pane and a large arc on the card — so a card now draws a symbol from the same font the pane draws it from, and sets a character that is still wider than the columns it stands in a little smaller until it fits them, instead of cutting it.
 - **On a Mac, `Edit ▸ Copy` and `Edit ▸ Paste` now act on the pane you are
   looking at.** Over a terminal they did nothing at all — the selection never
   reached the clipboard and the menu's Paste typed nothing — because macOS had
