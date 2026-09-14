@@ -2967,7 +2967,10 @@ mod tests {
             .expect("a shell takes its own output");
         position.prepare(&mut shell, 5);
         assert_eq!(position.persisted_skip(&shell), 0);
-        assert_eq!(transcript_tail(&shell, 40, 1, position.skip()).0, ["newest"]);
+        assert_eq!(
+            transcript_tail(&shell, 40, 1, position.skip()).0,
+            ["newest"]
+        );
     }
 
     /// T-CARD-ANCHOR-BOTTOM (iv): `Alt`+wheel keeps moving the card **by whole

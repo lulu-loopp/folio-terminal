@@ -15969,8 +15969,7 @@ mod tests {
                         + lines.len() as f32 * ROW_DESC_LINE_LOGICAL_PX;
                     assert_eq!(
                         metrics.row_height_for(lines.len()),
-                        2.0 * ROW_PADDING_Y_LOGICAL_PX
-                            + text_column.max(COMBO_HEIGHT_LOGICAL_PX),
+                        2.0 * ROW_PADDING_Y_LOGICAL_PX + text_column.max(COMBO_HEIGHT_LOGICAL_PX),
                         "{row:?} in {lang:?}: the band is not the {} lines it drew",
                         lines.len()
                     );

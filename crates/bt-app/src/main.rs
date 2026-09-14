@@ -131012,8 +131012,12 @@ mod tests {
         // A second display of a different size, parked to the right and hanging
         // below the zero screen's bottom edge: 2560x1440 points with its origin
         // at (1512, -458). The window is carried to it unchanged.
-        let on_the_second_screen =
-            caret_screen_origin((1512.0 + 100.0, -458.0 + 200.0), content_height_pt, scale, area);
+        let on_the_second_screen = caret_screen_origin(
+            (1512.0 + 100.0, -458.0 + 200.0),
+            content_height_pt,
+            scale,
+            area,
+        );
         assert_eq!(
             (
                 on_the_second_screen.0 - on_the_zero_screen.0,

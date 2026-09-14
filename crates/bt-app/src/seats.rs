@@ -28052,7 +28052,10 @@ mod tests {",
                 (WINDOW_CAPTION_GEAR_BOX_LOGICAL_PX * scale).round(),
                 "scale {scale}: on the box §13.48 ③ gave it"
             );
-            assert!(radius as f32 * 2.0 < side, "scale {scale}: a pill, not a circle");
+            assert!(
+                radius as f32 * 2.0 < side,
+                "scale {scale}: a pill, not a circle"
+            );
             assert!(
                 !hover_quads
                     .iter()
@@ -42913,7 +42916,11 @@ mod tests {",
             ),
             "the track is a full turn and is drawn first"
         );
-        assert_eq!(rings[1].color, [1, 2, 3], "the arc wears the state's colour");
+        assert_eq!(
+            rings[1].color,
+            [1, 2, 3],
+            "the arc wears the state's colour"
+        );
         assert_ne!(
             rings[0].color, rings[1].color,
             "a track the colour of its arc is not a track"
