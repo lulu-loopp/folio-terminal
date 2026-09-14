@@ -45,10 +45,6 @@ All notable changes to Folio are recorded here. The format follows
   changes on Windows, where the row still stands and still reports when a
   version of Windows has no blur to offer; and your settings file keeps the
   value either way, so a Windows machine sharing that file reads it as before.
-- **On a Mac, resting on the settings gear lights a rounded square that matches
-  the window's own corner.** The wash used to be a smaller pill; it is now the
-  same shape and the same curve as the corner it sits in, and the gear itself
-  has not moved.
 - **Moving the caret and typing in a very large Markdown document no longer
   waits on the whole document.** Each keystroke used to copy the text, rescan
   every line for the widest one and rebuild the caret's map of lines from
