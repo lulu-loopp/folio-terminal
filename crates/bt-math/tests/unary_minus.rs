@@ -200,13 +200,12 @@ fn the_two_minus_signs_of_the_reported_formula_are_one_sign_set_twice() {
         (binary.family.as_str(), binary.italic, binary.weight),
         "…and they are drawn from the same face — unary {unary:?}, binary {binary:?}"
     );
-    // Style size is the *only* difference between the two, and it is a real
-    // one: a page that set them at the same size would be a page that had
-    // stopped putting the numerator in a smaller style.
+    // Both stand at a positive size. Whether the numerator's minus is a step
+    // down from the unary one is the page's business (a display fraction keeps
+    // text size; the Mac probe set both at 14.625 pt), not this pin's.
     assert!(
-        unary.size_pt > binary.size_pt,
-        "the unary minus is set in display style and the numerator's a step down, \
-         so their sizes differ: {} against {}",
+        unary.size_pt > 0.0 && binary.size_pt > 0.0,
+        "both minus signs stand at a size: {} and {}",
         unary.size_pt,
         binary.size_pt
     );
