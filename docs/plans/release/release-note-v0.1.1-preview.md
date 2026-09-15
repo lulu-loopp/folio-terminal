@@ -1,4 +1,4 @@
-> Draft for the GitHub Release body. The published text is settled by the user at release time. 草稿，发布时由用户审定。
+> The body of the GitHub Release for this version, as published.
 
 # Folio 0.1.1-preview
 
