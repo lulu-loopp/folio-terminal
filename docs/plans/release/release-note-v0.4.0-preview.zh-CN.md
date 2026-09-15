@@ -1,10 +1,8 @@
-> 草稿，发布时由用户审定。
-
 # Folio 0.4.0-preview
 
 **下载：**[zip](https://github.com/lulu-loopp/folio-terminal/releases/download/v0.4.0-preview/folio-0.4.0-windows-x64.zip)（Windows 10 1809 及以上 / Windows 11，64 位）· [dmg](https://github.com/lulu-loopp/folio-terminal/releases/download/v0.4.0-preview/Folio-0.4.0-macos-arm64.dmg)（macOS 14 及以上，Apple 芯片）
 
-**下载：**上方 zip 与 dmg 即为完整下载，其余为校验和、物料清单与源码。[English release note](https://github.com/lulu-loopp/folio-terminal/blob/v0.4.0-preview/docs/plans/release/release-note-v0.4.0-preview.md)
+**下载：** 上方 zip 与 dmg 即为完整下载，其余为校验和、物料清单与源码。[English release note](https://github.com/lulu-loopp/folio-terminal/blob/v0.4.0-preview/docs/plans/release/release-note-v0.4.0-preview.md)
 
 0.4 是第一个同时面向两个系统的版本。Folio 在 macOS 上运行：同一个程序，为 Apple 芯片构建，要求 macOS 14 或更高版本，窗格、文件列、Git 页和预览都在——两个系统有差异的地方跟随所在的平台，快捷键用 Command 组合键，菜单栏是原生菜单栏，窗口带 macOS 绘制的三颗按钮，一个按键可以从任何应用呼出终端，在任一系统上写的设置文件另一台也能读。另一半是超大 Markdown 文档的预览。文件打开即完整呈现，可以直接编辑，上限是 8 MB 的编辑上限——`只读 · 64 KB` 的头部没有了，可编辑的文件不再显示为只读——打开和输入都不用等整篇文档加载：一个三兆字节的文件从约 3.4 秒降到十分之一秒显示第一块内容，段落内移动光标的耗时降到无法计量。
 

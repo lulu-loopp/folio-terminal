@@ -12,12 +12,12 @@
 **当前状态**：M-1 风险消减阶段的**第一部分已通过审核**（语料基建 + 双平面原型，三门 G1/G2/G3 全过，224 tests）。工程基线（CI / lint 政策 / 规范）刚刚落地。现在做 M-1 的**剩余工作**：一次 hygiene + 四个 spike。做完才能进 M0。
 
 **必读**：
-1. **`CONVENTIONS.md`** —— 工程约定，**新增，开工前必读**。规则分【事故】/【预防】/【提示】三级，【事故】级的每条都注明了它来自哪次返工。特别注意 §0（按规格推导）、§3.2（默认值掩盖 bug——这是一个**族**）、§3.3（断言要能失败，**射程覆盖构建配置本身**）、§8（lint 阶梯）。
+1. **`docs/CONVENTIONS.md`** —— 工程约定，**新增，开工前必读**。规则分【事故】/【预防】/【提示】三级，【事故】级的每条都注明了它来自哪次返工。特别注意 §0（按规格推导）、§3.2（默认值掩盖 bug——这是一个**族**）、§3.3（断言要能失败，**射程覆盖构建配置本身**）、§8（lint 阶梯）。
 2. `docs/DESIGN.md` —— 技术规格 v3.3，**唯一权威**。重点 §1.3、§2、§5、§8、§9、§10。
 3. `docs/reviews/` —— 五份审核记录。`claude-review-M-1-part1-signoff.md`（第一部分验收 + M0 携带事项）、`claude-review-conventions.md`（工程审核，含代码质量清单）。
 4. `docs/spikes/01-corpus.md`、`02-dual-plane.md` —— 已完成部分，照它们的格式写报告。
 
-**硬性规则**（前三轮审核换来的，`CONVENTIONS.md` 有完整版）：
+**硬性规则**（前三轮审核换来的，`docs/CONVENTIONS.md` 有完整版）：
 
 - **以规格与 upstream 契约为准推导，不要照复现步骤做局部修补**。前两轮的返工惨案全部源于此，其中一条审核方给的复现步骤**本身就是错的**，照着修反而改坏了 VT 状态机。审核给的是**症状**，规格才是**权威**。认为规格有问题 → 写「偏离申请」，不要自行偏离。
 - **no-go 是有价值的产出**。首次交付把零件级单测误报成"三门全过"，被打回重做。如实的 no-go 会被接受。
@@ -31,7 +31,7 @@
 
 ## 任务 00：把已交付的代码清理到规范水准（**先做，单独提交，单独过审**）
 
-`CONVENTIONS.md` 是在这些代码写完之后才立的，所以它们没按规范写过。**在任何新代码落上去之前先清理**——尤其是 M0 会往 `bt-term` 里加真 PTY 的代码。
+`docs/CONVENTIONS.md` 是在这些代码写完之后才立的，所以它们没按规范写过。**在任何新代码落上去之前先清理**——尤其是 M0 会往 `bt-term` 里加真 PTY 的代码。
 
 判据是：**只有当 M0 会教给我们某些改变答案的东西时，才推迟**。按这条，下面的都不该推迟；真的需要 M0 数据的只有两项（`SPIKE_CELL_HEIGHT_SUBPIXELS` 要真字体度量、`DEFAULT_FROZEN_QUOTA` 要实测内存），那两项留给 M0。
 
@@ -49,13 +49,13 @@
 
 - **G2/G3 的 `live_anchor(0, _)` 至少各改一个非 0 行**。row 0 是唯一会掩盖 rebase 缺陷的行，不该再是默认取值。
 - **`bt-term:548` 忽略了 `transition()` 的布尔返回值** → 非法状态转移会静默通过。改返回 `Result`，或加 `#[must_use]`，或至少 `debug_assert!`。
-- **`bt-transcript:299` 是一条撒谎注释**：写着 staging 锚点"由 generation bump 作废"，但**全 workspace 没有任何代码检查 anchor generation**；真正作废靠的是 `delete_transaction(removed, clear_staging=true)` 的显式 flag。这与 vendor 里那句"IL/DL deliberately never emit"是同一类型、同样危险的东西（`CONVENTIONS.md` §5）。**修正它，别只是删掉**。
+- **`bt-transcript:299` 是一条撒谎注释**：写着 staging 锚点"由 generation bump 作废"，但**全 workspace 没有任何代码检查 anchor generation**；真正作废靠的是 `delete_transaction(removed, clear_staging=true)` 的显式 flag。这与 vendor 里那句"IL/DL deliberately never emit"是同一类型、同样危险的东西（`docs/CONVENTIONS.md` §5）。**修正它，别只是删掉**。
 - **`bt-doc:331` 的死赋值：不要按 signoff 的建议直接删**。删完 `SourceLifecycle::Tombstoned` 就成了首轮 M-2 骂过的"幽灵变体"（从未被构造的分支）——一个 MINOR 换成一个已判定为 MAJOR 的模式。**先决定 tombstone 是不是 `HistoryEntry` 的状态**：代码的真实模型是「entry 在 = Frozen；entry 没了且 id 在 `tombstones` = Tombstoned」。按这个模型该删的是整个 `HistoryEntry.source` 字段，`SourceLifecycle` 只保留 staging 用的 `Live→Frozen`。**你的判断，但要在报告里说明理由。**
 - **决定 `DualPlaneSession` 的身份**：它自称 "M-1 protocol harness"，却已经是公开产品 API。要么扶正为正式 actor 核心，要么降为 test-support。**不要让 spike harness 默认演化成产品接口。**
 
 ### 00.3 upstream 的内存布局不得跨过适配层
 
-`bt-transcript` 存的是 **alacritty 的裸内存布局**：`flags: u16` 直接来自 `cell.flags.bits()`，颜色是 `encode_color` 手打的 `0x01/0x02/0x03` tag——而且**全 workspace 没有解码器、没有 round-trip 测试**（`CONVENTIONS.md` §2 把"只写数据"定义成可 grep 的坏味道：任何 `encode_*` 没有配套 `decode_*` 就是）。
+`bt-transcript` 存的是 **alacritty 的裸内存布局**：`flags: u16` 直接来自 `cell.flags.bits()`，颜色是 `encode_color` 手打的 `0x01/0x02/0x03` tag——而且**全 workspace 没有解码器、没有 round-trip 测试**（`docs/CONVENTIONS.md` §2 把"只写数据"定义成可 grep 的坏味道：任何 `encode_*` 没有配套 `decode_*` 就是）。
 
 危险在于：**upstream 重排 `Flags` 的位，测试全绿，而冻结的历史静默改变含义**。§2 的"升级前 diff `shrink_lines`"护栏**盖不到这里**。
 
@@ -118,7 +118,7 @@ G1/G2/G3 是**跨 crate 契约门**，DESIGN §9 说"任一不过 → 砍功能"
 
 ### 00.9 死规格：接线或删（**你判断，报告里说明**）
 
-规格要求携带、但全 workspace **从未被读过**的字段——按 `CONVENTIONS.md` §3.2 它们是**死规格**：
+规格要求携带、但全 workspace **从未被读过**的字段——按 `docs/CONVENTIONS.md` §3.2 它们是**死规格**：
 
 - `ContentAnchor` 的 `generation`（三个变体都带，§3.2 说锚点携带 generation，但只有 worker task 的 `VersionStamp` 被校验）。**注意**：不要在没有消费者的时候先造一个校验框架——那只会得到第二个只写机制。先决定它要不要。
 - `LayoutKey` 的 `dpi_milli` / `font_rev` / `theme_rev`（全 workspace 只以字面量 `1000`/`1`/`1` 出现，**没有任何 API 能改它们**——把 `LayoutKey` 换成只剩 `width_cells` 的 struct，全部测试照样绿）。
@@ -130,7 +130,7 @@ G1/G2/G3 是**跨 crate 契约门**，DESIGN §9 说"任一不过 → 砍功能"
 - **删掉没用的依赖**：bt-term / bt-viewport / bt-detect 声明了 `serde` + `thiserror` **都没用**；bt-transcript 声明 `thiserror` 没用。**serde 尤其要删**：15 个类型挂着 derive 但全 workspace 无任何序列化调用，而且在 00.3 修好前这个格式本来就不该被序列化（等于把 upstream 的内存布局写进磁盘）。
 - **`bt-replay.rs:12` 在用户 CLI 输入上 `.expect()`** —— 那是真边界，该 `.parse().context(...)?`（同文件其他地方都规矩地用 anyhow）。
 - **`bt-transcript:198-245` `capture()` 40 行里 4 个 unwrap + 1 个 expect**——全因为反复 `self.staging.back()` 重查而不是持有引用。**重构成先确定 target candidate 再操作，unwrap 自然消失**（改结构，不是加校验）。
-- **`bt-doc:420` 的 `unreachable!()`**：真的不可达，但是**控制流**证明的，不是类型系统证明的（`CONVENTIONS.md` §4.4）。让 `key` 返回 `Option`、两边 `.ok_or(AnchorError::IsolatedScreen)?` → 同时消掉重复的 Alternate 检查和 unreachable。
+- **`bt-doc:420` 的 `unreachable!()`**：真的不可达，但是**控制流**证明的，不是类型系统证明的（`docs/CONVENTIONS.md` §4.4）。让 `key` 返回 `Option`、两边 `.ok_or(AnchorError::IsolatedScreen)?` → 同时消掉重复的 Alternate 检查和 unreachable。
 - **`NonZeroU32`**：`bt-viewport:116-118` / `bt-transcript:165-166` 的公开构造器直接 `assert!` 调用方参数——既不是边界，又和"panic = 数据丢失"打架。**正解既不是删 assert 也不是留 assert，是 `NonZeroU32`**（类型层解决）。
 - **命名**：`project_view`（创建）vs `refresh_view`（更新）从名字看不出区别 → `new_projection` / `refresh_projection`；`TranscriptStore::width_resize()` 是事件名当命令方法名，实际语义是"强制定稿全部候选" → `finalize_all_candidates(reason)`；`Finalized` 形容词当类型名 → `FinalizedLine`。
 
@@ -153,6 +153,6 @@ G1/G2/G3 是**跨 crate 契约门**，DESIGN §9 说"任一不过 → 砍功能"
 
 ## 交接
 
-**单独提交，做完停下。** 产出 `docs/spikes/00-baseline.md`：每条做了什么、**哪个测试在修复前会红**（`CONVENTIONS.md` §7）、00.9 的判断与理由、以及任何偏离申请。
+**单独提交，做完停下。** 产出 `docs/spikes/00-baseline.md`：每条做了什么、**哪个测试在修复前会红**（`docs/CONVENTIONS.md` §7）、00.9 的判断与理由、以及任何偏离申请。
 
 之后由 Claude 审核。审核通过前不要开始 spike 或 M0。

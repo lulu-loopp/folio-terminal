@@ -611,7 +611,7 @@ mod tests {
     /// Process id, wall-clock nanoseconds and a counter, because two tests in
     /// one binary run at once and two binaries can run at once too — and a
     /// fixture that two walks are writing into is the "shared fixture hides a
-    /// bug" family from `CONVENTIONS.md` §3 in its most literal form.
+    /// bug" family from `docs/CONVENTIONS.md` §3 in its most literal form.
     fn scratch(name: &str) -> PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let unique = COUNTER.fetch_add(1, Ordering::Relaxed);

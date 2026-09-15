@@ -26,9 +26,19 @@ if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -Scope Global -Er
 
 $repo = Split-Path -Parent $PSScriptRoot
 
+# `--workspace`, and not the narrower `--package bt-app --bin folio` this once
+# ran, so that it selects what the three gates select. Package selection decides
+# feature resolution: `proptest` is a dev-dependency of `bt-term`, so it is in
+# the graph under `--workspace` and out of it under a subset, and it enables
+# `bit-set/default`, `bit-vec/default` and — through `tempfile` — `fastrand/default`.
+# A feature reaches rustc as `--cfg feature="…"` and is part of the unit
+# fingerprint, so a narrower selection is a different `bit-set`, a different
+# `fastrand`, and therefore a different `syntect`, `phf`, `typst-library`,
+# `bt-math`, `bt-app` and 200 MiB test harness — rebuilt and relinked every time
+# this gate ran after the suite. Selecting the same set makes every unit Fresh.
 Push-Location $repo
 try {
-    & cargo test --package bt-app --bin folio --locked -- --exact `
+    & cargo test --workspace --locked -- --exact `
         shortcuts::tests::docs_shortcuts_md_is_the_bindings_table | Out-Host
     $code = $LASTEXITCODE
 } finally {

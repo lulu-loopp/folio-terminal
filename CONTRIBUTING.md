@@ -1,10 +1,10 @@
 # Contributing
 
 Thank you for looking. This file is the short version of how work is done here.
-`CONVENTIONS.md` is the long version — it is written in Chinese, it names the
-incidents each rule was paid for, and it is worth reading before a first change of
-any size. `docs/DESIGN.md` says what the program is supposed to do; this file says
-how a change to it gets made.
+`docs/CONVENTIONS.md` is the long version — it is written in Chinese, it names
+the incidents each rule was paid for, and it is worth reading before a first
+change of any size. `docs/DESIGN.md` says what the program is supposed to do;
+this file says how a change to it gets made.
 
 Security problems do not go in an issue. `SECURITY.md` has the private channel.
 
@@ -37,6 +37,14 @@ that would otherwise drift:
 | `scripts/check-vendor-notices.ps1` | every copied-in dependency and its licence text |
 | `scripts/check-adapter-boundary.ps1` | the terminal adapter and the policy it must not import |
 | `scripts/check-machine-paths.ps1` | no tracked file naming a person, an address or a checkout path |
+
+**Run them after the three, in the same checkout and against the same `target/`.**
+The ones that compile — `check-shortcuts-table.ps1` and its generator — select
+`--workspace --locked`, which is what the gate above selects, so everything they
+need is already built and every unit is `Fresh`. Selecting anything narrower is
+not cheaper: package selection decides feature resolution, and a graph resolved
+with one feature more is a different set of compiled units from the first
+dependency that feature touches all the way up to the test harness.
 
 ## Write the failing test first
 
