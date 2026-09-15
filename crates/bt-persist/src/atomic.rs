@@ -8,7 +8,7 @@
 //! `MOVEFILE_REPLACE_EXISTING` when the destination exists, which is the
 //! platform atomic replace the spec asks for — no `unsafe` FFI needed here,
 //! keeping this crate outside the workspace's one deliberate `unsafe`
-//! boundary (`bt-platform`, per `CONVENTIONS.md` §零).
+//! boundary (`bt-platform`, per `docs/CONVENTIONS.md` §零).
 
 use std::fs::{self, File};
 use std::io::{self, Write};

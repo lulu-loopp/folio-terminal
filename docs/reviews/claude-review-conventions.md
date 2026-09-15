@@ -8,7 +8,7 @@
 2. `cargo fmt --all -- --check` **会因 vendor 大面积失败**。
 3. vendor 成员 CI 检查 **实际上不起作用**。
 
-此外，`CONVENTIONS.md` 把若干通用偏好包装成“项目已付过代价的教训”，有夸大和张冠李戴。
+此外，`docs/CONVENTIONS.md` 把若干通用偏好包装成“项目已付过代价的教训”，有夸大和张冠李戴。
 
 ---
 
@@ -38,7 +38,7 @@
 | §7 报告纪律 | 首轮误报三门通过、后续撤回是直接案例 | **成立** |
 | §8 工具链固定、不得靠抑制换干净 | 固定原则合理，第三轮记录零抑制 | **原则成立；“绝不 allow”过度，应允许局部 `#[expect(..., reason = "...")]`** |
 
-因此，[CONVENTIONS.md:4](D:/Developer/BetterTerminal/CONVENTIONS.md:4) 的“每一条都是已经付过代价的教训”不成立。建议把规则明确分成：
+因此，[docs/CONVENTIONS.md:4](D:/Developer/BetterTerminal/docs/CONVENTIONS.md:4) 的“每一条都是已经付过代价的教训”不成立。建议把规则明确分成：
 
 - 事故后形成的硬规则；
 - M0 新采用的预防性原则；
