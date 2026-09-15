@@ -4,11 +4,15 @@ on:
   # A bare `push:` ran this whole matrix on every push of every branch, so each
   # work-in-progress commit on a feature branch mailed the owner its own red run.
   # What is worth a full run is what the product is: `main`, the release tags,
-  # and a branch as it is proposed for merging.
+  # and a branch as it is proposed for merging — or one the coordinator asks
+  # for by name (`gh workflow run ci.yml --ref <branch>`), which is how a
+  # branch is gated on these machines beside the others instead of one at a
+  # time on the laptop.
   push:
     branches: [main]
     tags: ['v*']
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
