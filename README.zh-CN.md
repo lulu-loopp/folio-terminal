@@ -10,6 +10,7 @@
 [![Build](https://github.com/lulu-loopp/folio-terminal/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/lulu-loopp/folio-terminal/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/lulu-loopp/folio-terminal?include_prereleases&label=release&color=blue)](https://github.com/lulu-loopp/folio-terminal/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/lulu-loopp/folio-terminal/total?label=downloads&color=pink)](https://github.com/lulu-loopp/folio-terminal/releases)
+[![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-8a2be2)](#%E5%AE%89%E8%A3%85)
 
 Folio 是一个开源的 Windows 和 macOS 终端。公式在命令输出中原位排版，文件在终端旁预览，窗口自由布局，agent 等待时标签页亮灯提醒。
 

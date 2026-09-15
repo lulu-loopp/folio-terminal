@@ -12,6 +12,7 @@
 [![Build](https://github.com/lulu-loopp/folio-terminal/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/lulu-loopp/folio-terminal/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/lulu-loopp/folio-terminal?include_prereleases&label=release&color=blue)](https://github.com/lulu-loopp/folio-terminal/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/lulu-loopp/folio-terminal/total?label=downloads&color=pink)](https://github.com/lulu-loopp/folio-terminal/releases)
+[![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-8a2be2)](#install)
 
 Folio is an open-source terminal for Windows and macOS. It typesets LaTeX where
 a command prints it, previews files beside the prompt, lets panes and windows
