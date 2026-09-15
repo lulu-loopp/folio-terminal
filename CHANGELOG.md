@@ -34,6 +34,8 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- Inner products and bra-kets written with `\langle … \rangle` now typeset.
+
 - **Turning a formula into its source no longer makes the window hesitate.**
   Pressing the `‹›` mark beside a typeset block — or pressing it again to put the
   picture back — used to hitch for a moment before the block changed. Changing a
