@@ -17762,4 +17762,47 @@ mod macos_player_signature_tests {
             );
         }
     }
+
+    /// RED (RA-5) — **the engine thread has an autorelease pool, and the pump
+    /// drains one every turn.**
+    ///
+    /// Apple's contract for a secondary thread that touches Cocoa: a pool
+    /// before the first message, and a pool drained inside any long-lived loop.
+    /// The pump calls into AVFoundation every `FRAME_POLL_INTERVAL` for as long
+    /// as a preview is open, so a pool that drains only when the preview closes
+    /// is the case this is about rather than the fix for it.
+    ///
+    /// A source pin for `the_player_is_allocated_without_claiming_the_window_thread`'s
+    /// reason — the arm compiles on one machine, and what is being asserted is
+    /// a structural property rather than a measurable one: there is no number
+    /// AVFoundation publishes for "objects waiting for a pool".
+    ///
+    /// MUTATION: put the pool around `pump` instead of inside it — one pool for
+    /// the whole lifetime, which is the shape this finding rejects — and the
+    /// second half of this names it.
+    #[test]
+    fn the_engine_thread_holds_a_pool_and_drains_one_every_turn() {
+        let run = MACOS_ARM
+            .split("\nfn run(")
+            .nth(1)
+            .expect("the macOS engine thread has a body");
+        let run = run.split("\n}\n").next().unwrap_or_default();
+        assert!(
+            run.contains("autoreleasepool(") && run.contains("Machinery::build("),
+            "the engine thread sends its first Objective-C message with no autorelease \
+             pool on it; Apple's contract for a thread this file started is that it \
+             makes one before it does: {run}"
+        );
+        let pump = MACOS_ARM
+            .split("fn pump(&mut self, shared: &Arc<Shared>, inbox: &mpsc::Receiver<Command>) {")
+            .nth(1)
+            .expect("the macOS engine has a pump");
+        let pump = pump.split("\n    }\n").next().unwrap_or_default();
+        assert!(
+            pump.contains("while autoreleasepool(") && pump.contains("self.one_turn("),
+            "the pump's work is no longer inside a pool that is drained on every \
+             iteration, so a preview left open accumulates everything AVFoundation \
+             autoreleased on this thread: {pump}"
+        );
+    }
 }
