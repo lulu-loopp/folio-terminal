@@ -108,26 +108,57 @@ fn resource_bytes(icon: &Path, version: &str) -> Vec<u8> {
 
 /// The short commit hash of `workspace`, or [`NO_COMMIT`].
 ///
-/// The rebuild triggers are the two files a commit moves: `HEAD` itself, and —
-/// when `HEAD` names a branch — the file that branch's tip is written in.
-/// Without them the hash would be frozen at whatever it was the first time this
-/// crate was compiled, which is worse than not having one: a stale hash in a
-/// panic log points at the wrong source.
+/// The rebuild triggers are the files a commit moves: `HEAD` itself, and — when
+/// `HEAD` names a branch — wherever that branch's tip is written. Without them
+/// the hash would be frozen at whatever it was the first time this crate was
+/// compiled, which is worse than not having one: a stale hash in a panic log
+/// points at the wrong source.
+///
+/// **Where those files live is git's question to answer, not ours.** A repository
+/// is not one directory: a linked worktree has its own `HEAD` under
+/// `.git/worktrees/<name>/`, while branches stay in the *common* directory at
+/// `.git/refs/heads/`, so a path built by joining names onto one git dir names a
+/// file that exists in neither place. And a tip is not always a file at all —
+/// once `git gc` packs it, the loose ref is gone and the tip lives in
+/// `packed-refs`. Both cases matter to cargo the same way: a
+/// `rerun-if-changed` path that does not exist makes the build script *always*
+/// dirty, so this crate — the workspace's longest link — would be rebuilt on
+/// every single `cargo` invocation.
+///
+/// So each file is located with `rev-parse --git-path`, which knows the
+/// per-worktree/common split; the loose ref is declared only when it is really
+/// there, and `packed-refs` alongside it, because a packed tip moves that file
+/// instead.
 fn commit_of(workspace: &Path) -> String {
-    let Some(git_dir) = git(workspace, &["rev-parse", "--absolute-git-dir"]) else {
+    // Also the "is there a git here at all" question: it fails when git is
+    // absent and when this is not a repository.
+    let Some(head) = git_path(workspace, "HEAD") else {
         return NO_COMMIT.to_owned();
     };
-    let git_dir = PathBuf::from(git_dir);
-    println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
+    println!("cargo:rerun-if-changed={}", head.display());
     if let Some(reference) = git(workspace, &["symbolic-ref", "--quiet", "HEAD"]) {
-        // Absent while the tip is packed, and named the moment a commit lands
+        // Absent while the tip is packed, and written the moment a commit lands
         // on this branch — which is the transition that has to be noticed.
-        println!(
-            "cargo:rerun-if-changed={}",
-            git_dir.join(reference).display()
-        );
+        if let Some(path) = git_path(workspace, &reference).filter(|path| path.exists()) {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
+    // The other half of that pair: while the tip is packed, this is the file it
+    // is packed in, and unpacking it rewrites this file too.
+    if let Some(path) = git_path(workspace, "packed-refs").filter(|path| path.exists()) {
+        println!("cargo:rerun-if-changed={}", path.display());
     }
     git(workspace, &["rev-parse", "--short=10", "HEAD"]).unwrap_or_else(|| NO_COMMIT.to_owned())
+}
+
+/// Where git keeps the file it calls `name`, as an absolute path.
+///
+/// `--git-path` answers relative to the current directory — `.git/HEAD` in an
+/// ordinary checkout — so the answer is resolved against `workspace`, which is
+/// the directory the command ran in. An answer that is already absolute, as it
+/// is from a linked worktree, survives the join unchanged.
+fn git_path(workspace: &Path, name: &str) -> Option<PathBuf> {
+    git(workspace, &["rev-parse", "--git-path", name]).map(|path| workspace.join(path))
 }
 
 /// One `git` command's trimmed output, or `None` when git is absent, this is not
