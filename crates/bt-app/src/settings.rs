@@ -1428,8 +1428,8 @@ const FONT_SIZE_LABELS: [&str; FONT_SIZE_OPTIONS.len()] = [
     "10", "11", "12", "13", "14", "15", "16", "18", "20", "22", "24",
 ];
 
-/// This machine's monospaced families, enumerated once and kept for the life of
-/// the process.
+/// This machine's monospaced families, **as the window thread last adopted
+/// them** — and never enumerated on the thread that asks for them.
 ///
 /// **The `&'static` list is what makes `option_label`'s `&'static str` honest.**
 /// A family name is a runtime string, and every other picker in this dialog
@@ -1438,110 +1438,408 @@ const FONT_SIZE_LABELS: [&str; FONT_SIZE_OPTIONS.len()] = [
 /// redraws on hover, and without changing the signature of nine functions and
 /// their thirty call sites.
 ///
-/// Enumerated lazily — the first time a caller actually asks — rather than at
-/// startup, because opening a system font collection is exactly the cost
-/// `bt_render::terminal_font_system` refuses to pay on every launch. The Settings
-/// dialog is the only thing that asks.
+/// # The stall this shape was written for (GitHub issue #3, 2026-09-15)
 ///
-/// **It was a `OnceLock` until 2026-08-19, and the comment beside it said the
-/// list cannot change under it — "a font installed mid-session is a case every
-/// other program answers with restart too".** The `Install fonts…` ruling made
-/// that sentence false: the picker now ends in a door onto Windows' own Fonts
-/// page, so a reader is *expected* to leave, install a family and come back, and
-/// telling them to restart the terminal they were invited out of would be the
-/// rudest possible answer.
+/// Until this slice the slot was keyed on a revision that the gear's own press
+/// bumped, and the first reader after the bump **enumerated on the spot**. The
+/// first reader is not the picker: `Runtime::settings_values` asks
+/// [`family_index`] which row is ticked, on the press that opens the dialog and
+/// before any page has been chosen. So *every* open — not the first, every one,
+/// on whichever page — walked DirectWrite's whole system font collection on the
+/// window thread, opening a font face per monospaced family to name its files.
+/// On a large font library that is the several seconds an outside user reported
+/// as the window freezing when the gear is clicked.
 ///
-/// So the slot is keyed, on the shape [`SchemeLabelSlot`] already solved this
-/// exact problem with: a revision the list was built at, compared on every read,
-/// re-enumerated only when it has moved. The key is bumped by
-/// [`rescan_monospace_families`] and by nothing else.
+/// # The shape now
 ///
-/// **THE LIST RESCANS WHEN THE DIALOG REOPENS, NOT WHILE IT IS UP.**
-/// DirectWrite's collection is snapshotted when a picker is built, a font
-/// installed behind an open dialog would need that collection invalidated and
-/// every open popup rebuilt under the pointer, and the gesture that put the font
-/// there — leaving, dropping a file on a Windows page, coming back — already
-/// crosses a close and a reopen. So the rule is the plainest one available and
-/// needs no watcher.
+/// Three facts and one rule.
 ///
-/// The leak is per rescan and not per call. It is bounded by how many times one
-/// session opens the dialog *after installing a font*, since a rescan that finds
-/// the same families keeps the list it already had — which is
-/// [`schemes::rescan`]'s own arithmetic one crate over.
-struct MonospaceFamilySlot(std::sync::RwLock<(u64, &'static [bt_platform::MonospaceFamily])>);
+/// - `published` is what a drawn frame reads. [`monospace_families`] hands it
+///   back and **cannot block, cannot enumerate and cannot allocate**.
+/// - `scanned` says whether that list came from the machine or is the seed
+///   [`begin_monospace_scan`] publishes so the button can read the family in
+///   force from the very first frame — see there for why a seed and not an
+///   empty list.
+/// - `offered` is where a finished walk leaves its answer.
+///
+/// **The rule is that only the window thread publishes.** The worker fills
+/// `offered` and asks for a wake; [`adopt_scanned_families`] moves it across,
+/// and its one caller is the `FontsScanned` arm of `user_event` — between two
+/// frames. That is not fastidiousness: `Runtime::settings_layout` is called
+/// several times within one frame (the hover, the hit test, the draw) and each
+/// of them reads this list afresh, so a swap landing between two of those calls
+/// would be a popup hit-tested against a list it was not drawn from. It is also
+/// what is left of the 2026-08-19 ruling's second half — "the list rescans when
+/// the dialog reopens, not while it is up" — said in the one place that can
+/// actually keep it: the swap happens at a moment when no measurement is in
+/// flight.
+///
+/// The leak is per adopted list, and a walk that finds the same families as the
+/// last one keeps the slice it already leaked — which is [`SchemeLabelSlot`]'s
+/// own arithmetic, and what bounds this to the number of times one session's
+/// fonts actually change.
+struct MonospaceFamilySlot {
+    /// `(came from the machine, what a frame draws)`.
+    published: std::sync::RwLock<(bool, &'static [bt_platform::MonospaceFamily])>,
+    /// What a finished walk is holding out to the window thread.
+    offered: std::sync::Mutex<Option<Vec<bt_platform::MonospaceFamily>>>,
+    scan: std::sync::Mutex<ScanState>,
+}
+
+/// Whether a walk is out, and whether another was asked for while it was.
+///
+/// The second field is the whole of the coalescing: the dialog can be opened
+/// twice in the time one walk takes, and a second thread walking the same
+/// collection would answer the same question twice while the first answer was
+/// still in the post. A request made while a walk is out is not dropped either
+/// — a font may have been installed since that walk started, which is exactly
+/// the gesture `Install fonts…` invites — so it is remembered and the worker
+/// goes round once more.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ScanState {
+    running: bool,
+    again: bool,
+}
 
 impl MonospaceFamilySlot {
     const fn new() -> Self {
-        Self(std::sync::RwLock::new((0, &[])))
+        Self {
+            published: std::sync::RwLock::new((false, &[])),
+            offered: std::sync::Mutex::new(None),
+            scan: std::sync::Mutex::new(ScanState {
+                running: false,
+                again: false,
+            }),
+        }
     }
 
-    fn get(&self, revision: u64) -> &'static [bt_platform::MonospaceFamily] {
-        {
-            let held = self
-                .0
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            // Revision zero is "never enumerated", so it can never be a hit —
-            // which is what makes the empty slice above unreachable rather than
-            // merely unlikely.
-            if held.0 == revision && revision > 0 {
-                return held.1;
-            }
+    /// **What a frame draws, and it is never empty.**
+    ///
+    /// The emptiness matters because a promise in this file depends on it: a
+    /// picker's button reads the label of its ticked item, so a family list with
+    /// no rows in it is a control that draws blank — which is the state
+    /// `DEFAULT_MONOSPACE_FAMILY`'s own documentation exists to forbid, and
+    /// which `shown_value`'s `every picker row this dialog holds reads
+    /// something` is the pin for.
+    ///
+    /// Before this slice that promise was kept by the enumeration happening on
+    /// the first read, so there was no moment at which the list was empty and
+    /// somebody was looking. Now there is — every moment before the first
+    /// [`begin_monospace_scan`] — so the promise is made here instead, by
+    /// [`default_families`], which is the same one-row list the enumeration
+    /// itself degrades to and costs no disk at all.
+    ///
+    /// One read lock and nothing else.
+    fn published(&self) -> &'static [bt_platform::MonospaceFamily] {
+        let adopted = self.adopted();
+        if adopted.is_empty() {
+            return default_families();
         }
-        let mut held = self
+        adopted
+    }
+
+    /// What has actually been put on the screen — empty until something has.
+    ///
+    /// Separate from [`Self::published`] because "what does a reader see" and
+    /// "has anything been adopted yet" are two questions, and the seed asks the
+    /// second: a `published` that never answers empty would be a seed that never
+    /// publishes.
+    fn adopted(&self) -> &'static [bt_platform::MonospaceFamily] {
+        self.published
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .1
+    }
+
+    /// Whether the drawn list is the machine's answer rather than the seed.
+    fn scanned(&self) -> bool {
+        self.published
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .0
+    }
+
+    /// **Put a list on the screen. Window thread only.**
+    ///
+    /// Answers whether what the picker draws actually moved, which is what
+    /// decides whether a frame is owed: the common walk finds the families the
+    /// machine already had, keeps the slice it already leaked, and costs a
+    /// comparison.
+    fn publish(&self, families: Vec<bt_platform::MonospaceFamily>, scanned: bool) -> bool {
+        let mut held = self
+            .published
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if held.0 == revision && revision > 0 {
-            return held.1;
+        if held.1 == families.as_slice() {
+            held.0 |= scanned;
+            return false;
         }
-        // **One name, no gate** (M2-4). This used to be a `#[cfg(windows)]`
-        // pair — the real DirectWrite enumeration on one side and
-        // `order_monospace_families(Vec::new())` on the other — which was this
-        // page deciding what platform it was on for a reason that had nothing
-        // to do with the page. `bt_platform` answers it on every platform now:
-        // DirectWrite here, CoreText on a Mac, and the one-row list anywhere
-        // else.
-        let enumerated = bt_platform::monospace_font_families();
-        // The families this machine had a moment ago are the families it has
-        // now, on every launch but the one where somebody installed a font — so
-        // the common rescan keeps the slice it already leaked and costs the
-        // enumeration and a comparison, nothing more.
-        if held.1 == enumerated.as_slice() {
-            *held = (revision, held.1);
-            return held.1;
-        }
+        let scanned = held.0 | scanned;
         let leaked: &'static [bt_platform::MonospaceFamily] =
-            Box::leak(enumerated.into_boxed_slice());
-        *held = (revision, leaked);
-        leaked
+            Box::leak(families.into_boxed_slice());
+        *held = (scanned, leaked);
+        true
+    }
+
+    /// **The list the picker holds until the machine answers** — the family in
+    /// force, and the one the grid falls back to beside it.
+    ///
+    /// A no-op once anything has been published, so a second open can never put
+    /// a one-row list back over the machine's own answer. See
+    /// [`begin_monospace_scan`] for why the seed is a family and not an empty
+    /// list.
+    fn seed(&self, in_force: &str) {
+        if !self.adopted().is_empty() {
+            return;
+        }
+        let named = if in_force.is_empty() {
+            Vec::new()
+        } else {
+            vec![bt_platform::MonospaceFamily {
+                name: in_force.to_owned(),
+                // **No files, and that is the honest value rather than a
+                // placeholder**: the renderer is already drawing this face, so
+                // there is nothing here to load. The one press that could ask
+                // for them — choosing this row back off the seed before the walk
+                // lands — goes through [`monospace_family_files`], which sees an
+                // unscanned list and asks the machine.
+                files: Vec::new(),
+            }]
+        };
+        self.publish(bt_platform::order_monospace_families(named), false);
+    }
+
+    /// Hold an answer out to the window thread. **Worker thread.**
+    fn offer(&self, families: Vec<bt_platform::MonospaceFamily>) {
+        *self
+            .offered
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(families);
+    }
+
+    fn take_offer(&self) -> Option<Vec<bt_platform::MonospaceFamily>> {
+        self.offered
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
+    /// Ask for a walk. `true` when this call is the one that has to start the
+    /// thread; `false` when one is already out and has been told to go round
+    /// again.
+    fn claim_scan(&self) -> bool {
+        let mut held = self
+            .scan
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if held.running {
+            held.again = true;
+            return false;
+        }
+        *held = ScanState {
+            running: true,
+            again: false,
+        };
+        true
+    }
+
+    /// A walk is done. `true` when it has to be walked once more, because a
+    /// rescan was asked for while it was out.
+    fn finish_scan(&self) -> bool {
+        let mut held = self
+            .scan
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if held.again {
+            held.again = false;
+            return true;
+        }
+        held.running = false;
+        false
     }
 }
 
 static MONOSPACE_FAMILIES: MonospaceFamilySlot = MonospaceFamilySlot::new();
-/// Which enumeration the picker's list is from. Zero until the first one.
-static MONOSPACE_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-/// Every monospaced family this machine has, in the order the picker draws them.
-#[must_use]
-pub fn monospace_families() -> &'static [bt_platform::MonospaceFamily] {
-    MONOSPACE_FAMILIES.get(MONOSPACE_REVISION.load(std::sync::atomic::Ordering::Acquire))
+/// **The list before anybody has asked the machine anything** — one row, and it
+/// is the family the grid falls back to.
+///
+/// `bt_platform::order_monospace_families` promises the default is in whatever
+/// it is handed, so handing it nothing is the shortest true statement this
+/// process can make about the machine's fonts: *there is at least the one the
+/// renderer is already drawing*. It is the same one-row list the real
+/// enumeration degrades to on a machine whose DirectWrite refuses, and it is
+/// what the picker draws for the seconds before the first walk lands — see
+/// [`MonospaceFamilySlot::published`] for why the alternative, an empty list,
+/// is not available.
+///
+/// Pure: no disk, no font collection, one allocation once per process.
+fn default_families() -> &'static [bt_platform::MonospaceFamily] {
+    static LIST: std::sync::OnceLock<&'static [bt_platform::MonospaceFamily]> =
+        std::sync::OnceLock::new();
+    LIST.get_or_init(|| {
+        Box::leak(bt_platform::order_monospace_families(Vec::new()).into_boxed_slice())
+    })
 }
 
-/// **Ask the machine again the next time somebody wants the list** (user ruling
-/// 2026-08-19).
+/// **How many times this process has walked the machine's font collection.**
+///
+/// A counter rather than a trace line, because what has to be provable here is
+/// a *negative*: that opening the dialog and drawing every row of it performs
+/// none. A number a test can read before and after a call says that; a log a
+/// human reads does not. See
+/// `opening_the_dialog_walks_no_font_collection_on_the_calling_thread`.
+static MONOSPACE_SCANS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How the worker's answer brings the event loop round — `psreadline::WAKE`'s
+/// shape, for its reason: the answer is published on a thread with no window,
+/// and the window that needs the repaint is very often sitting on a modal with
+/// nothing else coming to make it draw.
+static MONOSPACE_WAKE: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>> =
+    std::sync::OnceLock::new();
+
+/// Every monospaced family this machine has, in the order the picker draws them
+/// — as far as this process has been told.
+///
+/// **Never empty**, which is a promise the picker depends on and not a courtesy:
+/// a button reads the label of its ticked item, so a list with no rows is a
+/// control drawn blank. Before the first [`begin_monospace_scan`] this is
+/// [`default_families`] — the one family the renderer falls back to; from the
+/// press that opens the dialog it is at least the family in force; and when the
+/// walk lands it is the machine's own.
+#[must_use]
+pub fn monospace_families() -> &'static [bt_platform::MonospaceFamily] {
+    MONOSPACE_FAMILIES.published()
+}
+
+/// How many font-collection walks this process has performed.
+///
+/// **A door for the pins and nothing else**, which is what the `cfg` says out
+/// loud: the product never asks this — it is the reader of a counter that exists
+/// to state a *negative*, and a negative is only ever stated by a test. Left
+/// ungated it is dead code in a binary crate, and a dead public function is the
+/// shape a reader mistakes for an interface.
+///
+/// The counter it reads is written on both sides of the `cfg`, because what the
+/// walks cost is a fact about the run whether or not anybody is counting.
+#[cfg(test)]
+#[must_use]
+pub fn monospace_scans() -> u64 {
+    MONOSPACE_SCANS.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// Teach the scan how to bring the event loop round when its answer lands.
+///
+/// Called once, at startup, beside the four probes' own — see
+/// `psreadline::install_wake`, whose argument this is word for word: the wake
+/// belongs to the process's event loop and not to whichever call happens to
+/// start the walk.
+pub fn install_font_scan_wake(wake: impl Fn() + Send + Sync + 'static) {
+    let _ = MONOSPACE_WAKE.set(Box::new(wake));
+}
+
+/// **Ask the machine for its families, off the window thread** (user ruling
+/// 2026-08-19, re-shaped for GitHub issue #3).
 ///
 /// Called when the Settings dialog OPENS and nowhere else: that is the moment
-/// the ruling names, and it is the one moment at which no picker is drawn, no
-/// popup is anchored and no measurement is in flight — so a list that comes back
-/// one family longer moves nothing under anybody's pointer.
+/// the ruling names — the picker ends in a door onto the system's own Fonts
+/// page, so a reader is *expected* to leave, install a family and come back,
+/// and the gesture crosses exactly this call.
 ///
-/// It marks rather than enumerates. Opening a system font collection costs what
-/// `bt_render::terminal_font_system` refuses to pay at launch, and a reader who
-/// opens the dialog to change a shortcut should not pay it either; the next
-/// caller who actually wants a family pays, exactly as the first one always did.
-pub fn rescan_monospace_families() {
-    MONOSPACE_REVISION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+/// **The seed is the point.** `in_force` is the family `settings.json` names,
+/// and on the very first open it is published straight away as a one-row list,
+/// because the alternative is an empty one — and `DEFAULT_MONOSPACE_FAMILY`'s
+/// own documentation says what an empty one means: "a picker whose list can
+/// come back without the entry that is currently selected is a picker that
+/// shows a blank row". So the button reads the reader's own font from the first
+/// frame, the row it is on is the row it will still be on when the walk lands,
+/// and what the walk adds is every *other* family. `order_monospace_families`
+/// is what makes that true of a stored name this machine no longer has, and of
+/// no stored name at all: both come back as the default, alone.
+///
+/// The walk itself is in the workers' band. It opens a system font collection
+/// and a font face per family, which is exactly the cost
+/// `bt_render::terminal_font_system` refuses to pay at launch, and it must
+/// never be the reason a frame was late.
+pub fn begin_monospace_scan(in_force: &str) {
+    MONOSPACE_FAMILIES.seed(in_force);
+    if !MONOSPACE_FAMILIES.claim_scan() {
+        return;
+    }
+    if bt_platform::spawn_at_priority(
+        "font-families",
+        bt_platform::ThreadPriority::BelowNormal,
+        scan_monospace_families,
+    )
+    .is_err()
+    {
+        // A machine that will not give this process a thread keeps the seed and
+        // may be asked again at the next open. Releasing the claim is the whole
+        // of the handling: nothing in this file waits for an answer.
+        let _ = MONOSPACE_FAMILIES.finish_scan();
+    }
+}
+
+/// The worker's whole body: walk, hold the answer out, wake, and go round again
+/// if somebody asked while this one was out.
+fn scan_monospace_families() {
+    loop {
+        MONOSPACE_SCANS.fetch_add(1, std::sync::atomic::Ordering::Release);
+        MONOSPACE_FAMILIES.offer(bt_platform::monospace_font_families());
+        // After the answer is in the mailbox and never before: a wake that
+        // raced the offer would send the loop to adopt nothing, and the frame
+        // the reader is waiting for would then be owed to a wake that is not
+        // coming.
+        if let Some(wake) = MONOSPACE_WAKE.get() {
+            wake();
+        }
+        if !MONOSPACE_FAMILIES.finish_scan() {
+            return;
+        }
+    }
+}
+
+/// **Take the answer a finished walk left** — the window thread's half of
+/// [`MonospaceFamilySlot`]'s rule.
+///
+/// `true` when the list a frame draws has changed and a frame is therefore
+/// owed. `false` when there was nothing waiting, and `false` when the machine
+/// answered with the families it had last time, which is every walk but the one
+/// after somebody installs a font.
+pub fn adopt_scanned_families() -> bool {
+    let Some(families) = MONOSPACE_FAMILIES.take_offer() else {
+        return false;
+    };
+    MONOSPACE_FAMILIES.publish(families, true)
+}
+
+/// **The files one family's outlines live in** — the renderer's question, and
+/// the one caller in this process that is allowed to wait for the machine.
+///
+/// `apply_stored_terminal_font` needs a path before it can draw a single frame
+/// in the face `settings.json` names, and there is no frame yet to put a
+/// placeholder in; a default install names no family and still walks nothing,
+/// which is the cost `bt_render::terminal_font_system` refuses to pay at launch
+/// and this must not reintroduce.
+///
+/// It walks only while the drawn list is the seed. Everything it learns is
+/// published, so a startup that paid for the walk hands the dialog a list that
+/// is already there — and a session that never names a family never walks here
+/// at all.
+#[must_use]
+pub fn monospace_family_files(name: &str) -> Vec<std::path::PathBuf> {
+    if name.is_empty() {
+        return Vec::new();
+    }
+    if !MONOSPACE_FAMILIES.scanned() {
+        MONOSPACE_SCANS.fetch_add(1, std::sync::atomic::Ordering::Release);
+        MONOSPACE_FAMILIES.publish(bt_platform::monospace_font_families(), true);
+    }
+    monospace_families()
+        .iter()
+        .find(|candidate| candidate.name.eq_ignore_ascii_case(name))
+        .map(|candidate| candidate.files.clone())
+        .unwrap_or_default()
 }
 
 /// Which row of the family picker a stored family name is.
@@ -1987,6 +2285,20 @@ pub enum SettingsCategory {
     /// it is always in the rail, and it is last because it is the page a reader
     /// goes to deliberately rather than one they scroll past.
     Shortcuts,
+    /// **Which Folio this is** (GitHub issue #3, T-SETTINGS-ABOUT).
+    ///
+    /// The page an outside user asked for, in the words they asked in: they had
+    /// a defect to report and nowhere in this window to read the version off.
+    ///
+    /// **Last, after `Shortcuts`**, and the rail's own 从看到用 rule is what
+    /// puts it there rather than a habit borrowed from other programs. The
+    /// pages narrow from the product to the window to the session to the pane,
+    /// and then `Shortcuts` — the page a reader goes to deliberately rather
+    /// than one they scroll past. This is that measure taken one step further:
+    /// it is the only page in the rail that holds no setting at all, so nobody
+    /// arrives here except on purpose, and nobody scrolling for something to
+    /// change should have to pass it.
+    About,
 }
 
 impl SettingsCategory {
@@ -2025,7 +2337,7 @@ impl SettingsCategory {
     /// `nav_items`, `first_category`, the arrow walk and Home/End all read it;
     /// nothing on disk does ([`Self::key`] says why), so a reorder is this
     /// literal and the two pins that quote it.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::General,
         Self::Appearance,
         // — the one window a key calls up, which is a window and so stands in the
@@ -2037,6 +2349,9 @@ impl SettingsCategory {
         Self::Agents,
         Self::RenderedBlocks,
         Self::Shortcuts,
+        // — and which Folio all of the above belongs to, which is the one page
+        // here that changes nothing. See the variant.
+        Self::About,
     ];
 
     /// How many pages this build knows — [`AdvancedOpen`]'s width, and the one
@@ -2078,6 +2393,7 @@ impl SettingsCategory {
             Self::Agents => "agents",
             Self::RenderedBlocks => "rendered-blocks",
             Self::Shortcuts => "shortcuts",
+            Self::About => "about",
         }
     }
 
@@ -2111,6 +2427,7 @@ impl SettingsCategory {
             Self::Agents => Text::CategoryAgents.text(),
             Self::RenderedBlocks => Text::CategoryRenderedBlocks.text(),
             Self::Shortcuts => Text::CategoryShortcuts.text(),
+            Self::About => Text::CategoryAbout.text(),
         }
     }
 
@@ -2134,6 +2451,7 @@ impl SettingsCategory {
             Self::Agents => Text::NavAgents.text(),
             Self::RenderedBlocks => Text::NavRenderedBlocks.text(),
             Self::Shortcuts => Text::NavShortcuts.text(),
+            Self::About => Text::NavAbout.text(),
         }
     }
 }
@@ -2297,6 +2615,25 @@ pub enum SettingsControl {
     /// locked to the tallest *page*, so a new variable makes this page scroll a
     /// little further and never makes the dialog grow under the rail.
     EnvTable,
+    /// **A fact, where a choice would be** — the About page's version and
+    /// platform lines (T-SETTINGS-ABOUT).
+    ///
+    /// The first control in this dialog that is not a control: it draws the
+    /// row's answer on the column every picker's value stands on, in the muted
+    /// ink a sentence is written in, and it takes no press and no ring. A
+    /// combo holding a value nobody can change would be a button that lies
+    /// about being pressable, and a sentence in the row's description column
+    /// would put the version where the *explanation* goes — on the one page a
+    /// reader opens to copy it into a bug report.
+    Text,
+    /// **A fact you go and read somewhere else** — the About page's three
+    /// addresses (T-SETTINGS-ABOUT).
+    ///
+    /// [`Self::Text`] with a press on it and the `↗` this dialog already wears
+    /// wherever it hands an address to the browser (the update row's
+    /// `Open releases page`). One mark, one meaning: something is answered
+    /// outside this window.
+    Link,
 }
 
 impl SettingsControl {
@@ -2817,6 +3154,29 @@ pub enum SettingsRow {
     /// A greyed item is the same sentence the `˅` menu's greyed row speaks, in
     /// the same words, because it is the same fact.
     DefaultProfile,
+    /// **The build this window is running** (GitHub issue #3) — the banner
+    /// `--version`, `diagnostics.log` and every hang report print, said once
+    /// more where a person can read it without leaving the window.
+    ///
+    /// The whole sentence and not the number alone, and that is the point: a
+    /// reporter who quotes this row and a maintainer who reads the log are
+    /// comparing the same line, character for character, rather than two
+    /// spellings of one build.
+    AboutVersion,
+    /// Which machine this copy was made for. The half of a bug report that is
+    /// never in the log the reporter attaches, because the log was written by
+    /// the same build that would have to say it.
+    AboutPlatform,
+    /// The releases page — what changed, in this version and in the ones before
+    /// it. The same address the update row's own verb opens, read off the same
+    /// constant so the two doors cannot come apart.
+    AboutReleaseNotes,
+    /// Where a defect is filed. It is the row this whole page exists for: the
+    /// report that asked for a version asked for it *so that a bug report could
+    /// name one*.
+    AboutIssues,
+    /// The notices for everything this window is built out of.
+    AboutLicences,
     /// **Which language the window writes in** (user ruling 2026-08-10, shipped
     /// 2026-08-17) — `General`'s first row, above the two that were already here.
     ///
@@ -3184,6 +3544,14 @@ impl SettingsRow {
             // And the row that is about what this product does off this machine
             // rather than on it — see the variant.
             | Self::UpdateCheck => SettingsCategory::General,
+            // **The page that holds no setting** (T-SETTINGS-ABOUT). Two rows
+            // that state a fact and three that hand an address to the browser —
+            // see [`SettingsCategory::About`].
+            Self::AboutVersion
+            | Self::AboutPlatform
+            | Self::AboutReleaseNotes
+            | Self::AboutIssues
+            | Self::AboutLicences => SettingsCategory::About,
             // **The eight rows of one window** (§7.54e ⑤, user ruling 2026-09-05). Four of them
             // stood on `General` until that ruling, under `Default profile`, on the argument that
             // the row above said what a new terminal starts as; what the page they are on now says
@@ -3348,6 +3716,11 @@ impl SettingsRow {
             Self::QuakeCommand => Text::RowQuakeCommand.text(),
             Self::QuakeTopGap => Text::RowQuakeTopGap.text(),
             Self::QuakeRestore => Text::RowQuakeRestore.text(),
+            Self::AboutVersion => Text::RowAboutVersion.text(),
+            Self::AboutPlatform => Text::RowAboutPlatform.text(),
+            Self::AboutReleaseNotes => Text::RowAboutReleaseNotes.text(),
+            Self::AboutIssues => Text::RowAboutIssues.text(),
+            Self::AboutLicences => Text::RowAboutLicences.text(),
         }
     }
 
@@ -3622,6 +3995,11 @@ impl SettingsRow {
             Self::QuakeCommand => Text::DescQuakeCommand.text(),
             Self::QuakeTopGap => Text::DescQuakeTopGap.text(),
             Self::QuakeRestore => Text::DescQuakeRestore.text(),
+            Self::AboutVersion => Text::DescAboutVersion.text(),
+            Self::AboutPlatform => Text::DescAboutPlatform.text(),
+            Self::AboutReleaseNotes => Text::DescAboutReleaseNotes.text(),
+            Self::AboutIssues => Text::DescAboutIssues.text(),
+            Self::AboutLicences => Text::DescAboutLicences.text(),
         }
     }
 
@@ -3684,6 +4062,13 @@ impl SettingsRow {
             // capability sentence, so the control and the sentence under it are
             // the choice and its consequence standing together.
             Self::ProfileIntegration => SettingsControl::Combo,
+            // The two rows that answer with a fact and the three that answer
+            // with an address — see [`SettingsControl::Text`] and
+            // [`SettingsControl::Link`].
+            Self::AboutVersion | Self::AboutPlatform => SettingsControl::Text,
+            Self::AboutReleaseNotes | Self::AboutIssues | Self::AboutLicences => {
+                SettingsControl::Link
+            }
             _ => SettingsControl::Combo,
         }
     }
@@ -3809,7 +4194,15 @@ impl SettingsRow {
             | Self::ProfileName
             | Self::ProfileProgram
             | Self::ProfileStartAt
-            | Self::ProfileColour => false,
+            | Self::ProfileColour
+            // Nothing on the About page is behind a disclosure: the page has no
+            // group, and a version a reader has to reveal is a version they
+            // will not find on the day they need it.
+            | Self::AboutVersion
+            | Self::AboutPlatform
+            | Self::AboutReleaseNotes
+            | Self::AboutIssues
+            | Self::AboutLicences => false,
             // And the four the disclosure exists for — by the same measure that
             // put `Customise scheme…` behind one.
             Self::ProfileArgs
@@ -3870,6 +4263,15 @@ impl SettingsRow {
             // table's own background — the gap between two lines — land nowhere
             // instead of on whichever of its parts was named here.
             SettingsControl::EnvTable => SettingsTarget::Panel,
+            // **A stated fact is not a control**, so it answers with the
+            // surface it is standing on — `EnvTable`'s own answer above, for
+            // the same reason: there is nothing here to press, and naming a
+            // target would be a ring the keyboard could park on and a press
+            // that did nothing.
+            SettingsControl::Text => SettingsTarget::Panel,
+            // A link is, and it is its own target rather than a `Combo`,
+            // because what it opens is not a list.
+            SettingsControl::Link => SettingsTarget::Link(self),
         }
     }
 
@@ -3969,7 +4371,15 @@ impl SettingsRow {
             | Self::ProfileName
             | Self::ProfileProgram
             | Self::ProfileArgs
-            | Self::ProfileEnv => 0,
+            | Self::ProfileEnv
+            // And the five that answer with a fact or an address: neither is a
+            // list, and what the control column is wide enough for is asked of
+            // [`Self::stated_value`] instead.
+            | Self::AboutVersion
+            | Self::AboutPlatform
+            | Self::AboutReleaseNotes
+            | Self::AboutIssues
+            | Self::AboutLicences => 0,
         }
     }
 
@@ -4100,7 +4510,12 @@ impl SettingsRow {
             | Self::ProfileName
             | Self::ProfileProgram
             | Self::ProfileArgs
-            | Self::ProfileEnv => None,
+            | Self::ProfileEnv
+            | Self::AboutVersion
+            | Self::AboutPlatform
+            | Self::AboutReleaseNotes
+            | Self::AboutIssues
+            | Self::AboutLicences => None,
         }
     }
 
@@ -4573,9 +4988,208 @@ impl SettingsRow {
             | Self::ProfileName
             | Self::ProfileProgram
             | Self::ProfileArgs
-            | Self::ProfileEnv => None,
+            | Self::ProfileEnv
+            | Self::AboutVersion
+            | Self::AboutPlatform
+            | Self::AboutReleaseNotes
+            | Self::AboutIssues
+            | Self::AboutLicences => None,
         }
     }
+
+    /// **What a row that answers with a fact says**, or `None` for every row
+    /// that answers with a choice (T-SETTINGS-ABOUT).
+    ///
+    /// One reader for the three that need it — the width the control column is
+    /// solved to, the draw, and the tests — so a row whose words are measured
+    /// and a row whose words are drawn cannot be two different rows. It is
+    /// `&'static str` for the reason every label in this file is: the two facts
+    /// are constants of the process (see [`about_version_line`]), and the
+    /// verb on a link is a literal out of the table.
+    #[must_use]
+    pub fn stated_value(self) -> Option<&'static str> {
+        match self {
+            Self::AboutVersion => Some(about_version_line()),
+            Self::AboutPlatform => Some(about_platform_line()),
+            Self::AboutReleaseNotes | Self::AboutIssues | Self::AboutLicences => {
+                Some(Text::AboutOpen.text())
+            }
+            _ => None,
+        }
+    }
+
+    /// **Where a link row goes**, or `None` for every row that goes nowhere.
+    ///
+    /// The row owns its destination, which is what keeps the press and the page
+    /// a single answer: a router that carried a `match` of its own would be a
+    /// second place for a row to be filed under the wrong address. The releases
+    /// row reads `update::RELEASES_PAGE` rather than a copy of it, so this page
+    /// and the update row's own verb cannot come apart.
+    ///
+    /// Two of the three are addresses and always will be. The third is
+    /// [`notices_destination`], which answers with a **file** where this build
+    /// shipped one — see there.
+    #[must_use]
+    pub fn link_destination(self) -> Option<LinkDestination> {
+        match self {
+            Self::AboutReleaseNotes => Some(LinkDestination::Address(crate::update::RELEASES_PAGE)),
+            Self::AboutIssues => Some(LinkDestination::Address(ISSUES_PAGE)),
+            Self::AboutLicences => Some(notices_destination()),
+            _ => None,
+        }
+    }
+}
+
+/// **Where one of the About page's doors leads** (owner ruling 2026-09-15).
+///
+/// Two answers and not one string, because they leave this window by two
+/// different doors and must: an address goes to the browser through
+/// `Runtime::hand_url_to_the_browser`, and a file goes to whatever this machine
+/// has registered for it through `Runtime::open_local_path` — the one door out
+/// of this window that takes a path, and the one that will not start a program.
+/// Handing a path to the browser door would put a `file:` URL through
+/// `webnav::address_bar`, which is a judgement written about addresses a reader
+/// typed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LinkDestination {
+    /// An address, handed to the browser.
+    Address(&'static str),
+    /// A file on this machine, opened with its own default handler.
+    File(&'static std::path::Path),
+}
+
+/// **The tracker a defect is filed in.**
+///
+/// Beside [`notices_page`] and not in `update`, which owns the *release* half of
+/// this repository's addresses and nothing else. `update::RELEASES_PAGE` is read
+/// from there rather than copied, for the reason
+/// [`SettingsRow::link_destination`] gives.
+pub const ISSUES_PAGE: &str = "https://github.com/lulu-loopp/folio-terminal/issues";
+
+/// The repository, as an address. One literal for the two pages below it.
+const REPOSITORY_PAGE: &str = "https://github.com/lulu-loopp/folio-terminal";
+
+/// The notices file's name, wherever it is — the archive's copy, the bundle's,
+/// and the repository's are one file with one name, so it is written once.
+const NOTICES_FILE: &str = "THIRD-PARTY-NOTICES.md";
+
+/// **The notices for everything this window is built out of, on the tag this
+/// build was released under** (owner ruling 2026-09-15).
+///
+/// The *fallback*, and the ruling is what makes it one: where a copy of the file
+/// shipped beside the executable, that copy is what opens, because it matches
+/// the build exactly. This is what is left — a development build with nothing
+/// beside it, and any package that did not carry the file.
+///
+/// **Pinned to [`crate::version::RELEASE_TAG`] and never to `main`.** `main`
+/// moves; the notices are a statement about the dependency set *this* binary was
+/// linked from, and a link to a branch would answer a reader's question about
+/// their own copy with somebody else's. See `version::RELEASE_TAG` for why the
+/// tag is not simply `v` and the version.
+///
+/// A leak of one string per process, built the first time somebody opens the
+/// page — `concat!` takes literals and the tag is one constant away, which is
+/// the only reason this is a function and not a `const`.
+#[must_use]
+pub fn notices_page() -> &'static str {
+    static PAGE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    PAGE.get_or_init(|| {
+        let tag = crate::version::RELEASE_TAG;
+        Box::leak(format!("{REPOSITORY_PAGE}/blob/{tag}/{NOTICES_FILE}").into_boxed_str())
+    })
+}
+
+/// **Where the licences row actually goes on this machine** (owner ruling
+/// 2026-09-15): the copy that shipped with this build if there is one, and the
+/// repository's copy of the same tag if there is not.
+///
+/// The local copy wins because it *is* this build's notices — the same bytes
+/// `scripts/release/package.ps1` put in the archive beside `folio.exe`, checked
+/// against `Cargo.lock` by `scripts/check-notices.ps1` in the same run that
+/// built the binary. An address can only ever be a very good guess at that.
+///
+/// **Resolved once per process**, which is what makes it safe to ask from a
+/// dialog that redraws on hover: this is one `current_exe` and one or two
+/// `is_file`, and the file beside a running executable does not move under it —
+/// `SettingsValues`' own `explorer_menu::package_file().is_some()` is the same
+/// arithmetic on the same page.
+fn notices_destination() -> LinkDestination {
+    static WHERE: std::sync::OnceLock<LinkDestination> = std::sync::OnceLock::new();
+    *WHERE.get_or_init(|| match notices_beside_the_executable() {
+        Some(file) => LinkDestination::File(Box::leak(file.into_boxed_path())),
+        None => LinkDestination::Address(notices_page()),
+    })
+}
+
+/// The notices file this build shipped with, if it shipped with one.
+///
+/// The impure half: which executable is running. The rule itself is
+/// [`shipped_notices_near`], which takes the path and can therefore be stated
+/// over a tree a test builds — the same split `visible_rows_for` makes for the
+/// platform.
+fn notices_beside_the_executable() -> Option<std::path::PathBuf> {
+    shipped_notices_near(&std::env::current_exe().ok()?)
+}
+
+/// **Where a build's own copy of the notices would be, given where its
+/// executable is** (owner ruling 2026-09-15).
+///
+/// **Two places, because this program has two shapes.** A Windows archive is a
+/// folder, and `scripts/release/package.ps1` lays the file down beside
+/// `folio.exe`; a macOS application is a bundle, whose executable lives in
+/// `Contents/MacOS` and whose every non-code file lives one directory over in
+/// `Contents/Resources`. That is the bundle's own layout rather than a guess,
+/// which is why the second look is taken **only** under that name: a `folio` in
+/// somebody's `bin` directory has no reason to go hunting through a sibling
+/// `Resources` for a file it was never given.
+///
+/// `None` is the ordinary answer for a development build and is not a failure:
+/// `cargo run` puts the executable in `target/debug`, where no release script
+/// has ever been.
+fn shipped_notices_near(executable: &std::path::Path) -> Option<std::path::PathBuf> {
+    let beside = executable.parent()?;
+    let shipped = beside.join(NOTICES_FILE);
+    if shipped.is_file() {
+        return Some(shipped);
+    }
+    if beside.file_name()? != "MacOS" {
+        return None;
+    }
+    let in_resources = beside.parent()?.join("Resources").join(NOTICES_FILE);
+    in_resources.is_file().then_some(in_resources)
+}
+
+/// **The one sentence every diagnostic file opens with**, on a row a person can
+/// read (GitHub issue #3).
+///
+/// `crate::version::banner()` builds a `String` and this signature is
+/// `&'static str`, so it is leaked exactly once — a constant of the process by
+/// construction, which is what [`SettingsRow::stated_value`] promises. The same
+/// arithmetic [`intern_scheme_name`] runs, with a set of one.
+fn about_version_line() -> &'static str {
+    static LINE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    LINE.get_or_init(|| Box::leak(crate::version::banner().into_boxed_str()))
+}
+
+/// **The machine this copy was made for** — `Windows (x86_64)`.
+///
+/// Not in the language table, and the table's own header says why: an operating
+/// system's name and a processor's are names, and a window that translated
+/// `macOS` would be naming a system nobody sells. Leaked once, on the line
+/// above's terms.
+fn about_platform_line() -> &'static str {
+    static LINE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    LINE.get_or_init(|| {
+        let system = match bt_platform::host_platform() {
+            bt_platform::HostPlatform::Windows => "Windows",
+            bt_platform::HostPlatform::MacOs => "macOS",
+            // The word the toolchain itself uses for this target, because this
+            // build has no name of its own for a system it was not ported to.
+            bt_platform::HostPlatform::OtherUnix => std::env::consts::OS,
+        };
+        let processor = std::env::consts::ARCH;
+        Box::leak(format!("{system} ({processor})").into_boxed_str())
+    })
 }
 
 /// Which rows the dialog holds while the tabs run on this axis, in the order
@@ -4830,6 +5444,17 @@ fn every_row_of_the_dialog(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     // decides whether a reported one is allowed off this window and onto the
     // desktop.
     rows.push(SettingsRow::TurnEndNotifications);
+    // ── About (GitHub issue #3) ──
+    //
+    // **What this is, then where to go about it.** The two facts first, in the
+    // order a bug report needs them — which build, then which machine — and
+    // under them the three doors, in the order a reader reaches for them: what
+    // changed, where to say it went wrong, and what this was built out of.
+    rows.push(SettingsRow::AboutVersion);
+    rows.push(SettingsRow::AboutPlatform);
+    rows.push(SettingsRow::AboutReleaseNotes);
+    rows.push(SettingsRow::AboutIssues);
+    rows.push(SettingsRow::AboutLicences);
     rows
 }
 
@@ -6240,7 +6865,10 @@ impl SettingsPanel {
             // editor (§7.1.6c-6b). It was not one while there was nothing for
             // `Enter` to do, because a ring on a thing that cannot be activated
             // is a ring that lies.
-            | SettingsTarget::ProfileRow(_) => self.focus = Some(target),
+            | SettingsTarget::ProfileRow(_)
+            // A link is a stop for the profile row's reason: Enter on it opens
+            // the page, so there is something for the ring to be on.
+            | SettingsTarget::Link(_) => self.focus = Some(target),
             // An item of a row's `⋯` focuses the trigger it hangs from, exactly
             // as a picker's item focuses its row: the menu is about to close,
             // and the ring belongs on the thing that stays.
@@ -7318,6 +7946,12 @@ pub fn page_order(content: SettingsContent<'_>, category: SettingsCategory) -> V
                 }))
                 .chain(std::iter::once(SettingsTarget::EnvAdd))
                 .collect(),
+            // **A row that only states a fact holds no stop** — the About
+            // page's version and platform lines. A ring is not a label: it says
+            // a press does something here, and on these two rows nothing does.
+            // The three link rows below them are stops, because opening a page
+            // is an action.
+            PageItem::Row(row) if matches!(row.control(), SettingsControl::Text) => Vec::new(),
             PageItem::Row(row) => vec![row.control_target()],
             // **The disclosure is a focus stop** (user ruling 2026-08-17): Enter
             // and Space turn it, which is the whole of "keyboard focusable".
@@ -7429,6 +8063,15 @@ pub enum SettingsTarget {
     Nav(SettingsCategory),
     /// A row's picker button.
     Combo(SettingsRow),
+    /// **A row that hands an address to the browser** — the About page's three
+    /// (T-SETTINGS-ABOUT).
+    ///
+    /// Its own variant and not [`Self::Combo`], because what it opens is not a
+    /// list: a `Combo` is a thing that raises a popup
+    /// ([`target_raises_a_popup`]) and every reader of that predicate would
+    /// have had to learn an exception. Which address is the row's own answer —
+    /// see [`SettingsRow::link_destination`].
+    Link(SettingsRow),
     /// A slider row's control column — the track, its thumb and the number
     /// beside them, which are one target because they are one control (§7.1.6c-4b).
     ///
@@ -7637,6 +8280,9 @@ pub fn target_popup(target: SettingsTarget) -> Option<DialogPopup> {
         | SettingsTarget::Close
         | SettingsTarget::Nav(_)
         | SettingsTarget::Combo(_)
+        // A link raises nothing: it hands an address to the browser and is
+        // over, which is the whole difference between it and a picker.
+        | SettingsTarget::Link(_)
         | SettingsTarget::Slider(_)
         | SettingsTarget::Record(_)
         | SettingsTarget::QuakeChord
@@ -7710,6 +8356,7 @@ pub fn target_is_ground(target: SettingsTarget) -> bool {
         SettingsTarget::Close
         | SettingsTarget::Nav(_)
         | SettingsTarget::Combo(_)
+        | SettingsTarget::Link(_)
         | SettingsTarget::Slider(_)
         | SettingsTarget::Menu(_)
         | SettingsTarget::Choice(..)
@@ -8290,6 +8937,7 @@ impl SettingsLayout {
         // "nowhere", and it is the first one that is a control.
         let band = match target {
             SettingsTarget::Combo(row)
+            | SettingsTarget::Link(row)
             | SettingsTarget::Slider(row)
             | SettingsTarget::Menu(row) => self.row(row).map(|placed| placed.band),
             SettingsTarget::Choice(row, _)
@@ -10949,6 +11597,13 @@ fn everyday_cap(
 /// rather than a special case in [`page_combo_width`].
 fn widest_option(row: SettingsRow, scale: f32, measure: &mut dyn FnMut(&str, f32) -> f32) -> f32 {
     let font = COMBO_FONT_LOGICAL_PX * scale;
+    // **A row that answers with a fact has one string and it is not in a list**
+    // (T-SETTINGS-ABOUT). Measured through the same call the values above go
+    // through, so the About page's column is solved by the rule every other
+    // page's is: as wide as the widest thing any row on it has to say.
+    if let Some(stated) = row.stated_value() {
+        return measure(stated, font);
+    }
     row.option_labels()
         .map(|label| measure(label, font))
         .fold(0.0_f32, f32::max)
@@ -12023,6 +12678,28 @@ pub fn build(
             // The table draws itself below, with its ghosts; the row's own box
             // is the area it occupies and carries no face of its own.
             SettingsControl::EnvTable => {}
+            // **A fact, and a fact with a door on it** (T-SETTINGS-ABOUT). No
+            // border and no ground: a box would say "press me" on the two rows
+            // where nothing happens, and the three where something does say it
+            // with the `↗` instead — the mark this dialog already wears
+            // wherever an address leaves the window.
+            SettingsControl::Text | SettingsControl::Link => {
+                push_stated_value(
+                    &mut content_stack,
+                    placed.combo,
+                    placed.row.stated_value().unwrap_or_default(),
+                    // **The control form and not the destination.** Whether
+                    // this row leaves the window is a fact about the row;
+                    // resolving *where* it goes touches the disk, and a draw
+                    // that asked it would ask on every hover.
+                    matches!(placed.row.control(), SettingsControl::Link)
+                        .then_some(MENU_ACTION_MARK_AWAY),
+                    hover == Some(SettingsTarget::Link(placed.row)),
+                    scale,
+                    palette,
+                    measure,
+                );
+            }
         }
         // After the control it names, because a ring is a fill and a layer draws
         // its fills in order — pushed before, the control's own face would cover
@@ -13882,6 +14559,88 @@ fn focus_ring(rect: [f32; 4], scale: f32, accent: [u8; 3]) -> Vec<OverlayQuad> {
 /// on the summoned terminal's row is nothing at all for its first item. The two
 /// are separate arguments for exactly that reason — see
 /// [`SettingsRow::value_mark`] and [`option_icon_advance`].
+/// **A row's answer when the answer is not a choice** (T-SETTINGS-ABOUT).
+///
+/// Drawn in the box a picker would have stood in, right-aligned, so the About
+/// page's answers end on the column every other page's buttons end on — which
+/// is [`page_combo_width`]'s own ruling read one step further: a reader
+/// comparing pages is comparing one column.
+///
+/// `mark` is the `↗` on a row that leaves the window, and it is given the width
+/// a picker reserves for its chevron so that the two land on the same x. The
+/// ink follows the same three-way rule the rest of the dialog uses: a stated
+/// fact is muted, a door is titled, and a door under the pointer is accented.
+#[allow(clippy::too_many_arguments)]
+fn push_stated_value(
+    stack: &mut OverlayLayer,
+    rect: [f32; 4],
+    value: &str,
+    mark: Option<&str>,
+    lit: bool,
+    scale: f32,
+    palette: bt_render::ChromePalette,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) {
+    let px = |logical: f32| logical * scale;
+    let mark_span = px(COMBO_CHEVRON_FONT_LOGICAL_PX);
+    let text_right = if mark.is_some() {
+        rect[2] - mark_span - px(COMBO_GAP_LOGICAL_PX)
+    } else {
+        rect[2]
+    };
+    let font_size_px = px(COMBO_FONT_LOGICAL_PX);
+    stack.labels.push(ChromeLabel {
+        mono: false,
+        // **Ellipsised on the same terms every picker's value is** — this
+        // column is solved to hold the whole of what these rows say
+        // ([`widest_option`]) and is capped at [`COMBO_MAX_ROW_SHARE`] like
+        // every other, so what this can reach is a window too narrow to hold
+        // the version at all, and a string running out under the sentence
+        // beside it would be worse than one that says it was cut.
+        text: ellipsized(value, text_right - rect[0], font_size_px, measure),
+        rect: [rect[0], rect[1], text_right, rect[3]],
+        font_size_px,
+        color: if lit {
+            palette.accent
+        } else if mark.is_some() {
+            palette.dialog_title_text
+        } else {
+            palette.dialog_muted_text
+        },
+        align_right: true,
+        align_center: false,
+        letter_spacing_em: 0.0,
+        weight: ChromeLabelWeight::Regular,
+        tabular_numerals: false,
+        clip: None,
+    });
+    let Some(mark) = mark else {
+        return;
+    };
+    stack.labels.push(ChromeLabel {
+        mono: false,
+        text: mark.to_owned(),
+        rect: [
+            text_right + px(COMBO_GAP_LOGICAL_PX),
+            rect[1],
+            rect[2],
+            rect[3],
+        ],
+        font_size_px: px(MENU_ACTION_MARK_FONT_LOGICAL_PX),
+        color: if lit {
+            palette.accent
+        } else {
+            palette.menu_item_hint_text
+        },
+        align_right: false,
+        align_center: true,
+        letter_spacing_em: 0.0,
+        weight: ChromeLabelWeight::Regular,
+        tabular_numerals: false,
+        clip: None,
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 fn push_combo(
     stack: &mut OverlayLayer,
@@ -14183,6 +14942,402 @@ mod tests {
             bt_render::DEFAULT_PRIMARY_FONT_FAMILY,
             "the picker promises a row for a family the grid is not drawn in"
         );
+    }
+
+    /// One family, as the machine would report it.
+    fn family(name: &str) -> bt_platform::MonospaceFamily {
+        bt_platform::MonospaceFamily {
+            name: name.to_owned(),
+            files: vec![std::path::PathBuf::from(format!("C:/fonts/{name}.ttf"))],
+        }
+    }
+
+    /// PIN (GitHub issue #3) — **the picker holds the family in force before the
+    /// machine has answered.**
+    ///
+    /// The walk moved to a worker so that the gear's press is free, and the
+    /// price of that is a first frame with no answer in it. The honest thing to
+    /// draw on that frame is not nothing: `DEFAULT_MONOSPACE_FAMILY`'s own
+    /// documentation says an empty list is "a picker that shows a blank row",
+    /// and the row the reader is about to look at is the one naming the font
+    /// they are already reading. So the seed is that font, and
+    /// `order_monospace_families` puts the default beside it — which is what
+    /// makes a stored family this machine no longer has, and no stored family at
+    /// all, come back as one honest row rather than as none.
+    ///
+    /// Red gate: publish an empty list instead of the seed and the second
+    /// assertion goes red; drop `order_monospace_families` and the third does.
+    #[test]
+    fn the_picker_holds_the_family_in_force_before_the_machine_answers() {
+        let slot = MonospaceFamilySlot::new();
+        assert!(
+            slot.adopted().is_empty(),
+            "nothing has been adopted before the dialog has ever been opened"
+        );
+        // **And what a frame would draw is still not nothing.** A picker's
+        // button reads its ticked item's label, so an empty list is a control
+        // drawn blank — see `MonospaceFamilySlot::published`, and
+        // `shown_value`'s own `every picker row this dialog holds reads
+        // something`, which is the pin that found this.
+        assert_eq!(
+            slot.published()
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![bt_platform::DEFAULT_MONOSPACE_FAMILY],
+            "before anybody has asked the machine, the list is the one family \
+             the grid falls back to"
+        );
+
+        slot.seed("Fira Code");
+        assert!(
+            !slot.scanned(),
+            "and the seed does not claim to be the machine's answer"
+        );
+        let names: Vec<&str> = slot
+            .published()
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert!(
+            names.contains(&"Fira Code"),
+            "the button reads the reader's own font from the first frame: {names:?}"
+        );
+        assert!(
+            names.contains(&bt_platform::DEFAULT_MONOSPACE_FAMILY),
+            "beside the family the grid falls back to: {names:?}"
+        );
+
+        // And the two degenerate files: no family named, and a family this
+        // machine does not have. Both are one row, and it is the default's.
+        let empty = MonospaceFamilySlot::new();
+        empty.seed("");
+        assert_eq!(
+            empty
+                .published()
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![bt_platform::DEFAULT_MONOSPACE_FAMILY],
+        );
+    }
+
+    /// PIN (GitHub issue #3, and the 2026-08-19 ruling it inherits) — **the
+    /// answer lands on the window thread, and a walk that finds nothing new
+    /// costs nothing.**
+    ///
+    /// Three claims in one sitting because they are three readings of the same
+    /// handover:
+    ///
+    /// 1. A finished walk *offers*; it does not publish. Until the window thread
+    ///    takes the answer, every frame still reads the seed — which is what
+    ///    stops a swap landing between the hover, the hit test and the draw of
+    ///    one frame, all three of which build their own layout.
+    /// 2. Taking it replaces the seed, and the list is then the machine's.
+    /// 3. **A second open reuses what is already there.** The walk after it
+    ///    finds the families the machine already had, the slot keeps the slice
+    ///    it already leaked, and nothing is redrawn — which is the whole of what
+    ///    "a rescan that finds nothing new costs nothing" means now that the
+    ///    rescan itself is free.
+    ///
+    /// Red gate: publish from `offer` and the first assertion goes red; leak a
+    /// fresh slice on every adopt and the last pointer comparison does.
+    #[test]
+    fn the_machines_answer_lands_on_the_window_thread_and_a_second_walk_costs_nothing() {
+        let slot = MonospaceFamilySlot::new();
+        slot.seed("Cascadia Mono");
+        let seeded = slot.published();
+
+        slot.offer(vec![family("Cascadia Mono"), family("Consolas")]);
+        assert_eq!(
+            slot.published().as_ptr(),
+            seeded.as_ptr(),
+            "an offer nobody has taken changes no frame"
+        );
+
+        let answer = slot.take_offer().expect("the walk left its answer");
+        assert!(
+            slot.publish(answer, true),
+            "the machine's list is not the seed, so a frame is owed"
+        );
+        assert!(slot.scanned(), "and it is the machine's from here on");
+        let adopted = slot.published();
+        assert_eq!(adopted.len(), 2, "both families are drawn");
+        assert_eq!(
+            adopted[0].files,
+            vec![std::path::PathBuf::from("C:/fonts/Cascadia Mono.ttf")],
+            "with the files the renderer needs to load them"
+        );
+
+        // The next open: another walk, the same machine.
+        slot.offer(vec![family("Cascadia Mono"), family("Consolas")]);
+        let again = slot.take_offer().expect("and its answer");
+        assert!(
+            !slot.publish(again, true),
+            "a walk that found nothing new owes no frame"
+        );
+        assert_eq!(
+            slot.published().as_ptr(),
+            adopted.as_ptr(),
+            "and keeps the slice it already leaked, so the reopen costs a \
+             comparison and no memory"
+        );
+        assert!(
+            slot.take_offer().is_none(),
+            "and the mailbox is empty, so the next wake adopts nothing twice"
+        );
+    }
+
+    /// PIN (GitHub issue #3) — **two opens inside one walk are one more walk,
+    /// not two threads.**
+    ///
+    /// The dialog can be opened twice in the time a large font library takes to
+    /// list, and the ask is not droppable either: `Install fonts…` invites the
+    /// reader to leave, install a family and come back, so a request made while
+    /// a walk is out is about a machine that walk may not have seen. One walk at
+    /// a time, and one more round for everybody who asked during it.
+    ///
+    /// Red gate: drop `again` and the fourth assertion goes red — the font a
+    /// reader just installed would not appear until the open after the one they
+    /// made; let `claim_scan` answer `true` while a walk is out and the second
+    /// does, which is a second thread on the same collection.
+    #[test]
+    fn two_opens_inside_one_walk_are_one_more_walk() {
+        let slot = MonospaceFamilySlot::new();
+        assert!(slot.claim_scan(), "the first ask starts the thread");
+        assert!(!slot.claim_scan(), "the second rides on it");
+        assert!(!slot.claim_scan(), "and so does the third");
+        assert!(
+            slot.finish_scan(),
+            "so the walk goes round once more, for the machine those two may \
+             have changed"
+        );
+        assert!(
+            !slot.finish_scan(),
+            "and stops, because nobody asked during the second round"
+        );
+        assert!(
+            slot.claim_scan(),
+            "the next open starts a thread again, rather than waiting for one \
+             that has gone"
+        );
+    }
+
+    /// PIN (GitHub issue #3, T-SETTINGS-ABOUT) — **the window can say which
+    /// Folio it is, and where to take that.**
+    ///
+    /// The report was two sentences: the gear freezes, and there is no version
+    /// anywhere in Settings to put in a defect report. This is the second half,
+    /// stated as the four claims that make the page useful rather than merely
+    /// present:
+    ///
+    /// 1. The page holds the five rows, in the order a report needs them.
+    /// 2. The version row says **the same line** `--version`, `diagnostics.log`
+    ///    and every hang report open with — so a reporter quoting the row and a
+    ///    maintainer reading the log are comparing one string.
+    /// 3. The three doors have addresses, and the releases one is the update
+    ///    row's own constant rather than a second copy of it.
+    /// 4. The keyboard reaches every door and none of the two facts: a ring on
+    ///    a row where nothing happens is a ring that lies.
+    ///
+    /// Red gate: spell the releases address here instead of reading
+    /// `update::RELEASES_PAGE` and the third block goes red the day that
+    /// constant moves; make the version row a `Combo` and the last block does,
+    /// because the page would then offer a picker onto a fact.
+    #[test]
+    fn the_about_page_names_the_build_the_machine_and_three_ways_out() {
+        let rows = visible_rows(TabLayoutMode::Horizontal);
+        let page: Vec<SettingsRow> = rows
+            .iter()
+            .copied()
+            .filter(|row| row.category() == SettingsCategory::About)
+            .collect();
+        assert_eq!(
+            page,
+            vec![
+                SettingsRow::AboutVersion,
+                SettingsRow::AboutPlatform,
+                SettingsRow::AboutReleaseNotes,
+                SettingsRow::AboutIssues,
+                SettingsRow::AboutLicences,
+            ],
+            "what this is, then where to go about it"
+        );
+
+        let banner = crate::version::banner();
+        assert_eq!(
+            SettingsRow::AboutVersion.stated_value(),
+            Some(banner.as_str()),
+            "the row and the diagnostics say one line"
+        );
+        assert!(
+            SettingsRow::AboutPlatform
+                .stated_value()
+                .is_some_and(|line| line.contains(std::env::consts::ARCH)),
+            "the machine row names the processor this copy was made for"
+        );
+
+        assert_eq!(
+            SettingsRow::AboutReleaseNotes.link_destination(),
+            Some(LinkDestination::Address(crate::update::RELEASES_PAGE)),
+            "one address, read by this page and by the update row's own verb"
+        );
+        for row in [
+            SettingsRow::AboutReleaseNotes,
+            SettingsRow::AboutIssues,
+            SettingsRow::AboutLicences,
+        ] {
+            assert!(
+                row.link_destination().is_some(),
+                "{row:?} is a door with nowhere to go"
+            );
+            assert_eq!(row.control(), SettingsControl::Link);
+            assert_eq!(row.control_target(), SettingsTarget::Link(row));
+        }
+        for row in [SettingsRow::AboutReleaseNotes, SettingsRow::AboutIssues] {
+            let Some(LinkDestination::Address(url)) = row.link_destination() else {
+                panic!("{row:?} answers with an address on every machine")
+            };
+            assert!(url.starts_with("https://"), "{row:?} goes to {url}");
+        }
+
+        let lines = shortcut_lines();
+        let content = content(&rows, &lines);
+        assert!(
+            content.nav_items().contains(&SettingsCategory::About),
+            "a page with rows has a word in the rail"
+        );
+        assert_eq!(
+            page_order(content, SettingsCategory::About),
+            vec![
+                SettingsTarget::Link(SettingsRow::AboutReleaseNotes),
+                SettingsTarget::Link(SettingsRow::AboutIssues),
+                SettingsTarget::Link(SettingsRow::AboutLicences),
+            ],
+            "the keyboard reaches the three doors and stops on neither fact"
+        );
+        for row in page {
+            assert_eq!(
+                row.option_count(),
+                0,
+                "{row:?} offers a picker onto something that is not a choice"
+            );
+        }
+    }
+
+    /// PIN (owner ruling 2026-09-15) — **the licences row falls back to *this
+    /// build's* notices, never to a branch.**
+    ///
+    /// The row opens the copy that shipped beside the executable where there is
+    /// one, because those are the notices this binary was actually linked
+    /// against. Where there is not — a development build, a package that did not
+    /// carry the file — it hands the browser an address, and the whole worth of
+    /// that address is that it names the same build: `main` moves, and a link to
+    /// a branch answers a reader's question about their own copy with somebody
+    /// else's dependency set.
+    ///
+    /// Stated about the address alone, which is the half that can be pinned
+    /// purely: what `notices_destination` answers on a given machine is a fact
+    /// about that machine's disk, and a test that asserted one would be a test
+    /// about the runner.
+    ///
+    /// Red gate: put `main` back into the address and the third assertion names
+    /// it; drop the `-preview` from `version::RELEASE_TAG` and the second goes
+    /// red there, on the constant, where the tag is decided.
+    #[test]
+    fn the_licences_address_is_pinned_to_this_builds_own_tag() {
+        let page = notices_page();
+        assert!(
+            page.starts_with("https://github.com/lulu-loopp/folio-terminal/blob/"),
+            "the fallback is this repository's own copy of the file: {page}"
+        );
+        assert!(
+            page.contains(crate::version::RELEASE_TAG),
+            "{page} does not name the tag this build was released under, \
+             {}",
+            crate::version::RELEASE_TAG
+        );
+        assert!(
+            !page.contains("/blob/main/"),
+            "a branch moves under the reader: {page}"
+        );
+        assert!(
+            page.ends_with(NOTICES_FILE),
+            "and it is the notices file itself and not the folder: {page}"
+        );
+        // Asked twice, because the address is leaked once and every later caller
+        // has to get that same string rather than a second leak of it.
+        assert_eq!(
+            page.as_ptr(),
+            notices_page().as_ptr(),
+            "one address per process, leaked once"
+        );
+    }
+
+    /// PIN (owner ruling 2026-09-15) — **where the shipped copy is looked for is
+    /// the two shapes this program has, and nothing else.**
+    ///
+    /// A Windows archive is a folder and `scripts/release/package.ps1` lays the
+    /// file beside `folio.exe`; a macOS application is a bundle whose executable
+    /// is in `Contents/MacOS` and whose non-code files are one directory over in
+    /// `Contents/Resources`. The second look is taken *only* under that name, so
+    /// this is the bundle's own layout rather than a sweep of the neighbourhood:
+    /// a `folio` in some other `bin` directory does not go hunting through a
+    /// sibling folder for a file it has no reason to expect.
+    ///
+    /// Stated over a temporary tree, so it is the rule that is tested and not
+    /// the machine the test runs on.
+    ///
+    /// Red gate: drop the `MacOS` guard and the last block goes red — a plain
+    /// `bin` directory would start answering out of a sibling `Resources`.
+    #[test]
+    fn the_shipped_notices_are_looked_for_beside_the_binary_and_in_a_bundles_resources() {
+        let root = std::env::temp_dir().join(format!(
+            "folio-notices-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let beside = root.join("archive");
+        let bundle = root.join("Folio.app").join("Contents");
+        std::fs::create_dir_all(&beside).expect("a directory to stand an archive in");
+        std::fs::create_dir_all(bundle.join("MacOS")).expect("the bundle's executable directory");
+        std::fs::create_dir_all(bundle.join("Resources")).expect("and its resources");
+
+        // The archive's shape: the file beside the executable.
+        assert_eq!(
+            shipped_notices_near(&beside.join("folio.exe")),
+            None,
+            "nothing is claimed before the file is there"
+        );
+        std::fs::write(beside.join(NOTICES_FILE), "notices").expect("write the archive's copy");
+        assert_eq!(
+            shipped_notices_near(&beside.join("folio.exe")),
+            Some(beside.join(NOTICES_FILE)),
+            "the copy that shipped beside the executable is the one that opens"
+        );
+
+        // The bundle's shape: one directory over, and only under that name.
+        let executable = bundle.join("MacOS").join("folio");
+        assert_eq!(
+            shipped_notices_near(&executable),
+            None,
+            "an empty bundle claims nothing"
+        );
+        std::fs::write(bundle.join("Resources").join(NOTICES_FILE), "notices")
+            .expect("write the bundle's copy");
+        assert_eq!(
+            shipped_notices_near(&executable),
+            Some(bundle.join("Resources").join(NOTICES_FILE)),
+            "a bundle keeps it in Contents/Resources"
+        );
+        let elsewhere = root.join("Folio.app").join("Contents").join("Helpers");
+        std::fs::create_dir_all(&elsewhere).expect("some other directory in the same bundle");
+        assert_eq!(
+            shipped_notices_near(&elsewhere.join("folio")),
+            None,
+            "only Contents/MacOS looks in Contents/Resources"
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// The window every geometry claim below is stated against — an ordinary
@@ -20651,6 +21806,10 @@ mod tests {
                     SettingsCategory::SummonedTerminal,
                     SettingsCategory::Terminal,
                     SettingsCategory::Agents,
+                    // Last, and last in `SettingsCategory::ALL` too: the one
+                    // page in the rail that holds no setting at all
+                    // (T-SETTINGS-ABOUT).
+                    SettingsCategory::About,
                 ],
                 "{tab_layout:?}: every category with rows is shown once, its rows \
                  together"
@@ -20712,6 +21871,7 @@ mod tests {
                     SettingsCategory::Agents,
                     SettingsCategory::RenderedBlocks,
                     SettingsCategory::Shortcuts,
+                    SettingsCategory::About,
                 ],
                 "{tab_layout:?}: the rail is the categories with content, in \
                  declaration order"
@@ -23919,7 +25079,17 @@ mod tests {
                 SettingsRow::ClaudeHooks,
                 SettingsRow::CodexNotify,
                 SettingsRow::CopilotHooks,
-                SettingsRow::TurnEndNotifications
+                SettingsRow::TurnEndNotifications,
+                // ── About (GitHub issue #3) ──
+                //
+                // Last, because its page is last in the rail: the two facts a
+                // report needs, then the three doors — see
+                // `SettingsCategory::About`.
+                SettingsRow::AboutVersion,
+                SettingsRow::AboutPlatform,
+                SettingsRow::AboutReleaseNotes,
+                SettingsRow::AboutIssues,
+                SettingsRow::AboutLicences
             ]
         );
         assert_eq!(
@@ -23978,7 +25148,12 @@ mod tests {
                 SettingsRow::ClaudeHooks,
                 SettingsRow::CodexNotify,
                 SettingsRow::CopilotHooks,
-                SettingsRow::TurnEndNotifications
+                SettingsRow::TurnEndNotifications,
+                SettingsRow::AboutVersion,
+                SettingsRow::AboutPlatform,
+                SettingsRow::AboutReleaseNotes,
+                SettingsRow::AboutIssues,
+                SettingsRow::AboutLicences
             ],
             "Sidebar stands directly under `Tab layout`; the two font rows stay \
              next to each other because they are one decision in two halves, the \
@@ -27082,6 +28257,7 @@ mod tests {
                 SettingsCategory::Agents,
                 SettingsCategory::RenderedBlocks,
                 SettingsCategory::Shortcuts,
+                SettingsCategory::About,
             ]
         );
     }

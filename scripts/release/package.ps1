@@ -35,9 +35,10 @@
     on its own by people who then had a package naming a folder with no
     `folio.exe` in it. The working directory is taken away once the archive has
     been read back, so what the output directory holds is exactly what the
-    release page carries: the archive, the bill of materials and
-    `SHA256SUMS.txt`. `smoke.ps1 -ExpectSigned` reads the package identity out
-    of the copy in the archive, which is the copy a recipient registers.
+    release page carries: the archive, the copy of it under the name that never
+    changes, the bill of materials and `SHA256SUMS.txt`.
+    `smoke.ps1 -ExpectSigned` reads the package identity out of the copy in the
+    archive, which is the copy a recipient registers.
 
     There is deliberately no `README.md` in it. Every relative link and every
     image in that file resolves against the repository, and inside a zip it
@@ -63,7 +64,9 @@
       * `AppxManifest.xml` in the tree still says `Version="0.0.0.0"`, so the
         version that reaches the package is this run's and not a second one
         somebody wrote down;
-      * every entry in the archive is byte-for-byte the size of what went in.
+      * every entry in the archive is byte-for-byte the size of what went in;
+      * `folio-windows-x64.zip` — the copy under the name that is the same in
+        every release — hashes to exactly what the archive hashes to.
 
     Run it by hand exactly as the release workflow runs it. That is the whole
     reason it is a script and not a block of YAML — a packaging step that can
@@ -86,10 +89,15 @@
     `packaging/`. Today that is `folio-here.cmd`.
 
 .PARAMETER Output
-    Where the archive and `SHA256SUMS.txt` are written. Defaults to
-    `target/release-package`. Anything already there is hashed into
-    `SHA256SUMS.txt` alongside the archive, which is how the SBOM written by
-    `sbom.ps1` before this runs ends up covered.
+    Where the archive, the copy of it under the stable name and `SHA256SUMS.txt`
+    are written. Defaults to `target/release-package`. Anything left there is
+    hashed into `SHA256SUMS.txt` alongside the archive, which is how the SBOM
+    written by `sbom.ps1` before this runs ends up covered.
+
+    **It is emptied first**, apart from that SBOM. The directory is the release
+    page — `gh release create` is handed all of it — so a file the previous
+    release left behind is a file the next release publishes, which is what
+    0.4.0 nearly did with 0.3.0's archive.
 
 .PARAMETER ToolsOnly
     Find `makeappx.exe`, say which one, and stop. Nothing is read, built,
@@ -215,6 +223,38 @@ if ($ToolsOnly) {
 }
 
 if (-not $Version) { $Version = Get-WorkspaceVersion }
+
+# ── the output directory is the release page, and it starts empty ────────────
+#
+# **Everything left in it is uploaded.** `docs/RELEASING.md` hands
+# `gh release create` the whole directory rather than a list of names, which is
+# what makes it impossible to leave an asset out — and, until this block, just
+# as impossible to leave one behind. On the 0.4.0 run the directory still held
+# 0.3.0's archive and 0.3.0's `SHA256SUMS.txt` from the release before it: two
+# releases' assets under two version numbers, with nothing between them and the
+# page but somebody reading the upload list.
+#
+# So a run begins by taking the previous one away. Everything here is generated
+# — it is a directory under `target\` — and the one generated file written
+# *before* this script and needed *by* it is this version's bill of materials,
+# which `sbom.ps1` wrote minutes ago and whose line goes into `SHA256SUMS.txt`
+# below. That name is kept; the rest of the directory goes, files and folders
+# alike, which includes the macOS assets of an earlier release if somebody
+# fetched them here. **The macOS half is fetched into this directory after this
+# script has run**, and `smoke.ps1` is the second net: it refuses a package
+# directory holding a file whose name carries a version other than this one.
+#
+# Nothing outside `$Output` is reachable from here. The list comes from
+# `Get-ChildItem` on that one directory and every entry is removed by its own
+# `-LiteralPath`, so there is no pattern for a name to escape through and no
+# recursion into anything that was not already inside it.
+$sbomName = "folio-$Version.cdx.json"
+[System.IO.Directory]::CreateDirectory($Output) | Out-Null
+foreach ($previous in (Get-ChildItem -LiteralPath $Output -Force)) {
+    if ($previous.Name -eq $sbomName) { continue }
+    Write-Host "cleared from $([IO.Path]::GetFileName($Output)): $($previous.Name)"
+    Remove-Item -LiteralPath $previous.FullName -Recurse -Force
+}
 
 # The archive, in the order a person opening it should meet it: the program,
 # the two files it cannot start without, then what it is under and what that
@@ -480,6 +520,30 @@ try {
     }
 }
 finally { $zip.Dispose() }
+
+# **A second copy, under a name that is the same in every release.** GitHub
+# serves `/releases/latest/download/<asset>`, which is the one download link a
+# page outside this repository can carry without it going stale — and it
+# resolves an asset by *name*, so it can only find a name no version moves.
+# `folio-<version>-windows-x64.zip` is not one of those; `folio-windows-x64.zip`
+# is.
+#
+# It is a copy of the bytes and not a second archive, so there is nothing for the
+# two to disagree about, and it is made here rather than by whoever uploads:
+# `SHA256SUMS.txt` below hashes this directory, so both names reach the release
+# page carrying one hash between them and a reader who fetched either can check
+# what they have. The hash is compared on the spot, because a copy nobody read
+# back is a copy.
+$stable = Join-Path $Output 'folio-windows-x64.zip'
+Copy-Item -LiteralPath $archive -Destination $stable -Force
+$archiveHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+$stableHash = (Get-FileHash -LiteralPath $stable -Algorithm SHA256).Hash
+if ($stableHash -ne $archiveHash) {
+    throw ("$([IO.Path]::GetFileName($stable)) is not a copy of " +
+           "$([IO.Path]::GetFileName($archive)): $stableHash against $archiveHash")
+}
+Write-Host ("$([IO.Path]::GetFileName($stable)) — the same bytes, under the name " +
+            '/releases/latest/download/ resolves')
 
 # **The working directory goes away here**, after the archive has been read
 # back and before anything in `$Output` is hashed. `folio.msix` is in the

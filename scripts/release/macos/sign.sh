@@ -63,7 +63,10 @@
 #      entitlements.
 #
 # **Folio has no nested code today.** One executable with every Rust crate linked
-# into it, an `.icns`, an `Info.plist` and a `PkgInfo`; `otool -L` on the
+# into it, an `.icns`, an `Info.plist`, a `PkgInfo` and the four documents
+# `bundle.sh` puts in `Contents/Resources/` — the two licences, the third-party
+# notices and the trademark notice, which the seal covers and the walk below
+# passes over because none of them is Mach-O; `otool -L` on the
 # executable names only `/System/Library/Frameworks` and `/usr/lib`, which are
 # Apple's and are not this project's to sign. The walk below therefore finds
 # nothing and says so — which is a fact worth printing at every release, because
@@ -86,14 +89,22 @@
 #
 # ## What this script exits with
 #
-# `codesign --verify --deep --strict` failing is a failure on any identity.
-# `spctl` is the one that depends: an ad-hoc signature is *correctly* rejected
-# by Gatekeeper — measured, `spctl -a -vvv` prints `rejected` and exits 3 — so
-# on `--identity -` that answer is printed and the script still exits 0. With a
-# real identity the same answer is a release that must not ship, and the exit
-# code says so. Before notarization even a real Developer ID signature is
-# rejected with `source=Unnotarized Developer ID`; that is M5-2's step, and the
-# message `spctl` prints names which of the two it is.
+# `codesign --verify --deep --strict` failing is a failure on any identity: a
+# signature that does not read back is this script's own work being wrong.
+#
+# **`spctl` here is informational, and it is informational on every identity.**
+# It runs at the only moment it cannot be passed — after signing and before
+# notarization — and at that moment Gatekeeper refuses the bundle *by design*,
+# with `source=Unnotarized Developer ID` on a real Developer ID and `rejected`
+# on an ad-hoc one. Exiting non-zero on an answer that is the expected answer
+# makes a lane stop at the step before the one that fixes it: the 0.4.0 release
+# ran `set -e` over this script, took the 1 for a failure, and the outer
+# launcher had to be patched to ignore it and a second script written to resume
+# from the disk image. So the verdict is printed and the exit code is 0.
+#
+# The assessment that has to pass is `notarize.sh`'s, which is made **after**
+# the ticket is stapled and is fatal there — on the bundle and again on the
+# disk image, because those are two staples of two tickets.
 
 set -eu
 
@@ -262,17 +273,15 @@ set -e
 echo "spctl exit $spctl_rc"
 
 if [ "$spctl_rc" = "0" ]; then
-	echo "sign.sh: Gatekeeper accepts this bundle"
-	exit 0
-fi
-
-if [ "$identity" = "-" ]; then
+	echo "sign.sh: Gatekeeper accepts this bundle already"
+elif [ "$identity" = "-" ]; then
 	echo "sign.sh: rejected, and that is the expected answer for an ad-hoc signature —"
 	echo "         Gatekeeper asks who signed it and an ad-hoc signature has no answer."
-	exit 0
+else
+	echo "sign.sh: rejected, and before notarization that is the expected answer for a"
+	echo "         real identity too — the line above says 'source=Unnotarized Developer"
+	echo "         ID'. notarize.sh is the step that changes it, and the assessment that"
+	echo "         has to pass is the one it makes after stapling the ticket."
 fi
 
-echo "sign.sh: Gatekeeper refused a signature made with a real identity." >&2
-echo "         Before notarization this is expected and the line above says" >&2
-echo "         'source=Unnotarized Developer ID' — run notarize.sh and try again." >&2
-exit 1
+exit 0

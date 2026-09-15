@@ -164,7 +164,7 @@ jobs:
           if-no-files-found: warn
 
       # And that is the end of it. The release itself — the tag's page, its notes
-      # and the five signed assets on it — is made by hand from the machine that
+      # and the seven signed assets on it — is made by hand from the machine that
       # signed them, with `gh release create`. `docs/RELEASING.md` has the
       # command. Nothing above this line is part of it.
 
@@ -263,7 +263,10 @@ jobs:
 
       # `bundle.sh` assembles `Folio.app` around that binary — the plist from
       # `render-info-plist`, the icon resampled from `assets/app-icon/`,
-      # `PkgInfo` — and runs `dsymutil` into `Folio.app.dSYM` beside it.
+      # `PkgInfo`, and the four documents the Windows archive also carries —
+      # asks the executable it just copied in whether it is this version at this
+      # commit, reads the tree back and refuses a bundle that is not exactly
+      # those eight files, and runs `dsymutil` into `Folio.app.dSYM` beside it.
       # Nothing in it signs.
       - name: the bundle
         run: scripts/release/macos/bundle.sh --out "$FOLIO_STAGE"
@@ -408,6 +411,12 @@ jobs:
       # lane's**, and it is where the version and the architecture join the name
       # — the tag and the asset are one claim, and an Intel Mac has to be able
       # to tell from the name that this build is not for it.
+      #
+      # It writes a second file as well, `Folio-macos-arm64.dmg`: the same bytes
+      # under a name that is the same in every release. That one is moved across
+      # under the name it already has, because `/releases/latest/download/`
+      # resolves an asset by name and a link on a page outside this repository
+      # can only be written against a name no version moves.
       - name: the disk image
         run: |
           set -eu
@@ -420,6 +429,7 @@ jobs:
               --identity "$FOLIO_IDENTITY" --skip-notarize
           fi
           mv "$FOLIO_STAGE/Folio.dmg" "$FOLIO_PACKAGE/Folio-$VERSION-macos-arm64.dmg"
+          mv "$FOLIO_STAGE/Folio-macos-arm64.dmg" "$FOLIO_PACKAGE/Folio-macos-arm64.dmg"
           if [ -f "$FOLIO_STAGE/Folio.dmg.notarylog.json" ]; then
             mv "$FOLIO_STAGE/Folio.dmg.notarylog.json" "$FOLIO_SYMBOLS/Folio.dmg.notarylog.json"
           fi
@@ -688,6 +698,20 @@ jobs:
           dmg="downloaded/$FOLIO_DMG"
 
           codesign --verify --deep --strict --verbose=2 "$app"
+
+          # The four documents the licences ask to travel with the binary, asked
+          # of the copies that actually travelled: assembled by `bundle.sh`,
+          # sealed by `sign.sh`, packed into the image, uploaded and fetched
+          # back. They are inside the seal, so the line above would already have
+          # refused a bundle one was taken out of — this names the file, rather
+          # than leaving a reader with "a sealed resource is missing", and it
+          # asks for bytes as well as for a name.
+          for document in LICENSE-MIT LICENSE-APACHE THIRD-PARTY-NOTICES.md TRADEMARK.md; do
+            if [ ! -s "$app/Contents/Resources/$document" ]; then
+              echo "the application carries no $document" >&2
+              exit 1
+            fi
+          done
 
           set +e
           spctl -a -vvv -t open --context context:primary-signature "$dmg" \

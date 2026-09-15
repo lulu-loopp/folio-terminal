@@ -78,6 +78,14 @@
     one a recipient registers. Which of the two a path is is settled by opening
     it rather than by its name: an msix is a zip too, so the name could not
     settle it.
+
+.PARAMETER PackageDirectory
+    The directory `package.ps1` writes the release page into. Defaults to
+    `target/release-package`, which is `package.ps1 -Output`'s own default.
+
+    Nothing is required to be in it — an ordinary build has never filled it —
+    but whatever is in it may not belong to another release. See the door check
+    below.
 #>
 
 [CmdletBinding()]
@@ -87,7 +95,8 @@ param(
     [int] $TimeoutSeconds = 90,
     [switch] $ExpectSigned,
     [string] $SignerSubject,
-    [string] $Msix
+    [string] $Msix,
+    [string] $PackageDirectory
 )
 
 $ErrorActionPreference = 'Stop'
@@ -206,6 +215,57 @@ else {
     # is one folder holding both files. Nothing is asked of it here — an
     # ordinary unsigned build has no package beside it and is not meant to.
     $Msix = Join-Path (Split-Path -Parent $Exe) 'folio.msix'
+}
+
+# ── the door, last: the package directory holds one release and not two ──────
+#
+# **The release page is a directory listing.** `docs/RELEASING.md` hands
+# `gh release create` everything in `target/release-package`, so a file left
+# there by an earlier release is an asset of this one. `package.ps1` empties the
+# directory before it writes into it, which settles what it put there; what it
+# cannot settle is what arrives afterwards — the macOS image and its checksum
+# file are fetched from the Mac into the same directory, and the copy that gets
+# fetched is the copy somebody typed a path to.
+#
+# So this is asked of the directory rather than of any script's memory of it:
+# every file whose name carries a version must carry this one. The version is
+# read out of `Cargo.toml`, the same single source `package.ps1` reads it from,
+# so the two cannot disagree about which release is being made. A file with no
+# version in its name says nothing either way and is left alone: the two
+# checksum files, and the two copies the release page carries under a name that
+# is the same in every release — `folio-windows-x64.zip` and
+# `Folio-macos-arm64.dmg`, which are what `/releases/latest/download/` resolves
+# by. That is not an exemption written for those four. A name carrying no
+# version cannot name another release, which is the whole of what this asks.
+function Get-WorkspaceVersion {
+    $manifest = Get-Content -LiteralPath (Join-Path $root 'Cargo.toml') -Raw
+    if ($manifest -notmatch '(?ms)^\[workspace\.package\](.*?)^\[') {
+        throw 'Cargo.toml has no [workspace.package] table'
+    }
+    if ($Matches[1] -notmatch '(?m)^\s*version\s*=\s*"([^"]+)"') {
+        throw '[workspace.package] declares no version'
+    }
+    return $Matches[1]
+}
+
+if (-not $PackageDirectory) { $PackageDirectory = Join-Path $root 'target\release-package' }
+$PackageDirectory = Resolve-GivenPath $PackageDirectory
+if (Test-Path -LiteralPath $PackageDirectory -PathType Container) {
+    # The three numbers, which is what a file name can carry: `package.ps1`
+    # compares `folio.exe`'s `VERSIONINFO` against the same `[-+]`-stripped
+    # version, because a pre-release suffix is not part of what a `VERSIONINFO`
+    # or a `\d+\.\d+\.\d+` in a file name can say.
+    $releasing = ((Get-WorkspaceVersion) -split '[-+]')[0]
+    $strangers = @(
+        foreach ($file in (Get-ChildItem -LiteralPath $PackageDirectory -File)) {
+            if (($file.Name -match '\d+\.\d+\.\d+') -and ($Matches[0] -ne $releasing)) { $file.Name }
+        }
+    )
+    if ($strangers.Count -gt 0) {
+        throw ("$PackageDirectory is the release page and this release is $releasing, but it " +
+               "also holds $($strangers -join ', '). Run package.ps1, which empties it, and " +
+               'fetch the macOS assets again afterwards.')
+    }
 }
 
 Add-Type -Namespace Smoke -Name Win32 -MemberDefinition @'

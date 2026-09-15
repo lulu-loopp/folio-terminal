@@ -2192,6 +2192,30 @@ impl DualPlaneSession {
             .div_euclid(1000)
     }
 
+    /// **The most of the live grid one block may take**, or `None` where nothing limits it.
+    ///
+    /// `bt_viewport::sync_live_math_artifacts`' visible-text floor, read on this side so a block's
+    /// own breathing can stop short of it rather than be turned away by it
+    /// ([`math_block_padding_subpixels`], owner's ruling 2026-09-15 ①). The two must agree, so the
+    /// expression is that filter's exactly — `live_rows - LIVE_MIN_VISIBLE_TEXT_ROWS` with no
+    /// floor of one, because a pane with no room at all really does refuse every band.
+    ///
+    /// `None` on the alternate plane, which is expand-only by that same function's first branch:
+    /// extra pixels overflow the fixed grid rather than consuming the application's rows, so there
+    /// is nothing for a margin to be measured against.
+    fn live_block_box_limit_subpixels(&self, screen: ScreenId) -> Option<i64> {
+        (screen != ScreenId::Alternate).then(|| {
+            i64::from(
+                self.terminal
+                    .dimensions()
+                    .1
+                    .get()
+                    .saturating_sub(LIVE_MIN_VISIBLE_TEXT_ROWS),
+            )
+            .saturating_mul(self.cell_height_subpixels.get())
+        })
+    }
+
     /// Restore the retired inline-image-band policy for this session (`INLINE_IMAGE_BANDS`).
     ///
     /// The reversal a future ruling makes by editing one character, a pin makes at runtime. This is
@@ -8104,6 +8128,7 @@ impl DualPlaneSession {
                         record,
                         self.math_band(),
                         self.math_vertical_padding_subpixels(),
+                        self.cell_height_subpixels.get(),
                     )
                 })
                 .flatten()
@@ -8156,6 +8181,8 @@ impl DualPlaneSession {
                         self.layout_key,
                         self.math_band(),
                         self.math_vertical_padding_subpixels(),
+                        self.cell_height_subpixels.get(),
+                        self.live_block_box_limit_subpixels(record.screen),
                     )
                 })
                 .flatten()
@@ -8576,6 +8603,7 @@ impl DualPlaneSession {
                 record,
                 self.math_band(),
                 self.math_vertical_padding_subpixels(),
+                self.cell_height_subpixels.get(),
             ) else {
                 continue;
             };
@@ -8640,6 +8668,8 @@ impl DualPlaneSession {
                 self.layout_key,
                 self.math_band(),
                 self.math_vertical_padding_subpixels(),
+                self.cell_height_subpixels.get(),
+                self.live_block_box_limit_subpixels(record.screen),
             ) else {
                 continue;
             };
@@ -8717,6 +8747,7 @@ impl DualPlaneSession {
                 record,
                 self.math_band(),
                 self.math_vertical_padding_subpixels(),
+                self.cell_height_subpixels.get(),
             ) else {
                 continue;
             };
@@ -8788,6 +8819,8 @@ impl DualPlaneSession {
                 self.layout_key,
                 self.math_band(),
                 self.math_vertical_padding_subpixels(),
+                self.cell_height_subpixels.get(),
+                self.live_block_box_limit_subpixels(record.screen),
             ) else {
                 continue;
             };
@@ -11753,12 +11786,20 @@ fn project_artifact_at_scale(
     artifact: &PlaceholderArtifact,
     scale_milli: u32,
     source: String,
-    vertical_padding_subpixels: i64,
+    requested_padding_subpixels: i64,
+    cell_height_subpixels: i64,
+    max_box_subpixels: Option<i64>,
 ) -> ProjectedMathArtifact {
     let tight_height_subpixels = artifact
         .height_subpixels
         .saturating_mul(i64::from(scale_milli))
         / 1000;
+    let vertical_padding_subpixels = math_block_padding_subpixels(
+        tight_height_subpixels,
+        requested_padding_subpixels,
+        cell_height_subpixels,
+        max_box_subpixels,
+    );
     ProjectedMathArtifact {
         inline_runs: artifact.inline_runs.clone(),
         key: artifact.key.clone(),
@@ -11802,6 +11843,7 @@ fn projected_frozen_artifact(
     record: &DecorationRecord,
     band: MathBand,
     vertical_padding_subpixels: i64,
+    cell_height_subpixels: i64,
 ) -> Option<ProjectedMathArtifact> {
     let source = record.span.as_ref()?.render_source.clone();
     let (artifact, scale_milli) = frozen_artifact_and_scale(record)?;
@@ -11814,6 +11856,10 @@ fn projected_frozen_artifact(
         } else {
             vertical_padding_subpixels
         },
+        cell_height_subpixels,
+        // A history block has no visible-text floor to be turned away by — it is clipped by
+        // `block_max_height_px` when there is one, never refused — so it keeps the whole wish.
+        None,
     ))
 }
 
@@ -11840,6 +11886,8 @@ fn projected_live_artifact(
     current_layout: LayoutKey,
     band: MathBand,
     vertical_padding_subpixels: i64,
+    cell_height_subpixels: i64,
+    max_box_subpixels: Option<i64>,
 ) -> Option<ProjectedMathArtifact> {
     let (artifact, scale_milli) = live_artifact_and_scale(record, current_layout)?;
     Some(project_artifact_at_scale(
@@ -11851,6 +11899,8 @@ fn projected_live_artifact(
         } else {
             vertical_padding_subpixels
         },
+        cell_height_subpixels,
+        max_box_subpixels,
     ))
 }
 
@@ -11861,6 +11911,75 @@ fn math_presentation_height_subpixels(
     tight_height_subpixels
         .saturating_add(vertical_padding_subpixels.saturating_mul(2))
         .max(1)
+}
+
+/// **The breathing room one side of a display band gets, in subpixels** (owner's ruling
+/// 2026-09-15 ①, T-MATH-BLOCK-POLISH).
+///
+/// `MathLayoutOptions::vertical_padding_cell_milli` asks for a fraction of a cell — a quarter of
+/// one by default — and a quarter of a row is not a row: a block padded by it stands a quarter of
+/// a line clear of the text above and below, which reads as a picture that failed to line up
+/// rather than as a block with room around it. The ruling is that the room is **whole cell rows**,
+/// so the band sits in the grid.
+///
+/// The arithmetic states that in the only way that keeps the band a whole number of rows tall,
+/// which is the second half of the ruling ("sits in the grid"): count the rows the ink itself
+/// needs, add the requested breathing rounded up to whole rows on each side, and centre the ink in
+/// the band those rows make. The padding this returns is therefore *derived from* the band rather
+/// than added to the ink, and `math_presentation_height_subpixels` reproduces the band from it.
+///
+/// **Top and bottom may differ by one subpixel**, when the rows the band spans do not exceed the
+/// ink by an even number of them. That is `bt_viewport::centered_content_offset`'s own convention
+/// and the same 1/1024 of a pixel it already spends; the alternative is a band that is not a whole
+/// number of rows, which is the thing being fixed.
+///
+/// Zero asks for no room at all and gets none, band rows included:
+/// `vertical_padding_cell_milli: 0` is documented as deliberately exposing the alpha-tight raster,
+/// and a block that had its ink trimmed to the grid would not be that.
+///
+/// # A block keeps only the breathing it can afford
+///
+/// `max_box_subpixels` is the most of the grid this block is allowed to take — for a live block on
+/// the primary plane, `bt_viewport::sync_live_math_artifacts`' visible-text floor, and `None`
+/// wherever there is no such ceiling (history, and the alternate plane, which is expand-only).
+///
+/// It is read here because that floor is measured against the **presentation box**, breathing
+/// included, and a block pushed past it falls back to its `$$…$$` source. Without this clamp the
+/// ruling would have made a twelve-row pane stop rendering formulas altogether: the floor there is
+/// four rows, and two of them would have gone to blank margin. **The ruling asked for room around a
+/// formula, not for fewer formulas**, so the margin is what yields: whole rows while they fit,
+/// fewer when they do not, and none at all when the ink alone fills the block's allowance — where
+/// the band is still a whole number of rows and still sits in the grid, with whatever the rounding
+/// up of the ink left over as its breathing. A pane with room grants the wish in full.
+fn math_block_padding_subpixels(
+    tight_height_subpixels: i64,
+    requested_padding_subpixels: i64,
+    cell_height_subpixels: i64,
+    max_box_subpixels: Option<i64>,
+) -> i64 {
+    if requested_padding_subpixels <= 0 {
+        return 0;
+    }
+    let cell = cell_height_subpixels.max(1);
+    let tight = tight_height_subpixels.max(0);
+    let rows_of = |height: i64| height.saturating_add(cell - 1).div_euclid(cell);
+    let ink_rows = rows_of(tight).max(1);
+    let wished_rows = rows_of(requested_padding_subpixels).max(1);
+    // The allowance is floored, never rounded up: a block may take whole rows *within* the
+    // ceiling, and a row the ceiling only half covers is a row it does not have.
+    let padding_rows = max_box_subpixels.map_or(wished_rows, |max| {
+        max.max(0)
+            .div_euclid(cell)
+            .saturating_sub(ink_rows)
+            .max(0)
+            .div_euclid(2)
+            .min(wished_rows)
+    });
+    let band_rows = ink_rows.saturating_add(padding_rows.saturating_mul(2));
+    band_rows
+        .saturating_mul(cell)
+        .saturating_sub(tight)
+        .div_euclid(2)
 }
 
 fn live_grid_input(inputs: &[LiveDetectionInput], row: u32) -> Option<&LiveDetectionInput> {
@@ -14334,11 +14453,52 @@ mod tests {
         );
     }
 
-    fn default_math_padding_subpixels() -> i64 {
-        SPIKE_CELL_HEIGHT_SUBPIXELS
-            .get()
-            .saturating_mul(i64::from(DEFAULT_MATH_VERTICAL_PADDING_CELL_MILLI))
-            / 1000
+    /// The breathing room a display band of `tight_height_subpixels` of ink gets on the fixtures'
+    /// own cell, with the default option in force.
+    ///
+    /// **A function of the ink since the owner's ruling of 2026-09-15 ①**: the option asks for a
+    /// quarter of a row and the band answers in whole rows, so what one side of a band actually
+    /// gets depends on how many rows the ink itself needed. Reading the option alone here would be
+    /// a fixture that agrees with a rule nobody implements any more.
+    fn default_math_padding_subpixels(
+        tight_height_subpixels: i64,
+        max_box_subpixels: Option<i64>,
+    ) -> i64 {
+        math_block_padding_subpixels(
+            tight_height_subpixels,
+            SPIKE_CELL_HEIGHT_SUBPIXELS
+                .get()
+                .saturating_mul(i64::from(DEFAULT_MATH_VERTICAL_PADDING_CELL_MILLI))
+                / 1000,
+            SPIKE_CELL_HEIGHT_SUBPIXELS.get(),
+            max_box_subpixels,
+        )
+    }
+
+    /// The whole box a display band of `tight_height_subpixels` of ink stands in, under the
+    /// default option — the ink plus [`default_math_padding_subpixels`] on each side.
+    fn default_math_box_subpixels(
+        tight_height_subpixels: i64,
+        max_box_subpixels: Option<i64>,
+    ) -> i64 {
+        math_presentation_height_subpixels(
+            tight_height_subpixels,
+            default_math_padding_subpixels(tight_height_subpixels, max_box_subpixels),
+        )
+    }
+
+    /// **The ceiling a live block on the *primary* plane is measured against**, for a pane of
+    /// `grid_rows` — `bt_viewport::sync_live_math_artifacts`' visible-text floor, which is what a
+    /// block's breathing stops short of (owner's ruling 2026-09-15 ①).
+    ///
+    /// Every fixture that seats a formula on the primary plane states its own pane here, because
+    /// that is the fact that decides how much of the wish the block actually gets. The alternate
+    /// plane is expand-only and passes `None`, and so does history.
+    fn live_box_ceiling_subpixels(grid_rows: u32) -> Option<i64> {
+        Some(
+            i64::from(grid_rows.saturating_sub(LIVE_MIN_VISIBLE_TEXT_ROWS))
+                .saturating_mul(SPIKE_CELL_HEIGHT_SUBPIXELS.get()),
+        )
     }
 
     fn hide_cursor(session: &mut DualPlaneSession, observed_at: Instant) {
@@ -15158,10 +15318,8 @@ mod tests {
         );
         assert_eq!(
             projection.heights().get(0),
-            Some(math_presentation_height_subpixels(
-                35 * SUBPIXELS_PER_PX,
-                default_math_padding_subpixels(),
-            ))
+            // A frozen block: nothing refuses it for its height, so it keeps the whole wish.
+            Some(default_math_box_subpixels(35 * SUBPIXELS_PER_PX, None))
         );
         assert!(!ready.cells.iter().any(|cell| cell.text == "$"));
 
@@ -16985,12 +17143,14 @@ mod tests {
         );
         assert_eq!(
             rendered.math_blocks[0].clip_height_subpixels,
-            math_presentation_height_subpixels(
-                20 * SUBPIXELS_PER_PX,
-                default_math_padding_subpixels(),
-            )
+            // A primary pane of twelve rows: the floor leaves four, the ink needs two, so the
+            // block can afford the whole row of breathing above and below that the ruling of
+            // 2026-09-15 ① asks for.
+            default_math_box_subpixels(20 * SUBPIXELS_PER_PX, live_box_ceiling_subpixels(12))
         );
-        // Bottom relief: the block inflates grid row 0 by `29696 - 18432 = 11264` subpixels while
+        // Bottom relief: the block inflates grid row 0 by `73728 - 18432 = 55296` subpixels — four
+        // whole rows of band against the one row of grid it stands on, the ink's two plus the
+        // ruling's one above and one below — while
         // rows 2..11 are a blank tail, so the whole inflation is relieved at rest. Nothing is cut
         // off above the pane any more, so there is no "rows above" affordance to advertise — the
         // resting frame proves it by placing row 0 flush at the pane top at its full band height.
@@ -16999,10 +17159,7 @@ mod tests {
         assert_eq!(rendered.row_map[0].top_subpixels, 0);
         assert_eq!(
             rendered.row_map[0].height_subpixels,
-            math_presentation_height_subpixels(
-                20 * SUBPIXELS_PER_PX,
-                default_math_padding_subpixels(),
-            )
+            default_math_box_subpixels(20 * SUBPIXELS_PER_PX, live_box_ceiling_subpixels(12))
         );
         assert!(!rendered.cells.iter().any(|cell| cell.text == "$"));
 
@@ -17300,10 +17457,11 @@ mod tests {
         assert_eq!(exact.math_blocks.len(), 1);
         assert_eq!(
             exact.math_blocks[0].clip_height_subpixels,
-            math_presentation_height_subpixels(
-                40 * SUBPIXELS_PER_PX,
-                default_math_padding_subpixels(),
-            )
+            // A primary pane of twelve rows: the visible-text floor leaves the block four, and
+            // this ink already needs three — so under the ruling of 2026-09-15 ① the block keeps
+            // the rows its ink needs and the breathing is what the rounding up leaves, rather
+            // than taking a whole row on each side and being refused for it.
+            default_math_box_subpixels(40 * SUBPIXELS_PER_PX, live_box_ceiling_subpixels(12))
         );
         assert_eq!(exact.math_blocks[0].artifact.render_scale_milli, 1000);
         let separator = exact
@@ -17374,15 +17532,14 @@ mod tests {
         assert_eq!(expanded.math_blocks.len(), 1);
         assert_eq!(
             expanded.math_blocks[0].clip_height_subpixels,
-            math_presentation_height_subpixels(
-                40 * SUBPIXELS_PER_PX,
-                default_math_padding_subpixels(),
-            )
+            default_math_box_subpixels(40 * SUBPIXELS_PER_PX, live_box_ceiling_subpixels(12))
         );
         assert_eq!(expanded.math_blocks[0].artifact.render_scale_milli, 1000);
-        // Bottom relief: grid row 0 grows to 50176 subpixels (inflation 31744) while rows 2..11 are
-        // a blank tail, so the resting frame yields that tail instead of cutting the block. The
-        // band lands flush at the pane top and there is nothing above to advertise.
+        // Bottom relief: grid row 0 grows to 55296 subpixels — the three whole rows this ink needs,
+        // which is all the twelve-row pane's visible-text floor lets the block afford (inflation
+        // 36864) — while rows 2..11 are a blank tail, so the resting frame yields that tail instead
+        // of cutting the block. The band lands flush at the pane top and there is nothing above to
+        // advertise.
         assert_eq!(expanded.status_text, None);
         assert_eq!(expanded.row_map[0].live_grid_row, Some(0));
         assert_eq!(expanded.row_map[0].top_subpixels, 0);
@@ -17395,7 +17552,7 @@ mod tests {
             expanded_last
                 .top_subpixels
                 .saturating_add(expanded_last.height_subpixels),
-            12 * SPIKE_CELL_HEIGHT_SUBPIXELS.get() + 31744,
+            12 * SPIKE_CELL_HEIGHT_SUBPIXELS.get() + 36864,
             "the blank tail yields exactly the relieved pixels below the pane bottom"
         );
 
@@ -17501,8 +17658,12 @@ mod tests {
             )
             .unwrap();
         session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        // **One cell row of ink**, so the band is three rows: the ink's one and the ruling of
+        // 2026-09-15's one above and one below. That is a two-row overflow over the single grid
+        // row `$$x$$` stands on, which is the geometry every number below is about — the raster
+        // was 40px tall while the breathing was a quarter of a row and bought the same three.
         assert_eq!(
-            complete_detected_live_tasks(&mut session, synthetic_raster(40, 40)),
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 18)),
             1
         );
         let last_grid_row = session.terminal.visible_row(11).unwrap().cells;
@@ -17522,10 +17683,8 @@ mod tests {
             bottom.row_map[0].top_subpixels,
             SPIKE_CELL_HEIGHT_SUBPIXELS
                 .get()
-                .saturating_sub(math_presentation_height_subpixels(
-                    40 * SUBPIXELS_PER_PX,
-                    default_math_padding_subpixels(),
-                ),)
+                // The alternate plane is expand-only, so the block keeps the whole wish.
+                .saturating_sub(default_math_box_subpixels(18 * SUBPIXELS_PER_PX, None))
         );
         assert_eq!(bottom.row_map[11].live_grid_row, Some(11));
         assert_eq!(
@@ -17597,7 +17756,8 @@ mod tests {
     /// Complement of `bottom_frame_keeps_the_last_live_row_visible_and_alt_overflow_is_locally_reviewable`
     /// on the same alternate grid: this application stops writing at row 3, so rows 4..11 are a
     /// blank tail and the bottom-relief ruling applies exactly as it does on the primary screen.
-    /// The band inflates grid row 0 from 18432 to 50176 subpixels (overflow 31744), the blank tail
+    /// The band inflates grid row 0 from 18432 to 92160 subpixels (overflow 73728 — three rows of
+    /// ink and, since the ruling of 2026-09-15, one blank row above and one below), the blank tail
     /// is worth 8 * 18432 = 147456, so the whole overflow is relieved: the equation is complete at
     /// rest, the eight blank rows absorb the shift, and there is no local review left to offer.
     #[test]
@@ -17621,10 +17781,7 @@ mod tests {
         assert_eq!(bottom.row_map[0].live_grid_row, Some(0));
         assert_eq!(
             bottom.row_map[0].height_subpixels,
-            math_presentation_height_subpixels(
-                40 * SUBPIXELS_PER_PX,
-                default_math_padding_subpixels(),
-            )
+            default_math_box_subpixels(40 * SUBPIXELS_PER_PX, None)
         );
         assert_eq!(
             bottom.row_map[0].top_subpixels, 0,
@@ -17642,7 +17799,7 @@ mod tests {
             .expect("the fixed last live row stays presented");
         assert_eq!(
             last.top_subpixels.saturating_add(last.height_subpixels),
-            12 * cell + 31744,
+            12 * cell + 73728,
             "the yielded pixels come out of the blank tail below the pane bottom"
         );
         let cursor_row = bottom
@@ -18061,7 +18218,15 @@ mod tests {
             .expect("resize and reconcile must preserve the uniquely projected clipped owner");
         assert!(retained.stale_artifact.is_some());
         assert!(
-            projected_live_artifact(retained, session.layout_key, session.math_band(), 0).is_some(),
+            projected_live_artifact(
+                retained,
+                session.layout_key,
+                session.math_band(),
+                0,
+                session.cell_height_subpixels.get(),
+                session.live_block_box_limit_subpixels(retained.screen),
+            )
+            .is_some(),
             "the retained stale raster must remain paintable while relayout is pending"
         );
     }
@@ -18877,17 +19042,11 @@ mod tests {
         );
         assert_eq!(
             placement.clip_height_subpixels,
-            math_presentation_height_subpixels(
-                70 * SUBPIXELS_PER_PX,
-                default_math_padding_subpixels(),
-            )
+            default_math_box_subpixels(70 * SUBPIXELS_PER_PX, None)
         );
         assert_eq!(
             placement.artifact.height_subpixels,
-            math_presentation_height_subpixels(
-                70 * SUBPIXELS_PER_PX,
-                default_math_padding_subpixels(),
-            )
+            default_math_box_subpixels(70 * SUBPIXELS_PER_PX, None)
         );
         assert_eq!(placement.artifact.render_scale_milli, 1000);
         let alternate_raster_top = placement
@@ -18944,10 +19103,7 @@ mod tests {
         let placement = &frame.math_blocks[0];
         assert_eq!(
             placement.clip_height_subpixels,
-            math_presentation_height_subpixels(
-                18 * SUBPIXELS_PER_PX,
-                default_math_padding_subpixels(),
-            )
+            default_math_box_subpixels(18 * SUBPIXELS_PER_PX, live_box_ceiling_subpixels(12))
         );
         let primary_raster_top = placement
             .top_subpixels
@@ -18973,8 +19129,127 @@ mod tests {
         );
     }
 
+    /// PIN (owner's ruling 2026-09-15 ①): **the rounding itself**, without a terminal around it.
+    ///
+    /// The band the arithmetic answers with is always a whole number of rows and always holds at
+    /// least one row of breathing on each side, whatever the ink's height is — including the two
+    /// cases a rule written in pixels gets wrong: ink that already divides by the cell, and ink one
+    /// subpixel over a row.
+    ///
+    /// MUTATIONS: drop the `.max(1)` on the padding rows → a quarter-cell request buys nothing;
+    /// `div_euclid` the ink's rows instead of rounding up → an ink one subpixel over a row loses
+    /// its bottom row; honour a zero request with rows anyway → the last assertion.
     #[test]
-    fn display_box_is_tight_ink_plus_configurable_symmetric_padding() {
+    fn whole_cell_rows_of_breathing_keep_the_band_on_the_grid() {
+        let cell = 18 * SUBPIXELS_PER_PX;
+        let quarter = cell / 4;
+        for tight in [
+            1,
+            quarter,
+            cell,
+            cell + 1,
+            2 * cell,
+            5 * cell + 7,
+            37 * cell - 1,
+        ] {
+            let padding = math_block_padding_subpixels(tight, quarter, cell, None);
+            let band = math_presentation_height_subpixels(tight, padding);
+            assert!(
+                padding >= cell,
+                "a quarter-cell request must still buy a whole row: {padding} for ink {tight}"
+            );
+            // The band divides by the cell — to within the odd subpixel an integer halving of an
+            // odd remainder cannot place, which is the one the offset spends and not a row.
+            let rows = band.saturating_add(1).div_euclid(cell);
+            assert!(
+                band == rows * cell || band == rows * cell - 1,
+                "ink {tight} gave a band of {band}, which is not {rows} rows of {cell}"
+            );
+            // And the ink is inside it with a row to spare above and below.
+            assert!(band >= tight + 2 * cell, "ink {tight} lost its breathing");
+        }
+        // Zero is the documented way to ask for the alpha-tight raster and nothing else; rounding
+        // that to rows would be this rule overriding the option rather than expressing it.
+        assert_eq!(math_block_padding_subpixels(5 * cell + 7, 0, cell, None), 0);
+    }
+
+    /// PIN (owner's ruling 2026-09-15 ①, and the gate's own 2026-09-15 run): **a block keeps only
+    /// the breathing it can afford, and is never refused for asking.**
+    ///
+    /// The floor `bt_viewport::sync_live_math_artifacts` measures a primary live block against is
+    /// measured on the **presentation box**, breathing included, and a block over it falls back to
+    /// its `$$…$$` source. On a twelve-row pane that floor is four rows — so a whole row of margin
+    /// above and below would have spent half of it, and every formula needing three rows of ink
+    /// (a `\frac`, a small matrix, the fixture rasters throughout this file) would have stopped
+    /// rendering the day the ruling landed. Fourteen tests in this file caught exactly that.
+    ///
+    /// The margin is therefore what yields. The band stays whole cell rows either way, which is
+    /// the half of the ruling that is about the grid; what shrinks is the half that is about air.
+    ///
+    /// MUTATIONS: ignore `max_box_subpixels` → ② asks for five rows out of a four-row allowance
+    /// and the block is refused; round the allowance up instead of down → ③ takes a row the
+    /// ceiling only half covers; let the clamp raise the wish → ① grows past its one row.
+    #[test]
+    fn a_block_keeps_only_the_breathing_its_pane_can_afford() {
+        let cell = 18 * SUBPIXELS_PER_PX;
+        let quarter = cell / 4;
+        let box_of = |tight: i64, ceiling: Option<i64>| {
+            math_presentation_height_subpixels(
+                tight,
+                math_block_padding_subpixels(tight, quarter, cell, ceiling),
+            )
+        };
+        // The twelve-row pane every live fixture in this file uses: twelve rows less the eight the
+        // visible-text floor keeps for text.
+        let floor = Some(4 * cell);
+
+        // ① Room to spare: the wish is granted whole, and never more than whole.
+        assert_eq!(box_of(2 * cell, Some(16 * cell)), 4 * cell);
+        assert_eq!(box_of(2 * cell, None), 4 * cell);
+
+        // ② Three rows of ink under a four-row ceiling: one row of margin would make five, so the
+        //    block takes the three its ink needs and stays inside the floor — rendered, where it
+        //    used to fall back to source.
+        let three_rows = 40 * SUBPIXELS_PER_PX;
+        assert!(three_rows > 2 * cell && three_rows <= 3 * cell);
+        assert_eq!(box_of(three_rows, floor), 3 * cell);
+        assert!(box_of(three_rows, floor) <= 4 * cell);
+        // And it is still a whole number of rows with its ink centred in them.
+        assert_eq!(
+            math_block_padding_subpixels(three_rows, quarter, cell, floor),
+            (3 * cell - three_rows) / 2
+        );
+
+        // ③ The allowance is floored: a row the ceiling only half covers is a row the block does
+        //    not have. Two rows of ink under three and a half rows of ceiling therefore keep no
+        //    margin — rounding the allowance up would grant a row and put the band *over* the very
+        //    ceiling it is being measured against.
+        assert_eq!(box_of(2 * cell, Some(3 * cell + cell / 2)), 2 * cell);
+
+        // ④ Ink that already fills the allowance keeps no margin at all, and the block is left
+        //    exactly where the floor would have put it before the ruling existed.
+        assert_eq!(box_of(4 * cell, floor), 4 * cell);
+
+        // ⑤ And the margin cannot rescue a block whose ink alone is over: a pane with no
+        //    allowance still refuses every band, which is the case the ruling never touched.
+        assert_eq!(box_of(cell, Some(0)), cell);
+    }
+
+    /// PIN (owner's ruling 2026-09-15 ①): **a display band is its ink plus whole cell rows of
+    /// breathing, and the band that makes is a whole number of rows tall.**
+    ///
+    /// This was `display_box_is_tight_ink_plus_configurable_symmetric_padding`, which pinned the
+    /// option's fraction of a cell *as* the padding. The ruling replaces the fraction with rows:
+    /// the option still says how much room is wanted and still says "none" at zero, and what it
+    /// buys is now rounded out to rows so the block sits in the grid instead of a quarter of a
+    /// line clear of the text around it.
+    ///
+    /// MUTATIONS: add the requested padding straight to the ink (the former rule) → the band stops
+    /// dividing by the cell; drop the `.max(1)` on the padding rows → a quarter-cell request buys
+    /// nothing and the first assertion loses its whole cell; honour the option's zero with rows
+    /// anyway → the tight-only block grows.
+    #[test]
+    fn a_display_band_is_ink_plus_whole_cell_rows_of_breathing() {
         let start = Instant::now();
         let mut session = DualPlaneSession::new(nz(40), nz(12));
         session
@@ -18988,18 +19263,32 @@ mod tests {
         let mut projection = session.new_projection(session.layout_key());
         let padded = session.viewport_frame(&mut projection).unwrap();
         let block = &padded.math_blocks[0];
-        let padding = default_math_padding_subpixels();
         let tight = 20 * SUBPIXELS_PER_PX;
+        let cell = SPIKE_CELL_HEIGHT_SUBPIXELS.get();
+        // The alternate plane is expand-only: nothing measures this block against a floor, so it
+        // keeps the whole wish and the band is the ink's rows plus one above and one below.
+        let padding = default_math_padding_subpixels(tight, None);
         assert_eq!(block.artifact.height_subpixels, tight + 2 * padding);
         assert_eq!(block.clip_height_subpixels, tight + 2 * padding);
         assert_eq!(block.content_offset_subpixels, padding);
-        assert_eq!(
-            block
-                .clip_height_subpixels
-                .saturating_sub(block.content_offset_subpixels)
-                .saturating_sub(tight),
-            padding,
-            "top and bottom padding must be symmetric"
+        // ① The band is whole cell rows: two for this ink, one of breathing above and one below.
+        assert_eq!(block.clip_height_subpixels % cell, 0);
+        assert_eq!(block.clip_height_subpixels / cell, 4);
+        // ② And the breathing really is a whole row on each side, not the quarter-row the option
+        //    asks for — the room above the ink is at least a line of text.
+        assert!(
+            padding >= cell,
+            "a quarter of a row is not a row: {padding} against a {cell} cell"
+        );
+        // ③ Symmetric to the subpixel the integer halving cannot split, which is
+        //    `bt_viewport::centered_content_offset`'s own convention.
+        let below = block
+            .clip_height_subpixels
+            .saturating_sub(block.content_offset_subpixels)
+            .saturating_sub(tight);
+        assert!(
+            below == padding || below == padding + 1,
+            "top {padding} and bottom {below} must match to within the odd subpixel"
         );
 
         session.set_math_layout_options(MathLayoutOptions {
@@ -19062,17 +19351,18 @@ mod tests {
         assert!(raster_bottom <= clip_bottom);
         assert_eq!(
             raster_top.saturating_sub(clip_top),
-            default_math_padding_subpixels()
+            default_math_padding_subpixels(100 * SUBPIXELS_PER_PX, None)
         );
         // Mutation: box height = tight + one padding makes raster_bottom exceed clip_bottom.
         assert_eq!(
             clip_bottom.saturating_sub(raster_bottom),
-            default_math_padding_subpixels()
+            default_math_padding_subpixels(100 * SUBPIXELS_PER_PX, None)
         );
-        // Bottom relief: the align block expands 37888 subpixels past its four source rows while
-        // rows 5..15 of this 16-row alternate grid are a blank tail, so the resting frame yields
-        // the tail and shows the complete equation. Its clip therefore starts at the pane top and
-        // no local-review affordance is advertised, because there is nothing left above to review.
+        // Bottom relief: the align block's ink needs six rows and the ruling of 2026-09-15 gives it
+        // a seventh above and an eighth below, so it expands four rows past its four source rows
+        // while rows 5..15 of this 16-row alternate grid are a blank tail — the resting frame
+        // yields the tail and shows the complete equation. Its clip therefore starts at the pane
+        // top and no local-review affordance is advertised, because there is nothing left above.
         assert_eq!(clip_top, 0);
         assert_eq!(frame.status_text, None);
         assert!(
@@ -19103,10 +19393,7 @@ mod tests {
         let mut projection = session.new_projection(session.layout_key());
         let frame = session.viewport_frame(&mut projection).unwrap();
         let block = &frame.math_blocks[0];
-        let expected_box = math_presentation_height_subpixels(
-            20 * SUBPIXELS_PER_PX,
-            default_math_padding_subpixels(),
-        );
+        let expected_box = default_math_box_subpixels(20 * SUBPIXELS_PER_PX, None);
         assert!(session.terminal_modes().alternate_screen);
         assert!(matches!(
             frame.cell_anchors[0].start,
@@ -19235,10 +19522,7 @@ mod tests {
         assert_eq!(frame.math_blocks.len(), 1);
         assert_eq!(
             frame.math_blocks[0].clip_height_subpixels,
-            math_presentation_height_subpixels(
-                70 * SUBPIXELS_PER_PX,
-                default_math_padding_subpixels(),
-            )
+            default_math_box_subpixels(70 * SUBPIXELS_PER_PX, None)
         );
         assert_eq!(frame.math_blocks[0].artifact.render_scale_milli, 1000);
 
