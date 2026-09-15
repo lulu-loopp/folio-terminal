@@ -6,7 +6,17 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
-Nothing yet.
+### Fixed
+
+- **The two marks beside a typeset formula behave like the rest of the window's
+  buttons.** Pointing at `‹›` or `⧉` now lights that mark the way a pane head's
+  buttons light, so you can see which one a click would reach. Turning a block
+  into its source makes it taller — the marks move with it straight away,
+  instead of staying beside the shape the block used to have until you took the
+  pointer off the formula and brought it back; the same is true when a window
+  resize re-wraps the block or the display scale changes. And they arrive, move
+  and leave gently rather than blinking in and out. If you have asked your
+  system for less motion, they simply appear and disappear where they belong.
 
 ## 0.4.0-preview — 2026-09-14
 

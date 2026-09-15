@@ -12568,21 +12568,27 @@ struct WindowRuntime {
     peek_thumbnail_pending: Option<PeekThumbnailTarget>,
     math_hover_anchor: Option<MathBlockAnchor>,
     math_hover_clear_at: Option<Instant>,
-    /// **When the hovered band's two marks began to arrive** (owner's ruling
-    /// 2026-09-14 ②).
+    /// **The two marks on the glass: where they stand, how solid they are, and
+    /// what they are on their way to** (owner's ruling 2026-09-14 ②, and its
+    /// report of that evening, T-MATH-TOOLS-FOLLOW).
     ///
     /// The marks are not drawn at rest and fade in over
     /// [`tooltip::TOOLTIP_FADE`] once the pointer is on a band — the tip's own
     /// ninety milliseconds, which is the one duration this window spends on
     /// everything a hover reveals, and which the glance card was ruled onto the
-    /// day before this. It is set beside [`Self::math_hover_anchor`] and dies
-    /// with it, so a pointer crossing from one formula to the next starts the
-    /// second band's fade rather than inheriting the first band's.
+    /// day before this. They fade out again over the same span when the band's
+    /// 500 ms grace runs out, and when the block underneath them changes shape
+    /// they *travel* to their new boxes; [`formula_tools::FormulaToolFollow`] is
+    /// all three, with no second clock beside it.
     ///
-    /// `None` is "no band has its tools up", which is the same fact
-    /// `math_hover_anchor` states — two fields because one is *which* and one is
-    /// *when*, and the pair is never half-set: every write below sets both.
-    math_tools_since: Option<Instant>,
+    /// **Deliberately not the same fact as [`Self::math_hover_anchor`].** That
+    /// field is the band the pointer is on and it dies the instant the grace
+    /// runs out; this one outlives it by the exit fade, and it is written from
+    /// the *picture in hand* rather than from the gesture — which is the whole of
+    /// §7.1.5p ⑥'s "the marks are drawn from the picture that lit the band",
+    /// extended by the evening's report to every picture in which the band's
+    /// geometry differs from the one they were placed from.
+    math_tools: Option<formula_tools::FormulaToolFollow>,
     /// **The mark a button is being held down on**, with the band it belongs to.
     ///
     /// The band is carried because a press latches `MouseRoute::MathBlock` and
@@ -36235,7 +36241,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         peek_thumbnail_pending: None,
         math_hover_anchor: None,
         math_hover_clear_at: None,
-        math_tools_since: None,
+        math_tools: None,
         math_tool_pressed: None,
         math_copied: None,
         pending_math_context_anchor: None,
@@ -84860,14 +84866,16 @@ impl Runtime<'_> {
             self.window.math_hover_clear_at = None;
             if self.window.math_hover_anchor.as_ref() != Some(&hit.anchor) {
                 self.window.math_hover_anchor = Some(hit.anchor.clone());
-                // **The marks' fade starts with the band, not with the window**
-                // (owner's ruling 2026-09-14 ②). Written here and nowhere else:
-                // this is the one place a band becomes the hovered one, and a
-                // clock set anywhere else would be a second opinion about when
-                // "now" was. Crossing straight from one formula to the next is a
-                // change of anchor, so the second band's marks arrive the same
-                // way the first band's did rather than simply appearing.
-                self.window.math_tools_since = Some(now);
+                // **And no clock is set here** (owner's report 2026-09-14
+                // evening). Until that report the marks' fade began on this
+                // line, from the gesture — and a fade begun by the gesture is a
+                // fade whose first frames are drawn from the picture that was in
+                // hand *before* it, which is the stale-overlay half of the very
+                // defect §7.1.5p ⑥ was written about. The marks arrive when the
+                // picture that lights the band arrives, which is
+                // [`Self::sync_math_tools`]'s answer and nobody else's. Crossing
+                // straight from one formula to the next is a change of anchor,
+                // so that door still sees a second arrival rather than a move.
                 if self.set_hovered_math(Some(hit.anchor.clone())) {
                     self.repaint_hovered_pane()?;
                 }
@@ -84880,59 +84888,165 @@ impl Runtime<'_> {
         Ok(hit)
     }
 
-    /// **How far the hovered band's marks have come up**, `0.0 ..= 1.0`.
+    /// **Read the picture in hand against the marks on the glass**, and answer
+    /// whether the overlay owes a rebuild.
     ///
-    /// [`tooltip::hover_fade_opacity`] and not a curve of its own: the tip, the
-    /// glance card and these read one fade, so the day any of them moves all
-    /// three move (owner's ruling 2026-09-13 ⑭, and its own "一条规矩,两个时钟"
-    /// — the curve is shared, the clocks are each surface's own).
+    /// The one door between the two halves of this surface: the renderer says
+    /// where a named band's boxes are *on this picture*
+    /// ([`Self::math_tool_placement`]), the pointer says which mark it is on
+    /// ([`Self::hovered_math_tool`]), and
+    /// [`formula_tools::FormulaToolFollow::follow`] decides what that means for
+    /// two marks already standing somewhere — nothing, a new target to travel
+    /// to, or a different ink.
     ///
-    /// `0.0` with no band hovered, which is the ruling's "at rest they are NOT
-    /// drawn" said in the one place that decides it.
-    fn math_tools_opacity(&self, now: Instant) -> f32 {
-        self.window.math_tools_since.map_or(0.0, |since| {
-            tooltip::hover_fade_opacity(now.saturating_duration_since(since), self.app.motion)
-        })
+    /// **It is asked on every turn and not only while a clock is running**
+    /// (owner's report 2026-09-14 evening). The three things it notices all
+    /// happen with no pointer event and no clock of their own: a press on `‹›`
+    /// republishes the block taller, a resize re-wraps its rows, a scale change
+    /// resizes every box — and the marks were left beside geometry that is not
+    /// there any more until the pointer left the band and came back. The cost of
+    /// asking is one early return on every frame no band is hovered, which is
+    /// almost all of them.
+    ///
+    /// **A band the pointer has left is never re-read from a picture.** The
+    /// grace running out clears [`WindowRuntime::math_hover_anchor`] a whole
+    /// picture before the shell stops lighting the block, so a frame in that gap
+    /// still carries a lit placement; following it would turn the exit fade
+    /// round and light the marks again over a band nobody is pointing at.
+    fn sync_math_tools(&mut self, now: Instant) -> bool {
+        if self.window.math_tools.is_none() && self.window.math_hover_anchor.is_none() {
+            return false;
+        }
+        let motion = self.app.motion;
+        let mut changed = if self.window.math_hover_anchor.is_none() {
+            self.window
+                .math_tools
+                .as_mut()
+                .is_some_and(|follow| follow.leave(now, motion))
+        } else if let Some(boxes) = self.math_tool_placement() {
+            let hovered = self.hovered_math_tool();
+            if let Some(follow) = self.window.math_tools.as_mut() {
+                follow.follow(&boxes, hovered, now, motion)
+            } else {
+                self.window.math_tools = Some(formula_tools::FormulaToolFollow::arriving(
+                    &boxes, hovered, now,
+                ));
+                true
+            }
+        } else {
+            // A picture that has not caught up has nothing to say about this
+            // band, and §7.1.5p ⑥'s answer to that is unchanged: it says
+            // nothing, rather than offering a neighbour. The marks stand where
+            // they are until a picture that knows the band arrives.
+            false
+        };
+        // And a fade that has finished leaving is a surface that is gone: the
+        // follow is dropped whole, so "no marks" is one fact and not a struct
+        // holding a zero.
+        if self
+            .window
+            .math_tools
+            .as_ref()
+            .is_some_and(|follow| follow.gone(now, motion))
+        {
+            self.window.math_tools = None;
+            changed = true;
+        }
+        changed
     }
 
-    /// **The frames the band's marks still owe the glass**, and none once they
-    /// have landed.
+    /// **Which mark the pointer is on**, of the two the hovered band put up.
     ///
-    /// Two debts, and the second is the one the owner's report of 2026-09-14
-    /// added (T-MATH-TOOLS-SEAT). The first is the fade: while the ninety
-    /// milliseconds is climbing each frame draws the marks a little more solid,
-    /// which is what [`tooltip::hover_fade_owes_frames`] says on its own.
+    /// [`Self::math_hit`] and never a second hit test: the box you can press and
+    /// the box that lights up are one box by construction, which is the same
+    /// arrangement [`Self::math_tool_placement`] keeps with the drawing. The two
+    /// arms that are not verbs answer `None` — a pointer on the formula itself
+    /// is not on a control.
+    fn hovered_math_tool(&self) -> Option<formula_tools::FormulaTool> {
+        match self.math_hit()?.target {
+            MathHitTarget::ToggleSource => Some(formula_tools::FormulaTool::ToggleSource),
+            MathHitTarget::CopyLatex => Some(formula_tools::FormulaTool::CopyLatex),
+            MathHitTarget::Block | MathHitTarget::Failure => None,
+        }
+    }
+
+    /// **Where the hovered band's marks stand on the picture in hand**, in the
+    /// surface's own pixels.
     ///
-    /// The second is **the arrival itself**. The marks are built from a pane's
-    /// *last presented* picture ([`Self::formula_tool_layers`]), and the picture
-    /// that lights a band is composed by the very gesture that lit it and
-    /// presented after it — so at the moment the band changes, the newest
-    /// picture in hand is the one from before the pointer moved, and it carries
-    /// no lit placement under the new band's name. Something has to come back
-    /// and look again once that picture has landed. Nothing did, which is why
-    /// the owner's marks did not follow the pointer to the next formula.
+    /// **The band is named, and it is named by the same anchor that lit it**
+    /// (owner's report 2026-09-14, T-MATH-TOOLS-SEAT).
+    /// [`WindowRuntime::math_hover_anchor`] is the block the pointer resolved and
+    /// the block [`Self::set_hovered_math`] wrote into the shell, so it is the
+    /// block wearing the ground; handing it to the renderer is what makes the
+    /// floor and the marks one answer.
     ///
-    /// So the debt is the whole span and not only the climbing part of it, which
-    /// is also the one reading `Motion::Reduced` can live with: that setting
-    /// lands the fade on its first frame and would otherwise owe no frame at all
-    /// — no fade to pay for, and no second look either. A band standing still
-    /// under a still pointer still costs no wake-ups once the span is spent,
+    /// This used to ask for *whichever* block in the frame was carrying
+    /// `toolbar_visible`, and that is a different question, because **the frame
+    /// read here is not the frame on the glass**: a pane keeps the picture it
+    /// last presented, and the overlay is composed from that copy while the seat
+    /// under it is drawn from the projection of the gesture that has just
+    /// happened. One frame apart, "whichever block is lit" is the block that was
+    /// lit *before* the pointer moved — which is the owner's screenshot exactly:
+    /// the ground under the matrix and the two marks beside the Gaussian above
+    /// it. Named, the stale frame simply has no lit placement under that name and
+    /// answers `None`, which is the only honest thing a stale frame can say.
+    ///
+    /// **Still the shells and not the pointer's pane**: the anchor outlives the
+    /// pointer by the 500ms grace, so a pointer that has left the *pane* leaves a
+    /// band still wearing its ground for half a second, and marks that went
+    /// looking for the pointer's own pane would have vanished a beat before the
+    /// floor they stand beside. The pointer still decides which mark is *lit*,
+    /// which is the only question it is the authority on.
+    fn math_tool_placement(&self) -> Option<bt_render::MathToolBoxes> {
+        let hovered = self.window.math_hover_anchor.as_ref()?;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let (seat, mut boxes) = self.sessions.iter().find_map(|(seat, leaf)| {
+            let frame = leaf.last_presented_frame.as_ref()?;
+            Some((*seat, self.window.renderer.math_tool_boxes(frame, hovered)?))
+        })?;
+        let body = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)?;
+        let (dx, dy) = (body.x as f32, body.y as f32);
+        for rect in [&mut boxes.block, &mut boxes.source, &mut boxes.copy] {
+            *rect = [rect[0] + dx, rect[1] + dy, rect[2] + dx, rect[3] + dy];
+        }
+        Some(boxes)
+    }
+
+    /// **The frames the band's marks still owe the glass**, and none once both
+    /// their journeys have landed.
+    ///
+    /// The arrival, the exit and a move to new geometry are one question here
+    /// because they are one question in
+    /// [`formula_tools::FormulaToolFollow::owes_frames`]: a journey owes frames
+    /// exactly while it is travelling, and under `Motion::Reduced` no journey
+    /// ever is. **No span is spelled here** — the ninety milliseconds belongs to
+    /// [`tooltip::TOOLTIP_FADE`] and is read where the journey is, which is what
+    /// keeps a second copy of it from appearing on the day it changes.
+    ///
+    /// A band standing still under a still pointer costs no wake-ups at all,
     /// which is the silence §7.29 promises every other hover in this window.
     fn math_tools_owe_frames(&self, now: Instant) -> bool {
         self.window
-            .math_tools_since
-            .is_some_and(|since| now.saturating_duration_since(since) <= tooltip::TOOLTIP_FADE)
+            .math_tools
+            .as_ref()
+            .is_some_and(|follow| follow.owes_frames(now, self.app.motion))
     }
 
-    /// The instant the marks' last owed frame is due.
+    /// **The next frame a running journey is owed**, and nothing at all once
+    /// both have landed.
+    ///
+    /// The tip's own arrangement ([`Self::tooltip_deadline`]): a surface in
+    /// motion asks for the next frame rather than for the end of its span, so
+    /// the ninety milliseconds is *drawn* rather than merely begun and finished.
+    /// Until the owner's report of 2026-09-14 evening this asked for the end of
+    /// the fade, which on a still window is two frames of a fade and no middle.
     fn math_tools_deadline(&self, now: Instant) -> Option<Instant> {
-        let since = self.window.math_tools_since?;
         self.math_tools_owe_frames(now)
-            .then_some(since + tooltip::TOOLTIP_FADE)
+            .then(|| now + STRIP_ANIMATION_FRAME)
     }
 
-    /// **Draw the band's marks from the picture that lit the band**, and keep
-    /// paying the fade's frames until it lands.
+    /// **Draw the band's marks from the picture in hand**, and keep paying their
+    /// journeys' frames until both land.
     ///
     /// The tip's own advancer, on the tip's own clock
     /// ([`Self::advance_tooltip_if_due`]) — and it is here for the reason that
@@ -84941,8 +85055,16 @@ impl Runtime<'_> {
     /// that keeps looking, or it is drawn once, from whatever was in hand, and
     /// left there. `refresh_overlay` answers whether the marks actually moved,
     /// so a span in which nothing changed costs a rebuild and no present.
+    ///
+    /// **Two reasons to pay and only one of them is a clock.** The sync is asked
+    /// first and unconditionally, because the thing it notices — the block
+    /// changing shape under a pointer that never moved, or the pointer arriving
+    /// on one of the marks — starts no clock of its own and would otherwise wait
+    /// for the band to be left and entered again (owner's report 2026-09-14
+    /// evening).
     fn advance_math_tools_if_due(&mut self, now: Instant) -> Result<()> {
-        if self.math_tools_owe_frames(now) && self.refresh_overlay() {
+        let moved = self.sync_math_tools(now);
+        if (moved || self.math_tools_owe_frames(now)) && self.refresh_overlay() {
             self.present_chrome_change()?;
         }
         Ok(())
@@ -84959,71 +85081,38 @@ impl Runtime<'_> {
         })
     }
 
-    /// **The hovered formula band's two marks**, as one overlay layer.
+    /// **The band's two marks, wherever they have got to**, as one overlay
+    /// layer.
     ///
-    /// The renderer answers where they stand, in the pane body's own pixels,
-    /// through exactly the arithmetic [`Self::math_hit`] is answered from — so
-    /// the box you can press and the box you can see are one box by construction
-    /// rather than by two call sites agreeing. This moves them to that body's
-    /// corner and hands them to [`formula_tools::sprites`].
+    /// Nothing is decided here any more (owner's report 2026-09-14 evening).
+    /// Where the marks stand, how solid they are and which of them is lit are
+    /// three answers [`WindowRuntime::math_tools`] is already holding, because
+    /// all three can be *between* two values on the frame this is asked for: a
+    /// mark on its way to the geometry a toggle just published, a pair coming up
+    /// or going out, an ink that changed when the pointer crossed onto one of
+    /// them. This lane draws what that says and does no looking of its own —
+    /// which is also what makes the whole of the ruling's motion clause testable
+    /// without a GPU.
     ///
-    /// **The band is named, and it is named by the same anchor that lit it**
-    /// (owner's report 2026-09-14, T-MATH-TOOLS-SEAT).
-    /// [`WindowRuntime::math_hover_anchor`]
-    /// is the block the pointer resolved and the block `Self::set_hovered_math`
-    /// wrote into the shell, so it is the block wearing the ground; handing it to
-    /// the renderer is what makes the floor and the marks one answer.
-    ///
-    /// This used to ask for *whichever* block in the frame was carrying
-    /// `toolbar_visible`, and that is a different question, because **the frame
-    /// read here is not the frame on the glass**: a pane keeps the picture it
-    /// last presented, and the overlay is composed from that copy while the seat
-    /// under it is drawn from the projection of the gesture that has just
-    /// happened. One frame apart, "whichever block is lit" is the block that was
-    /// lit *before* the pointer moved — which is the owner's screenshot exactly:
-    /// the ground under the matrix and the two marks beside the Gaussian above
-    /// it. Named, the stale frame simply has no lit placement under that name and
-    /// draws nothing for a frame, which is the only honest thing a stale frame
-    /// can say.
-    ///
-    /// **Still the shells and not the pointer's pane**: the anchor outlives the
-    /// pointer by the 500ms grace above, so a pointer that has left the *pane*
-    /// leaves a band still wearing its ground for half a second, and marks that
-    /// went looking for the pointer's own pane would have vanished a beat before
-    /// the floor they stand beside. The pointer still decides which mark is
-    /// *lit*, which is the only question it is the authority on.
+    /// The boxes it is handed are still the renderer's own, through exactly the
+    /// arithmetic [`Self::math_hit`] is answered from ([`Self::math_tool_placement`]),
+    /// so the box you can press and the box you can see are one box by
+    /// construction rather than by two call sites agreeing.
     ///
     /// One layer or none: there is one pointer, so at most one band.
     fn formula_tool_layers(&self, now: Instant) -> Vec<marks::OverlayLayer> {
-        let opacity = self.math_tools_opacity(now);
+        let Some(follow) = self.window.math_tools.as_ref() else {
+            return Vec::new();
+        };
+        let motion = self.app.motion;
+        let opacity = follow.opacity(now, motion);
         if opacity <= 0.0 {
             return Vec::new();
         }
-        let Some(hovered) = self.window.math_hover_anchor.as_ref() else {
-            return Vec::new();
-        };
+        let boxes = follow.placed(now, motion);
         let scale = self.window.renderer.metrics().scale_factor as f32;
-        let Some((seat, mut boxes)) = self.sessions.iter().find_map(|(seat, leaf)| {
-            let frame = leaf.last_presented_frame.as_ref()?;
-            Some((*seat, self.window.renderer.math_tool_boxes(frame, hovered)?))
-        }) else {
-            return Vec::new();
-        };
-        let Some(body) = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)
-        else {
-            return Vec::new();
-        };
-        let (dx, dy) = (body.x as f32, body.y as f32);
-        for rect in [&mut boxes.block, &mut boxes.source, &mut boxes.copy] {
-            *rect = [rect[0] + dx, rect[1] + dy, rect[2] + dx, rect[3] + dy];
-        }
-        let hit = self.math_hit();
         let state = formula_tools::FormulaToolState {
-            hovered: hit.as_ref().and_then(|hit| match hit.target {
-                MathHitTarget::ToggleSource => Some(formula_tools::FormulaTool::ToggleSource),
-                MathHitTarget::CopyLatex => Some(formula_tools::FormulaTool::CopyLatex),
-                MathHitTarget::Block | MathHitTarget::Failure => None,
-            }),
+            hovered: follow.hovered(),
             pressed: self
                 .window
                 .math_tool_pressed
@@ -85073,25 +85162,30 @@ impl Runtime<'_> {
         }
         self.window.math_hover_clear_at = None;
         self.window.math_hover_anchor = None;
-        // **The marks leave with the band, and they leave at once.**
+        // **The marks leave with the band, and they leave over the ninety
+        // milliseconds they arrived on** (owner's report 2026-09-14 evening).
         //
         // The 500ms above is the grace — the mock-up's own `transition-delay:
         // .5s` on leaving, which forgives a pointer clipping the corner of a
-        // mark on its way to it — and when it runs out the ground and the marks
-        // go together, in one frame, with no fade out. That asymmetry is the
-        // glance card's ruling read here (owner, 2026-09-13 ⑭): a fade in is ink
-        // arriving, and there is nothing for a fade out to say that the surface
-        // being gone does not say better.
-        self.window.math_tools_since = None;
+        // mark on its way to it — and it is untouched. What the report revised is
+        // what happens when it runs out: §7.1.5p ② spent the glance card's
+        // asymmetry here (a fade in and no fade out) and the owner asked for the
+        // pair, so the ground still goes with the pane's next picture and the two
+        // marks fade where they stand. `math_tools` therefore outlives
+        // `math_hover_anchor` by exactly that span, and the sync above — which
+        // reads the anchor, not this door — is what finally drops it.
+        let motion = self.app.motion;
+        if let Some(follow) = self.window.math_tools.as_mut() {
+            follow.leave(now, motion);
+        }
         self.window.math_tool_pressed = None;
         if self.set_hovered_math(None) {
             self.repaint_hovered_pane()?;
         }
-        // And the marks go in the same breath. The ground above leaves with the
-        // pane's next picture; the marks are an overlay layer and leave only when
-        // the overlay is rebuilt, and [`Self::advance_math_tools_if_due`] cannot
-        // do it — the clock it reads has just been unset. `hide_tooltip`'s own
-        // idiom, for a surface that goes down the same way.
+        // And the first frame of that fade goes up in the same breath: the marks
+        // are an overlay layer, so nothing is on the glass until the overlay is
+        // rebuilt, and under `Motion::Reduced` this frame is the whole exit.
+        // `hide_tooltip`'s own idiom, for a surface that goes down the same way.
         if self.refresh_overlay() {
             self.present_chrome_change()?;
         }
@@ -100141,9 +100235,11 @@ impl Runtime<'_> {
             self.window.hyperlink_hover.show_at,
             self.window.peek_hover.show_at,
             self.window.math_hover_clear_at,
-            // The band's marks while their ninety milliseconds is still
-            // climbing, and nothing once it has landed — a pointer resting on a
-            // formula costs no wake-ups at all (owner's ruling 2026-09-14 ②).
+            // The band's marks while either of their journeys is still running —
+            // the fade in, the fade out, or a move to the boxes a block that
+            // changed shape has just published — and nothing once both have
+            // landed: a pointer resting on a formula costs no wake-ups at all
+            // (owner's ruling 2026-09-14 ②, and its report that evening).
             self.math_tools_deadline(now),
             // And the copy tick's one wake-up: the instant it is due to turn
             // back into a pair of sheets. One entry because there is one
@@ -102998,6 +103094,13 @@ mod file_peek_fade_tests {
 /// again once the picture has landed. None of it has a value to assert without a
 /// surface, so it is read off this file as text, for [`file_peek_fade_tests`]'
 /// reason and by its reader.
+///
+/// **Extended by the owner's report of that evening** (T-MATH-TOOLS-FOLLOW,
+/// §7.1.5p ⑦): looking again is owed on every turn and not only while a clock is
+/// running, because a block that changes shape starts no clock; and the marks'
+/// three motions — arriving, travelling to new geometry, leaving — are a value
+/// (`formula_tools::FormulaToolFollow`) and are pinned as one, beside the
+/// drawing, without a surface.
 #[cfg(test)]
 mod formula_tool_seat_tests {
     /// This file, read as text.
@@ -103030,7 +103133,7 @@ mod formula_tool_seat_tests {
     /// *before* the pointer moved. That is the owner's screenshot.
     #[test]
     fn the_marks_are_placed_under_the_hovered_bands_own_name() {
-        let placed = body(&["    fn formula_tool", "_layers(&self, now: Instant)"].concat());
+        let placed = body(&["    fn math_tool", "_placement(&self)"].concat());
         assert!(
             placed.contains("self.window.math_hover_anchor.as_ref()"),
             "the band is named, and the name is the one the ground was laid under"
@@ -103038,6 +103141,22 @@ mod formula_tool_seat_tests {
         assert!(
             placed.contains("math_tool_boxes(frame, hovered)"),
             "and the name is what the boxes are asked for"
+        );
+        assert!(
+            placed.contains("leaf.last_presented_frame.as_ref()"),
+            "asked of the picture the pane has actually shown"
+        );
+        // And the lane that draws them asks nothing of the frame at all: it draws
+        // what the follow says, which is what lets a mark be *between* two places
+        // on the frame it is asked for (owner's report 2026-09-14 evening).
+        let lane = body(&["    fn formula_tool", "_layers(&self, now: Instant)"].concat());
+        assert!(
+            lane.contains("self.window.math_tools.as_ref()"),
+            "the overlay lane draws the marks this window is holding"
+        );
+        assert!(
+            !lane.contains("math_tool_boxes("),
+            "and does no placing of its own:\n{lane}"
         );
     }
 
@@ -103053,9 +103172,12 @@ mod formula_tool_seat_tests {
     /// started.
     ///
     /// MUTATIONS: drop the call from `turn` and the marks never arrive at all —
-    /// the owner's headline. Gate the advancer on `hover_fade_owes_frames`
-    /// alone and `Motion::Reduced`, which owes no fade frame, never gets its
-    /// second look.
+    /// the owner's headline. Put the sync behind the debt (`if
+    /// self.math_tools_owe_frames(now) && self.sync_math_tools(now)`) and the
+    /// evening's report comes straight back: once the fade has landed nothing
+    /// looks again, so a block that changes shape under a still pointer keeps
+    /// its marks beside geometry that is not there any more — and
+    /// `Motion::Reduced`, which owes no frame at all, would never look twice.
     #[test]
     fn the_bands_own_turn_draws_the_marks_from_the_picture_that_lit_it() {
         assert!(
@@ -103071,48 +103193,109 @@ mod formula_tool_seat_tests {
             ]
             .concat(),
         );
+        let sync = advancer
+            .find("self.sync_math_tools(now)")
+            .expect("every turn reads the picture in hand against the marks on the glass");
+        let debt = advancer
+            .find("self.math_tools_owe_frames(now)")
+            .expect("and pays the journeys that are still running");
         assert!(
-            advancer.contains("self.math_tools_owe_frames(now)"),
-            "and it pays only while the frames are owed"
+            sync < debt,
+            "the look is unconditional and the clock is what is conditional:\n{advancer}"
         );
         assert!(
             advancer.contains("self.refresh_overlay()"),
             "and what it pays with is the overlay, rebuilt from the picture in hand"
         );
 
+        // The sync is where the three answers meet — the picture's boxes, the
+        // pointer's mark, and what the marks already on the glass should do
+        // about them.
+        let syncing = body(&["    fn sync_math", "_tools(&mut self, now: Instant)"].concat());
+        for asked in [
+            "self.math_tool_placement()",
+            "self.hovered_math_tool()",
+            "follow.follow(",
+            "follow.leave(",
+        ] {
+            assert!(syncing.contains(asked), "the sync asks {asked}:\n{syncing}");
+        }
+        // And a band the pointer has left is never re-read from a picture that
+        // has not caught up: that would turn the exit fade round and light the
+        // marks again over a band nobody is pointing at.
+        let leave = syncing
+            .find("self.window.math_hover_anchor.is_none()")
+            .expect("the sync asks first whether the band has been left at all");
+        assert!(
+            leave
+                < syncing
+                    .find("self.math_tool_placement()")
+                    .expect("and only then where the band is"),
+            "a left band is read from the anchor and never from the picture:\n{syncing}"
+        );
+
+        // The debt itself keeps no span: the ninety milliseconds belongs to the
+        // journey, which reads the tip's own.
         let owed = body(&["    fn math_tools", "_owe_frames(&self, now: Instant)"].concat());
         assert!(
-            owed.contains("tooltip::TOOLTIP_FADE"),
-            "the span is the tip's own, not a number of this method's"
+            owed.contains("follow.owes_frames(now, self.app.motion)"),
+            "the journeys say whether they are still running"
         );
         assert!(
-            !owed.contains("hover_fade_owes_frames"),
-            "and it is the whole span, so reduced motion gets its second look too"
+            !owed.contains("TOOLTIP_FADE"),
+            "and the span is not spelled a second time here"
+        );
+
+        // And what a running journey asks the loop for is the **next frame**,
+        // the tip's own arrangement — asking for the end of the span instead
+        // draws two frames of a ninety-millisecond motion and no middle.
+        let wake = body(&["    fn math_tools", "_deadline(&self, now: Instant)"].concat());
+        assert!(
+            wake.contains("now + STRIP_ANIMATION_FRAME"),
+            "a moving surface wakes for its next frame:\n{wake}"
+        );
+        assert!(
+            wake.contains("self.math_tools_owe_frames(now)"),
+            "and only while it is moving"
         );
     }
 
-    /// RED — **the marks leave when the band does.**
+    /// RED — **the marks leave when the band does, over the span they arrived
+    /// on** (owner's report 2026-09-14 evening ③).
     ///
-    /// The 500ms grace ends with `math_tools_since` unset, and an advancer that
-    /// reads that clock can no longer take anything down — so the door that
-    /// unsets it takes the marks down itself, which is `hide_tooltip`'s own
-    /// idiom for a surface that goes at once.
+    /// The 500ms grace is where it always was; what happens at the end of it is
+    /// the half of §7.1.5p ② that report revised. The door that clears the
+    /// anchor starts the exit itself and puts its first frame up in the same
+    /// breath, because the marks are an overlay layer and nothing is on the
+    /// glass until the overlay is rebuilt — `hide_tooltip`'s own idiom, for a
+    /// surface that goes down the same way.
     ///
-    /// MUTATION: leave the overlay alone here and a band the pointer left half a
-    /// second ago keeps its two marks on the glass for as long as nothing else
-    /// happens to rebuild the overlay.
+    /// MUTATIONS: leave the overlay alone here and a band the pointer left half
+    /// a second ago keeps its two marks on the glass for as long as nothing else
+    /// happens to rebuild the overlay. Drop the follow here instead of sending
+    /// it out — `self.window.math_tools = None` — and the exit is a blink again,
+    /// which is the thing the owner reported.
     #[test]
     fn the_grace_running_out_takes_the_marks_off_the_glass() {
+        let door = body(
+            &[
+                "    fn clear_math_hover",
+                "_if_due(&mut self, now: Instant)",
+            ]
+            .concat(),
+        );
         assert!(
-            body(
-                &[
-                    "    fn clear_math_hover",
-                    "_if_due(&mut self, now: Instant)"
-                ]
-                .concat()
-            )
-            .contains("self.refresh_overlay()"),
+            door.contains("self.refresh_overlay()"),
             "the band and its marks go together"
+        );
+        assert!(
+            door.contains("follow.leave(now, motion)"),
+            "and the marks go out over the ninety milliseconds they came in on:\n{door}"
+        );
+        assert!(
+            !door.contains("self.window.math_tools = None"),
+            "the follow is not dropped here — the exit it has just begun is what \
+             drops it, a span later:\n{door}"
         );
     }
 }

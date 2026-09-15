@@ -19,17 +19,32 @@
 //! drift [`crate::marks`]'s own header exists to forbid.
 //!
 //! **Nothing in this module decides where a mark goes** — the renderer does,
-//! from the band's own geometry — and nothing in it holds a clock. It is handed
-//! the boxes, what the pointer is doing, and one opacity, and it answers with
-//! sprites; that is the same division `seats.rs` keeps with the solver, and it
-//! is what lets every clause of the ruling be pinned without a GPU.
+//! from the band's own geometry. [`sprites`] is handed the boxes, what the
+//! pointer is doing, and one opacity, and it answers with sprites; that is the
+//! same division `seats.rs` keeps with the solver, and it is what lets every
+//! clause of the ruling be pinned without a GPU.
+//!
+//! **What the module does hold, since the owner's report of the evening of
+//! 2026-09-14 (T-MATH-TOOLS-FOLLOW), is the marks' own two clocks**
+//! ([`FormulaToolFollow`]). The renderer still answers *where the boxes are on
+//! this picture*; what nobody answered was what the marks should do when that
+//! answer changes under a pointer that has not moved — a press on `‹›` makes the
+//! block taller, a re-wrap moves its rows, a scale change resizes everything —
+//! and "be re-struck somewhere else" is not an answer a window this size is
+//! allowed to give. The follow is still nothing but arithmetic over instants,
+//! for the same reason the drawing is: every clause of this half is pinned
+//! without a GPU too.
+
+use std::time::Instant;
 
 use bt_render::{ChromePalette, MATH_TOOL_PILL_RADIUS_LOGICAL_PX, MathToolBoxes};
-use bt_viewport::MathBlockDisplay;
+use bt_viewport::{MathBlockAnchor, MathBlockDisplay};
 
 use crate::{
+    Motion,
     icons::MarkSlot,
     marks::{ChromeMark, ChromeSprite},
+    tooltip,
 };
 
 /// Which of a band's two marks a gesture is on.
@@ -163,6 +178,251 @@ pub fn sprites(
     sprites
 }
 
+/// **One value on its way to another, on the window's own fast ease.**
+///
+/// The curve, the span and the reduced-motion answer are all the tip's
+/// ([`crate::tooltip::hover_fade_opacity`]) — read here as *how far along a
+/// journey is* rather than as ink, which is the whole of what the ruling's "move
+/// with the same short ease" is as arithmetic. One function and not a second
+/// curve beside it: a mark that slides to a new place must not end up sounding
+/// different from the fade that put it there, and stillness is honoured once,
+/// where that function already honours it.
+///
+/// **A journey is retargeted, never restarted from where it was going.**
+/// [`Ease::retarget`] takes the value the ease is showing *at this instant* as
+/// the new start, so a band whose geometry moves twice inside ninety
+/// milliseconds — a toggle that re-wraps and then settles — travels from where
+/// the marks actually are rather than snapping back to where the first journey
+/// began.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Ease<T> {
+    from: T,
+    to: T,
+    since: Instant,
+}
+
+impl<T: Lerp> Ease<T> {
+    /// A value that is not going anywhere.
+    fn settled(value: T, now: Instant) -> Self {
+        Self {
+            from: value,
+            to: value,
+            since: now,
+        }
+    }
+
+    /// Where the journey is at `now` — and **exactly** its end once it has
+    /// landed, which under [`Motion::Reduced`] is the frame it began.
+    ///
+    /// The exactness is the point rather than a nicety: an eased value that
+    /// stops at 0.9997 of its way is a mark parked a fraction of a pixel off its
+    /// box, and an opacity that never quite reaches full, for ever, on a band
+    /// nobody is touching any more.
+    fn at(self, now: Instant, motion: Motion) -> T {
+        let elapsed = now.saturating_duration_since(self.since);
+        if !tooltip::hover_fade_owes_frames(elapsed, motion) {
+            return self.to;
+        }
+        self.from
+            .lerp(self.to, tooltip::hover_fade_opacity(elapsed, motion))
+    }
+
+    /// Send the value somewhere else, from wherever it is now. `false` when it
+    /// was already going there, which is what keeps a still band from asking the
+    /// glass for anything.
+    fn retarget(&mut self, to: T, now: Instant, motion: Motion) -> bool {
+        if self.to == to {
+            return false;
+        }
+        *self = Self {
+            from: self.at(now, motion),
+            to,
+            since: now,
+        };
+        true
+    }
+
+    /// Whether this journey still owes the glass a frame.
+    fn owes_frames(self, now: Instant, motion: Motion) -> bool {
+        self.from != self.to
+            && tooltip::hover_fade_owes_frames(now.saturating_duration_since(self.since), motion)
+    }
+}
+
+/// What it takes to be carried by an [`Ease`]: a value with points in between.
+///
+/// Two implementations, and one of them derives the other — a number, and any
+/// fixed-size array of them, which is how a box (`[f32; 4]`) and a whole
+/// placement (`[[f32; 4]; 3]`) travel without either of them being written out.
+trait Lerp: Copy + PartialEq {
+    fn lerp(self, to: Self, t: f32) -> Self;
+}
+
+impl Lerp for f32 {
+    fn lerp(self, to: Self, t: f32) -> Self {
+        self + (to - self) * t
+    }
+}
+
+impl<T: Lerp, const N: usize> Lerp for [T; N] {
+    fn lerp(self, to: Self, t: f32) -> Self {
+        std::array::from_fn(|index| self[index].lerp(to[index], t))
+    }
+}
+
+/// **The hovered band's marks as something that arrives, follows and leaves**
+/// (owner's report 2026-09-14 evening, T-MATH-TOOLS-FOLLOW).
+///
+/// Everything above this is a function of the picture in hand; this is the one
+/// thing in the module that remembers, and it exists because the report's three
+/// clauses are about *change* rather than about a picture: which mark the
+/// pointer is on, where the band's boxes went when the block changed shape, and
+/// how long each of those takes to become true on the glass.
+///
+/// It holds two journeys and no rules of its own. The opacity's is the arrival
+/// and the departure. The placement's is the block changing shape underneath a
+/// pointer that never moved — a toggle to source, a resize that re-wraps, a
+/// scale change — and the marks *travel* to the new boxes rather than being
+/// re-struck in them. Both are an [`Ease`], so both are the tip's ninety
+/// milliseconds and both stand down under [`Motion::Reduced`].
+///
+/// **The band's identity is `MathBlockAnchor::same_block`'s**, which is the
+/// identity the hover sweep and the renderer's own placement lookup already key
+/// on (§7.1.5p ⑥): a block whose rows a fold or a re-wrap has moved is the same
+/// block, and that is precisely the case this type exists to travel rather than
+/// to re-place. A *different* block is a different arrival, fade and all.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FormulaToolFollow {
+    /// The band these marks belong to.
+    anchor: MathBlockAnchor,
+    /// The face it is wearing, which decides whether the first mark is `#i-code`
+    /// or `#i-eye`. It flips with the geometry a toggle changes, in the same
+    /// breath, because the mark names the view the press leads to.
+    display: MathBlockDisplay,
+    /// `[the band, the source mark's box, the copy mark's box]`, in the
+    /// surface's own pixels.
+    place: Ease<[[f32; 4]; 3]>,
+    /// How solid they are drawn: `0 -> 1` on arrival, `-> 0` on leaving.
+    opacity: Ease<f32>,
+    /// The mark under the pointer, if it is on one.
+    hovered: Option<FormulaTool>,
+}
+
+impl FormulaToolFollow {
+    /// Marks arriving beside a band: placed where the picture says, coming up
+    /// from nothing.
+    #[must_use]
+    pub fn arriving(boxes: &MathToolBoxes, hovered: Option<FormulaTool>, now: Instant) -> Self {
+        Self {
+            anchor: boxes.anchor.clone(),
+            display: boxes.display,
+            place: Ease::settled([boxes.block, boxes.source, boxes.copy], now),
+            opacity: Ease {
+                from: 0.0,
+                to: 1.0,
+                since: now,
+            },
+            hovered,
+        }
+    }
+
+    /// **The picture in hand, read against the marks on the glass.**
+    ///
+    /// Returns whether anything the overlay draws has changed — a new target for
+    /// either journey, a different face, or a different mark under the pointer —
+    /// so a band standing still under a still pointer asks for nothing at all.
+    ///
+    /// A picture of a *different* block is not a move but an arrival: the marks
+    /// come up beside it the way they came up beside the first one, which is the
+    /// reading §7.1.5p ② already gave crossing from one formula to the next.
+    pub fn follow(
+        &mut self,
+        boxes: &MathToolBoxes,
+        hovered: Option<FormulaTool>,
+        now: Instant,
+        motion: Motion,
+    ) -> bool {
+        if !self.anchor.same_block(&boxes.anchor) {
+            *self = Self::arriving(boxes, hovered, now);
+            return true;
+        }
+        // Kept as the picture spells it: `same_block` is the identity, and the
+        // inline run inside an anchor belongs to the frame rather than to the
+        // block.
+        self.anchor = boxes.anchor.clone();
+        let mut changed = self
+            .place
+            .retarget([boxes.block, boxes.source, boxes.copy], now, motion);
+        // A band the pointer came back to before its exit had finished turns
+        // round from wherever it had faded to, rather than starting again at
+        // nothing.
+        changed |= self.opacity.retarget(1.0, now, motion);
+        if self.display != boxes.display {
+            self.display = boxes.display;
+            changed = true;
+        }
+        if self.hovered != hovered {
+            self.hovered = hovered;
+            changed = true;
+        }
+        changed
+    }
+
+    /// The band is not hovered any more: the marks go out over the same span.
+    ///
+    /// **This is the half of §7.1.5p ② the owner revised on the evening of
+    /// 2026-09-14.** That clause spent the glance card's asymmetry here — a fade
+    /// in and no fade out — and the revision is narrow: the 500 ms grace is
+    /// untouched, the band's own floor still leaves with the picture that stops
+    /// lighting it, and what fades is the two marks, over the ninety
+    /// milliseconds they arrived on.
+    pub fn leave(&mut self, now: Instant, motion: Motion) -> bool {
+        self.opacity.retarget(0.0, now, motion)
+    }
+
+    /// Whether there is nothing left to draw — the exit has landed, and under
+    /// stillness that is the frame it was asked for.
+    #[must_use]
+    pub fn gone(&self, now: Instant, motion: Motion) -> bool {
+        self.opacity.to == 0.0 && !self.opacity.owes_frames(now, motion)
+    }
+
+    /// The mark the pointer is on, as the drawing half is told it.
+    #[must_use]
+    pub fn hovered(&self) -> Option<FormulaTool> {
+        self.hovered
+    }
+
+    /// How solid the marks are drawn this frame.
+    #[must_use]
+    pub fn opacity(&self, now: Instant, motion: Motion) -> f32 {
+        self.opacity.at(now, motion)
+    }
+
+    /// Where they stand this frame — the band's own boxes when nothing is
+    /// moving, and a point on the way when the block has just changed shape.
+    #[must_use]
+    pub fn placed(&self, now: Instant, motion: Motion) -> MathToolBoxes {
+        let [block, source, copy] = self.place.at(now, motion);
+        MathToolBoxes {
+            anchor: self.anchor.clone(),
+            display: self.display,
+            block,
+            source,
+            copy,
+        }
+    }
+
+    /// **Whether either journey still owes the glass a frame**, which is also
+    /// the whole of what wakes the loop for this surface: a pointer resting on a
+    /// formula whose marks have arrived costs no wake-ups at all, and under
+    /// [`Motion::Reduced`] nothing here ever does.
+    #[must_use]
+    pub fn owes_frames(&self, now: Instant, motion: Motion) -> bool {
+        self.place.owes_frames(now, motion) || self.opacity.owes_frames(now, motion)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,6 +440,54 @@ mod tests {
             source: [200.0, 22.0, 224.0, 46.0],
             copy: [226.0, 22.0, 250.0, 46.0],
         }
+    }
+
+    /// **The same block after a press on `‹›`.** The source face is taller, so
+    /// the band's rows and the two boxes centred beside them have all moved —
+    /// and the anchor has not, which is exactly the case
+    /// [`MathBlockAnchor::same_block`] exists to answer and the case the marks
+    /// must *travel* rather than be re-struck in.
+    fn toggled(geometry: &MathToolBoxes) -> MathToolBoxes {
+        MathToolBoxes {
+            display: MathBlockDisplay::Source,
+            block: [40.0, 10.0, 200.0, 106.0],
+            source: [200.0, 46.0, 224.0, 70.0],
+            copy: [226.0, 46.0, 250.0, 70.0],
+            ..geometry.clone()
+        }
+    }
+
+    /// A different formula on the same screen.
+    fn another_band() -> MathToolBoxes {
+        MathToolBoxes {
+            anchor: bt_viewport::MathBlockAnchor::History {
+                run: None,
+                start: bt_transcript::TranscriptId(9),
+                end: bt_transcript::TranscriptId(9),
+            },
+            block: [40.0, 200.0, 200.0, 248.0],
+            source: [200.0, 212.0, 224.0, 236.0],
+            copy: [226.0, 212.0, 250.0, 236.0],
+            ..boxes(MathBlockDisplay::Rendered)
+        }
+    }
+
+    /// **What the overlay lane would put on the glass for this follow.**
+    ///
+    /// `Runtime::formula_tool_layers` with the window's own palette and scale
+    /// filled in — which is all of that method there is, since the day it stopped
+    /// deciding anything (owner's report 2026-09-14 evening).
+    fn drawn(follow: &FormulaToolFollow, now: Instant, motion: Motion) -> Vec<ChromeSprite> {
+        sprites(
+            &follow.placed(now, motion),
+            FormulaToolState {
+                hovered: follow.hovered(),
+                ..FormulaToolState::default()
+            },
+            &DARK_CHROME,
+            1.0,
+            follow.opacity(now, motion),
+        )
     }
 
     fn pill_of(sprites: &[ChromeSprite]) -> Option<ChromeSprite> {
@@ -541,6 +849,346 @@ mod tests {
         assert!(
             (mark.rect[2] - mark.rect[0]) > (small.rect[2] - small.rect[0]),
             "a mark struck without the scale is the same size on a retina display"
+        );
+    }
+
+    /// RED — **the mark under the pointer is lit, and the one beside it is
+    /// not** (owner's report 2026-09-14 evening ①).
+    ///
+    /// The owner's sentence was that the pointer over `‹›` or `⧉` changes
+    /// nothing at all, and the ink was never the fault: [`sprites`] has drawn a
+    /// pill and the risen glyph for a hovered mark since the ruling that made
+    /// these house marks. What was missing is the **state** — nobody kept which
+    /// mark the pointer was on, so nobody could notice it changing, so the glass
+    /// was never asked for a new picture and the band kept the one composed
+    /// while the pointer was still out on the formula. This is that fact as
+    /// arithmetic: crossing onto a mark is a *change*, and a change is what the
+    /// overlay is rebuilt for.
+    ///
+    /// MUTATIONS: let [`FormulaToolFollow::follow`] ignore the mark it is handed
+    /// and the first assertion fails — which is the build the owner was looking
+    /// at. Answer `false` from it when only the hover moved and the second
+    /// fails: the state would be right and the glass would never hear about it.
+    /// Give the resting and the lit mark one ink and the last pair fails.
+    #[test]
+    fn the_mark_under_the_pointer_is_lit_and_the_one_beside_it_is_not() {
+        let now = Instant::now();
+        let geometry = boxes(MathBlockDisplay::Rendered);
+        let mut follow = FormulaToolFollow::arriving(&geometry, None, now);
+        let settled = now + tooltip::TOOLTIP_FADE;
+
+        // At rest — the band is hovered, the marks are up, the pointer is on
+        // neither of them — there is no pill and the glyphs wear the quiet ink.
+        let resting = drawn(&follow, settled, Motion::Full);
+        assert!(pill_of(&resting).is_none(), "{resting:?}");
+
+        // ① The pointer crosses onto the source mark, and ② the glass is owed a
+        //    new picture for it.
+        assert!(
+            follow.follow(
+                &geometry,
+                Some(FormulaTool::ToggleSource),
+                settled,
+                Motion::Full
+            ),
+            "a pointer arriving on a mark is a change the overlay has to be rebuilt for"
+        );
+        assert_eq!(follow.hovered(), Some(FormulaTool::ToggleSource));
+
+        // ③ It stands in the strip's own control-pill wash, in its own box.
+        let lit = drawn(&follow, settled, Motion::Full);
+        let pill = pill_of(&lit).expect("a hovered mark stands in a pill");
+        assert_eq!(pill.rect, geometry.source);
+        assert_eq!(pill.color, DARK_CHROME.formula_tool_pill);
+
+        // ④ And its ink has risen out of the resting one, while the mark beside
+        //    it has not moved at all.
+        let before = mark_of(&resting, ChromeMark::Code).expect("the source mark at rest");
+        let after = mark_of(&lit, ChromeMark::Code).expect("the source mark, lit");
+        assert_ne!(after.color, before.color);
+        assert_eq!(after.color, DARK_CHROME.formula_tool_glyph_on_pill);
+        assert_eq!(
+            mark_of(&lit, ChromeMark::Copy)
+                .expect("the copy mark")
+                .color,
+            DARK_CHROME.formula_tool_glyph
+        );
+
+        // ⑤ Leaving the mark for the band is a change too, and puts it back.
+        assert!(follow.follow(&geometry, None, settled, Motion::Full));
+        assert!(pill_of(&drawn(&follow, settled, Motion::Full)).is_none());
+
+        // ⑥ And a pointer that has not moved asks for nothing: a band standing
+        //    still costs the glass no frames at all.
+        assert!(!follow.follow(&geometry, None, settled, Motion::Full));
+        assert!(!follow.owes_frames(settled, Motion::Full));
+    }
+
+    /// RED — **a block that changed shape takes its marks with it, on the next
+    /// frame and with no pointer move** (owner's report 2026-09-14 evening ②).
+    ///
+    /// The owner's case is a press on `‹›`: the block becomes its source, which
+    /// is taller, and the two marks stayed beside the geometry that is not there
+    /// any more until the pointer left the band and came back. The "which block"
+    /// answer never changed — `same_block` says so, which is the point — only
+    /// its rows and pixels did, and the same is true of a resize that re-wraps
+    /// and of a scale change.
+    ///
+    /// MUTATIONS: place the marks once and keep the boxes — the follow answers
+    /// `false` here and the first assertion fails, which is the build the owner
+    /// reported. Compare anchors with `==` instead of `same_block` and the flip
+    /// reads as a *different* block: the marks would be re-struck with a fresh
+    /// fade instead of travelling, and ③ fails. Leave `display` where it was and
+    /// ② fails — the eye would go on offering source on a block already showing
+    /// it.
+    #[test]
+    fn a_block_that_changed_shape_takes_its_marks_with_it_with_no_pointer_move() {
+        use std::time::Duration;
+
+        let now = Instant::now();
+        let rendered = boxes(MathBlockDisplay::Rendered);
+        let mut follow = FormulaToolFollow::arriving(&rendered, None, now);
+        let settled = now + tooltip::TOOLTIP_FADE;
+        assert_eq!(follow.placed(settled, Motion::Full).source, rendered.source);
+
+        let source_face = toggled(&rendered);
+        assert!(
+            source_face.anchor.same_block(&rendered.anchor),
+            "a toggle changes the block's shape and not its identity"
+        );
+
+        // ① The very next frame the picture carries the new geometry, the marks
+        //    are owed a new place — with no pointer event of any kind.
+        assert!(
+            follow.follow(&source_face, None, settled, Motion::Full),
+            "the frame that publishes the new geometry is the frame the marks move on"
+        );
+
+        // ② And the first mark has already flipped: it names the view the press
+        //    leads to, and the press has happened.
+        let placed = follow.placed(settled, Motion::Full);
+        assert_eq!(marks(placed.display, false)[0], ChromeMark::Eye);
+
+        // ③ They travel rather than jump — somewhere in between at half the
+        //    span, and neither of the two ends.
+        let half = follow.placed(settled + tooltip::TOOLTIP_FADE / 2, Motion::Full);
+        for (moving, from, to) in [
+            (half.source, rendered.source, source_face.source),
+            (half.copy, rendered.copy, source_face.copy),
+        ] {
+            assert_ne!(moving, from, "a mark still at the old boxes has not moved");
+            assert_ne!(moving, to, "and one already at the new boxes has jumped");
+            assert!(
+                moving[1] > from[1] && moving[1] < to[1],
+                "{moving:?} is not on the way from {from:?} to {to:?}"
+            );
+        }
+
+        // ④ **No stale overlay survives the change.** By the end of the span the
+        //    marks are at the new boxes exactly, and they stay there.
+        for ms in [90, 200, 9_000] {
+            let landed = follow.placed(settled + Duration::from_millis(ms), Motion::Full);
+            assert_eq!(landed.source, source_face.source, "at {ms}ms");
+            assert_eq!(landed.copy, source_face.copy, "at {ms}ms");
+        }
+
+        // ⑤ The journey owes the glass its frames while it runs, and none after.
+        assert!(follow.owes_frames(settled, Motion::Full));
+        assert!(follow.owes_frames(settled + tooltip::TOOLTIP_FADE / 2, Motion::Full));
+        assert!(!follow.owes_frames(settled + tooltip::TOOLTIP_FADE, Motion::Full));
+    }
+
+    /// RED — **the marks fade in, travel and fade out on the tip's own ninety
+    /// milliseconds** (owner's report 2026-09-14 evening ③).
+    ///
+    /// Three motions and one span, which is the whole of the clause: the arrival
+    /// the ruling of that morning already gave them, the exit it explicitly
+    /// withheld — the owner asked for it this evening — and the move ② is about.
+    /// All three are read out of [`crate::tooltip::hover_fade_opacity`], so a
+    /// day that changes the window's fast tier changes them together, and this
+    /// module keeps no second copy of the curve or the number.
+    ///
+    /// MUTATIONS: take the marks down in one frame and the exit's climb-down
+    /// fails. Start the exit at full instead of from where the fade had got to
+    /// and the re-entry pin below fails. Spell a span of this module's own and
+    /// the last pair fails.
+    #[test]
+    fn the_marks_fade_in_travel_and_fade_out_on_the_tips_own_ninety_milliseconds() {
+        use std::time::Duration;
+
+        let now = Instant::now();
+        let geometry = boxes(MathBlockDisplay::Rendered);
+        let mut follow = FormulaToolFollow::arriving(&geometry, None, now);
+
+        // ① In: nothing on the frame they appear, climbing, full at ninety.
+        assert_eq!(follow.opacity(now, Motion::Full), 0.0);
+        assert!(drawn(&follow, now, Motion::Full).is_empty());
+        let at = |ms: u64| follow.opacity(now + Duration::from_millis(ms), Motion::Full);
+        for (earlier, later) in [(0, 20), (20, 45), (45, 70), (70, 89)] {
+            assert!(
+                at(earlier) < at(later),
+                "{earlier}ms is not below {later}ms"
+            );
+        }
+        assert_eq!(at(90), 1.0, "and it lands exactly");
+        assert!(follow.owes_frames(now, Motion::Full));
+        assert!(!follow.owes_frames(now + tooltip::TOOLTIP_FADE, Motion::Full));
+
+        // ② Out: the same span, climbing down, and only then is there nothing
+        //    left to draw.
+        let left = now + tooltip::TOOLTIP_FADE;
+        assert!(follow.leave(left, Motion::Full));
+        let going = |ms: u64| follow.opacity(left + Duration::from_millis(ms), Motion::Full);
+        for (earlier, later) in [(0, 20), (20, 45), (45, 70), (70, 89)] {
+            assert!(
+                going(earlier) > going(later),
+                "{earlier}ms is not above {later}ms"
+            );
+        }
+        assert_eq!(going(90), 0.0);
+        assert!(
+            !follow.gone(left, Motion::Full),
+            "it is still on its way out"
+        );
+        assert!(follow.gone(left + tooltip::TOOLTIP_FADE, Motion::Full));
+        assert!(follow.owes_frames(left, Motion::Full));
+        assert!(!follow.owes_frames(left + tooltip::TOOLTIP_FADE, Motion::Full));
+
+        // ③ And the fade reaches the glass rather than being a number nobody
+        //    draws with.
+        let halfway = drawn(&follow, left + tooltip::TOOLTIP_FADE / 2, Motion::Full);
+        assert!(!halfway.is_empty());
+        assert!(
+            halfway
+                .iter()
+                .all(|sprite| sprite.opacity > 0.0 && sprite.opacity < 1.0)
+        );
+
+        // ④ One span for all three, and it is the archive's fast rung — this
+        //    module spells neither the number nor the curve.
+        assert_eq!(tooltip::TOOLTIP_FADE, bt_render::MOTION_FAST);
+        // This module's own code, read as text — everything above the tests,
+        // whose own clocks are written in milliseconds on purpose. The marker is
+        // assembled rather than written out for the reason the house's other
+        // text pins assemble theirs: a literal here would be a second occurrence
+        // of the very string being searched for.
+        const SOURCE: &str = include_str!("formula_tools.rs");
+        let module = SOURCE
+            .split(&["#[cfg(", "test)]"].concat())
+            .next()
+            .unwrap_or(SOURCE);
+        for second_copy in [["from_", "millis"].concat(), ["cubic_", "bezier"].concat()] {
+            assert!(
+                !module.contains(&second_copy),
+                "the band's marks keep a {second_copy} of their own"
+            );
+        }
+    }
+
+    /// RED — **stillness settles the arrival, the move and the exit at once**
+    /// (owner's report 2026-09-14 evening ③, and the house rule under it).
+    ///
+    /// A reader who has asked the system for stillness gets the end state on the
+    /// frame each of the three is asked for, and a window that wakes up for none
+    /// of them. `Motion::Reduced` is honoured in exactly one place — the tip's
+    /// own pair of functions — so there is no arm here to forget.
+    ///
+    /// MUTATION: read the fade's progress without the motion setting (a plain
+    /// ratio of elapsed to span) and every one of these fails at once, which is
+    /// the whole reason the journey asks that function rather than the clock.
+    #[test]
+    fn stillness_settles_the_arrival_the_move_and_the_exit_at_once() {
+        let now = Instant::now();
+        let geometry = boxes(MathBlockDisplay::Rendered);
+        let mut follow = FormulaToolFollow::arriving(&geometry, None, now);
+
+        // ① There, solid, on the frame it appears.
+        assert_eq!(follow.opacity(now, Motion::Reduced), 1.0);
+        assert!(!follow.owes_frames(now, Motion::Reduced));
+
+        // ② And a block that changes shape simply *is* somewhere else.
+        let source_face = toggled(&geometry);
+        assert!(follow.follow(&source_face, None, now, Motion::Reduced));
+        assert_eq!(
+            follow.placed(now, Motion::Reduced).source,
+            source_face.source
+        );
+        assert_eq!(follow.placed(now, Motion::Reduced).copy, source_face.copy);
+        assert!(!follow.owes_frames(now, Motion::Reduced));
+
+        // ③ And leaving is the frame it is asked for, with nothing left to draw.
+        assert!(follow.leave(now, Motion::Reduced));
+        assert_eq!(follow.opacity(now, Motion::Reduced), 0.0);
+        assert!(drawn(&follow, now, Motion::Reduced).is_empty());
+        assert!(follow.gone(now, Motion::Reduced));
+    }
+
+    /// RED — **a band re-entered before its exit landed turns round where it
+    /// stands.**
+    ///
+    /// The 500ms grace forgives a pointer that clips the corner of a mark on its
+    /// way to it; this forgives the ninety milliseconds after that. A journey is
+    /// retargeted from the value it is showing, never restarted from the value it
+    /// was going to, which is what keeps a hand that hesitates on the edge of a
+    /// band from making the marks flash.
+    ///
+    /// MUTATION: restart the fade at `0.0` on the way back in — the marks blink
+    /// out and climb again under a pointer that never left the band.
+    #[test]
+    fn a_band_re_entered_before_its_exit_landed_turns_round_where_it_stands() {
+        let now = Instant::now();
+        let geometry = boxes(MathBlockDisplay::Rendered);
+        let mut follow = FormulaToolFollow::arriving(&geometry, None, now);
+        let settled = now + tooltip::TOOLTIP_FADE;
+        follow.leave(settled, Motion::Full);
+
+        let halfway = settled + tooltip::TOOLTIP_FADE / 2;
+        let caught = follow.opacity(halfway, Motion::Full);
+        assert!(caught > 0.0 && caught < 1.0, "{caught}");
+
+        assert!(follow.follow(&geometry, None, halfway, Motion::Full));
+        assert_eq!(
+            follow.opacity(halfway, Motion::Full),
+            caught,
+            "the way back begins from where the way out had got to"
+        );
+        assert_eq!(
+            follow.opacity(halfway + tooltip::TOOLTIP_FADE, Motion::Full),
+            1.0
+        );
+        assert!(!follow.gone(halfway + tooltip::TOOLTIP_FADE, Motion::Full));
+    }
+
+    /// RED — **a different block is an arrival, not a journey.**
+    ///
+    /// The one case that must *not* tween: marks sliding across the pane from
+    /// one formula to another would be this window claiming the two bands are
+    /// one surface. §7.1.5p ② already ruled on it for the fade — crossing
+    /// straight from one formula to the next starts the second band's own — and
+    /// the placement follows the same rule for the same reason.
+    ///
+    /// MUTATION: retarget on a different anchor and the marks crawl between two
+    /// blocks with the first band's ink half spent.
+    #[test]
+    fn a_different_block_is_an_arrival_and_not_a_journey() {
+        let now = Instant::now();
+        let geometry = boxes(MathBlockDisplay::Rendered);
+        let mut follow = FormulaToolFollow::arriving(&geometry, Some(FormulaTool::CopyLatex), now);
+        let settled = now + tooltip::TOOLTIP_FADE;
+
+        let next = another_band();
+        assert!(!next.anchor.same_block(&geometry.anchor));
+        assert!(follow.follow(&next, None, settled, Motion::Full));
+
+        // Placed beside the new band at once, and coming up from nothing there —
+        // no slide across the pane, and no ink inherited from the band left
+        // behind.
+        assert_eq!(follow.placed(settled, Motion::Full).source, next.source);
+        assert_eq!(follow.opacity(settled, Motion::Full), 0.0);
+        assert_eq!(follow.hovered(), None);
+        assert_eq!(
+            follow.opacity(settled + tooltip::TOOLTIP_FADE, Motion::Full),
+            1.0
         );
     }
 }
