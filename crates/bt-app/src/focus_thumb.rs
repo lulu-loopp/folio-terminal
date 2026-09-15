@@ -84,7 +84,8 @@
 //! re-project even though nothing behind it moved.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet, VecDeque},
     time::{Duration, Instant},
 };
 
@@ -1097,27 +1098,76 @@ pub(crate) fn transcript_tail(
     if rows == 0 {
         return (Vec::new(), false);
     }
-    let climb = card_climb(session, rows.saturating_add(skip));
-    let aimed = skip.min(climb.len().saturating_sub(rows));
-    let window = climb
+    // **The card keeps a card's worth of text and never the climb behind it**
+    // (T-CARD-WHEEL-LAG). The walk is bounded by `rows + skip` and the drawn
+    // window is the last `rows` lines of it — in both of the two cases, which is
+    // why one rolling buffer answers them:
+    //
+    // * the walk reached its bound, so the lines it last handed over are
+    //   `[skip, skip + rows)` — exactly the window the stored offset asks for;
+    // * the pane ran out first, so they are the last `rows` it had, which is the
+    //   window the offset gets once it is held down to what is reachable.
+    //
+    // The retired buffer is reused rather than dropped, so a card aimed a
+    // thousand lines above the tail allocates a card's worth of strings instead
+    // of a thousand — the whole of what a notch used to spend on a big card.
+    let mut window: VecDeque<String> = VecDeque::with_capacity(rows);
+    let walked = card_walk(session, rows.saturating_add(skip), |line| {
+        let mut slot = if window.len() == rows {
+            window
+                .pop_front()
+                .expect("a window holding a card's rows has a row to retire")
+        } else {
+            String::new()
+        };
+        slot.clear();
+        slot.push_str(line);
+        window.push_back(slot);
+    });
+    let drawn = window
         .into_iter()
-        .skip(aimed)
-        .take(rows)
         .rev()
         .map(|row| cut_to(row.trim_end(), columns))
         .collect();
-    (window, aimed > 0)
+    // `aimed > 0` said in the walk's own terms: the offset the draw settles on
+    // is `min(skip, walked - rows)`, and that is above zero exactly when the
+    // walk assembled more lines than the card can hold.
+    (drawn, walked > rows)
 }
 
-/// Bounded newest-first row assembly, shared by drawing and the wheel clamp.
-/// Rows retain the next59 live/staging/history join and blank-floor rules;
-/// their positions are plain distances from the tail, not registered sources.
-fn card_climb(session: &DualPlaneSession, wanted: usize) -> Vec<String> {
+/// Bounded newest-first row assembly, shared by drawing, the wheel clamp and the
+/// trace. Rows retain the next59 live/staging/history join and blank-floor
+/// rules; their positions are plain distances from the tail, not registered
+/// sources.
+///
+/// **The lines are handed over, not handed back** (T-CARD-WHEEL-LAG). Every
+/// caller of this walk wants one of two things — *how many lines are up there*
+/// or *the handful the card draws* — and only the second wants any text at all.
+/// A walk that built a `String` per line made the first question cost what the
+/// second does, and it made both cost the distance the card is aimed above the
+/// tail rather than the card's own height: a notch on a card aimed a thousand
+/// lines up paid for a thousand strings three times over (the entry clamp, the
+/// landing clamp and the draw), and history is the deep plane, so those strings
+/// were clones of lines this window already holds.
+///
+/// So `keep` is called with a **borrowed** line, once per assembled line and in
+/// the order the walk assembles them (newest first). Frozen history is handed
+/// over without a copy at all; only the live screen and the staging plane are
+/// built, because their rows are cells rather than text, and both are bounded by
+/// the grid. The return value is how many lines were assembled — the `len()` the
+/// old `Vec` reported, for exactly the callers that only ever read it.
+fn card_walk(session: &DualPlaneSession, wanted: usize, mut keep: impl FnMut(&str)) -> usize {
+    // Nobody asks for nothing — every caller's bound carries a card's rows — but
+    // a walk that was asked for nothing has nothing to look at, and saying so
+    // here is what keeps the bound test below on the far side of a kept line.
+    if wanted == 0 {
+        return 0;
+    }
     let (columns, rows) = session.live_dimensions();
     let live = (0..rows.get()).rev().filter_map(|row| {
         let captured = session.live_row(row)?;
         Some((
-            row_text(&captured),
+            Cow::Owned(row_text(&captured)),
             wrapped_at_a_width_the_pane_no_longer_has(
                 captured.continues,
                 captured.captured_columns,
@@ -1132,7 +1182,7 @@ fn card_climb(session: &DualPlaneSession, wanted: usize) -> Vec<String> {
                 .staged_rows_newest_first()
                 .map(|staged| {
                     (
-                        row_text(&staged.row),
+                        Cow::Owned(row_text(&staged.row)),
                         wrapped_at_a_width_the_pane_no_longer_has(
                             staged.row.continues,
                             staged.row.captured_columns,
@@ -1142,7 +1192,10 @@ fn card_climb(session: &DualPlaneSession, wanted: usize) -> Vec<String> {
                 });
             let frozen = session.document().entries().values().rev().map(|entry| {
                 (
-                    entry.line.text.clone(),
+                    // The one plane that can be a hundred thousand lines deep,
+                    // and the one the walk never copies: a frozen line's text is
+                    // this window's own and stands still while the walk reads it.
+                    Cow::Borrowed(entry.line.text.as_str()),
                     wrapped_at_a_width_the_pane_no_longer_has(
                         entry.line.wrap_split,
                         entry
@@ -1158,24 +1211,53 @@ fn card_climb(session: &DualPlaneSession, wanted: usize) -> Vec<String> {
         })
         .into_iter()
         .flatten();
-    let mut climb = Vec::with_capacity(wanted.min(256));
-    let mut line: Option<String> = None;
+    let mut kept = 0;
+    let mut line: Option<Cow<'_, str>> = None;
     for (row, continues) in live.chain(behind) {
         if continues && let Some(open) = line.as_mut() {
-            open.insert_str(0, &row);
+            // A join is the one place a borrowed line has to become its own
+            // copy, and it is the exception the rejoin rule already is.
+            let piece: &str = &row;
+            open.to_mut().insert_str(0, piece);
             continue;
         }
         if let Some(done) = line.replace(row) {
-            keep_card_line(done, &mut climb);
-            if climb.len() >= wanted {
-                return climb;
+            let text: &str = &done;
+            if keep_card_line(text, kept) {
+                keep(text);
+                kept += 1;
+                if kept >= wanted {
+                    return kept;
+                }
             }
         }
     }
     if let Some(done) = line {
-        keep_card_line(done, &mut climb);
+        let text: &str = &done;
+        if keep_card_line(text, kept) {
+            keep(text);
+            kept += 1;
+        }
     }
+    kept
+}
+
+/// [`card_walk`] with every line kept, for the one reader that wants the text of
+/// a line it has not counted to yet — the trace's own walk
+/// ([`FocusThumbnails::trace_card_walk`]), which reports the two rows a reader is
+/// looking at and therefore has to hold the whole window it walked.
+fn card_climb(session: &DualPlaneSession, wanted: usize) -> Vec<String> {
+    let mut climb = Vec::with_capacity(wanted.min(256));
+    card_walk(session, wanted, |line| climb.push(line.to_owned()));
     climb
+}
+
+/// How many lines the pane can give, up to `wanted` — [`card_walk`] asked for
+/// its count and nothing else, which is the whole of what both of the hand's
+/// clamps ever read off it (T-CARD-WHEEL-LAG). It assembles no text, so a card
+/// aimed deep into a long history costs a walk and not a copy of the history.
+fn card_reach(session: &DualPlaneSession, wanted: usize) -> usize {
+    card_walk(session, wanted, |_| {})
 }
 
 /// **`card walk`** — one line per call of the per-frame station, whichever of
@@ -1271,9 +1353,14 @@ fn clamp_card_skip(session: &DualPlaneSession, skip: &mut usize, rows: usize) {
     if rows == 0 || *skip == 0 {
         return;
     }
-    let climb = card_climb(session, rows.saturating_add(*skip));
-    if !climb.is_empty() {
-        *skip = (*skip).min(climb.len().saturating_sub(rows));
+    // A count and not a copy of the text it counted (T-CARD-WHEEL-LAG): the only
+    // thing this line has ever read off the walk is how far it got, and a pane
+    // that gave nothing at all still leaves the stored number alone — a card
+    // whose shell has not spoken keeps its place rather than being sent to the
+    // tail.
+    let walked = card_reach(session, rows.saturating_add(*skip));
+    if walked > 0 {
+        *skip = (*skip).min(walked.saturating_sub(rows));
     }
 }
 
@@ -1304,8 +1391,9 @@ pub(crate) fn aim_card_skip(
     } else {
         skip.saturating_sub(steps.unsigned_abs() as usize)
     };
-    let climb = card_climb(session, rows.saturating_add(requested));
-    let reachable = climb.len().saturating_sub(rows);
+    // The landing clamp, on the entry clamp's own terms: a count of what is up
+    // there, never the text of it (T-CARD-WHEEL-LAG).
+    let reachable = card_reach(session, rows.saturating_add(requested)).saturating_sub(rows);
     *skip = requested.min(reachable);
     let aimed = *skip;
     card_trace::line(|| {
@@ -1351,11 +1439,13 @@ fn wrapped_at_a_width_the_pane_no_longer_has(
 }
 
 /// Exclude the blank floor, keeping blank lines inside the assembled tail.
-fn keep_card_line(row: String, climb: &mut Vec<String>) {
-    if row.trim_end().is_empty() && climb.is_empty() {
-        return;
-    }
-    climb.push(row);
+///
+/// `kept` is how many lines the walk has assembled so far, which is the whole of
+/// what "the floor" means: the blank rows *under* the last thing the shell said,
+/// and nothing above it. Asked as a count rather than of a list because the walk
+/// hands its lines on instead of keeping them (T-CARD-WHEEL-LAG).
+fn keep_card_line(row: &str, kept: usize) -> bool {
+    !(row.trim_end().is_empty() && kept == 0)
 }
 
 /// One captured row's text.
@@ -2873,6 +2963,105 @@ mod tests {
             card_trace::Card::untraced()
         ));
         assert_eq!(position, narrow - 1);
+    }
+
+    /// What [`transcript_tail`] computed while the walk still handed its climb
+    /// back: assemble every line up to the bound, hold the stored offset down to
+    /// what the assembly reached, and cut the card's window out of the middle.
+    ///
+    /// Kept here as the oracle the rolling window is measured against
+    /// (T-CARD-WHEEL-LAG). The two are different arithmetic over the same walk —
+    /// `skip`/`take` over a list that was built, against a buffer of the card's
+    /// own height that never grows — so an equality between them is a real
+    /// claim and not a restatement.
+    fn window_the_long_way(
+        shell: &DualPlaneSession,
+        columns: usize,
+        rows: usize,
+        skip: usize,
+    ) -> (Vec<String>, bool) {
+        let climb = card_climb(shell, rows.saturating_add(skip));
+        let aimed = skip.min(climb.len().saturating_sub(rows));
+        (
+            climb
+                .into_iter()
+                .skip(aimed)
+                .take(rows)
+                .rev()
+                .map(|row| cut_to(row.trim_end(), columns))
+                .collect(),
+            aimed > 0,
+        )
+    }
+
+    /// **The count and the text are the same walk** (T-CARD-WHEEL-LAG): what the
+    /// clamps read off the walk is how far it got, and that is the number of
+    /// lines the card could draw if it were tall enough to hold them all.
+    ///
+    /// The bound is a ceiling and never a floor: asked for four it answers four
+    /// off a pane holding twenty, and asked for more than the pane has it answers
+    /// what the pane has.
+    ///
+    /// Red gate: let the bound test in [`card_walk`] run before a line is kept
+    /// rather than after, and the short bounds here come back one line light.
+    #[test]
+    fn the_reach_is_the_lines_the_walk_would_have_assembled() {
+        let mut shell = a_wrapped_shell();
+        resize_shell(&mut shell, 24);
+        let all = card_lines(&shell);
+        assert_eq!(
+            card_reach(&shell, usize::MAX),
+            all.len(),
+            "an unbounded walk counts every line the card can draw: {all:?}"
+        );
+        assert_eq!(card_reach(&shell, all.len() + 100), all.len());
+        for bound in [1, 2, 4, 9] {
+            assert_eq!(card_reach(&shell, bound), bound, "bound {bound}");
+            assert_eq!(
+                card_reach(&shell, bound),
+                card_climb(&shell, bound).len(),
+                "the count and the assembly disagree at bound {bound}"
+            );
+        }
+        // And at a width whose joins give the walk a different number of lines to
+        // count — the half of the question a resize asks.
+        resize_shell(&mut shell, 12);
+        let split = card_lines(&shell);
+        assert_ne!(
+            split.len(),
+            all.len(),
+            "the narrow pane must break the lines the wide one joined"
+        );
+        assert_eq!(card_reach(&shell, usize::MAX), split.len());
+    }
+
+    /// **The card keeps a card's worth of lines and gets the same window for it**
+    /// (T-CARD-WHEEL-LAG).
+    ///
+    /// Every offset a reader can hold is checked against the arithmetic the draw
+    /// used before: resting on the tail, part way up, exactly at the reachable
+    /// top, one past it and far past it — the last two being the states a resize
+    /// or a shrinking transcript leaves a stored number in.
+    ///
+    /// Red gate: drop the retiring `pop_front` in [`transcript_tail`] so the
+    /// buffer grows past the card's height, and every offset above zero comes
+    /// back showing the wrong end of the pane.
+    #[test]
+    fn the_cards_window_is_the_one_the_climb_would_have_been_cut_to() {
+        let mut shell = a_wrapped_shell();
+        for columns in [24, 12] {
+            resize_shell(&mut shell, columns);
+            let reach = card_reach(&shell, usize::MAX);
+            for rows in [1, 3, 5, 13] {
+                for skip in [0, 1, 4, reach.saturating_sub(rows), reach, reach + 7, 5_000] {
+                    assert_eq!(
+                        transcript_tail(&shell, 40, rows, skip),
+                        window_the_long_way(&shell, 40, rows, skip),
+                        "{columns} columns, {rows} rows, skip {skip}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
