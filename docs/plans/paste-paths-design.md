@@ -1,10 +1,12 @@
 # A file on the clipboard, a file on the pointer, and a picture with no name
 
 Design for 0.4.1 — GitHub issues #1 and #2. 2026-09-15, branch
-`docs/paste-paths-design` off `main` at `76ca0788`. **Docs only**: nothing here
-is built, no crate is touched, and every claim about this codebase carries a
-`path:line` so that the ticket which implements it can check the claim before it
-trusts it.
+`docs/paste-paths-design` off `main` at `76ca0788`. **Revised 2026-09-15 against
+`docs/plans/review/paste-paths-review-2026-09-15.md`** (24 findings, 7
+blocking); §10 is the ledger that answers each one, and the rulings below are
+the revised ones. **Docs only**: nothing here is built, no crate is touched, and
+every claim about this codebase carries a `path:line` so that the ticket which
+implements it can check the claim before it trusts it.
 
 Two requests from one outside reader, and they are one feature:
 
@@ -17,40 +19,43 @@ Two requests from one outside reader, and they are one feature:
 They are one feature because after the second sentence of #2 there is a file on
 the disk and a path to put at a prompt, which is #1. Everything below is
 arranged around that: **one ladder that turns whatever the clipboard or the
-pointer is carrying into a list of paths, and one function that spells a path
-for the program standing in the pane.**
+pointer is carrying into a list of paths, and one encoder that spells a path as
+one argument for the program the pane's row starts.**
+
+**What this document promises and what it does not.** It settles rulings and
+names the places a ruling has to be *measured* before it can be implemented.
+Nine things are marked **PROBE** and no ticket may assume their answer: they are
+collected in §9.2.
 
 ---
 
 ## 0. The short answer, before the reasons
 
-**Five rulings carry the whole design.**
+**Six rulings carry the whole design.**
 
 1. **The clipboard is asked in a fixed order — files, then text, then a
-   picture — and the first rung that answers wins.** Text beats a picture:
-   every source that offers both means the text, and the only sources #2 is
-   about (a screenshot tool, a snip) offer no text at all.
-2. **A path is spelled for the program the pane's profile starts, and the
-   profile already knows which program that is.** No new setting. PowerShell
-   gets `'…'` with `''` for a quote; `cmd` gets `"…"`; bash, zsh, sh and Git
-   Bash get `'…'` with `'\''` for a quote; a WSL pane gets `/mnt/d/…` and a Git
-   Bash pane `/d/…`, by the same mount rule this window already reads in the
-   other direction; and an **agent** pane gets the path bare, because Claude
-   Code reads a line of prose, not a command line.
-3. **A drop is a gesture of this window's drag system, not a winit event.**
-   winit 0.30.13 throws the drop point away on Windows and reads macOS paths
-   through an `NSString`, so `bt-platform` grows a drop door of its own and the
-   drop lands in the verb table that already decides what a dragged row means
-   (`row_verb`) — which gains exactly one row: **a file on a terminal pane's
-   centre inserts its path.**
-4. **A picture becomes a PNG in `…/Folio/clipboard/`, named `clip-<stamp>.png`,
-   never overwriting, swept at startup at seven days**, and from that point it
-   is an ordinary file taking the ordinary quoting. It is the one part of this
-   feature that writes to the disk, so it is the one part with a switch and a
-   paragraph in `PRIVACY.md`.
-5. **The gesture is plain `Ctrl+V` / `⌘V` / `Shift+Insert`.** No chord, no mode.
-   What is on the clipboard is the clipboard's business; the reader's gesture is
-   *paste*.
+   picture — and the first rung that *answers* wins.** The order is a
+   **preference with losses**, not a proof of what the source meant, so the
+   losing case gets a verb of its own: an explicit **Paste picture** row.
+2. **A path is always quoted — there is no bare form — and the literal is
+   encoded per grammar, over a subset each grammar proves.** A path the UTF-8
+   transport or the paste sanitiser cannot carry unchanged is **refused
+   visibly**; nothing is ever spelled with `U+FFFD` and no filename control
+   character is ever sent.
+3. **The grammar and the spelling are a property of the row's resolved launch,
+   stated as a spawn-time default and overridable in `profiles.json`.** This
+   window does not know what program is reading the line *now* and will not
+   guess from the screen.
+4. **A drop is a gesture of this window's drag system, not a winit event** —
+   winit 0.30.13 discards the drop point on Windows, has no `draggingUpdated:`
+   on macOS, and reads macOS paths through an `NSString`. The drop lands in the
+   verb table that already decides what a dragged row means, which gains one
+   cell: **a file on a terminal pane's centre inserts its path.**
+5. **A picture becomes a PNG under a vetted, owner-only directory in the
+   platform's temp**, named `clip-<stamp>.png`, never overwriting, bounded at
+   acquisition and in aggregate, and swept by both age and quota. Its delivery
+   carries the identity of the pane that asked for it.
+6. **The gesture is plain `Ctrl+V` / `⌘V` / `Shift+Insert`.** No chord, no mode.
 
 ---
 
@@ -61,21 +66,24 @@ for the program standing in the pane.**
 `bt_platform::clipboard_text` is two implementations of one sentence. On Windows
 (`crates/bt-platform/src/lib.rs:5925`) it opens the clipboard through the owner
 window M1-9 gave it, asks `IsClipboardFormatAvailable(CF_UNICODETEXT)`, locks
-the handle and copies UTF-16 out. On macOS (`lib.rs:11319`) it is
-`NSPasteboard::generalPasteboard` and `stringForType(NSPasteboardTypeString)`,
-and that file's own header already names the gap this design fills: a pasteboard
-holding only a picture answers `None`, "the same *no Unicode text* the Windows
-arm answers when `CF_UNICODETEXT` is absent", and **"a richer pasteboard is a
-product decision nobody has taken."** This is that decision.
+the handle and copies UTF-16 out; it answers `Result<String, String>`, and an
+empty clipboard text is `Ok("")` rather than an error (`lib.rs:5940`). On macOS
+(`lib.rs:11358`) it is `NSPasteboard::generalPasteboard` and
+`stringForType(NSPasteboardTypeString)`, also `Result<String, String>` — the
+`Option` from AppKit is turned into an `Err` with a sentence. That file's own
+header already names the gap this design fills: a pasteboard holding only a
+picture answers `None`, "the same *no Unicode text* the Windows arm answers when
+`CF_UNICODETEXT` is absent", and **"a richer pasteboard is a product decision
+nobody has taken."** This is that decision.
 
-One reusable thing is already written. `macos_services::paths_on`
-(`crates/bt-platform/src/macos_services.rs:181`) reads local file paths off a
-pasteboard for the Finder Service — `readObjectsForClasses`, `absoluteString`
-rather than `-[NSURL path]` (because a path is bytes, not text), the reader's
-own item order preserved because "a selection of three folders is three tabs and
-the reader chose which is first", and a non-file URL dropped with a line instead
-of failing the lot. The file rung on macOS is that function with a second
-caller.
+`macos_services::paths_on` (`crates/bt-platform/src/macos_services.rs:181`)
+reads local file paths off a pasteboard for the Finder Service —
+`readObjectsForClasses`, `absoluteString` rather than `-[NSURL path]` (because a
+path is bytes, not text), and the reader's own item order preserved. It is a
+**model**, not a call site: it collapses *nothing there* and *there but
+unreadable* into one empty `Vec` and it prints `BT_MAC_APP` lines that belong to
+the Service. The clipboard rung gets a shared decoder extracted beneath both,
+which distinguishes the two and logs nothing (§1.3).
 
 ### 1.2 Ruling — the rungs, and their order
 
@@ -84,7 +92,7 @@ caller.
 ```text
 ClipboardPayload::Files(Vec<PathBuf>)      // the source said: these are files
 ClipboardPayload::Text(String)             // what clipboard_text() answers today
-ClipboardPayload::Picture(PictureBytes)    // Png | Dib | Tiff, and the bytes
+ClipboardPayload::Picture(PictureBytes)    // Png | Dib | Dibv5, and the bytes
 ClipboardPayload::Nothing
 ```
 
@@ -92,7 +100,7 @@ ClipboardPayload::Nothing
 | --- | --- | --- |
 | 1 — files | `CF_HDROP` | `readObjectsForClasses:[NSURL]`, file URLs only |
 | 2 — text | `CF_UNICODETEXT` | `NSPasteboardTypeString` |
-| 3 — picture | the registered `"PNG"` format, then `CF_DIBV5`, then `CF_DIB` | `public.png`, then `public.tiff` |
+| 3 — picture | the registered `"PNG"` format, then `CF_DIBV5`, then `CF_DIB` | `public.png` |
 
 **Ruling ①: files win over everything.** A file list is the one format whose
 meaning is not in doubt — the source did not offer a *representation* of
@@ -100,335 +108,520 @@ something, it named objects on the disk. And on macOS the order is not a
 preference but a correctness requirement: a Finder copy also puts the file's
 **leaf name** on the pasteboard as plain text, so a text-first ladder would
 paste `report.pdf` for a file the reader selected at
-`/Users/ann/Papers/report.pdf`. Asking for URLs first is the only order that
-answers the gesture.
+`/Users/ann/Papers/report.pdf`.
 
-**Ruling ②: text wins over a picture.** This is the question the ticket asked to
-settle, and the argument runs in one direction only. Every source that puts a
-picture on the clipboard *beside* text means the text — a spreadsheet range, a
-browser selection, an IDE, a word processor all offer a bitmap as a courtesy to
-a program that cannot take text. Every source #2 is about — Snipping Tool,
-`⌃⇧⌘4`, a screenshot utility — offers **no text at all**. So taking the picture
-only when there is no text costs the picture case nothing, while taking the
-picture when there is text costs the text case everything: a copied sentence
-would become a PNG on the disk and a path the reader never asked for.
+**Ruling ②: text beats a picture, and this is a preference with a stated loss,
+not a deduction about intent.** The preference is worth having because the
+common cases point one way: a spreadsheet range, a browser text selection, an
+IDE and a word processor all offer a bitmap beside their text as a courtesy to a
+program that cannot take text, and answering those with a PNG on the disk would
+be wrong every time. **The loss is real and is named here rather than
+discovered**: a source that offers a picture *and* text — a screenshot tool
+configured to put the capture and its saved path on the clipboard together, a
+copy-as-picture out of a spreadsheet, a browser's *Copy image* where the page
+also advertised text — can never reach the picture rung under this order. Two
+consequences follow, and both are part of the design:
 
-**Ruling ③: the rungs are tried in order and the first one that answers wins —
-there is no merging.** A paste is one gesture and it puts one thing at the
-prompt. A clipboard carrying three files and a line of text is a clipboard whose
-source said "files", and the text on it is that source's caption.
+* **A verb for the losing case.** The terminal's right-click menu gains a
+  **Paste picture** row, enabled only while a picture rung can answer, and a
+  bindable command beside it. It is not a second persistent setting and it asks
+  the reader nothing in advance; it is the one gesture that says *the picture,
+  please*. It reads the clipboard on the same terms as every other paste (§7.2).
+* **A fixture table, not an assertion.** §6.2 carries a source × gesture ×
+  advertised-formats × chosen-rung table that has to be *filled in by
+  measurement* — Explorer and Finder selections, Excel cells and copy-as-picture,
+  Word text and images, a browser text selection and *Copy image*, Snipping Tool,
+  `⌃⇧⌘4`, and a screenshot tool configured to offer a path. **PROBE 1.**
 
-**Ruling ④: a promise is not read.** Windows `FileGroupDescriptorW` +
-`FileContents` (an Outlook attachment), macOS `NSFilesPromisePboardType` and
-`com.apple.NSFilePromiseItemMetaData` (a drag out of Photos or Mail) are
-deliberately **not** rungs. A promise means *tell me where to put it and I will
-write it*, which is a file this window would have to create in a place it chose
-— the picture lane's problem with none of the picture lane's guarantees (no
-format it can name, no size it can bound, and a write performed by another
-process). `paths_on`'s own rule applies: what this window cannot open, it drops
-with a line rather than guessing at.
+**Ruling ③: the rungs are tried in order and the first one that *answers* wins —
+there is no merging, and "answers" is defined.** Each rung reports one of three
+things:
 
-**Ruling ⑤: the old door stays.** `clipboard_text()` is not replaced and not
-re-pointed. The Markdown editor's paste (`crates/bt-app/src/main.rs:60428`), the
-palette and search fields, the settings text fields (`main.rs:47228`) and the
-web address bar are asking for **text**, on purpose, and a field that answered a
-copied file with a path would be answering a question nobody asked. The new door
-is beside the old one, and only the terminal's paste walks through it.
+| | meaning | what the ladder does |
+| --- | --- | --- |
+| **Absent** | the format is not advertised, or it is advertised and names nothing (an `HDROP` with zero files) | fall to the next rung |
+| **Present** | the format is there and readable, including a legally empty string | **stop**; this is the answer |
+| **Unreadable** | advertised, and the read failed — a lock failure, a delayed render that returned nothing, malformed content | **stop and report**; do not fall through |
 
-### 1.3 Cited behaviour
+`Unreadable` does not fall through because a failed read is not evidence of
+absence, and a ladder that treated it as absence would answer a broken file list
+with a PNG. The reader gets the toast `recoverable_clipboard_read` already
+writes the diagnostic line for (`main.rs:110700`) and nothing is typed. The one
+fallback that *is* allowed is **within** the picture rung — PNG unreadable, try
+`CF_DIBV5`, then `CF_DIB` — because those are three encodings of one semantic
+rung rather than three rungs.
 
-Windows Terminal reads `CF_HDROP` and pastes the path; it did in 1.18, lost it
-in 1.19 as a regression, and issue #16627 (PR #16634) is the whole story — which
-is worth knowing for a second reason: the feature is quiet enough that it took a
-version and a half for anyone to file it, so the acceptance rows below are
-written to be *checked* rather than assumed. No terminal in the survey reads a
-clipboard **picture** into a file: kitty defines OSC 5522 so the *program* can
-ask for typed clipboard data, WezTerm's answer is a user's Lua recipe writing
-into `/tmp/wezterm-clipboard-images/`, Ghostty has a request and no
-implementation, and the working answer people actually use is a third-party
-daemon that watches the clipboard and rewrites it. **Folio will not watch the
-clipboard** (§7); it will answer the paste.
+An empty `HDROP` is `Absent`: a list that names nothing is not a list. An empty
+text is `Present`: an empty string is a legal thing to have copied, and a paste
+of it correctly does nothing.
+
+**Ruling ④: one coherent snapshot, and a changed clipboard cancels.** All rungs
+are read inside one transaction — on Windows one `OpenClipboard` …
+`CloseClipboard` pair, which is the shape `clipboard_text` already has, with
+`GetClipboardSequenceNumber` read before and after; on macOS the pasteboard's
+`changeCount` read before and after. If the number moved, the whole read is
+discarded and the paste is refused with a toast rather than delivering a mixture
+of two clipboards. Delayed rendering means the owner runs code while we hold the
+clipboard open, and that code can legally replace it.
+
+**Ruling ⑤: a promise is not read.** Windows `FileGroupDescriptorW` +
+`FileContents`, macOS `NSFilesPromisePboardType` and
+`com.apple.NSFilePromiseItemMetaData` are deliberately **not** rungs in 0.4.1. A
+promise means *tell me where to put it and I will write it*: a file this window
+would have to create in a place it chose, written by another process, with no
+format it can name in advance and no size it can bound — the picture lane's
+problem with none of the picture lane's guarantees. A pasteboard or a drag
+offering **only** a promise is `Absent` at every rung and is refused visibly.
+This is what makes §3.4's browser-image case a measured question rather than a
+free success.
+
+**Ruling ⑥: the old door stays.** `clipboard_text()` is not replaced and not
+re-pointed. The Markdown editor's paste (`main.rs:60428`), the palette and
+search fields, the settings text fields (`main.rs:47228`) and the web address
+bar are asking for **text**, on purpose, and a field that answered a copied file
+with a path would be answering a question nobody asked. The new door is beside
+the old one, and only the terminal's paste walks through it.
+
+### 1.3 The shared decoder
+
+`paths_on` is not called from the clipboard path. A decoder is extracted beneath
+it that answers `Absent | Present(Vec<PathBuf>) | Unreadable(reason)`, keeps the
+byte-preserving `absoluteString` route and the item order, and **logs nothing**;
+`macos_services` keeps its own `BT_MAC_APP` lines, which are about a Service and
+name paths a Service was handed. A clipboard decoder that printed a path into
+`diagnostics.log` would violate red line 3.
+
+### 1.4 What other terminals do
+
+Windows Terminal reads `CF_HDROP` and pastes the path: it did in 1.18, lost it
+in 1.19, and the regression is issue #16627 with PR #16634. That is the whole of
+the claim — **no inference is drawn from how long the report took**, which is
+report timing and not adoption data.
+
+For a clipboard **picture**, no released terminal in the survey writes a file and
+pastes its path. kitty defines OSC 5522 so that the *program* can ask for typed
+clipboard data, which is a different shape: the terminal transports, the program
+decides. Ghostty discussion #10517 is about **image paste over SSH** and links a
+proposed implementation; it is not a statement about Ghostty's local clipboard
+today. A WezTerm recipe writing into `/tmp/wezterm-clipboard-images/` circulates
+in the community; **it is unverified here** — no revision or canonical URL was
+located — and it is cited as folklore, not as a design precedent.
 
 ---
 
-## 2. One path, spelled for the program standing in the pane
+## 2. One path, spelled as one argument for the program the row starts
 
 ### 2.1 What this window already knows, and the defect it is hiding
 
 There is a path-to-shell-text function in the product today, and it is wrong on
-one of the two platforms Folio now ships on. `inserted_path_text`
-(`crates/bt-app/src/main.rs:8824`) is what `Insert path into terminal` (K144)
-puts at the prompt, and its own doc comment states the reason for its quoting:
+both platforms. `inserted_path_text` (`main.rs:8824`) is what
+`Insert path into terminal` (K144) puts at the prompt. It quotes with `"` on
+every platform, quotes **only when the path contains whitespace**
+(`main.rs:8841`), and reaches the string through `to_string_lossy`
+(`main.rs:8840`). Its own doc comment gives the reason for the quote character —
+"this window's shells are Windows shells" — which stopped being true at 0.4.0.
+Three defects, not one:
 
-> Quoted with `"` rather than `'` because this window's shells are Windows
-> shells, where `'` is a literal character to `cmd` and a *different* kind of
-> quote to PowerShell — and because a Windows path cannot itself contain a `"`,
-> the character is illegal in a file name, so there is nothing to escape.
+* **macOS**: `"…"` in zsh expands `$`, and a backtick or backslash in the name is
+  an escape.
+* **Windows**: a path with `$` and no space is emitted **bare** into a PowerShell
+  pane, and a path with `$` *and* a space is emitted in double quotes, which
+  PowerShell expands. `$RECYCLE.BIN` is on every volume.
+* **Both**: `to_string_lossy` can hand the shell a *different name*, which is the
+  thing `macos_files.rs:33` is written about.
 
-Every clause of that was true when it was written and the first one stopped
-being true at 0.4.0. In a zsh pane on a Mac, `"/Users/ann/$HOME notes/a.txt"`
-expands `$HOME`, and a backtick or a backslash in the name is an escape. **K144
-is a defect on macOS today**, and this ticket does not add a second quoting
-function beside it — it absorbs it. The two rules around the quoting are right
-and are kept verbatim: a space in front unless the cell left of the cursor is
-already blank (`input_line_needs_a_space_first`, `main.rs:8850`, which reads the
-*grid* because the shell will not tell us what the input line holds), and a
-space after, always.
+**K144 is repaired in T-PASTE-1**, not deferred behind pictures and drops: it
+shares `paste_text` and needs the same encoder. The two rules around its quoting
+are right and are kept — a space in front unless the cell left of the cursor is
+already blank (`input_line_needs_a_space_first`, `main.rs:8861`, which reads the
+*grid* because the shell will not tell us what the input line holds), and a space
+after — and so is its focus behaviour (`insert_path_into_terminal`,
+`main.rs:76921`, moves the keyboard and the layout focus to the pane it is
+filling, because the reader is being sent somewhere to finish a command). §3.2's
+drop insertion is **target-specific and moves no focus**; K144 keeps its move.
 
-The namespace half is already written too, in the other direction.
-`PrintedPathNamespace` (`crates/bt-transcript/src/paths.rs:61`) is
-`Windows | Msys { home } | Wsl { distro, home }`, built for a pane by
-`profiles::printed_path_namespace` (`crates/bt-app/src/profiles.rs:3201`) off
-the pair the profile row already carries, and `to_local_path` (`paths.rs:134`)
-turns `/mnt/d/Demo` and `/d/Demo` into `D:\Demo` so that a printed path can be
-clicked. **What this design needs is that function run backwards.**
+### 2.2 Ruling — three questions, three owners, and a stated contract
 
-### 2.2 Ruling — two axes, two homes, and neither is a new setting
+A path becomes text by answering three independent questions:
 
-A path becomes text by answering two independent questions, and they are kept
-apart because they have different owners:
-
+* **Is it representable?** — §2.4's gate, and it can refuse.
 * **Which spelling** — `D:\Demo\a.txt`, `/mnt/d/Demo/a.txt`, `/d/Demo/a.txt`.
-  That is `PrintedPathNamespace`'s question, and the answer goes **on that type**
-  as `to_pane_spelling(&self, local: &Path) -> Option<String>`, the inverse of
-  `to_local_path` and sitting against it in the same file. One place, two
-  directions, and a round-trip test (§6) that makes it impossible for them to
-  drift. A second module that knew the `/mnt` rule would be the start of two
-  answers to one question, which is the thing `paths.rs`' own header refuses.
-* **Which grammar** — how a string becomes one word to the program reading it.
-  That is `ShellGrammar` — `PowerShell | Cmd | Posix | Plain` — and it is read
-  off the row by `profiles::shell_grammar(index)`, written as
-  `derive_integration`'s twin (`profiles.rs:799`): the program's **file stem**,
-  lower-cased, matched against a list, plus one check of `AGENT_IDS`
-  (`profiles.rs:1746`).
+  That is `PrintedPathNamespace`'s question
+  (`crates/bt-transcript/src/paths.rs:61`), and the answer goes **on that type**
+  as `to_pane_spelling`, against its inverse `to_local_path` (`paths.rs:134`).
+* **Which grammar** — how a string becomes **one argument** to the program
+  reading it. `ShellGrammar`, §2.3.
 
-**Ruling ⑥: the grammar comes from the program the row starts, never from the
-integration choice.** `served_by` can answer `Integration::None` for a perfectly
-ordinary `pwsh` whose owner turned shell integration off, and quoting has
-nothing to do with whether a startup script was installed. `derive_integration`
-reads the program; so does this.
+**Ruling ⑦: the grammar and the spelling are a spawn-time default, and the
+document says so in as many words.** Folio knows what the row *started*. It does
+not know what is reading the line now, and it will not guess: a reader can type
+`nu` into a pwsh pane, `wsl.exe -e fish` is a legal row, and
+`shell_integration.rs:248`'s `WSL_LOGIN_SHELL` asks the distribution itself which
+shell to `exec` — `bash`, `zsh` or `*) exec "$shell" -l`, which can be fish or
+nu. Inferring the foreground program from what is on the screen is the kind of
+guess §7.30 spent five revisions removing from the path detector, and it is worse
+here because the consequence is an argument, not an underline.
 
-**Ruling ⑦: no per-profile setting, and Windows Terminal is the reason.** WT
-added `pathTranslationStyle` (`none` / `wsl` / `cygwin` / `msys2` / `mingw`,
-defaulting to `none` except on WSL profiles) because a WT profile is a command
-line and nothing else — it has no idea what it starts, so it has to ask the
-reader. A Folio profile row already carries `paths: PathNamespace`, an
-integration and a program source, and `printed_path_namespace` already derives a
-three-way answer from them for the *reading* direction. Deriving the writing
-direction from the same row costs the reader no question. The setting gets added
-the day a real row is measured wrong, and not before.
+So the contract is: **the encoder is correct for the program the row starts, on a
+fresh argument boundary (§5.2), and for nothing else.** Everything that follows —
+the override, the refusals, the acceptance rows — hangs off that sentence.
+
+**Ruling ⑧: derived from the row's *resolved* launch, not from its id and not
+from the integration choice.** `derive_grammar(&ProgramSource) -> ShellGrammar`
+is `derive_integration`'s twin (`profiles.rs:799`) and keeps its two structural
+answers: `ProgramSource::PowerShellSeven` is a PowerShell without looking at a
+file name, and a `FirstOf` row is read off its first candidate because the
+candidates of one row are one program family. `served_by` is **not** consulted:
+it can answer `Integration::None` for an ordinary `pwsh` whose owner turned
+integration off, and quoting has nothing to do with whether a startup script was
+installed.
+
+**Ruling ⑨: one `profiles.json` key, and no settings-page question.** A row may
+carry `"paste_as": "powershell" | "cmd" | "posix" | "fish" | "nu" | "agent"`, and
+a row that carries it is believed. It exists because inference provably fails for
+wrappers — `wsl.exe -e nu`, a `.cmd` shim around PowerShell, `env`, a Python
+REPL profile — and because a reader who has built such a row is exactly the
+reader who can name its grammar. It is **not** on the Settings page: it is a
+property of one row in a file the reader already edits, like `args` and `env`.
+This narrows but does not withdraw the earlier ruling against a setting: Windows
+Terminal's `pathTranslationStyle` asks *every* profile, including the ones it
+ships, because a WT profile is a command line and nothing else; Folio asks
+nobody and offers an override to the rows where its derivation has no evidence.
+
+**Ruling ⑩: an unheard-of program gets the platform's own argument convention,
+not a bare path.** On a Unix host, `Posix`. On Windows, `Cmd` — double quotes
+under the C runtime rules, which is what a Windows program's own argv parser
+reads. The earlier `Plain` answer for unknown Windows programs is **withdrawn**:
+it was reasoned from the agent rows, and finding 9 showed the agent reasoning
+itself was wrong (§2.3).
 
 ### 2.3 The grammar table
 
-| The row | Grammar | Quote | Escape inside it |
+Every grammar **always quotes**. There is no bare form and no "is this path
+simple enough" predicate — that predicate was the whole of finding 1, and the
+cost of removing it is quotation marks a reader can see, against a benefit of
+never emitting a path that a shell re-lexes into something else. Windows
+Terminal's own issue #8109 makes the same argument for drops.
+
+| Row | Grammar | Literal | Escape inside |
 | --- | --- | --- | --- |
-| `pwsh`, `winps`, any `powershell`/`pwsh` stem | `PowerShell` | `'…'` | `'` → `''` |
-| `cmd` | `Cmd` | `"…"` | nothing to escape; a trailing `\` is doubled |
-| `gitbash`, `wsl`, `bash`, `zsh`, `sh`, and every other stem on a Unix host | `Posix` | `'…'` | `'` → `'\''` |
-| the seven `AGENT_IDS` rows, and an unheard-of program on Windows | `Plain` | none | none |
+| `pwsh`, `winps`, `powershell`/`pwsh` stems, `PowerShellSeven` | `PowerShell` | `'…'` | every character PowerShell reads as a single quote, doubled — **PROBE 2** |
+| `cmd` | `Cmd` | `"…"` | trailing backslashes doubled (2N); `%` refused; `!` refused when the row's own args turn delayed expansion on |
+| `bash`, `zsh`, `sh`, `dash`, `ksh`, `wsl`, `gitbash` | `Posix` | `'…'` | `'` → `'\''` |
+| `fish` | `Fish` | `'…'` | `\` → `\\`, `'` → `\'` |
+| `nu` | `Nushell` | `r#'…'#` | none — the fence grows instead |
+| the seven `AGENT_IDS` rows | `Agent` | `'…'` (POSIX form, both platforms) | `'` → `'\''` — **PROBE 3** |
+| anything else | `Posix` on Unix, `Cmd` on Windows | as above | as above |
 
-**PowerShell takes single quotes.** Inside them PowerShell expands nothing — no
-`$`, no backtick, no subexpression — and the only character needing anything is
-the quote itself, doubled. Double quotes would expand `$`, and `$` in a Windows
-path is not exotic: `$RECYCLE.BIN` is on every volume and `$` is a legal file
-name character. This is the same bug WT shipped in the other grammar and fixed
-in PR #16214 after issue #15646, where `$hello.txt` dropped into a WSL tab became
-a variable.
+**PowerShell — single quotes, and the quote character is not only `U+0027`.**
+Inside single quotes PowerShell expands nothing: no `$`, no backtick, no
+subexpression. That is why single quotes and not double, and it is the fix for
+the K144 defect of §2.1. But *about_Quoting_Rules* documents that PowerShell also
+accepts the Unicode quotation marks as quoting characters, and a Windows filename
+may legally contain `’`. So the file name
+`a’;Write-Host PASTE_PROBE;#.txt` would **terminate an apostrophe-quoted literal
+and put command syntax on the line** — a real injection, not a spelling problem.
+The encoder therefore doubles **each** character in PowerShell's single-quote
+class, not just `U+0027`. **PROBE 2: measure, on Windows PowerShell 5.1 and
+PowerShell 7, (a) which code points close a single-quoted string and (b) whether
+doubling each of them yields one literal character.** Where (b) is false for a
+code point, a path containing it is **refused visibly** in a PowerShell pane;
+this design does not ship a literal it has not seen hold. The same probe covers
+PowerShell's non-ASCII token separators, which is the other half of finding 1 and
+the reason `char::is_whitespace()` is not assumed inert.
 
-**`cmd` takes double quotes, and there is nothing to escape** — `"` is illegal
-in a Windows file name, which is the one clause of K144's old comment that
-survives intact. One addition: **a path ending in `\` has that backslash
-doubled** before the closing quote (`"D:\\"`). The C runtime's argument parser —
-which is what every program `cmd` starts uses to split its command line — reads
-`\"` as a literal quote, so `"D:\"` hands the program `D:` and an unterminated
-word; `"D:\\"` hands it `D:\`, and cmd's own builtins read a doubled separator
-in a path as one. Correct on both sides of the fork, which is why it is a rule
-and not a special case.
+**`cmd` — double quotes, and the interpreter and the argv parser are two
+consumers.** `"` is illegal in a Windows filename, so nothing inside the quotes
+needs escaping for `cmd` itself. What needs care is everything else:
 
-**bash, zsh, sh and Git Bash take single quotes with `'\''`** — close the quote,
-write an escaped quote, open it again. WT issue #18006 is precisely the bug of
-not doing this: `D:\John's Archive` became `'/mnt/d/John's Archive'`, where the
-quoting ends at the apostrophe and the space after it is bare. WT's own
-`_translatePathInPlace` does the `'\''` escape now, and this design copies the
-escape and not the plumbing. The same three characters also happen to be correct
-in **fish** — outside quotes fish reads `\'` as a literal quote, so the sequence
-concatenates the same three pieces — which is checked rather than assumed,
-because `usershell` on a Mac can be pointed at anything. **nushell is the known
-exception** and is named here rather than discovered later: a nu single-quoted
-string has no escape at all, so a path containing `'` cannot be spelled for it.
-A `nu` row gets `Posix` and that one path gets it wrong; adding a `Nushell`
-grammar is a ticket for the day somebody runs one.
+* **Trailing backslashes: 2N, not one extra.** The C runtime's parser — which is
+  what a *native* child of `cmd` uses — reads `\"` as a literal quote, so
+  `"D:\"` does not hand the program `D:`; it consumes the backslash, emits a
+  literal `"` into the argument and leaves the quote state flipped. N trailing
+  backslashes need 2N to survive.
+* **A `cmd` builtin does not use those rules.** `cd "C:\a b\\"` reaches `cd` with
+  the doubled separator still in it. That is harmless for a path — a doubled
+  separator names the same directory — but it is *not* the identical string, and
+  the acceptance asserts the **file that opens**, not the text.
+* **`%NAME%` expands inside double quotes and cannot be escaped on a command
+  line** (the `%%` form is a batch-file rule). **Ruling: a path containing `%` is
+  refused in a `cmd` pane**, with a toast naming the file and the reason. Quoting
+  it would hand the reader a mangled name that looks like it worked, and this
+  product's standing rule is that a visible refusal beats a silent wrong answer.
+* **`!NAME!` expands only under delayed expansion**, which is off by default and
+  which this window *can* read for the one case that matters: a row whose own
+  `args` carry `/v:on` or `/v on`. A path containing `!` is refused in such a
+  row and allowed elsewhere, with the residue stated — a reader who turned
+  delayed expansion on from inside the shell is outside what the row can say.
+* **`^` is not escaped.** Inside a double-quoted argument `^` is an ordinary
+  character; escaping it would insert a caret into the name.
 
-**An agent row gets the path bare, and this is the most important row in the
-table.** `claude`, `codex`, `copilot`, `kimi`, `pi`, `hermes` and `opencode`
-(`profiles.rs:1746`) are not shells. Claude Code reads a **line of prose** and
-opens the file whose path it finds in it; handed
-`'C:\Users\ann\clip-20260915-140233.png'` it looks for a file whose name begins
-with an apostrophe. Since handing a picture to an agent is the entire stated
-purpose of #2, a design that quoted for an agent would fail at the only thing it
-was asked to do. And the derivation is the same shape as everything else here:
-the table already knows which rows are agents, and the pane already knows which
-row it is.
+**bash, zsh, sh, Git Bash — `'…'` with `'\''`.** Close the quote, write an
+escaped quote, open it again. WT issue #18006 is precisely the bug of not doing
+this: `D:\John's Archive` became `'/mnt/d/John's Archive'`, where the quoting ends
+at the apostrophe and the space after it is bare.
 
-**The unheard-of row splits by platform, and the split is a fact about the two
-tables rather than a preference.** On Windows every shell Folio ships a row for
-is in the list above, and a row pointed at something else is a row pointed at a
-*program* — the seven agent rows are the shipped examples of exactly that — so
-an unheard-of Windows program gets `Plain`. On a Unix host the unheard-of row is
-`usershell`, which is the account's own `$SHELL` (`profiles.rs:1541` and the
-note above it), and every shell an account can be set to takes POSIX single
-quoting — so it gets `Posix`. The cost of being wrong points the same way in
-both cases: a bare path handed to a shell is a path the reader can quote by
-hand, while a quoted path handed to a program is a path that names nothing.
+**fish gets its own arm, because the POSIX encoder is wrong there.** Inside fish
+single quotes `\\` is one backslash and `\'` is a quote, so a POSIX-encoded
+literal containing two backslashes silently loses one, and a backslash before the
+closing quote escapes it. The earlier claim that `'\''` "happens to be correct in
+fish" was reasoning from one sequence to a whole encoder, which is not a proof.
+Fish's encoder is `\` → `\\` and `'` → `\'`, both inside the quotes.
 
-### 2.4 When a path is quoted at all
+**nushell gets a raw string, which removes the question.** `r#'…'#` has no
+escapes at all; the encoder chooses the smallest fence `r#…#'` whose closing
+sequence does not occur in the path, which is a total function. The earlier claim
+that a nu path containing `'` is unspellable is **withdrawn** — it was false, and
+so was the sentence that "every shell an account can be set to takes POSIX single
+quoting."
 
-**Ruling ⑧: a path is written bare when every one of its characters is safe, and
-quoted otherwise.** The safe set is ASCII letters, ASCII digits, and
-`_ . - / \ :` — **and every non-ASCII character**, because none of PowerShell,
-`cmd`, bash, zsh or fish gives any non-ASCII code point syntactic meaning. That
-last clause is why `D:\文档\报告.md` and `~/Pictures/スクショ.png` come out bare
-and readable instead of wearing quotes for no reason, which matters on a product
-whose second language is Chinese.
+**An agent row gets a quoted single token, and the earlier bare-path ruling is
+reversed.** The reversal is forced by reading the parser rather than reasoning
+about it. Codex's `normalize_pasted_path` strips one surrounding `"` or `'` pair,
+tries a Windows-path recogniser, and otherwise runs **shlex over the original
+string and requires exactly one token**. So on macOS a bare
+`/Users/ann/My Pictures/screen.png` yields two tokens and **no attachment at
+all**, while the single-quoted form yields one and works; the Windows recogniser
+is why the bare form appears to work there, which is a platform special case and
+not a grammar. The POSIX single-quoted form is the one spelling that satisfies
+both the quote-strip and the shlex paths, so `Agent` uses it on **both**
+platforms.
 
-Everything else quotes: the space (WT's own threshold), `~` (which expands in
-all three grammars — a leading one would be enough, but a `~` elsewhere in a
-path is rare enough that the simpler rule costs nothing), `'`, `"`, `$`,
-backtick, `%`, `!`, `#`, `&`, `;`, `,`, `*`, `?`, `(`, `)`, `[`, `]`, `{`, `}`,
-`<`, `>`, `|`, `^`, `=`, `+`, `@`. The rule is a *set*, not a list of
-metacharacters per shell, because a per-shell list is a second copy of each
-grammar and the copy that is out of date is the one that bites.
+Three consequences are stated rather than assumed:
 
-**Two things this window cannot make safe, stated rather than papered over.**
-① `cmd` expands `%NAME%` **inside** double quotes and there is no command-line
-escape for `%` (the `%%` form is a batch-file rule), so a file called
-`%USERPROFILE% backup.txt` pasted into a `cmd` pane will be mangled by `cmd` and
-no quoting fixes it. ② PowerShell treats `[` and `]` as wildcard characters in
-the path parameters of most cmdlets even inside single quotes, so
-`Get-Content 'C:\a[1].txt'` needs `-LiteralPath` and the reader has to supply
-it. Both are the shell's grammar and not this window's bug; the document names
-them so that a report about either can be answered in one line.
+* **Prose references and automatic attachments are different things.** Claude
+  Code documents paths written in prose, which a *model* reads — quotes are read
+  correctly there, and model interpretation is not deterministic filename
+  parsing, so no promise is made about it beyond "the path is present and
+  delimited." Copilot CLI documents `@` attachments, not a bare-path grammar.
+  Codex is the only one of the three whose parser was read. **The "seven agents
+  take a bare path" rule of the first draft had no evidence behind it for six of
+  them.**
+* **Several paths in one insertion are not several attachments.** Codex's parser
+  returns `None` when shlex yields more than one token, so a two-file paste into a
+  Codex pane attaches nothing. The design still inserts both, space-separated and
+  each quoted, because that is the text the reader asked for and can edit; it
+  **does not promise** that more than one becomes an attachment.
+* **PROBE 3.** Measure, per agent and with the version recorded: a path with a
+  space; a path with an apostrophe (Codex's naive quote-strip runs *before* its
+  Windows recogniser, so an apostrophe-bearing Windows path is a suspected wrong
+  name); two paths in one paste; and a `file:` URI. Where an agent is measured to
+  need a different spelling, it gets its own arm — the table is per recipient,
+  and `AGENT_IDS` is a starting grouping, not a finding.
+
+### 2.4 The representability gate
+
+**Ruling ⑪: a path is checked before it is quoted, and what cannot be carried
+unchanged is refused visibly.** Quoting does not make a name transportable, and
+three separate stages of this window will alter one:
+
+* **`Option<String>` is the transport.** `paste_text` takes `&str`
+  (`main.rs:110689`). A Unix path that is not valid UTF-8, or a Windows path with
+  an unpaired surrogate, has no `&str`. `to_string_lossy` — which K144 uses today
+  — substitutes `U+FFFD` and names a *different file*. **Ruling: `path.to_str()`
+  is `None` → refuse, with a toast naming the entry it could not spell.** Never
+  `to_string_lossy`, here or in the repaired K144.
+* **`sanitize_paste` deletes controls and turns LF into CR** (`input.rs:711`):
+  `'\n' => normalized.push('\r')`, `character if !character.is_control() =>
+  push`, everything else dropped. A POSIX filename may legally contain LF, TAB,
+  ESC or any C0 byte. Quoting does not remove them, and sanitising them changes
+  the name — while a CR delivered to a shell that is *not* in bracketed-paste
+  mode is an Enter. **Ruling: a path containing any C0 or C1 control, DEL, or a
+  line terminator is refused.** Bypassing the sanitiser for paths is refused
+  too: that is how a bracket terminator or a control sequence from a filename
+  would reach the terminal.
+* **The earlier sentence "a quoted path has no control character and no newline"
+  was simply false** and is struck.
+
+The gate runs **before** the spelling and the grammar, answers
+`Ok(&str) | Err(Unrepresentable)`, and is the same gate for a paste, a drop, a
+picture's own path and K144. With several files, the representable ones are
+inserted and the refused ones are named in one toast — the `paths_on` rule that
+four openable folders and one thing this program cannot open is four tabs and a
+line, not five refusals.
+
+**This amends an acceptance promise.** §6.2's non-UTF-8 SMB case is no longer
+"pastes correctly"; it is "**refuses visibly and names the file**", which is a
+row that can be checked.
 
 ### 2.5 The spelling, per pane
 
-**Ruling ⑨: the mount rule, not `wslpath`.** A WSL pane is handed
-`/mnt/d/Demo/a.txt`, derived by the inverse of `drive_mount_to_local_path` — the
-function `to_local_path` already uses — and a Git Bash pane is handed
-`/d/Demo/a.txt` by the MSYS arm of the same. `wslpath` is refused for three
-reasons and the first is enough: running it means spawning a process on every
-paste, and this window's paste is measured in the same latency budget as a
-keystroke. The second is that the alternative — writing `$(wslpath …)` into the
-reader's command line — puts a command in their history that they did not type.
-The third is that it would be a **second** source of truth for a rule this
-codebase already implements in one place, and `paths.rs`' own header is about
-not having two.
+**Ruling ⑫: the insertion namespace is derived from the row's launch, and the
+detector is re-pointed at the same derivation.** `printed_path_namespace`
+(`profiles.rs:3201`) reads `(paths(index), integration(index))`, so a Git Bash
+row whose owner set integration to `None` answers `Windows` (`profiles.rs:3219`)
+— and a design that reused it would give that pane `D:\Demo\a.txt` while
+promising `/d/Demo`. The answer is not to copy the function with a patch: the
+namespace is a fact about the **program**, and integration is a fact about a
+startup script. `derive_namespace(&Profile) -> PrintedPathNamespace` reads the
+program and the `paths` field, `printed_path_namespace` becomes a caller of it,
+and **the reading direction changes with it** — an integration-off Git Bash pane
+now also *detects* the `/d/…` paths it prints. That is a strict improvement, it
+is the same one rule in both directions, and it is pinned by a test named in
+§6.1. It is called out here because it is a behaviour change outside this
+feature's own surface.
 
-The known limit is the same limit the reading direction already lives with, and
-is therefore not a new belief: a distribution whose `/etc/wsl.conf` moves
-`automount.root`, or an MSYS installation with a custom mount table, is spelled
-wrong — **in both directions, identically**. One wrong answer that agrees with
-itself is better than two that disagree, and a reader who has moved their
-automount root sees the same spelling in a printed path they click and in a path
-they paste.
+**Ruling ⑬: the mount rule, not `wslpath`, and the translation is partial over a
+normalised domain.** A WSL pane is handed `/mnt/d/Demo/a.txt` and a Git Bash pane
+`/d/Demo/a.txt`, by the inverse of the rule `to_local_path` already reads.
+`wslpath` is refused: running it means spawning a process inside the
+distribution on every paste, against a latency budget shared with a keystroke;
+and writing `$(wslpath …)` into the reader's command line puts a command in their
+history that they did not type. **Never inject a substitution into the line.**
 
-**Ruling ⑩: a distribution-internal path goes back through the share.** A file
-at `\\wsl.localhost\Ubuntu-24.04\home\ann\x` dropped into a pane of that same
-distribution is pasted as `/home/ann/x`, which is `distro_path_to_local_path`
-run backwards and the exact mirror of the 2026-09-07 ruling in `DESIGN.md`
-§7.30. A share naming a *different* distribution than the pane's is not
-translated.
+What the inverse is, exactly — because the first draft claimed a universal
+round-trip it cannot have:
 
-**Ruling ⑪: a path with no translation is pasted in this machine's spelling,
-quoted.** A UNC path (`\\server\share\x`), a drive a distribution has not
-mounted, an MSYS path outside the drive mounts. `to_local_path` refuses rather
-than guesses, and that is right for *reading*, because a wrong underline points
-at a file nobody named; here refusing means pasting **nothing**, which is worse
-than pasting a path the shell cannot open. The reader sees the path they
-dragged, quoted so it is inert, and decides what to do with it.
+* **Lexical rules and mount facts are separated.** The inverse is *lexical*: it
+  maps a drive-rooted Windows path to `/mnt/<lower letter>/…` or `/<lower
+  letter>/…`, and a `\\wsl.localhost\<distro>\…` or `\\wsl$\<distro>\…` path of
+  **this pane's own distribution** to the path below the share. It knows no mount
+  facts, exactly as `drive_mount_to_local_path` (`paths.rs:218`) knows none in the
+  other direction.
+* **Therefore it is best-effort and says so.** A drive that the distribution has
+  not mounted — `automount` disabled, `automount.root` moved, a drive mounted by
+  hand elsewhere — is spelled `/mnt/d/…` and names nothing. This is disclosed as
+  a **default-mount assumption**, not presented as a translation. A future ticket
+  may cache real mount facts from a measured probe; that is named as the upgrade
+  path and is not in 0.4.1.
+* **The legacy alias is read.** `\\wsl$\<distro>\…` is accepted on input even
+  though `paths.rs:235` does not emit it: a path arriving from Explorer or a drop
+  comes from outside this program, and the producer's habits are not ours.
+* **The ambiguity is named.** `\\wsl.localhost\Ubuntu\mnt\d\x` translates to
+  `/mnt/d/x`, which reads back as `D:\x`. The round trip is not an identity there
+  and the test suite says so explicitly rather than excluding the case quietly.
+* **Drive letters are normalised**, so the round trip is an identity over a
+  **normalised** domain: `d:\x` and `D:\x` both spell `/mnt/d/x` and both read
+  back as `D:\x`.
+* **A path with no translation is spelled in this machine's own form, quoted.**
+  A UNC share, a different distribution's share, an MSYS path outside the drive
+  mounts. `to_local_path` refuses rather than guesses and that is right for
+  *reading*; here refusing means pasting nothing, which is worse than pasting a
+  path the shell cannot open. The reader sees what they dragged, inert inside its
+  quotes.
+* **Absolute always; never `~`.** A quoted `~/…` does not expand, so emitting one
+  would produce a literal `~` directory. A literal `~` inside a path is just a
+  character and is quoted like any other.
+
+**Ruling ⑭: Git Bash converts again after us, and that is measured rather than
+prevented.** MSYS2 rewrites POSIX-looking arguments when it starts a **native**
+Windows child, and `MSYS2_ARG_CONV_EXCL` disables that globally or by prefix;
+quoting does not turn the stage off. So `/d/Demo/a.txt` is right for an MSYS tool
+and right for a native child under default settings, and *wrong* for a native
+child in a shell whose owner set an exclusion. **Folio does not change the
+reader's environment to force its own answer.** §6.2 carries rows for an MSYS
+consumer and a native consumer with exclusions unset and set; if a native
+recipient turns out to need it, a forward-slash Windows spelling (`D:/Demo/a.txt`)
+is the documented fallback for that row — through the `paste_as` override, not by
+guessing. **PROBE 4.**
 
 ### 2.6 Several files
 
-**Ruling ⑫: space-separated, each spelled and quoted on its own, in the order
-the source gave them.** The order is load-bearing and is already ruled so —
-`paths_on`'s header says a reader's selection has an order and the pasteboard
-keeps it, and `CF_HDROP` keeps Explorer's. K144's leading and trailing space
-rules apply to the whole run rather than per path: one space in front if the
-cell left of the cursor is not blank, one space at the end.
-
-`cat 'a b.txt' 'c d.txt' ` is what a person would have typed, and it is the same
-sentence in an agent pane without the quotes.
+**Ruling ⑮: space-separated, each spelled, gated and quoted on its own, in the
+order the source gave them.** The order is load-bearing and already ruled so.
+K144's leading and trailing space rules apply to the whole run: one space in
+front if the cell left of the cursor is not blank, one space at the end.
+`cat 'a b.txt' 'c d.txt' ` is what a person would have typed. In an `Agent` pane
+the same run is inserted with the same quoting, under §2.3's stated limit on what
+a second path means.
 
 ---
 
 ## 3. The pointer's half: drag and drop
 
-### 3.1 Nothing handles a drop today, and winit's events cannot carry one
+### 3.1 winit's events cannot carry a drop, and the door has to be ours
 
 `DroppedFile`, `HoveredFile` and `HoveredFileCancelled` appear nowhere in this
-workspace — the grep is empty — and `with_drag_and_drop` is never called, so
-winit's Windows drop target is registered by default and its events are thrown
-away. Turning them on is the obvious first move, and it does not survive reading
-the backend:
+workspace, and `with_drag_and_drop` is never called. Reading both backends of
+winit 0.30.13 in `~/.cargo/registry`:
 
-* **The drop point is discarded.**
-  `winit-0.30.13/src/platform_impl/windows/drop_handler.rs` takes
-  `_pt: *const POINTL` in both `DragOver` and `Drop` and uses neither.
-  `DroppedFile(PathBuf)` carries a path and nothing else. A window that draws
-  every pane itself cannot route a drop it cannot locate.
-* **`DragOver` reaches the application not at all.** `HoveredFile` fires once,
-  from `DragEnter`. There is no event while the hand moves across the window, so
-  there is nothing to drive a landing highlight with — and a highlight is not
-  optional here (§3.3).
-* **A multi-file drop arrives as N events with no batch marker.** Both backends
-  loop over the file names sending one event each. Ten files are ten
-  `DroppedFile`s, and nothing says where the tenth is.
-* **macOS reads the paths through an `NSString`.**
-  `platform_impl/macos/window_delegate.rs:369-429` uses the deprecated
-  `NSFilenamesPboardType` with `propertyListForType`, which is exactly the round
-  trip `macos_files.rs:53` forbids at length — "a name that is not UTF-8 comes
-  back as a *different name*, with `U+FFFD` where its bytes were, and the file
-  that then opens is not the file the reader pointed at". A file dragged off an
-  SMB or exFAT volume is the case that file is written about.
+* **Windows discards the drop point.** `platform_impl/windows/drop_handler.rs`
+  takes `_pt: *const POINTL` in `DragOver` and in `Drop` and uses neither.
+  `DroppedFile(PathBuf)` carries a path and nothing else.
+* **A multi-file drop is N events with no batch marker**, on both platforms.
+* **macOS implements the dragging methods on `WindowDelegate`, not on a view.**
+  `platform_impl/macos/window_delegate.rs:367` is
+  `unsafe impl NSDraggingDestination for WindowDelegate` inside a
+  `declare_class!`, and the registration is `window.registerForDraggedTypes`
+  (`:666`) with the deprecated `NSFilenamesPboardType`. **The first draft named
+  the content view; that was wrong**, and a `class_replaceMethod` aimed at a view
+  would have replaced nothing on the route that is actually registered.
+* **There is no `draggingUpdated:`.** winit implements `draggingEntered:`,
+  `prepareForDragOperation:`, `performDragOperation:`, `concludeDragOperation:`
+  and `draggingExited:` — and nothing else, so AppKit reuses the answer
+  `draggingEntered:` gave for the whole drag. A landing highlight that follows
+  the hand is impossible through winit's route, and §3.3 makes that highlight
+  non-optional.
+* **macOS reads paths through an `NSString`**, which is exactly the round trip
+  `macos_files.rs:33` forbids: "a name that is not UTF-8 comes back as a
+  *different name*, with `U+FFFD` where its bytes were."
 
-**Ruling ⑬: `bt-platform` grows a drop door of its own, and winit's is switched
-off.** On Windows: `with_drag_and_drop(false)` on the window attributes and our
-own `IDropTarget` via `RegisterDragDrop`, which hands us the screen point in
-`DragEnter`/`DragOver`/`Drop`, the whole `IDataObject` — so the picture rung of
-§1 works for a drag exactly as it does for a paste — the full file list in one
-call, and control of the `DROPEFFECT` the cursor shows. On macOS: the three
-dragging selectors on winit's content-view class, re-registered for
-`NSPasteboardTypeFileURL` and reading with `readObjectsForClasses`, which is
-`paths_on` again, with `draggingLocation` for the point.
+**Ruling ⑯: the drop door is `bt-platform`'s, and the shape of it is a probe
+result, not a decision taken here.**
 
-This is the largest single piece of work in the feature, and it is why drag is
-its own ticket. Two honesties about it.
+**macOS — PROBE 5, and it is the first work of T-PASTE-3.** The probe evaluates,
+in this order of preference:
 
-First, the macOS half is **replacement, not addition**. `class_addMethod`
-answers no for a selector the class already implements, and winit's view
-implements all three, so this is `class_replaceMethod` — a different and heavier
-thing than the M3-1 route `macos_app.rs` established for the *delegate*, whose
-header is careful to say it only adds selectors winit leaves null. The
-difference is defensible — a view carries no `is_kind_of` assertion the way
-`NSApp.delegate` does, and winit's implementations only queue events nothing
-consumes — but it is a claim about another crate's internals, and **T-PASTE-3
-opens with a Mac probe** in the shape of `docs/plans/port/probe-x*.md`, not with
-an implementation.
+1. **An application-owned destination `NSView`** installed in the existing
+   hierarchy, registered for the types we want. This is ordinary AppKit with no
+   other crate's internals in it, and it is preferred if it can be made not to
+   disturb anything. What the probe has to establish: hit testing (a destination
+   view must not take mouse events from the panes beneath it), the responder
+   chain and IME, the wgpu `CAMetalLayer` beneath it, and the embedded WKWebView
+   panes.
+2. **A narrow upstream extension** to winit — a `draggingUpdated:` and a
+   pasteboard-carrying event — which is the honest fix and the slowest.
+3. **Class-wide replacement on `WinitWindowDelegate`** only if neither works, and
+   then with a per-window lifetime contract written down: the replacement is
+   class-wide and therefore affects every window this process ever creates,
+   including ones created later, and the design must say what each of them does.
 
-Second, the cheap alternative was considered and rejected. Reading
-`bt_platform::pointer_position()` — which exists on both platforms,
-`lib.rs:7280` and `macos_impl.rs:613` — when a `DroppedFile` arrives would give
-a point that is *probably* right; and on macOS, where winit **queues** the event
-rather than sending it, probably-right is a guess about where the hand was. This
-product's standing rule on marks is that pointing at the wrong thing is worse
-than not pointing (`DESIGN.md` §7.1.5k), and a drop that lands in the wrong pane
-types a path into the wrong shell.
+Whichever shape wins, the door specifies the whole destination contract:
+`draggingEntered:`, `draggingUpdated:`, `draggingExited:`,
+`prepareForDragOperation:`, `performDragOperation:`, `concludeDragOperation:`,
+their native ABI return types, per-window teardown, and the conversion from
+AppKit points to this window's physical coordinates — the same conversion
+`macos_impl::pointer_position` (`macos_impl.rs:613`) already performs, reused
+rather than rewritten.
 
-### 3.2 Ruling — the drop joins the verb table that already exists
+**Windows — the OLE initialisation comes with the target, and both are ours.**
+`platform_impl/windows/window.rs:1167` gates **`OleInitialize` and
+`RegisterDragDrop` together** behind `attributes.platform_specific.drag_and_drop`,
+so `with_drag_and_drop(false)` removes the STA initialisation this window then
+needs for its own target. And `event_loop.rs:1262` calls `RevokeDragDrop` on
+`WM_DESTROY` **unconditionally**, whether or not winit registered anything. So
+the ruling is:
 
-There is a table. `row_verb` (`crates/bt-app/src/main.rs`, called from
-`commit_layout_drop` at `:88732`) decides what a **row dragged out of the files
-column** means when it lands, and it reads three things: the payload's kind, the
-landing, and the target pane's kind.
+* Folio owns `OleInitialize`/`OleUninitialize` on the event-loop thread, balanced
+  over the process's life rather than per window.
+* Folio registers its own `IDropTarget` on **every** HWND it creates — the main
+  windows, the summoned terminal, anything a later slice adds. Two targets cannot
+  coexist on one HWND: a missed constructor leaves winit's target in place and
+  the second registration fails with `DRAGDROP_E_ALREADYREGISTERED`, which is a
+  red test rather than a silent degradation.
+* Teardown is written against winit's unconditional revoke rather than around it.
+* **Effects are non-destructive only.** The target returns `DROPEFFECT_COPY` or
+  `DROPEFFECT_NONE` and never `DROPEFFECT_MOVE`: telling a source that a move
+  happened, when all Folio did was type a name, can make the source delete the
+  original.
+* Payloads are copied out before `IDataObject`/`STGMEDIUM` is released; callbacks
+  are bounded and re-entrancy-safe; screen-to-client and DPI conversion is pinned
+  by a test; source key-state masks, multi-window teardown and cancellation are
+  specified.
+
+**The cheap alternative is rejected, for the record.** Reading
+`bt_platform::pointer_position()` when a `DroppedFile` arrives gives a point that
+is *probably* right, and on macOS, where winit queues the event, probably-right
+is a guess about where the hand was. Pointing at the wrong thing is worse than
+not pointing (`DESIGN.md` §7.1.5k), and a drop in the wrong pane types a path
+into the wrong shell.
+
+### 3.2 Ruling — the drop joins the table that exists, and the table is described accurately
+
+`row_verb` (called from `commit_layout_drop`, `main.rs:88732`) decides what a
+**row dragged out of the files column** means. It takes the payload's kind, the
+landing and the target pane's kind, and it is reached only behind
+`DropLanding::layout_aim`.
 
 | Landing | File | Folder |
 | --- | --- | --- |
@@ -436,215 +629,346 @@ landing, and the target pane's kind.
 | **centre** of a Preview pane | `Retarget` — open it there | `Refused` |
 | **centre** of a Files column | `Refused` | `Retarget` — re-root the column |
 | **centre** of a Terminal pane | `Refused` → **`Insert`** | `Refused` → **`Insert`** |
-| the tab strip | `Refused` | `Refused` |
 
-**Ruling ⑭: an OS drop goes through this same table, and the table gains one
-row — a file or a folder on a terminal pane's centre inserts its path.** Both
-carriers, one table. Three reasons:
+**The strip is not in this table, and the first draft misdescribed it.**
+`main.rs:28995` documents the strip arm as **unreachable** — `layout_aim` is
+`None` for all three strip landings — and the strip's own verbs are read off
+`row_strip_landing` (`main.rs:29555`) and committed by `commit_strip_extract` and
+`commit_strip_adopt`. So there is no "the strip refuses" row to state and nothing
+there to defer: **the internal strip verbs are untouched**, and the only decision
+is what an *OS* drop does when it lands on the strip. **Ruling: an OS drop on the
+strip is refused in 0.4.1**, at the strip's own routing rather than in
+`row_verb`, and the refusal is drawn by the strip's own feedback. Opening a new
+tab at a dropped folder is a tab-creation verb and a separate ticket.
 
-* **The rectangle must not have two answers.** A file dropped on the middle of a
-  shell pane has to mean one thing whether it came from Explorer or from Folio's
-  own column. Two carriers with two answers over one rectangle is the shape this
-  product argues against wherever it has met it — the same object, two answers,
-  and what differs is not the object but where it was pointed at.
-* **The cell being changed is a refusal, so nothing is taken away.** A file on a
-  terminal centre traces the box and does nothing today. It becomes the verb
-  that surface actually has.
-* **It makes the window's own column better for free.** Dragging a file out of
-  the files column onto a shell to get its path is a thing people try, and today
-  it is refused.
+**Ruling ⑰: a file or a folder on a terminal pane's centre inserts its path, for
+both carriers.** The rectangle must not have two answers depending on where the
+dragged thing came from; the cell being changed is a refusal, so nothing is taken
+away; and the window's own files column gains a verb people try today and are
+refused.
 
-Everything else in the table is unchanged, and each unchanged cell now has a
-reason it can be asked for:
+**Ruling ⑱: batch admission is defined, because the table's other verbs take one
+item.** `row_verb` and its commit are written around a singular payload, and
+fifty files dropped on a preview pane have no defined meaning in it.
 
-* **On a preview pane** the drop opens the file, which is `open_preview_onto`
-  (`main.rs:54632`) and therefore the same door as a double-click in the tree,
-  with the pool lookup and the view memory coming along.
-* **On a files column**, a folder re-roots the column — and this is a genuine
-  gain from #1, because a folder dragged off the desktop can now point a column
-  at it. A **file** on a column stays `Refused`, and the reason is that the only
-  meaning it could have is *copy it here*, which is a write to the filesystem
-  this window does not make on a drag. The traced box is the honest answer
-  (M147).
-* **At a pane's edge or the window's rim** the drop splits and opens the file in
-  the new pane, which for a `.png` is the picture pane and for a `.md` the
-  reader — unchanged.
-* **On the tab strip** the drop is refused. Opening a new tab at a dropped
-  folder is a reasonable verb, and it is a tab-creation decision rather than a
-  paste one; naming it here would widen this feature by a surface. Noted as a
-  debt, not designed.
+* **Terminal centre — many.** Every admitted path is inserted, in source order,
+  as one run (§2.6). This is the only multi-item verb.
+* **Preview centre, seat edge, root rim, files column — one.** These verbs open
+  or re-root **one** thing. A drop carrying more than one item on such a target
+  is **refused as a whole**, with the refusal box traced while the hand is still
+  open, so the hover never promises a commit the release will not make. Opening
+  fifty preview panes from one release, or silently picking the first of fifty,
+  are both worse than a refusal the reader saw coming.
+* **Mixed kinds** — files and folders in one drop — are admitted on a terminal
+  centre (they are all paths) and refused everywhere else, by the same rule.
+* **A cap.** More than 64 items in one drop is refused with a toast. A number,
+  not "a lot", so that the acceptance row can be written.
+* **Partial failure.** If some paths fail §2.4's gate, the representable ones are
+  inserted and the rest are named in one toast; if *none* is representable,
+  nothing is inserted and the toast says why.
+
+**Ruling ⑲: drop insertion is target-specific and moves no focus**, unlike K144,
+which moves the keyboard and the layout focus on purpose (`main.rs:76921`). A
+drop names the pane by where the hand let go; taking the keyboard as well would
+be a second, unasked-for consequence of a pointer gesture. Both call the same
+insertion with a seat parameter, the way `paste_from_clipboard_into` already
+takes one (`main.rs:96290`).
 
 ### 3.3 Hover feedback
 
-**Ruling ⑮: the existing drag chrome, minus the ghost.** The landing highlight
+**Ruling ⑳: the existing drag chrome, minus the ghost.** The landing highlight
 and the traced refusal box are driven by `DropLanding`, computed from the live
-pointer — which is the second reason the door of §3.1 has to report `DragOver`
-and not just the drop. Nothing new is drawn.
+pointer — which is why the door of §3.1 must report a continuous update and why
+winit's route, with no `draggingUpdated:` at all, cannot serve. Nothing new is
+drawn. The **ghost is suppressed for an OS drag**: the system already draws the
+dragged file's image under the pointer.
 
-The **ghost is suppressed for an OS drag**: the system is already drawing the
-dragged file's own image under the pointer, and a second phantom would be this
-window drawing a thing that is already there.
+`DESIGN.md` §7.1.5f applies at full force — *a mark is a promise, and a mark that
+answers hover but not click is this window lying about what it drew.* Every
+rectangle that highlights has a verb; every rectangle that does not traces the
+refusal box. That is what routing through one table buys, and it is why §3.2's
+batch rules are decided **before** the highlight rather than at the release, and
+why §3.4 refuses an unsupported payload while the hand is still open.
 
-The promise rule applies with its full force. `DESIGN.md` §7.1.5f: *a mark is a
-promise, and a mark that answers hover but not click is this window lying about
-what it drew.* A highlight under a hand holding a file promises that letting go
-does something, so every rectangle that highlights must have a verb and every
-rectangle that does not must trace the refusal box instead. That is what routing
-the OS drop through `row_verb` buys — the box and the verb are read off one
-table, so they cannot disagree.
+### 3.4 What a drag may carry
 
-### 3.4 The rest of the drop's rules
+**Ruling ㉑: a drop has its own admitted-type matrix; it does not inherit the
+clipboard's.** The registered types and the decoding are shared code, but what is
+registered and what each target accepts is stated here:
 
-* **Multi-file: one drop, one insertion, one gesture.** The door hands over the
-  whole list; §2.6 spells it.
-* **A picture with no file behind it** — dragging an image out of a browser,
-  where the drag carries `public.png` or `CF_DIB` and no file URL — goes down
-  the picture lane of §4 and arrives as a path. The lanes are shared, so this
-  costs nothing, and it is what a reader dragging a picture at a shell means.
+| Payload | Registered | Terminal centre | Preview centre / edge / rim |
+| --- | --- | --- | --- |
+| file URLs | yes | insert the paths | open the one file (one-item rule) |
+| raw picture (`public.png`; `CF_DIB`/`CF_DIBV5`/`"PNG"`) | yes | §4's lane, then insert the path | §4's lane, then open the written file |
+| a file **promise** | **not registered** | refused while hovering | refused while hovering |
+| text | not registered | — | — |
+
+Raw picture types are registered explicitly: a PNG-only drag out of a browser
+does not match a file-URL-only registration and would never arrive. A **promise**
+is not registered at all, so the destination refuses it before the highlight
+lights, which is §3.3's rule rather than a courtesy.
+
+**The Safari claim is withdrawn.** The first draft asserted that a picture
+dragged out of Safari carries `public.png` and no file URL. Apple's own file-
+promise sample exists precisely because Safari, Mail and Photos drag image
+*promises*, so what an image drag offers is browser- and version-specific and is
+a measurement, not a premise. **PROBE 6: record what Safari, Chrome and Firefox
+offer for a dragged image, by version.** Until it is run, a browser image drag is
+whatever the matrix above says about the types it actually presents — possibly a
+refusal.
+
+### 3.5 The rest of the drop's rules
+
 * **A drop while a modal is open is refused** — the first-run card, a dialog, a
-  menu, the palette. `paste_from_clipboard_into`'s neighbours already keep that
-  predicate (`main.rs:96260`).
-* **A drop into a pane that is not the focused one does not move the focus.** A
-  paste into a named pane already answers that pane's attention without taking
-  the keyboard (`main.rs:96320`), and a drop is the same gesture with a
-  different starting point.
+  menu, the palette; the predicate `paste_from_clipboard_into`'s neighbours keep
+  (`main.rs:96257`).
+* **A drop into a pane that is not the focused one does not move the focus**
+  (ruling ⑲), and it answers that pane's attention the way a named-seat paste
+  already does (`main.rs:96312`).
 
 ---
 
 ## 4. A picture becomes a file
 
-### 4.1 Where it goes
+### 4.1 Where it goes, and what the directory has to prove
 
-**Ruling ⑯: the platform's own temporary directory, in a folder of this
-product's — `%TEMP%\Folio\clipboard\` on Windows, `$TMPDIR/Folio/clipboard/` on
-macOS.**
+**Ruling ㉒: under the platform's own temp, discovered rather than constructed —
+`std::env::temp_dir()`, then `Folio`, then `clipboard`.** That is `GetTempPath2W`
+on Windows and `$TMPDIR` on macOS, which is already per-account there and is
+already where this program keeps its per-run socket (`PRIVACY.md`, "Elsewhere").
+macOS's `/var/folders/…` form and its `/private/var` alias are **not** rejected:
+they are the standard answer, and a check that refused them would refuse every
+Mac.
 
-Not `%LOCALAPPDATA%` and not `~/Library/Caches`: a cache is a thing the program
-manages for its own benefit and keeps until it decides otherwise, and this is a
-thing the *system* should be free to sweep. `$TMPDIR` is already per-account on
-macOS and is already where this program keeps its per-run socket (`PRIVACY.md`,
-"Elsewhere"); `%TEMP%` is already where the panic log goes. Both are directories
-a reader already understands as temporary, which is half of the privacy answer.
+**Ruling ㉓: a trust contract, on both platforms, for every Folio-made ancestor,
+before every operation.** The earlier draft vetted the final directory once per
+run against the rules `launch_pipe_unix::vetted_endpoint` (`:470`) applies to a
+*socket*. That is the wrong precedent twice over: a socket's `0600` is not a
+directory's mode, and once per run is not before every write. The directory
+precedent in this codebase is `instance::prepare_runtime_directory`
+(`crates/bt-platform/src/instance.rs:360`), which creates with an explicit mode,
+`symlink_metadata`s the result, refuses a symlink or a non-directory, refuses a
+foreign uid, and **repairs an existing mode** rather than refusing the claim.
+This lane follows it:
 
-The folder is created once, on the first picture paste of a run, and vetted the
-way `launch_pipe_unix::vetted_endpoint` (`launch_pipe_unix.rs:470`) vets its
-socket: `symlink_metadata` rather than `metadata`, refuse a symlink standing
-where the folder should be, refuse a directory belonging to another uid, and on
-Unix create it `0o700`. A refusal is a toast and no file — never a write
-somewhere else.
+* **Unix.** `DirBuilder::mode(0o700)` for `Folio` **and** for `clipboard` —
+  both, because an intermediate directory of ours redirected by a link
+  redirects the final one that is not a link. Then, for each level:
+  `symlink_metadata`, not a symlink, is a directory, `uid == geteuid()`, and mode
+  repaired to `0700` if it is anything else. A same-owner world-readable
+  directory does **not** pass. Files are created `0600`.
+* **Windows.** There is no uid; the equivalents are stated rather than left
+  implied: refuse a **reparse point** at either level, and create both
+  directories with a DACL granting the current user only — the same
+  owner-restricted footing `SECURITY.md` records for the launch pipe. Files
+  inherit it.
+* **Before every operation, not once.** The vetting runs before each create and
+  before each sweep, because a directory replaced after the first check redirects
+  everything after it. `create_new` protects a *name*; it protects no parent.
+* **Anchored where the platform allows.** On Unix the creates and the sweep are
+  performed relative to a verified directory handle with no-follow semantics. On
+  Windows the equivalent handle-relative primitive is out of reach from `std`, so
+  the mitigation is the reparse-point check plus `create_new`, and **that residue
+  is stated here rather than left to be discovered**.
+* **Fail closed, with a sanitised message.** A refusal is a toast and no file —
+  never a write somewhere else, and never a message that quotes a path a reader
+  did not ask to see.
 
-### 4.2 The name, the format, the size
+### 4.2 The name, the format, the bounds, and the delivery
 
-**Name — `clip-<yyyymmdd>-<hhmmss>.png`, in local time**, and on a collision
-`clip-<yyyymmdd>-<hhmmss>-2.png`, `-3`, and so on. Local time, because the name
-is for the reader, who is about to see it in a shell listing beside timestamps
-from the same clock. The collision ladder exists because two pastes in one
-second are ordinary, and it is resolved by **`File::create_new`** —
-`CREATE_NEW` / `O_EXCL` — so that the collision is detected by the filesystem
-rather than by a `stat` another process can invalidate between the look and the
-write. Never `bt_persist::atomic_write`: replacing is exactly what must not
-happen here.
+**Name — `clip-<yyyymmdd>-<hhmmss>.png`**, and on a collision
+`clip-<yyyymmdd>-<hhmmss>-<n>.png` for `n` from 2. The stamp is **local time
+from the system clock**, which is the clock the reader's shell listing uses; the
+sweep's age comparison uses the file's own mtime, not the name (§4.3), so a clock
+change or a DST step cannot make a file immortal or delete a new one. Creation is
+`File::create_new` — `CREATE_NEW` / `O_EXCL` — so a collision is detected by the
+filesystem rather than by a `stat` another process can invalidate. Never
+`bt_persist::atomic_write`: replacing is the thing that must not happen.
 
-**Format — PNG, always, and the source's PNG bytes are written through
-unchanged.** If the clipboard offers the registered `"PNG"` format or
-`public.png`, those bytes go to the file after a header check that confirms they
-are a PNG and reports the dimensions; they are not decoded and re-encoded,
-because a lossless round trip changes every byte for nothing and can drop
-ancillary chunks such as a colour profile. A `CF_DIBV5` or `CF_DIB` — preferred
-in that order, since V5 carries alpha and the older header does not — is
-converted: a 14-byte `BITMAPFILEHEADER` is synthesised in front of the DIB, the
-result handed to the `image` crate's BMP decoder, and the pixels re-encoded as
-PNG. **This needs `bmp` added to the workspace's `image` features**
-(`Cargo.toml:107` has `gif, jpeg, png, webp`), which is one decoder inside a
-dependency already present, and a notices-drift check that is already automated.
-A `public.tiff` takes the same road through the TIFF decoder.
+**Format — PNG, and the picture is validated by a full decode while the *original
+bytes* are what get written.** If the source offers PNG, those bytes are decoded
+end to end to prove they are a whole picture — an `IHDR` that parses says nothing
+about a truncated or corrupt stream, and a "successful" filename naming a broken
+file is worse than a refusal — and then the **original** bytes are written, so
+the colour profile and every other ancillary chunk survive. A `CF_DIBV5` or
+`CF_DIB` is decoded through `image`'s **`BmpDecoder::new_without_file_header`**
+(`image-0.25.10/src/codecs/bmp/decoder.rs:534`), which exists in that crate
+explicitly for `CF_DIB`; the first draft's synthesised 14-byte
+`BITMAPFILEHEADER` is **withdrawn** — it was a hand-rolled offset calculation
+across headers, masks, palettes and profiles, standing next to an audited entry
+point that needs none of it.
 
-One extension for every picture, because three readers depend on the name: the
-agent, whose reader picks its decoder off it; Folio's own preview, if the reader
-opens the path they just pasted; and the reader, who should be able to tell what
-a file in that folder is without opening it.
+**Ruling ㉔: alpha is decided by the bitmap, not by the clipboard format id, and
+an unsupported layout is refused rather than converted.** `CF_DIBV5` with
+`BI_RGB` does not carry a meaningful alpha channel simply because the header is a
+V5, and that decoder's own alpha handling depends on the compression and on a
+non-zero mask (`decoder.rs:752`). Treating premultiplied channels as straight
+darkens translucent edges; treating undefined legacy alpha as meaningful turns
+opaque pixels transparent. So: masks and compression are read; a layout this
+design has not specified — an unexpected bit depth, a mask combination not in the
+table, a palette form not covered — is **refused with a toast** rather than
+emitted as a changed picture. §6.1 carries known-pixel producer fixtures for
+each supported layout. **PROBE 7: capture real `CF_DIBV5` payloads from Snipping
+Tool, `Win+Shift+S`, Paint, Chrome's *Copy image* and Excel's copy-as-picture,
+and record for each what the header, the masks and the alpha actually are.**
 
-**Size — refused above 64 MiB of source bytes, or above 256 MiB of decoded
-RGBA** (which is, for instance, 8192 × 8192). The decoded bound is the real
-cost, and the encoded one stops a decoder being handed a bomb. A refusal says so
-in a toast; it is never silent, because a paste that appears to do nothing is
-the failure mode §7.1.5f exists to prevent.
+**TIFF is out of 0.4.1.** `Cargo.toml:107` turns defaults off and enables
+`gif, jpeg, png, webp`; `tiff` is a separate feature in `image-0.25.10`
+(`Cargo.toml:120`). Enabling it is a dependency, a lockfile and a
+`THIRD-PARTY-NOTICES.md` change, and `public.tiff` is a *fallback* offered beside
+`public.png` by macOS sources that already offer PNG. So the macOS picture rung
+is `public.png` only, a PNG-less TIFF-only pasteboard is `Absent`, and the TIFF
+arm is a named debt with its notices work attached.
 
-**The work does not run on the event-loop thread.** A DIB of a 4K screen is a
-one-to-three-hundred-millisecond encode, which is a dropped frame on a product
-that measures `event_to_present_us`. The gesture starts the work, the file
-lands, and the path is inserted when it exists — re-asking
-`input_line_needs_a_space_first` at that moment, which is exactly how K144
-already decides its leading space, so a reader who typed a character in the
-meantime still gets a well-formed line. A failed write is a toast and nothing
-typed.
+**Multi-frame sources take the first frame and say so** in the toast. A copied
+GIF is a plausible thing to paste; silently keeping one frame without saying so
+is not.
+
+**Ruling ㉕: bounded at acquisition, in decode, and in aggregate.** Per-picture
+caps alone bound nothing — the first draft's caps ran *after* native bytes had
+been copied across the boundary, and nothing stopped a reader from starting a
+legal 256 MiB job every second.
+
+* **At acquisition.** The native length is read and compared before anything is
+  copied: `GlobalSize` on the Windows handle. On macOS `data(forType:)` produces
+  an `NSData` before its length can be read, so the bound applies to *our* copy
+  and the decode, not to AppKit's own allocation — **stated as a residue**, with
+  the mitigation that nothing is copied out of it above the cap.
+* **Before allocation.** The header's dimensions are checked against the pixel
+  cap before a decode buffer is allocated. The cap is expressed in **decode
+  bytes**, not in an RGBA8 multiplication: a 16-bit-per-channel intermediate is
+  eight bytes a pixel, and the decoder's own scratch is not free.
+* **Numbers.** Source bytes ≤ 64 MiB; decode allocation ≤ 256 MiB; written file
+  ≤ 64 MiB; the `clipboard` directory ≤ 512 MiB in aggregate. A write that would
+  exceed the directory quota first removes the oldest `clip-*.png` files; if that
+  cannot free enough, the write is refused.
+* **One in flight.** At most one picture job per window. A second picture paste
+  while one is pending is **refused with a toast**, not queued — a queue would
+  need an ordering contract for a gesture that has no meaningful order.
+* **Failures are complete.** A write, flush or close error deletes the partial
+  file and reports; disk pressure is a refusal, not a truncated PNG.
+* **Acquisition has a latency contract.** A delayed-rendered format means the
+  *owner* runs code before we get bytes; the read is bounded and a source that
+  does not answer within it is `Unreadable` (ruling ③). **PROBE 8: measure
+  delayed-render latency for the common Windows sources** so the bound is a
+  number with evidence under it.
+
+**Ruling ㉖: the delayed insertion carries identity, and it is revalidated at
+completion.** Encoding a 4K DIB is a one-to-three-hundred-millisecond job and
+must not run on the event-loop thread. That makes the insertion **asynchronous**,
+and the first draft's single re-check of the cell left of the cursor solved none
+of the real problems: a reader can switch tabs, restart or close the shell, open
+a modal, press Enter, or paste again while it runs. So a job carries:
+
+* **window, tab and leaf**, plus the **session incarnation** of that leaf, so
+  that a restarted shell in the same seat is a different recipient and a reused
+  `SeatId` cannot be mistaken for the original;
+* a **request sequence number**, globally unique in the way `CONVENTIONS.md:154`
+  requires of worker addresses, with one owner for the answer.
+
+At completion the job **revalidates** the original target's existence and
+incarnation, the modal gate, and the setting of §4.6 — and if any has changed, it
+does not insert. Cancellation is explicit when the pane closes, the shell
+restarts, the window closes or the setting is turned off; a cancelled job's file
+is deleted through the owned path rather than left for the sweep. Ordering is
+unnecessary because only one job is ever in flight (ruling ㉕), which is a second
+reason for that rule. The leading-space rule is re-asked at insertion, as K144
+already does — but as the *last* step, not the whole of the contract. The same
+applies to a delayed picture **drop**.
 
 ### 4.3 When the files go
 
-**Ruling ⑰: swept at startup, at seven days. Never on exit, never never.**
+**Ruling ㉗: best-effort retention with a quota-backed maximum, and no promise
+about history.** The first draft claimed seven days "exceeds any session" and
+"preserves history". Neither is true: a Folio left running for eight days still
+needs its file while another Folio's startup deletes it, a continuously running
+Folio never sweeps at all, and the operating system's own temp cleaning can
+remove a file before either. The honest statement, which goes in `PRIVACY.md` in
+these terms:
 
-Not on exit, because the path may be sitting in a shell's history, in an agent's
-conversation, or in a command the reader is about to re-run with Up-Enter — a
-terminal that deleted the file it had just named would be breaking the sentence
-it wrote. Not never, because a screenshot is often of something private, and a
-folder the reader does not know about should not accumulate them forever. Seven
-days is longer than any session and longer than yesterday's history, and shorter
-than any reasonable memory of what a picture was.
+* Files are removed when they are older than **seven days**, checked at startup
+  **and** hourly while a Folio runs, so that a long-lived process is not a
+  reason for unbounded retention.
+* The directory is additionally bounded at **512 MiB** (ruling ㉕), oldest first.
+  Those two together are the maximum retention this design offers.
+* **The system may remove them sooner.** A temp directory is swept by the
+  platform, and Folio does not prevent it.
+* **A path in shell history is not a promise that the file is there.** A reader
+  who wants to keep a picture copies it somewhere of their own; the toast that
+  reports a written file says where it is, which is the moment to do that.
 
-The sweep runs once at startup, which is the same shape and the same argument as
-`diagnostics.log`'s rotation, already documented in `PRIVACY.md` as "checked
-once at startup". It removes only **regular files** whose names match
-`clip-*.png` in that one folder — not directories, not symlinks, not anything
-else somebody put there — so it cannot be aimed at a file that is not ours.
+The owned-name grammar is exact — `clip-` + 8 digits + `-` + 6 digits +
+optional `-` + digits + `.png` — because `clip-family.png` is a file a reader
+could have put there and the sweep must not own it. Only **regular files** in
+that one directory are considered: not directories, not symlinks, not anything
+reached through one. Age is the file's mtime. A file currently being written by
+this process is excluded by name through the in-flight job; a file being written
+by *another* Folio is excluded by the `create_new` + age rule, since a file
+younger than the cutoff is never a candidate. Failures are counted and reported
+once in `diagnostics.log`, never per file.
+
+**This is not clipboard watching** and the privacy text says so: the sweep looks
+at a directory of our own files, on a timer, and reads no clipboard.
 
 ### 4.4 The path is a path
 
-**Ruling ⑱: once the file exists it is an ordinary file and takes §2 whole.**
-Quoted by the pane's grammar, spelled in the pane's namespace — which means a
-picture pasted into a WSL pane arrives as
-`/mnt/c/Users/ann/AppData/Local/Temp/Folio/clipboard/clip-20260915-140233.png`
-and into a `claude` pane bare. There is no second rule for pictures, and that is
-the point of writing the file at all: after the write, #2 *is* #1.
+**Ruling ㉘: once the file exists it is an ordinary file and takes §2 whole** —
+the representability gate, the pane's spelling, the pane's grammar. A picture
+pasted into a WSL pane arrives as
+`/mnt/c/Users/ann/AppData/Local/Temp/Folio/clipboard/clip-20260915-140233.png`,
+and into an agent pane single-quoted (§2.3). There is no second rule for
+pictures, which is the point of writing the file at all: after the write, #2 *is*
+#1.
 
 ### 4.5 What `PRIVACY.md` and `README.md` must say
 
-A new row in `PRIVACY.md`'s **Elsewhere** list, in that section's voice, saying
-all of:
+A new row in `PRIVACY.md`'s **Elsewhere** list, in both languages, in that
+section's voice, saying all of:
 
 * the two directories by name, `%TEMP%\Folio\clipboard` and
-  `$TMPDIR/Folio/clipboard`;
+  `$TMPDIR/Folio/clipboard`, and that the files are readable only by you;
 * what is in them — *a PNG of whatever picture was on your clipboard when you
-  pasted into a pane*, which is the plainest possible statement of the risk;
-* that a file is written **only** by that gesture: no clipboard is watched, and
+  pasted, or of a picture you dropped on a pane* — and that the PNG keeps
+  whatever metadata the source put in it;
+* that a file is written **only** by those gestures: no clipboard is watched and
   nothing is written when you copy;
-* that files older than seven days are removed at startup, and that you may
-  delete the folder at any time;
-* the delete command for each platform, as every other row there carries one;
+* that files are removed after seven days, that the directory is capped, that the
+  system may remove them sooner, and that **none of this reaches a path already
+  written into your shell history, an agent's own records, or a copy the
+  recipient made** — deleting the directory does not undo those;
+* that `%TEMP%` can be redirected to a network or roaming location by policy, in
+  which case the picture is written there;
+* the delete command for each platform;
 * the switch that turns it off.
 
-And one clause in the README's privacy paragraph (`README.md:87`). That
-paragraph today accounts for the network and for settings, profiles and
-sessions; a picture written to a temporary file is a **new kind of thing on the
-disk**, and a paragraph that lists the kinds has to list it.
+And one clause in the README's privacy paragraph (`README.md:87`), which today
+accounts for the network and for settings, profiles and sessions: a picture
+written to a temporary file is a **new kind of thing on the disk**, and a
+paragraph that lists the kinds has to list it.
 
 ### 4.6 The one setting
 
-**Ruling ⑲: one switch, and it is only for the picture.**
-`Settings ▸ General ▸ Paste a picture as a file`, default **on**. Off, a
-clipboard holding only a picture pastes nothing and says so in a toast.
+**Ruling ㉙: one switch, and it covers every picture file Folio creates.**
+`Settings ▸ General ▸ Save a pasted picture as a file`, default **on**. Off:
 
-The reason it exists: this is the only part of the feature that writes to the
-disk, and a program that writes a file the reader did not name should let them
-say no. The reason there is **no** switch for the path paste — the "paste plain
-text instead" toggle the ticket asks about — is that it would have no case to
-serve. When the clipboard holds files there is, in the overwhelming case, no
-text on it at all: Explorer's `Ctrl+C` offers none, and *Copy as path* offers
-text and is therefore already the text rung, quotes and all, unchanged. And when
-a source offers both, ruling ② has already given the reader the text. A setting
-is a question asked of every reader forever; ask it only when both answers are
-real.
+* a clipboard picture pastes nothing and says so in a toast;
+* **a dropped picture does the same** — the first draft's switch named the
+  clipboard only, while §3.4 writes files too;
+* **a job already in flight is cancelled and its file deleted**, so that turning
+  the switch off does not leave a write landing a second later.
 
-Its description is two sentences in the settings voice — written statement,
+Inserting the path of a picture that **already exists** on the disk is not this
+switch's business and is never disabled by it: that is #1, and no file is
+created.
+
+There is **no** switch for the path paste. When the clipboard holds files there
+is, in the overwhelming case, no text on it at all — Explorer's `Ctrl+C` offers
+none, and *Copy as path* offers text and is therefore already the text rung,
+quotes and all, unchanged. A setting is a question asked of every reader forever;
+ask it only when both answers are real. The mixed picture-and-text case gets the
+**Paste picture** verb of ruling ② instead of a second persistent question.
+
+The description is two sentences in the settings voice — written statement,
 reader's perspective, no English mode names inside the Chinese, at most two
 lines, pinned by the budget test — and it names where the file goes.
 
@@ -654,201 +978,357 @@ lines, pinned by the budget test — and it names where the file goes.
 
 ```text
 bt-platform     clipboard_payload()  -> Files | Text | Picture(bytes + what they are) | Nothing
-                the drop door:       register / point / payload / effect
-                    windows_impl:    IDropTarget, RegisterDragDrop, with_drag_and_drop(false)
-                    macos:           the three dragging selectors + paths_on
+                                        each rung: Absent | Present | Unreadable
+                                        one snapshot, change-count checked
+                the drop door:       register / continuous point / payload / effect
+                    windows_impl:    own OleInitialize + IDropTarget on every HWND
+                    macos:           PROBE 5 — destination view, upstream, or replacement
+                the file-URL decoder shared beneath macos_services::paths_on
                 (clipboard_text() unchanged, and still what every text field reads)
 
 bt-transcript   PrintedPathNamespace::to_pane_spelling()   — beside to_local_path
+                derive_namespace()   — one derivation, both directions
 
-bt-app          shell_literal.rs     ShellGrammar + shell_literal() + the line builder  [pure]
-                profiles::shell_grammar(index)             — derive_integration's twin
-                main.rs              paste routing, the drop landing, the picture lane
-                                     inserted_path_text (K144) absorbed
+bt-app          shell_literal.rs     representability gate + ShellGrammar + encoders  [pure]
+                profiles::grammar()  — derive_integration's twin, plus "paste_as"
+                main.rs              paste routing, drop landing, picture lane + job identity
+                                     inserted_path_text (K144) absorbed and repaired
 ```
 
-**Ruling ⑳: `bt-platform` hands over bytes and what they are; it does not
-decode.** `bt-platform` carries no `image` dependency and should not grow one —
-a door's job is to cross the boundary. `bt-app` already depends on `image`
-(`crates/bt-app/Cargo.toml:64`), and the conversion, the size bound and the file
-write live there, above the platform line, where they are the same code on both
-platforms.
+**Ruling ㉚: `bt-platform` hands over bytes and what they are; it does not
+decode.** It carries no `image` dependency and should not grow one. `bt-app`
+already depends on `image` (`crates/bt-app/Cargo.toml:64`), and the decode, the
+bounds and the file write live there, above the platform line, where they are the
+same code on both platforms. The *acquisition* bound (ruling ㉕) is the
+exception and is enforced at the boundary, before the copy, which is what
+`CONVENTIONS.md:34` asks of a boundary.
 
-**Bracketed paste: yes, unchanged, and by doing nothing.** The built line is
-ordinary text and goes through `paste_text` → `input::paste_bytes`
-(`main.rs:110689`, `input.rs:696`), so it is bracketed exactly when the shell
-asked for bracketing and not otherwise. `sanitize_paste` is a no-op on it — a
-quoted path has no control character and no newline — and a multi-file paste is
-one lump inside one pair of brackets, which is what it is. This matters most in
-an agent pane, where bracketed paste is how the agent knows a block arrived as
-one piece.
+### 5.1 Bracketed paste
 
-**The keyboard: nothing new.** `is_paste_shortcut_on` (`input.rs:299`) already
-answers `Ctrl+V`, `Ctrl+Shift+V` and `Shift+Insert` on Windows and `⌘V` on
-macOS, and every one of them lands in `paste_from_clipboard_into`
-(`main.rs:96290`) — as do the terminal menu's `Paste` row (`main.rs:73388`) and
-macOS's `Edit ▸ Paste` action. One door, so the feature arrives at all of them at
-once. A separate chord was considered and rejected: the reader's gesture is
-*paste*, and asking them to know in advance what is on the clipboard in order to
-choose a key is asking them to do the work this feature exists to do.
+Inherited, unchanged, by doing nothing: the built line goes through `paste_text`
+→ `input::paste_bytes` (`main.rs:110689`, `input.rs:696`), so it is bracketed
+exactly when the shell asked and not otherwise. It is **not** disabled to bypass
+a shell's paste hooks. §2.4's gate is what makes the sanitiser a no-op on our
+text, rather than the old, false claim that a quoted path cannot contain a
+control character.
+
+### 5.2 What the encoder promises, and where the promise stops
+
+**Ruling ㉛: the literal is correct at a fresh argument boundary, and nowhere
+else.** The envelope is not quote-context awareness, and
+`input_line_needs_a_space_first` sees one cell. Three cases are outside the
+promise and are documented rather than defended against:
+
+* **Inside an open token or quote.** Pasting after `Get-Content '` inserts a
+  literal that closes the reader's quote and opens its own. Nothing this window
+  can read tells it the shell is mid-quote.
+* **A wrapped line at column zero**, where the character before the cursor is on
+  the previous visual row and the one-cell look sees a blank.
+* **A shell that rewrites the paste.** zsh's `bracketed-paste-magic` can run
+  widgets over a paste and requote the whole of it, including turning a
+  multi-file run into one string.
+
+PSReadLine editing and PowerShell's native-argument marshalling
+(`$PSNativeCommandArgumentPassing`) are later stages too, and §6.2's acceptance
+asserts the **argument the program received and the file it opened**, not the
+text on the glass.
+
+### 5.3 The keyboard
+
+`is_paste_shortcut_on` (`input.rs:299`) already answers `Ctrl+V`, `Ctrl+Shift+V`
+and `Shift+Insert` on Windows and `⌘V` on macOS, and every one of them lands in
+`paste_from_clipboard_into` (`main.rs:96290`) — as do the terminal menu's
+`Paste` row (`main.rs:73388`) and macOS's `Edit ▸ Paste` action. One door, so the
+feature arrives at all of them at once. A separate chord for path pasting was
+considered and rejected: the reader's gesture is *paste*. **Paste picture**
+(ruling ②) is a new menu row and a bindable command with no default chord.
 
 ---
 
 ## 6. What is tested
 
-### 6.1 Pure, and therefore the whole of the specification
+### 6.1 Pure — necessary, and not sufficient
 
-**`shell_literal`, one table per grammar.** A bare safe path; a space; `'`; `"`;
-`$`; a backtick; `%`; `!`; `#`; `&`; `;`; `(`; `[`; a leading `~`; a `~` in the
-middle; CJK; an emoji; a name that is entirely unsafe characters; a path ending
-in `\`, which is where `Cmd` doubles it and the other two do not; the drive root
-`D:\`; and a path containing both `'` and a space, which is the combination WT
-#18006 got wrong.
+These pin the rulings. They do not pin the product: **no pure test observes an
+argv, a shell's re-lexing, an agent's attachment or a native drop**, and §6.2 is
+where those live. The first draft's claim that the pure set is "the whole of the
+specification" is struck.
 
-**`to_pane_spelling`, one table per namespace.** `D:\Demo\a.txt` →
-`/mnt/d/Demo/a.txt` and `/d/Demo/a.txt`; `C:\` → `/mnt/c/`;
-`\\wsl.localhost\Ubuntu\home\a\x` → `/home/a/x` in that distribution's pane and
-untranslated in another's; `\\server\share\x` untranslated; a path on a drive
-with no mount; a `Windows` namespace, which translates nothing.
+**The representability gate.** A non-UTF-8 `OsStr` refuses; an unpaired surrogate
+refuses; LF, CR, TAB, ESC, NUL, a C1 control and DEL each refuse; the toast names
+the entry; several files with one bad entry insert the rest.
 
-**The round trip, which is the strongest pin in the set.** For every path in the
-corpus and both foreign namespaces, `to_local_path(to_pane_spelling(p)) == p`.
-The two directions live in one file so that they cannot drift; this is the test
-that says so.
+**Each encoder, over its own table.** Space; apostrophe; each of PowerShell's
+Unicode quote characters; backslash — one, two, and trailing; `"`; `$`;
+backtick; `%`; `!`; `#`; `&`; `;`; `(`; `[`; `~` leading and interior; CJK;
+emoji; a non-ASCII space; the drive root; a path that is one unsafe character;
+and the combinations — apostrophe **with** a space, backslash **with** an
+apostrophe. `Cmd`: 1, 2 and 3 trailing backslashes → 2, 4 and 6; `%` refuses; `!`
+refuses under a `/v:on` row and passes otherwise; `^` is untouched. `Fish`: two
+backslashes survive as two; an apostrophe becomes `\'`. `Nushell`: the fence
+grows past a path containing `'#`. `Agent`: the result is one shlex token, which
+is asserted **by running a shlex** over the output rather than by eye.
 
-**Format precedence.** A fake clipboard described by *which rungs answer* —
-every combination of {files, text, png, dib} — and an assertion on which rung is
-chosen. Pure over the description rather than over a real clipboard, so it runs
-on every platform including CI's.
+**`to_pane_spelling`, over a normalised domain.** `D:\Demo\a.txt` →
+`/mnt/d/Demo/a.txt` and `/d/Demo/a.txt`; `d:\x` and `D:\x` agree; `C:\` →
+`/mnt/c/`; `\\wsl.localhost\Ubuntu\home\a\x` and `\\wsl$\Ubuntu\home\a\x` →
+`/home/a/x` in that distribution's pane, untranslated in another's; a UNC share
+untranslated; an unmounted drive spelled anyway, asserted **as the documented
+default-mount assumption**; a `Windows` namespace translates nothing.
 
-**The temp file.** The name from a fixed timestamp; the collision ladder to
-`-3`; the sweep predicate — which names are old enough, that a name not matching
-`clip-*.png` is untouched however old, that a directory is untouched, that a
-symlink is untouched.
+**Two round-trip suites, and they are separate.** One asserts
+`to_local_path(to_pane_spelling(p)) == p` over the **supported** normalised
+domain. The other lists the **known non-identities** and asserts each of them by
+name — `\\wsl.localhost\Ubuntu\mnt\d\x` → `/mnt/d/x` → `D:\x` is the first entry.
+A single suite claiming a universal identity would be a false pin.
+
+**The derivations.** Every shipped row id on both seed platforms → its grammar
+and its namespace, as a table, so that adding a row without deciding either is a
+red test. A `pwsh` row with integration `None` is still `PowerShell`; **a
+`gitbash` row with integration `None` is `Msys` in both directions** (ruling ⑫);
+`wsl.exe -e nu` without an override is `Posix` and **the test says so, naming it
+as the spawn-time default**; a `"paste_as"` row is believed.
+
+**Rung semantics.** A fake clipboard described by each rung's answer —
+`Absent` / `Present` / `Unreadable`, and `Present`-but-empty — across every
+combination, asserting the chosen rung, that `Unreadable` stops the ladder, that
+an empty `HDROP` is `Absent`, that an empty text is `Present`, and that a changed
+change-count discards.
+
+**The picture.** Known-pixel fixtures per supported DIB layout — top-down and
+bottom-up, `BI_RGB` and `BI_BITFIELDS`, V5 with and without a real alpha mask,
+palette forms — asserting the written pixels; an unsupported layout refuses; a
+truncated PNG with a valid `IHDR` refuses; dimensions over the cap refuse before
+allocation; a multi-frame source writes frame one and says so.
+
+**The file and the sweep.** The name from a fixed stamp; the collision ladder to
+`-3`; the owned-name grammar accepting exactly its own shape and rejecting
+`clip-family.png`; age by mtime, on both sides of the cutoff; a directory,
+a symlink and a foreign file untouched; the quota evicting oldest-first; a
+refused write when eviction cannot free enough.
+
+**Job identity.** A completion whose leaf is gone does not insert; whose
+incarnation changed does not insert; whose modal opened does not insert; whose
+setting was turned off does not insert and deletes its file; a second paste while
+one is pending is refused.
 
 **The line put at the prompt.** A leading space only when the cell left of the
-cursor is not blank (the existing shape at `main.rs:152531`); a trailing space
-always; three files space-separated in the source's order; the same three in an
-agent pane, bare.
+cursor is not blank (the shape at `main.rs:152531`); a trailing space always;
+three files in source order; drop insertion moves no focus while K144 still does.
 
-**The grammar derivation.** Every shipped row id on both seed platforms → its
-grammar, as a table, so that adding a row without deciding its grammar is a red
-test. Plus: a `pwsh` row with integration turned off is still `PowerShell`
-(ruling ⑥ as an assertion), and every `AGENT_IDS` row is `Plain`.
+**i18n.** The new toast strings, the setting's two lines, the `Text::ALL` count
+(660 today) and the description's two-line budget.
 
-**i18n.** The new toast strings and the setting's two lines, the `Text::ALL`
-count (660 today), and the description's two-line budget.
+### 6.2 Measured, on both machines — where the feature is actually proved
 
-### 6.2 By hand, on both machines, because none of the above touches a clipboard
+Every row asserts **the argument the program received or the file it opened**,
+not a screenshot. `BT_PTY_DUMP` is on for these runs and the records are kept;
+the records are *ours*, and §7.3 distinguishes them from a reader's own.
 
-**Windows.** Explorer `Ctrl+C` on one file, on three files, on a folder, and on
-a file whose name has a space, a `'`, a `$`, a `%` and CJK — pasted into `pwsh`,
-`winps`, `cmd`, `gitbash`, `wsl` and a `claude` pane, six panes in one tab, and
-each line then *run*, to prove the shell opened the file. *Copy as path* pasted
-into each, unchanged and not double-quoted. Snipping Tool and `Win+Shift+S` into
-a `claude` pane and into `pwsh`. A drag from Explorer onto a terminal centre, a
-terminal edge, a preview pane, a files column, the tab strip and the window
-chrome — and out of the window and back, so that the box un-traces. A drop while
-a menu is open. Fifty files at once.
+**The source matrix (PROBE 1).** Source × gesture × advertised formats × chosen
+rung, filled in by measurement, for: Explorer one file / three files / a folder /
+*Copy as path*; Finder one file / three files; Excel a cell range and
+copy-as-picture; Word text and an image; a browser text selection and *Copy
+image*; Snipping Tool; `Win+Shift+S`; `⌃⇧⌘4`; and a screenshot tool configured to
+offer a path beside the picture. Each row records the product version.
 
-**macOS.** Finder `⌘C` on one file and on three; `⌃⇧⌘4` into a `zsh` pane and a
-`claude` pane; a drag from Finder onto each of the same surfaces; a picture
-dragged out of Safari, which carries `public.png` and no file URL; a file whose
-name contains `'`; a file with a CJK name; and **a file on an SMB or exFAT
-volume whose name is not valid UTF-8**, which is the case `macos_files.rs` is
-written about and the case winit's own handler gets wrong.
+**The shell matrix.** A file whose name has a space, an apostrophe, `$`, `%`,
+`!`, a PowerShell smart quote and CJK, into `pwsh`, `winps`, `cmd`, `gitbash`,
+`wsl`, `zsh`, `bash`, a `fish` row and a `nu` row — each line then **run**, and
+the opened file compared. Under `cmd`, a builtin (`cd`, `type`) *and* a native
+child (`findstr`, a tiny argv printer) for the trailing-backslash rows, with
+`/v:on` and without. Under PowerShell, 5.1 and 7, with PSReadLine default and
+with bracketing off. Under zsh, default and with `bracketed-paste-magic`. Under
+Git Bash, an MSYS consumer and a native consumer with `MSYS2_ARG_CONV_EXCL`
+unset and set (PROBE 4).
+
+**The agents (PROBE 3).** Claude Code, Codex and Copilot CLI, versions recorded:
+a spaced path, an apostrophe path, two paths in one insertion, a `file:` URI —
+and for each, whether it attached, referenced or ignored the file.
+
+**The drop matrix.** From Explorer and from Finder onto: a terminal centre, a
+terminal edge, a preview centre, a files column, the tab strip and the window
+chrome; out of the window and back, so the box un-traces; a drop while a menu is
+open; 3 files; 64 files; 65 files (refused); mixed file-and-folder on a terminal
+and on a preview (refused). A browser image drag from Safari, Chrome and Firefox
+(PROBE 6). On Windows: a second window and the summoned terminal, to prove every
+HWND registered; a DPI-changing monitor, to pin the coordinate conversion; and a
+source that would have accepted a move, to prove the effect returned.
+
+**The storage.** A world-readable existing directory is repaired; a symlink at
+either level refuses; a Windows reparse point at either level refuses; a file
+lands `0600` / owner-only ACL; a `%TEMP%` redirected to a share writes there and
+is disclosed.
 
 **Both.** The Markdown editor, the palette, the search field and the settings
-fields still paste *text* when the clipboard holds a file — the regression this
-feature is most likely to cause. `BT_PTY_DUMP` on for every window, and the
-record kept.
+fields still paste **text** when the clipboard holds a file — the regression this
+feature is most likely to cause. And the non-UTF-8 name on an SMB or exFAT volume
+**refuses visibly and names the file**, which is what §2.4 changed.
 
 ---
 
 ## 7. Red lines
 
-The feature must never:
+### 7.1 Never
 
-1. **Touch the network.** Nothing here has an address.
-2. **Read the clipboard except on the reader's own paste gesture.** No watcher,
-   no timer, no read on focus, and **no read to decide whether a menu row should
-   be enabled** — the terminal menu's `Paste` and macOS's `Edit ▸ Paste` stay
-   always enabled, and a paste with nothing to paste says so afterwards. A
-   terminal that polls the clipboard knows what you copied in another
-   application; the third-party tools people currently use for #2 work exactly
-   that way, and this one will not.
-3. **Persist anything the clipboard held.** Not in `session.json`, not in
-   `pins.json`, not in `diagnostics.log`, not in a `BT_*` trace. A diagnostic
-   line for a paste may name the rung that answered and the number of paths; it
-   may never name a path, a file name, or a byte of text.
-4. **Resolve a symlink, or canonicalise.** The path pasted is the path the
-   source named. The reader pointed at a name, and handing the shell a different
-   name is the same lie a wrong underline is. On Windows there is a second
-   reason for the same rule: `canonicalize` returns a `\\?\` prefix that half
-   the shells in the matrix cannot open.
-5. **Overwrite an existing file.** The picture is written with `create_new`
-   only, in the one folder, and a collision takes the next name.
-6. **Follow a link standing where the clipboard folder should be**, or write
-   into a directory owned by somebody else.
-7. **Press Enter.** A paste puts characters at a prompt and never runs them,
-   whatever the clipboard held.
-8. **Read a file promise**, or render a delayed format that would make another
+1. **Make a network request of its own.** Nothing in this feature has an
+   address. A path on a UNC share, or a dropped file on a network volume, is
+   ordinary filesystem I/O the reader asked for by dragging it; that is a
+   different thing from a request this feature initiates, and the line is drawn
+   at the one it can control.
+2. **Read the clipboard except on the reader's own gesture** — a paste, a
+   **Paste picture**, or a drop. No watcher, no timer, no read on focus, and
+   **no read to decide whether a menu row is enabled**. `Paste` stays always
+   enabled. **Paste picture** is the one row whose enablement depends on what is
+   there, and it reads only the advertised *type list*, never the content, and
+   only while its menu is being built. The third-party tools people currently
+   use for #2 watch the clipboard continuously; this one does not.
+3. **Persist what the clipboard held, with one named exception.** Not in
+   `session.json`, not in `pins.json`, not in `diagnostics.log`, not in a `BT_*`
+   trace. A diagnostic line may name the rung that answered and the number of
+   paths; never a path, a file name or a byte of text. **The exception is the
+   feature itself**: a picture is written to a file, which is what #2 asked for,
+   and §4.5 discloses it in both languages.
+4. **Substitute `U+FFFD`, or send a filename's control characters.** §2.4
+   refuses instead.
+5. **Resolve a symlink, or canonicalise.** The path pasted is the path the source
+   named; handing the shell a different name is the same lie a wrong underline
+   is. On Windows there is a second reason: `canonicalize` returns a `\\?\`
+   prefix that half the shells in the matrix cannot open.
+6. **Overwrite an existing file.** `create_new` only.
+7. **Follow a link, or a reparse point, at any level of its own directory**, or
+   write into a directory it has not vetted on this operation.
+8. **Press Enter**, or emit anything that becomes one. §2.4's refusal of line
+   terminators is what makes this true rather than hoped for.
+9. **Read a file promise**, or render a delayed format that would make another
    process write a file.
-9. **Move, copy or delete a file the reader dragged.** A drop reads a name.
-10. **Answer a highlight with nothing.** Every rectangle that lights under a
-    held file has a verb; every rectangle that has none traces the refusal box.
+10. **Move, copy or delete a file the reader dragged**, or tell a drag source
+    that a move occurred.
+11. **Answer a highlight with nothing.** Every rectangle that lights under a held
+    file has a verb, and the batch and payload rules of §3.2 and §3.4 are decided
+    before the highlight, not at the release.
+12. **Change the reader's environment** to make its own answer correct — no
+    `MSYS2_ARG_CONV_EXCL`, no `$PSNativeCommandArgumentPassing`, no injected
+    `$(wslpath …)`.
+
+### 7.2 What the reader is told instead
+
+A refusal is never silent. Every refusal in this design — unrepresentable path,
+`%` in a `cmd` pane, an unsupported bitmap layout, an over-cap picture, a busy
+job, a full quota, a vetting failure, a promise-only payload, an over-count drop
+— is a toast that names what was refused and why, in both languages.
+
+### 7.3 What is disclosed rather than forbidden
+
+`BT_PTY_DUMP` writes every byte of a pane to a file the reader names, and
+`PRIVACY.md:186` already says so; a pasted path is in that file like any other
+byte. That is an opt-in recording, not this feature's storage, and §4.5 keeps the
+two apart. The Mac package is **not sandboxed**
+(`packaging/macos/entitlements.plist:20`), so no App Sandbox container blocker is
+invented here; what does have to be measured is whether a child process started
+by a Folio row can read a file under `$TMPDIR` and whether any TCC prompt appears
+on the paths this feature touches. **PROBE 9**, and there is no fallback copy
+into a second location if it fails — a refusal instead.
 
 ---
 
 ## 8. The split
 
-Three tickets, in order. Each ends green on its own and leaves the product
-shippable.
+Three tickets. Each is independently shippable, and each states the lane it does
+**not** ship so that the refusal is explicit rather than a gap.
 
-### T-PASTE-1 — the clipboard door, and one path spelled for one shell
+### T-PASTE-1 — the clipboard door, and one path as one argument
 
-**Size: M-L** — the largest share of the pure code, and all of the argument.
+**Size: L.** It was sized M–L on the assumption that the encoder was a table;
+it is six encoders, a refusal gate, a two-direction namespace change and a
+recipient contract.
 
-`bt_platform::clipboard_payload` on both platforms (the files and text rungs;
-the picture rung is declared in the enum and answers `Nothing` until T-PASTE-2).
-`PrintedPathNamespace::to_pane_spelling`. `shell_literal.rs` with `ShellGrammar`
-and the line builder. `profiles::shell_grammar`. The routing in
-`paste_from_clipboard_into`. **K144's `inserted_path_text` absorbed**, which is
-also the fix for its macOS defect (§2.1). All of §6.1 except the temp-file rows.
+`clipboard_payload` on both platforms with the three-state rung semantics, the
+snapshot and change-count check, and the shared file-URL decoder (the picture rung
+is declared and answers `Absent`). The representability gate. The six encoders.
+`derive_grammar`, `derive_namespace` and the `"paste_as"` override, with
+`printed_path_namespace` re-pointed. `to_pane_spelling`. The routing in
+`paste_from_clipboard_into`. **K144 absorbed and repaired**, keeping its focus
+move. All of §6.1 except the picture, file, sweep and job-identity rows; the
+shell and agent matrices of §6.2, and PROBEs 1–4.
 
-Ships: #1's clipboard half, on every shell, on both platforms.
+**Gates:** every §6.2 shell row asserts the opened file; PROBE 2 answered or the
+affected PowerShell paths refused; PROBE 3 answered or the agent arm refused for
+the unmeasured recipients. **Does not ship:** pictures, drops. A clipboard
+picture is `Absent` and the paste says "nothing to paste"; a drop does nothing,
+as today.
 
 ### T-PASTE-2 — a picture becomes a file
 
-**Size: M.**
+**Size: L–XL, and it splits in two reviewable halves.**
 
-The picture rung on both platforms. The folder, its vetting, the name, the
-collision ladder, the startup sweep. DIB and TIFF conversion, PNG passthrough,
-the `bmp` feature on `image`, the size bounds, the off-thread encode and the
-late insertion. The `Settings ▸ General` row and its two lines in both
-languages. `PRIVACY.md`'s new row and the README clause.
+**2a — acquisition and decoding.** The picture rung on both platforms, the
+acquisition bound, the `new_without_file_header` path, the alpha and layout
+table, full-decode validation with original-byte write, the frame rule, the
+fixtures, PROBEs 7 and 8.
 
-Ships: #2, whole. Depends on T-PASTE-1 for the spelling and the quoting.
+**2b — storage, delivery and the switch.** The directory trust contract on both
+platforms, the name, the collision ladder, owner-only files, the age-and-quota
+sweep, the job identity and revalidation, the one-in-flight rule, the
+`Settings ▸ General` row in both languages, `PRIVACY.md` and the README clause,
+PROBE 9.
+
+**Gates:** the storage rows of §6.2; a written picture compared pixel-for-pixel
+against its source for each supported layout; a refused layout refuses. **Does
+not ship:** TIFF (a named debt with its notices work), promises, drops.
 
 ### T-PASTE-3 — the drop door
 
-**Size: L**, and it opens with a probe rather than an implementation.
+**Size: L–XL**, with the Windows adapter, the macOS adapter and the batch routing
+separately reviewable.
 
-A Mac probe first, in the `docs/plans/port/probe-x*.md` shape: can the three
-dragging selectors be replaced on winit's content-view class without disturbing
-winit's own view, and does a replaced `performDragOperation:` reach us with the
-pasteboard and the location. Then the Windows `IDropTarget` and
-`with_drag_and_drop(false)`; the macOS half; the landing computed from the drop
-point; the one new row in `row_verb` and the OS drop routed through it; the
-ghost suppressed; multi-file; and the picture-on-a-drag case sharing T-PASTE-2's
-lane.
+**It opens with PROBE 5**, and the probe is bounded and does **not** presuppose
+swizzling: an application-owned destination `NSView` first, a narrow upstream
+extension second, class-wide replacement last and only with a written per-window
+lifetime contract. Then the Windows adapter (own OLE initialisation, a target on
+every HWND, teardown against winit's unconditional revoke, effects, coordinates);
+the macOS adapter (the full destination contract including `draggingUpdated:`,
+per-window teardown, AppKit-to-physical conversion); the landing from the live
+point; the terminal-centre cell in `row_verb` and the OS drop routed through it;
+batch admission; the ghost suppressed; the drop admitted-type matrix sharing
+T-PASTE-2's lane for raw pictures; PROBE 6.
 
-Ships: #1's drag half, and the window's own files column gains the same verb.
-Depends on both tickets above.
+**Gates:** the drop matrix of §6.2 including 65 files, mixed kinds and a second
+window. **Does not ship:** promises, strip verbs for OS drops.
+
+**If 0.4.1 has to shrink**, T-PASTE-1 alone is a release: the K144 repair plus
+file-clipboard pasting on the shells whose rows §6.2 measured, with the unmeasured
+recipients refusing rather than guessing.
 
 ---
 
-## 9. Sources
+## 9. Probes and open ends
+
+### 9.1 What still needs a machine
+
+| | What | Blocks |
+| --- | --- | --- |
+| **PROBE 1** | source × gesture × advertised formats × chosen rung, versions recorded | ruling ② |
+| **PROBE 2** | PowerShell 5.1 and 7: which code points close a single-quoted string, and whether doubling each yields one character | the `PowerShell` encoder |
+| **PROBE 3** | Claude Code, Codex, Copilot CLI: spaces, apostrophes, two paths, `file:` URI | the `Agent` encoder |
+| **PROBE 4** | Git Bash, MSYS and native consumers, `MSYS2_ARG_CONV_EXCL` unset and set | ruling ⑭ |
+| **PROBE 5** | macOS drop destination: own view / upstream / replacement | all of T-PASTE-3's macOS half |
+| **PROBE 6** | what Safari, Chrome and Firefox offer for a dragged image, by version | ruling ㉑ |
+| **PROBE 7** | real `CF_DIBV5` payloads: headers, masks, actual alpha | ruling ㉔ |
+| **PROBE 8** | delayed-render latency for common Windows sources | the acquisition bound |
+| **PROBE 9** | can a child of a Folio row read `$TMPDIR`; any TCC prompt on these paths | §4.1 |
+
+**An unrun probe is not evidence either way.** Nothing in this document may be
+implemented as though a probe had answered.
+
+### 9.2 Named debts
+
+TIFF on macOS, with its feature, lockfile and notices work. File promises on both
+platforms. An OS drop on the tab strip. Real WSL mount facts in place of the
+default-mount assumption. A `nu` or `fish` row reached through `wsl.exe -e`
+without an override.
+
+### 9.3 Sources
 
 Every claim about this codebase is cited in place. The outside ones:
 
@@ -857,19 +1337,75 @@ Every claim about this codebase is cited in place. The outside ones:
 * microsoft/terminal **#15646** and PR **#16214** — `$hello.txt` dropped into a
   WSL tab expanded as a variable; the fix is single quotes.
 * microsoft/terminal **#18006** — a path containing `'` dropped into a WSL tab
-  was single-quoted without escaping, ending the quoting at the apostrophe.
+  was single-quoted without escaping.
 * microsoft/terminal **#8109** — the argument for always quoting a dropped path.
-* Windows Terminal's `_translatePathInPlace`
-  (`src/cascadia/TerminalControl/TermControl.cpp`) and the
-  **`pathTranslationStyle`** profile setting — `none` / `wsl` / `cygwin` /
-  `msys2` / `mingw`, defaulting to `none` except on WSL profiles.
-* kitty's **OSC 5522**, the clipboard protocol with MIME types — the other
-  answer to #2, which needs the program to ask rather than the terminal to act.
-* The WezTerm community recipe writing clipboard pictures into
-  `/tmp/wezterm-clipboard-images/`, and ghostty-org/ghostty discussion **#10517**
-  — the state of the art for #2 outside this product, which is a Lua snippet and
-  a feature request.
+* Windows Terminal's `_translatePathInPlace` and its **`pathTranslationStyle`**
+  profile setting (`none` / `wsl` / `cygwin` / `msys2` / `mingw`).
+* *about_Quoting_Rules* and *about_Parsing* (PowerShell 7.x) — the Unicode
+  quotation characters, and native-argument passing.
+* *Parsing C command-line arguments* (MSVC) — the `2N`/`2N+1` backslash rules,
+  and their scope: **that parser's consumers, not `cmd` itself**.
+* The fish language reference on quoting, and the Nushell book on strings and raw
+  strings.
+* MSYS2's *Filesystem paths*, for argument conversion and `MSYS2_ARG_CONV_EXCL`.
+* Microsoft's *WSL configuration*, for `automount` and its root.
+* Codex `normalize_pasted_path` and its paste consumer, at revision
+  `a8964cb1bad67bc26a826fb07d1bef99c6a3f008`
+  (`codex-rs/tui/src/clipboard_paste.rs`, `…/bottom_pane/chat_composer.rs`).
+* Claude Code's common-workflows documentation (prose paths and `@`), and GitHub
+  Copilot CLI's attachment documentation (`@`).
+* Apple's *Accepting drags* destination contract, the file-promise sample, and
+  `NSTemporaryDirectory`.
+* `RegisterDragDrop` and *Clipboard operations* (delayed rendering) on MSDN.
+* kitty's **OSC 5522**; ghostty-org/ghostty discussion **#10517**, which is about
+  image paste **over SSH**; and an unverified WezTerm community recipe writing
+  into `/tmp/wezterm-clipboard-images/`.
 * winit **0.30.13**, read in `~/.cargo/registry`:
-  `src/platform_impl/windows/drop_handler.rs`,
-  `src/platform_impl/macos/window_delegate.rs:369-429`, and
-  `src/platform/windows.rs:497` (`with_drag_and_drop`).
+  `platform_impl/windows/drop_handler.rs`,
+  `platform_impl/windows/window.rs:1167`, `platform_impl/windows/event_loop.rs:1262`,
+  `platform_impl/macos/window_delegate.rs:367` and `:666`,
+  `platform/windows.rs:497`.
+* `image` **0.25.10**: `src/codecs/bmp/decoder.rs:534`
+  (`new_without_file_header`, "for decoding the `CF_DIB` format directly from the
+  Windows clipboard") and `:752`; `Cargo.toml:120` for the `tiff` feature.
+
+---
+
+## 10. Review ledger
+
+`docs/plans/review/paste-paths-review-2026-09-15.md`, 24 findings. Every one is
+answered below: **accepted** means the design changed, and the section says
+where.
+
+| # | Verdict | What changed |
+| --- | --- | --- |
+| **1** | accepted | §2.3, §2.4. The universal safe set is **gone**: there is no bare form, every grammar always quotes. POSIX backslash is no longer assumed inert; PowerShell's Unicode quote characters are doubled and **PROBE 2** must prove the doubling before the arm ships, with refusal as the fallback. Non-ASCII whitespace is no longer assumed lexically inert. §6.1 asserts argument identity by running a lexer over the output, and the table carries Unicode delimiter attacks beside CJK and emoji. |
+| **2** | accepted | §2.4 is a new section: a representability gate ahead of quoting. `to_str()` failure, any C0/C1 control, DEL or line terminator → **visible refusal**; `to_string_lossy` is banned including in the repaired K144; the false sentence "a quoted path has no control character and no newline" is struck (§5.1); the invalid-UTF-8 acceptance promise is amended from "pastes correctly" to "refuses visibly and names the file" (§2.4, §6.2). Ordinary text sanitisation is untouched. |
+| **3** | accepted | §2.3's `cmd` row rewritten. Interpreter and CRT consumer separated; `2N` trailing backslashes, not one extra; the `"D:\"` description corrected (a literal quote after the consumed backslash, not `D:`); builtins named as not following CRT rules, with §6.2 asserting the opened file for both; `%` **refused**; `!` refused when the row's own args turn delayed expansion on; `^` explicitly not escaped; "universal cmd safety" dropped. |
+| **4** | accepted | §2.3 gains a `Fish` arm (`\`→`\\`, `'`→`\'`) and a `Nushell` arm (raw string with a growing fence). The "`'\''` happens to be correct in fish" reasoning is withdrawn as reasoning from one sequence to an encoder; the "nu cannot spell an apostrophe path" claim is withdrawn as false; the "every shell an account can be set to" claim is narrowed. §6.1 tests combined backslash-and-apostrophe cases. |
+| **5** | accepted | §2.2 ruling ⑦ states a **spawn-time default**, not a recipient guarantee, and says in as many words that the foreground program is not inferred from the screen. Derivation is from the **resolved** launch and keeps `PowerShellSeven` (ruling ⑧). Ruling ⑨ adds a `profiles.json` `"paste_as"` override for wrappers and unknowns. `shell_integration.rs:248`'s WSL login-shell `exec` is cited as the reason a WSL row's reader is unknowable. §6.1 tests `wsl.exe -e nu` and an override row, not only builtin ids. |
+| **6** | accepted | §2.5 ruling ⑫. The namespace is derived from the program, not from `(paths, integration)`; `printed_path_namespace` becomes a caller of the same derivation, so **the reading direction changes too** — an integration-off Git Bash pane now also detects `/d/…`. Stated as a behaviour change outside the feature's surface and pinned in §6.1, not left as debt. |
+| **7** | accepted | §2.5 ruling ⑬ rewritten: lexical inverse separated from mount facts; the unmounted-drive case is a disclosed **default-mount assumption**, not a translation; `\\wsl$\` read; drive case normalised; the `\\wsl.localhost\…\mnt\d\x` non-identity named; UNC and foreign-distro fallbacks stated as having no inverse; `~` never emitted because a quoted one does not expand. §6.1 splits the round trip into a **supported-identity** suite and a **known-non-identity** suite. `$(wslpath …)` remains forbidden (red line 12). |
+| **8** | accepted | §2.5 ruling ⑭: MSYS2's own argument conversion is named, `MSYS2_ARG_CONV_EXCL` is named, quotes do not disable it, §6.2 carries MSYS and native consumers with the variable unset and set (**PROBE 4**), the forward-slash Windows spelling is the documented per-row fallback through the override, and red line 12 forbids changing the reader's environment. |
+| **9** | accepted — the earlier ruling is **reversed** | §2.3. Codex's `normalize_pasted_path` at revision `a8964cb1…` was read: it strips one surrounding quote pair, tries a Windows recogniser, then requires exactly one shlex token — so a **bare spaced POSIX path attaches nothing** and the quoted one works. `Agent` is now the POSIX single-quoted form on both platforms. The "quotes make agents seek apostrophe-prefixed names" claim is withdrawn. Prose references and automatic attachments are separated; Claude's prose/`@` and Copilot's `@` are described as documented rather than as a seven-agent grammar; several paths in one insertion are stated **not** to be several attachments (Codex returns `None`); delimiters are preserved. **PROBE 3** must measure spaces, apostrophes and multiples per agent, with versions. |
+| **10** | accepted | §1.2 ruling ② now states the order as a **preference with a named loss**, not a deduction about intent; the "screenshot tools offer no text at all" claim is struck. The losing case gets a **Paste picture** verb (menu row plus bindable command) rather than a second setting. §6.2 carries the versioned source/gesture/format/result matrix (**PROBE 1**). No ShareX default is claimed — the product is not cited at all, only the mixed-workflow *case*. The files-versus-text order is stated once, in ruling ①, and the contradictory sentence in the setting's rationale is rewritten (§4.6). |
+| **11** | accepted | §1.2 ruling ③ defines **Absent / Present / Unreadable**, with empty-`HDROP` as absent and empty text as present, and `Unreadable` stopping the ladder; encoding-level fallback is allowed only *within* the picture rung. Ruling ④ adds a coherent snapshot with `GetClipboardSequenceNumber` / `changeCount` before and after. §1.3 extracts a shared, log-free file-URL decoder beneath `paths_on` rather than reusing the service helper. §1.1 corrects the `Result`/`Option` descriptions. WSL/RDP bridged formats are covered by PROBE 1's "record what is advertised"; no file identity is inferred from arbitrary text. |
+| **12** | accepted | §5.2 is a new section: the promise is limited to a **fresh argument boundary**, and inside-token, mid-quote and wrapped-column-zero behaviour is documented as outside it. zsh `bracketed-paste-magic`, PSReadLine and `$PSNativeCommandArgumentPassing` are named as later stages; §6.2 asserts the argument received and the file opened, on 5.1 and 7, default and custom zsh, bracketing on and off. Bracketed inheritance is kept and is explicitly not disabled to bypass hooks (§5.1). |
+| **13** | accepted | §4.2 ruling ㉖. A job carries window, tab, leaf, **session incarnation** and a globally unique **request sequence** (`CONVENTIONS.md:154`), revalidates target, modal gate and setting at completion, cancels on ownership or setting change and deletes its file through the owned path. Ordering is removed as a problem by ruling ㉕'s one-in-flight rule. The same applies to delayed drops. |
+| **14** | accepted | §3.1 rebuilt. The first draft's "winit's content-view class" is **corrected**: `NSDraggingDestination` is implemented on `WindowDelegate` (`window_delegate.rs:367`) and registration is on the window (`:666`); the methods are entered/prepare/perform/conclude/exited with **no `draggingUpdated:`**, which is why winit's route cannot feed a following highlight. **PROBE 5** now prefers an application-owned destination `NSView` first and a narrow upstream extension second, with class-wide replacement last and only with a written per-window lifetime contract; it must verify hit testing, responder/IME, the `CAMetalLayer` and the web panes, and specify the full method set, native ABI return types, teardown and the AppKit-to-physical conversion. |
+| **15** | accepted | §3.1's Windows half. `window.rs:1167` gates `OleInitialize` **and** registration together, so Folio owns the STA initialisation and its balance; a target is registered on **every** HWND, with `DRAGDROP_E_ALREADYREGISTERED` named as the failure of a missed constructor; teardown is written against `event_loop.rs:1262`'s unconditional `RevokeDragDrop`; payloads are copied before release; effects are `COPY`/`NONE` only, never `MOVE`; coordinates, DPI, source masks, multi-window teardown, cancellation and re-entrancy are specified. |
+| **16** | accepted | §3.2. The strip row is **removed from the table** and described accurately: `row_verb`'s strip arm is unreachable (`main.rs:28995`) and the strip's verbs live on `row_strip_landing` (`:29555`) and its two commits, which are untouched; only an *OS* drop on the strip is refused, at the strip's own routing. Ruling ⑱ defines batch admission — many on a terminal centre, one-item verbs refuse a multi-item drop **while hovering**, mixed kinds, a 64-item cap, partial failure. Ruling ⑲ makes drop insertion target-specific and focus-free while **preserving K144's focus move** (`main.rs:76921`), which the first draft misdescribed. |
+| **17** | accepted | §3.4 ruling ㉑ gives drops their own admitted-type matrix: raw picture types are registered explicitly, promises are **not registered** so they refuse before the highlight, picture drops on preview and edge are defined, and decoders and insertion are shared. The unconditional Safari claim is **withdrawn** and replaced by **PROBE 6**. |
+| **18** | accepted | §4.2. The synthesised `BITMAPFILEHEADER` is **withdrawn** in favour of `image`'s audited `BmpDecoder::new_without_file_header` (`decoder.rs:534`, written for `CF_DIB`). **TIFF is removed from 0.4.1** and becomes a named debt with its feature, lockfile and notices work, since `tiff` is a separate feature (`image-0.25.10/Cargo.toml:120`) the workspace does not enable. Ruling ㉔ makes alpha a property of compression and mask, not of the format id, covers premultiplication and undefined legacy alpha, refuses unsupported layouts, and adds known-pixel fixtures and **PROBE 7**. |
+| **19** | accepted | §4.2 ruling ㉕. Native length checked **before** copying (`GlobalSize`), with the macOS residue stated; dimensions checked before allocation; the cap expressed in decode bytes rather than an RGBA8 multiplication; a 512 MiB aggregate directory quota with oldest-first eviction; **one job in flight**, a second refused; write/flush/close failures delete the partial file; disk pressure refuses; full-decode validation with original-byte write replaces "header check"; first-frame policy stated; **PROBE 8** gives acquisition a measured latency contract. |
+| **20** | accepted | §4.1 ruling ㉓. The socket precedent is replaced by the **directory** precedent `instance.rs:360`, including **repair of an existing mode**; a same-owner world-readable directory no longer passes; both Folio-made levels are vetted, so an intermediate link cannot redirect a non-link leaf; vetting runs **before every operation**, not once per run; files are owner-only; operations are anchored to a verified handle with no-follow on Unix, with the Windows residue stated; Windows gets reparse-point refusal and an owner-only DACL as the uid counterpart; temp discovery is `std::env::temp_dir()` and macOS's `/var` alias is explicitly not rejected; failures are closed and sanitised. |
+| **21** | accepted | §4.3 ruling ㉗. The "seven days exceeds any session" and "preserves history" claims are **struck**. Retention is best-effort with a real maximum from the quota; the sweep runs at startup **and hourly**; the system may remove files sooner; the exact owned-name grammar excludes `clip-family.png`; age is mtime; active writes are excluded; failures are reported once. A path in history is explicitly not a promise the file exists, and how to keep a picture permanently is stated. The text says the sweep is not clipboard watching. |
+| **22** | accepted | §4.6 ruling ㉙ makes the switch cover **clipboard and drop** pictures and cancel pending jobs; inserting an existing file's path is explicitly outside it. Red line 3 carries the **named storage exception**; red line 1 is narrowed to feature-initiated requests, with UNC and network-volume I/O described as the reader's own gesture; §7.3 separates `BT_PTY_DUMP` (opt-in, already disclosed at `PRIVACY.md:186`) from this feature's storage. §4.5 discloses drops, original PNG metadata, cleanup limits, redirected `%TEMP%`, and that deleting the directory does not undo history, agent records or recipient copies. No sandbox blocker is invented — `entitlements.plist:20` says the package is unsandboxed — and child access and TCC become **PROBE 9** with refusal, not a fallback copy, if it fails. |
+| **23** | accepted | §8. T-PASTE-1 is **L**; T-PASTE-2 is **L–XL** and splits into 2a acquisition/decoding and 2b storage/delivery/settings; T-PASTE-3 is **L–XL** with three separately reviewable parts and opens with a bounded probe that does not preselect swizzling. §6.1 no longer claims to be the whole specification, and §6.2 adds native argv, recipient versions, async ownership, storage attacks and decoder fixtures. The picture and i18n rows move to T-PASTE-2. Each ticket states the lane it does not ship and its gates. K144 stays in T-PASTE-1 and its Windows defect is written out (§2.1). |
+| **24** | accepted | §1.4 and §9.3. The adoption inference from WT's report timing is removed; Ghostty #10517 is narrowed to **SSH image paste**; the WezTerm recipe is marked **unverified**; WT's history is cited as examples rather than as proof of the grammar table; the `usershell` anchor is corrected to `profiles.rs:1512` (`1541` is the zsh seed) and the Codex citation carries its revision. |
+
+**Nothing is declined.** Two findings were answered by reversing an earlier
+ruling rather than by adjusting it — **9** (agents get a quoted single token) and
+**1** (there is no bare form at all) — and two by withdrawing a claim the design
+could not support: the Safari offer (**17**) and the universal round trip
+(**7**).
