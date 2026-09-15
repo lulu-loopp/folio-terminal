@@ -5,7 +5,9 @@
 #   licenses/bundled-assets.md     — the components Cargo.lock cannot see, with
 #                                    every `<!-- verbatim: path -->` marker
 #                                    replaced by that file's exact bytes
-#   cargo about                    — every package in Cargo.lock
+#   cargo about                    — every package in Cargo.lock, configured by
+#                                    licenses/about.toml and rendered through
+#                                    licenses/about.hbs
 #
 # Deterministic: same lock file and same inputs, same bytes out. `check-notices.ps1`
 # depends on that.
@@ -75,7 +77,7 @@ if ($found -eq 0) { throw "licenses/bundled-assets.md has no <!-- verbatim: ... 
 $aboutFile = Join-Path ([IO.Path]::GetTempPath()) ("folio-about-" + [Guid]::NewGuid().ToString("N") + ".md")
 Push-Location $repo
 try {
-    & cargo about generate --locked --workspace --fail -o $aboutFile about.hbs
+    & cargo about generate --locked --workspace --fail -c licenses/about.toml -o $aboutFile licenses/about.hbs
     if ($LASTEXITCODE -ne 0) {
         throw "cargo about failed (installed? ``cargo install cargo-about --locked --features cli``)"
     }
@@ -85,7 +87,7 @@ try {
     Remove-Item -LiteralPath $aboutFile -ErrorAction SilentlyContinue
 }
 
-# about.hbs fences each licence in eight backticks, which handlebars cannot pick
+# licenses/about.hbs fences each licence in eight backticks, which handlebars cannot pick
 # to fit its contents. Nothing in a licence text has ever contained a run that
 # long — but "has ever" is not "cannot", and a fence that closes early would cut
 # a legal document in half silently.
@@ -94,7 +96,7 @@ $lines = $cratesText -split "`n"
 $fences = @($lines | Where-Object { $_ -match ("^" + $tick + "{8}") }).Count
 $headings = @($lines | Where-Object { $_ -match "^### " }).Count
 if ($fences -ne 2 * $headings) {
-    throw "expected $(2 * $headings) fence lines for $headings licences, found $fences — a licence text contains an eight-backtick run and the fence in about.hbs no longer encloses it"
+    throw "expected $(2 * $headings) fence lines for $headings licences, found $fences — a licence text contains an eight-backtick run and the fence in licenses/about.hbs no longer encloses it"
 }
 
 [void]$out.Append($cratesText)

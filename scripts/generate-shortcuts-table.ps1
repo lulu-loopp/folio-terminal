@@ -27,9 +27,12 @@ $checkedIn = Join-Path $repo "docs/shortcuts.md"
 
 if (Test-Path $generated) { Remove-Item $generated -Force }
 
+# `--workspace` for the reason `scripts/check-shortcuts-table.ps1` gives at the
+# same line: package selection decides feature resolution, and a selection that
+# differs from the gate's shares no compiled artifact with it.
 Push-Location $repo
 try {
-    & cargo test --package bt-app --bin folio --locked -- --exact `
+    & cargo test --workspace --locked -- --exact `
         shortcuts::tests::docs_shortcuts_md_is_the_bindings_table | Out-Host
 } finally {
     Pop-Location

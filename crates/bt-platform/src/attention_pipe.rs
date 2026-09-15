@@ -397,8 +397,8 @@ pub struct AttentionPipe {
 impl AttentionPipe {
     /// Open this process's endpoint and start listening.
     ///
-    /// **It returns already listening**, which is `CONVENTIONS.md`'s rule for anything shaped like
-    /// a subscription and is load-bearing here for a specific reason: the first pane's shell is
+    /// **It returns already listening**, which is `docs/CONVENTIONS.md`'s rule for anything shaped
+    /// like a subscription and is load-bearing here for a specific reason: the first pane's shell is
     /// spawned within a frame of this returning, and a hook that fired against an endpoint that was
     /// "about to exist" would be a signal that is not late but *gone*. So the listener thread
     /// issues its first `ConnectNamedPipe` and says so, and this waits for that word — or hands
