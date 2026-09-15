@@ -680,6 +680,17 @@ mod macos_handoff {
     /// did its own `stat` would be a second one the call below could disagree
     /// with. The `metadata` here is the same one the URL's `isDirectory` is
     /// built from.
+    ///
+    /// **`path` is the *resolved* target and not the name a row carried**, and
+    /// that is a repaired hole rather than a preference (RA-4, 2026-09-15).
+    /// Clause ① reads a name and clause ② reads what the file system said, so
+    /// when the two describe different files the gate answers about neither: a
+    /// symbolic link called `notes` pointing at `Payload.app` is a directory
+    /// (the target's `is_dir`) with no `.app` suffix (the link's name), and ①
+    /// therefore did not fire on an application that `openURL:` — which follows
+    /// the link — then launched. [`openable_target`] resolves before it asks, so
+    /// the name and the mode here always belong to the same file, and that file
+    /// is the one the URL is built from.
     fn opening_it_would_run_it(path: &Path, metadata: &std::fs::Metadata) -> bool {
         if metadata.is_dir() {
             return path
@@ -738,23 +749,56 @@ mod macos_handoff {
         hand_over(&url, &path.to_string_lossy())
     }
 
-    /// Open one file the user picked out of a directory listing with its
-    /// registered default handler — and never run a program.
+    /// **Decide what a row actually points at, and refuse it if opening it
+    /// would run it** — the whole of [`open_local_path`]'s policy, with no call
+    /// to LaunchServices in it, which is what lets the rule be tested on a
+    /// machine that must not put a window on somebody's desk.
     ///
-    /// The two gates are [`openable_unix_path`] and [`opening_it_would_run_it`],
-    /// and the second is the product rule the files column matches on:
+    /// The answer is the **resolved** path and whether that path is a
+    /// directory, and the two gates are asked in this order for reasons that do
+    /// not commute:
+    ///
+    /// 1. [`openable_unix_path`] first, **before any disk call**. It is lexical
+    ///    — empty, NUL, relative — and a relative path must be refused for what
+    ///    it is rather than resolved against this process's working directory,
+    ///    which is the folder the shell that started Folio happened to be
+    ///    standing in.
+    /// 2. `canonicalize` next, which is the one question the rest is asked of.
+    ///    It follows every link and settles every `..`, so it answers with the
+    ///    file `openURL:` would reach — and a link pointing at nothing fails
+    ///    here with the operating system's own words, in the same
+    ///    `"{path:?}: {error}"` shape the plain missing file has always had, so
+    ///    a reader is told the true fact (there is nothing there) rather than a
+    ///    false one about programs.
+    /// 3. [`opening_it_would_run_it`] last, asked of that resolved path and of
+    ///    the metadata of that same path.
+    ///
     /// [`PROGRAM_REFUSED`] is the sentence `bt-app` turns into *the tree does
     /// not run programs*, and every other refusal here is a fact about the
     /// machine that the same caller shows as a toast.
-    pub fn open_local_path(window: NativeWindow, path: &Path) -> Result<(), String> {
-        let _ = window;
+    fn openable_target(path: &Path) -> Result<(std::path::PathBuf, bool), String> {
         openable_unix_path(path)?;
-        let metadata = std::fs::metadata(path).map_err(|error| format!("{path:?}: {error}"))?;
-        if opening_it_would_run_it(path, &metadata) {
+        let real = std::fs::canonicalize(path).map_err(|error| format!("{path:?}: {error}"))?;
+        let metadata = std::fs::metadata(&real).map_err(|error| format!("{real:?}: {error}"))?;
+        if opening_it_would_run_it(&real, &metadata) {
             return Err(PROGRAM_REFUSED.to_owned());
         }
-        let url = file_url(path, metadata.is_dir())?;
-        hand_over(&url, &path.to_string_lossy())
+        Ok((real, metadata.is_dir()))
+    }
+
+    /// Open one file the user picked out of a directory listing with its
+    /// registered default handler — and never run a program.
+    ///
+    /// The gates and their order are [`openable_target`]'s, and **the URL is
+    /// built from the target that gate judged**, not from the name the row
+    /// carried. Those have to be the same file: handing `openURL:` a link while
+    /// having classified its target leaves the two able to disagree, which is
+    /// exactly how a bundle once got past the refusal (RA-4).
+    pub fn open_local_path(window: NativeWindow, path: &Path) -> Result<(), String> {
+        let _ = window;
+        let (real, directory) = openable_target(path)?;
+        let url = file_url(&real, directory)?;
+        hand_over(&url, &real.to_string_lossy())
     }
 
     /// Open Finder on a path, with the file **selected** inside its folder.
@@ -902,6 +946,7 @@ mod macos_handoff {
     /// in its own note what it leaves behind and what it takes back.
     #[cfg(test)]
     mod tests {
+        use std::os::unix::fs::symlink;
         use std::path::PathBuf;
 
         use objc2::rc::Retained;
@@ -977,6 +1022,135 @@ mod macos_handoff {
                     "{program:?} is a program and this door does not run one"
                 );
             }
+            let _ = std::fs::remove_dir_all(&root);
+        }
+
+        /// RED — **the refusal is about the file that will actually be
+        /// opened**, so a symbolic link is judged by its target and handed on
+        /// as its target (RA-4, 2026-09-15).
+        ///
+        /// The finding's own shape is ① below: a link *named* `notes` pointing
+        /// at `Payload.app`. Before the fix the gate asked `is_dir` of the
+        /// target and `extension` of the link, so that file was a directory
+        /// with no `.app` suffix and the bundle clause did not fire — while
+        /// `openURL:`, which follows links, launched the application. The
+        /// execute-bit clause never had the hole, because a mode can only be
+        /// read off the resolved file; ② keeps it that way.
+        ///
+        /// The other half of the ruling is that resolving must not turn every
+        /// link into a refusal (③, ④) and must not turn a link to nothing into
+        /// a claim about programs (⑥) — the reader is owed the true fact.
+        ///
+        /// **Nothing opens.** Every case here is refused, or stops at the gate
+        /// [`openable_target`] before LaunchServices is reached.
+        ///
+        /// MUTATION: resolve for the metadata but classify the path as given
+        /// and ① goes green-to-red; build the URL from the path as given
+        /// instead of from the resolved target and ③'s second half fails.
+        #[test]
+        fn a_link_is_judged_by_what_it_points_at_and_opened_as_that() {
+            let root = scratch("links");
+            let bundle = root.join("Payload.app");
+            std::fs::create_dir_all(&bundle).expect("a bundle");
+            let folder = root.join("plain-folder");
+            std::fs::create_dir_all(&folder).expect("a folder");
+            let script = root.join("run-me");
+            std::fs::write(&script, b"#!/bin/sh\nexit 0\n").expect("a script");
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                .expect("the execute bit");
+            let document = root.join("notes.txt");
+            std::fs::write(&document, b"x").expect("a document");
+
+            let link = |target: &std::path::Path, name: &str| {
+                let at = root.join(name);
+                symlink(target, &at).expect("a symbolic link");
+                at
+            };
+            let to_bundle = link(&bundle, "notes");
+            let to_script = link(&script, "harmless.txt");
+            let to_document = link(&document, "readme");
+            let to_folder = link(&folder, "elsewhere");
+            let missing = root.join("never-was");
+            let dangling = link(&missing, "gone");
+
+            let refused = Err(PROGRAM_REFUSED.to_owned());
+            let window = crate::NativeWindow::stand_in(0);
+
+            // ① The finding: a directory target with no `.app` in the *link's*
+            //    name. Both the gate and the door say the product's sentence.
+            assert_eq!(
+                openable_target(&to_bundle),
+                refused,
+                "a link pointing at an application is an application"
+            );
+            assert_eq!(
+                open_local_path(window, &to_bundle),
+                Err(PROGRAM_REFUSED.to_owned())
+            );
+            // ② An executable behind a link, and the `.txt` on the link's name
+            //    is the lie the mode sees through.
+            assert_eq!(
+                openable_target(&to_script),
+                refused,
+                "a link pointing at a program is a program"
+            );
+            // ③ A link to an ordinary document still opens, and what is opened
+            //    is the resolved target — the file the gate judged.
+            assert_eq!(
+                openable_target(&to_document),
+                Ok((
+                    std::fs::canonicalize(&document).expect("the document resolves"),
+                    false
+                )),
+                "resolving may not turn every link into a refusal"
+            );
+            // ④ The `isDirectory` the URL is built with is the resolved
+            //    target's too, so a link to a folder opens as a folder.
+            assert_eq!(
+                openable_target(&to_folder),
+                Ok((
+                    std::fs::canonicalize(&folder).expect("the folder resolves"),
+                    true
+                ))
+            );
+            // ⑤ Named directly, nothing has changed.
+            assert_eq!(openable_target(&bundle), refused);
+            assert_eq!(
+                openable_target(&script),
+                refused,
+                "the execute bit never had the hole"
+            );
+            assert_eq!(
+                openable_target(&document),
+                Ok((
+                    std::fs::canonicalize(&document).expect("the document resolves"),
+                    false
+                ))
+            );
+            // ⑥ A link to nothing is refused in the words the operating system
+            //    uses for a file that is not there — the same refusal a plain
+            //    missing path has always had, and never the product's sentence.
+            let words = |reason: &str, path: &std::path::Path| {
+                reason
+                    .strip_prefix(&format!("{path:?}: "))
+                    .map(str::to_owned)
+            };
+            let broken = openable_target(&dangling).expect_err("a link to nothing opens nothing");
+            let gone = openable_target(&missing).expect_err("a path that is not there");
+            assert!(
+                !broken.contains(PROGRAM_REFUSED),
+                "a link to nothing is not a program: {broken:?}"
+            );
+            assert!(
+                words(&broken, &dangling).is_some(),
+                "the refusal names the path the reader gave: {broken:?}"
+            );
+            assert_eq!(
+                words(&broken, &dangling),
+                words(&gone, &missing),
+                "a link to nothing is refused in the same words a missing file is"
+            );
+
             let _ = std::fs::remove_dir_all(&root);
         }
 
