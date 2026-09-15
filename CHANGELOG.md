@@ -78,6 +78,15 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **Text sent from a phone keyboard, or from another program that types for you,
+  now reaches the terminal.** A sentence typed on a phone through its desktop
+  companion, or pasted in by a tool that types on your behalf, arrived as
+  characters with no key behind them — and Folio, which decides what a keystroke
+  means by looking at which key it was, had nothing to look at and typed
+  nothing. Such a character is now the key that would have produced it, so it
+  lands wherever you are typing: the shell, the search box, a file being edited,
+  a tab you are renaming.
+
 - **On a Mac, opening a shortcut from the files column opens what it points at.**
   The files column does not run programs, and a shortcut whose name gave nothing
   away — a link called `notes` pointing at an application — used to get past that

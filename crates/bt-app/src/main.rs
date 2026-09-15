@@ -95531,6 +95531,44 @@ impl Runtime<'_> {
         if !input::is_a_keystroke(event.state, is_synthetic) {
             return Ok(());
         }
+        // **A program that types for you is still typing** (T-REMOTE-INPUT-PACKET,
+        // user report 2026-09-15: a sentence sent from an OPPO phone through
+        // O+ Connect's phone keyboard never appeared in the pane).
+        //
+        // Such a program sends characters, not key presses, and the press winit
+        // hands on for one carries the character in `text` and nothing in either
+        // key field. Every rung below this line reads `logical_key` — the
+        // encoder, the four one-line fields, the quick edit, the column — so the
+        // character had no rung and was dropped. [`input::injected_logical_key`]
+        // has the measurements and the whole argument; what matters here is
+        // *where* it is applied.
+        //
+        // **On the event, once, above the ladder**, and not as a rung of its own.
+        // A rung would have to be placed, and there is no placement that is
+        // right: put it high and a character typed into the settings sheet stops
+        // reaching the sheet, put it low and every field above has already
+        // swallowed the press. Rewriting the key instead leaves the ladder
+        // exactly as it is — one field to read, one modifier policy, one door to
+        // the child — and the event arrives at whichever rung owns the keyboard
+        // indistinguishable from the same character typed by a hand. That is
+        // also what records it as typing: the encoder's own
+        // `send_user_input(.., UserInputKind::Keyboard)` and the
+        // `note_user_typing` above it, rather than a second road to the pipe with
+        // a paste's bracketing or a provenance of its own.
+        //
+        // Below the gate, because a release needs no key: the `WM_KEYUP` half of
+        // every injected character is one, and it has already returned.
+        let injected = input::injected_logical_key(
+            event.physical_key,
+            &event.logical_key,
+            event.text.as_deref(),
+        )
+        .map(|key| {
+            let mut event = event.clone();
+            event.logical_key = key;
+            event
+        });
+        let event = injected.as_ref().unwrap_or(event);
         let now = Instant::now();
         // **The hint card is spent by the first key that is not a modifier**
         // (§7.1.5e′), and this is the top of the function for the one reason
@@ -150308,6 +150346,102 @@ mod tests {
                  may blink, and never on any other terms"
             );
         }
+    }
+
+    /// PIN (T-REMOTE-INPUT-PACKET, owner evidence 2026-09-15) — **a commit that
+    /// arrived with no composition in front of it is still what the reader
+    /// typed**, and it is typed once.
+    ///
+    /// # The second shape of injected text
+    ///
+    /// A program that types for you reaches this window in one of two shapes,
+    /// and only one of them is a key. The phone keyboard's is
+    /// ([`input::injected_logical_key`] carries that half). Windows' own **Win+H
+    /// voice typing**, in a window with no text store — which is every window
+    /// this program has — uses the *other* one: it opens an IMM composition and
+    /// goes straight to its result, with no pre-edit anywhere in it. Measured in
+    /// a bare Win32 window on 2026-09-15:
+    ///
+    /// ```text
+    /// WM_IME_STARTCOMPOSITION
+    /// WM_IME_COMPOSITION lParam=0x0800 (GCS_RESULTSTR) "你可以听到我说话吗"
+    /// WM_IME_ENDCOMPOSITION
+    /// ```
+    ///
+    /// winit reads `GCS_RESULTSTR` the same way whatever else is in `lParam`
+    /// (`event_loop.rs`'s `WM_IME_COMPOSITION` arm), so what this window is
+    /// handed is `Ime::Preedit("")` followed by `Ime::Commit(sentence)` — the
+    /// identical pair Microsoft Pinyin ends a word with, which is why that half
+    /// needs no new road: **a commit is already unconditional here.** This test
+    /// is what keeps it that way. The tempting guard — "only commit while
+    /// something is being composed" — is one this file has the vocabulary to
+    /// write (the window's own `preedit` and `composing` are both in reach)
+    /// and it would silently delete every dictated sentence, because a
+    /// dictation never composes anything.
+    ///
+    /// **And once.** winit answers `WM_IME_COMPOSITION` with `Value(0)` rather
+    /// than `DefWindowProc`, so the `WM_IME_CHAR`/`WM_CHAR` tail the probe saw
+    /// is never generated under it; and a `WM_CHAR` with no key press under it
+    /// is dropped by winit's own builder ("Received a CHAR message but no
+    /// `event_info` was available"). So the commit door and the key door cannot
+    /// both fire for one sentence — which is also why the injected-text rewrite
+    /// belongs at the top of the *key* ladder and nowhere near this one.
+    ///
+    /// MUTATIONS: put any `if` or any early `return` between the commit arm and
+    /// its write — Win+H goes silent again while every Chinese IME keeps
+    /// working, which is exactly the shape of bug that survives a release; move
+    /// the injected-key rewrite out of `keyboard_input` and the last assertion
+    /// goes red.
+    #[test]
+    fn a_commit_with_no_composition_in_front_of_it_still_reaches_the_child() {
+        const SOURCE: &str = include_str!("main.rs");
+        fn body(signature: &str) -> &'static str {
+            let start = SOURCE
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+            let rest = &SOURCE[start + signature.len()..];
+            &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+        }
+
+        let door = body("fn ime_input(&mut self, event: Ime) -> Result<()> {");
+        let commit = door
+            .find("Ime::Commit(text) => {")
+            .expect("the composition door has a commit arm");
+        let write = door[commit..]
+            .find("write_pty_input(")
+            .expect("and that arm ends in the write into the child");
+        let statements = door[commit..commit + write]
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with("//"))
+            .collect::<Vec<_>>();
+        assert!(
+            !statements.iter().any(|line| line.starts_with("if ")),
+            "a condition stands between a commit and the child, and a dictated \
+             sentence composes nothing for it to be true of:\n{statements:#?}"
+        );
+        // A `return` *statement*, which is the only way out of this arm short of
+        // the write — `return_to_live_for_input` is a call and spells the same
+        // six letters, which is why this is asked of the start of the line.
+        assert!(
+            !statements.iter().any(|line| line.starts_with("return")),
+            "the commit arm can now decline to type what it was given:\n{statements:#?}"
+        );
+
+        // The other shape's road, and the assertion that the two stay apart: the
+        // key that carries text is rewritten in the *key* ladder, so no sentence
+        // can arrive through both doors.
+        let ladder = body(
+            "fn keyboard_input(&mut self, event: &KeyEvent, is_synthetic: bool) -> Result<()> {",
+        );
+        assert!(
+            ladder.contains("input::injected_logical_key("),
+            "a press that carries text and names no key has no rung again"
+        );
+        assert!(
+            !door.contains("injected_logical_key"),
+            "the composition door does not also rewrite keys"
+        );
     }
 
     /// PIN (user report, 2026-08-17) — **every rung says where its caret comes
