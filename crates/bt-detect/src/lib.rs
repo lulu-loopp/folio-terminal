@@ -799,9 +799,10 @@ pub const INLINE_ROW_JOIN_MAX_CLOSING_COLUMNS: usize = 48;
 /// never proved. Both rows must sit at the same inline-eligible site — adjacent eligible rows with
 /// nothing between them are one command's output, and a prompt row between two outputs is not
 /// eligible, so requiring the site is how "the same command printed both halves" gets proved
-/// without this crate knowing what a command is. And this row may not *begin* something: a blank
-/// row is a paragraph break, and a bullet, a quote, a heading or a numbered item is a new
-/// structure whose `$` belongs to its own sentence.
+/// without this crate knowing what a command is. And this row may not *begin* something: a bullet,
+/// a quote, a heading or a numbered item is a new structure whose `$` belongs to its own sentence.
+/// A blank row — the plainest new block of all, a paragraph break — needs no rule: it carries no
+/// closing `$`, so there is nothing for the fragment above to be joined to.
 ///
 /// The joined source — the two fragments with the row break replaced by a single space, which is
 /// where the producer's wrap ate one — then faces **every content gate a one-row run faces**, in
@@ -829,29 +830,26 @@ pub fn detect_inline_math_across_rows(
     if previous.len() > MAX_MATH_SOURCE_BYTES || text.len() > MAX_MATH_SOURCE_BYTES {
         return None;
     }
-    if inline_line_is_code_like(previous) || inline_line_is_code_like(text) {
-        return None;
-    }
+    // The two delimiter questions first: they are one `$` pass each and a bounded column walk, and
+    // they refuse nearly every pair of rows a terminal ever prints. The structural reads below walk
+    // the lines, so they are asked only of rows that have a delimiter pair to argue about.
+    //
+    // Neither fragment can hold a second `$`, which is what makes the pair unambiguous: the opener
+    // is the row above's *only* dollar, and the closer is the first one on this row, so the text
+    // between them contains none.
+    let open = lone_trailing_opener(previous)?;
+    let close = first_inline_closer(text)?;
     if commonmark_indented_code(previous) || commonmark_indented_code(text) {
         return None;
     }
-    if text.trim().is_empty() || row_opens_a_block(text) {
+    if row_opens_a_block(text) {
         return None;
     }
-    // Neither fragment can hold a second `$` by construction, which is what makes the pair
-    // unambiguous: the opener is the row above's *only* dollar, and the closer is the first one on
-    // this row, so the text between them contains none.
-    let open = lone_trailing_opener(previous)?;
+    if inline_line_is_code_like(previous) || inline_line_is_code_like(text) {
+        return None;
+    }
     let head_body = previous.get(open + 1..)?.trim_end();
-    let close = first_inline_closer(text)?;
-    if close == 0 {
-        return None;
-    }
     let before_closer = text.get(..close)?;
-    let closing_column = bt_unicode::text_width(before_closer).saturating_add(1);
-    if closing_column > INLINE_ROW_JOIN_MAX_CLOSING_COLUMNS {
-        return None;
-    }
     let tail_body = before_closer.trim_start();
     if tail_body.is_empty() {
         return None;
@@ -886,39 +884,112 @@ pub fn detect_inline_math_across_rows(
     })
 }
 
-/// Could this row carry the closing half of a formula the row above left open?
+/// What one pass over a line's dollars found: none, exactly one and where, or at least two.
 ///
-/// **The arming prefilter's share of the row-split rule.** A scan is queued for a row that carries
-/// two `$` — a pair it could close on its own — and a row that closes a split formula need carry
-/// only one, so without this question the join could be proved for the sentence in the 2026-09-15
-/// report (whose closing row happens to carry three) and never for the single formula that is the
-/// ordinary case.
+/// Both inline questions a line is ever asked — "could it carry a pair of its own?" and "could it
+/// close one left open above?" — are answered from this, so a line is scanned for `$` **once**.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DollarCensus {
+    None,
+    Lone(usize),
+    Pair,
+}
+
+/// Take that one pass. Lazy and short-circuiting: it stops at the second `$` and never looks past
+/// it, so a densely dollared line costs two `memchr`-shaped steps and not a walk of the line.
+fn dollar_census(text: &str) -> DollarCensus {
+    let mut dollars = text
+        .bytes()
+        .enumerate()
+        .filter_map(|(index, byte)| (byte == b'$').then_some(index));
+    match (dollars.next(), dollars.next()) {
+        (None, _) => DollarCensus::None,
+        (Some(only), None) => DollarCensus::Lone(only),
+        (Some(_), Some(_)) => DollarCensus::Pair,
+    }
+}
+
+/// Could this row take part in inline detection at all — by carrying a pair of `$` of its own, or
+/// by closing a formula the row above left open?
 ///
-/// It is answered from this row alone, because that is all a prefilter sees, and it is deliberately
-/// the *tight* half of the join's own test — which is what keeps it from arming a screen's worth of
-/// shell text. A lone `$` that could close something stands past column 0 (a row beginning with one
-/// is opening, not closing), is not escaped, is not half of a `$$`, and is **not followed by an
-/// identifier character**: that last one is the whole of `$PATH`, `$1`, `$5`, `$BUILD_DIR` and
-/// every other sigil, which is to say nearly every lone dollar a terminal ever prints.
+/// **The arming prefilter's whole inline question, and the budget it keeps.** This runs on the
+/// per-line path: once for every logical line of history a frame can see
+/// (`schedule_visible_artifacts`), once for every logical row of the live grid
+/// (`live_candidate_rows`), and once per line again for the live context signature. It must
+/// therefore stay **one pass over the line's bytes and nothing else** — the same cost as the
+/// two-dollar byte scan it replaced. Two rules keep it there and must survive any edit:
+///
+/// * one [`dollar_census`], never a second scan bolted on beside it; and
+/// * no `text_width` over the line. [`closes_a_row_split`] measures columns with a walk that stops
+///   at [`INLINE_ROW_JOIN_MAX_CLOSING_COLUMNS`], so a hundred-thousand-column line costs the same
+///   as a short one. A plain `bt_unicode::text_width(&text[..close])` here is O(line) on a path
+///   that is walked once per line per frame, which is how a per-line prefilter becomes a per-frame
+///   cost.
+///
+/// The row-split half is deliberately the *tight* half of the join's own test, which is what keeps
+/// it from arming a screen's worth of shell text: a lone `$` that could close something stands past
+/// column 0 (a row beginning with one is opening, not closing), is not escaped, is not half of a
+/// `$$`, and is **not followed by an identifier character** — that last one is the whole of
+/// `$PATH`, `$1`, `$5`, `$BUILD_DIR` and every other sigil, which is to say nearly every lone
+/// dollar a terminal ever prints.
 ///
 /// A row this arms still has to survive [`detect_inline_math_across_rows`] in full, including
 /// everything about the row above, which this cannot see. Arming is permission to ask, never an
 /// answer.
 #[must_use]
+pub fn may_carry_inline_math(text: &str) -> bool {
+    match dollar_census(text) {
+        DollarCensus::None => false,
+        // A pair is a run this row could prove on its own; nothing more needs asking.
+        DollarCensus::Pair => true,
+        DollarCensus::Lone(close) => closes_a_row_split(text, close),
+    }
+}
+
+/// Could this row carry the closing half of a formula the row above left open, and *only* that?
+///
+/// [`may_carry_inline_math`] minus the pair: the question the frozen scan window asks before it
+/// reaches one line further back, where a row that can prove a run by itself needs no such reach.
+/// Same single pass, same bounded column walk.
+#[must_use]
 pub fn may_close_row_split_inline_math(text: &str) -> bool {
-    let mut dollars = text.match_indices('$').map(|(byte, _)| byte);
-    let Some(close) = dollars.next() else {
+    matches!(dollar_census(text), DollarCensus::Lone(close) if closes_a_row_split(text, close))
+}
+
+/// Can the `$` at `close` be read as the closer of a formula the row above left open?
+///
+/// Ordered cheapest first and bounded at the end: three constant-time byte tests, then a column
+/// walk that stops the moment it passes the reach. Nothing here may become O(line) — see the budget
+/// on [`may_carry_inline_math`].
+fn closes_a_row_split(text: &str, close: usize) -> bool {
+    close > 0
+        && text.as_bytes().get(close + 1) != Some(&b'$')
+        && !byte_continues_an_identifier(text, close + 1)
+        && !delimiter_is_escaped(text, close)
+        && closer_is_within_reach(text, close)
+}
+
+/// Does the `$` at `close` stand inside [`INLINE_ROW_JOIN_MAX_CLOSING_COLUMNS`] of the row's start?
+///
+/// **The bound lives here.** Width is monotonic across a prefix, so once the accumulated columns
+/// reach the ceiling no later cluster can bring them back under it, and the walk stops — which
+/// makes the cost a function of the reach and not of the line. It is the same measurement
+/// `bt_unicode::text_width` makes, taken one cluster at a time so it can be abandoned.
+///
+/// A consequence worth stating because a test pins it: nothing past the reach can change the
+/// verdict, because nothing past the reach is ever read.
+fn closer_is_within_reach(text: &str, close: usize) -> bool {
+    let Some(prefix) = text.get(..close) else {
         return false;
     };
-    if dollars.next().is_some() {
-        // Two dollars arm this row on their own; this question is only about the lone one.
-        return false;
+    let mut column = 0usize;
+    for cluster in bt_unicode::graphemes(prefix) {
+        column = column.saturating_add(bt_unicode::cluster_width(cluster));
+        if column >= INLINE_ROW_JOIN_MAX_CLOSING_COLUMNS {
+            return false;
+        }
     }
-    let closing_column = bt_unicode::text_width(&text[..close]).saturating_add(1);
-    close > 0
-        && closing_column <= INLINE_ROW_JOIN_MAX_CLOSING_COLUMNS
-        && !delimiter_is_escaped(text, close)
-        && !byte_continues_an_identifier(text, close + 1)
+    true
 }
 
 /// The row's single `$`, when it is an unmatched opener at the end of the row.
@@ -927,13 +998,9 @@ pub fn may_close_row_split_inline_math(text: &str) -> bool {
 /// they pair with each other, and a fragment that could have been read another way is not proof of
 /// anything — `tiers $5-$10-$20` must never contribute half of a formula to the row below it.
 fn lone_trailing_opener(text: &str) -> Option<usize> {
-    let mut dollars = text
-        .char_indices()
-        .filter_map(|(byte, character)| (character == '$').then_some(byte));
-    let open = dollars.next()?;
-    if dollars.next().is_some() {
+    let DollarCensus::Lone(open) = dollar_census(text) else {
         return None;
-    }
+    };
     if delimiter_is_escaped(text, open) {
         return None;
     }
@@ -950,13 +1017,7 @@ fn lone_trailing_opener(text: &str) -> Option<usize> {
 /// The row's first `$`, when it can be read as the closer of a formula opened above.
 fn first_inline_closer(text: &str) -> Option<usize> {
     let close = text.find('$')?;
-    if delimiter_is_escaped(text, close)
-        || text.as_bytes().get(close + 1) == Some(&b'$')
-        || byte_continues_an_identifier(text, close + 1)
-    {
-        return None;
-    }
-    Some(close)
+    closes_a_row_split(text, close).then_some(close)
 }
 
 /// Does this row *begin* something, rather than continue the row above?
@@ -4007,6 +4068,32 @@ mod tests {
             wrong.len(),
             wrong.join("\n  ")
         );
+    }
+
+    /// **The prefilter reads no further than its own reach**, which is the observable half of the
+    /// budget on [`may_carry_inline_math`]: it is answered by a walk that stops at
+    /// [`INLINE_ROW_JOIN_MAX_CLOSING_COLUMNS`], so a hundred thousand columns of line cannot change
+    /// the verdict — and cannot be walked to reach it either. A `text_width` over the prefix would
+    /// give the same answers and cost the line; this is the assertion that says the answers must
+    /// not depend on what is out there.
+    #[test]
+    fn the_arming_prefilter_never_reads_past_its_own_reach() {
+        let near = "= a$ rest";
+        assert!(
+            may_carry_inline_math(near) && may_close_row_split_inline_math(near),
+            "a lone closer inside the reach arms its row"
+        );
+        // The same closer, pushed past the reach — first by a little text, then by a hundred
+        // thousand columns of it. Both are refused, and the second costs what the first does,
+        // because the walk stops at the reach and never sees the rest.
+        for padding in [60, 50_000] {
+            let far = format!("{}{near}", "漢".repeat(padding));
+            assert!(!may_carry_inline_math(&far), "{padding} wide characters in");
+            assert!(
+                !may_close_row_split_inline_math(&far),
+                "{padding} wide characters in, asked the window's way"
+            );
+        }
     }
 
     /// The arming prefilter's half of the rule: tight enough that the sigils a terminal prints do

@@ -12347,16 +12347,17 @@ fn may_contain_display_math(text: &str) -> bool {
 
 /// Could this line carry an inline `$…$` run? The cheapest structurally honest question.
 ///
-/// A run needs a *pair* of delimiters, so one `$` can never make one and a single-dollar line is
-/// not armed — `echo $PATH` and `Cost: $5` cost a two-byte scan and nothing else. Two is where the
-/// pre-filter has to stop being clever: `$5 和 $10` also has two, and deciding that it is currency
-/// rather than mathematics is the disambiguator's job, not a prefilter's.
+/// A run needs a *pair* of delimiters — or a lone `$` that closes one the line above left open,
+/// which is the row-split case. Both readings come out of **one pass over this line's dollars**,
+/// because this runs once per line for every line a frame can see; `bt_detect`'s
+/// [`bt_detect::may_carry_inline_math`] states the budget and holds it. A single-dollar line that
+/// is a sigil — `echo $PATH`, `Cost: $5` — still costs that one scan and nothing else.
+///
+/// Two dollars is where the pre-filter has to stop being clever: `$5 和 $10` also has two, and
+/// deciding that it is currency rather than mathematics is the disambiguator's job, not a
+/// prefilter's.
 fn may_contain_inline_math(text: &str) -> bool {
-    text.bytes().filter(|byte| *byte == b'$').take(2).count() == 2
-        // A row that closes a formula the row above left open carries one `$`, not two. The
-        // question is asked of this row alone and is tight enough that the sigils a terminal
-        // actually prints (`$PATH`, `$1`, `$5`) do not answer it.
-        || bt_detect::may_close_row_split_inline_math(text)
+    bt_detect::may_carry_inline_math(text)
 }
 
 /// Could this line take part in a math detection at *some* site? The membership test for the live
