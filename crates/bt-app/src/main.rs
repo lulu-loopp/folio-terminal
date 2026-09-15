@@ -64626,13 +64626,35 @@ impl Runtime<'_> {
         self.window.composed_terminal_frames =
             self.window.composed_terminal_frames.saturating_add(1);
         let asked_about_paths;
+        // **What the projection cost this frame** (`BT_PERF_TRACE projection`,
+        // T-MATH-TOGGLE-STUTTER). The gesture that made this worth printing is
+        // the formula source toggle: it changes the set of suppressed ids, which
+        // is the one thing that sends `project` down its rebuild road, and the
+        // question a person at the machine has to be able to answer is whether
+        // that rebuild measured the lines that changed or the whole scrollback.
+        // `lines_measured` is exactly that number. Off unless the switch is set,
+        // and the reading costs one `u64` load when it is not.
+        let trace_perf = self.app.trace_perf;
+        let measurements_before = self.shell().projection.line_text_measurements();
         let mut terminal_frame = {
             // Bound once, to the focused leaf: `session` and `projection` are
             // two fields of one shell, and reaching each through its own deref
             // would be two borrows of the tab rather than one borrow of the
             // leaf.
             let leaf = self.window.tabs[active].shell_mut();
+            let projection_started_at = trace_perf.then(Instant::now);
             leaf.session.refresh_projection(&mut leaf.projection);
+            if let Some(started_at) = projection_started_at {
+                eprintln!(
+                    "BT_PERF_TRACE projection source={:?} refresh_us={} lines_measured={} projected_lines={}",
+                    trigger.source,
+                    started_at.elapsed().as_micros(),
+                    leaf.projection
+                        .line_text_measurements()
+                        .saturating_sub(measurements_before),
+                    leaf.projection.projected_line_count(),
+                );
+            }
             let frame = leaf
                 .session
                 .viewport_frame(&mut leaf.projection)
