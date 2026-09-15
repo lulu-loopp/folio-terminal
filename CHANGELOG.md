@@ -26,6 +26,8 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- A formula whose macros multiply their arguments through several levels is now refused instead of exhausting memory.
+
 - **Turning a formula into its source no longer makes the window hesitate.**
   Pressing the `‹›` mark beside a typeset block — or pressing it again to put the
   picture back — used to hitch for a moment before the block changed. Changing a
