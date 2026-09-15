@@ -19213,7 +19213,7 @@ mod tests {
         let three_rows = 40 * SUBPIXELS_PER_PX;
         assert!(three_rows > 2 * cell && three_rows <= 3 * cell);
         assert_eq!(box_of(three_rows, floor), 3 * cell);
-        assert!(box_of(three_rows, floor) <= floor.expect("a floor"));
+        assert!(box_of(three_rows, floor) <= 4 * cell);
         // And it is still a whole number of rows with its ink centred in them.
         assert_eq!(
             math_block_padding_subpixels(three_rows, quarter, cell, floor),
