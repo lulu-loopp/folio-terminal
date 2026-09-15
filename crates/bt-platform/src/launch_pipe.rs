@@ -201,8 +201,8 @@ unsafe impl Sync for LaunchPipe {}
 impl LaunchPipe {
     /// Open this process's launch endpoint for `directory` and start listening.
     ///
-    /// **It returns already listening**, which is `CONVENTIONS.md`'s rule for anything shaped like
-    /// a subscription and is load-bearing here for a specific reason: the process is about to
+    /// **It returns already listening**, which is `docs/CONVENTIONS.md`'s rule for anything shaped
+    /// like a subscription and is load-bearing here for a specific reason: the process is about to
     /// finish starting, and a second launch fired at it in that window would find no pipe and open
     /// a window of its own. So the listener thread issues its first `ConnectNamedPipe` and says so,
     /// and this waits for that word — or hands back the refusal instead of a thread that dies in

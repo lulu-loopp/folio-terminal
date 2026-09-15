@@ -186,7 +186,7 @@ pub enum CliFault {
     /// A flag that takes a value, given twice.
     ///
     /// Refused rather than resolved by a last-one-wins rule, which is
-    /// `CONVENTIONS.md` §一 applied to a command line: a caller who wrote
+    /// `docs/CONVENTIONS.md` §一 applied to a command line: a caller who wrote
     /// `--cwd A --cwd B` has said two things, and a program that silently picks
     /// one of them is guessing on the user's behalf about the one input they
     /// were most explicit about.

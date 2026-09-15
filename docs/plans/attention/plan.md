@@ -305,7 +305,7 @@ HANDOFF §4 g 写的是写 `~/.claude/settings.json` 的 `preferredNotifChannel=
 
 ## 7. 红线
 
-1. **不许读屏猜「在问 y/n」。** `CONVENTIONS.md` §1;UI-UX 给启发式留的那一档,前提是「不存在协议真相」,而本块正在造协议真相。
+1. **不许读屏猜「在问 y/n」。** `docs/CONVENTIONS.md` §1;UI-UX 给启发式留的那一档,前提是「不存在协议真相」,而本块正在造协议真相。
 2. **不许把标题转轮当信号。** §2.3 第 3 条是它的证据,不是意见。
 3. **一点一断言不许继续退化。** Bell 与 Awaiting 若仍同色,必须有**静态可分**的差别(reduced-motion 下也在);做不到就合并成一态。
 4. **`attention_is_consumed` 不许长第三个参数。** 桌面那一档另起函数(§5.3)。

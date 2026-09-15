@@ -40,7 +40,7 @@ signature and is never stored. `bt-persist` states it as policy: `SessionV1.wind
 
 That last fact is *good news* for this block. "Per-window taskbar progress" is today just "fold
 over `self.tabs`", and there is no window-routing problem in a toast click. It is also a constraint:
-nothing here should pre-build multi-window machinery, and `CONVENTIONS.md` forbids speculative
+nothing here should pre-build multi-window machinery, and `docs/CONVENTIONS.md` forbids speculative
 persisted fields — a field must arrive in the same change as its reader.
 
 There is also **no single-instance mechanism** (no named mutex, pipe, or `WM_COPYDATA`). A second
@@ -547,7 +547,7 @@ On the Settings surface itself, note the existing shape before designing the pan
 **there is no checkbox widget** — booleans render as a two-item combo picker reading "On"/"Off"
 (`settings.rs:184, 210-213`). A new Windows-only group would follow how `Files` was added. Any
 persisted boolean bumps `SETTINGS_SCHEMA_VERSION` (currently 5) with one structural migration step in
-`bt-persist/src/migrate.rs`, and `CONVENTIONS.md` requires the field to arrive **in the same change as
+`bt-persist/src/migrate.rs`, and `docs/CONVENTIONS.md` requires the field to arrive **in the same change as
 its reader** — no placeholder fields.
 
 ---

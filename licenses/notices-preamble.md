@@ -21,10 +21,10 @@ than written is that only the first two are stable:
    Fonts, icons, colour schemes, vendored binaries and vendored source live here:
    things inside the product that `Cargo.lock` has never heard of.
 3. **Every package in the resolved dependency graph**, from `cargo about` reading
-   `about.toml` and `about.hbs`, over every target and including development
-   dependencies — a wider set than a Windows release actually links. Over-inclusion
-   in a notice file costs a reader some scrolling; the alternative costs an
-   attribution.
+   `licenses/about.toml` and `licenses/about.hbs`, over every target and
+   including development dependencies — a wider set than a Windows release
+   actually links. Over-inclusion in a notice file costs a reader some scrolling;
+   the alternative costs an attribution.
 4. **The remainder of `Cargo.lock`**: the optional and platform-specific entries
    the resolver keeps but no build here reaches. Nothing links them, so they get a
    name and their declared terms rather than a licence text — and they are listed

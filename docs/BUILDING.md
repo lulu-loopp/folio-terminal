@@ -184,7 +184,9 @@ Nine directories at the root, and every one of them is what its name says:
 - `crates/` — the product, cut into compilation units. `bt-app` is the window.
 - `docs/` — the design record, the plans behind each block of work, the spike
   reports, the screenshots the README shows, and the prototypes in `docs/design/`.
-- `licenses/` — upstream licence texts, reproduced as their licences require.
+- `licenses/` — upstream licence texts, reproduced as their licences require,
+  and the `cargo-about` configuration and template that assemble them into
+  `THIRD-PARTY-NOTICES.md`.
 - `packaging/` — the MSIX manifest and logos, the winget manifest, and in
   `packaging/macos/` the `Info.plist` template and the entitlements a Developer
   ID signature is given.
@@ -197,14 +199,15 @@ Nine directories at the root, and every one of them is what its name says:
 - `.github/` — the workflows.
 
 Everything else at the root is a file: the two READMEs, the licences, the
-changelog, this project's conventions, and the cargo, clippy and rustfmt
-configuration.
+changelog, and the cargo, clippy and rustfmt configuration. The conventions
+moved to `docs/CONVENTIONS.md` and the `cargo-about` configuration to
+`licenses/`, each beside what it belongs with.
 
 ## Where the decisions are written down
 
 - `docs/DESIGN.md` — what the program is supposed to do.
-- `CONVENTIONS.md` — how work is done here, in Chinese, naming the incident each
-  rule was paid for.
+- `docs/CONVENTIONS.md` — how work is done here, in Chinese, naming the incident
+  each rule was paid for.
 - `CONTRIBUTING.md` — the short version of the same, and how a change is
   proposed.
 - `docs/BT-ENVIRONMENT.md` — every `BT_*` environment variable the program reads,

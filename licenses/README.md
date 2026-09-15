@@ -1,24 +1,27 @@
 # `licenses/`
 
-Verbatim licence texts, and the prose that frames them. These are the **inputs**
-to `THIRD-PARTY-NOTICES.md` at the root — not a second, competing copy of it.
+Verbatim licence texts, the prose that frames them, and the configuration that
+turns all of it into one file. These are the **inputs** to
+`THIRD-PARTY-NOTICES.md` at the root — not a second, competing copy of it.
 
 ```
 ./scripts/generate-notices.ps1   # preamble + bundled-assets + cargo about  ->  THIRD-PARTY-NOTICES.md
 ./scripts/check-notices.ps1      # regenerate into a temp file and demand the bytes match
 ```
 
-Nothing in this directory should ever be edited except `notices-preamble.md` and
-`bundled-assets.md`. The rest are other people's words, copied byte for byte;
-the only correct change to one of them is replacing it wholesale when its
-upstream changes.
+Nothing in this directory should ever be edited except the four files written
+here — `notices-preamble.md`, `bundled-assets.md`, `about.toml` and `about.hbs`.
+The rest are other people's words, copied byte for byte; the only correct change
+to one of them is replacing it wholesale when its upstream changes.
 
-## The two written here
+## The four written here
 
 | File | |
 |---|---|
 | `notices-preamble.md` | The head of `THIRD-PARTY-NOTICES.md`: what the file is and how it is made |
 | `bundled-assets.md` | The section for everything inside the product that `Cargo.lock` cannot see — fonts, icons, colour schemes, vendored binaries, vendored source. Each `<!-- verbatim: path -->` marker is replaced at generation time by that file's exact bytes |
+| `about.toml` | The `cargo-about` configuration: which licence expressions this product accepts, and the absences that make an unacceptable one turn the gate red. Passed as `-c licenses/about.toml` |
+| `about.hbs` | The handlebars template `cargo about` renders the crate sections through — one section per distinct licence text. Paths inside it are written from the repository root, as everything else here is |
 
 ## The texts copied here
 

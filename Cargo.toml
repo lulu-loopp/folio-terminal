@@ -53,8 +53,8 @@ publish = false
 #
 # Only lints the tree passes TODAY live here. CI runs -D warnings, so a "warn"
 # entry is a deny wearing a disguise — there is no such thing as an advisory lint
-# in this manifest. Lints we intend to adopt are staged in CONVENTIONS.md §8 with
-# the cleanup each one needs first; they move here once that cleanup lands.
+# in this manifest. Lints we intend to adopt are staged in docs/CONVENTIONS.md §8
+# with the cleanup each one needs first; they move here once that cleanup lands.
 #
 # Members must opt in with `[lints] workspace = true` — cargo does not inherit
 # these automatically, and without that line this whole table is decoration.
@@ -186,7 +186,17 @@ unicode-segmentation = "1"
 unicode-script = "0.5.8"
 unicode-properties = { version = "0.1", default-features = false, features = ["emoji", "general-category"] }
 unicode-width = "0.2"
-vte = "0.15"
+# `default-features = false` and `std` named instead, which is the same thing —
+# `vte`'s `default` is exactly `["std"]`. The point is that it is the same thing
+# under *every* package selection. `bt-corpus` is the only workspace member that
+# takes `vte` directly, so with `default` left on, `cargo test --workspace`
+# resolved `vte` with `default` and `cargo test -p bt-app` resolved it without.
+# A feature reaches rustc as `--cfg feature="…"` and is part of the unit
+# fingerprint, so those were two different `vte` units — and `vte` is under the
+# vendored `alacritty_terminal`, under `bt-term`, under `bt-app`, so the whole
+# stack including the test harness was rebuilt whenever the two selections
+# alternated. Naming `std` buys the same crate and makes the two agree.
+vte = { version = "0.15", default-features = false, features = ["std"] }
 wgpu = { version = "30.0.0", default-features = false, features = ["std", "dx12", "wgsl"] }
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
 
