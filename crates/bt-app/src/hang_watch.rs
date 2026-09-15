@@ -1893,13 +1893,15 @@ mod tests {
         None
     }
 
-    /// The footprints [`fake_footprint`] hands back, in order, and how many
-    /// times it has been asked.
-    ///
-    /// Thread-local because libtest gives each case its own thread and runs them
-    /// at once: a static here would have two tests handing each other their
-    /// numbers, which is the kind of shared fixture this repository's own
-    /// conventions call a bug factory.
+    // The footprints `fake_footprint` hands back, in order, and how many times
+    // it has been asked. A `//` comment and not a `///` one: the item is inside
+    // a macro, so a doc comment here documents nothing and `unused_doc_comment`
+    // says so.
+    //
+    // Thread-local because libtest gives each case its own thread and runs them
+    // at once: a static here would have two tests handing each other their
+    // numbers, which is the kind of shared fixture this repository's own
+    // conventions call a bug factory.
     thread_local! {
         static FAKE_FOOTPRINTS: RefCell<(Vec<Footprint>, usize)> =
             const { RefCell::new((Vec::new(), 0)) };
@@ -3201,7 +3203,10 @@ mod tests {
     /// in the millions and says nothing about any hold at all.
     #[test]
     fn a_slow_hold_carries_the_faults_taken_between_its_own_two_ends() {
-        queue_footprints(&[(1_000_000, 179 * 1024 * 1024), (1_038_210, 412 * 1024 * 1024)]);
+        queue_footprints(&[
+            (1_000_000, 179 * 1024 * 1024),
+            (1_038_210, 412 * 1024 * 1024),
+        ]);
         let heart = Heartbeat::sampling(fake_footprint);
         heart.woke_at(1_000);
         heart.at_station(Station::Wheel, 1_010);
@@ -3221,7 +3226,8 @@ mod tests {
         );
         assert_eq!(footprints_asked(), 2, "one end, then the other");
         assert!(
-            hold.line().ends_with("· faults +38210, working set 179 → 412 MB"),
+            hold.line()
+                .ends_with("· faults +38210, working set 179 → 412 MB"),
             "{}",
             hold.line(),
         );
