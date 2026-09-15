@@ -241,7 +241,7 @@ fn slow_hold_threshold_ms() -> u64 {
 /// Held against [`Station`] by `every_station_has_a_slot_in_the_ledger`: a
 /// further variant added without widening this would have its milliseconds
 /// charged to nobody, and the line would silently stop adding up.
-const STATION_COUNT: usize = 25;
+const STATION_COUNT: usize = 26;
 
 /// How many reports are kept. The oldest beyond this are deleted.
 ///
@@ -390,6 +390,8 @@ pub enum Station {
     /// picker's width measured through the renderer, and the profile and scheme
     /// lists it reads afresh each time.
     Settings = 24,
+    /// Synchronous clipboard acquisition may wait on another process's delayed renderer.
+    ClipboardRead = 25,
 }
 
 impl Station {
@@ -422,6 +424,7 @@ impl Station {
             Self::Chrome => "refresh_chrome",
             Self::WebSpoke => "drive_web_page",
             Self::Settings => "settings_layout",
+            Self::ClipboardRead => "clipboard read",
         }
     }
 
@@ -467,6 +470,7 @@ impl Station {
             22 => Self::Chrome,
             23 => Self::WebSpoke,
             24 => Self::Settings,
+            25 => Self::ClipboardRead,
             _ => Self::Starting,
         }
     }

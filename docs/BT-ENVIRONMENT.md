@@ -91,6 +91,10 @@ Never present in a release binary. `BT_PSREADLINE_MODULE_PATH`, `BT_BURST_EMIT`,
 test process sets on the child it spawns to prove the decoration worker survives a
 hostile formula).
 
+| Variable | Value | What it does | What can end up in the file | Default |
+| --- | --- | --- | --- | --- |
+| `BT_PASTE_CRT_CONSUMER` | absolute path to the separately compiled `paste_paths_crt.exe` fixture | Set by the developer or acceptance coordinator when explicitly running the ignored Windows direct-CRT test. Names the consumer that receives the encoder's literal through the quiet process door; the test checks its captured argument count and UTF-16 units. | No file is written by this switch; consumer output is captured through pipes. | not set; the test is ignored by default and fails if explicitly run without this value |
+
 ## 3. `BT_` names in the source that are not environment variables
 
 Listed so that the check described at the top of this file can tell them apart

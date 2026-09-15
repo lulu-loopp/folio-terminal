@@ -6,6 +6,10 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- A copied file or a copied path from Explorer/Finder pastes as one quoted argument in the shell’s own spelling.
+
 ### Changed
 
 - **Switching a formula between its typeset and source forms now animates

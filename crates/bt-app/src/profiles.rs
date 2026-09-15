@@ -411,6 +411,13 @@ pub struct Profile {
     /// derived from the program, or named outright. See [`IntegrationChoice`],
     /// and [`served_by`] for the resolved answer every other module wants.
     pub integration: IntegrationChoice,
+    /// `profiles.json` grammar override: powershell/cmd/posix/fish/nu/agent. Unknown values
+    /// are refused once at load. This is a spawn-time default at a fresh argument boundary.
+    pub paste_as: Option<String>,
+    /// Insertion-only Windows spelling: windows/windows-slash/wsl/msys. Every value on Unix,
+    /// and unknown values (including cygwin until T-PASTE-CYG), are refused once at load.
+    /// The standing printed_path_namespace derivation and detector never read this field.
+    pub paste_paths_as: Option<String>,
     /// Kept out of the pickers.
     ///
     /// A built-in cannot be deleted — a row that is missing looks exactly like a
@@ -857,6 +864,107 @@ pub fn served_by(profile: &Profile) -> Integration {
     }
 }
 
+/// Grammar follows the resolved launch family, independently of integration (paste design ⑧).
+pub fn derive_grammar(program: &ProgramSource) -> crate::shell_literal::ShellGrammar {
+    derive_grammar_on(program, SeedPlatform::of_this_build())
+}
+
+fn program_stem(program: &ProgramSource) -> Option<String> {
+    let leaf = match program {
+        ProgramSource::PowerShellSeven => return Some("pwsh".into()),
+        ProgramSource::Path(path) => path.to_str()?,
+        ProgramSource::FirstOf(candidates) => match candidates.first()? {
+            ProgramCandidate::Under { tail, .. } | ProgramCandidate::BesideOnPath { tail, .. } => {
+                tail
+            }
+            ProgramCandidate::OnPath { name } => name,
+        },
+    }
+    .rsplit(['\\', '/'])
+    .next()?;
+    Some(
+        leaf.rsplit_once('.')
+            .map_or(leaf, |(stem, _)| stem)
+            .to_ascii_lowercase(),
+    )
+}
+
+fn derive_grammar_on(
+    program: &ProgramSource,
+    platform: SeedPlatform,
+) -> crate::shell_literal::ShellGrammar {
+    use crate::shell_literal::ShellGrammar;
+    match program_stem(program).as_deref() {
+        Some("pwsh" | "powershell") => ShellGrammar::PowerShell,
+        Some("cmd") => ShellGrammar::Cmd,
+        Some("bash" | "zsh" | "sh" | "dash" | "ksh" | "wsl" | "gitbash") => ShellGrammar::Posix,
+        Some("fish") => ShellGrammar::Fish,
+        Some("nu") => ShellGrammar::Nushell,
+        Some(agent) if AGENT_IDS.contains(&agent) => ShellGrammar::Agent,
+        _ if platform == SeedPlatform::Windows => ShellGrammar::Cmd,
+        _ => ShellGrammar::Posix,
+    }
+}
+
+pub fn grammar(index: usize) -> crate::shell_literal::ShellGrammar {
+    with_table(|table| {
+        table.get(index).map_or_else(
+            || derive_grammar(&ProgramSource::FirstOf(Vec::new())),
+            |row| {
+                row.paste_as
+                    .as_deref()
+                    .and_then(crate::shell_literal::ShellGrammar::from_name)
+                    .unwrap_or_else(|| derive_grammar(&row.program))
+            },
+        )
+    })
+}
+
+fn encoder_for(
+    row: &Profile,
+    grammar: crate::shell_literal::ShellGrammar,
+) -> crate::shell_literal::Encoder {
+    crate::shell_literal::Encoder {
+        grammar,
+        named_cmd: grammar == crate::shell_literal::ShellGrammar::Cmd
+            && (row.paste_as.as_deref() == Some("cmd")
+                || program_stem(&row.program).as_deref() == Some("cmd")),
+        delayed_expansion: crate::shell_literal::delayed_expansion(&row.args),
+        powershell_doubled_quotes: &[],
+    }
+}
+
+/// Captured at spawn so editing profiles does not change the grammar of a running recipient.
+/// The namespace call is deliberately the standing resolver, unchanged by either insertion key.
+pub fn paste_recipient(
+    index: usize,
+    environment: &dyn ShellEnvironment,
+) -> crate::shell_literal::Recipient {
+    let grammar = grammar(index);
+    let (encoder, spelling) = with_table(|table| {
+        let row = table.get(index);
+        (
+            row.map_or(
+                crate::shell_literal::Encoder {
+                    grammar,
+                    named_cmd: false,
+                    delayed_expansion: false,
+                    powershell_doubled_quotes: &[],
+                },
+                |row| encoder_for(row, grammar),
+            ),
+            row.and_then(|row| row.paste_paths_as.as_deref())
+                .and_then(crate::shell_literal::PathSpelling::from_name),
+        )
+    });
+    crate::shell_literal::Recipient {
+        encoder,
+        namespace: printed_path_namespace(index, environment),
+        spelling,
+        wsl_distribution: wsl_distribution(index),
+    }
+}
+
 /// The profile whose PSReadLine is the one this product can repair.
 ///
 /// Named rather than spelled at the two places that compare against it: the
@@ -1022,6 +1130,8 @@ fn windows_shipped() -> Vec<Profile> {
             paths: PathNamespace::Windows,
             qualifier: Qualifier::None,
             integration: IntegrationChoice::Auto,
+            paste_as: None,
+            paste_paths_as: None,
             hidden: false,
             origin: Origin::Builtin,
         },
@@ -1057,6 +1167,8 @@ fn windows_shipped() -> Vec<Profile> {
             // is written for 5.1 and 7 alike, and the PSReadLine 2.0.0 anchor repair
             // 5.1 needs is an existing no-op sentinel rather than a second code path.
             integration: IntegrationChoice::Auto,
+            paste_as: None,
+            paste_paths_as: None,
             hidden: false,
             origin: Origin::Builtin,
         },
@@ -1096,6 +1208,8 @@ fn windows_shipped() -> Vec<Profile> {
             paths: PathNamespace::Wsl,
             qualifier: Qualifier::WslDistribution,
             integration: IntegrationChoice::Auto,
+            paste_as: None,
+            paste_paths_as: None,
             hidden: false,
             origin: Origin::Builtin,
         },
@@ -1155,6 +1269,8 @@ fn windows_shipped() -> Vec<Profile> {
             paths: PathNamespace::Windows,
             qualifier: Qualifier::None,
             integration: IntegrationChoice::Auto,
+            paste_as: None,
+            paste_paths_as: None,
             hidden: false,
             origin: Origin::Builtin,
         },
@@ -1176,6 +1292,8 @@ fn windows_shipped() -> Vec<Profile> {
             paths: PathNamespace::Windows,
             qualifier: Qualifier::None,
             integration: IntegrationChoice::Auto,
+            paste_as: None,
+            paste_paths_as: None,
             hidden: false,
             origin: Origin::Builtin,
         },
@@ -1251,6 +1369,8 @@ fn windows_shipped() -> Vec<Profile> {
             paths: PathNamespace::Windows,
             qualifier: Qualifier::None,
             integration: IntegrationChoice::Auto,
+            paste_as: None,
+            paste_paths_as: None,
             hidden: false,
             origin: Origin::Builtin,
         },
@@ -1286,6 +1406,8 @@ fn windows_shipped() -> Vec<Profile> {
             paths: PathNamespace::Windows,
             qualifier: Qualifier::None,
             integration: IntegrationChoice::Auto,
+            paste_as: None,
+            paste_paths_as: None,
             hidden: false,
             origin: Origin::Builtin,
         },
@@ -1320,6 +1442,8 @@ fn windows_shipped() -> Vec<Profile> {
             paths: PathNamespace::Windows,
             qualifier: Qualifier::None,
             integration: IntegrationChoice::Auto,
+            paste_as: None,
+            paste_paths_as: None,
             hidden: false,
             origin: Origin::Builtin,
         },
@@ -1369,6 +1493,8 @@ fn windows_shipped() -> Vec<Profile> {
             paths: PathNamespace::Windows,
             qualifier: Qualifier::None,
             integration: IntegrationChoice::Auto,
+            paste_as: None,
+            paste_paths_as: None,
             hidden: false,
             origin: Origin::Builtin,
         },
@@ -1409,6 +1535,8 @@ fn windows_shipped() -> Vec<Profile> {
             paths: PathNamespace::Windows,
             qualifier: Qualifier::None,
             integration: IntegrationChoice::Auto,
+            paste_as: None,
+            paste_paths_as: None,
             hidden: false,
             origin: Origin::Builtin,
         },
@@ -1453,6 +1581,8 @@ fn windows_shipped() -> Vec<Profile> {
             paths: PathNamespace::Windows,
             qualifier: Qualifier::None,
             integration: IntegrationChoice::Auto,
+            paste_as: None,
+            paste_paths_as: None,
             hidden: false,
             origin: Origin::Builtin,
         },
@@ -1492,6 +1622,8 @@ fn windows_shipped() -> Vec<Profile> {
             paths: PathNamespace::Windows,
             qualifier: Qualifier::None,
             integration: IntegrationChoice::Auto,
+            paste_as: None,
+            paste_paths_as: None,
             hidden: false,
             origin: Origin::Builtin,
         },
@@ -1699,6 +1831,8 @@ fn unix_shell_row(
         // `Integration::None`, which is the honest whole answer rather than a
         // door that would be silently ignored (review row R3-6).
         integration: IntegrationChoice::Auto,
+        paste_as: None,
+        paste_paths_as: None,
         hidden: false,
         origin: Origin::Builtin,
     }
@@ -2210,6 +2344,8 @@ pub enum ProfileFault {
     /// wins, because a stable id has to name one thing and the seeds on disk
     /// pointing at it were written when only the first existed.
     Duplicate { id: String },
+    /// Keep the row and its default; report an unusable insertion override once at load.
+    PasteOverride { id: String, key: &'static str },
 }
 
 /// Read `profiles.json` onto the shipped table and put the result in force.
@@ -2236,6 +2372,14 @@ pub fn install(file: &ProfilesV1) -> Vec<ProfileFault> {
 /// [`install`]'s pure half, so the rules can be tested without a process-wide
 /// table under them.
 fn merge(shipped: Vec<Profile>, file: &ProfilesV1) -> (Vec<Profile>, Vec<ProfileFault>) {
+    merge_on(shipped, file, SeedPlatform::of_this_build())
+}
+
+fn merge_on(
+    shipped: Vec<Profile>,
+    file: &ProfilesV1,
+    platform: SeedPlatform,
+) -> (Vec<Profile>, Vec<ProfileFault>) {
     let mut faults = Vec::new();
     let mut built: Vec<Profile> = Vec::new();
     for entry in &file.profiles {
@@ -2246,12 +2390,36 @@ fn merge(shipped: Vec<Profile>, file: &ProfilesV1) -> (Vec<Profile>, Vec<Profile
             continue;
         }
         let seed = shipped.iter().find(|profile| profile.id == entry.id);
-        let Some(profile) = compose(seed, entry) else {
+        let Some(profile) = compose_on(seed, entry, platform) else {
             faults.push(ProfileFault::Unusable {
                 id: entry.id.clone(),
             });
             continue;
         };
+        for (key, value, valid) in [
+            (
+                "paste_as",
+                entry.paste_as.as_ref(),
+                entry.paste_as.as_deref().is_none_or(|value| {
+                    crate::shell_literal::ShellGrammar::from_name(value).is_some()
+                }),
+            ),
+            (
+                "paste_paths_as",
+                entry.paste_paths_as.as_ref(),
+                entry.paste_paths_as.as_deref().is_none_or(|value| {
+                    platform == SeedPlatform::Windows
+                        && crate::shell_literal::PathSpelling::from_name(value).is_some()
+                }),
+            ),
+        ] {
+            if value.is_some() && !valid {
+                faults.push(ProfileFault::PasteOverride {
+                    id: entry.id.clone(),
+                    key,
+                });
+            }
+        }
         built.push(profile);
     }
     for profile in shipped {
@@ -2263,7 +2431,11 @@ fn merge(shipped: Vec<Profile>, file: &ProfilesV1) -> (Vec<Profile>, Vec<Profile
 }
 
 /// One file entry onto one shipped profile, or onto nothing.
-fn compose(seed: Option<&Profile>, entry: &ProfileEntryV1) -> Option<Profile> {
+fn compose_on(
+    seed: Option<&Profile>,
+    entry: &ProfileEntryV1,
+    platform: SeedPlatform,
+) -> Option<Profile> {
     let mut profile = match seed {
         Some(shipped) => shipped.clone(),
         None => Profile {
@@ -2294,6 +2466,8 @@ fn compose(seed: Option<&Profile>, entry: &ProfileEntryV1) -> Option<Profile> {
             // served. Writing `None` in here would have been a decision nobody
             // made, kept forever.
             integration: IntegrationChoice::Auto,
+            paste_as: None,
+            paste_paths_as: None,
             hidden: false,
             origin: Origin::User,
         },
@@ -2340,6 +2514,19 @@ fn compose(seed: Option<&Profile>, entry: &ProfileEntryV1) -> Option<Profile> {
     // longer runs. The derivation reproduces all five shipped answers —
     // `the_namespace_every_shipped_profile_states_is_the_one_it_derives` — so
     // what this replaces is a copy and not a decision.
+    profile.paste_as = entry
+        .paste_as
+        .as_ref()
+        .filter(|value| crate::shell_literal::ShellGrammar::from_name(value).is_some())
+        .cloned();
+    profile.paste_paths_as = entry
+        .paste_paths_as
+        .as_ref()
+        .filter(|value| {
+            platform == SeedPlatform::Windows
+                && crate::shell_literal::PathSpelling::from_name(value).is_some()
+        })
+        .cloned();
     profile.paths = derived_paths(&profile);
     profile.hidden = entry.hidden;
     Some(profile)
@@ -2600,6 +2787,8 @@ fn entry_for(profile: &Profile, seed: Option<&Profile>) -> ProfileEntryV1 {
             display_title: (profile.display_title != seed.display_title)
                 .then(|| profile.display_title.clone()),
             hidden: profile.hidden,
+            paste_as: profile.paste_as.clone(),
+            paste_paths_as: profile.paste_paths_as.clone(),
             program: (profile.program != seed.program).then(|| program_to_file(&profile.program)),
             args: (profile.args != seed.args).then(|| profile.args.clone()),
             env,
@@ -2617,6 +2806,8 @@ fn entry_for(profile: &Profile, seed: Option<&Profile>) -> ProfileEntryV1 {
             id: profile.id.clone(),
             display_title: Some(profile.display_title.clone()),
             hidden: profile.hidden,
+            paste_as: profile.paste_as.clone(),
+            paste_paths_as: profile.paste_paths_as.clone(),
             program: Some(program_to_file(&profile.program)),
             args: (!profile.args.is_empty()).then(|| profile.args.clone()),
             env,
@@ -24275,5 +24466,294 @@ mod tests {
         assert_eq!(unkeepable.page_url(), None);
         assert!(page.is_page());
         assert!(!file.is_page());
+    }
+}
+
+#[cfg(test)]
+mod paste_tests {
+    use super::*;
+    #[cfg(windows)]
+    use crate::shell_literal::{PathSpelling, Recipient};
+    use crate::shell_literal::{Refusal, ShellGrammar};
+
+    struct EmptyMachine;
+    impl ShellEnvironment for EmptyMachine {
+        fn var_os(&self, _: &str) -> Option<OsString> {
+            None
+        }
+        fn is_file(&self, _: &Path) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn every_seed_row_has_a_grammar_and_standing_namespace_pair() {
+        for platform in [SeedPlatform::Windows, SeedPlatform::MacOs] {
+            let rows = shipped_for(platform, &EmptyMachine);
+            let expected = if platform == SeedPlatform::Windows {
+                vec![
+                    ("pwsh", ShellGrammar::PowerShell, "windows"),
+                    ("winps", ShellGrammar::PowerShell, "windows"),
+                    ("wsl", ShellGrammar::Posix, "wsl"),
+                    ("gitbash", ShellGrammar::Posix, "msys"),
+                    ("cmd", ShellGrammar::Cmd, "windows"),
+                    ("claude", ShellGrammar::Agent, "windows"),
+                    ("codex", ShellGrammar::Agent, "windows"),
+                    ("copilot", ShellGrammar::Agent, "windows"),
+                    ("kimi", ShellGrammar::Agent, "windows"),
+                    ("pi", ShellGrammar::Agent, "windows"),
+                    ("hermes", ShellGrammar::Agent, "windows"),
+                    ("opencode", ShellGrammar::Agent, "windows"),
+                ]
+            } else {
+                vec![
+                    ("zsh", ShellGrammar::Posix, "msys"),
+                    ("bash", ShellGrammar::Posix, "msys"),
+                    ("sh", ShellGrammar::Posix, "windows"),
+                ]
+            };
+            assert_eq!(rows.len(), expected.len());
+            for (row, (id, grammar, namespace)) in rows.iter().zip(expected) {
+                assert_eq!(row.id, id);
+                assert_eq!(derive_grammar_on(&row.program, platform), grammar);
+                // Assert the standing pair, retaining its context population. On Unix the
+                // namespace's Windows-only translation is inert even for a bash/zsh pair.
+                let pair = (row.paths, served_by(row));
+                let actual = match pair {
+                    (PathNamespace::Wsl, _) => "wsl",
+                    (
+                        PathNamespace::Windows,
+                        Integration::BashInitFile | Integration::ZshDotDir,
+                    ) => "msys",
+                    _ => "windows",
+                };
+                assert_eq!(actual, namespace, "{id}");
+            }
+        }
+    }
+
+    #[test]
+    fn grammar_reads_launch_family_even_without_integration_and_wsl_nu_is_a_default() {
+        assert_eq!(
+            derive_grammar_on(&ProgramSource::PowerShellSeven, SeedPlatform::Windows),
+            ShellGrammar::PowerShell
+        );
+        let first = ProgramSource::FirstOf(vec![
+            ProgramCandidate::OnPath {
+                name: "fish.exe".into(),
+            },
+            ProgramCandidate::OnPath {
+                name: "bash.exe".into(),
+            },
+        ]);
+        assert_eq!(
+            derive_grammar_on(&first, SeedPlatform::Windows),
+            ShellGrammar::Fish
+        );
+        for stem in ["bash", "zsh", "sh", "dash", "ksh", "wsl"] {
+            assert_eq!(
+                derive_grammar_on(
+                    &ProgramSource::Path(format!("/bin/{stem}").into()),
+                    SeedPlatform::Windows
+                ),
+                ShellGrammar::Posix
+            );
+        }
+        let rows = windows_shipped();
+        for id in ["pwsh", "gitbash", "wsl"] {
+            let mut row = rows.iter().find(|row| row.id == id).unwrap().clone();
+            row.integration = IntegrationChoice::Named(Integration::None);
+            row.args = vec!["-e".into(), "nu".into()];
+            assert_eq!(
+                derive_grammar_on(&row.program, SeedPlatform::Windows),
+                if id == "pwsh" {
+                    ShellGrammar::PowerShell
+                } else {
+                    ShellGrammar::Posix
+                }
+            );
+            if id == "gitbash" {
+                // Owner ruling 2026-09-07, confirmed 2026-09-15: integration-off keeps Windows.
+                assert_eq!(
+                    (row.paths, served_by(&row)),
+                    (PathNamespace::Windows, Integration::None)
+                );
+            }
+        }
+        let unknown = ProgramSource::Path("python.exe".into());
+        assert_eq!(
+            derive_grammar_on(&unknown, SeedPlatform::Windows),
+            ShellGrammar::Cmd
+        );
+        assert_eq!(
+            derive_grammar_on(&unknown, SeedPlatform::MacOs),
+            ShellGrammar::Posix
+        );
+        assert_eq!(
+            derive_grammar_on(&ProgramSource::Path("nu".into()), SeedPlatform::MacOs),
+            ShellGrammar::Nushell
+        );
+    }
+
+    fn file(paste_as: Option<&str>, spelling: Option<&str>) -> ProfilesV1 {
+        ProfilesV1 {
+            schema_version: PROFILES_SCHEMA_VERSION,
+            profiles: vec![ProfileEntryV1 {
+                id: "gitbash".into(),
+                paste_as: paste_as.map(str::to_owned),
+                paste_paths_as: spelling.map(str::to_owned),
+                ..ProfileEntryV1::default()
+            }],
+        }
+    }
+
+    #[test]
+    fn keys_are_independent_preserved_by_round_trip_and_invalid_keys_refuse_once() {
+        let seed = windows_shipped();
+        for (grammar, spelling) in [
+            (None, Some("windows-slash")),
+            (Some("cmd"), Some("msys")),
+            (Some("fish"), None),
+            (Some("powershell"), None),
+            (Some("posix"), None),
+            (Some("nu"), None),
+            (Some("agent"), Some("wsl")),
+        ] {
+            let (rows, faults) = merge_on(
+                seed.clone(),
+                &file(grammar, spelling),
+                SeedPlatform::Windows,
+            );
+            assert!(faults.is_empty());
+            let row = &rows[0];
+            let original = seed.iter().find(|row| row.id == "gitbash").unwrap();
+            assert_eq!(
+                (row.paths, served_by(row)),
+                (original.paths, served_by(original))
+            );
+            let saved = entry_for(row, Some(original));
+            assert_eq!(saved.paste_as.as_deref(), grammar);
+            assert_eq!(saved.paste_paths_as.as_deref(), spelling);
+            let json = serde_json::to_string(&saved).unwrap();
+            assert_eq!(
+                serde_json::from_str::<ProfileEntryV1>(&json).unwrap(),
+                saved
+            );
+        }
+        for spelling in ["windows", "windows-slash", "wsl", "msys", "cygwin", "bogus"] {
+            let (rows, faults) = merge_on(
+                seed.clone(),
+                &file(Some("fish"), Some(spelling)),
+                SeedPlatform::MacOs,
+            );
+            assert_eq!(
+                faults,
+                [ProfileFault::PasteOverride {
+                    id: "gitbash".into(),
+                    key: "paste_paths_as"
+                }]
+            );
+            assert_eq!(rows[0].paste_paths_as, None);
+            assert_eq!(rows[0].paste_as.as_deref(), Some("fish"));
+        }
+        let (rows, faults) = merge_on(
+            seed,
+            &file(Some("unknown"), Some("cygwin")),
+            SeedPlatform::Windows,
+        );
+        assert_eq!(faults.len(), 2);
+        assert_eq!(rows[0].paste_as, None);
+        assert_eq!(rows[0].paste_paths_as, None);
+    }
+
+    #[test]
+    fn named_cmd_override_captures_interpreter_rules_on_a_wrapper() {
+        let mut row = windows_shipped().remove(0);
+        row.program = ProgramSource::Path("custom-tool.exe".into());
+        row.args = vec!["/v".into(), "on".into()];
+        let default = encoder_for(&row, ShellGrammar::Cmd);
+        for name in ["%", "%NAME%", "!", "!NAME!"] {
+            assert!(default.literal(name).is_ok());
+        }
+        row.paste_as = Some("cmd".into());
+        let named = encoder_for(&row, ShellGrammar::Cmd);
+        for name in ["%", "%NAME%"] {
+            assert_eq!(named.literal(name), Err(Refusal::CmdPercent));
+        }
+        for name in ["!", "!NAME!"] {
+            assert_eq!(named.literal(name), Err(Refusal::CmdDelayedExpansion));
+        }
+        row.args.clear();
+        assert!(
+            encoder_for(&row, ShellGrammar::Cmd)
+                .literal("!NAME!")
+                .is_ok()
+        );
+        // Captured policy remains stable when its row changes later.
+        assert_eq!(named.literal("!NAME!"), Err(Refusal::CmdDelayedExpansion));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn gitbash_spelling_override_and_cmd_grammar_compose_without_touching_detection() {
+        for grammar in [None, Some("cmd")] {
+            let (rows, faults) = merge_on(
+                windows_shipped(),
+                &file(grammar, Some("msys")),
+                SeedPlatform::Windows,
+            );
+            assert!(faults.is_empty());
+            let row = &rows[0];
+            let grammar = row
+                .paste_as
+                .as_deref()
+                .and_then(ShellGrammar::from_name)
+                .unwrap_or_else(|| derive_grammar(&row.program));
+            let mut recipient = Recipient {
+                encoder: encoder_for(row, grammar),
+                namespace: PrintedPathNamespace::Msys { home: None },
+                spelling: Some(PathSpelling::Msys),
+                wsl_distribution: None,
+            };
+            let result = recipient.literal(Path::new(r"D:\Data\100%\r.csv"));
+            if grammar == ShellGrammar::Cmd {
+                assert_eq!(result, Err(Refusal::CmdPercent));
+            } else {
+                assert_eq!(result.unwrap(), "'/d/Data/100%/r.csv'");
+                recipient.spelling = Some(PathSpelling::WindowsSlash);
+                assert_eq!(
+                    recipient.literal(Path::new(r"D:\Demo\a.txt")).unwrap(),
+                    "'D:/Demo/a.txt'"
+                );
+            }
+            assert_eq!(
+                (row.paths, served_by(row)),
+                (PathNamespace::Windows, Integration::BashInitFile)
+            );
+        }
+    }
+
+    #[test]
+    fn namespace_resolver_keeps_its_standing_inputs_and_grammar_does_not_use_served_by() {
+        let source = include_str!("profiles.rs");
+        let resolver = source
+            .split_once("pub fn printed_path_namespace(")
+            .unwrap()
+            .1
+            .split_once("/// Which distribution")
+            .unwrap()
+            .0;
+        assert!(resolver.contains("match (paths(index), integration(index))"));
+        assert!(!resolver.contains("paste_as"));
+        assert!(!resolver.contains("paste_paths_as"));
+        let grammar = source
+            .split_once("pub fn derive_grammar(")
+            .unwrap()
+            .1
+            .split_once("pub fn grammar(")
+            .unwrap()
+            .0;
+        assert!(!grammar.contains("served_by("));
+        assert!(!grammar.contains("paste_paths_as"));
     }
 }

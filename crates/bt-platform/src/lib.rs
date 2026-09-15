@@ -5900,7 +5900,7 @@ mod windows_impl {
     /// `ImmGetContext` answers the same `HIMC` for any window of this thread —
     /// which is why [`cancel_composition`] cancels the composition in flight
     /// whichever of this process's windows it is handed.
-    fn owner_window() -> Result<HWND, String> {
+    pub(super) fn owner_window() -> Result<HWND, String> {
         let mut owners = CLIPBOARD_OWNERS
             .get_or_init(|| Mutex::new(Vec::new()))
             .lock()
@@ -5910,7 +5910,7 @@ mod windows_impl {
             .ok_or_else(|| "no window of this thread owns the clipboard".to_owned())
     }
 
-    fn open_clipboard_with_retry(hwnd: HWND) -> Result<(), String> {
+    pub(super) fn open_clipboard_with_retry(hwnd: HWND) -> Result<(), String> {
         retry_open_clipboard(
             || {
                 // SAFETY: `hwnd` is a live window of the calling thread — see `owner_window` — and
@@ -17824,4 +17824,22 @@ mod macos_player_signature_tests {
             );
         }
     }
+}
+
+/// Gesture-only terminal clipboard acquisition; text fields retain `clipboard_text`.
+pub mod clipboard;
+pub use clipboard::{ClipboardPayload, PictureBytes, PictureEncoding, UnsupportedKind};
+#[cfg(windows)]
+mod windows_clipboard;
+#[cfg(windows)]
+pub use windows_clipboard::clipboard_payload;
+#[cfg(target_os = "macos")]
+mod macos_clipboard_payload;
+#[cfg(target_os = "macos")]
+mod macos_file_urls;
+#[cfg(target_os = "macos")]
+pub use macos_clipboard_payload::clipboard_payload;
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn clipboard_payload() -> Result<ClipboardPayload, String> {
+    Err("terminal clipboard acquisition is unavailable on this platform".to_owned())
 }
