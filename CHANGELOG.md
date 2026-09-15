@@ -6,6 +6,19 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- **Settings has an About page, and it says which Folio this is.** The last word
+  in the list on the left. It carries the version and the build it came from —
+  the same line `folio --version` prints and the same one at the top of every
+  diagnostic file, so a report about something going wrong can quote it — the
+  system and processor this copy was made for, and three rows that open in your
+  browser: the release notes, the place a defect is filed, and the licences of
+  everything Folio is made of. The licences row opens the copy that came with
+  this download where there is one, so what you read is what this copy was built
+  from. Nothing on the page is a setting, so nothing on it can be changed by
+  accident.
+
 ### Changed
 
 - **The checksum files on the release page can be checked where you downloaded
@@ -33,6 +46,16 @@ All notable changes to Folio are recorded here. The format follows
   script run after a green gate has nothing left to compile.
 
 ### Fixed
+
+- **Opening Settings no longer makes the window wait.** Clicking the gear used
+  to freeze the window for several seconds on a machine with a lot of fonts
+  installed, every time it was opened. Folio was asking the system for the list
+  of monospaced families — the list the `Terminal font` picker offers — and
+  waiting for the answer before it would draw anything. It now asks in the
+  background: the page opens at once, the font row shows the family you are
+  already using, and the rest of the list fills in a moment later. `Install
+  fonts…` still does what it did — leave, install a family, come back, and it
+  is there.
 
 - A formula whose macros multiply their arguments through several levels is now refused instead of exhausting memory.
 
