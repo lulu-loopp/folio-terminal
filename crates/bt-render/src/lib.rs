@@ -16995,10 +16995,21 @@ mod tests {
             assert!(button_bottom <= bottom);
             assert_eq!(button_bottom - button_top, bottom - top);
         }
+        // A block taller than the control keeps the control whole, centred on the
+        // block's own midline. **The control is 19 and not 24 since the owner's
+        // ruling of 2026-09-15 ②** — the marks are the pane head's own button —
+        // so the size is read off [`MATH_TOOL_BUTTON_LOGICAL_PX`] here rather
+        // than written out a second time, which is what made this pair stale.
+        let (button_top, button_bottom) = math_toolbar_vertical_bounds(5.0, 35.0, 1.0);
         assert_eq!(
-            math_toolbar_vertical_bounds(5.0, 35.0, 1.0),
-            (8.0, 32.0),
-            "a taller block keeps the intended 24px control"
+            button_bottom - button_top,
+            MATH_TOOL_BUTTON_LOGICAL_PX,
+            "a taller block keeps the whole control"
+        );
+        assert_eq!(
+            (button_top + button_bottom) / 2.0,
+            (5.0 + 35.0) / 2.0,
+            "and stands it on the block's own midline"
         );
     }
 
@@ -17076,7 +17087,11 @@ mod tests {
             source[0] >= 200.0 && copy[2] <= block[2],
             "the pair ({source:?}, {copy:?}) left the block's right reserve"
         );
-        assert_eq!(source[0] - 200.0, block[2] - copy[2], "centred in the reserve");
+        assert_eq!(
+            source[0] - 200.0,
+            block[2] - copy[2],
+            "centred in the reserve"
+        );
         assert_eq!(source[3] - source[1], MATH_TOOL_BUTTON_LOGICAL_PX);
         assert_eq!(copy[3] - copy[1], MATH_TOOL_BUTTON_LOGICAL_PX);
         assert_eq!(source[1], copy[1], "one row, not two");

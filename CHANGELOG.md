@@ -10,7 +10,8 @@ All notable changes to Folio are recorded here. The format follows
 
 - **A typeset formula now sits in a block with room around it, and the block's
   two marks sit inside it.** A display formula keeps whole blank lines above and
-  below it and a clear column on each side, so it no longer touches the text it
+  below it — as many as the window has room for — and a clear column on each
+  side, so it no longer touches the text it
   stands between; hovering it lights that whole region, and the show-source and
   copy marks stand at its right edge, on its middle line, drawn as the same
   buttons a pane head wears. An inline formula no longer starts a few pixels

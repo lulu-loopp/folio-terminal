@@ -85175,7 +85175,10 @@ impl Runtime<'_> {
         let (body, mut boxes) = self.sessions.iter().find_map(|(seat, leaf)| {
             let frame = leaf.last_presented_frame.as_ref()?;
             let body = seats::pane_body_viewport(&self.seats, &self.seat_layout, *seat, scale)?;
-            Some((body, self.window.renderer.math_tool_boxes(body, frame, hovered)?))
+            Some((
+                body,
+                self.window.renderer.math_tool_boxes(body, frame, hovered)?,
+            ))
         })?;
         let (dx, dy) = (body.x as f32, body.y as f32);
         for rect in [&mut boxes.block, &mut boxes.source, &mut boxes.copy] {
@@ -103731,11 +103734,7 @@ mod formula_copy_clock_tests {
         // subtracting it from a clock that started at boot is a panic on a
         // machine that has only just started.
         let said_at = Instant::now();
-        assert_eq!(
-            math_copy_window(None, said_at),
-            None,
-            "no copy, no clock"
-        );
+        assert_eq!(math_copy_window(None, said_at), None, "no copy, no clock");
 
         let halfway = said_at + FOOT_REVEAL_FEEDBACK / 2;
         assert_eq!(
@@ -136988,11 +136987,26 @@ mod tests {
         let cell_height = 18 * bt_viewport::SUBPIXELS_PER_PX;
         assert!(frame.row_map[0].height_subpixels > cell_height);
         assert_eq!(frame.math_blocks[0].artifact.render_scale_milli, 1000);
-        let padding = cell_height / 4;
+        // **The box is the ink plus whole cell rows of breathing** (owner's
+        // ruling 2026-09-15 ①). The option still asks for a quarter of a cell
+        // and the band still answers symmetrically, but what a quarter-row
+        // request buys is rounded out to whole rows — the rows the ink needs,
+        // one blank row above and one below — so the block sits in the grid
+        // instead of a quarter of a line clear of the text around it. This
+        // restates that rule for the reason it restated the old one: the
+        // arithmetic lives in `bt_term` and this crate cannot call it.
+        let ink = i64::from(ink_height_px) * bt_viewport::SUBPIXELS_PER_PX;
+        let ink_rows = (ink + cell_height - 1) / cell_height;
+        let band = (ink_rows + 2) * cell_height;
+        let padding = (band - ink) / 2;
+        assert!(
+            padding >= cell_height,
+            "a quarter of a row is not a row: {padding} against a {cell_height} cell"
+        );
         assert_eq!(
             frame.math_blocks[0].artifact.height_subpixels,
-            i64::from(ink_height_px) * bt_viewport::SUBPIXELS_PER_PX + 2 * padding,
-            "display box height is alpha-tight ink plus symmetric 25% cell padding"
+            ink + 2 * padding,
+            "display box height is alpha-tight ink plus whole cell rows of breathing"
         );
         assert_eq!(
             frame.math_blocks[0].artifact.vertical_padding_subpixels,
