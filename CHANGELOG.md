@@ -83,6 +83,29 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **On a Mac, opening a shortcut from the files column opens what it points at.**
+  The files column does not run programs, and a shortcut whose name gave nothing
+  away — a link called `notes` pointing at an application — used to get past that
+  rule and start the application. The rule is now asked about the file the link
+  leads to, which is the file that would have been opened, so a shortcut to a
+  program is refused for what it is and a shortcut to a document still opens.
+
+- **On a Mac, a previewed page is only reported as guarded when it really is.**
+  When a preview was built twice in quick succession — a slow start and the
+  retry behind it — the rules that keep a local page from reaching the network
+  could land on the page that had just been replaced, while Folio went on saying
+  the new page was covered by them. A page now only counts as guarded when its
+  own rules are on it, and closing a preview while its rules were still being
+  prepared no longer leaves that preview unable to prepare them again.
+
+- **On a Mac, Folio can be quit with no window open.** With the last window
+  closed — where Folio stays in the Dock — `Quit Folio` in the menu bar was
+  greyed out and `Cmd+Q` did nothing, so the only way out was the Dock icon's
+  own menu. Quit now answers from an empty desk, and it is the same quit as
+  always: what you were working on is written down before Folio goes.
+
+- Inner products and bra-kets written with `\langle … \rangle` now typeset.
+
 - **Aiming a card's window with the wheel keeps up with the hand.** On a tall
   card over a pane with a long history, every notch used to copy out every line
   between the bottom of the pane and the place the card was pointing at — three
