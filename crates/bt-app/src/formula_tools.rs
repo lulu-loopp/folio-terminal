@@ -18,6 +18,15 @@
 //! marks the house already owns (`#i-code`, `#i-eye`, `#i-copy`), which is the
 //! drift [`crate::marks`]'s own header exists to forbid.
 //!
+//! **Since the owner's ruling of 2026-09-15 ② the two marks stand *inside* the
+//! block**, in the whole cell columns of ground it keeps at its right edge, on
+//! its midline, and they are the pane head's own button — the same box, the
+//! same corner, the same ink. Nothing about that is decided here either: the
+//! seat is `bt_render`'s `math_tool_boxes_px`, and what this module holds is
+//! the pin that the box really is the head's
+//! (`tests::a_bands_marks_wear_the_pane_heads_own_button`), because this is the
+//! one crate that can see both constants.
+//!
 //! **Nothing in this module decides where a mark goes** — the renderer does,
 //! from the band's own geometry. [`sprites`] is handed the boxes, what the
 //! pointer is doing, and one opacity, and it answers with sprites; that is the
@@ -428,6 +437,15 @@ mod tests {
     use super::*;
     use bt_render::{DARK_CHROME, LIGHT_CHROME};
 
+    /// A band with its two marks where the renderer now seats them: **inside the
+    /// block, in the room it keeps at its right edge, on its midline** (owner's
+    /// ruling 2026-09-15 ②).
+    ///
+    /// The pane head's 19px box with the mock-up's 2px between them, so the pair
+    /// is 40 wide, and the block's own right inset is what it stands in — which
+    /// is what `bt_render`'s `math_tool_boxes_px` answers and what these
+    /// fixtures have to depict, or every pin below would be struck on a
+    /// placement the product does not draw.
     fn boxes(display: MathBlockDisplay) -> MathToolBoxes {
         MathToolBoxes {
             anchor: bt_viewport::MathBlockAnchor::History {
@@ -436,23 +454,23 @@ mod tests {
                 end: bt_transcript::TranscriptId(1),
             },
             display,
-            block: [40.0, 10.0, 200.0, 58.0],
-            source: [200.0, 22.0, 224.0, 46.0],
-            copy: [226.0, 22.0, 250.0, 46.0],
+            block: [40.0, 10.0, 300.0, 59.0],
+            source: [230.0, 25.0, 249.0, 44.0],
+            copy: [251.0, 25.0, 270.0, 44.0],
         }
     }
 
     /// **The same block after a press on `‹›`.** The source face is taller, so
-    /// the band's rows and the two boxes centred beside them have all moved —
-    /// and the anchor has not, which is exactly the case
+    /// the band's rows and the two boxes on its midline have all moved — and the
+    /// anchor has not, which is exactly the case
     /// [`MathBlockAnchor::same_block`] exists to answer and the case the marks
     /// must *travel* rather than be re-struck in.
     fn toggled(geometry: &MathToolBoxes) -> MathToolBoxes {
         MathToolBoxes {
             display: MathBlockDisplay::Source,
-            block: [40.0, 10.0, 200.0, 106.0],
-            source: [200.0, 46.0, 224.0, 70.0],
-            copy: [226.0, 46.0, 250.0, 70.0],
+            block: [40.0, 10.0, 300.0, 107.0],
+            source: [230.0, 49.0, 249.0, 68.0],
+            copy: [251.0, 49.0, 270.0, 68.0],
             ..geometry.clone()
         }
     }
@@ -465,11 +483,25 @@ mod tests {
                 start: bt_transcript::TranscriptId(9),
                 end: bt_transcript::TranscriptId(9),
             },
-            block: [40.0, 200.0, 200.0, 248.0],
-            source: [200.0, 212.0, 224.0, 236.0],
-            copy: [226.0, 212.0, 250.0, 236.0],
+            block: [40.0, 200.0, 300.0, 249.0],
+            source: [230.0, 215.0, 249.0, 234.0],
+            copy: [251.0, 215.0, 270.0, 234.0],
             ..boxes(MathBlockDisplay::Rendered)
         }
+    }
+
+    /// Whether every mark of `geometry` is seated the way the ruling asks: inside
+    /// the block, right of everything else in it, and on its midline.
+    fn seated_inside_the_block(geometry: &MathToolBoxes) -> bool {
+        let [left, top, right, bottom] = geometry.block;
+        let midline = (top + bottom) / 2.0;
+        [geometry.source, geometry.copy].into_iter().all(|mark| {
+            mark[0] >= left
+                && mark[2] <= right
+                && mark[1] >= top
+                && mark[3] <= bottom
+                && ((mark[1] + mark[3]) / 2.0 - midline).abs() <= 0.5
+        })
     }
 
     /// **What the overlay lane would put on the glass for this follow.**
@@ -1190,5 +1222,119 @@ mod tests {
             follow.opacity(settled + tooltip::TOOLTIP_FADE, Motion::Full),
             1.0
         );
+    }
+
+    /// PIN (owner's ruling 2026-09-15 ②): **a band's marks are the pane head's
+    /// own buttons.**
+    ///
+    /// The ruling's sentence is about reuse — "the same size and ink as the
+    /// pane-header buttons already in the app" — and the two numbers live in two
+    /// crates that cannot see each other (`bt_render` gives the boxes, `bt_app`
+    /// draws the marks in them). This is the one place that sees both, which is
+    /// the arrangement `the_default_family_is_the_one_the_renderer_draws` keeps
+    /// for the grid's own face.
+    ///
+    /// The inks are a derivation rather than a comparison: `formula_tool_glyph`
+    /// *is* `ink3(termbg)`, which is `pane_close_glyph`'s own expression, and
+    /// the two pills are the same ladder one rung apart — the hover wash and,
+    /// under a held mark, the pane head's own. Asserting the numbers would pin
+    /// the coincidence; asserting that the held mark wears the head's pill pins
+    /// the sentence.
+    ///
+    /// MUTATIONS: put 24 back in `MATH_TOOL_BUTTON_LOGICAL_PX` → ①; strike the
+    /// pill with a corner of its own → ②; give the marks an ink that is not the
+    /// head's → ③.
+    #[test]
+    fn a_bands_marks_wear_the_pane_heads_own_button() {
+        // ① The box, and ② the corner.
+        assert_eq!(
+            bt_render::MATH_TOOL_BUTTON_LOGICAL_PX,
+            crate::seats::PANE_HEAD_TRIGGER_BOX_LOGICAL_PX
+        );
+        assert_eq!(
+            MATH_TOOL_PILL_RADIUS_LOGICAL_PX,
+            crate::seats::PANE_HEAD_TRIGGER_RADIUS_LOGICAL_PX
+        );
+
+        // ③ And the ink, on both canvases: the resting glyph is the head's
+        //    resting glyph, and a held mark stands in the head's own pill.
+        for palette in [DARK_CHROME, LIGHT_CHROME] {
+            assert_eq!(palette.formula_tool_glyph, palette.pane_close_glyph);
+            assert_eq!(palette.formula_tool_pill_pressed, palette.pane_close_pill);
+        }
+    }
+
+    /// PIN (owner's ruling 2026-09-15 ②/③): **the marks are seated inside the
+    /// block on both faces, and they slide along its right-hand midline as its
+    /// height changes.**
+    ///
+    /// The seat is the ruling's ②; the slide is its ③, and the slide is the one
+    /// half of that clause this module owns — the block's own height travel and
+    /// the cross-fade between the picture and the source text are the
+    /// projection's, not the overlay's. What is pinned here is that a mark never
+    /// leaves the block during the ninety milliseconds, at either end or
+    /// anywhere between: a mark that hung off the block for three frames would
+    /// be the placement the ruling overturned, reappearing while the block
+    /// resized.
+    ///
+    /// MUTATIONS: seat the marks from the ink rather than from the block, or
+    /// from the block's top rather than its midline — `seated_inside_the_block`
+    /// fails on one of the two faces; lerp the marks independently of the block
+    /// box → the mid-travel assertion fails, because the block travels and they
+    /// do not.
+    #[test]
+    fn the_marks_ride_the_blocks_right_hand_midline_while_it_changes_height() {
+        let now = Instant::now();
+        let rendered = boxes(MathBlockDisplay::Rendered);
+        let source_face = toggled(&rendered);
+
+        // ① Both endpoints are seats the ruling accepts.
+        assert!(seated_inside_the_block(&rendered));
+        assert!(seated_inside_the_block(&source_face));
+        assert!(
+            source_face.block[3] - source_face.block[1] > rendered.block[3] - rendered.block[1],
+            "the source face is the taller of the two, which is what makes this a travel"
+        );
+
+        let mut follow = FormulaToolFollow::arriving(&rendered, None, now);
+        let settled = now + tooltip::TOOLTIP_FADE;
+        assert!(follow.follow(&source_face, None, settled, Motion::Full));
+
+        // ② Every frame of the travel is a seat too — the block box is eased
+        //    beside the two marks, so the three cannot come apart.
+        for step in 0..=6 {
+            let at = settled + tooltip::TOOLTIP_FADE * step / 6;
+            let placed = follow.placed(at, Motion::Full);
+            assert!(
+                seated_inside_the_block(&placed),
+                "at step {step} the marks left the block: {placed:?}"
+            );
+        }
+
+        // ③ The endpoints are exact: the block box lands on the new one, not a
+        //    fraction short of it, and so do the marks.
+        let landed = follow.placed(settled + tooltip::TOOLTIP_FADE, Motion::Full);
+        assert_eq!(landed.block, source_face.block);
+        assert_eq!(landed.source, source_face.source);
+        assert_eq!(landed.copy, source_face.copy);
+
+        // ④ Halfway the block is genuinely between the two heights, and the
+        //    marks are on *that* block's midline rather than on either end's.
+        let half = follow.placed(settled + tooltip::TOOLTIP_FADE / 2, Motion::Full);
+        assert!(
+            half.block[3] > rendered.block[3] && half.block[3] < source_face.block[3],
+            "the block's own height is not on the way: {:?}",
+            half.block
+        );
+
+        // ⑤ And a reader who asked for stillness gets the far end on the frame
+        //    the press happened, with no travel to watch and no frame owed.
+        let mut still = FormulaToolFollow::arriving(&rendered, None, now);
+        assert!(still.follow(&source_face, None, now, Motion::Reduced));
+        let snapped = still.placed(now, Motion::Reduced);
+        assert_eq!(snapped.block, source_face.block);
+        assert_eq!(snapped.source, source_face.source);
+        assert_eq!(snapped.copy, source_face.copy);
+        assert!(!still.owes_frames(now, Motion::Reduced));
     }
 }

@@ -231,8 +231,12 @@ else {
 # every file whose name carries a version must carry this one. The version is
 # read out of `Cargo.toml`, the same single source `package.ps1` reads it from,
 # so the two cannot disagree about which release is being made. A file with no
-# version in its name — `SHA256SUMS.txt`, `SHA256SUMS-macos.txt` — says nothing
-# either way and is left alone.
+# version in its name says nothing either way and is left alone: the two
+# checksum files, and the two copies the release page carries under a name that
+# is the same in every release — `folio-windows-x64.zip` and
+# `Folio-macos-arm64.dmg`, which are what `/releases/latest/download/` resolves
+# by. That is not an exemption written for those four. A name carrying no
+# version cannot name another release, which is the whole of what this asks.
 function Get-WorkspaceVersion {
     $manifest = Get-Content -LiteralPath (Join-Path $root 'Cargo.toml') -Raw
     if ($manifest -notmatch '(?ms)^\[workspace\.package\](.*?)^\[') {
