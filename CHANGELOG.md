@@ -21,6 +21,12 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- **The release page now also carries download files with a fixed name, so a
+  link to the latest build never goes stale.** Beside the versioned archive and
+  disk image there is now a `folio-windows-x64.zip` and a
+  `Folio-macos-arm64.dmg` — the same bytes under a name that does not change
+  from one release to the next, covered by the same checksum file.
+
 - **The checksum files on the release page can be checked where you downloaded
   them.** Both `SHA256SUMS.txt` and `SHA256SUMS-macos.txt` now name each file
   plainly — the hash, two spaces, the file name — so putting them next to the
