@@ -8,6 +8,11 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- **Switching a formula between its typeset and source forms now animates
+  instead of jumping.** The block grows or shrinks to the height of the other
+  form while the picture and the `$$…$$` text cross-fade, and its two marks ride
+  along with it; if you have asked your system to reduce motion, the change still
+  happens in a single frame.
 - **A typeset formula now sits in a block with room around it, and the block's
   two marks sit inside it.** A display formula keeps whole blank lines above and
   below it — as many as the window has room for — and a clear column on each

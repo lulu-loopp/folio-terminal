@@ -12605,6 +12605,22 @@ struct WindowRuntime {
     /// extended by the evening's report to every picture in which the band's
     /// geometry differs from the one they were placed from.
     math_tools: Option<formula_tools::FormulaToolFollow>,
+    /// **The block that is changing face, while it is changing** (owner's ruling
+    /// 2026-09-15, T-MATH-TOGGLE-MOTION; §7.1.5p ⑪).
+    ///
+    /// A press on `‹›` used to be one frame; it is now a ninety-millisecond
+    /// journey of a band's presented height and a cross-fade between the picture
+    /// and the rows of `$$…$$` underneath it, and this is the whole of what the
+    /// window remembers about it. The *document* remembers nothing extra: the
+    /// block stays one entry with an artifact height for the length of the
+    /// flight, and `DualPlaneSession::toggle_math_source` is told once, at the
+    /// end the direction puts it at — see
+    /// [`formula_tools::FormulaToggleMotion`].
+    ///
+    /// One field and not one per pane because there is one hand: a block changes
+    /// face because somebody pressed its mark, and a second press anywhere lands
+    /// the first change before it begins its own.
+    math_toggle: Option<formula_tools::FormulaToggleMotion>,
     /// **The mark a button is being held down on**, with the band it belongs to.
     ///
     /// The band is carried because a press latches `MouseRoute::MathBlock` and
@@ -36257,6 +36273,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         math_hover_anchor: None,
         math_hover_clear_at: None,
         math_tools: None,
+        math_toggle: None,
         math_tool_pressed: None,
         math_copied: None,
         pending_math_context_anchor: None,
@@ -44584,7 +44601,15 @@ impl Runtime<'_> {
             // and below everything a menu can drop over a pane (owner's ruling
             // 2026-09-14 ②). Empty on every frame no pointer is on a formula,
             // which is almost all of them.
-            formula_tools: self.formula_tool_layers(now),
+            //
+            // **And, under them, the other face of a band that is changing into
+            // it** (§7.1.5p ⑪): one block, one lane, and the marks stand on the
+            // source text exactly as they stand on the picture it is replacing.
+            formula_tools: self
+                .formula_toggle_layers(now)
+                .into_iter()
+                .chain(self.formula_tool_layers(now))
+                .collect(),
             rail: self.rail_overlay_layers(),
             // **Directly above the list it came out of** (§7.1.6b″). At full
             // opacity and never at the rail's fold: the fold is what a panel
@@ -57982,6 +58007,9 @@ impl Runtime<'_> {
     /// setter of its own, so the clamp stays in the one place that owns it —
     /// the drag and the wheel end up at the same extent by the same arithmetic.
     fn scroll_seat_to_subpixels(&mut self, seat: SeatId, wanted: i64) -> Result<()> {
+        // The bar moves the view like any other scroll, so it lands a band that is still changing
+        // face like any other scroll (§7.1.5p ⑪).
+        self.settle_math_toggle()?;
         let active = self.window.active_tab;
         let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) else {
             return Ok(());
@@ -85083,8 +85111,20 @@ impl Runtime<'_> {
                 .is_some_and(|follow| follow.leave(now, motion))
         } else if let Some(boxes) = self.math_tool_placement() {
             let hovered = self.hovered_math_tool();
+            // **A band whose own height is travelling carries its marks** rather than having them
+            // travel to it (§7.1.5p ⑪): two journeys over one distance would leave the marks
+            // trailing the edge they ride and settling ninety milliseconds after it stopped.
+            let riding = self
+                .window
+                .math_toggle
+                .as_ref()
+                .is_some_and(|flight| flight.anchor().same_block(&boxes.anchor));
             if let Some(follow) = self.window.math_tools.as_mut() {
-                follow.follow(&boxes, hovered, now, motion)
+                if riding {
+                    follow.ride(&boxes, hovered, now, motion)
+                } else {
+                    follow.follow(&boxes, hovered, now, motion)
+                }
             } else {
                 self.window.math_tools = Some(formula_tools::FormulaToolFollow::arriving(
                     &boxes, hovered, now,
@@ -85399,9 +85439,16 @@ impl Runtime<'_> {
             && self.window.math_hover_clear_at.is_none()
             && self.window.math_tools.is_none()
             && self.window.math_tool_pressed.is_none()
+            && self.window.math_toggle.is_none()
         {
             return Ok(());
         }
+        // **And a block still changing face lands here.** This is the door a tab switch, a pane
+        // close and a focus change come through (audit 2026-09-15, RB-3), and all three take the
+        // band off the screen; a journey carried across one would go on presenting a height for a
+        // document nobody can see, and land — or not — against a picture from another tab. The end
+        // state is what such a change is carried across as (§7.1.5p ⑪).
+        self.settle_math_toggle()?;
         self.window.math_hover_clear_at = None;
         self.window.math_hover_anchor = None;
         let motion = self.app.motion;
@@ -85420,6 +85467,306 @@ impl Runtime<'_> {
             self.present_chrome_change()?;
         }
         Ok(())
+    }
+
+    /// **The pane of this tab whose session knows this block, and what its two faces measure**
+    /// (owner's ruling 2026-09-15, T-MATH-TOGGLE-MOTION).
+    ///
+    /// The seat comes back with the answer for the reason RC-2 made a band's boxes take one
+    /// (§7.1.5p ⑩ iii): a block belongs to a pane, and every step of a change — the height it is
+    /// presented at, the document being told, the frame that carries it to the glass — has to be
+    /// spent on **that** pane and not on whichever one happens to hold the keyboard when the clock
+    /// next ticks. The press arrives on the focused pane, but a flight outlives the press.
+    ///
+    /// `None` for a block no session in this tab can measure between two faces: a live block (for
+    /// which §7.1.5p ⑪ gives the reason), an inline run, a block whose record went away, and every
+    /// block in a tab with no shell at all (§7.1.6h).
+    fn math_toggle_faces(
+        &self,
+        anchor: &MathBlockAnchor,
+    ) -> Option<(SeatId, bt_term::MathToggleFaces)> {
+        self.sessions.iter().find_map(|(seat, leaf)| {
+            leaf.session
+                .math_toggle_faces(&leaf.projection, anchor)
+                .map(|faces| (*seat, faces))
+        })
+    }
+
+    /// **The `‹›` mark was pressed** — see [`formula_tools::FormulaToggleMotion`] for what the
+    /// ninety milliseconds after it are made of.
+    fn press_math_toggle(&mut self, anchor: &MathBlockAnchor) -> Result<()> {
+        let now = Instant::now();
+        let motion = self.app.motion;
+        if let Some(mut flight) = self.window.math_toggle.take() {
+            if flight.anchor().same_block(anchor) {
+                // **A second press turns the journey round where it stands.** The document is not
+                // touched and cannot need to be: the block has been one entry with an artifact
+                // height for the whole of the flight, in *both* directions, so changing where it
+                // is heading only moves which end the telling happens at.
+                let Some((seat, faces)) = self.math_toggle_faces(anchor) else {
+                    // The session stopped being able to measure this block between the two
+                    // presses. Landing it is the only answer that leaves the picture and the
+                    // document agreeing.
+                    self.window.math_toggle = Some(flight);
+                    return self.settle_math_toggle();
+                };
+                flight.reverse(faces.heights(), faces.source.rows, now, motion);
+                self.window.math_toggle = Some(flight);
+                return self.present_math_toggle(seat, now);
+            }
+            // A press on a **different** block lands the one in flight first: two bands are two
+            // surfaces (§7.1.5p ⑦ iii's own reading of crossing from one to the next), and this
+            // window tells one story about its document at a time.
+            self.window.math_toggle = Some(flight);
+            self.settle_math_toggle()?;
+        }
+        let Some((seat, faces)) = self.math_toggle_faces(anchor) else {
+            // Not a history display band. It changes in the one frame it always did.
+            return self.switch_math_source_now(anchor);
+        };
+        if motion == Motion::Reduced {
+            // **Stillness lands the change on the frame it is asked for** and wakes the loop for
+            // none of it — the answer every other surface in this window gives, given here by
+            // never starting a journey rather than by a second reading of the setting.
+            return self.switch_math_source_now(anchor);
+        }
+        let to_source = !faces.showing_source;
+        if !to_source {
+            // **A block going back to its picture is told so now.** The representation that can be
+            // presented at any height is the artifact one, so this direction switches at the near
+            // end and is then presented at the rows' own height on this very frame — which is the
+            // same identity the other direction gets at the far end, read from the other side.
+            let Some(leaf) = self.sessions.get_mut(&seat) else {
+                return Ok(());
+            };
+            if !leaf.session.toggle_math_source(anchor) {
+                return Ok(());
+            }
+        }
+        self.clear_selection();
+        self.window.math_toggle = Some(formula_tools::FormulaToggleMotion::begin(
+            anchor.clone(),
+            faces.heights(),
+            to_source,
+            faces.source.rows,
+            now,
+        ));
+        self.present_math_toggle(seat, now)
+    }
+
+    /// **The change made in a single frame** — what pressing `‹›` was before this clause, and what
+    /// it still is under [`Motion::Reduced`], on the live plane, and wherever the two faces cannot
+    /// be measured.
+    fn switch_math_source_now(&mut self, anchor: &MathBlockAnchor) -> Result<()> {
+        // `math_hit()` answered, so a shell drew the block that was clicked and this tab has one
+        // (§7.1.6h).
+        if self.shell_mut().session.toggle_math_source(anchor) {
+            self.clear_selection();
+            self.publish_interaction_frame()?;
+        }
+        Ok(())
+    }
+
+    /// **Put the flight's own frame on the glass**: the band at the height it has reached, the
+    /// picture at the strength it has reached, and the overlay that carries the other face rebuilt
+    /// against the same instant.
+    ///
+    /// One instant for both halves, for the reason [`Self::refresh_overlay`] takes one: the band
+    /// the projection draws and the source text laid over it must not disagree about what time it
+    /// is, and two `Instant::now()` calls in one frame can.
+    fn present_math_toggle(&mut self, seat: SeatId, now: Instant) -> Result<()> {
+        let motion = self.app.motion;
+        let presentation =
+            self.window
+                .math_toggle
+                .as_ref()
+                .map(|flight| bt_term::MathTogglePresentation {
+                    anchor: flight.anchor().clone(),
+                    height_subpixels: flight.height_subpixels(now, motion),
+                    picture_opacity_milli: flight.picture_opacity_milli(now, motion),
+                });
+        let Some(leaf) = self.sessions.get_mut(&seat) else {
+            return Ok(());
+        };
+        // **A turn that would draw the frame already on the glass asks for nothing.** `turn` runs
+        // on every pass of the loop, which under a talkative shell is far more often than the
+        // ninety milliseconds has frames in it; what decides whether this one is worth a picture is
+        // whether the band would actually stand anywhere new — `Ease::retarget`'s own rule, asked
+        // of the session rather than of the clock.
+        if leaf.session.math_toggle_presentation() == presentation.as_ref() {
+            return Ok(());
+        }
+        leaf.session.set_math_toggle_presentation(presentation);
+        self.repaint_pane_change(seat)?;
+        // The other face is an overlay layer, so nothing of it is on the glass until the overlay
+        // is rebuilt — `leave_hovered_math`'s own idiom, for the same reason.
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// **End the change now, wherever it had got to**: the far face on the glass, the document told
+    /// if the telling was still owed, and the presentation put back.
+    ///
+    /// **The one door, and every ending comes through it** — the journey landing on its own clock,
+    /// a press on another block, a wheel notch, a re-wrap that moved the height it was travelling
+    /// to, and the band leaving the screen altogether ([`Self::leave_hovered_math`], which is how a
+    /// tab switch, a pane close and a focus change reach here). A half-animated block is not
+    /// something to carry into a view that has changed under it; the end state is.
+    ///
+    /// It refuses before it does anything at all when nothing is in flight, so a window nobody has
+    /// pressed a formula in pays one `Option` read for every door it ever passes through.
+    fn settle_math_toggle(&mut self) -> Result<()> {
+        let Some(flight) = self.window.math_toggle.take() else {
+            return Ok(());
+        };
+        let Some(seat) = self
+            .math_toggle_faces(flight.anchor())
+            .map(|(seat, _)| seat)
+        else {
+            // No session in this tab can answer for the block any more — it was rewritten, or the
+            // pane holding it went away. There is nothing left to tell and nothing to land on, but
+            // a presentation is a thing a session is *holding*, so every leaf is told to let go of
+            // one rather than the one this flight believes it is on: a leak here would present a
+            // band at a height that stopped meaning anything, for the life of the window.
+            for (_, leaf) in self.leaves_mut() {
+                leaf.session.set_math_toggle_presentation(None);
+            }
+            return Ok(());
+        };
+        let switched = flight.switch_owed();
+        if let Some(leaf) = self.sessions.get_mut(&seat) {
+            leaf.session.set_math_toggle_presentation(None);
+            if switched {
+                leaf.session.toggle_math_source(flight.anchor());
+            }
+        }
+        if switched {
+            // The rows a selection was taken from are about to stop existing, which is why the
+            // one-frame switch has always cleared it. The other direction cleared it at the press.
+            self.clear_selection();
+        }
+        self.repaint_pane_change(seat)?;
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// **Pay the frames a change of face owes**, and land it on the frame it is due.
+    ///
+    /// The marks' own advancer beside it ([`Self::advance_math_tools_if_due`]) and on the same
+    /// terms: a surface whose content is a function of a clock is redrawn by something that keeps
+    /// looking, or it is drawn once and left there. What is different here is that the picture this
+    /// one owes is a **terminal** frame and not an overlay — the band's height is part of the
+    /// document's layout — so it republishes the pane rather than rebuilding chrome over it.
+    ///
+    /// **The endpoints are re-read on every turn.** A pane that re-wrapped, a font that changed
+    /// size, a setting that changed the breathing a band keeps: any of them moves the height this
+    /// journey is travelling *to*, and a journey that lands somewhere the block does not stand is
+    /// the jump this clause exists to remove. Asking is one measurement of one block's own lines,
+    /// and only while something is in flight.
+    fn advance_math_toggle_if_due(&mut self, now: Instant) -> Result<()> {
+        let motion = self.app.motion;
+        let Some((anchor, landed)) = self
+            .window
+            .math_toggle
+            .as_ref()
+            .map(|flight| (flight.anchor().clone(), flight.landed(now, motion)))
+        else {
+            return Ok(());
+        };
+        let Some((seat, faces)) = self.math_toggle_faces(&anchor) else {
+            return self.settle_math_toggle();
+        };
+        let still_measures = self
+            .window
+            .math_toggle
+            .as_ref()
+            .is_some_and(|flight| flight.still_measures(faces.heights()));
+        if landed || !still_measures {
+            return self.settle_math_toggle();
+        }
+        self.present_math_toggle(seat, now)
+    }
+
+    /// **The next frame a running change of face is owed**, and nothing at all once it has landed.
+    ///
+    /// The tip's own arrangement, through the marks': the next frame rather than the end of the
+    /// span, so the ninety milliseconds is drawn rather than merely begun and finished. No span is
+    /// spelled here either.
+    fn math_toggle_deadline(&self, now: Instant) -> Option<Instant> {
+        self.window
+            .math_toggle
+            .as_ref()
+            .is_some_and(|flight| flight.owes_frames(now, self.app.motion))
+            .then(|| now + STRIP_ANIMATION_FRAME)
+    }
+
+    /// **The other face of a block that is changing, over the band it is changing in.**
+    ///
+    /// The source text as an overlay, on its own layer under the marks': the two are drawn in one
+    /// lane because they belong to one block, and the marks stand *on* the source text exactly as
+    /// they stand on the picture (§7.1.5p ⑨ ii).
+    ///
+    /// Empty whenever nothing is in flight, when the fade has not left the picture yet, and when
+    /// the picture in hand does not know the band — which is §7.1.5p ⑥'s answer unchanged: a frame
+    /// that has not caught up says nothing rather than drawing this block's source over somebody
+    /// else's rows.
+    fn formula_toggle_layers(&self, now: Instant) -> Vec<marks::OverlayLayer> {
+        let Some(flight) = self.window.math_toggle.as_ref() else {
+            return Vec::new();
+        };
+        let opacity = flight.source_opacity(now, self.app.motion);
+        if opacity <= 0.0 {
+            return Vec::new();
+        }
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let Some((body, mut face)) = self.sessions.iter().find_map(|(seat, leaf)| {
+            let frame = leaf.last_presented_frame.as_ref()?;
+            let body = seats::pane_body_viewport(&self.seats, &self.seat_layout, *seat, scale)?;
+            Some((
+                body,
+                self.window
+                    .renderer
+                    .math_band_face(body, frame, flight.anchor())?,
+            ))
+        }) else {
+            return Vec::new();
+        };
+        if face.display == bt_viewport::MathBlockDisplay::Source {
+            // **The picture in hand is already drawing these very rows.** A block returning to its
+            // typeset face is told at the near end, and the pane keeps the last frame it presented
+            // — so for the frame between the telling and the next present, the terminal is still
+            // painting the source itself. Laying the overlay over that would strike the same text
+            // twice, in the same face, at the same place.
+            return Vec::new();
+        }
+        let (dx, dy) = (body.x as f32, body.y as f32);
+        face.block = [
+            face.block[0] + dx,
+            face.block[1] + dy,
+            face.block[2] + dx,
+            face.block[3] + dy,
+        ];
+        face.rows_top += dy;
+        face.rows_left += dx;
+        face.rows_right += dx;
+        let labels = formula_tools::source_face_labels(
+            &face,
+            flight.source_rows(),
+            bt_render::foreground_rgb(),
+            self.window.renderer.metrics().font_size_px,
+        );
+        if labels.is_empty() {
+            return Vec::new();
+        }
+        vec![marks::OverlayLayer {
+            labels,
+            opacity,
+            ..marks::OverlayLayer::default()
+        }]
     }
 
     fn copy_math_latex(&mut self, anchor: &MathBlockAnchor) {
@@ -85679,6 +86026,10 @@ impl Runtime<'_> {
         if self.focused().is_none() {
             return Ok(());
         }
+        // A band still changing face lands before the view moves under it (§7.1.5p ⑪): two
+        // motions on one surface is not what the ruling asked for, and the end state is what a
+        // change is carried into a new view as.
+        self.settle_math_toggle()?;
         let leaf = self.shell_mut();
         let subpixels =
             i64::from(rows).saturating_mul(leaf.projection.cell_height_subpixels().get());
@@ -91933,16 +92284,12 @@ impl Runtime<'_> {
             }
             match (button, math_hit.target) {
                 (MouseButton::Left, MathHitTarget::ToggleSource) => {
-                    // `math_hit()` answered, so a shell drew the block that was
-                    // clicked and this tab has one (§7.1.6h).
-                    if self
-                        .shell_mut()
-                        .session
-                        .toggle_math_source(&math_hit.anchor)
-                    {
-                        self.clear_selection();
-                        self.publish_interaction_frame()?;
-                    }
+                    // **And it travels rather than jumping** (owner's ruling
+                    // 2026-09-15, §7.1.5p ⑪). The one-frame switch this used to
+                    // be still happens — under `Motion::Reduced`, on the live
+                    // plane, and wherever the two faces cannot be measured — and
+                    // it happens inside this door rather than beside it.
+                    self.press_math_toggle(&math_hit.anchor)?;
                 }
                 (MouseButton::Left, MathHitTarget::CopyLatex) => {
                     self.copy_math_latex(&math_hit.anchor);
@@ -95504,6 +95851,8 @@ impl Runtime<'_> {
         if take == 0 {
             return Ok(());
         }
+        // A notch lands a band that is still changing face, for `scroll_view`'s reason.
+        self.settle_math_toggle()?;
         let active = self.window.active_tab;
         let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) else {
             return Ok(());
@@ -100212,6 +100561,12 @@ impl Runtime<'_> {
         // ago.
         self.advance_drag_autoscroll(now)?;
         self.clear_math_hover_if_due(now)?;
+        // And the band that is changing face, **ahead** of the marks: the
+        // journey this pays for moves the block's own rectangle, and the marks
+        // ride that rectangle's right-hand midline (§7.1.5p ⑨ ii, ⑪) — so the
+        // picture they follow should be the one this turn has just asked for
+        // rather than the one before it.
+        self.advance_math_toggle_if_due(now)?;
         // And the band's marks, beside the clock that takes them down: the fade
         // they are climbing, and the second look they owe the picture that lit
         // the band they belong to (owner's report 2026-09-14).
@@ -100477,6 +100832,11 @@ impl Runtime<'_> {
             // landed: a pointer resting on a formula costs no wake-ups at all
             // (owner's ruling 2026-09-14 ②, and its report that evening).
             self.math_tools_deadline(now),
+            // And the band that is changing face, while its ninety milliseconds
+            // are still running — one entry, because one hand presses one mark,
+            // and none at all once it has landed or under `Motion::Reduced`,
+            // which never starts a journey at all (§7.1.5p ⑪).
+            self.math_toggle_deadline(now),
             // And the copy tick's one wake-up: the instant it is due to turn
             // back into a pair of sheets. One entry because there is one
             // clipboard and one clock.
@@ -103678,6 +104038,106 @@ mod formula_tool_seat_tests {
             placed.matches("pane_body_viewport(").count(),
             1,
             "the pane is resolved once:\n{placed}"
+        );
+    }
+
+    /// RED GATE — **a change of face is landed by whatever interrupts it, and never carried
+    /// half-drawn into a view that has moved** (owner's ruling 2026-09-15, T-MATH-TOGGLE-MOTION;
+    /// §7.1.5p ⑪).
+    ///
+    /// The arithmetic of the journey is pinned without a window in
+    /// [`formula_tools::FormulaToggleMotion`]'s own tests; what can only be pinned here is *who
+    /// calls the door*. There is one door — `settle_math_toggle` — and it does the same two things
+    /// for every caller: the far face on the glass, and the document told if the telling was still
+    /// owed.
+    ///
+    /// MUTATIONS: drop the call from `leave_hovered_math` and a tab switch leaves a block
+    /// presented at a height for a document nobody can see, with the press it was carrying never
+    /// reaching the transcript. Drop it from a scroll door and the band goes on growing while the
+    /// rows it stands on move under it. Drop `advance_math_toggle_if_due` from `turn` and the
+    /// change never lands at all — the block is frozen at whatever fraction of the way the press's
+    /// own frame caught it.
+    #[test]
+    fn an_interrupted_change_of_face_lands_before_the_thing_that_interrupted_it() {
+        for (door, why) in [
+            (
+                body(&["    fn leave_hovered", "_math(&mut self, now: Instant)"].concat()),
+                "a tab switch, a pane close and a focus change",
+            ),
+            (
+                body(&["    fn scroll", "_view(&mut self, rows: i32)"].concat()),
+                "a keyboard page",
+            ),
+            (
+                body(&["    fn scroll_view", "_exact_in("].concat()),
+                "a wheel notch",
+            ),
+            (
+                body(&["    fn scroll_seat", "_to_subpixels("].concat()),
+                "a drag of the scroll bar",
+            ),
+        ] {
+            assert!(
+                door.contains("self.settle_math_toggle()"),
+                "{why} lands a band that is still changing face:\n{door}"
+            );
+        }
+
+        // The turn pays the journey's frames, ahead of the marks that ride the rectangle it moves.
+        let turning = body("    fn turn(&mut self, now: Instant, application_clocks: bool)");
+        let toggle = turning
+            .find("self.advance_math_toggle_if_due(now)?;")
+            .expect("a change of face takes a turn like every other motion in this window");
+        let marks = turning
+            .find("self.advance_math_tools_if_due(now)?;")
+            .expect("and so do the marks beside it");
+        assert!(
+            toggle < marks,
+            "the block moves before the marks that ride it:\n{turning}"
+        );
+
+        // And the advancer re-reads the far end rather than trusting the one it set out for.
+        let advancer = body(
+            &[
+                "    fn advance_math_toggle",
+                "_if_due(&mut self, now: Instant)",
+            ]
+            .concat(),
+        );
+        assert!(
+            advancer.contains("still_measures(faces.heights())"),
+            "a pane that re-wrapped mid-flight moves the height the journey lands on:\n{advancer}"
+        );
+
+        // Stillness and the live plane take the one-frame switch, in the press's own door.
+        let press = body(&["    fn press_math", "_toggle(&mut self, anchor"].concat());
+        assert!(
+            press.contains("Motion::Reduced") && press.contains("self.switch_math_source_now("),
+            "a reader who asked for no motion gets the change on the frame it is asked for:\n\
+             {press}"
+        );
+    }
+
+    /// RED GATE — **the other face is never struck over a picture that is already drawing it**
+    /// (§7.1.5p ⑪ iii).
+    ///
+    /// A block returning to its typeset face is told at the near end, and a pane keeps the last
+    /// frame it presented — so between the telling and the next present, the terminal is still
+    /// painting the `$$…$$` rows itself.
+    ///
+    /// MUTATION: draw the overlay whatever face the picture in hand is wearing, and for that one
+    /// frame every line of the source is struck twice in the same place, which reads as the text
+    /// thickening the instant the mark is pressed.
+    #[test]
+    fn the_source_face_is_not_struck_over_a_picture_already_drawing_it() {
+        let lane = body(&["    fn formula_toggle", "_layers(&self, now: Instant)"].concat());
+        assert!(
+            lane.contains("face.display == bt_viewport::MathBlockDisplay::Source"),
+            "the lane asks which face the picture in hand is wearing:\n{lane}"
+        );
+        assert!(
+            lane.contains("leaf.last_presented_frame.as_ref()"),
+            "and it is the picture the pane has actually shown, as every band reader here is"
         );
     }
 }

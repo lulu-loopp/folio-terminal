@@ -567,6 +567,21 @@ pub struct MathBlockPlacement {
     /// without re-deriving the projection. Zero for a wholly-matched block.
     pub clipped_top_rows: u32,
     pub clipped_bottom_rows: u32,
+    /// **How solid this block's picture is drawn**, in thousandths — `1000` everywhere but inside
+    /// the ninety milliseconds a block spends changing face (`docs/DESIGN.md` §7.1.5p ⑪).
+    ///
+    /// A block toggling between its typeset face and its `$$…$$` source stays **one entry with an
+    /// artifact height** for the whole of that span — the document is not rewritten half-way
+    /// through a fade — so what crosses over is presentation: the band is presented at a height on
+    /// its way from one face's to the other's, the picture is drawn at this strength, and the
+    /// source text is drawn over the same rectangle at what is left. `bt_term::decorate_math_frame`
+    /// is the one writer, from the session's own presentation; every other placement in every other
+    /// frame carries the full thousand and nothing about it changes.
+    ///
+    /// Thousandths and not an `f32` for the reason [`ProjectedMathArtifact::render_scale_milli`] is
+    /// one: a frame is compared for equality on the way to the glass, and a float field would take
+    /// `Eq` off this type and off [`ViewportFrame`] with it.
+    pub picture_opacity_milli: u16,
     /// **The selection's own spans over the rows this block stands on**, in this frame's
     /// presentation-row coordinates — the wash a reader's drag lays on the picture
     /// (`docs/DESIGN.md` §7.1.6c-4g).
@@ -581,6 +596,20 @@ pub struct MathBlockPlacement {
     /// Empty whenever no cell this block stands on is selected, and empty for a block showing its
     /// source: there is no picture then, and the ordinary band paints the text as it always did.
     pub selection_spans: Vec<SelectionSpan>,
+}
+
+/// **What a display block's `$$…$$` source comes back as** — see
+/// [`ViewportProjection::math_source_face`].
+///
+/// Rows and a height and nothing else: it is a measurement of a document by a pane, taken by the
+/// same arithmetic the projection measures any other line with, and it says nothing about when or
+/// whether anybody is going to draw it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MathSourceFace {
+    /// The rows themselves, top to bottom — row `k` stands `k` cells below the band's own top.
+    pub rows: Vec<String>,
+    /// What those rows take together: `rows.len()` cells.
+    pub height_subpixels: i64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2898,6 +2927,9 @@ impl ViewportProjection {
                             frozen_prefix_rows: 0,
                             clipped_top_rows: 0,
                             clipped_bottom_rows: 0,
+                            // Whole, like every picture this layer places: a block mid-change is a
+                            // fact about a gesture, and the session is where a gesture is known.
+                            picture_opacity_milli: 1000,
                             // The selection is not this layer's to know: the session fills these
                             // in once every placement of the frame exists (`decorate_math_frame`).
                             selection_spans: Vec::new(),
@@ -3043,6 +3075,7 @@ impl ViewportProjection {
                                 frozen_prefix_rows: 0,
                                 clipped_top_rows: 0,
                                 clipped_bottom_rows: 0,
+                                picture_opacity_milli: 1000,
                                 selection_spans: Vec::new(),
                             });
                             image_top = image_top.saturating_add(artifact.height_subpixels);
@@ -3279,6 +3312,7 @@ impl ViewportProjection {
                     frozen_prefix_rows: frozen_rows,
                     clipped_top_rows: live_math.clipped_top_rows,
                     clipped_bottom_rows: live_math.clipped_bottom_rows,
+                    picture_opacity_milli: 1000,
                     selection_spans: Vec::new(),
                 });
 
@@ -4140,6 +4174,62 @@ impl ViewportProjection {
                 .map(|row| i64::from(row).saturating_mul(self.cell_height_subpixels.get()))
                 .collect();
             self.live_math_artifacts.clear();
+        }
+    }
+
+    /// **The rows one block's `$$…$$` source stands on, and the height they take.**
+    ///
+    /// The *other* face of a display block, measured by this pane: `start ..= end` are the
+    /// transcript lines a rendered block swallows ([`ProjectedMathArtifact::end`] names the last of
+    /// them), and this is what they come back as when it stops.
+    ///
+    /// **One answer, and both halves of the change read it** (`docs/DESIGN.md` §7.1.5p ⑪). The
+    /// height is where the band's own height is travelling *to*, and the rows are what the source
+    /// face draws while it is still an overlay — so "the block ends up as tall as the rows it
+    /// reveals" and "the overlay's lines land where those rows land" are one fact rather than two
+    /// that have to be kept in step. Answered whether the block is currently swallowing those rows
+    /// or showing them, because the change runs in both directions.
+    ///
+    /// The row count is `layout_frozen_line`'s, which is `frozen_visual_line_count`'s — the two
+    /// have to agree cluster for cluster and already do (`history_row_heights` has always relied on
+    /// it) — and a row's height is the cell's, because that is what [`Self::project`] gives a line
+    /// it is not holding an artifact for. The reading is taken at the pane's own left edge for
+    /// `vertical_reading`'s reason: how many rows a line takes is not a question about where the
+    /// reader has scrolled sideways to.
+    #[must_use]
+    pub fn math_source_face(
+        &self,
+        document: &HistoryDocument,
+        start: TranscriptId,
+        end: TranscriptId,
+    ) -> MathSourceFace {
+        let mut rows = Vec::new();
+        for (_, entry) in document.entries().range(start..=end) {
+            for row in layout_frozen_line(
+                &entry.line,
+                self.layout_key.width_cells.get() as usize,
+                &[],
+                self.vertical_reading(),
+            ) {
+                let mut text = String::new();
+                for cell in &row.cells {
+                    text.push_str(cell.text.as_str());
+                }
+                // A frozen row is padded out to the pane's width with blank cells
+                // (`pad_frozen_row`); they draw nothing, and carrying them would make every line of
+                // the overlay as wide as the pane for a text renderer to shape and clip.
+                while text.ends_with(' ') {
+                    text.pop();
+                }
+                rows.push(text);
+            }
+        }
+        let height_subpixels = i64::try_from(rows.len())
+            .unwrap_or(i64::MAX)
+            .saturating_mul(self.cell_height_subpixels.get());
+        MathSourceFace {
+            rows,
+            height_subpixels,
         }
     }
 
@@ -11170,6 +11260,134 @@ mod tests {
             "a rewritten line kept the width measured for text it no longer holds"
         );
         assert_ne!(projection.horizontal(), before);
+    }
+
+    /// Where one line stands in a projection, in subpixels from the top of history.
+    fn line_y(
+        projection: &ViewportProjection,
+        document: &HistoryDocument,
+        id: TranscriptId,
+    ) -> i64 {
+        let generation = document
+            .entries()
+            .get(&id)
+            .expect("the fixture's own line")
+            .line
+            .source_generation;
+        projection
+            .anchor_y(
+                document,
+                &ContentAnchor::History {
+                    id,
+                    offset: GraphemeOffset(0),
+                    bias: Bias::Before,
+                    generation,
+                },
+            )
+            .expect("a line this projection is holding")
+    }
+
+    /// The same block, presented at a height that is neither face's — one frame of a change of
+    /// face (§7.1.5p ⑪).
+    fn presented_at(end: TranscriptId, height_subpixels: i64) -> ProjectedMathArtifact {
+        ProjectedMathArtifact {
+            height_subpixels,
+            ..toggle_block(end)
+        }
+    }
+
+    /// RED (owner's ruling 2026-09-15, T-MATH-TOGGLE-MOTION): **the source face is measured by the
+    /// same arithmetic that will lay those rows out.**
+    ///
+    /// This is one end of the journey a change of face travels, and it is not a number anybody may
+    /// estimate: it is what the projection itself gives the four lines the block swallows, once it
+    /// stops swallowing them.
+    ///
+    /// MUTATION: count the block's `$$…$$` source lines instead of the transcript lines under it
+    /// and the count is the formula's, not the document's; measure at the wrong width and a
+    /// wrapping pane's rows stop agreeing with the height beside them.
+    #[test]
+    fn a_blocks_source_face_is_the_rows_this_pane_will_lay_its_source_out_on() {
+        let (store, document, ids) = toggle_fixture();
+        let mut projection = toggle_projection(&store);
+        projection.sync_math_artifacts([(ids[4], toggle_block(ids[7]))]);
+        projection.project(&document);
+
+        let face = projection.math_source_face(&document, ids[4], ids[7]);
+        assert_eq!(
+            face.rows.len(),
+            4,
+            "the opener and the three lines it swallows are four rows of this pane"
+        );
+        assert_eq!(face.height_subpixels, 4 * cell_height().get());
+        assert!(face.rows[0].starts_with("line-004"));
+        assert!(face.rows[3].starts_with("line-007"));
+
+        // And the same answer with the block already showing its source, because the change runs
+        // in both directions and the far end of the return journey is this very number.
+        projection.sync_math_artifacts([]);
+        projection.project(&document);
+        assert_eq!(projection.math_source_face(&document, ids[4], ids[7]), face);
+    }
+
+    /// RED (owner's ruling 2026-09-15, T-MATH-TOGGLE-MOTION): **the last frame of the change and
+    /// the first frame after it are one picture.**
+    ///
+    /// This is the whole correctness argument for animating a toggle at all. The document is not
+    /// rewritten while the block travels — it stays one entry with an artifact height, presented at
+    /// a height on its way from one face's to the other's — so the only thing that could betray the
+    /// switch is the frame on which it finally happens. At `t = 1` the presented height **is** the
+    /// rows' own height, so everything below the block already stands exactly where the real rows
+    /// will put it, and the switch moves nothing.
+    ///
+    /// MUTATIONS: present the far end at the picture's height (the `t = 0` arm below, which the
+    /// last assertion pins as genuinely different) and the switch jumps by a row; round the
+    /// presented height to whole rows and the block lands a fraction of a line off.
+    #[test]
+    fn the_last_frame_of_a_change_of_face_is_the_first_frame_after_it() {
+        let (store, document, ids) = toggle_fixture();
+
+        // The document with the block's source really out: what the press ends at.
+        let mut switched = toggle_projection(&store);
+        switched.project(&document);
+        let source_height =
+            line_y(&switched, &document, ids[8]) - line_y(&switched, &document, ids[4]);
+
+        // The measurement the journey travels to, taken while the block is still a picture.
+        let mut animated = toggle_projection(&store);
+        animated.sync_math_artifacts([(ids[4], toggle_block(ids[7]))]);
+        animated.project(&document);
+        let face = animated.math_source_face(&document, ids[4], ids[7]);
+        assert_eq!(
+            face.height_subpixels, source_height,
+            "the height the band travels to is the height the rows really take"
+        );
+
+        // `t = 1`: the block is still one entry with an artifact height, presented at the source
+        // face's height.
+        animated.sync_math_artifacts([(ids[4], presented_at(ids[7], face.height_subpixels))]);
+        animated.project(&document);
+        assert_eq!(
+            line_y(&animated, &document, ids[8]),
+            line_y(&switched, &document, ids[8]),
+            "the line under the block stands in the same place on both frames"
+        );
+        assert_eq!(
+            line_y(&animated, &document, ids[8]) - line_y(&animated, &document, ids[4]),
+            source_height,
+            "the presented band is exactly as tall as the rows it is about to become"
+        );
+
+        // `t = 0`, which is the same comparison against the face the block is leaving: the two
+        // frames are *not* one picture there, which is what makes the assertions above able to
+        // fail at all.
+        animated.sync_math_artifacts([(ids[4], toggle_block(ids[7]))]);
+        animated.project(&document);
+        assert_ne!(
+            line_y(&animated, &document, ids[8]),
+            line_y(&switched, &document, ids[8]),
+            "this fixture's two faces are different heights, or nothing above is being tested"
+        );
     }
 
     #[test]
