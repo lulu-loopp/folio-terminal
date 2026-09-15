@@ -268,7 +268,7 @@ fn slow_hold_threshold_ms() -> u64 {
 /// Held against [`Station`] by `every_station_has_a_slot_in_the_ledger`: a
 /// further variant added without widening this would have its milliseconds
 /// charged to nobody, and the line would silently stop adding up.
-const STATION_COUNT: usize = 24;
+const STATION_COUNT: usize = 25;
 
 /// How many reports are kept. The oldest beyond this are deleted.
 ///
@@ -386,8 +386,8 @@ pub enum Station {
     FileIndex = 21,
     /// The probe and settings family — `PsReadLineProbed`,
     /// `PowerShellProfileProbed`, `CopilotProbed`, `UpdateChecked`,
-    /// `ExplorerPackageChanged`, `SchemesChanged`, `StorageChanged`,
-    /// `SystemPreferencesChanged`, `NotificationClicked`.
+    /// `ExplorerPackageChanged`, `FontsScanned`, `SchemesChanged`,
+    /// `StorageChanged`, `SystemPreferencesChanged`, `NotificationClicked`.
     ///
     /// **One station for nine arms**, because what they have in common is what a
     /// reader of this line needs: every one of them ends in `refresh_chrome` over
@@ -403,6 +403,20 @@ pub enum Station {
     /// themselves ([`Self::WebOutcomes`], [`Self::WebRetire`]), so what is left
     /// against it is the drive itself and the chrome read that follows.
     WebSpoke = 23,
+    /// `Runtime::settings_layout` — the Settings dialog's contents and geometry,
+    /// rebuilt from scratch on every road that draws, hovers or hit-tests it,
+    /// and once more on the press that opens it.
+    ///
+    /// **Born naming a stall that had already been reported** (GitHub issue #3).
+    /// An outside user's window froze for seconds when the gear was clicked, and
+    /// this ledger could only say `window_event` — the press — or
+    /// `publish_frame_inner` — the frame it happened to be inside. Both were
+    /// true and neither named the dialog. The cause was one call in this lane
+    /// walking the machine's font collection; the walk has gone to a worker, and
+    /// what is left here is what this page honestly costs: the rows, every
+    /// picker's width measured through the renderer, and the profile and scheme
+    /// lists it reads afresh each time.
+    Settings = 24,
 }
 
 impl Station {
@@ -434,6 +448,7 @@ impl Station {
             Self::FileIndex => "apply_file_index_results",
             Self::Chrome => "refresh_chrome",
             Self::WebSpoke => "drive_web_page",
+            Self::Settings => "settings_layout",
         }
     }
 
@@ -478,6 +493,7 @@ impl Station {
             21 => Self::FileIndex,
             22 => Self::Chrome,
             23 => Self::WebSpoke,
+            24 => Self::Settings,
             _ => Self::Starting,
         }
     }

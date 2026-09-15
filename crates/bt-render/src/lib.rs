@@ -180,23 +180,39 @@ const PADDING_LOGICAL_PX: f32 = 8.0;
 const NARROW_SHAPING_CACHE_BUDGET_BYTES: usize = 8 * 1024 * 1024;
 const WIDE_SHAPING_CACHE_BUDGET_BYTES: usize = 16 * 1024 * 1024;
 const COMPOSED_ROW_CACHE_BUDGET_BYTES: usize = 32 * 1024 * 1024;
-/// `.math-tools button { width: 24px; height: 24px }` (mock-up 2127-2129).
+/// **The box each of a band's two marks stands in — the pane head's own button**
+/// (owner's ruling 2026-09-15 ②, T-MATH-BLOCK-POLISH).
 ///
-/// **24 and not the 22 this drew until 2026-09-14.** The old number was this
-/// file's own, from the milestone when the two verbs were small bordered chips;
-/// the mock-up's box is the house's, it is the box the strip's own controls
-/// stand in, and it is *larger* than what it replaces — which is the one
-/// direction a hit box is allowed to move (owner's ruling 2026-09-14 ③).
-const MATH_TOOL_BUTTON_LOGICAL_PX: f32 = 24.0;
+/// `.tab-files, .pane-files { width: 19px; height: 19px }`, which is
+/// `bt_app::seats::PANE_HEAD_TRIGGER_BOX_LOGICAL_PX`. The ruling is a sentence
+/// about *reuse* — "the same size and ink as the pane-header buttons already in
+/// the app" — so the number is that run's, not a second one struck for a band:
+/// a mark inside a block is the same control the head wears, and two controls
+/// doing one job at two sizes is the drift `bt_app::marks`'s own header exists
+/// to forbid.
+///
+/// The two constants live in two crates that do not know about each other, so
+/// the rule is held from the one crate that sees both
+/// (`bt_app::formula_tools::tests::a_bands_marks_wear_the_pane_heads_own_button`),
+/// on `DEFAULT_PRIMARY_FONT_FAMILY`'s own precedent.
+///
+/// **Smaller than the 24 this drew until today**, and that is a hit box moving
+/// the direction the 2026-09-14 ruling forbade — under a *different* geometry:
+/// that box stood on the terminal's own ground beside the band, where nothing
+/// else could be pressed and a generous box cost nothing. These stand inside the
+/// block, on its floor, in a right inset cut to hold exactly them; the run they
+/// now belong to is the window's run of head controls, and its box is 19.
+pub const MATH_TOOL_BUTTON_LOGICAL_PX: f32 = 19.0;
 /// `.math-tools { gap: 2px }` (mock-up 2117).
 const MATH_TOOL_GAP_LOGICAL_PX: f32 = 2.0;
 /// `.math-tools button { border-radius: 5px }` (mock-up 2129) — the pill a
 /// hovered or pressed mark wears.
 ///
-/// Its own number and not [`WINDOW_NEW_TAB_RADIUS_LOGICAL_PX`]: the strip's
-/// controls are 6 in a taller box, and §7.1.6's rule about two radii doing "the
-/// same thing" cuts the other way here — these are two boxes of two sizes and
-/// the design struck a corner for each.
+/// The same corner the pane head's own buttons are struck with
+/// (`bt_app::seats::PANE_HEAD_TRIGGER_RADIUS_LOGICAL_PX`), and since the marks
+/// moved inside the block that is a derivation rather than a coincidence: one
+/// control, one box, one corner. The cross-crate pin on
+/// [`MATH_TOOL_BUTTON_LOGICAL_PX`] holds this number too.
 ///
 /// Public because the pill is drawn a crate up: the two marks are house marks
 /// and house marks are rasterized in `bt_app::marks`, so this file gives the
@@ -206,8 +222,22 @@ pub const MATH_TOOL_PILL_RADIUS_LOGICAL_PX: f32 = 5.0;
 /// A rendered formula's raster is cropped tight to its ink, so its glyphs would touch the pane
 /// edge while a text row's characters sit inside their cell with natural left bearing. This small
 /// indent gives the ink the same visual left edge as the text above it (user report 2026-07-20).
-/// Applied to rendered blocks only - a source block already carries its own column offset.
+///
+/// **A display band's, and only a display band's** (owner's ruling 2026-09-15 ④). The flag used to
+/// be "this placement draws a picture rather than source text", which is true of an *inline*
+/// composite as well — and an inline picture stands mid-sentence at the column its own `$` stands
+/// in, not against the pane edge. Eight logical pixels of indent there is a gap opened between the
+/// word before the formula and the formula, and eight pixels taken off the cells left for its ink
+/// at the other end: the two sides of the gap the ruling names.
 const MATH_LEFT_INDENT_LOGICAL_PX: f32 = 8.0;
+/// **How much ground a display block keeps around its ink, in whole cell columns**
+/// (owner's ruling 2026-09-15 ①).
+///
+/// Whole columns rather than a logical-pixel number for the reason the vertical
+/// breathing is whole rows: the block is a region *in the grid*, so the room it
+/// keeps is measured in the grid's own units and follows the font and the DPI
+/// without a second rule. One column is the smallest room that reads as room.
+const MATH_BLOCK_INSET_CELLS: f32 = 1.0;
 
 fn math_toolbar_vertical_bounds(visible_top: f32, visible_bottom: f32, scale: f32) -> (f32, f32) {
     let band_height = (visible_bottom - visible_top).max(0.0);
@@ -216,33 +246,77 @@ fn math_toolbar_vertical_bounds(visible_top: f32, visible_bottom: f32, scale: f3
     (top, top + button)
 }
 
+/// The width the two marks and the gap between them take together, in the pane's
+/// own pixels.
+fn math_tool_cluster_width_px(scale: f32) -> f32 {
+    MATH_TOOL_BUTTON_LOGICAL_PX * scale * 2.0 + MATH_TOOL_GAP_LOGICAL_PX * scale
+}
+
+/// **The ground a display block keeps around its ink** — its left and right
+/// edges, in the pane body's own pixels.
+///
+/// `ink` is `[the raster's visible left, its visible right]` and `pane` is `[the
+/// pane's left edge, its right edge]`.
+///
+/// One whole cell column on the left; on the right that column *plus* the cells
+/// the two marks need, because since the owner's ruling of 2026-09-15 ② the
+/// marks stand inside the block rather than beside it and a right inset that did
+/// not hold them would be a mark laid over the formula's own ink. Rounded up to
+/// whole columns for the same reason the vertical breathing is rounded up to
+/// whole rows: the block is a region in the grid.
+///
+/// Clamped to the pane at both ends, so a formula already filling the pane keeps
+/// the ground it can have rather than growing one it cannot.
+fn math_block_ground_bounds(metrics: CellMetrics, ink: [f32; 2], pane: [f32; 2]) -> (f32, f32) {
+    let [ink_left, ink_right] = ink;
+    let [pane_left, pane_right] = pane;
+    let cell = metrics.cell_width_px.max(1.0);
+    let inset = MATH_BLOCK_INSET_CELLS * cell;
+    let tools_cells = (math_tool_cluster_width_px(metrics.scale_factor as f32) / cell).ceil();
+    let left = (ink_left - inset).max(pane_left);
+    let right = (ink_right + inset + tools_cells * cell).min(pane_right);
+    (left, right.max(left))
+}
+
 /// **Where a band's two marks stand** — the toggle-source box and the copy box,
 /// in that order, in the pane body's own pixels.
 ///
-/// `band` is `[the band's right edge, its visible top, its visible bottom]` and
-/// `pane` is `[the pane's left edge, its right edge]`.
+/// `block` is the block's own rectangle — its ground, not its ink — and
+/// `ink_right` is where the formula's pixels stop.
 ///
-/// **Beside the band and not inside it**, which is the mock-up's own placement
-/// and its own reasoning (2010-2012: *"The fill is the formula's region alone —
-/// the tools sit beside it, not in it"*, and 1989-1998 for why they are
-/// nevertheless inside the region the pointer has to be in). The owner's ruling
-/// of 2026-09-14 ② says "inside the block's top-right corner"; the same ruling
-/// names the mock-up the visual authority and asks for the formula block to be
-/// found in it, and the mock-up both has one and is explicit here — a mark laid
-/// over the corner of a band would be a mark laid over the formula's own ink,
-/// which is alpha-tight and runs the whole width of the band.
+/// **Inside the block, at its right edge, centred on its midline** (owner's
+/// ruling 2026-09-15 ②). Until that ruling they stood *beside* the band, which
+/// was the mock-up's own placement (2010-2012: *"The fill is the formula's
+/// region alone — the tools sit beside it, not in it"*) and is what the ruling
+/// overturns: the ruling's own mock-up draws the ground reaching past the ink on
+/// every side and the two marks standing in the room it keeps on the right, and
+/// that room is [`math_block_ground_bounds`]' right inset. So nothing is laid
+/// over the formula — the marks stand in cells the block reserved for them, and
+/// they are centred in that reserve rather than jammed against a corner, which
+/// is what puts the same air on both sides of them however the rounding to whole
+/// columns fell.
 ///
-/// Pulled out of `math_block_geometry` on the same day so the arithmetic can be
-/// pinned without a GPU, which is the arrangement `math_horizontal_bounds` and
+/// A block the pane has cut short has no reserve left to centre in; there the
+/// pair is pushed up against the block's own right edge, and against its left
+/// edge if even that is not wide enough. Both are degradations of one rule and
+/// neither is a second placement.
+///
+/// Pulled out of `math_block_geometry` so the arithmetic can be pinned without a
+/// GPU, which is the arrangement `math_horizontal_bounds` and
 /// `math_toolbar_vertical_bounds` beside it already keep.
-fn math_tool_boxes_px(band: [f32; 3], pane: [f32; 2], scale: f32) -> ([f32; 4], [f32; 4]) {
-    let [visible_right, visible_top, visible_bottom] = band;
-    let [pane_left, pane_right] = pane;
-    let (top, bottom) = math_toolbar_vertical_bounds(visible_top, visible_bottom, scale);
+fn math_tool_boxes_px(block: [f32; 4], ink_right: f32, scale: f32) -> ([f32; 4], [f32; 4]) {
+    let [block_left, block_top, block_right, block_bottom] = block;
+    let (top, bottom) = math_toolbar_vertical_bounds(block_top, block_bottom, scale);
     let button = bottom - top;
     let gap = MATH_TOOL_GAP_LOGICAL_PX * scale;
     let total = button * 2.0 + gap;
-    let left = visible_right.min(pane_right - total).max(pane_left);
+    let reserve_left = ink_right.clamp(block_left, block_right);
+    let reserve = block_right - reserve_left;
+    let left = if reserve >= total {
+        reserve_left + (reserve - total) / 2.0
+    } else {
+        (block_right - total).max(block_left)
+    };
     (
         [left, top, left + button, bottom],
         [left + button + gap, top, left + total, bottom],
@@ -356,7 +430,26 @@ fn inline_run_at(placement: &MathBlockPlacement, block: [f32; 4], x: f32) -> Opt
 
 #[derive(Clone, Copy, Debug)]
 struct MathBlockGeometry {
+    /// **The block as a region**: its ground, the box the pointer has to be
+    /// inside, and the box the two marks are seated in.
+    ///
+    /// A display band's ink plus the room the block keeps around it — whole cell
+    /// columns across ([`math_block_ground_bounds`]) and, down, the whole padded
+    /// band rather than the raster alone, which is where the whole cell rows of
+    /// breathing that `bt_term`'s projection put above and below the formula
+    /// actually become visible (owner's ruling 2026-09-15 ①). An inline
+    /// composite keeps no region of its own: it stands in a line of prose, and
+    /// its block *is* its ink.
     block: [f32; 4],
+    /// **The formula's own pixels** — where the raster begins and ends.
+    ///
+    /// [`Self::block`] was this until the ruling above gave the block room
+    /// around its ink; every reader that means *the picture* rather than *the
+    /// region* reads this one — the selection's wash, so growing the region can
+    /// never grow the wash, and the composite's own origin, so an inline run is
+    /// still named from where the picture starts. The marks' seat reads both: the
+    /// block is where they stand, and this is what they must not stand on.
+    ink: [f32; 4],
     clip: [f32; 4],
     eye: Option<[f32; 4]>,
     copy: Option<[f32; 4]>,
@@ -368,7 +461,7 @@ struct MathBlockGeometry {
 /// the grid it is measured on ([`CellMetrics`]) and the seat it is cut to, and
 /// both are plain numbers. [`WindowRenderer::math_block_geometry`] is the one
 /// caller that holds those two as state; every other reader of this arithmetic —
-/// the ground under a band, the two marks beside it, and the pin that says the
+/// the ground under a band, the two marks inside it, and the pin that says the
 /// two stand on one block — can now be answered without a surface.
 fn math_block_geometry_px(
     metrics: CellMetrics,
@@ -393,12 +486,17 @@ fn math_block_geometry_px(
     };
     let clip_height = placement.clip_height_subpixels.max(1) as f32 / SUBPIXELS_PER_PX as f32;
     let scaled_width = if placement.display == MathBlockDisplay::Source {
+        // The longest source line, and nothing added to it. It carried `+ 4` from M1.9b, which was
+        // room for the two verbs drawn inside the box in that milestone; the room they need is
+        // stated once now, in `math_block_ground_bounds`' right inset, and adding it here as well
+        // would be a block reserving the same cells twice.
         placement
             .source
             .lines()
-            .map(|line| line.chars().count() + 4)
+            .map(|line| line.chars().count())
             .max()
-            .unwrap_or(4) as f32
+            .unwrap_or(0)
+            .max(1) as f32
             * metrics.cell_width_px
     } else {
         placement.artifact.width_px as f32 * placement.artifact.render_scale_milli as f32 / 1000.0
@@ -423,41 +521,74 @@ fn math_block_geometry_px(
         frame.columns,
         placement.left_subpixels,
         scaled_width,
-        placement.display == MathBlockDisplay::Rendered,
+        math_block_takes_the_left_indent(placement),
     )?;
     if visible_right <= visible_left || visible_bottom <= visible_top {
         return None;
     }
-    let block = [visible_left, visible_top, visible_right, visible_bottom];
+    let ink = [visible_left, visible_top, visible_right, visible_bottom];
     // Display math owns a complete presentation box: alpha-tight ink is offset by symmetric
     // padding inside the band, while the clip is the band itself. Inline math retains its
     // baseline-relative clip. In both cases the visible raster is intersected with this clip
     // above, so the frame-level rule remains explicit: clip contains every block pixel.
     let clip = [visible_left, clip_top, pane_right, clip_bottom];
-    // The scissor must never crop the visible raster: its top may not sit below the block's
-    // top, nor its bottom above the block's bottom. This is the invariant the centred multi-
+    // The scissor must never crop the visible raster: its top may not sit below the raster's
+    // top, nor its bottom above the raster's bottom. This is the invariant the centred multi-
     // line clip violated (see above); asserting it here fails the moment any future change
     // decouples the clip from `top` again.
     debug_assert!(
-        clip[1] <= block[1] + 0.5 && clip[3] >= block[3] - 0.5,
-        "math scissor crops the raster: clip={clip:?} block={block:?}"
+        clip[1] <= ink[1] + 0.5 && clip[3] >= ink[3] - 0.5,
+        "math scissor crops the raster: clip={clip:?} ink={ink:?}"
     );
-    let (eye, copy) = if placement.toolbar_visible {
-        let (source, copy) = math_tool_boxes_px(
-            [visible_right, visible_top, visible_bottom],
+    // The region, where a block has one: across, the ink plus whole cell columns of ground; down,
+    // the whole band the projection reserved, which is the ink plus the whole cell rows of
+    // breathing above and below it. An inline composite's region is its ink, so the two agree and
+    // nothing about a line of prose changes.
+    let block = if math_block_is_a_band(placement) {
+        let (ground_left, ground_right) = math_block_ground_bounds(
+            metrics,
+            [visible_left, visible_right],
             [pane_left, pane_right],
-            metrics.scale_factor as f32,
         );
+        [ground_left, clip_top, ground_right, clip_bottom]
+    } else {
+        ink
+    };
+    let (eye, copy) = if placement.toolbar_visible {
+        let (source, copy) = math_tool_boxes_px(block, visible_right, metrics.scale_factor as f32);
         (Some(source), Some(copy))
     } else {
         (None, None)
     };
     Some(MathBlockGeometry {
         block,
+        ink,
         clip,
         eye,
         copy,
     })
+}
+
+/// Whether this placement is a **band** standing on rows of its own, rather than
+/// a composite standing in a line of prose.
+///
+/// A band owns rows, keeps ground around its ink ([`math_block_ground_bounds`])
+/// and carries the two marks; an inline formula owns cells inside a sentence and
+/// does none of the three. The face it is wearing does not enter into it — a
+/// block showing its `$$…$$` source is the same region as the picture it
+/// replaced, which is the whole of why the marks can travel between the two.
+fn math_block_is_a_band(placement: &MathBlockPlacement) -> bool {
+    placement.artifact.mode == MathMode::Display
+}
+
+/// Whether this placement's raster takes [`MATH_LEFT_INDENT_LOGICAL_PX`].
+///
+/// A band's picture does, for that constant's own reason. A source block does
+/// not: it is terminal text and already carries its own column offset. An inline
+/// composite does not either, and that is the correction of 2026-09-15 ④ — it
+/// stands where its own `$` stands.
+fn math_block_takes_the_left_indent(placement: &MathBlockPlacement) -> bool {
+    math_block_is_a_band(placement) && placement.display == MathBlockDisplay::Rendered
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -490,7 +621,8 @@ fn math_overflow_fade_slabs(
     }
     let scaled_width =
         placement.artifact.width_px as f32 * placement.artifact.render_scale_milli as f32 / 1000.0;
-    let content_left = math_block_left_px(metrics, placement.left_subpixels, true)
+    let indent = math_block_takes_the_left_indent(placement);
+    let content_left = math_block_left_px(metrics, placement.left_subpixels, indent)
         - placement.horizontal_scroll_px as f32;
     let content_right = content_left + scaled_width;
 
@@ -588,7 +720,9 @@ fn math_selection_wash_slabs(
     if placement.display != MathBlockDisplay::Rendered || placement.selection_spans.is_empty() {
         return Vec::new();
     }
-    let [block_left, block_top, block_right, block_bottom] = geometry.block;
+    // The picture and not the region: the ground a band keeps around its ink is not part of what a
+    // drag took, and washing it would colour empty floor the selection never reached.
+    let [block_left, block_top, block_right, block_bottom] = geometry.ink;
     if block_right <= block_left || block_bottom <= block_top {
         return Vec::new();
     }
@@ -7058,19 +7192,34 @@ impl WindowRenderer {
     /// in which the hovered block is not (yet) the lit one: a frame older than
     /// the gesture draws no marks for one frame rather than drawing them
     /// somewhere else.
+    ///
+    /// **`seat` is the band's own pane** (audit 2026-09-15, RC-2) — the same
+    /// `SeatViewport` the caller translates the answer by, and the same one it
+    /// hands [`Self::math_hit_test`], so the box you can press and the box that
+    /// is drawn cannot be cut to two different panes. See
+    /// [`Self::math_block_geometry`] for what `self.seat` would have answered.
     #[must_use]
     pub fn math_tool_boxes(
         &self,
+        seat: SeatViewport,
         frame: &ViewportFrame,
         hovered: &MathBlockAnchor,
     ) -> Option<MathToolBoxes> {
-        math_tool_boxes_for(self.metrics, self.seat, frame, hovered)
+        math_tool_boxes_for(self.metrics, seat, frame, hovered)
     }
 
-    pub fn math_hit_test(&self, frame: &ViewportFrame, x: f64, y: f64) -> Option<MathHit> {
+    /// The pointer's half of [`Self::math_tool_boxes`], cut to the same `seat`
+    /// and for the same reason (RC-2).
+    pub fn math_hit_test(
+        &self,
+        seat: SeatViewport,
+        frame: &ViewportFrame,
+        x: f64,
+        y: f64,
+    ) -> Option<MathHit> {
         let point = [x as f32, y as f32];
         if let Some(failure) = frame.math_failures.iter().rev().find(|failure| {
-            self.math_failure_geometry(frame, failure)
+            self.math_failure_geometry(seat, frame, failure)
                 .is_some_and(|(_, hit)| point_in_rect(point, hit))
         }) {
             return Some(MathHit {
@@ -7082,7 +7231,7 @@ impl WindowRenderer {
             if placement.artifact.kind != bt_viewport::RgbaArtifactKind::Math {
                 return None;
             }
-            let geometry = self.math_block_geometry(frame, placement)?;
+            let geometry = self.math_block_geometry(seat, frame, placement)?;
             let target = if geometry.eye.is_some_and(|rect| point_in_rect(point, rect)) {
                 MathHitTarget::ToggleSource
             } else if geometry.copy.is_some_and(|rect| point_in_rect(point, rect)) {
@@ -7093,11 +7242,12 @@ impl WindowRenderer {
                 return None;
             };
             Some(MathHit {
-                anchor: placement.anchor.with_run(inline_run_at(
-                    placement,
-                    geometry.block,
-                    point[0],
-                )),
+                // The composite's own origin, which is its ink's left edge and never the region's:
+                // a band keeps ground around its picture and an offset measured from that ground
+                // would name the wrong run.
+                anchor: placement
+                    .anchor
+                    .with_run(inline_run_at(placement, geometry.ink, point[0])),
                 target,
             })
         })
@@ -9533,7 +9683,7 @@ impl WindowRenderer {
                 self.note_textureless_block(gpu, key, placement.artifact.rgba.len());
                 continue;
             };
-            let Some(geometry) = self.math_block_geometry(frame, placement) else {
+            let Some(geometry) = self.math_block_geometry(self.seat, frame, placement) else {
                 continue;
             };
             drawn.insert(index);
@@ -9554,7 +9704,7 @@ impl WindowRenderer {
             let block_left_px = math_block_left_px(
                 self.metrics,
                 placement.left_subpixels,
-                placement.display == MathBlockDisplay::Rendered,
+                math_block_takes_the_left_indent(placement),
             );
             let block_left = block_left_px - placement.horizontal_scroll_px as f32;
             let block_top = block_top - placement.vertical_scroll_px as f32;
@@ -10033,12 +10183,25 @@ impl WindowRenderer {
         (draws, vertices)
     }
 
+    /// **The seat is a parameter and never `self.seat`** (audit 2026-09-15,
+    /// RC-2).
+    ///
+    /// Outside `compose_frame` this renderer's `seat` field names the **focused**
+    /// seat, by design and by its own comment — the per-seat value is set and
+    /// restored around a compose. Everything below that reads it inside a
+    /// compose is therefore right, and every reader *outside* one was clamping a
+    /// band in an unfocused pane against the focused pane's width and height. A
+    /// pane narrower than the focused one had its marks pushed past its own right
+    /// edge; a taller one had them cut off. Handing the seat in is what makes the
+    /// answer a fact about the pane the band is in rather than about whichever
+    /// pane happens to have the keyboard.
     fn math_block_geometry(
         &self,
+        seat: SeatViewport,
         frame: &ViewportFrame,
         placement: &MathBlockPlacement,
     ) -> Option<MathBlockGeometry> {
-        math_block_geometry_px(self.metrics, self.seat, frame, placement)
+        math_block_geometry_px(self.metrics, seat, frame, placement)
     }
 
     /// This seat's rendered tables, turned into bodies in whole-window coordinates.
@@ -10065,8 +10228,9 @@ impl WindowRenderer {
             })
             .filter_map(|placement| {
                 let paint = self.table_blocks.get(&placement.artifact.source)?;
-                let geometry = self.math_block_geometry(frame, placement)?;
-                let left = math_block_left_px(self.metrics, placement.left_subpixels, true)
+                let geometry = self.math_block_geometry(self.seat, frame, placement)?;
+                let indent = math_block_takes_the_left_indent(placement);
+                let left = math_block_left_px(self.metrics, placement.left_subpixels, indent)
                     - placement.horizontal_scroll_px as f32;
                 let top = pane_top
                     + placement
@@ -10116,8 +10280,12 @@ impl WindowRenderer {
             .collect()
     }
 
+    /// The seat is a parameter for [`Self::math_block_geometry`]'s reason (RC-2):
+    /// the failure marker is a hit target too, and a hit target clamped against
+    /// the focused pane is a press that lands somewhere else.
     fn math_failure_geometry(
         &self,
+        seat: SeatViewport,
         frame: &ViewportFrame,
         placement: &bt_viewport::MathFailurePlacement,
     ) -> Option<([f32; 4], [f32; 4])> {
@@ -10126,9 +10294,9 @@ impl WindowRenderer {
         }
         let pane_left = self.metrics.padding_px;
         let pane_right = (pane_left + frame.columns.get() as f32 * self.metrics.cell_width_px)
-            .min(self.seat.width as f32);
+            .min(seat.width as f32);
         let pane_top = self.metrics.padding_px;
-        let pane_bottom = self.seat.height as f32;
+        let pane_bottom = seat.height as f32;
         let raw_top = pane_top + placement.top_subpixels as f32 / SUBPIXELS_PER_PX as f32;
         let raw_bottom = raw_top + placement.height_subpixels as f32 / SUBPIXELS_PER_PX as f32;
         let top = raw_top.max(pane_top);
@@ -10414,7 +10582,7 @@ impl WindowRenderer {
             (PREVIEW_CODE_GROUND_RADIUS_LOGICAL_PX * self.metrics.scale_factor as f32).max(0.0);
         for (index, placement) in frame.math_blocks.iter().enumerate() {
             if math_block_ground_is_drawn(placement, drawn_math_blocks.contains(&index))
-                && let Some(geometry) = self.math_block_geometry(frame, placement)
+                && let Some(geometry) = self.math_block_geometry(self.seat, frame, placement)
             {
                 rects.extend(
                     rounded_rect_coverage(geometry.block, ground_radius)
@@ -10433,7 +10601,7 @@ impl WindowRenderer {
             }
         }
         for failure in &frame.math_failures {
-            if let Some((marker, _)) = self.math_failure_geometry(frame, failure) {
+            if let Some((marker, _)) = self.math_failure_geometry(self.seat, frame, failure) {
                 rects.push(self.pixel_rect_with_coverage(
                     marker[0],
                     marker[1],
@@ -10611,7 +10779,7 @@ impl WindowRenderer {
             if placement.selection_spans.is_empty() {
                 continue;
             }
-            let Some(geometry) = self.math_block_geometry(frame, placement) else {
+            let Some(geometry) = self.math_block_geometry(self.seat, frame, placement) else {
                 continue;
             };
             rects.extend(
@@ -10653,7 +10821,7 @@ impl WindowRenderer {
     fn math_overlay_rectangles(&self, frame: &ViewportFrame) -> Vec<RectInstance> {
         let mut rects = Vec::new();
         for placement in &frame.math_blocks {
-            let Some(geometry) = self.math_block_geometry(frame, placement) else {
+            let Some(geometry) = self.math_block_geometry(self.seat, frame, placement) else {
                 continue;
             };
             rects.extend(self.math_overflow_fade_rectangles(placement, &geometry));
@@ -15161,10 +15329,11 @@ fn math_quad_vertices(
 /// The x where a math block's raster (and its clip and hit rect) begins. Every consumer must use
 /// this one value: the quad vertices, the scissor and the hit test all key on it, and computing
 /// the indent in one place while the quad computes its own left is exactly how the indent clipped
-/// the raster's left edge (user report 2026-07-20). `rendered_indent` gives a tight-cropped
-/// formula the left bearing that text glyphs have; a source block already carries its column.
-fn math_block_left_px(metrics: CellMetrics, left_subpixels: i64, rendered_indent: bool) -> f32 {
-    let indent = if rendered_indent {
+/// the raster's left edge (user report 2026-07-20). `takes_the_indent` gives a band's tight-cropped
+/// formula the left bearing that text glyphs have ([`math_block_takes_the_left_indent`]); a source
+/// block already carries its column, and an inline composite stands where its own `$` stands.
+fn math_block_left_px(metrics: CellMetrics, left_subpixels: i64, takes_the_indent: bool) -> f32 {
+    let indent = if takes_the_indent {
         (MATH_LEFT_INDENT_LOGICAL_PX * metrics.scale_factor as f32).round()
     } else {
         0.0
@@ -15178,12 +15347,12 @@ fn math_horizontal_bounds(
     columns: NonZeroU32,
     left_subpixels: i64,
     scaled_width: f32,
-    rendered_indent: bool,
+    takes_the_indent: bool,
 ) -> Option<(f32, f32)> {
     let pane_left = metrics.padding_px;
     let pane_right =
         (pane_left + columns.get() as f32 * metrics.cell_width_px).min(surface_width as f32);
-    let block_left = math_block_left_px(metrics, left_subpixels, rendered_indent);
+    let block_left = math_block_left_px(metrics, left_subpixels, takes_the_indent);
     let visible_left = block_left.max(pane_left);
     let visible_right = (block_left + scaled_width).min(pane_right);
     (visible_right > visible_left).then_some((visible_left, visible_right))
@@ -16826,10 +16995,21 @@ mod tests {
             assert!(button_bottom <= bottom);
             assert_eq!(button_bottom - button_top, bottom - top);
         }
+        // A block taller than the control keeps the control whole, centred on the
+        // block's own midline. **The control is 19 and not 24 since the owner's
+        // ruling of 2026-09-15 ②** — the marks are the pane head's own button —
+        // so the size is read off [`MATH_TOOL_BUTTON_LOGICAL_PX`] here rather
+        // than written out a second time, which is what made this pair stale.
+        let (button_top, button_bottom) = math_toolbar_vertical_bounds(5.0, 35.0, 1.0);
         assert_eq!(
-            math_toolbar_vertical_bounds(5.0, 35.0, 1.0),
-            (8.0, 32.0),
-            "a taller block keeps the intended 24px control"
+            button_bottom - button_top,
+            MATH_TOOL_BUTTON_LOGICAL_PX,
+            "a taller block keeps the whole control"
+        );
+        assert_eq!(
+            (button_top + button_bottom) / 2.0,
+            (5.0 + 35.0) / 2.0,
+            "and stands it on the block's own midline"
         );
     }
 
@@ -16881,31 +17061,36 @@ mod tests {
         );
     }
 
-    /// PIN (owner's ruling 2026-09-14 ②/③): **the two marks stand beside the
-    /// band, in the band's own row, in a box no smaller than the one they
-    /// replace.**
+    /// PIN (owner's ruling 2026-09-15 ②): **the two marks stand *inside* the
+    /// block, at its right edge, on its midline.**
     ///
-    /// The mock-up is the authority on the placement (`.math` is a row holding
-    /// `.mbox` and `.math-tools`, 2000-2012) and on the two numbers (24px box,
-    /// 2px gap, 2117-2129). The ruling's own third clause is the last assertion:
-    /// a hit box may only ever grow.
+    /// This replaces `the_two_marks_stand_beside_the_band_and_their_boxes_only_grew`,
+    /// which pinned the opposite placement from the mock-up of 2026-09-14
+    /// (`.math` as a row holding `.mbox` and `.math-tools`, 2000-2012). The new
+    /// ruling saw that drawing and overturned it: the block keeps ground on
+    /// every side and the marks stand in the room it keeps on the right, so
+    /// nothing is laid over the formula and nothing hangs off the block into the
+    /// terminal's own surface.
     ///
-    /// MUTATIONS: swap the two boxes → ②; drop the `pane_right - total` clamp →
-    /// ④; put 22 back in `MATH_TOOL_BUTTON_LOGICAL_PX` → ⑤.
-    // A restyle may not shrink a control the reader can already hit (a
-    // compile-time pin: the number is a constant).
-    const _: () = assert!(
-        MATH_TOOL_BUTTON_LOGICAL_PX >= 22.0,
-        "a restyle may not shrink a control the reader can already hit"
-    );
-
+    /// MUTATIONS: swap the two boxes → ②; seat them from the ink instead of the
+    /// block → ①; hang them from the block's top → ③; drop the `block_right`
+    /// clamp → ④.
     #[test]
-    fn the_two_marks_stand_beside_the_band_and_their_boxes_only_grew() {
-        // ① Side by side, in the band's own row, at the band's right edge.
-        let (source, copy) = math_tool_boxes_px([200.0, 10.0, 70.0], [8.0, 600.0], 1.0);
+    fn the_two_marks_stand_inside_the_block_at_its_right_edge() {
+        // A block from 40 to 300 whose ink stops at 200 — a right reserve of 100
+        // against a pair that needs 40, so the pair is centred in the reserve.
+        let block = [40.0, 10.0, 300.0, 70.0];
+        let (source, copy) = math_tool_boxes_px(block, 200.0, 1.0);
+
+        // ① Inside the block, in the room right of the ink, centred in it.
+        assert!(
+            source[0] >= 200.0 && copy[2] <= block[2],
+            "the pair ({source:?}, {copy:?}) left the block's right reserve"
+        );
         assert_eq!(
-            source[0], 200.0,
-            "the first mark starts where the band ends"
+            source[0] - 200.0,
+            block[2] - copy[2],
+            "centred in the reserve"
         );
         assert_eq!(source[3] - source[1], MATH_TOOL_BUTTON_LOGICAL_PX);
         assert_eq!(copy[3] - copy[1], MATH_TOOL_BUTTON_LOGICAL_PX);
@@ -16914,24 +17099,56 @@ mod tests {
         // ② Order, and the gap between them.
         assert_eq!(copy[0] - source[2], MATH_TOOL_GAP_LOGICAL_PX);
 
-        // ③ Centred in the band rather than hung from its top.
-        assert_eq!((source[1] + source[3]) / 2.0, (10.0 + 70.0) / 2.0);
+        // ③ On the block's own midline, not hung from its top: the ruling's
+        //    "vertically centred on the block", read against the whole padded
+        //    band rather than against the raster inside it.
+        assert_eq!((source[1] + source[3]) / 2.0, (block[1] + block[3]) / 2.0);
 
-        // ④ Neither reaches past the pane, however far right the band ends.
-        let (_, clamped) = math_tool_boxes_px([2_000.0, 10.0, 70.0], [8.0, 600.0], 1.0);
+        // ④ A block the pane cut short has no reserve left; the pair is pushed
+        //    against its right edge and still never escapes it.
+        let (_, tight) = math_tool_boxes_px([40.0, 10.0, 220.0, 70.0], 210.0, 1.0);
+        assert_eq!(tight[2], 220.0, "flush with the block's right edge");
+        let (narrow_source, narrow_copy) = math_tool_boxes_px([40.0, 10.0, 60.0, 70.0], 60.0, 1.0);
+        assert_eq!(
+            narrow_source[0], 40.0,
+            "a block narrower than the pair keeps them inside its left edge"
+        );
+        assert!(narrow_copy[2] >= narrow_source[2]);
+
+        // ⑤ And it is logical pixels, so the boxes double with the display.
+        let (retina, _) = math_tool_boxes_px([80.0, 20.0, 600.0, 140.0], 400.0, 2.0);
+        assert_eq!(retina[3] - retina[1], MATH_TOOL_BUTTON_LOGICAL_PX * 2.0);
+    }
+
+    /// PIN (owner's ruling 2026-09-15 ①): **a band keeps whole cell columns of
+    /// ground around its ink, and the right one holds the two marks.**
+    ///
+    /// MUTATIONS: measure the inset in logical pixels → the first assertion at
+    /// a second cell width; forget the marks' own columns on the right → the
+    /// third; drop the pane clamp → the fourth.
+    #[test]
+    fn a_bands_ground_is_whole_cell_columns_of_room_and_the_right_one_holds_the_marks() {
+        let metrics = fade_metrics();
+        let cell = metrics.cell_width_px;
+        let (left, right) = math_block_ground_bounds(metrics, [200.0, 400.0], [8.0, 2_000.0]);
+        assert_eq!(left, 200.0 - cell, "one whole cell column left of the ink");
+        let reserve = right - 400.0;
+        assert_eq!(
+            reserve % cell,
+            0.0,
+            "the right inset is whole cell columns, not {reserve}"
+        );
         assert!(
-            clamped[2] <= 600.0,
-            "the pair ran to {}, past the pane's own edge",
-            clamped[2]
+            reserve >= cell + math_tool_cluster_width_px(metrics.scale_factor as f32),
+            "the right inset must hold the two marks and still leave the block's own column"
         );
 
-        // ⑤ And the box only ever grew: 24 against the 22 of the bordered chips
-        //    this replaced (owner's ruling ③ — "hit boxes stay at least the
-        //    current size").
-
-        // ⑥ And it is logical pixels, so the boxes double with the display.
-        let (retina, _) = math_tool_boxes_px([200.0, 20.0, 140.0], [16.0, 1_200.0], 2.0);
-        assert_eq!(retina[3] - retina[1], MATH_TOOL_BUTTON_LOGICAL_PX * 2.0);
+        // Clamped to the pane at both ends: a formula already filling its pane
+        // keeps the ground it can have rather than growing one it cannot.
+        let (clamped_left, clamped_right) =
+            math_block_ground_bounds(metrics, [8.0, 600.0], [8.0, 600.0]);
+        assert_eq!(clamped_left, 8.0);
+        assert_eq!(clamped_right, 600.0);
     }
 
     #[test]
@@ -18502,6 +18719,99 @@ mod tests {
             "the marks went to {:?} from {:?}",
             on_second.source,
             on_first.source
+        );
+    }
+
+    /// RED (audit 2026-09-15, RC-2): **a band's boxes are cut to the pane the
+    /// band is in, and to nothing else.**
+    ///
+    /// `WindowRenderer`'s own `seat` field names the **focused** seat outside a
+    /// compose, by design and by its own comment, and both `math_tool_boxes` and
+    /// `math_hit_test` used to read it. A window split unevenly therefore
+    /// clamped a band hovered in one pane against another pane's width and
+    /// height: in a narrower pane the two marks were placed — and hit-tested —
+    /// past its own right edge, and in a shorter one they were cut off.
+    ///
+    /// The assertion is that the answer is a **function of the seat handed in**:
+    /// one frame, one band, two panes, two answers. Red at `6a414963` because
+    /// there was no seat to hand in and the answer was the same both times —
+    /// whatever the focused pane happened to be.
+    ///
+    /// MUTATIONS: read `self.seat` in either accessor → the text pin below;
+    /// clamp the ground to the pane and the marks to something else → the last
+    /// pair, which says the marks are cut with the block they stand in.
+    #[test]
+    fn a_bands_boxes_are_cut_to_the_pane_it_is_in() {
+        let frame = seat_test_frame(0);
+        let hovered = &frame.math_blocks[0].anchor;
+        let roomy = SeatViewport::whole(400, 400);
+        let cramped = SeatViewport::whole(120, 30);
+        let in_roomy =
+            math_tool_boxes_for(fade_metrics(), roomy, &frame, hovered).expect("the band's pane");
+        let in_cramped = math_tool_boxes_for(fade_metrics(), cramped, &frame, hovered)
+            .expect("a pane small enough to cut the band still holds it");
+
+        // ① Two panes, two answers — which is the whole of the finding.
+        assert_ne!(in_roomy.block, in_cramped.block);
+
+        // ② And each is cut to its own pane, across and down.
+        assert!(
+            in_cramped.block[2] <= 120.0 && in_cramped.block[3] <= 30.0,
+            "{:?} escaped the pane it is in",
+            in_cramped.block
+        );
+        assert!(
+            in_roomy.block[2] > 120.0,
+            "the roomy pane's band is the one that was being clamped away: {:?}",
+            in_roomy.block
+        );
+
+        // ③ The marks are cut with the block they stand in, never separately.
+        assert_ne!(in_roomy.copy, in_cramped.copy);
+        for mark in [in_cramped.source, in_cramped.copy] {
+            assert!(
+                mark[2] <= in_cramped.block[2] && mark[3] <= in_cramped.block[3],
+                "{mark:?} left the block {:?}",
+                in_cramped.block
+            );
+        }
+    }
+
+    /// PIN (audit 2026-09-15, RC-2, acceptance 5): **neither accessor reads the
+    /// renderer's own seat.**
+    ///
+    /// The value test above cannot see the difference between a parameter that
+    /// is used and one that is shadowed by `self.seat` two lines down, and this
+    /// file is where that would be written. Read as text for the reason
+    /// `every_headless_device_in_a_test_is_taken_through_the_lock` is: a call
+    /// site that goes back to the field is green on its author's machine and
+    /// wrong in every split window.
+    #[test]
+    fn the_band_accessors_are_given_a_seat_and_never_take_one() {
+        let source = include_str!("lib.rs");
+        for opening in [
+            "pub fn math_tool_boxes(",
+            "pub fn math_hit_test(",
+            "fn math_failure_geometry(",
+        ] {
+            let block = block_beginning_with(source, opening);
+            assert!(!block.is_empty(), "{opening} is declared in this file");
+            assert!(
+                block.contains("seat: SeatViewport"),
+                "{opening} takes the band's own pane:\n{block}"
+            );
+            assert!(
+                !block.contains("self.seat"),
+                "{opening} reads the focused pane's rectangle instead of the one it was \
+                 handed:\n{block}"
+            );
+        }
+        // And the one that does the arithmetic takes it too, so nothing below
+        // these three can quietly reach for the field again.
+        let geometry = block_beginning_with(source, "fn math_block_geometry(");
+        assert!(
+            geometry.contains("seat: SeatViewport") && !geometry.contains("self.seat"),
+            "the block's own geometry is a function of the seat it is handed:\n{geometry}"
         );
     }
 
@@ -25057,6 +25367,7 @@ mod tests {
         placement.artifact.render_scale_milli = 1000;
         let geometry = MathBlockGeometry {
             block: [left, 0.0, right, 20.0],
+            ink: [left, 0.0, right, 20.0],
             clip: [left, 0.0, right, 20.0],
             eye: None,
             copy: None,
@@ -25184,6 +25495,7 @@ mod tests {
     fn wash_geometry(block: [f32; 4]) -> MathBlockGeometry {
         MathBlockGeometry {
             block,
+            ink: block,
             clip: block,
             eye: None,
             copy: None,

@@ -22,11 +22,38 @@ reader to `/releases` and name the assets as
 the angle brackets standing where a number used to. A link to
 `/releases/download/v<version>-preview/<asset>` was a second copy of the claim
 the tag and the manifest already make, it went stale the same way, and a stale
-one is worse than none because it works and hands somebody an old build.
-`/releases/latest` was never the way out either: it answers 404 on a repository
-whose releases are all pre-releases. So there is nothing to bump at
-release-prep time — check instead that no document has grown a versioned link
-back.
+one is worse than none because it works and hands somebody an old build. So
+there is nothing to bump at release-prep time — check instead that no document
+has grown a versioned link back.
+
+**The link that does not go stale is `/releases/latest/download/<asset>`, and
+from the next release every page carries the two assets it needs.** GitHub
+resolves that address by asset *name*, so it can only find a name that is the
+same in every release: `package.ps1` writes `folio-windows-x64.zip` beside
+`folio-<version>-windows-x64.zip`, and `dmg.sh` writes `Folio-macos-arm64.dmg`
+beside the image the rename gives the long name to. Each pair is one set of
+bytes copied by the packaging step itself and covered by the same checksum file,
+so the two names on a page cannot come apart. A download link written anywhere
+outside this repository takes this form:
+
+```
+https://github.com/lulu-loopp/folio-terminal/releases/latest/download/folio-windows-x64.zip
+https://github.com/lulu-loopp/folio-terminal/releases/latest/download/Folio-macos-arm64.dmg
+```
+
+**`/releases/latest` is the release GitHub calls latest, which is never a
+pre-release.** Every release up to and including v0.4.0-preview was published
+with `--prerelease`, so on that repository the address answered 404. **From
+v0.4.1 on, a release is published without `--prerelease`** (owner ruling,
+2026-09-15): the tag keeps its `-preview` suffix and the release note still
+says preview, but GitHub marks the release *Latest*, the two links above
+answer, and the repository's front page shows the newest release. The
+`-preview` suffix itself stays until 1.0. `README.md` and the two
+`docs/install` documents keep sending readers to `/releases`, which always
+answered. The product page does not depend on the flag either way: its script
+asks the API for the list of releases and takes the newest, which is the same
+endpoint the update check reads — what the stable names buy there is a download
+address it does not have to rewrite each time.
 
 ## The workflow
 
@@ -75,7 +102,7 @@ run by hand exactly as it runs there:
 | script | what it produces |
 | --- | --- |
 | `scripts/release/sbom.ps1` | the bill of materials, written into the output directory |
-| `scripts/release/package.ps1` | `folio-<version>-windows-x64.zip`, with `folio.msix` and the executable both in it, and `SHA256SUMS.txt` over everything beside it — **after emptying the output directory**, apart from that bill of materials |
+| `scripts/release/package.ps1` | `folio-<version>-windows-x64.zip`, with `folio.msix` and the executable both in it, a copy of it called `folio-windows-x64.zip`, and `SHA256SUMS.txt` over everything beside it — **after emptying the output directory**, apart from that bill of materials |
 | `scripts/release/smoke.ps1` | starts the executable that was built and checks the seven things a green build can still be broken about, and refuses an output directory holding a file from another release |
 
 ## What gets published
@@ -109,10 +136,11 @@ then left where it is.
 | asset | what it is |
 | --- | --- |
 | `folio-<version>-windows-x64.zip` | the nine files, in one folder |
-| `SHA256SUMS.txt` | one line for each of the other two, in the format `sha256sum -c` reads |
+| `folio-windows-x64.zip` | the same bytes, under the name `/releases/latest/download/` resolves |
+| `SHA256SUMS.txt` | one line for each of the other three, in the format `sha256sum -c` reads |
 | `folio-<version>.cdx.json` | the CycloneDX bill of materials `sbom.ps1` writes |
 
-**Three, and `folio.msix` is not one of them.** It was an asset of its own up to
+**Four, and `folio.msix` is not one of them.** It was an asset of its own up to
 0.2.2, beside the copy of itself in the zip, and what that bought was people
 downloading it on its own: a file called `folio.msix` on a release page reads as
 an installer, and a package registered against the folder it was downloaded into
@@ -126,11 +154,17 @@ available to recipients and that they be told how to get it, which
 `THIRD-PARTY-NOTICES.md` does by naming the exact version, the crates.io address
 it is served from, and the SHA-256 `Cargo.lock` records for those bytes.
 
-`SHA256SUMS.txt` cannot carry its own hash, so it is two lines over the other
-two files.
+`SHA256SUMS.txt` cannot carry its own hash, so it is three lines over the other
+three files. **Two of those three lines carry the same hash**, because the
+archive and the copy of it are the same bytes under two names: a reader who
+fetched either can check what they have against the line that names it. A
+`sha256sum -c` run in a folder holding one of them reports the rest as missing —
+the bill of materials always was one of those — and says `OK` for the file that
+is there.
 
-Two more assets come from the Mac and are fetched into the same directory —
-`Folio-<version>-macos-arm64.dmg` and the `SHA256SUMS-macos.txt` beside it; see
+Three more assets come from the Mac and are fetched into the same directory —
+`Folio-<version>-macos-arm64.dmg`, the copy of it called
+`Folio-macos-arm64.dmg`, and the `SHA256SUMS-macos.txt` beside them; see
 **macOS** below. **Both checksum files carry bare file names**, the hash, two
 spaces and the name of the file, so that `sha256sum -c` or `shasum -c` works in
 the folder a reader downloaded into. That is what `package.ps1` writes and what
@@ -412,17 +446,19 @@ written into the steps they belong to:
    `notarize.sh` after it staples, and that assessment is the one that must
    pass; `sign.sh`'s own is informational and never fatal. `bundle.sh` refuses a
    binary that is not this version at this commit, and a bundle missing any of
-   the four documents. `checksums.sh` writes `SHA256SUMS-macos.txt` with **bare
-   file names**.
+   the four documents. `dmg.sh` writes `Folio-macos-arm64.dmg` beside the image,
+   and the rename moves both. `checksums.sh` writes `SHA256SUMS-macos.txt` with
+   **bare file names**.
 2. **The Windows lane** — `sbom.ps1`, then `package.ps1 -Sign`, which
    **empties `target/release-package`** before it writes, then `smoke.ps1`.
-3. **Fetch the two macOS assets** — `Folio-<version>-macos-arm64.dmg` and
-   `SHA256SUMS-macos.txt` — from the Mac into `target/release-package`. After
-   2, never before it: step 2 empties that directory.
-4. **Look at the directory.** Five files — the three from the Windows lane and
-   the two from the Mac — and every version in a name is this release's. Re-run
-   `smoke.ps1` if anything was moved in or out since it last ran: it refuses a
-   directory carrying another release's version.
+3. **Fetch the three macOS assets** — `Folio-<version>-macos-arm64.dmg`,
+   `Folio-macos-arm64.dmg` and `SHA256SUMS-macos.txt` — from the Mac into
+   `target/release-package`. After 2, never before it: step 2 empties that
+   directory.
+4. **Look at the directory.** Seven files — the four from the Windows lane and
+   the three from the Mac — and every version in a name is this release's.
+   Re-run `smoke.ps1` if anything was moved in or out since it last ran: it
+   refuses a directory carrying another release's version.
 5. **`gh release create`**, below, over that directory. The body is **copied
    from the file in `docs/plans/release/`**, with its first line — the banner
    saying what the file is — dropped; see **Release note shape**.
@@ -439,7 +475,7 @@ $body = Join-Path ([IO.Path]::GetTempPath()) 'folio-release-body.md'
 
 $assets = @(Get-ChildItem target/release-package -File | ForEach-Object { $_.FullName })
 $arguments = @('release', 'create', 'v0.4.0-preview') + $assets + @(
-    '--draft', '--prerelease',
+    '--draft',
     '--title', 'Folio 0.4.0',
     '--notes-file', $body)
 & gh @arguments
@@ -448,8 +484,9 @@ $arguments = @('release', 'create', 'v0.4.0-preview') + $assets + @(
 The list is built and splatted rather than written on one line: `gh` is a native
 command, and an array interpolated into one takes its own view of quoting the day
 a path has a space in it. `--draft` because a person reads the page and presses
-the button; `--prerelease` because every release so far has been one, and because
-the update check reads the list endpoint for exactly that reason.
+the button. No `--prerelease`: from v0.4.1 the release is the one GitHub calls
+latest, so `/releases/latest` answers (see **The tag** above); the update check
+reads the list endpoint and is unaffected either way.
 
 **The assets are whatever is in that directory, and the directory is the signed
 build.** Nothing is typed out, so nothing can be left out; nothing is fetched
@@ -484,7 +521,11 @@ The shape, in order:
 
 1. **`# Folio <version>`**, and nothing above it.
 2. **The download line** — the zip, `(Windows 10 1809+ / 11, 64-bit)`, a middle
-   dot, the dmg, `(macOS 14+, Apple silicon)`. Then the Chinese download line,
+   dot, the dmg, `(macOS 14+, Apple silicon)`. **Both name this release's own
+   assets at this release's tag, and not `/releases/latest/download/`**: the page
+   is about one build, and a fixed-name link on it would hand a reader of an
+   older page whatever shipped since. The fixed names are for pages that are
+   about Folio rather than about a version. Then the Chinese download line,
    and a link to the Chinese note. Both Chinese lines are written by the
    translation lane; in `TEMPLATE.md` they are empty.
 3. **`## Highlights`** — three to five bullets, one sentence each, about what a
@@ -662,7 +703,7 @@ Four values, and three of them are the version:
 | --- | --- | --- |
 | `PackageVersion` | all three | the workspace version, without the tag's `-preview` |
 | `RelativeFilePath` | installer | `folio-<version>\folio.exe` |
-| `InstallerUrl` | installer | the release page's zip asset |
+| `InstallerUrl` | installer | the release page's zip asset, at its versioned name under this release's tag — **never** `/releases/latest/download/`, which would make the manifest for one version hand out another |
 | `InstallerSha256` | installer | the `folio-<version>-windows-x64.zip` line of `SHA256SUMS.txt`, in upper case |
 | `ReleaseDate` | installer | the day the release page was published |
 | `PrivacyUrl`, `LicenseUrl`, `ReleaseNotesUrl` | locale | the same URLs at the new tag |
@@ -772,7 +813,7 @@ order of this list is the order they run in.
 | `bundle.sh --out <dir>` | Assembles `Folio.app` from `target/release/folio` — the rendered plist, the icon built from `assets/app-icon/folio.ico`, `PkgInfo`, the two licences, the third-party notices and the trademark notice — asks the executable whether it is this version at this commit, reads the tree back and refuses a bundle that is not exactly those eight files, and runs `dsymutil` into `Folio.app.dSYM` **beside** the bundle, never inside it. |
 | `sign.sh --app <bundle> --identity <id>` | Signs with the hardened runtime, a secure timestamp and `packaging/macos/entitlements.plist`, inside out, then reads the signature back. Its Gatekeeper verdict is informational and never fatal, and `--no-spctl` skips it, which is what the recipes and the workflow pass. `--identity` defaults to `-`, which is ad-hoc: that is how the script is exercised on a machine with no certificate. |
 | `notarize.sh --path <bundle or image>` | Submits, waits, keeps the notarization log beside the artifact, staples the ticket to it, and asks Gatekeeper the one question that has to be answered `accepted`, `source=Notarized Developer ID`. |
-| `dmg.sh --app <bundle> --out <dir> --identity <id>` | Stages the application beside a link to `/Applications`, writes the compressed read-only image, and signs, notarizes and staples that too. |
+| `dmg.sh --app <bundle> --out <dir> --identity <id>` | Stages the application beside a link to `/Applications`, writes the compressed read-only image, and signs, notarizes and staples that too. Then copies the stapled image to `Folio-macos-arm64.dmg` beside it — the same bytes, under the name `/releases/latest/download/` resolves — and hashes the two against each other. |
 | `checksums.sh --dir <dir>` | Hashes every file in the directory the release page is made of, from inside it, into `SHA256SUMS-macos.txt`, and reads the file back with `shasum -c`. |
 | `cask.sh <version> <sha256>` | Prints the Homebrew cask for this release, so the tap is a copy rather than two fields somebody retypes. |
 
@@ -833,6 +874,7 @@ scripts/release/macos/dmg.sh    --app target/macos/Folio.app --out target/macos 
 
 mkdir -p target/macos-package
 mv target/macos/Folio.dmg target/macos-package/Folio-<version>-macos-arm64.dmg
+mv target/macos/Folio-macos-arm64.dmg target/macos-package/Folio-macos-arm64.dmg
 scripts/release/macos/checksums.sh --dir target/macos-package
 ```
 
@@ -888,6 +930,16 @@ person making the page. Both halves of the published name earn their place —
 the version, because the tag and the asset are one claim, and the architecture,
 because this preview is arm64 and an Intel Mac must be able to tell from the
 name that this is not for it.
+
+**A copy of it is published as `Folio-macos-arm64.dmg`, and `dmg.sh` makes that
+one.** It is written after the ticket is stapled, out of the stapled image, and
+hashed against it: a copy taken any earlier would be the file most people click
+and the one Gatekeeper turns away offline. The rename moves it across under the
+name it already has, because that name is the whole point —
+`/releases/latest/download/` resolves an asset by name, and a name with a
+version in it cannot be linked to from outside this repository without going
+stale. `checksums.sh` hashes the directory, so both names land in
+`SHA256SUMS-macos.txt` under one hash.
 
 **Never sign anything again after it has been stapled.** The ticket lives inside
 the signed artifact and a second `codesign` throws it away, so
@@ -1103,7 +1155,9 @@ is the order of this list:
   beside a link to `/Applications`, writes a compressed read-only image with
   `hdiutil create`, signs it, notarizes it, staples it, and ends with
   `spctl -a -vvv -t open --context context:primary-signature`, which is the
-  assessment a downloaded image actually gets.
+  assessment a downloaded image actually gets. It leaves two files: `Folio.dmg`,
+  which the rename gives the published versioned name to, and
+  `Folio-macos-arm64.dmg`, the same bytes under the name that never changes.
 
 Both of the last two take `--dry-run`, which prints every command with the real
 paths filled in and touches nothing.

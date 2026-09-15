@@ -47,7 +47,8 @@
 | asset | what it is |
 | --- | --- |
 | `folio-<version>-windows-x64.zip` | the nine files that belong together, in one folder — `sha256:<hash>` |
-| `SHA256SUMS.txt` | the hash of the archive and of the bill of materials, in the format `sha256sum -c` reads |
+| `folio-windows-x64.zip` | the same archive under a name that does not change from one release to the next — the same `sha256` |
+| `SHA256SUMS.txt` | the hash of the archive under each of its two names and of the bill of materials, in the format `sha256sum -c` reads |
 | `folio-<version>.cdx.json` | the CycloneDX bill of materials for what is in the build |
 
 Unpack the zip wherever you keep programs and run `folio.exe`. There is no
@@ -78,7 +79,8 @@ sha256sum -c SHA256SUMS.txt
 | asset | what it is |
 | --- | --- |
 | `Folio-<version>-macos-arm64.dmg` | the application, signed and notarized — `sha256:<hash>` |
-| `SHA256SUMS-macos.txt` | the hash of the disk image, in the format `shasum -c` reads |
+| `Folio-macos-arm64.dmg` | the same image under a name that does not change from one release to the next — the same `sha256` |
+| `SHA256SUMS-macos.txt` | the hash of the image under each of its two names, in the format `shasum -c` reads |
 
 Open the image and drag **Folio** to Applications. Needs an **Apple silicon Mac
 running macOS 14 or newer**; there is no Intel build in this preview. Or, with

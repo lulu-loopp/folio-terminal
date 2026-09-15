@@ -415,6 +415,21 @@ enum AppEvent {
     /// `explorer_menu::state()` and `explorer_menu::take_outcome()` by the time
     /// this is sent, and this says only that something did.
     ExplorerPackageChanged,
+    /// **The machine listed its monospaced families** (GitHub issue #3).
+    ///
+    /// The tenth of the same family and the newest, and it is owed a wake for
+    /// [`Self::CopilotProbed`]'s reason with one more on top: the walk was
+    /// started by the press that opened the dialog, so the reader is looking at
+    /// a picker that is holding one row — the family in force — and waiting for
+    /// the rest. Nothing else is going to produce the frame that fills it in,
+    /// because a modal is up.
+    ///
+    /// Carries nothing, on `UpdateChecked`'s footing: the answer is in
+    /// `settings`' own mailbox by the time this is sent, and the handler is the
+    /// **one place** allowed to move it onto the screen — see
+    /// `settings::adopt_scanned_families` for why it has to be between two
+    /// frames rather than on the worker.
+    FontsScanned,
     /// **Something spoke into this process's attention endpoint** (`attention_wire`).
     ///
     /// The same family again and the same reason for a wake of its own, in its strongest form: the
@@ -584,6 +599,7 @@ impl AppEvent {
             | Self::CopilotProbed
             | Self::UpdateChecked
             | Self::ExplorerPackageChanged
+            | Self::FontsScanned
             | Self::SchemesChanged
             | Self::StorageChanged
             | Self::SystemPreferencesChanged
@@ -33782,15 +33798,14 @@ fn apply_stored_terminal_font(
     // never opens the system font collection at startup, which is the cost
     // `bt_render::terminal_font_system` refuses to pay and this must not
     // reintroduce.
-    let files = if family.is_empty() {
-        Vec::new()
-    } else {
-        settings::monospace_families()
-            .iter()
-            .find(|candidate| candidate.name.eq_ignore_ascii_case(family))
-            .map(|candidate| candidate.files.clone())
-            .unwrap_or_default()
-    };
+    //
+    // **The one door in this process that is allowed to wait for the machine**,
+    // and it is this one because there is no frame yet to put a placeholder in:
+    // the face `settings.json` names has to be loaded before the first grid is
+    // measured. Every other reader of the family list — the whole of the
+    // Settings dialog — goes through `settings::monospace_families`, which
+    // cannot walk anything. See `settings::monospace_family_files`.
+    let files = settings::monospace_family_files(family);
     // **Clamped here and nowhere else** (review row R4-2). This is the one place
     // a stored size crosses into the renderer, and a `0` past it is an assertion
     // inside the text layer before there is a window to report it on. See
@@ -36694,6 +36709,18 @@ impl Runtime<'_> {
                 let _ = proxy.send_event(AppEvent::ExplorerPackageChanged);
             });
         }
+        // **And the sixth's** (GitHub issue #3), which is the only one of them
+        // that is started by a *press* rather than by startup or by a pane: the
+        // gear asks the machine for its monospaced families, and the picker is
+        // holding one row until the answer lands. Owed a wake for the PSReadLine
+        // probe's reason in its strongest form — a modal is up, so there is no
+        // output, no hover and no keystroke coming.
+        {
+            let proxy = proxy.clone();
+            settings::install_font_scan_wake(move || {
+                let _ = proxy.send_event(AppEvent::FontsScanned);
+            });
+        }
         explorer_menu::begin_probe();
         update::load(&persist::storage_dir());
         update::begin(persist::storage_dir(), settings_store.loaded().update_check);
@@ -38464,6 +38491,15 @@ impl Runtime<'_> {
         if index >= self.window.tabs.len() || (!force && index == self.window.active_tab) {
             return Ok(());
         }
+        // **A formula's hover goes with the tab it was in** (audit 2026-09-15,
+        // RB-3), and **before** the assignment below: `set_hovered_math` sweeps
+        // the *active* tab's leaves, so a clear run after this line would sweep
+        // the tab arriving and leave the block in the tab departing still lit —
+        // it would be wearing its ground on the day the reader came back to it.
+        //
+        // Above `hover_pane = None` a dozen lines down for the same reason it is
+        // above the assignment: the sweep asks which pane the pointer is in.
+        self.leave_hovered_math(Instant::now())?;
         self.window.active_tab = index;
         // Looking at a tab is what answers every claim it was making, so the
         // dot goes out here — the unread mark, the bell and the failure all at
@@ -43967,6 +44003,13 @@ impl Runtime<'_> {
         if !self.window.settings.is_open() {
             return None;
         }
+        // **The dialog's own lane** (GitHub issue #3 — see
+        // [`hang_watch::Station::Settings`]). Every road that draws, hovers or
+        // hit-tests this page comes through here, and until this slice the
+        // milliseconds it spends were charged to whichever of `window_event` and
+        // `publish_frame_inner` happened to enclose it — two true labels, neither
+        // of which named the dialog to the reader of a slow-hold line.
+        let leaving_station = hang_watch::enter(hang_watch::Station::Settings);
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let scale = self.window.renderer.metrics().scale_factor as f32;
         // Read fresh every time rather than cached: the Sidebar row appears and
@@ -44017,7 +44060,7 @@ impl Runtime<'_> {
         // it is told.
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
-        settings::layout_for_menus(
+        let laid = settings::layout_for_menus(
             width as f32,
             height as f32,
             scale,
@@ -44028,7 +44071,9 @@ impl Runtime<'_> {
             scroll,
             menu_scroll,
             &mut measure,
-        )
+        );
+        hang_watch::at(leaving_station);
+        laid
     }
 
     /// The dialog's contents this frame, for the callers that need them beside a
@@ -46571,12 +46616,20 @@ impl Runtime<'_> {
         // owes the reader: the gesture it starts — leave, drop a file on a
         // Windows page, come back — crosses exactly this call.
         //
-        // Marked before the content is read, so the very frame that opens the
-        // dialog is already measuring the new list; and marked whether the press
-        // opens or closes, because a mark costs nothing and asking which way
-        // this press went would be a second reading of `is_open` between two
-        // frames that disagree about it.
-        settings::rescan_monospace_families();
+        // **Asked for, not paid for** (GitHub issue #3). Until 2026-09-15 this
+        // was a mark, and the first reader after it walked the machine's whole
+        // font collection on this thread — and the first reader is the very next
+        // statement, because `settings_values` asks which family is ticked. That
+        // is the several seconds an outside user reported as the window freezing
+        // when the gear is clicked. The walk is now a worker's, the seed this
+        // hands it is the family in force so no picker is ever drawn blank, and
+        // the answer arrives as `AppEvent::FontsScanned`.
+        //
+        // Started whether the press opens or closes, because starting costs
+        // nothing that is not already coalesced and asking which way this press
+        // went would be a second reading of `is_open` between two frames that
+        // disagree about it.
+        settings::begin_monospace_scan(&self.app.settings_store.loaded().terminal_font_family);
         let (rows, shortcuts, profile_lines, scheme_files, values) = self.settings_content();
         self.window.settings.toggle(self.settings_dialog(
             &rows,
@@ -46834,6 +46887,33 @@ impl Runtime<'_> {
             settings::SettingsTarget::MenuItemDelete(row, index) => {
                 self.delete_scheme_at(row, index)?;
             }
+            // **The About page's three doors** (GitHub issue #3). One arm and
+            // not three, because the destination is the row's own answer — see
+            // `settings::SettingsRow::link_destination`, where a row added
+            // tomorrow says where it goes and this router does not have to be
+            // told.
+            //
+            // **Two doors and not one** (owner ruling 2026-09-15). An address
+            // goes through the hand-off every other address in this window
+            // leaves through, which is what keeps one policy about what a
+            // browser is handed. A file goes through `open_local_path`, which is
+            // this window's one door out to the machine that takes a path and
+            // the one that will not start a program: the licences row opens the
+            // copy that shipped with this build where there is one, because
+            // those are the notices this binary was actually linked against.
+            settings::SettingsTarget::Link(row) => match row.link_destination() {
+                Some(settings::LinkDestination::Address(url)) => {
+                    self.hand_url_to_the_browser(url)?;
+                }
+                // `open_local_path` reports its own failure the way the files
+                // column's rows do — a window that stopped working because a
+                // text editor would not start is a worse answer than a row that
+                // quietly did nothing.
+                Some(settings::LinkDestination::File(path)) => {
+                    self.open_local_path(path);
+                }
+                None => {}
+            },
             _ => {}
         }
         // Tab layout is the one choice that changes which rows exist, and the
@@ -47062,7 +47142,18 @@ impl Runtime<'_> {
             | Row::ProfileArgs
             | Row::ProfileEnv
             | Row::ProfileHyperlink
-            | Row::ProfileIntegration => {}
+            | Row::ProfileIntegration
+            // And the five that hold no value at all (T-SETTINGS-ABOUT). The
+            // About page has no Advanced group to be handed out of, and that is
+            // the smaller half: what its rows say — which build this is, which
+            // machine it was made for, and three addresses — is not a
+            // preference, so there is no default for `Reset to defaults` to put
+            // back. Named rather than swept into a `_`, on this arm's own rule.
+            | Row::AboutVersion
+            | Row::AboutPlatform
+            | Row::AboutReleaseNotes
+            | Row::AboutIssues
+            | Row::AboutLicences => {}
         }
         Ok(())
     }
@@ -48167,7 +48258,14 @@ impl Runtime<'_> {
             | settings::SettingsTarget::ProfileDown(_)
             | settings::SettingsTarget::MenuAction(_)
             | settings::SettingsTarget::MenuItemEdit(..)
-            | settings::SettingsTarget::MenuItemDelete(..)) => {
+            | settings::SettingsTarget::MenuItemDelete(..)
+            // The About page's three doors, on that rule exactly
+            // (T-SETTINGS-ABOUT): the pointer and `Enter` open the same address
+            // or the same file, because both arrive at
+            // `apply_settings_choice`'s `Link` arm and neither carries a body of
+            // its own. No `close_menu` beside it, unlike the run below — the
+            // page this target can be drawn on holds no picker to close.
+            | settings::SettingsTarget::Link(_)) => {
                 self.apply_settings_choice(target)?;
             }
             // A press on the dialog's own body, or inside the open menu but on
@@ -50563,8 +50661,11 @@ impl Runtime<'_> {
     /// **The dialog stays open**, unlike the two scheme verbs beside it. What
     /// this opens is another program's window, not a document of ours, and a
     /// reader who installs a face is coming straight back to this picker to
-    /// choose it. `rescan_monospace_families` runs at the next open, so the
-    /// round trip is: press, install, close, reopen, choose.
+    /// choose it. `settings::begin_monospace_scan` runs at the next open, so the
+    /// round trip is: press, install, close, reopen, choose — and since the walk
+    /// it starts is a worker's, the reopen costs nothing and the new family
+    /// appears in the list a moment later, on the frame `AppEvent::FontsScanned`
+    /// asks for.
     ///
     /// A refusal is a card and not a silence, because the reader is looking at
     /// this window and the answer arrived somewhere else: nothing appearing at
@@ -53258,6 +53359,12 @@ impl Runtime<'_> {
         if closing_this_pane_closes_the_tab(self.seats.pane_count()) {
             return self.close_tab(self.window.active_tab);
         }
+        // **And the hovered formula goes with the pane** (audit 2026-09-15,
+        // RB-3). Placed here on purpose: both gates have passed, so the close is
+        // certain, and nothing has moved yet — the sweep can still reach the
+        // session that is about to be removed, and the frame this publishes is
+        // struck against a layout that is still the one on the glass.
+        self.leave_hovered_math(Instant::now())?;
         let metrics = self.seat_metrics();
         if !self.seats.close_seat(&metrics, seat) {
             return Ok(());
@@ -53361,7 +53468,7 @@ impl Runtime<'_> {
             // window by construction. The loop spends this at its own door — see
             // [`FolioApp::settle_quit`].
             shortcuts::Action::Quit => {
-                self.app.quit_requested = true;
+                self.app.ask_to_quit();
                 Ok(())
             }
             // I103's chain lives inside `close_pane`: the last pane of a tab
@@ -53745,7 +53852,19 @@ impl Runtime<'_> {
     /// position to a seat and then does exactly this, and the attention queue's
     /// jump names its seat outright. Two doors, one room — a second spelling of
     /// "focus this pane" is a second place for the frame slot to be forgotten.
+    /// **The keyboard door, so a formula's hover ends here too** (audit
+    /// 2026-09-15, RB-3).
+    ///
+    /// Here and deliberately **not** in [`Self::settle_focus_on`], which the two
+    /// doors share. The other one is [`Self::focus_pane_at`], and that is a
+    /// *press*: the press that focuses an unfocused pane is very often the press
+    /// that operates the mark in it, and a clear on that road would take the
+    /// marks off the glass — and the shell's own `toolbar_visible` with them —
+    /// between the pointer landing and `math_hit` being asked. This door is the
+    /// one nothing about the pointer reaches: a pane chord, or the attention
+    /// queue jumping to a seat.
     fn focus_seat(&mut self, seat: SeatId) -> Result<()> {
+        self.leave_hovered_math(Instant::now())?;
         self.take_keyboard_into(seat);
         self.settle_focus_on(seat)
     }
@@ -83889,11 +84008,25 @@ impl Runtime<'_> {
         Some(live_viewport_mouse_hit(frame, hit))
     }
 
+    /// **The band under the pointer, cut to the pointer's own pane** (audit
+    /// 2026-09-15, RC-2).
+    ///
+    /// The seat comes back from [`Self::pane_hit_context`] and is handed on
+    /// rather than dropped: the renderer clamps a band's box against a
+    /// `SeatViewport`, and the one it used to read off itself names the
+    /// **focused** pane outside a compose. In an unfocused pane narrower than
+    /// the focused one the two marks were hit-tested past that pane's own right
+    /// edge — the press missed the mark you could see. The body and not the
+    /// seat, for [`Self::pane_hit_context`]'s own reason: `position` has already
+    /// been measured from the body's corner, and the boxes must be cut to the
+    /// same rectangle they are measured in.
     fn math_hit(&self) -> Option<MathHit> {
-        let (_, position, frame) = self.pane_hit_context()?;
+        let (seat, position, frame) = self.pane_hit_context()?;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let body = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)?;
         self.window
             .renderer
-            .math_hit_test(frame, position.x, position.y)
+            .math_hit_test(body, frame, position.x, position.y)
     }
 
     fn hyperlink_hit(&self, hit: bt_render::GridHit) -> Option<HyperlinkHit> {
@@ -85022,14 +85155,31 @@ impl Runtime<'_> {
     /// looking for the pointer's own pane would have vanished a beat before the
     /// floor they stand beside. The pointer still decides which mark is *lit*,
     /// which is the only question it is the authority on.
+    ///
+    /// **The pane's own viewport goes in, and the same one moves the answer
+    /// out** (audit 2026-09-15, RC-2). The renderer cuts a band's boxes to the
+    /// `SeatViewport` it is handed; reading that off the renderer answered with
+    /// the *focused* pane's width and height, so a band hovered in a narrower or
+    /// shorter pane had its marks clamped against somebody else's rectangle and
+    /// then translated by its own. One `body`, resolved before the boxes are
+    /// asked for and spent on both, is what makes that pair impossible — and it
+    /// is the same value [`Self::math_hit`] hands the hit test, so drawing and
+    /// pressing cannot disagree either.
+    ///
+    /// A seat the solver is not showing as a pane is skipped rather than ending
+    /// the search: a folded seat is not the pane the band is in, and the band's
+    /// own pane may be the next one in the map.
     fn math_tool_placement(&self) -> Option<bt_render::MathToolBoxes> {
         let hovered = self.window.math_hover_anchor.as_ref()?;
         let scale = self.window.renderer.metrics().scale_factor as f32;
-        let (seat, mut boxes) = self.sessions.iter().find_map(|(seat, leaf)| {
+        let (body, mut boxes) = self.sessions.iter().find_map(|(seat, leaf)| {
             let frame = leaf.last_presented_frame.as_ref()?;
-            Some((*seat, self.window.renderer.math_tool_boxes(frame, hovered)?))
+            let body = seats::pane_body_viewport(&self.seats, &self.seat_layout, *seat, scale)?;
+            Some((
+                body,
+                self.window.renderer.math_tool_boxes(body, frame, hovered)?,
+            ))
         })?;
-        let body = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)?;
         let (dx, dy) = (body.x as f32, body.y as f32);
         for rect in [&mut boxes.block, &mut boxes.source, &mut boxes.copy] {
             *rect = [rect[0] + dx, rect[1] + dy, rect[2] + dx, rect[3] + dy];
@@ -85087,9 +85237,22 @@ impl Runtime<'_> {
     /// on one of the marks — starts no clock of its own and would otherwise wait
     /// for the band to be left and entered again (owner's report 2026-09-14
     /// evening).
+    /// **And the copy tick comes down here too** (audit 2026-09-15, RB-1).
+    ///
+    /// [`WindowRuntime::math_copied`] had a writer and no reader that ever
+    /// cleared it, so from [`FOOT_REVEAL_FEEDBACK`] after a copy the window's
+    /// turn returned a deadline permanently in the past, `ControlFlow::WaitUntil`
+    /// took it, and the loop span at one core for the life of the window — the
+    /// exact failure `Runtime::about_to_wait`'s empty-registry branch names in
+    /// its own comment. This is the reader: the acknowledgement is retired on the
+    /// turn its window runs out, the overlay is rebuilt once so the tick becomes
+    /// the pair of sheets again, and `math_copy_window` then answers `None` for
+    /// it for ever after. **Both halves are needed**: filtering the deadline
+    /// alone would leave the tick drawn until something else repainted the band.
     fn advance_math_tools_if_due(&mut self, now: Instant) -> Result<()> {
+        let spent = retire_spent_math_copy(&mut self.window.math_copied, now);
         let moved = self.sync_math_tools(now);
-        if (moved || self.math_tools_owe_frames(now)) && self.refresh_overlay() {
+        if (moved || spent || self.math_tools_owe_frames(now)) && self.refresh_overlay() {
             self.present_chrome_change()?;
         }
         Ok(())
@@ -85100,10 +85263,17 @@ impl Runtime<'_> {
     /// Keyed on the anchor as well as the clock: a tick left standing on the
     /// next formula the pointer walked onto would be this window confirming
     /// something about a block nobody copied.
+    ///
+    /// The clock half is [`math_copy_window`]'s and not a second reading of the
+    /// same instant (RB-1): the drawing, the retirement and the deadline are
+    /// three consumers of one answer, and three copies of `at +
+    /// FOOT_REVEAL_FEEDBACK` is how the field came to be drawn after it had
+    /// stopped being owed.
     fn math_copy_is_fresh(&self, anchor: &MathBlockAnchor, now: Instant) -> bool {
-        self.window.math_copied.as_ref().is_some_and(|(said, at)| {
-            said == anchor && now.saturating_duration_since(*at) < FOOT_REVEAL_FEEDBACK
-        })
+        self.window
+            .math_copied
+            .as_ref()
+            .is_some_and(|(said, at)| said == anchor && math_copy_window(Some(at), now).is_some())
     }
 
     /// **The band's two marks, wherever they have got to**, as one overlay
@@ -85185,20 +85355,55 @@ impl Runtime<'_> {
         {
             return Ok(());
         }
+        self.leave_hovered_math(now)
+    }
+
+    /// **The band under the pointer stops being under the pointer** — the one
+    /// door that ends a formula's hover, whatever ended it.
+    ///
+    /// [`Self::clear_math_hover_if_due`]'s body since the audit of 2026-09-15
+    /// (RB-3), because the grace running out was not the only way this fact can
+    /// stop being true and it was the only door that said so. A hover is a fact
+    /// about **a session**: the anchor names a block in one shell's transcript,
+    /// `math_tool_placement` looks for it in the active tab's leaves, and
+    /// `sync_math_tools`' last arm deliberately *keeps* the marks where they are
+    /// when no picture knows the band. Switch tabs by keyboard and all three
+    /// hold: the anchor is a block in a transcript nobody can see, no frame in
+    /// the new tab knows it, and the two marks therefore stood on the glass over
+    /// the new tab's content until the pointer happened to move. Now every door
+    /// that takes that session off the screen comes through here.
+    ///
+    /// **The marks leave with the band, and they leave over the ninety
+    /// milliseconds they arrived on** (owner's report 2026-09-14 evening).
+    ///
+    /// The 500ms the pointer's own door spends first is the grace — the
+    /// mock-up's own `transition-delay: .5s` on leaving, which forgives a
+    /// pointer clipping the corner of a mark on its way to it — and it is
+    /// untouched, *and it is that door's*: a tab switch is not a hand hesitating
+    /// on an edge and waits for nothing. What the report revised is what happens
+    /// when the hover ends: §7.1.5p ② spent the glance card's asymmetry here (a
+    /// fade in and no fade out) and the owner asked for the pair, so the ground
+    /// still goes with the pane's next picture and the two marks fade where they
+    /// stand. `math_tools` therefore outlives `math_hover_anchor` by exactly
+    /// that span, and `sync_math_tools` — which reads the anchor, not this door
+    /// — is what finally drops it.
+    fn leave_hovered_math(&mut self, now: Instant) -> Result<()> {
+        // **A window with no band under the pointer leaves nothing**, and that
+        // matters now that the doors are tab switches and pane closes rather
+        // than one 500ms deadline: everything below rebuilds the overlay and may
+        // present, and a window that has never hovered a formula must not pay
+        // for that on every tab switch it ever makes. The grace's own door
+        // reaches here only with `math_hover_clear_at` armed, so it is never the
+        // caller this refuses.
+        if self.window.math_hover_anchor.is_none()
+            && self.window.math_hover_clear_at.is_none()
+            && self.window.math_tools.is_none()
+            && self.window.math_tool_pressed.is_none()
+        {
+            return Ok(());
+        }
         self.window.math_hover_clear_at = None;
         self.window.math_hover_anchor = None;
-        // **The marks leave with the band, and they leave over the ninety
-        // milliseconds they arrived on** (owner's report 2026-09-14 evening).
-        //
-        // The 500ms above is the grace — the mock-up's own `transition-delay:
-        // .5s` on leaving, which forgives a pointer clipping the corner of a
-        // mark on its way to it — and it is untouched. What the report revised is
-        // what happens when it runs out: §7.1.5p ② spent the glance card's
-        // asymmetry here (a fade in and no fade out) and the owner asked for the
-        // pair, so the ground still goes with the pane's next picture and the two
-        // marks fade where they stand. `math_tools` therefore outlives
-        // `math_hover_anchor` by exactly that span, and the sync above — which
-        // reads the anchor, not this door — is what finally drops it.
         let motion = self.app.motion;
         if let Some(follow) = self.window.math_tools.as_mut() {
             follow.leave(now, motion);
@@ -100275,10 +100480,19 @@ impl Runtime<'_> {
             // And the copy tick's one wake-up: the instant it is due to turn
             // back into a pair of sheets. One entry because there is one
             // clipboard and one clock.
-            self.window
-                .math_copied
-                .as_ref()
-                .map(|(_, at)| *at + FOOT_REVEAL_FEEDBACK),
+            //
+            // **Through `math_copy_window`, so a spent tick asks for nothing**
+            // (audit 2026-09-15, RB-1). This used to be `*at + FOOT_REVEAL_FEEDBACK`
+            // unconditionally, and nothing ever cleared the field — so from 1300ms
+            // after a copy this handed `ControlFlow::WaitUntil` an instant already
+            // in the past, on every turn, for the life of the window. That is the
+            // 100%-CPU failure `about_to_wait`'s empty-registry branch names, and
+            // it was reached by a window with a formula somebody had copied.
+            // `advance_math_tools_if_due` above has already retired a spent
+            // acknowledgement by the time this is read, so on the ordinary road
+            // this filter never fires; it is here because a deadline that can be
+            // in the past must be impossible rather than merely unreached.
+            math_copy_window(self.window.math_copied.as_ref().map(|(_, at)| at), now),
             self.preview_resample_deadline(),
             application_clocks
                 .then(|| self.app.session_store.deadline())
@@ -100647,6 +100861,23 @@ impl App {
     /// window, because a second window's shut is not this process ending.
     fn finish(&mut self) {
         self.session_store.close();
+    }
+
+    /// **Ask for the quit transaction**, from whichever of the three doors the
+    /// ask arrived at.
+    ///
+    /// The debt and not the transaction, for [`Self::quit_requested`]'s own
+    /// reason: the first thing a quit does is read *every* window, so it cannot
+    /// run on the stack any one of these asks arrives on. The loop spends it at
+    /// [`FolioApp::settle_quit`].
+    ///
+    /// The three doors are the chord (`Runtime::run_shortcut`), AppKit
+    /// ([`FolioApp::begin_the_systems_quit`]) and the menu bar's own Quit row
+    /// ([`FolioApp::run_a_verb_of_the_applications`], RB-4). They are one line
+    /// each and that is exactly why they are this line: three copies of a flag
+    /// are three places for a fourth door to be written differently.
+    fn ask_to_quit(&mut self) {
+        self.quit_requested = true;
     }
 }
 
@@ -103131,7 +103362,11 @@ mod file_peek_fade_tests {
 /// running, because a block that changes shape starts no clock; and the marks'
 /// three motions — arriving, travelling to new geometry, leaving — are a value
 /// (`formula_tools::FormulaToolFollow`) and are pinned as one, beside the
-/// drawing, without a surface.
+/// drawing, without a surface. **The marks moved inside the block on 2026-09-15
+/// ②** and none of this changed with them: the follow eases the block's own box
+/// beside the two marks' (`Ease<[[f32; 4]; 3]>`), so a block that changes height
+/// carries its marks along its right-hand midline without this lane learning
+/// anything new.
 #[cfg(test)]
 mod formula_tool_seat_tests {
     /// This file, read as text.
@@ -103170,7 +103405,7 @@ mod formula_tool_seat_tests {
             "the band is named, and the name is the one the ground was laid under"
         );
         assert!(
-            placed.contains("math_tool_boxes(frame, hovered)"),
+            placed.contains("math_tool_boxes(body, frame, hovered)"),
             "and the name is what the boxes are asked for"
         );
         assert!(
@@ -103308,13 +103543,23 @@ mod formula_tool_seat_tests {
     /// which is the thing the owner reported.
     #[test]
     fn the_grace_running_out_takes_the_marks_off_the_glass() {
-        let door = body(
+        // The grace's own door holds the clock and nothing else since the audit
+        // of 2026-09-15 (RB-3): what it does when the clock runs out is the one
+        // leave every other door now shares.
+        let clock = body(
             &[
                 "    fn clear_math_hover",
                 "_if_due(&mut self, now: Instant)",
             ]
             .concat(),
         );
+        assert!(
+            clock.contains(".math_hover_clear_at")
+                && clock.contains("self.leave_hovered_math(now)"),
+            "the grace is a deadline, and running out is a leave:\n{clock}"
+        );
+
+        let door = body(&["    fn leave_hovered", "_math(&mut self, now: Instant)"].concat());
         assert!(
             door.contains("self.refresh_overlay()"),
             "the band and its marks go together"
@@ -103327,6 +103572,284 @@ mod formula_tool_seat_tests {
             !door.contains("self.window.math_tools = None"),
             "the follow is not dropped here — the exit it has just begun is what \
              drops it, a span later:\n{door}"
+        );
+        assert!(
+            door.contains("self.window.math_hover_anchor = None")
+                && door.contains("self.window.math_tool_pressed = None"),
+            "and the three facts about the band under the pointer end together:\n{door}"
+        );
+    }
+
+    /// RED — **a hover ends when the session it is about leaves the screen, not
+    /// only when the pointer says so** (audit 2026-09-15, RB-3).
+    ///
+    /// `math_hover_anchor` names a block in one shell's transcript;
+    /// `math_tool_placement` looks for it among the **active tab's** leaves; and
+    /// `sync_math_tools`' last arm deliberately keeps the marks where they are
+    /// when no picture knows the band. Switch tabs with the keyboard and the
+    /// three compose into tab A's two marks standing on the glass over tab B
+    /// until the pointer happens to move. The doors are pinned as text for this
+    /// module's own reason: a fourth way to swap what is on screen is one more
+    /// call site, and nothing about the one it forgot would fail.
+    ///
+    /// **The press door is deliberately absent.** `focus_pane_at` is the other
+    /// caller of `settle_focus_on`, and the press that focuses an unfocused pane
+    /// is very often the press that operates the mark in it — clearing there
+    /// would take `toolbar_visible` off the shell between the pointer landing
+    /// and `math_hit` being asked, so the press would miss the mark it was
+    /// aimed at. A pointer-driven focus change re-establishes the hover from the
+    /// same pointer event anyway, which is the half that was never broken.
+    ///
+    /// MUTATIONS: drop the call from `activate_tab` → the owner's case exactly;
+    /// move it *below* `self.window.active_tab = index` → the sweep runs over
+    /// the tab arriving and the block in the tab departing is still lit when the
+    /// reader comes back to it; add one to `settle_focus_on` → a press on a mark
+    /// in an unfocused pane stops working.
+    #[test]
+    fn a_tab_or_pane_that_leaves_the_screen_takes_the_bands_hover_with_it() {
+        let switching = body("    fn activate_tab(&mut self, index: usize, force: bool)");
+        let left = switching
+            .find("self.leave_hovered_math(")
+            .expect("a tab switch ends the hover the tab it is leaving was carrying");
+        let assigned = switching
+            .find("self.window.active_tab = index;")
+            .expect("activation is what this door does");
+        assert!(
+            left < assigned,
+            "the sweep reads the *active* tab, so it has to run before the tab changes:\n{switching}"
+        );
+
+        for (door, why) in [
+            (
+                body("    fn focus_seat(&mut self, seat: SeatId)"),
+                "the keyboard's own pane door",
+            ),
+            (
+                body("    fn close_pane(&mut self, seat: bt_layout::SeatId)"),
+                "a pane whose shell is going away",
+            ),
+        ] {
+            assert!(
+                door.contains("self.leave_hovered_math("),
+                "{why} leaves the band's hover behind:\n{door}"
+            );
+        }
+
+        // And the press road does not, on purpose: the two doors share
+        // `settle_focus_on`, and a clear there would fire on the very press that
+        // operates a mark.
+        let settled = body("    fn settle_focus_on(&mut self, seat: SeatId)");
+        assert!(
+            !settled.contains("leave_hovered_math"),
+            "a press that focuses a pane must not take the marks out from under itself"
+        );
+
+        // And a window with no band under the pointer pays nothing for any of
+        // the new doors: the leave refuses before it rebuilds an overlay, so a
+        // tab switch in a window that has never hovered a formula costs what it
+        // always did.
+        let leaving = body(&["    fn leave_hovered", "_math(&mut self, now: Instant)"].concat());
+        let refusal = leaving
+            .find("return Ok(());")
+            .expect("a window with nothing hovered leaves nothing");
+        let rebuild = leaving
+            .find("self.refresh_overlay()")
+            .expect("and one that had something rebuilds the overlay once");
+        assert!(
+            refusal < rebuild,
+            "the refusal is ahead of the work it refuses:\n{leaving}"
+        );
+    }
+
+    /// RED — **the hit test and the boxes are cut to the band's own pane, and to
+    /// the same one** (audit 2026-09-15, RC-2, acceptance 5).
+    ///
+    /// `WindowRenderer::seat` names the **focused** seat outside a compose, so
+    /// both readers were clamping a band against whichever pane had the keyboard.
+    /// The geometry half of this is pinned without a window in `bt-render`
+    /// (`a_bands_boxes_are_cut_to_the_pane_it_is_in`); what is pinned here is
+    /// that the two callers pass a viewport at all, and that each passes the one
+    /// it measures its own coordinates in.
+    ///
+    /// MUTATIONS: hand either of them `self.window.renderer.seat()` → the
+    /// parameter is back to being the focused pane; give `math_hit` a different
+    /// viewport from the one `pane_hit_context` measured `position` against →
+    /// the press and the drawing disagree again, one pane over.
+    #[test]
+    fn the_press_and_the_drawing_are_cut_to_one_pane() {
+        let hit = body("    fn math_hit(&self) -> Option<MathHit>");
+        assert!(
+            hit.contains("seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)")
+                && hit.contains("math_hit_test(body, frame, position.x, position.y)"),
+            "the pointer's own pane is what its band is cut to:\n{hit}"
+        );
+        let placed = body(&["    fn math_tool", "_placement(&self)"].concat());
+        let resolved = "pane_body_viewport(&self.seats, &self.seat_layout, *seat, scale)";
+        assert!(
+            placed.contains(resolved) && placed.contains("math_tool_boxes(body, frame, hovered)"),
+            "and the drawing is cut to the same rectangle it is then moved by:\n{placed}"
+        );
+        // One `body`, spent on the boxes and on the translation, so the two can
+        // never be two rectangles.
+        assert_eq!(
+            placed.matches("pane_body_viewport(").count(),
+            1,
+            "the pane is resolved once:\n{placed}"
+        );
+    }
+}
+
+/// **The copy tick's own clock** (audit 2026-09-15, RB-1).
+///
+/// `WindowRuntime::math_copied` had a writer, a drawer and a deadline, and no
+/// reader that ever cleared it — so from [`FOOT_REVEAL_FEEDBACK`] after a
+/// formula was copied the window's turn handed `ControlFlow::WaitUntil` an
+/// instant permanently in the past, every turn, for the life of the window.
+/// That is the 100%-CPU failure `about_to_wait`'s own empty-registry comment
+/// names, reached by a window in which somebody had pressed `⧉`.
+///
+/// The arithmetic is two free functions precisely so that this can be a value
+/// test rather than a source-text pin: the defect was a number, and a number can
+/// be asserted. The pin below is only about *who calls them*.
+#[cfg(test)]
+mod formula_copy_clock_tests {
+    use super::*;
+
+    /// This file, read as text — `formula_tool_seat_tests`' own reader.
+    const SOURCE: &str = include_str!("main.rs");
+
+    fn body(signature: &str) -> &'static str {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        let end = rest.find("\n    fn ").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    fn a_band() -> MathBlockAnchor {
+        MathBlockAnchor::History {
+            run: None,
+            start: bt_transcript::TranscriptId(1),
+            end: bt_transcript::TranscriptId(1),
+        }
+    }
+
+    /// RED — **a spent acknowledgement asks the loop for nothing.**
+    ///
+    /// The three cases are the whole of the clock: no copy at all, a copy still
+    /// inside its window, and one past it. Only the middle one is a wake-up, and
+    /// the last one is the defect — it used to be `Some(an instant in the past)`
+    /// for ever.
+    ///
+    /// MUTATION: drop the `.filter(|due| now < *due)` and the third assertion
+    /// fails with a deadline behind `now`, which is the build that spins.
+    #[test]
+    fn a_spent_copy_tick_asks_the_loop_for_nothing() {
+        // The copy's instant is the fixed point and the turns are read forward
+        // from it, never `Instant::now() - span`: this window is 1300ms wide and
+        // subtracting it from a clock that started at boot is a panic on a
+        // machine that has only just started.
+        let said_at = Instant::now();
+        assert_eq!(math_copy_window(None, said_at), None, "no copy, no clock");
+
+        let halfway = said_at + FOOT_REVEAL_FEEDBACK / 2;
+        assert_eq!(
+            math_copy_window(Some(&said_at), halfway),
+            Some(said_at + FOOT_REVEAL_FEEDBACK),
+            "a tick still up wakes the loop once, when it is due to come down"
+        );
+
+        let long_after = said_at + 2 * FOOT_REVEAL_FEEDBACK;
+        assert_eq!(
+            math_copy_window(Some(&said_at), long_after),
+            None,
+            "and a tick that is already down asks for nothing — never for an instant \
+             already behind the loop, which is a turn that returns immediately for ever"
+        );
+        // The boundary belongs to the side that is over: at exactly the span the
+        // acknowledgement is spent, so the one wake-up it asked for is also the
+        // last turn that sees it.
+        assert_eq!(
+            math_copy_window(Some(&said_at), said_at + FOOT_REVEAL_FEEDBACK),
+            None
+        );
+    }
+
+    /// RED — **the tick is retired once, and the turn that retires it is the one
+    /// that owes a rebuild** (acceptance 2).
+    ///
+    /// Two consecutive turns past the expiry must not both report a change: the
+    /// first takes the acknowledgement off the window and buys the single
+    /// overlay rebuild that turns the tick back into the pair of sheets, and
+    /// every turn after it finds nothing and asks for nothing. A `true` on every
+    /// turn would be the original defect moved one field over — a window
+    /// rebuilding its overlay for ever because of a formula somebody copied.
+    ///
+    /// MUTATION: report `true` whenever the copy is spent rather than only when
+    /// this call took it, and the second assertion fails.
+    #[test]
+    fn a_spent_copy_tick_is_taken_down_once_and_only_once() {
+        let said_at = Instant::now();
+        let long_after = said_at + 2 * FOOT_REVEAL_FEEDBACK;
+        let mut said = Some((a_band(), said_at));
+        assert!(
+            retire_spent_math_copy(&mut said, long_after),
+            "the turn the window runs out is the turn that owes the rebuild"
+        );
+        assert_eq!(said, None, "and the field is consumed, not merely read");
+        assert!(
+            !retire_spent_math_copy(&mut said, long_after),
+            "the next turn finds nothing and asks for nothing"
+        );
+
+        // A tick still inside its window is left exactly where it is: this door
+        // is the clock running out and never a second way to dismiss it.
+        let mut fresh = Some((a_band(), said_at));
+        assert!(!retire_spent_math_copy(
+            &mut fresh,
+            said_at + FOOT_REVEAL_FEEDBACK / 2
+        ));
+        assert_eq!(fresh, Some((a_band(), said_at)));
+    }
+
+    /// RED — **the turn is where it is retired, and the deadline is read through
+    /// the same answer** (acceptance 1's other half).
+    ///
+    /// The value tests above say what the arithmetic is; this says the window
+    /// uses it. `turn` calls the advancer before it gathers deadlines, so on the
+    /// ordinary road the field is already `None` by the time the arm below is
+    /// read — and the arm is filtered anyway, because a deadline that can be in
+    /// the past must be impossible rather than merely unreached.
+    ///
+    /// MUTATIONS: put `*at + FOOT_REVEAL_FEEDBACK` back in `turn` → the first
+    /// assertion fails; drop the retirement from the advancer → the second, and
+    /// the tick would stay drawn until something else repainted the band.
+    #[test]
+    fn the_turn_retires_the_tick_and_never_hands_the_loop_a_past_instant() {
+        let turning = body("    fn turn(&mut self, now: Instant, application_clocks: bool)");
+        assert!(
+            turning.contains("math_copy_window(self.window.math_copied.as_ref()"),
+            "the deadline is the clock's own answer and not a second reading of it:\n{turning}"
+        );
+        assert!(
+            !turning.contains("map(|(_, at)| *at + FOOT_REVEAL_FEEDBACK)"),
+            "the unconditional deadline is gone:\n{turning}"
+        );
+        let advancer = body(
+            &[
+                "    fn advance_math_tools",
+                "_if_due(&mut self, now: Instant)",
+            ]
+            .concat(),
+        );
+        assert!(
+            advancer.contains("retire_spent_math_copy(&mut self.window.math_copied, now)"),
+            "and the band's own turn is what takes the tick down:\n{advancer}"
+        );
+        assert!(
+            advancer.contains("moved || spent"),
+            "so the turn that takes it down is the turn that rebuilds the overlay:\n{advancer}"
         );
     }
 }
@@ -107902,12 +108425,15 @@ impl FolioApp {
                 // `run_shortcut`, which is the very function the chord reaches**;
                 // the whole of what the menu adds is the id of the row pressed.
                 //
-                // The window is the one the keyboard is on. A choice that
-                // arrives with none is dropped rather than held: the only state
-                // that reaches it is macOS's own, the application alive in the
-                // Dock with every window closed, and the bar says so meanwhile
-                // by greying every verb row (`menubar::plan`). The door that
-                // opens a window again is the reopen three arms up.
+                // The window is the one the keyboard is on. A choice for a
+                // *window* verb that arrives with none is dropped rather than
+                // held: the only state that reaches it is macOS's own, the
+                // application alive in the Dock with every window closed, and
+                // the bar says so meanwhile by greying those rows
+                // (`menubar::plan`). The door that opens a window again is the
+                // reopen three arms up. **A row that is the application's own
+                // is answered there and then** — Quit, since RB-4 — because
+                // that state is the one it is reached from.
                 //
                 // **A row of the Dock tile's menu lands here too**
                 // (T-MAC-DOCKMENU, §13.50 ③), carrying the same choice and
@@ -107930,9 +108456,15 @@ impl FolioApp {
     /// spent on the loop's own turn. A **bar** row is not routed through
     /// [`Self::a_window_for_the_delegate`], and that is the difference between
     /// it and a document: a document handed over from Finder is a request for a
-    /// window if there is none, and a bar row is not — the rows are greyed with
-    /// no window open, so a choice arriving there is a race rather than a
-    /// request.
+    /// window if there is none, and a bar row is not — the *window* rows are
+    /// greyed with no window open, so a choice arriving from one is a race
+    /// rather than a request.
+    ///
+    /// **Except the rows that are the application's**, which are answered first
+    /// and never want a window (RB-4, ruled 2026-09-15). One row is that today
+    /// and it is Quit; `menubar::is_an_application_verb` is where the bar says
+    /// which, so the enabled flag it draws and the dispatch here are two
+    /// readings of one statement rather than two statements.
     ///
     /// **A row of the Dock tile's menu is the other way round** (T-MAC-DOCKMENU,
     /// §13.50 ③), and the origin is the whole of what says so:
@@ -107956,6 +108488,27 @@ impl FolioApp {
         origin: bt_platform::AppDelegateOrigin,
         choice: bt_platform::menu::MenuChoice,
     ) -> Result<()> {
+        // **The application's own verbs are answered before a window is looked
+        // for** (RB-4, ruled 2026-09-15). The whole point of a row
+        // `menubar::is_an_application_verb` answers for is that there may be no
+        // window: Folio stays in the Dock after its last one closes (M3-1), and
+        // that is the state a reader reaches for Quit *from*. Asked below the
+        // lookup instead, the row would be enabled on the bar and then dropped
+        // on the way in.
+        //
+        // **The origin is not read here**, and that is the ruling rather than an
+        // oversight: everything below this block is about *which window* a press
+        // belongs to, and a verb that needs no window needs none from either
+        // menu. The Dock tile carries neither of these rows today — its Quit is
+        // AppKit's own and arrives as a termination request (`DOCK`, §13.50) —
+        // so this is a statement about the shape rather than a live second
+        // path.
+        if let bt_platform::menu::MenuChoice::Verb(row) = choice
+            && menubar::is_an_application_verb(row)
+        {
+            self.run_a_verb_of_the_applications(row);
+            return Ok(());
+        }
         let id = if origin == bt_platform::AppDelegateOrigin::Dock {
             let Some(id) = self.the_window_the_reader_was_last_in() else {
                 if let Some(opened) = self.a_window_for_the_delegate(event_loop)? {
@@ -108005,6 +108558,35 @@ impl FolioApp {
             }
         }
         Ok(())
+    }
+
+    /// **One verb that belongs to the application rather than to a window, run
+    /// without one** (RB-4, ruled 2026-09-15).
+    ///
+    /// [`Self::answer_a_menu_row`] asks `menubar::is_an_application_verb` and
+    /// lands here before it looks for a window, because a row of this kind is
+    /// reached precisely *from* the state where there is none — Folio stays in
+    /// the Dock after its last window closes (M3-1).
+    ///
+    /// One verb is this today and it is Quit, whose whole effect is a debt
+    /// recorded on the application: `Runtime::run_shortcut`'s own arm says why
+    /// it can be no more than that — a quit reads every window at once and a
+    /// `Runtime` is one window by construction — and both doors record it
+    /// through [`App::ask_to_quit`], so the transaction that follows is the same
+    /// one the chord starts, with zero windows exactly as with six.
+    ///
+    /// **A row this build does not know does nothing**, which is
+    /// [`Self::answer_a_menu_row`]'s own answer to the same question and for the
+    /// same reason: `menubar::every_verb_on_the_bar_names_a_row` makes it
+    /// impossible, and a menu is drawn on a frame.
+    fn run_a_verb_of_the_applications(&mut self, id: &str) {
+        let Some(app) = self.app.as_mut() else {
+            return;
+        };
+        let action = app.shortcuts.row(id).map(|row| row.action);
+        if action == Some(shortcuts::Action::Quit) {
+            app.ask_to_quit();
+        }
     }
 
     /// **The window the reader was last in**, or `None` when this run has none
@@ -108178,7 +108760,7 @@ impl FolioApp {
         }
         self.termination = Some(answer);
         if let Some(app) = self.app.as_mut() {
-            app.quit_requested = true;
+            app.ask_to_quit();
         }
     }
 
@@ -110042,6 +110624,31 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     }
                 })
             }
+            // **The one place the family list moves onto the screen.** The walk
+            // finished on a worker and left its answer in `settings`' mailbox;
+            // this is between two frames, which is the whole reason the worker
+            // was not allowed to publish it itself — `settings_layout` is called
+            // several times within one frame and every one of them has to read
+            // the same list. See `settings::adopt_scanned_families`.
+            //
+            // A walk that found the families the machine already had changes
+            // nothing and owes no frame, which is every walk but the one after
+            // somebody installs a font. Every window when it does, because the
+            // list is a fact about the machine and any of them may be showing a
+            // picker drawn from it.
+            AppEvent::FontsScanned => {
+                if settings::adopt_scanned_families() {
+                    self.for_each_window(|runtime| {
+                        if runtime.refresh_chrome() {
+                            runtime.present_chrome_change()
+                        } else {
+                            Ok(())
+                        }
+                    })
+                } else {
+                    Ok(())
+                }
+            }
             AppEvent::CopilotProbed => {
                 if let Some(app) = self.app.as_mut() {
                     app.copilot_readiness = attention_copilot::readiness();
@@ -110665,6 +111272,39 @@ fn write_terminal_clipboard_text(text: &str) -> Result<()> {
     bt_platform::set_clipboard_text(text)
         .map_err(|error| anyhow!(error))
         .context("write terminal selection to clipboard")
+}
+
+/// **The copy tick's own clock, read in one place** (audit 2026-09-15, RB-1).
+///
+/// `Some(the one instant the acknowledgement is due to come down)` while it is
+/// still up, and `None` the moment it is spent — which is both *"draw the
+/// sheets again"* and *"ask the loop for nothing"*, because they are one fact
+/// and were two readings of one field before this existed.
+///
+/// A free function and not a method so the arithmetic can be pinned without a
+/// window, which is the arrangement `formula_tools` keeps for the marks
+/// themselves: the defect this closes is a deadline in the past, and a deadline
+/// is a number.
+fn math_copy_window(said_at: Option<&Instant>, now: Instant) -> Option<Instant> {
+    said_at
+        .map(|at| *at + FOOT_REVEAL_FEEDBACK)
+        .filter(|due| now < *due)
+}
+
+/// **Take a spent acknowledgement off the window**, and answer whether *this*
+/// call is the one that took it (RB-1).
+///
+/// The answer is what buys the single overlay rebuild that turns the tick back
+/// into the pair of sheets. It is `true` exactly once per copy: the second call
+/// past the same expiry finds nothing and asks for nothing, which is what keeps
+/// a retired tick from repainting the band on every turn for ever — the shape of
+/// the defect, moved one field over.
+fn retire_spent_math_copy(said: &mut Option<(MathBlockAnchor, Instant)>, now: Instant) -> bool {
+    if said.is_some() && math_copy_window(said.as_ref().map(|(_, at)| at), now).is_none() {
+        *said = None;
+        return true;
+    }
+    false
 }
 
 fn recoverable_clipboard_write(result: Result<()>, action: &str) -> bool {
@@ -118040,38 +118680,53 @@ mod tests {
         std::fs::remove_dir_all(&directory).ok();
     }
 
-    /// PIN (user ruling 2026-08-19) — **the font list is re-enumerated when the
-    /// key moves, and not otherwise.**
+    /// PIN (GitHub issue #3) — **opening the dialog asks the machine for
+    /// nothing.**
     ///
-    /// The picker ends in a door onto Windows' own Fonts page, so a reader is
-    /// expected to leave, install a family and come back — and the list they come
-    /// back to has to be the machine's, not the one this process cached at
-    /// launch. The other half matters just as much: a dialog that redraws on
-    /// hover must not open a font collection every frame.
+    /// An outside user reported the window freezing for seconds when the gear is
+    /// clicked. The cause was one line of this file: `settings_values` asks
+    /// `settings::family_index` which family is ticked, on the press that opens
+    /// the dialog, and the list behind it had just been marked stale by the same
+    /// press — so every open walked DirectWrite's whole system font collection on
+    /// this thread, opening a font face per family to name its files.
     ///
-    /// Red gate: make `monospace_families` a `OnceLock` again and the second
-    /// assertion goes red; enumerate on every call and the first pointer
-    /// comparison does.
+    /// What this pins is the negative, which is the only half a counter can
+    /// state and the only half that was ever in doubt: **reading the list a
+    /// frame draws performs no walk**. That covers the press, the hover, the hit
+    /// test and the draw, because all four reach the list through exactly these
+    /// two functions.
+    ///
+    /// A delta and not a total, because the counter belongs to the process and
+    /// this binary's other tests share it.
+    ///
+    /// Red gate: put the enumeration back behind `monospace_families` — the
+    /// revision-keyed `MonospaceFamilySlot::get` this replaced — and the count
+    /// moves on the first line. See `settings::MonospaceFamilySlot` for the
+    /// shape that keeps it still, and the three tests beside it for the halves a
+    /// counter cannot state.
     #[test]
-    fn the_font_list_is_re_enumerated_exactly_when_the_dialog_reopens() {
-        let first = settings::monospace_families();
+    fn opening_the_dialog_asks_the_machine_for_no_fonts() {
+        let before = settings::monospace_scans();
+        let list = settings::monospace_families();
+        // Every road the dialog takes to the list, in the order the press takes
+        // them: which row is ticked, how many rows there are, and what each one
+        // reads.
+        let ticked = settings::family_index(bt_platform::DEFAULT_MONOSPACE_FAMILY);
+        let drawn: Vec<&str> = list.iter().map(|family| family.name.as_str()).collect();
         let again = settings::monospace_families();
         assert_eq!(
-            first.as_ptr(),
+            settings::monospace_scans(),
+            before,
+            "the dialog read the family list {} times and walked no font \
+             collection to do it (ticked row {ticked}, {} families drawn)",
+            drawn.len() + 3,
+            drawn.len(),
+        );
+        assert_eq!(
+            list.as_ptr(),
             again.as_ptr(),
-            "two reads inside one dialog are one enumeration"
-        );
-        settings::rescan_monospace_families();
-        let after = settings::monospace_families();
-        assert_eq!(
-            first, after,
-            "a machine whose fonts did not change lists the same families"
-        );
-        assert_eq!(
-            first.as_ptr(),
-            after.as_ptr(),
-            "and keeps the slice it already leaked, so the rescan that finds \
-             nothing new costs nothing"
+            "and two reads are one list, so a page redrawn on hover cannot be \
+             drawn from two"
         );
     }
 
@@ -136408,11 +137063,26 @@ mod tests {
         let cell_height = 18 * bt_viewport::SUBPIXELS_PER_PX;
         assert!(frame.row_map[0].height_subpixels > cell_height);
         assert_eq!(frame.math_blocks[0].artifact.render_scale_milli, 1000);
-        let padding = cell_height / 4;
+        // **The box is the ink plus whole cell rows of breathing** (owner's
+        // ruling 2026-09-15 ①). The option still asks for a quarter of a cell
+        // and the band still answers symmetrically, but what a quarter-row
+        // request buys is rounded out to whole rows — the rows the ink needs,
+        // one blank row above and one below — so the block sits in the grid
+        // instead of a quarter of a line clear of the text around it. This
+        // restates that rule for the reason it restated the old one: the
+        // arithmetic lives in `bt_term` and this crate cannot call it.
+        let ink = i64::from(ink_height_px) * bt_viewport::SUBPIXELS_PER_PX;
+        let ink_rows = (ink + cell_height - 1) / cell_height;
+        let band = (ink_rows + 2) * cell_height;
+        let padding = (band - ink) / 2;
+        assert!(
+            padding >= cell_height,
+            "a quarter of a row is not a row: {padding} against a {cell_height} cell"
+        );
         assert_eq!(
             frame.math_blocks[0].artifact.height_subpixels,
-            i64::from(ink_height_px) * bt_viewport::SUBPIXELS_PER_PX + 2 * padding,
-            "display box height is alpha-tight ink plus symmetric 25% cell padding"
+            ink + 2 * padding,
+            "display box height is alpha-tight ink plus whole cell rows of breathing"
         );
         assert_eq!(
             frame.math_blocks[0].artifact.vertical_padding_subpixels,
@@ -165149,6 +165819,105 @@ mod edit_menu_clipboard_tests {
                 "`{verb}` has no arm in the application menu's verb runner"
             );
         }
+    }
+}
+
+/// **Quit with no window open** (RB-4, ruled 2026-09-15).
+///
+/// Closing the last window is this platform's ordinary resting state and this
+/// port built it on purpose (M3-1) — so it is a state a reader quits *from*.
+/// Whether the row is offered is `menubar`'s and is checked there
+/// (`quit_is_in_force_with_no_window_and_nothing_else_is`); what is checked here
+/// is the other half, that a Quit chosen with the desk empty is **dispatched
+/// rather than dropped**. That is a property of control flow and no value
+/// carries it: the landing takes an `&ActiveEventLoop` and a window registry,
+/// and a `#[test]` can make neither.
+#[cfg(test)]
+mod quit_with_no_window_tests {
+    /// This file, read as text.
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The text of one method, from its signature to the next method's.
+    fn body(signature: &str) -> &'static str {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        let end = rest.find("\n    fn ").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// RED — **the application's own verbs are answered before a window is
+    /// looked for.**
+    ///
+    /// The landing used to return the moment `frontmost_window()` answered
+    /// `None`, which is every press made with no window open. Enabling the row
+    /// on the bar alone would therefore have changed nothing: `Cmd+Q` would have
+    /// stopped being swallowed and started being dropped one floor down.
+    ///
+    /// The rows that *do* need a window are still dropped there, and the last
+    /// assertion keeps that: it is the reason the early return exists.
+    ///
+    /// MUTATION: move the dispatch below the lookup and the ordering assertion
+    /// goes red — which is the bug, exactly.
+    #[test]
+    fn a_menu_quit_is_dispatched_before_the_landing_asks_for_a_window() {
+        let landing = body("    fn answer_a_menu_row(");
+        // The needles are the code's own spelling and not the prose around it:
+        // a comment that stayed put while the call moved would otherwise keep
+        // this green.
+        let dispatch = landing
+            .find("&& menubar::is_an_application_verb(row)")
+            .expect("the landing asks the bar which verbs need no window");
+        let lookup = landing
+            .find("let Some(id) = self.frontmost_window() else {")
+            .expect("the landing still asks which window has the keyboard");
+        assert!(
+            dispatch < lookup,
+            "a verb of the application's is decided after a window is looked for, so a Quit \
+             chosen with the desk empty is dropped on the way in"
+        );
+        assert!(
+            landing.contains("self.run_a_verb_of_the_applications(row);"),
+            "the landing does not run the verb it just recognised"
+        );
+        // `lookup`'s own needle is the second half of the ruling: a row that
+        // *does* need a window is still dropped when there is none, which is
+        // why that early return exists at all. It is asked for above, so a
+        // landing that stopped dropping them cannot reach this line.
+    }
+
+    /// RED — **the menu's Quit records the chord's own debt**, so what the loop
+    /// spends afterwards is one transaction with one implementation.
+    ///
+    /// `crate::quit` is untouched by this ticket: the card, the save, the
+    /// photograph of every window, the session write and the release of
+    /// `session.lock` all run exactly as they do for six windows, because the
+    /// transaction reads the window list and the list is simply empty.
+    ///
+    /// MUTATION: set the flag by hand at any of the three doors and the last
+    /// assertion names it.
+    #[test]
+    fn every_door_onto_the_quit_records_the_same_debt() {
+        assert!(
+            body("    fn run_a_verb_of_the_applications(").contains("app.ask_to_quit();"),
+            "the menu bar's Quit does not reach the quit transaction"
+        );
+        assert!(
+            body("    fn run_shortcut(").contains("self.app.ask_to_quit();"),
+            "the chord no longer records the debt through the one door"
+        );
+        assert!(
+            body("    fn begin_the_systems_quit(").contains("app.ask_to_quit();"),
+            "AppKit's own quit request no longer records it through the one door"
+        );
+        // And nothing writes the flag behind that door's back. The needle is
+        // spelled in two halves so that this line is not itself an occurrence.
+        assert_eq!(
+            SOURCE.matches(concat!("quit_requested", " = true")).count(),
+            1,
+            "the quit debt is recorded somewhere other than `App::ask_to_quit`"
+        );
     }
 }
 
