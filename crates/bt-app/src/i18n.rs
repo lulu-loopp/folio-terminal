@@ -2735,53 +2735,53 @@ impl Text {
             Self::PastePathEncoding => pick(
                 lang,
                 "This path cannot be sent as UTF-8.",
-                "This path cannot be sent as UTF-8.",
-            ), // zh: pending opus46
+                "路径无法按 UTF-8 发送。",
+            ),
             Self::PastePathControl => pick(
                 lang,
                 "This path contains a control character or line break.",
-                "This path contains a control character or line break.",
-            ), // zh: pending opus46
+                "路径包含控制字符或换行。",
+            ),
             Self::PastePathPowerShellQuote => pick(
                 lang,
                 "This quote character has not been verified for path paste in this shell.",
-                "This quote character has not been verified for path paste in this shell.",
-            ), // zh: pending opus46
+                "路径中的引号在当前 shell 中尚未验证。",
+            ),
             Self::PastePathDoubleQuote => pick(
                 lang,
                 "This path contains a double quote that this grammar cannot quote.",
-                "This path contains a double quote that this grammar cannot quote.",
-            ), // zh: pending opus46
+                "路径包含双引号，当前语法无法转义。",
+            ),
             Self::PastePathCmdPercent => pick(
                 lang,
                 "Command Prompt expands percent signs in paths.",
-                "Command Prompt expands percent signs in paths.",
-            ), // zh: pending opus46
+                "命令提示符会展开路径中的百分号。",
+            ),
             Self::PastePathCmdExpansion => pick(
                 lang,
                 "Command Prompt delayed expansion changes exclamation marks in paths.",
-                "Command Prompt delayed expansion changes exclamation marks in paths.",
-            ), // zh: pending opus46
+                "命令提示符的延迟展开会改变路径中的感叹号。",
+            ),
             Self::PastePathNushell => pick(
                 lang,
                 "Nushell path paste has not been measured yet.",
-                "Nushell path paste has not been measured yet.",
-            ), // zh: pending opus46
+                "Nushell 的路径粘贴尚未验证。",
+            ),
             Self::PasteClipboardPromise => pick(
                 lang,
                 "The clipboard offers a file promise. Copy a saved file instead.",
-                "The clipboard offers a file promise. Copy a saved file instead.",
-            ), // zh: pending opus46
+                "剪贴板提供的是文件承诺。改为复制已保存的文件。",
+            ),
             Self::PasteClipboardRead => pick(
                 lang,
                 "The clipboard could not be read. Copy again and retry.",
-                "The clipboard could not be read. Copy again and retry.",
-            ), // zh: pending opus46
+                "剪贴板无法读取。重新复制后再试。",
+            ),
             Self::PasteProfileOverride => pick(
                 lang,
                 "profiles.json: {id}: {key} is unsupported; the default was kept.",
-                "profiles.json: {id}: {key} is unsupported; the default was kept.",
-            ), // zh: pending opus46
+                "profiles.json：{id}：{key} 不受支持，已保留默认值。",
+            ),
             // ── window chrome ──────────────────────────────────────────────
             Self::Settings => pick(lang, "Settings", "设置"),
             // Mock-up 2270's own text, which names the verb in both directions.
@@ -5796,27 +5796,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 21] = [
-        (Self::PastePathEncoding, HostPlatform::Windows),
-        (Self::PastePathEncoding, HostPlatform::MacOs),
-        (Self::PastePathControl, HostPlatform::Windows),
-        (Self::PastePathControl, HostPlatform::MacOs),
-        (Self::PastePathPowerShellQuote, HostPlatform::Windows),
-        (Self::PastePathPowerShellQuote, HostPlatform::MacOs),
-        (Self::PastePathDoubleQuote, HostPlatform::Windows),
-        (Self::PastePathDoubleQuote, HostPlatform::MacOs),
-        (Self::PastePathCmdPercent, HostPlatform::Windows),
-        (Self::PastePathCmdPercent, HostPlatform::MacOs),
-        (Self::PastePathCmdExpansion, HostPlatform::Windows),
-        (Self::PastePathCmdExpansion, HostPlatform::MacOs),
-        (Self::PastePathNushell, HostPlatform::Windows),
-        (Self::PastePathNushell, HostPlatform::MacOs),
-        (Self::PasteClipboardPromise, HostPlatform::Windows),
-        (Self::PasteClipboardPromise, HostPlatform::MacOs),
-        (Self::PasteClipboardRead, HostPlatform::Windows),
-        (Self::PasteClipboardRead, HostPlatform::MacOs),
-        (Self::PasteProfileOverride, HostPlatform::Windows),
-        (Self::PasteProfileOverride, HostPlatform::MacOs),
+    const CHINESE_PENDING: [(Self, HostPlatform); 1] = [
         // zh: pending opus46 — the macOS column of the card a local file raises
         // when the engine would not take this window's rules (M4-3, §13.38 ②).
         // The Windows column beside it has had its Chinese since W2; what is
