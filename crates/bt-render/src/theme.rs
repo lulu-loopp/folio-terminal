@@ -856,16 +856,24 @@ pub struct ChromePalette {
     //
     // `.math-tools button` (mock-up 2117-2126): a glyph on the terminal's own
     // surface with `border: none; background: none` at rest, a wash under the
-    // pointer, and `--ink` once it is the subject. The marks stand *beside* the
-    // band and not inside it (`.math` is a row holding `.mbox` and
-    // `.math-tools`, mock-up 2000-2012), so their ground is `--termbg` and not
-    // [`Self::preview_code_ground`] — which is why none of these four is the
-    // fence's ink even though the band beside them now wears the fence's floor.
+    // pointer, and `--ink` once it is the subject.
+    //
+    // **Since the owner's ruling of 2026-09-15 ② the marks stand *inside* the
+    // block**, in the room it keeps at its right edge, so what they are drawn on
+    // is the block's own floor ([`Self::preview_code_ground`]) rather than the
+    // terminal's surface. These four are still the ladder over `--termbg` they
+    // were struck as, which the ruling itself asks for in the same breath — it
+    // names the pane head's run the authority for the marks' ink, and that run
+    // is this ladder. Deriving them over `--panel` instead would be a second
+    // ruling nobody has made; if a later one is, it is these four declarations
+    // that move and nothing else.
     //
     // Numerically three of them are the pane head's own three and the files
     // column's hover, because all four inks are the same ladder over the same
     // `--termbg`. Named apart on [`Self::pane_close_glyph`]'s own precedent:
-    // two declarations, either of which could be re-struck without the other.
+    // two declarations, either of which could be re-struck without the other —
+    // and `bt_app::formula_tools`'s own pin is what keeps the pair from drifting
+    // while they are meant to be one.
     /// `.math-tools button { color: var(--ink3) }` over `--termbg` — a mark the
     /// band's hover has revealed but the pointer has not reached.
     pub formula_tool_glyph: [u8; 3],

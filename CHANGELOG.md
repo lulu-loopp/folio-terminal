@@ -6,6 +6,31 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Changed
+
+- **A typeset formula now sits in a block with room around it, and the block's
+  two marks sit inside it.** A display formula keeps whole blank lines above and
+  below it — as many as the window has room for — and a clear column on each
+  side, so it no longer touches the text it
+  stands between; hovering it lights that whole region, and the show-source and
+  copy marks stand at its right edge, on its middle line, drawn as the same
+  buttons a pane head wears. An inline formula no longer starts a few pixels
+  right of where its source began, which closes the gap that opened before it in
+  the middle of a sentence.
+
+### Fixed
+
+- **Copying a formula no longer leaves the window busy.** The tick that confirms
+  the copy has always come down after a moment on screen, but the window went on
+  asking to be woken for it for as long as it stayed open — one processor core,
+  spent on a window doing nothing. The confirmation is now finished with when it
+  leaves the screen.
+- **A formula's two marks stay with the formula.** Switching tabs or closing a
+  pane used to leave the marks from the block you had been pointing at standing
+  over whatever came next, until you moved the mouse. And in a window split into
+  panes of different sizes, the marks in an unfocused pane were placed — and
+  could be pressed — as though that pane were the size of the focused one.
+
 ### Added
 
 - **Settings has an About page, and it says which Folio this is.** The last word
