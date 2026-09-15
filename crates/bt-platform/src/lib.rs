@@ -11639,7 +11639,44 @@ mod native_window_door_tests {
         declarations
     }
 
+    /// **Whether a declaration names `shape`, rather than merely containing its
+    /// letters.**
+    ///
+    /// [`public_declarations`] is generous on purpose about *how a declaration
+    /// is written* — wrapped over four lines, a function or a field or an alias
+    /// — because a gate that missed a leak because of how it was wrapped is a
+    /// gate the next leak walks through. It is **not** generous about what a
+    /// name is, and this is where that is said: the four spellings are names,
+    /// and a name that is part of a longer name is a different name.
+    ///
+    /// `EVENT_NOT_HANDLED_ERR` is the case that taught it. That is Carbon's
+    /// `eventNotHandledErr`, it names no handle of any kind, and a plain
+    /// substring search reported it because `HANDLED` contains `HANDLE` —
+    /// a false red on both platforms, and one that would have been answered by
+    /// hiding a constant that has every right to be public.
+    ///
+    /// So a match has to stand at a name's edge. On the left, always: nothing
+    /// may run into it, which is what keeps `my_windows::` out. On the right,
+    /// only when the spelling itself **ends** in a name character — `HANDLE`,
+    /// `HWND` and `NonZeroIsize` do, so `HANDLED` and `HWNDX` are not them,
+    /// while `windows::` ends in punctuation and is a path prefix whose whole
+    /// job is to be followed by more name.
+    fn names(declaration: &str, shape: &str) -> bool {
+        let is_name_byte = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+        let open_ended = !shape.as_bytes().last().copied().is_some_and(is_name_byte);
+        let text = declaration.as_bytes();
+        declaration.match_indices(shape).any(|(at, _)| {
+            let left = at == 0 || !is_name_byte(text[at - 1]);
+            let end = at + shape.len();
+            let right = open_ended || end == text.len() || !is_name_byte(text[end]);
+            left && right
+        })
+    }
+
     /// RED — **no public item of this crate names a Windows handle.**
+    ///
+    /// A *name* and not a run of letters — see [`names`], which is the whole of
+    /// the difference and carries the case that made it necessary.
     #[test]
     fn the_native_window_door_has_no_windows_type_in_its_signature() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -11656,7 +11693,7 @@ mod native_window_door_tests {
                     continue;
                 }
                 for shape in WINDOWS_SHAPES {
-                    if declaration.contains(shape) {
+                    if names(&declaration, shape) {
                         leaks.push(format!(
                             "{}: {declaration}",
                             file.strip_prefix(root).unwrap_or(&file).display()

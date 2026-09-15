@@ -1514,10 +1514,17 @@ mod macos_hotkey {
         NSApplication, NSApplicationActivationOptions, NSRunningApplication, NSWorkspace,
     };
 
+    // `EVENT_NOT_HANDLED_ERR` is deliberately **not** on this list. It is the
+    // other half of what the handler answers, and this module never writes it:
+    // the answer is decided once, in `super::summon_handler_answer`, and naming
+    // the constant here again would be a second place the decision could be
+    // made. `NO_ERR` is on it because this module reads it four times: the
+    // three `OSStatus`es Carbon hands back, and the answer the handler is about
+    // to return.
     use super::{
-        EVENT_HOT_KEY_EXISTS_ERR, EVENT_NOT_HANDLED_ERR, Foreground, Hotkey, HotkeyFault,
-        K_EVENT_CLASS_KEYBOARD, K_EVENT_HOT_KEY_PRESSED, K_EVENT_PARAM_DIRECT_OBJECT, NO_ERR,
-        SUMMON_SIGNATURE, TYPE_EVENT_HOT_KEY_ID, carbon_registration_bits,
+        EVENT_HOT_KEY_EXISTS_ERR, Foreground, Hotkey, HotkeyFault, K_EVENT_CLASS_KEYBOARD,
+        K_EVENT_HOT_KEY_PRESSED, K_EVENT_PARAM_DIRECT_OBJECT, NO_ERR, SUMMON_SIGNATURE,
+        TYPE_EVENT_HOT_KEY_ID, carbon_registration_bits,
     };
     use crate::NativeWindow;
 
