@@ -443,6 +443,28 @@ pub const TYPE_EVENT_HOT_KEY_ID: u32 = u32::from_be_bytes(*b"hkid");
 /// `eventHotKeyExistsErr` — somebody else has this chord.
 pub const EVENT_HOT_KEY_EXISTS_ERR: i32 = -9878;
 
+/// `noErr`, which is Carbon's word for **this handler dealt with the event**.
+///
+/// Out here with the other six since RA-2, and for the same reason they are:
+/// the answer the handler gives Carbon is now decided by
+/// [`summon_handler_answer`], which is pure and is asserted on a host that has
+/// no Carbon at all.
+pub const NO_ERR: i32 = 0;
+
+/// `eventNotHandledErr` — Carbon's word for **this handler did not deal with
+/// the event**, and the whole of RA-2.
+///
+/// Carbon's contract is that a handler which did not act on an event answers
+/// this, so dispatch carries on to whatever else is listening. The handler
+/// below used to answer `noErr` — "handled" — to an event whose direct-object
+/// parameter it could not read and to an event carrying somebody else's
+/// signature, which is this process telling the framework that a hot key it
+/// never claimed has been dealt with. The handler sits on
+/// `GetApplicationEventTarget()`, so what that can swallow is confined to this
+/// process and today Folio is the only Carbon registrant in it — which is why
+/// the finding is low and not why it is wrong.
+pub const EVENT_NOT_HANDLED_ERR: i32 = -9874;
+
 /// **This process's own four-character signature.**
 ///
 /// `folo`, because the handler is offered *every* hot key event that reaches
@@ -647,6 +669,34 @@ pub fn summon_should_act(
     registration_is_live: bool,
 ) -> bool {
     registration_is_live && is_our_hotkey(message, hwnd, wparam, id)
+}
+
+/// **What the Carbon handler answers, and therefore whether it acts** (RA-2).
+///
+/// [`summon_should_act`]'s macOS twin, and it carries one thing more than that
+/// one does: on this platform the return value *is* the decision as far as the
+/// framework is concerned. Carbon's contract is that a handler answers
+/// [`NO_ERR`] for an event it dealt with and [`EVENT_NOT_HANDLED_ERR`] for one
+/// it did not, so that dispatch carries on to whoever else is listening; a
+/// handler that answers "handled" to everything it was offered is a handler
+/// that consumes other registrants' events.
+///
+/// `named` is what the event said about itself — the signature it carried and
+/// whether this process holds a live claim under the id beside it — or `None`
+/// when the direct-object parameter could not be read at all, which is the
+/// third road through the handler and the one the shipped `'obj '` defect went
+/// down (see [`K_EVENT_PARAM_DIRECT_OBJECT`]). An event this code cannot read
+/// is an event it certainly did not handle.
+///
+/// Pure, and compiled on every platform, for [`carbon_key_code`]'s reason: the
+/// host writing this ticket has no Carbon and must still be able to assert what
+/// the host running it will tell the framework.
+#[must_use]
+pub fn summon_handler_answer(named: Option<(u32, bool)>) -> i32 {
+    match named {
+        Some((signature, live)) if signature == SUMMON_SIGNATURE && live => NO_ERR,
+        _ => EVENT_NOT_HANDLED_ERR,
+    }
 }
 
 /// **The ids this process holds a live `RegisterHotKey` claim under.**
@@ -1465,9 +1515,9 @@ mod macos_hotkey {
     };
 
     use super::{
-        EVENT_HOT_KEY_EXISTS_ERR, Foreground, Hotkey, HotkeyFault, K_EVENT_CLASS_KEYBOARD,
-        K_EVENT_HOT_KEY_PRESSED, K_EVENT_PARAM_DIRECT_OBJECT, SUMMON_SIGNATURE,
-        TYPE_EVENT_HOT_KEY_ID, carbon_registration_bits,
+        EVENT_HOT_KEY_EXISTS_ERR, EVENT_NOT_HANDLED_ERR, Foreground, Hotkey, HotkeyFault,
+        K_EVENT_CLASS_KEYBOARD, K_EVENT_HOT_KEY_PRESSED, K_EVENT_PARAM_DIRECT_OBJECT, NO_ERR,
+        SUMMON_SIGNATURE, TYPE_EVENT_HOT_KEY_ID, carbon_registration_bits,
     };
     use crate::NativeWindow;
 
@@ -1532,13 +1582,6 @@ mod macos_hotkey {
         ) -> i32;
     }
 
-    /// `noErr`, which is zero here as it is everywhere else in this framework.
-    ///
-    /// The one Carbon number still written inside this module, because it is the
-    /// one no keyboard and no header could make wrong — see
-    /// [`super::K_EVENT_PARAM_DIRECT_OBJECT`] for why the other six moved out.
-    const NO_ERR: i32 = 0;
-
     /// **A claim on a chord, held for as long as this value is alive.**
     ///
     /// Neither `Send` nor `Sync`, for the Windows arm's reason wearing macOS
@@ -1599,9 +1642,16 @@ mod macos_hotkey {
     /// unregistered, so in practice Carbon stops calling; the ledger is what
     /// makes that a fact this code knows rather than one it assumes.
     ///
-    /// **`noErr`**, which is Carbon's word for "handled": the press is ours and
-    /// stops here. Answering `eventNotHandledErr` would pass a chord this
-    /// application claimed on to the rest of the responder chain.
+    /// **And the answer it gives Carbon is the third fact, not a formality**
+    /// (RA-2). `noErr` means *this handler dealt with the event*, and it is
+    /// said only where that is true: after [`super::wake_the_summon`], for a
+    /// press this process claimed. Everything else — an event whose direct
+    /// object could not be read, a signature that is not this application's, an
+    /// id no live claim stands behind — answers `eventNotHandledErr`, which is
+    /// what lets Carbon carry on offering it to whatever else is listening.
+    /// Answering "handled" to those was this process consuming events it never
+    /// asked for; see [`super::summon_handler_answer`], which is where the
+    /// decision is made and where a host with no Carbon can read it.
     unsafe extern "C" fn summon_handler(
         _call: EventHandlerCallRef,
         event: EventRef,
@@ -1630,16 +1680,21 @@ mod macos_hotkey {
             // **The line this ticket exists for** — see
             // [`super::trace_handler_lost`]. The handler ran and the event did
             // not carry the parameter naming which claim fired, which is a fault
-            // in this file rather than anywhere near the keyboard.
+            // in this file rather than anywhere near the keyboard. An event this
+            // code could not read is an event it did not handle, so Carbon is
+            // told so and goes on dispatching it (RA-2).
             super::trace(|| super::trace_handler_lost(status));
-            return NO_ERR;
+            return super::summon_handler_answer(None);
         }
         let live = super::registration_is_live(named.id as i32);
         super::trace(|| super::trace_handler(named.signature, named.id, live));
-        if named.signature == SUMMON_SIGNATURE && live {
+        let answer = super::summon_handler_answer(Some((named.signature, live)));
+        if answer == NO_ERR {
+            // `noErr` is the promise that the press was acted on, so the acting
+            // happens before the promise is made.
             super::wake_the_summon();
         }
-        NO_ERR
+        answer
     }
 
     /// **The handler is installed once for the life of the process**, and the
@@ -2581,6 +2636,52 @@ mod tests {
             super::four_character_code(0x0001_0002),
             "....",
             "a signature that is not text is not put into somebody's terminal"
+        );
+    }
+
+    /// RED (RA-2) — **the handler tells Carbon it handled the event only when
+    /// it did.**
+    ///
+    /// Every answer `summon_handler` can give, read on a host with no Carbon:
+    /// the press this process claimed, an event carrying somebody else's
+    /// signature, an id no live claim stands behind, and a direct-object
+    /// parameter that could not be read at all. Carbon's contract is that a
+    /// handler which did not act answers `eventNotHandledErr` so dispatch
+    /// carries on; the shipped arm answered `noErr` — "dealt with" — to all
+    /// four.
+    ///
+    /// MUTATION: end the handler's decision on `NO_ERR` for every case, which
+    /// is what it did before this ticket, and the last three of these name it.
+    #[test]
+    fn the_handler_tells_carbon_it_handled_only_the_press_it_acted_on() {
+        assert_eq!(super::NO_ERR, 0, "noErr");
+        assert_eq!(
+            super::EVENT_NOT_HANDLED_ERR,
+            -9874,
+            "eventNotHandledErr, which is what `tests/macos_hotkey.rs` already \
+             accepts from `SendEventToEventTarget` for an event nobody handled"
+        );
+        assert_eq!(
+            super::summon_handler_answer(Some((super::SUMMON_SIGNATURE, true))),
+            super::NO_ERR,
+            "a press this process holds a live claim under is this process's to swallow"
+        );
+        assert_eq!(
+            super::summon_handler_answer(Some((super::SUMMON_SIGNATURE, false))),
+            super::EVENT_NOT_HANDLED_ERR,
+            "an id no live claim stands behind was never ours to answer for"
+        );
+        assert_eq!(
+            super::summon_handler_answer(Some((u32::from_be_bytes(*b"abcd"), true))),
+            super::EVENT_NOT_HANDLED_ERR,
+            "another registrant's signature in this address space is another \
+             registrant's event"
+        );
+        assert_eq!(
+            super::summon_handler_answer(None),
+            super::EVENT_NOT_HANDLED_ERR,
+            "an event whose direct object could not be read is an event this code \
+             certainly did not handle"
         );
     }
 }
