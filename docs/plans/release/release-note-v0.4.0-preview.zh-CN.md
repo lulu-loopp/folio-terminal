@@ -55,7 +55,7 @@
 
 | 文件 | 说明 |
 | --- | --- |
-| `folio-0.4.0-windows-x64.zip` | 九个归属文件，打包在一个文件夹中 — `sha256:<sha256>` |
+| `folio-0.4.0-windows-x64.zip` | 九个归属文件，打包在一个文件夹中 — `sha256:66da4ce336f90b032ce6900dda17197f0b865ca7080a65c35f3995cf0997f512` |
 | `SHA256SUMS.txt` | 压缩包和物料清单的哈希，格式为 `sha256sum -c` 可读 |
 | `folio-0.4.0.cdx.json` | CycloneDX 物料清单 |
 
@@ -67,7 +67,7 @@
 
 | 文件 | 说明 |
 | --- | --- |
-| `Folio-0.4.0-macos-arm64.dmg` | 应用程序，已签名并经过 Apple 公证 — `sha256:<sha256>` |
+| `Folio-0.4.0-macos-arm64.dmg` | 应用程序，已签名并经过 Apple 公证 — `sha256:346eb5a3fc2992513e141b0881762c2f85221b35d1be3a6223f1e7463e700dfd` |
 | `SHA256SUMS-macos.txt` | 磁盘映像的哈希，格式为 `shasum -a 256 -c` 可读 |
 
 打开磁盘映像，将 **Folio** 拖入"应用程序"文件夹。需要 **Apple 芯片 Mac，运行 macOS 14 或更高版本**；此预览版没有 Intel 构建。也可以用 [Homebrew](https://brew.sh)：

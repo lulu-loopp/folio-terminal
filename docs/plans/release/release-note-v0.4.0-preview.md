@@ -4,7 +4,7 @@
 
 **Download:** [zip](https://github.com/lulu-loopp/folio-terminal/releases/download/v0.4.0-preview/folio-0.4.0-windows-x64.zip) (Windows 10 1809+ / 11, 64-bit) · [dmg](https://github.com/lulu-loopp/folio-terminal/releases/download/v0.4.0-preview/Folio-0.4.0-macos-arm64.dmg) (macOS 14+, Apple silicon)
 
-**下载:**上方 zip 与 dmg 即为完整下载,其余为校验和、物料清单与源码。[中文版发布说明](https://github.com/lulu-loopp/folio-terminal/blob/v0.4.0-preview/docs/plans/release/release-note-v0.4.0-preview.zh-CN.md)
+**下载:**上方 zip 与 dmg 即为完整下载,其余为校验和、物料清单与源码。[中文版发布说明](https://github.com/lulu-loopp/folio-terminal/blob/main/docs/plans/release/release-note-v0.4.0-preview.zh-CN.md)
 
 0.4 is the first release for two systems. Folio runs on macOS: the same program,
 built for Apple silicon, asking for macOS 14 or newer, with the panes, the files
@@ -145,7 +145,7 @@ The full list is in `CHANGELOG.md` in the repository.
 
 | asset | what it is |
 | --- | --- |
-| `folio-0.4.0-windows-x64.zip` | the nine files that belong together, in one folder — `sha256:<sha256>` |
+| `folio-0.4.0-windows-x64.zip` | the nine files that belong together, in one folder — `sha256:66da4ce336f90b032ce6900dda17197f0b865ca7080a65c35f3995cf0997f512` |
 | `SHA256SUMS.txt` | the hash of the archive and of the bill of materials, in the format `sha256sum -c` reads |
 | `folio-0.4.0.cdx.json` | the CycloneDX bill of materials for what is in the build |
 
@@ -165,7 +165,7 @@ winget yet.
 
 | asset | what it is |
 | --- | --- |
-| `Folio-0.4.0-macos-arm64.dmg` | the application, signed and notarized — `sha256:<sha256>` |
+| `Folio-0.4.0-macos-arm64.dmg` | the application, signed and notarized — `sha256:346eb5a3fc2992513e141b0881762c2f85221b35d1be3a6223f1e7463e700dfd` |
 | `SHA256SUMS-macos.txt` | the hash of the disk image, in the format `shasum -a 256 -c` reads |
 
 Open the image and drag **Folio** to Applications. Needs an **Apple silicon Mac
