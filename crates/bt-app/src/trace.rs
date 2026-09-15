@@ -18,6 +18,27 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
+/// **The process's own zero, shared by every named trace.**
+///
+/// A clock taken at each file's own opening would be a different zero per
+/// variable — a gate opens at the first station any code path reaches, and two
+/// variables' first stations can be seconds apart — so the same event would
+/// carry two different numbers in two files of the same run. That is precisely
+/// the reading these files exist to support: the wheel's road is
+/// [`BT_MOUSE_TRACE`](crate::mouse_trace) and what it did to a card is
+/// [`BT_CARD_TRACE`](crate::card_trace), and a reader answers "which came
+/// first" by merging them on the first column. One origin makes that column
+/// mean the same thing in every file this process writes.
+///
+/// It is still per *process*, and that is what the header line is for: a file
+/// collecting several runs restarts at zero under each header.
+static ORIGIN: OnceLock<Instant> = OnceLock::new();
+
+/// [`ORIGIN`], set by whichever trace opens first.
+fn origin() -> Instant {
+    *ORIGIN.get_or_init(Instant::now)
+}
+
 /// One opened trace file, and the clock its timestamps are measured from.
 ///
 /// The clock is [`Instant`] rather than a wall time: what a reader of this file
@@ -44,7 +65,7 @@ impl Trace {
         file.flush()?;
         Ok(Self {
             file: Mutex::new(file),
-            started: Instant::now(),
+            started: origin(),
         })
     }
 
@@ -225,8 +246,50 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// **Two variables are two files and two clocks**, which is the property that
-    /// makes a second trace a binding rather than a fork of the machinery.
+    /// **Two variables are two files and ONE clock** (T-CARD-TRACE).
+    ///
+    /// The merge is the reading these files exist for — the wheel's road is
+    /// `BT_MOUSE_TRACE` and what it did to a card is `BT_CARD_TRACE` — and a
+    /// merge on the first column is only sound while that column counts from
+    /// the same instant in both. Two traces opened a measurable time apart are
+    /// therefore stamped from the same origin, so the second one's first line
+    /// is *later* than the first one's rather than starting again at zero.
+    ///
+    /// Mutation: give [`Trace::create`] its own `Instant::now()` back and the
+    /// second file's clock restarts, which silently shifts every one of its
+    /// lines against the other file's.
+    #[test]
+    fn two_gates_share_one_clock_so_their_files_merge() {
+        let first = scratch("clock-first");
+        let second = scratch("clock-second");
+        let early = Trace::create(&first, HEADER).expect("open the first trace");
+        emit(Some(&early), || String::from("first"));
+        let stamp_of = |line: &str| -> f64 {
+            line.split_whitespace()
+                .next()
+                .expect("a timestamp leads the line")
+                .parse()
+                .expect("and it is a number of milliseconds")
+        };
+        let opened_at = stamp_of(body(&first).lines().nth(1).expect("the first line"));
+        let late = Trace::create(&second, HEADER).expect("open the second trace");
+        emit(Some(&late), || String::from("second"));
+        let later = stamp_of(
+            body(&second)
+                .lines()
+                .nth(1)
+                .expect("the second file's line"),
+        );
+        assert!(
+            later >= opened_at,
+            "the second trace restarted the clock: {later} is before {opened_at}"
+        );
+        let _ = std::fs::remove_file(&first);
+        let _ = std::fs::remove_file(&second);
+    }
+
+    /// **Two variables are two files**, which is the property that makes a
+    /// second trace a binding rather than a fork of the machinery.
     #[test]
     fn two_gates_write_to_two_files() {
         let mouse = scratch("two-mouse");

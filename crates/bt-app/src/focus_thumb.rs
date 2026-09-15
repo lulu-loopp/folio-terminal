@@ -93,7 +93,7 @@ use bt_term::DualPlaneSession;
 use bt_transcript::CapturedRow;
 
 use crate::{
-    TabId,
+    TabId, card_trace,
     files::{self, DirCache, RowKind},
     preview::{PreviewBuffer, PreviewSource},
     seats::{FilesLeafState, FilesView, MiniFilesRow, MiniSeatContent, seat_title},
@@ -632,25 +632,69 @@ impl FocusThumbnails {
 
     /// Discard numeric overshoot when a changed card can be projected. Idle
     /// cards pay only the same revision/geometry comparisons as the draw gate.
+    ///
+    /// `site` names the card and says which caller ran the pass —
+    /// `BT_CARD_TRACE` (`card walk`) and nothing else. It is a parameter rather
+    /// than state on the leaf because a pane can be torn out into another tab,
+    /// and a stored identity would go on naming the tab the card used to be in.
     pub(crate) fn clamp_terminal_skip(
         &self,
         tab: TabId,
         demand: &SeatDemand<'_>,
         skip: &mut usize,
         now: Instant,
+        site: card_trace::Card,
     ) {
+        // **The one field a refusing exit still has** — the grid the pane is
+        // wearing, read behind the gate because an unset variable must pay one
+        // atomic load and nothing else on a per-frame path.
+        let terminal = match &demand.source {
+            SeatSource::Terminal { session, .. } => Some(*session),
+            _ => None,
+        };
+        let refuse = |leave: &'static str, skip: usize| {
+            trace_walk(site, leave, terminal, demand.rows, skip, skip, None);
+        };
         if *skip == 0 {
+            refuse("at-tail", *skip);
             return;
         }
-        if let Some(entry) = self.entries.get(&(tab, demand.id))
-            && (entry.damage == demand.damage()
-                || (!entry.unthrottled && now.duration_since(entry.at) < MIN_INTERVAL))
-        {
+        if let Some(entry) = self.entries.get(&(tab, demand.id)) {
+            // Asked once and kept, because a `Damage` is built rather than read
+            // and the word this exit writes is which of the two gates refused.
+            //
+            // **`unchanged` is not "the card did not move".** The damage key
+            // carries the card's own `skip`, so a card the wheel has just moved
+            // never takes this exit; what it says is that this demand asks for
+            // the picture already on the glass.
+            let same_picture = entry.damage == demand.damage();
+            if same_picture || (!entry.unthrottled && now.duration_since(entry.at) < MIN_INTERVAL) {
+                refuse(
+                    if same_picture {
+                        "unchanged"
+                    } else {
+                        "throttled"
+                    },
+                    *skip,
+                );
+                return;
+            }
+        }
+        let Some(session) = terminal else {
+            refuse("not-a-terminal", *skip);
             return;
-        }
-        if let SeatSource::Terminal { session, .. } = &demand.source {
-            clamp_card_skip(session, skip, demand.rows);
-        }
+        };
+        let before = *skip;
+        clamp_card_skip(session, skip, demand.rows);
+        trace_walk(
+            site,
+            "walked",
+            terminal,
+            demand.rows,
+            before,
+            *skip,
+            Some(before),
+        );
     }
 
     /// **Gates 3 and 4** — bring one visible card's seats up to date.
@@ -1116,6 +1160,84 @@ fn card_climb(session: &DualPlaneSession, wanted: usize) -> Vec<String> {
     climb
 }
 
+/// **`card walk`** — one line per call of the per-frame clamp, whichever of its
+/// five exits was taken (`BT_CARD_TRACE`, T-CARD-TRACE).
+///
+/// `walk_from` carries the only expensive thing here: `Some(n)` takes a bounded
+/// [`card_climb`] of this station's own — the same bound `clamp_card_skip` used
+/// — so the line can report the reachable maximum, the offset the *draw* will
+/// use, and the two rows a reader is looking at. [`clamp_card_skip`] hands none
+/// of that back, and [`transcript_tail`] is a pure function with no card
+/// identity to carry, so this is where the three numbers can be compared at all.
+/// `None` is a refusing exit: it prints the grid and the two offsets and says
+/// `-` for everything a walk would have answered, because an absent number is
+/// not a zero.
+///
+/// The whole body stands behind [`card_trace::is_on`], so an unset variable pays
+/// one atomic load and takes no walk.
+fn trace_walk(
+    site: card_trace::Card,
+    leave: &'static str,
+    session: Option<&DualPlaneSession>,
+    rows: usize,
+    skip_before: usize,
+    skip_after: usize,
+    walk_from: Option<usize>,
+) {
+    if !card_trace::is_on() {
+        return;
+    }
+    // A seat with no terminal behind it has no grid to report, and `0x0` is the
+    // honest way to say so rather than a width borrowed from somewhere else.
+    let grid = session.map_or((0, 0), |session| {
+        let (columns, live_rows) = session.live_dimensions();
+        (columns.get(), live_rows.get())
+    });
+    let mut reachable = None;
+    let mut drawn = None;
+    let mut first = None;
+    let mut last = None;
+    if let (Some(session), Some(from)) = (session, walk_from)
+        && rows > 0
+    {
+        let climb = card_climb(session, rows.saturating_add(from));
+        if !climb.is_empty() {
+            let max = climb.len().saturating_sub(rows);
+            // What `transcript_tail` will do with the number this clamp leaves
+            // behind. The draw's own walk is bounded by `rows + skip_after` and
+            // this one by `rows + skip_before`, which is the longer of the two,
+            // so the same answer comes out of it.
+            let at = skip_after.min(max);
+            reachable = Some(max);
+            drawn = Some(at);
+            // The climb is newest-first and the card draws `climb[at..at + rows]`
+            // reversed, so the row at the *top* of the card is the far end of
+            // that window and the one at the *bottom* is `climb[at]`. Reported
+            // as the pane wrote them, before the card cuts them to its own
+            // width: the question this station answers is *which part of the
+            // transcript*, and the mini's width is a fact about the picture.
+            let top = climb.len().min(at.saturating_add(rows)).saturating_sub(1);
+            first = Some(climb[top].trim_end().to_owned());
+            last = Some(climb[at].trim_end().to_owned());
+        }
+    }
+    card_trace::line(|| {
+        card_trace::Walk {
+            card: site,
+            leave,
+            grid,
+            rows,
+            skip_before,
+            skip_after,
+            reachable,
+            drawn,
+            first,
+            last,
+        }
+        .line()
+    });
+}
+
 /// Keep the stored offset reachable as a card grows or its transcript shrinks.
 /// A zero-height or not-yet-populated card cannot establish a useful limit.
 pub(crate) fn clamp_card_skip(session: &DualPlaneSession, skip: &mut usize, rows: usize) {
@@ -1130,24 +1252,48 @@ pub(crate) fn clamp_card_skip(session: &DualPlaneSession, skip: &mut usize, rows
 
 /// Move whole rows from the currently visible position, then discard excess.
 /// Clamping before subtraction also covers a resize before the next draw.
+///
+/// `site` names the card this notch is aimed at — `BT_CARD_TRACE` (`card aim`)
+/// and nothing else.
 pub(crate) fn aim_card_skip(
     session: &DualPlaneSession,
     skip: &mut usize,
     rows: usize,
     steps: i32,
+    site: card_trace::Card,
 ) -> bool {
     if rows == 0 || steps == 0 {
         return false;
     }
     let before = *skip;
     clamp_card_skip(session, skip, rows);
+    // **What the entry clamp made of the stored number** (`BT_CARD_TRACE`).
+    // `stored_before != clamped_before` is a resize having left this card
+    // pointing past the top and this notch paying that debt off, which is the
+    // whole reason the clamp stands above the arithmetic rather than below it.
+    let clamped_before = *skip;
     let requested = if steps > 0 {
         skip.saturating_add(steps.unsigned_abs() as usize)
     } else {
         skip.saturating_sub(steps.unsigned_abs() as usize)
     };
     let climb = card_climb(session, rows.saturating_add(requested));
-    *skip = requested.min(climb.len().saturating_sub(rows));
+    let reachable = climb.len().saturating_sub(rows);
+    *skip = requested.min(reachable);
+    let aimed = *skip;
+    card_trace::line(|| {
+        card_trace::Aim {
+            card: site,
+            detents: steps,
+            rows,
+            stored_before: before,
+            clamped_before,
+            requested,
+            skip_after: aimed,
+            reachable,
+        }
+        .line()
+    });
     before != *skip
 }
 
@@ -2663,18 +2809,42 @@ mod tests {
         resize_shell(&mut shell, 24);
         clamp_card_skip(&shell, &mut position, 4);
 
-        assert!(aim_card_skip(&shell, &mut position, 4, 6));
+        assert!(aim_card_skip(
+            &shell,
+            &mut position,
+            4,
+            6,
+            card_trace::Card::untraced()
+        ));
         assert_eq!(position, 6);
-        assert!(aim_card_skip(&shell, &mut position, 4, 1));
+        assert!(aim_card_skip(
+            &shell,
+            &mut position,
+            4,
+            1,
+            card_trace::Card::untraced()
+        ));
         assert_eq!(position, 7);
 
         // Narrower again: a detent still moves one current assembled row.
         resize_shell(&mut shell, 12);
         clamp_card_skip(&shell, &mut position, 4);
         let narrow = position;
-        assert!(aim_card_skip(&shell, &mut position, 4, 1));
+        assert!(aim_card_skip(
+            &shell,
+            &mut position,
+            4,
+            1,
+            card_trace::Card::untraced()
+        ));
         assert_eq!(position, narrow + 1);
-        assert!(aim_card_skip(&shell, &mut position, 4, -2));
+        assert!(aim_card_skip(
+            &shell,
+            &mut position,
+            4,
+            -2,
+            card_trace::Card::untraced()
+        ));
         assert_eq!(position, narrow - 1);
     }
 

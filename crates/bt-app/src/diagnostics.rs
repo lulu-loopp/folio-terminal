@@ -720,6 +720,7 @@ mod tests {
             "BT_WEB_TRACE_V",
             "BT_ATTENTION_TRACE",
             "BT_PREVIEW_TRACE",
+            "BT_CARD_TRACE",
         ] {
             assert!(
                 console_was_asked_for(names(&["PATH", asked, "APPDATA"])),

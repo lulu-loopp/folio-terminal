@@ -41,11 +41,11 @@ fn wheel_at_top_reverses_on_first_notch() {
     let mut p = 0;
     clamp_card_skip(&s, &mut p, 4);
     for _ in 0..50 {
-        aim_card_skip(&s, &mut p, 4, 1);
+        aim_card_skip(&s, &mut p, 4, 1, card_trace::Card::untraced());
     }
     let top = transcript_tail(&s, 40, 4, p);
     let at_top = p;
-    aim_card_skip(&s, &mut p, 4, -1);
+    aim_card_skip(&s, &mut p, 4, -1, card_trace::Card::untraced());
     let down = transcript_tail(&s, 40, 4, p);
     println!(
         "top stored={at_top} reverse stored={} top={top:?} down={down:?}",
@@ -63,12 +63,12 @@ fn height_growth_overshoot_and_reversal() {
         s.feed(format!("row-{n:02}\r\n").as_bytes()).unwrap();
     }
     let mut p = 0;
-    aim_card_skip(&s, &mut p, 4, 16);
+    aim_card_skip(&s, &mut p, 4, 16, card_trace::Card::untraced());
     clamp_card_skip(&s, &mut p, 12);
     let grown = transcript_tail(&s, 40, 12, p);
     assert_eq!(p, 8, "a taller card must discard stored overshoot");
     clamp_card_skip(&s, &mut p, 12);
-    aim_card_skip(&s, &mut p, 12, -1);
+    aim_card_skip(&s, &mut p, 12, -1, card_trace::Card::untraced());
     let down = transcript_tail(&s, 40, 12, p);
     println!("grown first reverse stored={} visible={down:?}", p);
     assert_eq!(p, 7);
@@ -184,9 +184,9 @@ fn height_growth_first_reverse_before_next_draw_moves() {
         s.feed(format!("row-{n:02}\r\n").as_bytes()).unwrap();
     }
     let mut p = 0;
-    aim_card_skip(&s, &mut p, 4, 16);
+    aim_card_skip(&s, &mut p, 4, 16, card_trace::Card::untraced());
     let grown = transcript_tail(&s, 40, 12, p).0;
-    aim_card_skip(&s, &mut p, 12, -1);
+    aim_card_skip(&s, &mut p, 12, -1, card_trace::Card::untraced());
     assert_eq!(p, 7, "reverse starts at visible maximum 8, not stored 16");
     assert_eq!(transcript_tail(&s, 40, 12, p).0[0], "row-01");
     assert_ne!(transcript_tail(&s, 40, 12, p).0, grown);
@@ -211,10 +211,22 @@ fn projection_gate_clamps_height_growth_before_publishing() {
     };
     thumbs.project(tab, &[demand(4, skip)], start);
     // The old picture remains until the normal projection clock admits it.
-    thumbs.clamp_terminal_skip(tab, &demand(12, skip), &mut skip, start);
+    thumbs.clamp_terminal_skip(
+        tab,
+        &demand(12, skip),
+        &mut skip,
+        start,
+        card_trace::Card::untraced(),
+    );
     assert_eq!(skip, 16);
     let ready = start + MIN_INTERVAL;
-    thumbs.clamp_terminal_skip(tab, &demand(12, skip), &mut skip, ready);
+    thumbs.clamp_terminal_skip(
+        tab,
+        &demand(12, skip),
+        &mut skip,
+        ready,
+        card_trace::Card::untraced(),
+    );
     assert_eq!(skip, 8);
     thumbs.project(tab, &[demand(12, skip)], ready);
     let MiniSeatContent::Transcript { lines, .. } = &thumbs.seats(tab).unwrap()[&seat] else {
@@ -222,6 +234,6 @@ fn projection_gate_clamps_height_growth_before_publishing() {
     };
     assert_eq!(lines.first().unwrap(), "row-00");
     assert_eq!(lines.last().unwrap(), "row-11");
-    aim_card_skip(&s, &mut skip, 12, -1);
+    aim_card_skip(&s, &mut skip, 12, -1, card_trace::Card::untraced());
     assert_eq!(skip, 7);
 }

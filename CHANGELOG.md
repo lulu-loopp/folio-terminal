@@ -36,6 +36,15 @@ Nothing yet.
   the rows macOS puts there for every app. They work from another app and from
   an empty desk: with every window closed, either one opens a window.
 
+- **A focus card can be asked to record what it does.** Set `BT_CARD_TRACE` to a
+  file name and Folio appends one line per decision behind the miniature in the
+  sidebar — where it clamped itself and which row that leaves on screen, what a
+  wheel notch did to it, every new size the pane behind it was given, and what a
+  change of display did to its height. It is off unless you set it, changes
+  nothing about how the card behaves, and shares its clock with `BT_MOUSE_TRACE`
+  so the two files read together. `docs/BT-ENVIRONMENT.md` says what a trace
+  file can contain.
+
 ### Changed
 
 - **Moving the caret and typing in a very large Markdown document no longer

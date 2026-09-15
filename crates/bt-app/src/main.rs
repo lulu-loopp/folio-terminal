@@ -46,6 +46,7 @@ mod attention_map;
 mod attention_trace;
 mod attention_wire;
 mod attention_words;
+mod card_trace;
 mod cardhint;
 mod cli;
 mod cmdrail;
@@ -18413,6 +18414,7 @@ fn schedule_leaf_grid_change(
     observed_at: Instant,
     on_stage: LeafOnStage,
     context: &'static str,
+    pane: card_trace::Pane,
 ) -> Result<bool> {
     let Some(reflow) = plan_grid_change(
         &mut leaf.pending_pty_resize,
@@ -18424,6 +18426,36 @@ fn schedule_leaf_grid_change(
     ) else {
         return Ok(false);
     };
+    // **`card pane resized`** (`BT_CARD_TRACE`, T-CARD-TRACE). A grid change is
+    // not a view: it re-wraps the live screen and freezes whatever it pushes off
+    // the top at the width it pushed it off at, so it is the one event that can
+    // move a card's content out from under a number nobody touched. The line is
+    // written here, above the `Behind` return, because a pane whose own reflow
+    // is deferred has still been *given* the size — that is what the `commit=`
+    // word is for. A plan that came back `None` changed nothing and writes
+    // nothing, which is what keeps a divider drag from filling the file.
+    let (stage, commit) = match on_stage {
+        LeafOnStage::Shown => ("shown", "local"),
+        LeafOnStage::Behind => ("behind", "queued"),
+    };
+    let before = (
+        u32::from(leaf.grid.columns.get()),
+        u32::from(leaf.grid.rows.get()),
+    );
+    let after = (
+        u32::from(reflow.columns.get()),
+        u32::from(reflow.rows.get()),
+    );
+    card_trace::line(|| {
+        card_trace::PaneResized {
+            pane,
+            stage,
+            commit,
+            before,
+            after,
+        }
+        .line()
+    });
     if on_stage == LeafOnStage::Behind {
         return Ok(false);
     }
@@ -22089,8 +22121,16 @@ impl CardAim {
 }
 
 /// Apply the whole rows spent by `CardAim` to the leaf's card window.
-fn aim_card_window(leaf: &mut LeafSession, rows: usize, steps: i32) -> bool {
-    focus_thumb::aim_card_skip(&leaf.session, &mut leaf.card_skip, rows, steps)
+///
+/// `site` names the card and says the notch is what ran the aim —
+/// `BT_CARD_TRACE` and nothing else (§7.1.6b′).
+fn aim_card_window(
+    leaf: &mut LeafSession,
+    rows: usize,
+    steps: i32,
+    site: card_trace::Card,
+) -> bool {
+    focus_thumb::aim_card_skip(&leaf.session, &mut leaf.card_skip, rows, steps, site)
 }
 
 /// What one wheel notch over the focus column is for.
@@ -39420,7 +39460,7 @@ impl Runtime<'_> {
             )
         };
         self.window.focus_mini_face_advance = focus_mini_face_advance;
-        self.refresh_focus_thumbnails(now, scale);
+        self.refresh_focus_thumbnails(now, scale, card_trace::why::FRAME);
         let badge_font_px = bt_render::WINDOW_TAB_BADGE_FONT_LOGICAL_PX * scale;
         let mut tabs = tabs
             .into_iter()
@@ -83204,6 +83244,12 @@ impl Runtime<'_> {
         context: &'static str,
     ) -> Result<()> {
         let active = self.window.active_tab;
+        // **Which pane this is**, read before the `&mut` below (`BT_CARD_TRACE`).
+        let pane = card_trace::Pane {
+            window: u64::from(self.window.window.id()),
+            tab: self.window.tabs[active].id,
+            seat: self.window.tabs[active].focused_leaf,
+        };
         // A tab with no shell has no grid to carry anywhere and no child to
         // carry it to (§7.1.6h). The rectangle it was solved into is real and
         // the chrome uses it; what is absent is the *cell* reading of that
@@ -83218,6 +83264,7 @@ impl Runtime<'_> {
             observed_at,
             LeafOnStage::Shown,
             context,
+            pane,
         )?;
         Ok(())
     }
@@ -83285,6 +83332,10 @@ impl Runtime<'_> {
         self.window.shells_settled_revision = self.seats.structure_revision();
         let plan = leaf_resize_plan(&self.seats, &self.seat_layout, self.focused_leaf, scale);
         let active = self.window.active_tab;
+        // Read before the walk takes a `&mut` of this tab's sessions
+        // (`BT_CARD_TRACE`).
+        let window = u64::from(self.window.window.id());
+        let tab_id = self.window.tabs[active].id;
         // The panes without the keyboard, before the focused one, so the pane a
         // gesture is aimed at is the last one this turn touches.
         for target in plan.iter().copied().filter(|target| !target.focused) {
@@ -83305,6 +83356,11 @@ impl Runtime<'_> {
                 observed_at,
                 LeafOnStage::Shown,
                 context,
+                card_trace::Pane {
+                    window,
+                    tab: tab_id,
+                    seat,
+                },
             )?;
         }
         // And the tabs nobody is looking at, before the focused pane for the
@@ -83378,6 +83434,8 @@ impl Runtime<'_> {
         observed_at: Instant,
         context: &'static str,
     ) -> Result<()> {
+        // Read before any tab is borrowed mutably (`BT_CARD_TRACE`).
+        let window = u64::from(self.window.window.id());
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let metrics = seats::seat_metrics(self.window.renderer.metrics().dpi_milli().get());
         let viewport = self.window.seat_viewport;
@@ -83408,6 +83466,7 @@ impl Runtime<'_> {
             let tab = &mut self.window.tabs[index];
             tab.seat_layout = layout;
             tab.seat_overflow = overflow;
+            let tab_id = tab.id;
             for (seat, next_grid, physical) in sized {
                 let Some(leaf) = tab.sessions.get_mut(&seat) else {
                     continue;
@@ -83419,6 +83478,11 @@ impl Runtime<'_> {
                     observed_at,
                     LeafOnStage::Behind,
                     context,
+                    card_trace::Pane {
+                        window,
+                        tab: tab_id,
+                        seat,
+                    },
                 )?;
             }
         }
@@ -83465,7 +83529,10 @@ impl Runtime<'_> {
         // key gated on the focused pane alone would leave a hidden pane's
         // typeset bands rastered for the width it had before the gesture.
         let mut reflowed_any = false;
+        // Read before the walk takes a `&mut` of the tab list (`BT_CARD_TRACE`).
+        let window = u64::from(self.window.window.id());
         for (index, tab) in self.window.tabs.iter_mut().enumerate() {
+            let tab_id = tab.id;
             for (seat, leaf) in tab.sessions.iter_mut() {
                 // The deferred local reflow lands inside this, immediately before the child hears
                 // the same size, in the same order every other resize path uses (actor first,
@@ -83477,11 +83544,47 @@ impl Runtime<'_> {
                 // accumulated; the send happens in `finish_resize_if_quiescent`, after ConPTY
                 // output has also been silent, so a closed input region still writes exactly zero
                 // private bytes.
+                //
+                // The grid this pane's own actor is wearing as the release begins is read first:
+                // it is the `grid_before` of the `card pane resized` line below, and this is the
+                // only place it can be read, because the release is what moves it
+                // (`BT_CARD_TRACE`).
+                let grid_before = leaf.grid;
                 let (commit, leaf_wake) = release_due_leaf_resize(leaf, now, hand_on_the_geometry)?;
                 wake_deadline = earliest_deadline([wake_deadline, leaf_wake]);
                 let Some(commit) = commit else {
                     continue;
                 };
+                // **`card pane resized`, the committed leg** (T-CARD-TRACE).
+                // The quiet boundary is where a hidden pane's deferred reflow
+                // actually happens and where every pane's child is told, so it
+                // is a second place a card's transcript can be re-wrapped under
+                // it — and the `commit=` word is what tells the two apart in the
+                // file.
+                let pane = card_trace::Pane {
+                    window,
+                    tab: tab_id,
+                    seat: *seat,
+                };
+                let before = (
+                    u32::from(grid_before.columns.get()),
+                    u32::from(grid_before.rows.get()),
+                );
+                let after = (
+                    u32::from(leaf.grid.columns.get()),
+                    u32::from(leaf.grid.rows.get()),
+                );
+                let stage = if index == active { "shown" } else { "behind" };
+                card_trace::line(|| {
+                    card_trace::PaneResized {
+                        pane,
+                        stage,
+                        commit: "committed",
+                        before,
+                        after,
+                    }
+                    .line()
+                });
                 if trace {
                     eprintln!(
                         "BT_RESIZE_TRACE conpty tab={index} seat={} cols={} rows={}",
@@ -91983,7 +92086,12 @@ impl Runtime<'_> {
     /// The projection itself is untouched: it still quotes only what is in
     /// memory, and the next pass finds the body there because somebody else put
     /// it there.
-    fn refresh_focus_thumbnails(&mut self, now: Instant, scale: f32) {
+    fn refresh_focus_thumbnails(&mut self, now: Instant, scale: f32, why: &'static str) {
+        // **This window's id, read before any borrow** (`BT_CARD_TRACE`,
+        // §7.1.6b′) — `mouse_trace::window_line`'s own rule: the clamp below
+        // stands inside a live `&mut` of this window's tabs, where `&self`
+        // cannot be taken, so the number is taken here and carried.
+        let window = u64::from(self.window.window.id());
         let geometry = self.focus_rail_geometry_now(now);
         // **The tab holding the pane that is in the air** (缺陷 #189, widened by
         // B2 on 2026-09-01). Its seat is being drawn twice while the gesture
@@ -92071,11 +92179,21 @@ impl Runtime<'_> {
                             skip: leaf.card_skip,
                         },
                     };
+                    // **`card walk`'s one product call site** (T-CARD-TRACE,
+                    // §7.1.6b′). The reason is this pass's caller's — a frame,
+                    // or the notch that re-spends the projection — because it is
+                    // the one field nothing inside the clamp can answer.
                     self.window.focus_thumbs.clamp_terminal_skip(
                         tab.id,
                         &demand,
                         &mut leaf.card_skip,
                         now,
+                        card_trace::Card {
+                            window,
+                            tab: tab.id,
+                            seat: seat.id,
+                            why,
+                        },
                     );
                 }
             }
@@ -93929,8 +94047,18 @@ impl Runtime<'_> {
             focus_thumb::MiniMetrics::TERM.line_px(scale),
             scale,
         );
+        // **The card this notch is about** (`BT_CARD_TRACE`, T-CARD-TRACE). The
+        // three ids were read above, before this `&mut` of the tab's sessions;
+        // `wheel` is the reason every station under the aim carries, which is
+        // how a card's own file is told apart from the frames around it.
+        let card = card_trace::Card {
+            window,
+            tab: tab_id,
+            seat: seat_id,
+            why: card_trace::why::WHEEL,
+        };
         // The wheel trace records the clamped numeric skip on either exit.
-        if !aim_card_window(leaf, rows, steps) {
+        if !aim_card_window(leaf, rows, steps, card) {
             let unchanged = leaf.card_skip;
             mouse_trace::window_line(window, || aim_line(unchanged));
             return Ok(true);
@@ -93946,7 +94074,7 @@ impl Runtime<'_> {
         self.window.focus_thumbs.unthrottle(tab_id, seat.id);
         // The picture is behind the number, so the projection is spent again
         // before the chrome is built — the order every frame already uses.
-        self.refresh_focus_thumbnails(now, scale);
+        self.refresh_focus_thumbnails(now, scale, card_trace::why::WHEEL);
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
@@ -96633,6 +96761,13 @@ impl Runtime<'_> {
             Instant::now(),
             "rebuild terminal grid on the rectangle a scale change settled on",
         )?;
+        // **The other half of the DPI move** (`BT_CARD_TRACE`, T-CARD-TRACE).
+        // The scale arrived at `apply_scale_factor`; the rectangle it was owed
+        // arrives here, and a card's height is answerable to both — so the same
+        // station is written again with the scale it has now on both sides,
+        // which is what makes the pair readable as one move.
+        let scale = self.window.renderer.metrics().scale_factor;
+        self.trace_card_scale(card_trace::why::RECTANGLE_SETTLED, scale, scale);
         self.sync_math_layout_key();
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),
@@ -96847,7 +96982,69 @@ impl Runtime<'_> {
                 eprintln!("BT_WEB rasterization scale failed: {error}");
             }
         }
+        self.trace_card_scale(
+            card_trace::why::SCALE_APPLIED,
+            measured_at,
+            metrics.scale_factor,
+        );
         Ok(())
+    }
+
+    /// **`card scale`** — the scale road, measured at the cards it moves
+    /// (T-CARD-TRACE, §7.1.6b′).
+    ///
+    /// The rows are the point, and they are why this station *computes* rather
+    /// than merely formats: how many rows a card holds is
+    /// [`focus_thumb::mini_rows`] of a rectangle only the column's own solve
+    /// produces, and that function rounds a border, two paddings and a line
+    /// height each on its own — so it is not a function of the logical box
+    /// alone and cannot be worked back out of the scale afterwards. Hence the
+    /// `is_on` gate, [`mouse_trace::is_on`]'s own: solving a column is not
+    /// something a display change pays for when nobody asked for a trace.
+    ///
+    /// One line per terminal mini seat, keyed by the same tab and seat every
+    /// other station of this file carries, so the scale road and the card's own
+    /// road merge on more than the timestamp. A window with no column says so in
+    /// one line rather than in silence.
+    fn trace_card_scale(&self, why: &'static str, before: f64, after: f64) {
+        if !card_trace::is_on() {
+            return;
+        }
+        let window = u64::from(self.window.window.id());
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let Some(geometry) = self.focus_rail_geometry_now(Instant::now()) else {
+            card_trace::line(|| card_trace::scale_without_a_column(window, why, before, after));
+            return;
+        };
+        for (index, card) in geometry.cards.iter().enumerate() {
+            let Some(tab) = self.window.tabs.get(index) else {
+                continue;
+            };
+            for seat in seats::focus_mini_seats(tab.seats.tree(), card.mini, scale) {
+                if seat.kind != SeatKind::Terminal {
+                    continue;
+                }
+                let rows = focus_thumb::mini_rows(
+                    seat.rect,
+                    focus_thumb::MiniMetrics::TERM.line_px(scale),
+                    scale,
+                );
+                card_trace::line(|| {
+                    card_trace::Scale {
+                        card: card_trace::Card {
+                            window,
+                            tab: tab.id,
+                            seat: seat.id,
+                            why,
+                        },
+                        before,
+                        after,
+                        rows,
+                    }
+                    .line()
+                });
+            }
+        }
     }
 
     /// **How far the panel's list is scrolled, said again in the new display's
@@ -103413,7 +103610,7 @@ mod focus_column_notch_tests {
     #[test]
     fn one_line_moves_a_cards_window() {
         let aim = body("    fn aim_focus_card_window(");
-        assert!(aim.contains("aim_card_window(leaf, rows, steps)"));
+        assert!(aim.contains("aim_card_window(leaf, rows, steps, card)"));
         let scroll = body("    fn scroll_rail(");
         assert!(!scroll.contains("aim_card_window("));
     }
@@ -134597,7 +134794,8 @@ mod tests {
                     physical,
                     at,
                     LeafOnStage::Shown,
-                    "drag"
+                    "drag",
+                    card_trace::Pane::untraced()
                 )
                 .unwrap(),
                 "every one of these rectangles is a new one, so every one is a reflow"
@@ -134697,7 +134895,8 @@ mod tests {
                     physical,
                     at,
                     LeafOnStage::Shown,
-                    "drag"
+                    "drag",
+                    card_trace::Pane::untraced()
                 )
                 .unwrap(),
                 "every one of these rectangles is a new one, so every one is a reflow"
@@ -134727,7 +134926,8 @@ mod tests {
                     physical,
                     at,
                     LeafOnStage::Behind,
-                    "drag"
+                    "drag",
+                    card_trace::Pane::untraced()
                 )
                 .unwrap(),
                 "a pane behind another tab reports no reflow, because it did none"
@@ -154926,6 +155126,7 @@ mod tests {
             Instant::now(),
             LeafOnStage::Shown,
             "resize card skip fixture",
+            card_trace::Pane::untraced(),
         )
         .unwrap();
         assert_eq!(
@@ -154959,7 +155160,7 @@ mod tests {
             },
             MouseScrollDelta::LineDelta(0.0, 1.0),
         );
-        aim_card_window(&mut leaf, 4, steps);
+        aim_card_window(&mut leaf, 4, steps, card_trace::Card::untraced());
         let after = card_restore_first(&mut leaf);
         eprintln!("upward projection: {before} -> {after}");
         assert_eq!(after, "H001");
@@ -154980,7 +155181,7 @@ mod tests {
             },
             MouseScrollDelta::LineDelta(0.0, -1.0),
         );
-        aim_card_window(&mut leaf, 4, steps);
+        aim_card_window(&mut leaf, 4, steps, card_trace::Card::untraced());
         let after = card_restore_first(&mut leaf);
         eprintln!("reverse projection: {before} -> {after}");
         assert_eq!(after, "H002");
@@ -154999,6 +155200,7 @@ mod tests {
             Instant::now(),
             stage,
             "card skip resize",
+            card_trace::Pane::untraced(),
         )
         .unwrap();
         if stage == LeafOnStage::Behind {
@@ -155058,9 +155260,9 @@ mod tests {
         // twenty lines scrolled past on their way up from the saved cursor.
         assert_eq!(card_restore_first(&mut leaf), "");
         assert_eq!(leaf.card_skip, 36);
-        aim_card_window(&mut leaf, 4, i32::MIN);
+        aim_card_window(&mut leaf, 4, i32::MIN, card_trace::Card::untraced());
         assert_eq!(card_restore_first(&mut leaf), "A017");
-        aim_card_window(&mut leaf, 4, 10);
+        aim_card_window(&mut leaf, 4, 10, card_trace::Card::untraced());
         assert_eq!(card_restore_first(&mut leaf), "A007");
         card_restore_resize(&mut leaf, 40, 40, LeafOnStage::Shown);
         assert_eq!(card_restore_first(&mut leaf), "A007");
@@ -155084,9 +155286,9 @@ mod tests {
     fn card_restore_boundary_discards_overflow_before_reversal() {
         let mut leaf = card_restore_fixture();
         card_restore_widen(&mut leaf);
-        aim_card_window(&mut leaf, 4, i32::MAX);
+        aim_card_window(&mut leaf, 4, i32::MAX, card_trace::Card::untraced());
         assert_eq!(card_restore_first(&mut leaf), "H001");
-        aim_card_window(&mut leaf, 4, i32::MAX);
+        aim_card_window(&mut leaf, 4, i32::MAX, card_trace::Card::untraced());
         let mut carry = None;
         let steps = CardAim::spend(
             &mut carry,
@@ -155096,7 +155298,7 @@ mod tests {
             },
             MouseScrollDelta::LineDelta(0.0, -1.0),
         );
-        aim_card_window(&mut leaf, 4, steps);
+        aim_card_window(&mut leaf, 4, steps, card_trace::Card::untraced());
         assert_eq!(card_restore_first(&mut leaf), "H002");
     }
 
