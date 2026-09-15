@@ -1513,8 +1513,38 @@ impl MonospaceFamilySlot {
         }
     }
 
-    /// What a frame draws. One read lock and nothing else.
+    /// **What a frame draws, and it is never empty.**
+    ///
+    /// The emptiness matters because a promise in this file depends on it: a
+    /// picker's button reads the label of its ticked item, so a family list with
+    /// no rows in it is a control that draws blank — which is the state
+    /// `DEFAULT_MONOSPACE_FAMILY`'s own documentation exists to forbid, and
+    /// which `shown_value`'s `every picker row this dialog holds reads
+    /// something` is the pin for.
+    ///
+    /// Before this slice that promise was kept by the enumeration happening on
+    /// the first read, so there was no moment at which the list was empty and
+    /// somebody was looking. Now there is — every moment before the first
+    /// [`begin_monospace_scan`] — so the promise is made here instead, by
+    /// [`default_families`], which is the same one-row list the enumeration
+    /// itself degrades to and costs no disk at all.
+    ///
+    /// One read lock and nothing else.
     fn published(&self) -> &'static [bt_platform::MonospaceFamily] {
+        let adopted = self.adopted();
+        if adopted.is_empty() {
+            return default_families();
+        }
+        adopted
+    }
+
+    /// What has actually been put on the screen — empty until something has.
+    ///
+    /// Separate from [`Self::published`] because "what does a reader see" and
+    /// "has anything been adopted yet" are two questions, and the seed asks the
+    /// second: a `published` that never answers empty would be a seed that never
+    /// publishes.
+    fn adopted(&self) -> &'static [bt_platform::MonospaceFamily] {
         self.published
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1559,7 +1589,7 @@ impl MonospaceFamilySlot {
     /// [`begin_monospace_scan`] for why the seed is a family and not an empty
     /// list.
     fn seed(&self, in_force: &str) {
-        if !self.published().is_empty() {
+        if !self.adopted().is_empty() {
             return;
         }
         let named = if in_force.is_empty() {
@@ -1631,6 +1661,27 @@ impl MonospaceFamilySlot {
 
 static MONOSPACE_FAMILIES: MonospaceFamilySlot = MonospaceFamilySlot::new();
 
+/// **The list before anybody has asked the machine anything** — one row, and it
+/// is the family the grid falls back to.
+///
+/// `bt_platform::order_monospace_families` promises the default is in whatever
+/// it is handed, so handing it nothing is the shortest true statement this
+/// process can make about the machine's fonts: *there is at least the one the
+/// renderer is already drawing*. It is the same one-row list the real
+/// enumeration degrades to on a machine whose DirectWrite refuses, and it is
+/// what the picker draws for the seconds before the first walk lands — see
+/// [`MonospaceFamilySlot::published`] for why the alternative, an empty list,
+/// is not available.
+///
+/// Pure: no disk, no font collection, one allocation once per process.
+fn default_families() -> &'static [bt_platform::MonospaceFamily] {
+    static LIST: std::sync::OnceLock<&'static [bt_platform::MonospaceFamily]> =
+        std::sync::OnceLock::new();
+    LIST.get_or_init(|| {
+        Box::leak(bt_platform::order_monospace_families(Vec::new()).into_boxed_slice())
+    })
+}
+
 /// **How many times this process has walked the machine's font collection.**
 ///
 /// A counter rather than a trace line, because what has to be provable here is
@@ -1650,15 +1701,28 @@ static MONOSPACE_WAKE: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>> =
 /// Every monospaced family this machine has, in the order the picker draws them
 /// — as far as this process has been told.
 ///
-/// **Empty only before the first [`begin_monospace_scan`]**, which is every
-/// moment before the dialog has ever been opened. From the press that opens it
-/// this holds at least the family in force, so no picker is ever drawn blank.
+/// **Never empty**, which is a promise the picker depends on and not a courtesy:
+/// a button reads the label of its ticked item, so a list with no rows is a
+/// control drawn blank. Before the first [`begin_monospace_scan`] this is
+/// [`default_families`] — the one family the renderer falls back to; from the
+/// press that opens the dialog it is at least the family in force; and when the
+/// walk lands it is the machine's own.
 #[must_use]
 pub fn monospace_families() -> &'static [bt_platform::MonospaceFamily] {
     MONOSPACE_FAMILIES.published()
 }
 
 /// How many font-collection walks this process has performed.
+///
+/// **A door for the pins and nothing else**, which is what the `cfg` says out
+/// loud: the product never asks this — it is the reader of a counter that exists
+/// to state a *negative*, and a negative is only ever stated by a test. Left
+/// ungated it is dead code in a binary crate, and a dead public function is the
+/// shape a reader mistakes for an interface.
+///
+/// The counter it reads is written on both sides of the `cfg`, because what the
+/// walks cost is a fact about the run whether or not anybody is counting.
+#[cfg(test)]
 #[must_use]
 pub fn monospace_scans() -> u64 {
     MONOSPACE_SCANS.load(std::sync::atomic::Ordering::Acquire)
@@ -5029,7 +5093,7 @@ const NOTICES_FILE: &str = "THIRD-PARTY-NOTICES.md";
 #[must_use]
 pub fn notices_page() -> &'static str {
     static PAGE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
-    *PAGE.get_or_init(|| {
+    PAGE.get_or_init(|| {
         let tag = crate::version::RELEASE_TAG;
         Box::leak(format!("{REPOSITORY_PAGE}/blob/{tag}/{NOTICES_FILE}").into_boxed_str())
     })
@@ -5104,7 +5168,7 @@ fn shipped_notices_near(executable: &std::path::Path) -> Option<std::path::PathB
 /// arithmetic [`intern_scheme_name`] runs, with a set of one.
 fn about_version_line() -> &'static str {
     static LINE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
-    *LINE.get_or_init(|| Box::leak(crate::version::banner().into_boxed_str()))
+    LINE.get_or_init(|| Box::leak(crate::version::banner().into_boxed_str()))
 }
 
 /// **The machine this copy was made for** — `Windows (x86_64)`.
@@ -5115,7 +5179,7 @@ fn about_version_line() -> &'static str {
 /// above's terms.
 fn about_platform_line() -> &'static str {
     static LINE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
-    *LINE.get_or_init(|| {
+    LINE.get_or_init(|| {
         let system = match bt_platform::host_platform() {
             bt_platform::HostPlatform::Windows => "Windows",
             bt_platform::HostPlatform::MacOs => "macOS",
@@ -14907,8 +14971,22 @@ mod tests {
     fn the_picker_holds_the_family_in_force_before_the_machine_answers() {
         let slot = MonospaceFamilySlot::new();
         assert!(
-            slot.published().is_empty(),
-            "nothing is drawn before the dialog has ever been opened"
+            slot.adopted().is_empty(),
+            "nothing has been adopted before the dialog has ever been opened"
+        );
+        // **And what a frame would draw is still not nothing.** A picker's
+        // button reads its ticked item's label, so an empty list is a control
+        // drawn blank — see `MonospaceFamilySlot::published`, and
+        // `shown_value`'s own `every picker row this dialog holds reads
+        // something`, which is the pin that found this.
+        assert_eq!(
+            slot.published()
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![bt_platform::DEFAULT_MONOSPACE_FAMILY],
+            "before anybody has asked the machine, the list is the one family \
+             the grid falls back to"
         );
 
         slot.seed("Fira Code");
@@ -21728,6 +21806,10 @@ mod tests {
                     SettingsCategory::SummonedTerminal,
                     SettingsCategory::Terminal,
                     SettingsCategory::Agents,
+                    // Last, and last in `SettingsCategory::ALL` too: the one
+                    // page in the rail that holds no setting at all
+                    // (T-SETTINGS-ABOUT).
+                    SettingsCategory::About,
                 ],
                 "{tab_layout:?}: every category with rows is shown once, its rows \
                  together"
@@ -24997,7 +25079,17 @@ mod tests {
                 SettingsRow::ClaudeHooks,
                 SettingsRow::CodexNotify,
                 SettingsRow::CopilotHooks,
-                SettingsRow::TurnEndNotifications
+                SettingsRow::TurnEndNotifications,
+                // ── About (GitHub issue #3) ──
+                //
+                // Last, because its page is last in the rail: the two facts a
+                // report needs, then the three doors — see
+                // `SettingsCategory::About`.
+                SettingsRow::AboutVersion,
+                SettingsRow::AboutPlatform,
+                SettingsRow::AboutReleaseNotes,
+                SettingsRow::AboutIssues,
+                SettingsRow::AboutLicences
             ]
         );
         assert_eq!(
@@ -25056,7 +25148,12 @@ mod tests {
                 SettingsRow::ClaudeHooks,
                 SettingsRow::CodexNotify,
                 SettingsRow::CopilotHooks,
-                SettingsRow::TurnEndNotifications
+                SettingsRow::TurnEndNotifications,
+                SettingsRow::AboutVersion,
+                SettingsRow::AboutPlatform,
+                SettingsRow::AboutReleaseNotes,
+                SettingsRow::AboutIssues,
+                SettingsRow::AboutLicences
             ],
             "Sidebar stands directly under `Tab layout`; the two font rows stay \
              next to each other because they are one decision in two halves, the \
