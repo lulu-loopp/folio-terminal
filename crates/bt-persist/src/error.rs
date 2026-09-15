@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 /// Failure writing a settings/session file. §5.3: "写失败…显式告警,绝不假装
 /// 成功" — this type is what the caller inspects to build that alert; this
-/// crate never panics on a write failure (`CONVENTIONS.md` §四 "panic = 数据
+/// crate never panics on a write failure (`docs/CONVENTIONS.md` §四 "panic = 数据
 /// 丢失").
 #[derive(Debug, thiserror::Error)]
 pub enum WriteError {

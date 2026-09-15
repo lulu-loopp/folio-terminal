@@ -1,10 +1,10 @@
-> Draft for the GitHub Release body. The published text is settled by the user at release time. 草稿，发布时由用户审定。
+> The body of the GitHub Release for this version, as published.
 
 # Folio 0.3.0-preview
 
 **Download:** [zip](https://github.com/lulu-loopp/folio-terminal/releases/download/v0.3.0-preview/folio-0.3.0-windows-x64.zip) (Windows 10 1809+ / 11, 64-bit). Unpack, run folio.exe.
 
-**下载:**上方 zip 即为完整下载,其余为校验和、物料清单与源码。
+**下载：** 上方 zip 即为完整下载,其余为校验和、物料清单与源码。
 
 0.3 is about writing on the page you were reading. A `.md` file in a preview
 pane — headings, tables, code and formulas typeset beside the prompt — is now

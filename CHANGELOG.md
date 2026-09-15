@@ -19,6 +19,24 @@ All notable changes to Folio are recorded here. The format follows
   from. Nothing on the page is a setting, so nothing on it can be changed by
   accident.
 
+### Changed
+
+- **Two files moved out of the top of the repository.** `CONVENTIONS.md` is now
+  `docs/CONVENTIONS.md`, beside the rest of the written record, and the
+  `cargo-about` configuration and template — `about.toml` and `about.hbs` — are
+  now `licenses/about.toml` and `licenses/about.hbs`, beside the licence texts
+  they assemble into `THIRD-PARTY-NOTICES.md`. Nothing about any of them changed
+  except where they are; a fork that names one by path updates the path.
+
+- **The gates that compile now all compile the same thing.** The shortcut-table
+  script and its generator asked cargo for a narrower set of crates than the test
+  gate does, and one dependency came out with one feature more under one of them
+  than the other — enough to make every crate above it, up to and including the
+  test executable, a different thing to build. So each script rebuilt what the
+  run before it had just finished building. They now ask for what the gate asks
+  for, and the feature is named outright rather than arriving by accident, so a
+  script run after a green gate has nothing left to compile.
+
 ### Fixed
 
 - **Opening Settings no longer makes the window wait.** Clicking the gear used
