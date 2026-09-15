@@ -163661,7 +163661,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 11] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 13] = [
         // The hook this build writes into somebody else's settings file names a
         // program, and a program is named differently on each platform.
         "attention_copilot.rs",
@@ -163681,10 +163681,16 @@ mod platform_gate_tests {
         "main.rs",
         // Which rows the palette offers on this machine.
         "palette_index.rs",
+        // Test fixtures compose Windows-only namespace translation with profile
+        // overrides; production profile policy uses the portable platform interface.
+        "profiles.rs",
         // A PowerShell module, which is a Windows fact end to end.
         "psreadline.rs",
         // Which shells can be integrated with here.
         "shell_integration.rs",
+        // Native invalid-name, Windows spelling and direct CRT test fixtures only;
+        // the pure encoders stay here as paste-paths design section 5 specifies.
+        "shell_literal.rs",
         // WSL.
         "wsl.rs",
     ];
@@ -163740,7 +163746,7 @@ mod platform_gate_tests {
         opens && PLATFORM_WORDS.iter().any(|word| line.contains(word))
     }
 
-    /// RED — **no twelfth file, and no name on the list that has stopped
+    /// RED — **no unlisted file, and no name on the list that has stopped
     /// asking.**
     ///
     /// Two directions, because a one-way list rots: a file that starts naming a

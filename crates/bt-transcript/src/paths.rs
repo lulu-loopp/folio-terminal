@@ -138,18 +138,16 @@ impl PrintedPathNamespace {
                     distro: Some(distro),
                     ..
                 } = self
+                    && let Some(share) = host.strip_prefix("\\\\")
+                    && let Some((server, rest)) = share.split_once('\\')
                 {
-                    if let Some(share) = host.strip_prefix("\\\\") {
-                        if let Some((server, rest)) = share.split_once('\\') {
-                            let (name, tail) = rest.split_once('\\').unwrap_or((rest, ""));
-                            if (server.eq_ignore_ascii_case(WSL_DISTRIBUTION_SHARE_HOST)
-                                || server.eq_ignore_ascii_case("wsl$"))
-                                && name.eq_ignore_ascii_case(distro)
-                                && is_distribution_name(distro)
-                            {
-                                return format!("/{}", tail.replace('\\', "/"));
-                            }
-                        }
+                    let (name, tail) = rest.split_once('\\').unwrap_or((rest, ""));
+                    if (server.eq_ignore_ascii_case(WSL_DISTRIBUTION_SHARE_HOST)
+                        || server.eq_ignore_ascii_case("wsl$"))
+                        && name.eq_ignore_ascii_case(distro)
+                        && is_distribution_name(distro)
+                    {
+                        return format!("/{}", tail.replace('\\', "/"));
                     }
                 }
             }

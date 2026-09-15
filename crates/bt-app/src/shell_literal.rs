@@ -443,10 +443,8 @@ mod tests {
         let crt = encoder(ShellGrammar::Cmd);
         for path in paths {
             let literal = crt.literal(&path).unwrap();
-            let output = std::process::Command::new(&consumer)
+            let output = bt_platform::quiet_command(&consumer)
                 .raw_arg(&literal)
-                // CREATE_NO_WINDOW: output is captured through pipes, never a console window.
-                .creation_flags(0x0800_0000)
                 .output()
                 .unwrap();
             assert!(output.status.success(), "{path:?}: {:?}", output.status);
