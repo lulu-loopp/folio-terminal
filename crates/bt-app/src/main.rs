@@ -92276,11 +92276,17 @@ impl Runtime<'_> {
                     // **`card walk`'s one product call site** (T-CARD-TRACE,
                     // §7.1.6b′). The reason is this pass's caller's — a frame,
                     // or the notch that re-spends the projection — because it is
-                    // the one field nothing inside the clamp can answer.
-                    self.window.focus_thumbs.clamp_terminal_skip(
+                    // the one field nothing inside the station can answer.
+                    //
+                    // The number goes in by value (T-CARD-NO-PASSIVE-CLAMP): a
+                    // frame writes a line about this card and never writes the
+                    // card's place, so a grid the window wears for an instant on
+                    // its way to another display cannot take the reader's place
+                    // with it.
+                    self.window.focus_thumbs.trace_card_walk(
                         tab.id,
                         &demand,
-                        &mut leaf.card_skip,
+                        leaf.card_skip,
                         now,
                         card_trace::Card {
                             window,
@@ -155289,12 +155295,15 @@ mod tests {
                 .len(),
             140
         );
-        assert_eq!(card_restore_first(&mut leaf), "H007");
+        assert_eq!(card_restore_first(&leaf), "H007");
         leaf
     }
 
-    fn card_restore_first(leaf: &mut LeafSession) -> String {
-        focus_thumb::clamp_card_skip(&leaf.session, &mut leaf.card_skip, 4);
+    /// The top row of this leaf's four-row card, drawn exactly as the product
+    /// draws it — and, since T-CARD-NO-PASSIVE-CLAMP, drawn without touching the
+    /// leaf's number: the draw's own clamp lives in `transcript_tail` and writes
+    /// nothing back, so looking at a card is not a way to move it.
+    fn card_restore_first(leaf: &LeafSession) -> String {
         focus_thumb::transcript_tail(&leaf.session, 40, 4, leaf.card_skip).0[0].clone()
     }
 
@@ -155320,20 +155329,31 @@ mod tests {
         );
     }
 
-    /// Reflow shrinks the reachable maximum from 136 to 116; discard excess.
+    /// Reflow shrinks the reachable maximum from 136 to 116. The drawing is held
+    /// to 116 and the stored 130 is not (T-CARD-NO-PASSIVE-CLAMP): a number cut
+    /// down by a width the pane wore on its way somewhere else is a reader's
+    /// place spent by nobody.
     #[test]
-    fn card_restore_clamps_stored_skip_across_reflow() {
+    fn card_restore_keeps_stored_skip_across_reflow() {
         let mut leaf = card_restore_fixture();
         card_restore_widen(&mut leaf);
-        assert_eq!(card_restore_first(&mut leaf), "H001");
-        assert_eq!(leaf.card_skip, 116);
+        assert_eq!(card_restore_first(&leaf), "H001");
+        assert_eq!(
+            leaf.card_skip, 130,
+            "the reflow drew the card, not the leaf"
+        );
+        // And the hand still has no debt to pay off: the notch clamps on the way
+        // in, so the first reverse from the visible 116 moves one row.
+        aim_card_window(&mut leaf, 4, -1, card_trace::Card::untraced());
+        assert_eq!(leaf.card_skip, 115);
+        assert_eq!(card_restore_first(&leaf), "H002");
     }
 
     #[test]
     fn card_restore_extra_upward_detent_stays_at_top() {
         let mut leaf = card_restore_fixture();
         card_restore_widen(&mut leaf);
-        let before = card_restore_first(&mut leaf);
+        let before = card_restore_first(&leaf);
         let mut carry = None;
         let steps = CardAim::spend(
             &mut carry,
@@ -155344,7 +155364,7 @@ mod tests {
             MouseScrollDelta::LineDelta(0.0, 1.0),
         );
         aim_card_window(&mut leaf, 4, steps, card_trace::Card::untraced());
-        let after = card_restore_first(&mut leaf);
+        let after = card_restore_first(&leaf);
         eprintln!("upward projection: {before} -> {after}");
         assert_eq!(after, "H001");
         assert_eq!(after, before);
@@ -155354,7 +155374,7 @@ mod tests {
     fn card_restore_reverse_detent_moves_toward_tail() {
         let mut leaf = card_restore_fixture();
         card_restore_widen(&mut leaf);
-        let before = card_restore_first(&mut leaf);
+        let before = card_restore_first(&leaf);
         let mut carry = None;
         let steps = CardAim::spend(
             &mut carry,
@@ -155365,7 +155385,7 @@ mod tests {
             MouseScrollDelta::LineDelta(0.0, -1.0),
         );
         aim_card_window(&mut leaf, 4, steps, card_trace::Card::untraced());
-        let after = card_restore_first(&mut leaf);
+        let after = card_restore_first(&leaf);
         eprintln!("reverse projection: {before} -> {after}");
         assert_eq!(after, "H002");
         assert_ne!(after, before);
@@ -155415,17 +155435,25 @@ mod tests {
         leaf.session.finish_resize_if_quiescent(deadline).unwrap();
     }
 
+    /// A deferred resize is persisted as the number the reader chose, and drawn
+    /// as the number the pane can reach (T-CARD-NO-PASSIVE-CLAMP).
     #[test]
-    fn card_restore_deferred_resize_clamps_numeric_persistence() {
+    fn card_restore_deferred_resize_keeps_numeric_persistence() {
         let mut leaf = card_restore_fixture();
         card_restore_resize(&mut leaf, 40, 40, LeafOnStage::Behind);
         assert_eq!(leaf.card_skip, 130);
         card_restore_settle(&mut leaf);
-        assert_eq!(card_restore_first(&mut leaf), "H001");
+        assert_eq!(card_restore_first(&leaf), "H001");
+        // The session file carries the raw number, saturating at `u32`, and a
+        // restart hands back what it carried.
         let saved = u32::try_from(leaf.card_skip).unwrap_or(u32::MAX);
         leaf.card_skip = saved as usize;
-        assert_eq!(card_restore_first(&mut leaf), "H001");
-        assert_eq!(leaf.card_skip, 116);
+        assert_eq!(card_restore_first(&leaf), "H001");
+        assert_eq!(leaf.card_skip, 130);
+        // The reflow left nothing for the hand to pay off either.
+        aim_card_window(&mut leaf, 4, -1, card_trace::Card::untraced());
+        assert_eq!(leaf.card_skip, 115);
+        assert_eq!(card_restore_first(&leaf), "H002");
     }
 
     #[test]
@@ -155437,20 +155465,24 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\r\n");
         leaf.session.feed(text.as_bytes()).unwrap();
-        // The numeric clamp sees only alternate rows, never primary history: the
-        // stored 130 (a place among the primary's 120 rows) is cut to the
-        // alternate screen's own 36, and the top of that screen is the blank the
-        // twenty lines scrolled past on their way up from the saved cursor.
-        assert_eq!(card_restore_first(&mut leaf), "");
-        assert_eq!(leaf.card_skip, 36);
+        // The card sees only alternate rows, never primary history: the stored
+        // 130 (a place among the primary's 120 rows) is *drawn* at the alternate
+        // screen's own 36, and the top of that screen is the blank the twenty
+        // lines scrolled past on their way up from the saved cursor. The number
+        // itself stands, because an app that took the screen for a moment is not
+        // a reader deciding to read somewhere else (T-CARD-NO-PASSIVE-CLAMP) —
+        // the clamp that meets the alternate screen is the next notch's, on the
+        // way in.
+        assert_eq!(card_restore_first(&leaf), "");
+        assert_eq!(leaf.card_skip, 130);
         aim_card_window(&mut leaf, 4, i32::MIN, card_trace::Card::untraced());
-        assert_eq!(card_restore_first(&mut leaf), "A017");
+        assert_eq!(card_restore_first(&leaf), "A017");
         aim_card_window(&mut leaf, 4, 10, card_trace::Card::untraced());
-        assert_eq!(card_restore_first(&mut leaf), "A007");
+        assert_eq!(card_restore_first(&leaf), "A007");
         card_restore_resize(&mut leaf, 40, 40, LeafOnStage::Shown);
-        assert_eq!(card_restore_first(&mut leaf), "A007");
+        assert_eq!(card_restore_first(&leaf), "A007");
         card_restore_settle(&mut leaf);
-        assert_eq!(card_restore_first(&mut leaf), "A007");
+        assert_eq!(card_restore_first(&leaf), "A007");
         let assembled = focus_thumb::transcript_tail(&leaf.session, 40, 200, 0).0;
         let nonblank = assembled
             .iter()
@@ -155470,7 +155502,7 @@ mod tests {
         let mut leaf = card_restore_fixture();
         card_restore_widen(&mut leaf);
         aim_card_window(&mut leaf, 4, i32::MAX, card_trace::Card::untraced());
-        assert_eq!(card_restore_first(&mut leaf), "H001");
+        assert_eq!(card_restore_first(&leaf), "H001");
         aim_card_window(&mut leaf, 4, i32::MAX, card_trace::Card::untraced());
         let mut carry = None;
         let steps = CardAim::spend(
@@ -155482,7 +155514,7 @@ mod tests {
             MouseScrollDelta::LineDelta(0.0, -1.0),
         );
         aim_card_window(&mut leaf, 4, steps, card_trace::Card::untraced());
-        assert_eq!(card_restore_first(&mut leaf), "H002");
+        assert_eq!(card_restore_first(&leaf), "H002");
     }
 
     /// One shell with a word in it that no other shell in the test has.

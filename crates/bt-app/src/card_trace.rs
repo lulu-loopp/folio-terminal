@@ -3,7 +3,7 @@
 //!
 //! A focus card is a miniature of a pane's transcript, and where in that
 //! transcript it is standing is decided by three things that never meet: the
-//! per-frame clamp ([`crate::focus_thumb::FocusThumbnails::clamp_terminal_skip`]),
+//! per-frame pass ([`crate::focus_thumb::FocusThumbnails::trace_card_walk`]),
 //! the wheel's aim ([`crate::focus_thumb::aim_card_skip`]), and — underneath
 //! both — the *grid the pane is wearing*, which a resize or a display of another
 //! scale rewrites without the card being asked. T-CARD-ANCHOR-DPI answered one
@@ -13,16 +13,18 @@
 //! reproduced from deterministic inputs by two audits. So the owner will record
 //! a real session, and the card has to write down what it does.
 //!
-//! **Three clamps, and none of them can see the other two.** A card's position
-//! is a plain number of rows above the tail (T-CARD-RESTORE-NEXT59), and it is
-//! bounded in three separate places: the per-frame gate clamps it *and writes it
-//! back*, a wheel notch clamps it on the way in so no debt survives past the top,
-//! and [`crate::focus_thumb::transcript_tail`] clamps it again at draw time and
-//! writes nothing back — so the number a session file carries may legitimately be
-//! larger than the row a reader is looking at. Telling those three apart from the
-//! outside is impossible, and telling them apart is the whole of this file:
-//! `skip_before`/`skip_after`/`drawn` on one station, `stored_before`/
-//! `clamped_before` on the other.
+//! **Two clamps, and only one of them writes.** A card's position is a plain
+//! number of rows above the tail (T-CARD-RESTORE-NEXT59), and it is bounded in
+//! two separate places: a wheel notch clamps it on the way in, so no debt
+//! survives past the top, and [`crate::focus_thumb::transcript_tail`] clamps it
+//! again at draw time and writes nothing back — so the number a session file
+//! carries may legitimately be larger than the row a reader is looking at. The
+//! per-frame pass held it down too, until this recording showed what that costs
+//! a reader whose window is crossing to a display of another scale
+//! (T-CARD-NO-PASSIVE-CLAMP); it now reports and writes nothing. Telling the
+//! stored number and the drawn one apart from the outside is impossible, and
+//! telling them apart is the whole of this file: `skip_before`/`skip_after`/
+//! `drawn` on one station, `stored_before`/`clamped_before` on the other.
 //!
 //! **This is forensic apparatus and nothing else: it changes no behaviour.**
 //! The idiom is [`BT_MOUSE_TRACE`](crate::mouse_trace)'s, down to the last rule
@@ -34,7 +36,7 @@
 //!
 //! **A traced run is slower than the run it measures.** `card walk` takes a
 //! bounded transcript walk of its own so that it can report the reachable
-//! maximum and the two rows a reader sees, which the clamp it is watching does
+//! maximum and the two rows a reader sees, which the draw it is watching does
 //! not hand back. The walk is bounded exactly as the draw's is and it happens
 //! only when this variable names a file — [`crate::glyph_trace`]'s bargain, said
 //! about a different instrument.
@@ -46,10 +48,11 @@
 //!
 //! # The stations
 //!
-//! * `card walk` — every call of the per-frame clamp, whichever of its five
+//! * `card walk` — every call of the per-frame pass, whichever of its five
 //!   exits it took, with the grid the pane is wearing, the rows the card holds,
-//!   the stored offset on both sides, how far the walk could reach, the offset
-//!   the *draw* will use, and the text of the card's first and last row.
+//!   the stored offset on both sides (one number, since the pass writes
+//!   nothing), how far the walk could reach, the offset the *draw* will use, and
+//!   the text of the card's first and last row.
 //! * `card aim` — every wheel aim: the detents, the stored offset, what the
 //!   entry clamp made of it, what was asked for and what was given.
 //! * `card pane resized` — every new grid a pane behind a card is given.
@@ -101,10 +104,10 @@ pub fn line(message: impl FnOnce() -> String) {
 /// and blanks in it, and a value with a blank in it is not a value on a
 /// `key=value` line.
 ///
-/// **`why` is the caller's and never guessed.** The per-frame clamp is reached
+/// **`why` is the caller's and never guessed.** The per-frame pass is reached
 /// from a frame and from the notch that re-spends the projection, and which of
 /// the two it was is the first thing a reader of a card's road needs; nothing
-/// inside the clamp can answer it.
+/// inside the pass can answer it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Card {
     pub window: u64,
@@ -206,24 +209,25 @@ fn count_word(count: Option<usize>) -> String {
     count.map_or_else(|| "-".to_owned(), |count| count.to_string())
 }
 
-/// **The per-frame clamp, whatever it decided** — the station a report of "the
+/// **The per-frame pass, whatever it found** — the station a report of "the
 /// card is showing the wrong window" is read off.
 ///
-/// One builder and one line for all five of the clamp's exits, because what a
+/// One builder and one line for all five of the pass's exits, because what a
 /// reader needs is the same fields whichever exit was taken and `leave=` is the
 /// one word that says which. A field a refusing exit never computed says so with
 /// `-`; an absent number is not a zero, and printing one would invent a walk that
 /// never happened.
 ///
-/// **`drawn` is the field this station exists for.** The clamp writes its answer
-/// back into the leaf; [`crate::focus_thumb::transcript_tail`] clamps again at
-/// draw time and writes nothing back. So on the three refusing exits `skip_after`
-/// is what the session file will carry and `drawn` is the row a reader is
-/// actually looking at, and the two are allowed to differ. Nothing else in the
-/// program compares them.
+/// **`drawn` is the field this station exists for.** The pass writes nothing back
+/// into the leaf (T-CARD-NO-PASSIVE-CLAMP), and
+/// [`crate::focus_thumb::transcript_tail`] clamps at draw time and writes nothing
+/// back either. So `skip_before` and `skip_after` are the number the session file
+/// will carry — one number, on every exit — and `drawn` is the row a reader is
+/// actually looking at, which is smaller whenever the grid the pane is wearing
+/// cannot reach that far. Nothing else in the program compares them.
 pub struct Walk {
     pub card: Card,
-    /// Which exit the clamp took — one of `WALK_EXITS`.
+    /// Which exit the pass took — one of `WALK_EXITS`.
     pub leave: &'static str,
     /// The grid the pane is wearing, in cells.
     pub grid: (u32, u32),
@@ -260,10 +264,10 @@ impl Walk {
     }
 }
 
-/// **Every way out of the per-frame clamp**, declared once so the clamp's own
+/// **Every way out of the per-frame pass**, declared once so the pass's own
 /// literals can be checked against a list.
 ///
-/// `cfg(test)` for [`crate::mouse_trace::WHEEL_ROUTES`]'s reason: the clamp
+/// `cfg(test)` for [`crate::mouse_trace::WHEEL_ROUTES`]'s reason: the pass
 /// writes its word beside the decision it describes, and a copy compiled into
 /// the product would be a second list for somebody to forget.
 ///
@@ -273,7 +277,8 @@ impl Walk {
 /// because the word on its own reads the other way.
 #[cfg(test)]
 pub const WALK_EXITS: [&str; 5] = [
-    // The card is resting on the newest line; there is no overshoot to discard.
+    // The card is resting on the newest line; there is nothing above it to
+    // report on.
     "at-tail",
     // The picture this card is showing is the picture this demand asks for.
     "unchanged",
@@ -281,7 +286,8 @@ pub const WALK_EXITS: [&str; 5] = [
     "throttled",
     // The seat is not a terminal, so there is no transcript to be above.
     "not-a-terminal",
-    // The walk ran and the stored offset was held to what it can reach.
+    // The walk ran: the stored offset stands, and `drawn` says what the draw
+    // will make of it.
     "walked",
 ];
 
@@ -478,7 +484,7 @@ mod tests {
                 grid: (240, 24),
                 rows: 8,
                 skip_before: 130,
-                skip_after: 116,
+                skip_after: 130,
                 reachable: Some(116),
                 drawn: Some(116),
                 first: Some("H001".to_owned()),
@@ -486,8 +492,9 @@ mod tests {
             }
             .line(),
             "card walk window=7 tab=TabId(3) seat=SeatId(2) why=frame leave=walked grid=240x24 \
-             rows=8 skip_before=130 skip_after=116 max=116 drawn=116 first=\"H001\" \
-             last=\"PS D:\\\\Developer> cargo test\""
+             rows=8 skip_before=130 skip_after=130 max=116 drawn=116 first=\"H001\" \
+             last=\"PS D:\\\\Developer> cargo test\"",
+            "a walk reports one stored number on both sides and clamps only `drawn`"
         );
         assert_eq!(
             Walk {
@@ -591,7 +598,7 @@ mod tests {
             grid: (320, 90),
             rows: 13,
             skip_before: 98_000,
-            skip_after: 1_240,
+            skip_after: 98_000,
             reachable: Some(1_240),
             drawn: Some(1_240),
             first: Some("x".repeat(400)),

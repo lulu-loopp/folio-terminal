@@ -285,6 +285,10 @@ All notable changes to Folio are recorded here. The format follows
   again.** A resting card keeps following the newest output. Alt+wheel moves
   by whole lines and stops at the top without debt: the first downward notch
   moves immediately, even after a taller card reduces how far back it can go.
+  And carrying the window to a display of another scale no longer loses the
+  card's place through the size the window wears on the way: while the pane is
+  briefly too small to hold what the card was showing, the card shows as much of
+  it as fits and goes back to the rows you left it on.
 - **On a Mac, tabs now take the whole width of the title bar.** The tab strip was setting aside room for four window buttons on a window that carries one — macOS draws minimise, zoom and close at the other end of the bar — so the tabs were squeezed to their profile marks, their names hidden, with a wide empty band before the settings gear. Seven tabs in a 934-point window now stand 91 points wide with their names showing instead of 72 without.
 - **Every picker in Settings that offers profiles now shows their marks.** The
   summoned terminal's `Profile for new tabs` listed its profiles as bare words,
