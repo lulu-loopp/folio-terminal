@@ -99,6 +99,8 @@ All notable changes to Folio are recorded here. The format follows
   own menu. Quit now answers from an empty desk, and it is the same quit as
   always: what you were working on is written down before Folio goes.
 
+- Inner products and bra-kets written with `\langle … \rangle` now typeset.
+
 - **Aiming a card's window with the wheel keeps up with the hand.** On a tall
   card over a pane with a long history, every notch used to copy out every line
   between the bottom of the pane and the place the card was pointing at — three

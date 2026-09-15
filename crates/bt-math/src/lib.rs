@@ -26,6 +26,51 @@ pub fn conversion_panic_is_contained() -> bool {
     CONVERTING.get()
 }
 
+/// Normalize named delimiters at the MiTeX/Typst boundary, leaving literals intact.
+fn normalize_delimiter_symbols(source: &str) -> String {
+    fn write(node: &typst_syntax::SyntaxNode, source: &str, output: &mut String) {
+        if node.kind() == typst_syntax::SyntaxKind::MathFieldAccess {
+            // MiTeX 0.2.4 emits Typst 0.10's angle.l/r; Typst 0.15 calls
+            // them chevron.l/r. Even an isolated angle.l fails: no comma or
+            // missing whitespace is involved. Normalize the delimiter family
+            // to literal glyphs (escape ASCII grouping syntax). MiTeX ignores
+            // a custom spec when emitting, so this belongs after conversion.
+            output.push_str(match source {
+                "angle.l" | "chevron.l" => "⟨",
+                "angle.r" | "chevron.r" => "⟩",
+                "paren.l" => r"\(",
+                "paren.r" => r"\)",
+                "bracket.l" => r"\[",
+                "bracket.r" => r"\]",
+                "brace.l" => r"\{",
+                "brace.r" => r"\}",
+                "floor.l" => "⌊",
+                "floor.r" => "⌋",
+                "ceil.l" => "⌈",
+                "ceil.r" => "⌉",
+                "bar.v" => "|",
+                "bar.v.double" => "‖",
+                _ => source,
+            });
+        } else if node.children().len() == 0 {
+            output.push_str(source);
+        } else {
+            let mut offset = 0;
+            for child in node.children() {
+                let end = offset + child.len();
+                write(child, &source[offset..end], output);
+                offset = end;
+            }
+        }
+    }
+
+    // Use Typst's syntax tree: a string containing "angle.l" is text, while
+    // a math field access is a symbol. Unknown complete accesses stay intact.
+    let mut output = String::with_capacity(source.len());
+    write(&typst_syntax::parse_math(source), source, &mut output);
+    output
+}
+
 fn convert_math(source: &str) -> Result<String, MathRenderError> {
     struct ConversionGuard(bool);
     impl Drop for ConversionGuard {
@@ -44,6 +89,7 @@ fn convert_math(source: &str) -> Result<String, MathRenderError> {
     }))
     .map_err(|_| MathRenderError::ConversionPanic)?
     .map_err(|error| MathRenderError::Convert(error.to_string()))
+    .map(|converted| normalize_delimiter_symbols(&converted))
 }
 
 pub const MAX_SOURCE_BYTES: usize = 8 * 1024;
@@ -983,6 +1029,98 @@ fn unpremultiply_srgb_rgba(rgba: &mut [u8]) {
 mod tests {
     use super::*;
     use serde::Deserialize;
+
+    #[test]
+    fn named_delimiters_render() {
+        let engine = MathEngine::with_system_fonts(false);
+        let key = MathRenderKey {
+            dpi_milli: NonZeroU32::new(2000).unwrap(),
+            font_milli_pt: NonZeroU32::new(24_000).unwrap(),
+            ..key()
+        };
+        let mut failures = Vec::new();
+        for source in [
+            r"\left| \langle u, v \rangle \right|^2 \le \langle u, u \rangle \cdot \langle v, v \rangle",
+            r"\langle u, v \rangle",
+            r"\langle\psi|\phi\rangle",
+            r"\lVert x \rVert_2",
+            r"\lfloor x \rfloor",
+            r"\left\langle a, b \right\rangle",
+            r"\lvert x \rvert",
+            r"\lceil x \rceil",
+            r"\lparen x \rparen",
+            r"\left| x \right|^2",
+            r"|x|^2 \le 1",
+            r"\langle",
+            r"\rangle",
+            r"\lang u, v \rang",
+            r"\lbrack x \rbrack",
+            r"\lbrace x \rbrace",
+            r"\left\lvert x \right\rvert",
+            r"\left\lVert x \right\rVert_2",
+            r"\left\lfloor x \right\rfloor",
+            r"\left\lceil x \right\rceil",
+            r"\left\lparen x \right\rparen",
+            r"\left\lbrack x \right\rbrack",
+            r"\left\lbrace x \right\rbrace",
+            r"\newcommand{\inner}[2]{\langle #1, #2 \rangle}\inner{u}{v}",
+        ] {
+            let emitted = mitex::convert_math(source, Some(DEFAULT_SPEC.clone())).unwrap();
+            let corrected = convert_math(source).unwrap();
+            eprintln!("LaTeX: {source}\nBefore: {emitted:?}\nAfter: {corrected:?}");
+            match engine.render(source, key) {
+                Ok(raster) => assert!(raster.rgba.chunks_exact(4).any(|pixel| pixel[3] != 0)),
+                Err(error) => failures.push(format!("{source}: {error}")),
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn delimiter_aliases_preserve_literals_and_geometric_angles() {
+        assert_eq!(
+            normalize_delimiter_symbols(
+                r#"angle.l "angle.l \"angle.r\"" /* angle.r */ angle.right angle.l.unknown"#
+            ),
+            r#"⟨ "angle.l \"angle.r\"" /* angle.r */ angle.right angle.l.unknown"#
+        );
+        for (source, expected) in [
+            (r"\langle u, v \rangle", r"⟨  u \, v  ⟩ "),
+            (r"\langle\psi|\phi\rangle", "⟨ psi | phi.alt ⟩ "),
+            (r"\left\langle a, b \right\rangle", r"lr(⟨  a \, b  ⟩ )"),
+        ] {
+            assert_eq!(convert_math(source).unwrap(), expected);
+        }
+        for source in [
+            r"\text{angle.l angle.r chevron.l}",
+            r"\angle + \measuredangle + \sphericalangle",
+        ] {
+            assert_eq!(
+                convert_math(source).unwrap(),
+                mitex::convert_math(source, Some(DEFAULT_SPEC.clone())).unwrap()
+            );
+        }
+        let engine = MathEngine::with_system_fonts(false);
+        for (source, equivalent) in [
+            (r"\langle u, v \rangle", "⟨u, v⟩"),
+            (r"\langle\psi|\phi\rangle", r"⟨\psi|\phi⟩"),
+            (r"\lang u, v \rang", "⟨u, v⟩"),
+            (
+                r"\left\langle\frac{a}{b}\right\rangle",
+                r"\left⟨\frac{a}{b}\right⟩",
+            ),
+            (r"\angle", "∠"),
+        ] {
+            let named = engine.render(source, key()).unwrap();
+            let literal = engine.render(equivalent, key()).unwrap();
+            assert_eq!(
+                (named.width_px, named.height_px),
+                (literal.width_px, literal.height_px),
+                "{source}"
+            );
+            assert_eq!(named.rgba, literal.rgba, "{source}");
+        }
+    }
 
     #[test]
     fn a_conversion_panic_is_a_neutral_refusal_and_clears_its_guard() {
