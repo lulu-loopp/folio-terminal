@@ -67384,10 +67384,13 @@ impl Runtime<'_> {
     /// crossing from one card to the next leaves two entries for ninety
     /// milliseconds, one coming up and one going down.
     ///
-    /// **Nothing is pulled toward `1.0` outside Cards mode.** The strip's `×` and
-    /// the rail's pin ride `TabTrailer::reveal`, which is a width; this register
-    /// is the card's alone, and a hover in another layout must not leave an entry
-    /// in it that the column would then draw with when the mode is turned on.
+    /// **Nothing is pulled toward `1.0` outside Cards mode.** This register is the
+    /// card's alone, and a hover in another layout must not leave an entry in it
+    /// that the column would then draw with when the mode is turned on. The
+    /// *width* half of a card head's reveal is not in here at all: it is
+    /// `TabTrailer::reveal`, the same tween the strip and the rail open their
+    /// pins with, driven off the very [`Self::hovered_tab`] this function reads
+    /// (owner ruling 2026-09-14 — a card head is a tab head, slide included).
     fn settled_card_ink(&mut self, now: Instant) -> Vec<(usize, f32)> {
         let motion = self.app.motion;
         let showing = self.sampled_rail(now).draws_focus_rail();
