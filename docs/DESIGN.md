@@ -7253,6 +7253,18 @@ Folio: the window thread held control for 660 ms on turn 323 — advance_web_pag
 
 **按用户的形状复现过,没有复现出来。** 2026-09-11,release 构建、窗口 1920×1200 物理(scale 2,与用户 `BT_DPI` 行里的 `swapchain_size` 一致)、文件栏开在 `D:\Developer\BetterTerminal` 上、旁边一个终端窗格、在文件栏里点开 `README.zh-CN.md`。结果:`document bytes=16980 blocks=73 source=none parse_us=274 intrinsic_us=39847 layout_us=6711 total_us=46833`——**46.8 ms**,那一转根本没有进慢占用的名单(整个运行只有开机那一转 `turn 1 — woken 865 ms, publish_frame_inner 295 ms, flush_wheel 146 ms` 越过 500ms)。`intrinsic` 那 39.8 ms 是 syntect 语法表第一次加载,英文 README 一样付。上一片已经量过 parse 在中文上是线性的(64 KiB 中文 1.12 ms,对英文 1.48 ms),排版与整形也都是线性的;现在整条开文件的路在真机、真几何、真构建下也只有 46.8 ms。89 700 ms 还是没有解释,而下一次它再来,那一行会写着是哪条 lane。
 
+**再补一栏:那是谁的秒(T-HOLD-FAULTS,`crates/bt-platform/src/mem.rs`、`crates/bt-app/src/hang_watch.rs`)。** 站牌答的是「时间花在哪」,答不了「那是谁的时间」。一句 `flush_wheel 1928 ms` 有两种读法:这个程序真的做了两秒的活,或者这个程序一动不动、操作系统正把它被削掉的工作集读回来——两种要修的地方正好相反,而报这个缺陷的机器恰恰是提交内存高过物理内存的那种(本机 58 GB 提交 / 31 GB RAM,`cargo` 一编译就是这副样子)。所以持有的两端各采一次进程的缺页计数与常驻集,差值接在行尾,前面一个中点:
+
+```
+Folio: the window thread held control for 4056 ms on turn 3937579 — publish_frame_inner 2092 ms, flush_wheel 1928 ms · faults +38210, working set 179 → 412 MB
+```
+
+**已有字段一个不动,新的一栏只往后加**——`held control for` 和站牌名仍旧是同两条 grep。缺页数打成差(累计计数器的绝对值说不出任何一次持有的事),工作集打成一对而不是一个带符号的差:**长大了是被读回来,缩小了是持有期间正在被削**,两件相反的事用一个数字会印成同一个字。
+
+**采样规则就是这一栏唯一的设计,而它只有一种排法。** 开头那一次每次持有都采,收尾那一次只走上报路径。「只给慢的那些采」造不出来:*慢* 是持有结束才知道的事实,而基线必须在它开始之前就已经取好。两条看起来更省的路各自死在同一处:① **让窗线程自己在站牌上发现超时**——`move_to` 手里本来就有钟,判一次不要钱,可是一次整段耗在一个长调用里的持有**根本不经过任何站牌**,1928 ms 的 `flush_wheel` 只会在出门那一刻武装采样器,基线读在分页结束之后,于是这一行在它唯一该说话的场合印出 `faults +0`;② **让看门狗从外面发现**——它两秒才醒一次,比 500 ms 的门槛粗四倍,它读到的是它自己醒来那一刻,不是别人那次持有的任何一端。于是账是这样的:窗线程每开一次持有付一次内核查询(一次持有就是一转,而那一转本来就带着一帧、一次 drain 和一次平台往返),停着的线程一次都不付(没有持有开着),收尾那一次在门槛判断之后,几乎没有哪一转走到。
+
+**两个平台数的不是同一件事,读日志的人得知道。** Windows 是 `PROCESS_MEMORY_COUNTERS.PageFaultCount`,**软缺页一起数**——工作集被削掉又读回来,不管有没有真到磁盘,这个数都涨,正是这里要问的那件事;macOS 是 `proc_pid_rusage` 的 `ri_pageins`,**只数真去了磁盘的那些**(Darwin 不在常驻集旁边公布进程级的软缺页计数),所以 Mac 那个数更严、也更沉默。Linux 没有臂:`getrusage` 只给得出峰值常驻集,当前值在 `/proc/self/statm` 里、那是读文件不是调用,而 Folio 不在那儿发版——那个构建照旧印站牌,后面不接这一栏,和采样被拒的那一行形状完全一样。
+
 ### 7.50 一扇窗过不了两块屏之间那条缝:系统建议的矩形就是这扇窗要站的矩形(跨 DPI 节;next22 用户实机「拖过去 DPI 一直来回跳、窗过不去」,已落地;`crates/bt-platform/src/lib.rs`、`crates/bt-app/src/main.rs`)
 
 **现象与铁证。** 4K@200% 与一块竖过来的 2.8K@150% 并排,把窗从一块拖到另一块——窗**过不去**,DPI 在 1.5 与 2 之间连续来回十余次。`%APPDATA%\Folio\diagnostics.log`(next22,`f70676d`)第 682–724 行原文,节选四个来回:
