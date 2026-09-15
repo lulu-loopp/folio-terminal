@@ -100,6 +100,16 @@ pub struct MathOccurrence {
     pub kind: BlockKind,
     pub cell_segments: Vec<MathCellSegment>,
     pub inline_runs: Vec<InlineMathRun>,
+    /// The half of an inline formula that was left on the logical line *above* this one, when a
+    /// producer's own line wrapping split one `$…$` across two rows (see
+    /// [`detect_inline_math_across_rows`]). `None` for every occurrence that stands on one line,
+    /// which is all of them but the joined ones.
+    ///
+    /// It is carried rather than resolved here because this crate has no coordinates: the fragment
+    /// is named by its byte range inside the line above and by the exact text that was there when
+    /// the join was proved, and the presentation layer — which alone knows which cells that line
+    /// was drawn in — clears it under the picture.
+    pub inline_joined_head: Option<InlineJoinedFragment>,
 }
 
 pub type MathSpan = MathOccurrence;
@@ -109,6 +119,32 @@ pub struct InlineMathRun {
     pub byte_start: u32,
     pub byte_end: u32,
     pub source: String,
+}
+
+/// The opening fragment of a row-split inline formula, as it sits on the line above.
+///
+/// `byte_start` points at the opening `$` itself and `byte_end` just past the last non-space
+/// character of the fragment, so the range is exactly the cells the picture below makes redundant.
+/// `text` is that range's content at the moment the join was proved: the presentation layer
+/// compares it against what the line holds now and clears nothing if the two have diverged, which
+/// is the only defence a two-line claim has against a full-screen application repainting one of
+/// them between detection and paint.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InlineJoinedFragment {
+    pub byte_start: u32,
+    pub byte_end: u32,
+    pub text: String,
+}
+
+/// One row-split inline formula, as proved on the row that closes it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JoinedInlineRow {
+    /// The fragment on the row above, for the placer to clear.
+    pub head: InlineJoinedFragment,
+    /// The closing row's runs: the joined formula first — its byte range is the head of this row,
+    /// its source the two fragments joined — then every further run this row carries, re-paired
+    /// from after the closing `$`.
+    pub runs: Vec<InlineMathRun>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -239,6 +275,7 @@ impl MathOccurrence {
             && self.mode == other.mode
             && self.kind == other.kind
             && self.inline_runs == other.inline_runs
+            && self.inline_joined_head == other.inline_joined_head
     }
 }
 
@@ -396,6 +433,7 @@ impl DecorationRecord {
                 kind: BlockKind::Math,
                 cell_segments: Vec::new(),
                 inline_runs: Vec::new(),
+                inline_joined_head: None,
             },
             versions: self.versions,
             cell_width_subpixels: SUBPIXELS_PER_PX,
@@ -660,9 +698,24 @@ pub fn detect_inline_math(text: &str, site: InlineMathSite) -> Vec<InlineMathRun
     if inline_line_is_code_like(text) || text.len() > MAX_MATH_SOURCE_BYTES {
         return Vec::new();
     }
+    inline_runs_from(text, 0)
+}
+
+/// The pairing half of [`detect_inline_math`], restricted to the `$` at or after `from`.
+///
+/// The site and gate-D checks are the caller's because they are facts about the whole line, and
+/// they must not be re-asked of a suffix: a row whose remainder happens to begin `- ` is not a diff
+/// hunk. Escape and identifier context is still read from the *whole* `text`, so a `$` at `from` is
+/// judged by the character in front of it exactly as it would be in a full-line scan.
+///
+/// A non-zero `from` is what a row-split formula leaves behind: its closing `$` has already been
+/// spent on the fragment above, and the rest of the row has to re-pair from after it or every
+/// following formula on the row inherits the wrong parity (the second formula in the user's 2026-09-15
+/// report was lost exactly that way).
+fn inline_runs_from(text: &str, from: usize) -> Vec<InlineMathRun> {
     let dollars = text
         .char_indices()
-        .filter_map(|(byte, character)| (character == '$').then_some(byte))
+        .filter_map(|(byte, character)| (character == '$' && byte >= from).then_some(byte))
         .collect::<Vec<_>>();
     let mut runs = Vec::new();
     let mut index = 0usize;
@@ -709,6 +762,228 @@ pub fn detect_inline_math(text: &str, site: InlineMathSite) -> Vec<InlineMathRun
         index = close_index + 1;
     }
     runs
+}
+
+/// How far into the closing row the closing `$` of a row-split formula may stand, in terminal
+/// cells, for [`detect_inline_math_across_rows`] to join the two halves.
+///
+/// **Measured off the fixtures, not chosen for roundness.** The longest inline formula the corpora
+/// carry is `$A=\begin{pmatrix}a & b \\ c & d\end{pmatrix}$` at 45 cells with its delimiters; the
+/// Euler identity is 36, and the quadratic formula in the 2026-09-15 report is 40, of which 37
+/// cells landed on the second row. A split can leave at most the whole formula on the closing row,
+/// so the bound has to clear the longest whole formula — 48 does, with three cells to spare.
+///
+/// It is a bound on *locality*, not a length limit on mathematics: a formula longer than this is
+/// not refused, it is only refused a **join**, and stays the source text it is today. That is the
+/// right direction for a rule whose whole licence is that it never guesses — the further down a row
+/// a `$` sits, the more ordinary text stands between it and the fragment above, and the less it can
+/// be said to be that fragment's closer.
+pub const INLINE_ROW_JOIN_MAX_CLOSING_COLUMNS: usize = 48;
+
+/// Join an inline formula the producer's own line wrapping split across two rows.
+///
+/// **The defect.** Claude Code wraps its answers itself, at the pane width, with hard newlines of
+/// its own rather than letting the terminal fold them. A sentence carrying `$x = \frac{-b \pm
+/// \sqrt{b^2 - 4ac}}{2a}$` therefore arrives as two rows, the first ending `…the quadratic formula
+/// $x` and the second beginning `= \frac{…}{2a}$, and the standard…`. Every gate in
+/// [`detect_inline_math`] reads one row, so neither half is a formula: the first has an opener and
+/// no closer, the second a closer and no opener. The user saw the Euler identity and the normal
+/// density typeset (both landed whole on a row) with the quadratic formula left as raw text between
+/// them (2026-09-15).
+///
+/// **What is proved here, and nothing more.** The row above must end in a single unmatched `$` —
+/// *the only* `$` on it, not escaped, not `$$`, not a sigil glued to the end of a word, and followed
+/// by a non-space. This row must carry the matching `$` within
+/// [`INLINE_ROW_JOIN_MAX_CLOSING_COLUMNS`] cells, as its first `$`, with no other `$` before it.
+/// Neither fragment may contain a second `$`, because a pair that could have been read two ways was
+/// never proved. Both rows must sit at the same inline-eligible site — adjacent eligible rows with
+/// nothing between them are one command's output, and a prompt row between two outputs is not
+/// eligible, so requiring the site is how "the same command printed both halves" gets proved
+/// without this crate knowing what a command is. And this row may not *begin* something: a blank
+/// row is a paragraph break, and a bullet, a quote, a heading or a numbered item is a new
+/// structure whose `$` belongs to its own sentence.
+///
+/// The joined source — the two fragments with the row break replaced by a single space, which is
+/// where the producer's wrap ate one — then faces **every content gate a one-row run faces**, in
+/// the same order: a math signal, completeness, balanced brackets, not prose, no whitespace at
+/// either end. That is what keeps the rule at zero false positives rather than merely few: it adds
+/// a way for two fragments to *reach* the gates and relaxes none of them. `costs $5` above `and
+/// three more` has nothing to close it; above `and Pro costs $15` the dollar below is glued to a
+/// number and cannot close anything either; and where one below could close, `Basic $5` above `and
+/// Pro (see above)$ monthly` produces `5 and Pro (see above)`, which is prose and dies exactly
+/// where a one-row `$5 and Pro (see above)$` would.
+///
+/// The run this returns is anchored on the **closing** row, spanning its cells from column 0 to the
+/// closing `$`: the picture has to stand somewhere, a picture cannot straddle two rows of a cell
+/// grid, and the larger part of the formula — and all the room to draw it — is here. The fragment
+/// left above travels with it as [`JoinedInlineRow::head`] so the placer can clear it.
+pub fn detect_inline_math_across_rows(
+    previous: &str,
+    previous_site: InlineMathSite,
+    text: &str,
+    site: InlineMathSite,
+) -> Option<JoinedInlineRow> {
+    if !site.permits_inline() || previous_site != site {
+        return None;
+    }
+    if previous.len() > MAX_MATH_SOURCE_BYTES || text.len() > MAX_MATH_SOURCE_BYTES {
+        return None;
+    }
+    if inline_line_is_code_like(previous) || inline_line_is_code_like(text) {
+        return None;
+    }
+    if commonmark_indented_code(previous) || commonmark_indented_code(text) {
+        return None;
+    }
+    if text.trim().is_empty() || row_opens_a_block(text) {
+        return None;
+    }
+    // Neither fragment can hold a second `$` by construction, which is what makes the pair
+    // unambiguous: the opener is the row above's *only* dollar, and the closer is the first one on
+    // this row, so the text between them contains none.
+    let open = lone_trailing_opener(previous)?;
+    let head_body = previous.get(open + 1..)?.trim_end();
+    let close = first_inline_closer(text)?;
+    if close == 0 {
+        return None;
+    }
+    let before_closer = text.get(..close)?;
+    let closing_column = bt_unicode::text_width(before_closer).saturating_add(1);
+    if closing_column > INLINE_ROW_JOIN_MAX_CLOSING_COLUMNS {
+        return None;
+    }
+    let tail_body = before_closer.trim_start();
+    if tail_body.is_empty() {
+        return None;
+    }
+    // The producer's wrap consumed exactly one space when it broke the line, so one space is what
+    // puts the formula back. Joining with nothing would weld `\frac` onto the token above it.
+    let source = format!("{head_body} {tail_body}");
+    if source.starts_with(char::is_whitespace)
+        || source.ends_with(char::is_whitespace)
+        || !inline_source_is_math(&source)
+        || !inline_source_is_complete(&source)
+        || block_body_looks_like_prose(&source)
+    {
+        return None;
+    }
+    let head_end = open + 1 + head_body.len();
+    let mut runs = vec![InlineMathRun {
+        byte_start: 0,
+        byte_end: u32::try_from(close + 1).ok()?,
+        source,
+    }];
+    // The closing `$` is spent. Everything after it on this row re-pairs from a clean state, which
+    // is how the second formula in the reported sentence survives the first one's split.
+    runs.extend(inline_runs_from(text, close + 1));
+    Some(JoinedInlineRow {
+        head: InlineJoinedFragment {
+            byte_start: u32::try_from(open).ok()?,
+            byte_end: u32::try_from(head_end).ok()?,
+            text: previous.get(open..head_end)?.to_owned(),
+        },
+        runs,
+    })
+}
+
+/// Could this row carry the closing half of a formula the row above left open?
+///
+/// **The arming prefilter's share of the row-split rule.** A scan is queued for a row that carries
+/// two `$` — a pair it could close on its own — and a row that closes a split formula need carry
+/// only one, so without this question the join could be proved for the sentence in the 2026-09-15
+/// report (whose closing row happens to carry three) and never for the single formula that is the
+/// ordinary case.
+///
+/// It is answered from this row alone, because that is all a prefilter sees, and it is deliberately
+/// the *tight* half of the join's own test — which is what keeps it from arming a screen's worth of
+/// shell text. A lone `$` that could close something stands past column 0 (a row beginning with one
+/// is opening, not closing), is not escaped, is not half of a `$$`, and is **not followed by an
+/// identifier character**: that last one is the whole of `$PATH`, `$1`, `$5`, `$BUILD_DIR` and
+/// every other sigil, which is to say nearly every lone dollar a terminal ever prints.
+///
+/// A row this arms still has to survive [`detect_inline_math_across_rows`] in full, including
+/// everything about the row above, which this cannot see. Arming is permission to ask, never an
+/// answer.
+#[must_use]
+pub fn may_close_row_split_inline_math(text: &str) -> bool {
+    let mut dollars = text.match_indices('$').map(|(byte, _)| byte);
+    let Some(close) = dollars.next() else {
+        return false;
+    };
+    if dollars.next().is_some() {
+        // Two dollars arm this row on their own; this question is only about the lone one.
+        return false;
+    }
+    let closing_column = bt_unicode::text_width(&text[..close]).saturating_add(1);
+    close > 0
+        && closing_column <= INLINE_ROW_JOIN_MAX_CLOSING_COLUMNS
+        && !delimiter_is_escaped(text, close)
+        && !byte_continues_an_identifier(text, close + 1)
+}
+
+/// The row's single `$`, when it is an unmatched opener at the end of the row.
+///
+/// *Single* is the whole of the conservatism. A row with two or more `$` has a reading in which
+/// they pair with each other, and a fragment that could have been read another way is not proof of
+/// anything — `tiers $5-$10-$20` must never contribute half of a formula to the row below it.
+fn lone_trailing_opener(text: &str) -> Option<usize> {
+    let mut dollars = text
+        .char_indices()
+        .filter_map(|(byte, character)| (character == '$').then_some(byte));
+    let open = dollars.next()?;
+    if dollars.next().is_some() {
+        return None;
+    }
+    if delimiter_is_escaped(text, open) {
+        return None;
+    }
+    if open
+        .checked_sub(1)
+        .is_some_and(|before| byte_continues_an_identifier(text, before))
+    {
+        return None;
+    }
+    let after = text.get(open + 1..)?.chars().next()?;
+    (!after.is_whitespace()).then_some(open)
+}
+
+/// The row's first `$`, when it can be read as the closer of a formula opened above.
+fn first_inline_closer(text: &str) -> Option<usize> {
+    let close = text.find('$')?;
+    if delimiter_is_escaped(text, close)
+        || text.as_bytes().get(close + 1) == Some(&b'$')
+        || byte_continues_an_identifier(text, close + 1)
+    {
+        return None;
+    }
+    Some(close)
+}
+
+/// Does this row *begin* something, rather than continue the row above?
+///
+/// A wrapped sentence resumes in plain prose. A bullet, a quotation, a heading or a numbered item
+/// starts a new one, and its `$` is its own — so a dangling opener above it stays dangling. The
+/// markers are the ones terminal producers actually draw, including the round bullets Claude Code
+/// and other TUIs use, which [`delimiter_start`] already recognises for display math.
+fn row_opens_a_block(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    if ["• ", "◦ ", "▪ ", "● ", "- ", "* ", "+ ", "> "]
+        .iter()
+        .any(|marker| trimmed.starts_with(marker))
+    {
+        return true;
+    }
+    if trimmed.starts_with('#') {
+        return true;
+    }
+    let digits = trimmed.len() - trimmed.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    digits > 0
+        && trimmed
+            .get(digits..)
+            .is_some_and(|rest| rest.starts_with('.') || rest.starts_with(')'))
+        && trimmed
+            .get(digits + 1..)
+            .is_some_and(|rest| rest.starts_with(' '))
 }
 
 /// Would the byte at `index` continue a shell identifier begun by an adjacent `$`?
@@ -900,7 +1175,12 @@ fn site_at(sites: Option<&[InlineMathSite]>, index: usize) -> InlineMathSite {
 /// captured byte→column table before anything reads them, because only the terminal knows how wide
 /// a character was drawn. The byte offsets are the load-bearing part — they must land on real
 /// grapheme boundaries, which a `$` always does.
-fn inline_group(id: TranscriptId, line: &str, runs: Vec<InlineMathRun>) -> Option<MathSpan> {
+fn inline_group(
+    id: TranscriptId,
+    line: &str,
+    runs: Vec<InlineMathRun>,
+    joined_head: Option<InlineJoinedFragment>,
+) -> Option<MathSpan> {
     let first = runs.first()?;
     let last = runs.last()?;
     let cell_segments = runs
@@ -932,6 +1212,7 @@ fn inline_group(id: TranscriptId, line: &str, runs: Vec<InlineMathRun>) -> Optio
         kind: BlockKind::Math,
         cell_segments,
         inline_runs: runs,
+        inline_joined_head: joined_head,
     })
 }
 
@@ -1218,7 +1499,13 @@ fn scan_math_blocks_impl<'a>(
     {
         rec.seed_carried_opening();
     }
+    // The line inline detection last ran on, and only if it was the line immediately above this
+    // one. Taken at the top of every iteration so that any path which skips the inline branch —
+    // a code fence, an indented code block, a display block's body, a line inside an unclosed
+    // opening — leaves no predecessor behind for a row-split join to reach across.
+    let mut inline_carry: Option<usize> = None;
     for (index, (_, text)) in lines.iter().enumerate() {
+        let inline_predecessor = inline_carry.take();
         if opening.is_none() && commonmark_indented_code(text) {
             continue;
         }
@@ -1436,21 +1723,34 @@ fn scan_math_blocks_impl<'a>(
             });
             continue;
         }
-        if opening.is_none()
-            && options.inline_formulas
-            && let Some(span) = inline_group(
-                lines[index].0,
-                text,
-                detect_inline_math(text, site_at(sites, index)),
-            )
-        {
-            let id = lines[index].0;
-            result.blocks.push(DetectedMathBlock {
-                start: id,
-                end: id,
-                span,
+        if opening.is_none() && options.inline_formulas {
+            let site = site_at(sites, index);
+            // This line reached inline detection, so the next one may try to join back to it —
+            // whatever this line's own verdict turns out to be. The head of a row-split formula
+            // yields no run at all (it is an opener with no closer), which is exactly why the
+            // carry is set on arrival here rather than on a detection.
+            inline_carry = Some(index);
+            let joined = inline_predecessor.and_then(|previous| {
+                detect_inline_math_across_rows(
+                    lines[previous].1,
+                    site_at(sites, previous),
+                    text,
+                    site,
+                )
             });
-            continue;
+            let (runs, head) = match joined {
+                Some(join) => (join.runs, Some(join.head)),
+                None => (detect_inline_math(text, site), None),
+            };
+            if let Some(span) = inline_group(lines[index].0, text, runs, head) {
+                let id = lines[index].0;
+                result.blocks.push(DetectedMathBlock {
+                    start: id,
+                    end: id,
+                    span,
+                });
+                continue;
+            }
         }
         if let Some(active) = opening.as_ref()
             && let Some((body_end, close_end)) = closing_delimiter(text, &active.delimiter)
@@ -1855,6 +2155,7 @@ fn occurrence(
         kind,
         cell_segments,
         inline_runs: Vec::new(),
+        inline_joined_head: None,
     }
 }
 
@@ -3482,6 +3783,263 @@ mod tests {
         );
     }
 
+    // ── T-MATH-INLINE-WRAP: a formula the producer's own wrapping split across two rows. ──
+
+    /// The head row and the tail row of the sentence in the 2026-09-15 report, as Claude Code wrote
+    /// them into the pane. The wrap fell between `$x` and `= \frac…`, which is where the terminal
+    /// would have folded it too — and is why no amount of one-row reading finds a formula here.
+    const SPLIT_HEAD: &str = "Use the quadratic formula $x";
+    const SPLIT_TAIL: &str =
+        r"= \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}$, and the density $\varphi(x) = e^{-x^2/2}$.";
+
+    fn join(previous: &str, text: &str) -> Option<JoinedInlineRow> {
+        detect_inline_math_across_rows(
+            previous,
+            InlineMathSite::CommandOutput,
+            text,
+            InlineMathSite::CommandOutput,
+        )
+    }
+
+    /// PIN: the exact defect. Two rows, one formula, typeset.
+    #[test]
+    fn a_formula_the_producer_wrapped_across_two_rows_is_joined_and_typeset() {
+        assert!(
+            detect_inline_math(SPLIT_HEAD, InlineMathSite::CommandOutput).is_empty()
+                && detect_inline_math(SPLIT_TAIL, InlineMathSite::CommandOutput).is_empty(),
+            "the premise of the ticket: neither half is a formula on its own"
+        );
+        let joined = join(SPLIT_HEAD, SPLIT_TAIL).expect("the two halves must join");
+        assert_eq!(
+            joined.runs[0].source,
+            r"x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}",
+            "the row break becomes one space and nothing else changes"
+        );
+        assert_eq!(
+            joined.runs[0].byte_start, 0,
+            "the joined run stands at the start of the closing row"
+        );
+        assert_eq!(
+            &SPLIT_TAIL[..joined.runs[0].byte_end as usize],
+            r"= \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}$",
+            "and owns exactly the cells of its own fragment, closing delimiter included"
+        );
+        assert_eq!(joined.head.text, "$x", "the fragment left above, for the placer");
+        assert_eq!(
+            &SPLIT_HEAD[joined.head.byte_start as usize..joined.head.byte_end as usize],
+            "$x"
+        );
+        assert_eq!(
+            joined.runs.len(),
+            2,
+            "the second formula on the closing row must survive the first one's split: {:?}",
+            joined.runs
+        );
+        assert_eq!(joined.runs[1].source, r"\varphi(x) = e^{-x^2/2}");
+    }
+
+    /// The same two rows through the scanner: one occurrence, keyed on the closing line.
+    #[test]
+    fn the_scanner_keys_a_row_split_formula_on_the_line_that_closes_it() {
+        let blocks = detect_math_blocks_with_sites(
+            [
+                (TranscriptId(1), SPLIT_HEAD, InlineMathSite::CommandOutput),
+                (TranscriptId(2), SPLIT_TAIL, InlineMathSite::CommandOutput),
+            ],
+            DetectionOptions::default(),
+        );
+        assert_eq!(blocks.len(), 1, "one occurrence, not two: {blocks:?}");
+        assert_eq!(blocks[0].start, TranscriptId(2));
+        assert_eq!(blocks[0].end, TranscriptId(2));
+        assert_eq!(blocks[0].span.mode, MathMode::Inline);
+        assert_eq!(blocks[0].span.inline_runs.len(), 2);
+        assert_eq!(
+            blocks[0]
+                .span
+                .inline_joined_head
+                .as_ref()
+                .map(|head| head.text.as_str()),
+            Some("$x"),
+            "the fragment above travels with the occurrence or the placer cannot clear it"
+        );
+        assert_eq!(
+            blocks[0].span.cell_segments.len(),
+            2,
+            "one segment per run, on the closing line, as for any inline occurrence"
+        );
+    }
+
+    /// A currency mark at the end of a row is not an opening delimiter, whatever follows it.
+    #[test]
+    fn a_trailing_currency_mark_never_joins_with_the_row_below() {
+        assert!(
+            join("The starter plan costs $5", "and the upgrade costs more").is_none(),
+            "a row with no closing delimiter cannot close anything"
+        );
+        assert!(
+            join("The starter plan costs $5", "and Pro costs $15 monthly").is_none(),
+            "nor can a row whose only dollar is another price"
+        );
+        assert!(
+            join("Basic $5", "and Pro (see above)$ monthly").is_none(),
+            "and where the dollar below could close, `5 and Pro (see above)` is prose and dies \
+             exactly where a one-row `$5 and Pro (see above)$` dies"
+        );
+    }
+
+    /// A blank row is a paragraph break, and nothing joins across one.
+    #[test]
+    fn a_dangling_opener_never_joins_across_a_blank_row() {
+        assert!(join(SPLIT_HEAD, "").is_none());
+        assert!(join(SPLIT_HEAD, "   ").is_none());
+    }
+
+    /// Nor across a row that begins something of its own.
+    #[test]
+    fn a_dangling_opener_never_joins_into_a_bullet_a_quote_or_a_heading() {
+        for opener in ["• ", "- ", "* ", "> ", "## ", "1. "] {
+            let text = format!(r"{opener}= \frac{{-b}}{{2a}}$ and so on");
+            assert!(
+                join(SPLIT_HEAD, &text).is_none(),
+                "{text:?} starts a new block and its dollar is its own"
+            );
+        }
+    }
+
+    /// Two rows that each leave a dollar open are two unfinished thoughts, not one formula.
+    #[test]
+    fn two_open_dollars_on_consecutive_rows_do_not_join() {
+        assert!(join("the value $x", "and the value $y").is_none());
+        assert!(join("the tensor $T", r"and also $\Phi + 1$ here").is_none());
+    }
+
+    /// A formula that is whole on its row is read exactly as it was before the join existed.
+    #[test]
+    fn a_complete_one_row_formula_is_untouched_by_the_join() {
+        let lines = [
+            (TranscriptId(1), "energy $E = mc^2$ here", InlineMathSite::CommandOutput),
+            (TranscriptId(2), r"and $a_1+b_1=c_1$ too", InlineMathSite::CommandOutput),
+        ];
+        let blocks = detect_math_blocks_with_sites(lines, DetectionOptions::default());
+        assert_eq!(blocks.len(), 2);
+        for block in &blocks {
+            assert_eq!(block.span.inline_runs.len(), 1);
+            assert!(
+                block.span.inline_joined_head.is_none(),
+                "nothing was split, so nothing was joined"
+            );
+        }
+        assert!(
+            join("energy $E = mc^2$ here", r"and $a_1+b_1=c_1$ too").is_none(),
+            "a row whose dollars already pair has no unmatched opener to offer"
+        );
+    }
+
+    /// The locality bound, stated as a bound and not as a length limit on mathematics: the formula
+    /// below is perfectly good and is refused a *join* only because its closer stands too far in.
+    #[test]
+    fn a_closer_beyond_the_join_reach_is_left_alone() {
+        // One formula, two lengths: the only thing that differs is how far into the row its
+        // closing delimiter lands.
+        let tail = |pad: usize| format!(r"= \gamma_{{{}}}$ and the rest", "b".repeat(pad));
+        let closing_column = |text: &str| {
+            bt_unicode::text_width(text.split('$').next().expect("a prefix")).saturating_add(1)
+        };
+        let near = tail(20);
+        let far = tail(60);
+        assert!(closing_column(&near) <= INLINE_ROW_JOIN_MAX_CLOSING_COLUMNS);
+        assert!(closing_column(&far) > INLINE_ROW_JOIN_MAX_CLOSING_COLUMNS);
+        assert!(join("the value $x", &near).is_some());
+        assert!(
+            join("the value $x", &far).is_none(),
+            "past {INLINE_ROW_JOIN_MAX_CLOSING_COLUMNS} cells the closer is no longer this \
+             fragment's closer"
+        );
+    }
+
+    /// Both halves must sit at the same inline-eligible site — which is how "one command printed
+    /// both of them" is proved by a crate that has never heard of a command.
+    #[test]
+    fn a_row_split_join_needs_one_site_for_both_halves() {
+        for (previous, text) in [
+            (InlineMathSite::CommandOutput, InlineMathSite::Ineligible),
+            (InlineMathSite::Ineligible, InlineMathSite::CommandOutput),
+            (InlineMathSite::CommandOutput, InlineMathSite::AltScreenContent),
+            (InlineMathSite::Ineligible, InlineMathSite::Ineligible),
+        ] {
+            assert!(
+                detect_inline_math_across_rows(SPLIT_HEAD, previous, SPLIT_TAIL, text).is_none(),
+                "{previous:?} above {text:?} is not one command's output"
+            );
+        }
+        assert!(
+            detect_inline_math_across_rows(
+                SPLIT_HEAD,
+                InlineMathSite::AltScreenContent,
+                SPLIT_TAIL,
+                InlineMathSite::AltScreenContent,
+            )
+            .is_some(),
+            "the alternate screen — where Claude Code lives — joins exactly as command output does"
+        );
+    }
+
+    /// **Zero false positives, in two dimensions.** The one-row corpus is the measurement the
+    /// inline ruling was made on; the join adds a second row to every line of it, so it is measured
+    /// again over every ordered pair the corpus can make. 1,600 pairs of real terminal text, no
+    /// joins.
+    #[test]
+    fn no_ordered_pair_of_the_false_positive_corpus_ever_joins() {
+        let mut wrong = Vec::new();
+        for (above, _) in INLINE_FALSE_POSITIVE_CORPUS {
+            for (below, _) in INLINE_FALSE_POSITIVE_CORPUS {
+                if let Some(joined) = join(above, below) {
+                    wrong.push(format!(
+                        "{above:?} over {below:?} would typeset {:?}",
+                        joined.runs[0].source
+                    ));
+                }
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "{} corpus pairs would be joined:\n  {}",
+            wrong.len(),
+            wrong.join("\n  ")
+        );
+    }
+
+    /// The arming prefilter's half of the rule: tight enough that the sigils a terminal prints do
+    /// not answer it, wide enough that the row which closes a split formula does.
+    #[test]
+    fn only_a_dollar_that_could_close_something_arms_a_row_on_its_own() {
+        for text in [
+            "echo $PATH",
+            "cost $5 today",
+            "awk '{print $1}' report.txt",
+            "$ ls -la",
+            r"escaped \$ here",
+            "out=$dir and more",
+            "no dollars at all",
+            "literal $PATH$ token",
+        ] {
+            assert!(
+                !may_close_row_split_inline_math(text),
+                "{text:?} must not arm a scan by itself"
+            );
+        }
+        for text in [
+            r"= \frac{-b}{2a}$, and the rest",
+            "4ac}}{2a}$ and so on",
+            "a}$ text",
+        ] {
+            assert!(
+                may_close_row_split_inline_math(text),
+                "{text:?} could close a formula left open above and must be asked about"
+            );
+        }
+    }
+
     #[test]
     fn a_truncated_window_never_pairs_a_closer_with_the_next_opener() {
         // The window starts INSIDE a block, so its first `$$` is really a closing delimiter.
@@ -4607,6 +5165,7 @@ abla f",
                 kind: BlockKind::Math,
                 cell_segments: Vec::new(),
                 inline_runs: Vec::new(),
+                inline_joined_head: None,
             },
             detection_complete: false,
             resolved: false,
