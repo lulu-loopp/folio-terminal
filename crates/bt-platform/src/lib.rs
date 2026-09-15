@@ -13824,35 +13824,97 @@ mod macos_process_door_tests {
     ///
     /// [`handoff::PROGRAM_REFUSED`] is a sentinel `bt-app` matches with
     /// `.contains` and turns into *the tree does not run programs*. Two things
-    /// about it are worth a pin rather than a comment: the door that opens a
+    /// about it are worth a pin rather than a comment: the road that opens a
     /// row **says it**, on this platform as on the other; and the door that
     /// *reveals* a row does not — a `.app` shown in Finder is a `.app` sitting
     /// selected in a folder, which is what somebody asking "where is this"
     /// wants and is not a way to start it.
     ///
-    /// MUTATION: drop the check from the macOS `open_local_path` and a row in
-    /// the files column launches an application; add one to the reveal and
-    /// "show me where this is" stops working for every program on the machine.
+    /// # The shape this reads changed on 2026-09-15, and so did what it checks
+    ///
+    /// The refusal used to sit in `open_local_path`'s own body, so this asked
+    /// only that the sentence was in there. RA-4 moved it: a symbolic link
+    /// named `notes` pointing at `Payload.app` got past the gate, because the
+    /// `stat` followed the link while the `.app` test read the link's *name* —
+    /// so resolving, classifying and building the URL now all happen in one
+    /// place, `openable_target`, which `open_local_path` is three lines over.
+    /// A pin that went on reading only the door's body would have been green on
+    /// the version with the hole in it and red on the version without.
+    ///
+    /// So it reads **two** bodies and, more to the point, their **order**,
+    /// which is the property the hole broke: lexical check, then resolve, then
+    /// refuse — and the refusal decided before a URL exists, let alone before
+    /// `hand_over`. The last pair is RA-4 itself said as text: the URL is built
+    /// from the resolved target and never from the path as given, because a
+    /// door that judges one file and opens another is the defect rather than a
+    /// spelling of it.
+    ///
+    /// MUTATION: build the URL from `path` and the sixth assertion goes red;
+    /// ask the gate before the lexical check, or after `file_url`, and the
+    /// ordering ones do; drop the refusal from `openable_target` and the first
+    /// does. Add one to the reveal and "show me where this is" stops working
+    /// for every program on the machine.
     #[test]
     fn the_macos_tree_still_refuses_to_run_a_program() {
         let at = HANDOFF
             .find("mod macos_handoff {")
             .expect("the macOS hand-off is a module");
         let arm = &HANDOFF[at..];
-        let door_body = |name: &str| {
+        // `pub fn` for a door, plain `fn` for the gate one floor under it.
+        let body = |head: &str| {
             let at = arm
-                .find(&format!("pub fn {name}("))
-                .unwrap_or_else(|| panic!("`{name}` is in this arm"));
+                .find(head)
+                .unwrap_or_else(|| panic!("`{head}` is in this arm"));
             let rest = &arm[at..];
             let end = rest
                 .find("\n    }\n")
-                .expect("a door in a module is closed at four spaces");
+                .expect("a function in a module is closed at four spaces");
             rest[..end].to_owned()
         };
+        let door_body = |name: &str| body(&format!("pub fn {name}("));
+        let offset_of = |source: &str, needle: &str| {
+            source
+                .find(needle)
+                .unwrap_or_else(|| panic!("`{needle}` is gone from the macOS open: {source}"))
+        };
+
+        // ① The gate says the product's sentence, ② after the lexical check and
+        // ③ off the *resolved* target rather than the name it was handed.
+        let gate = body("fn openable_target(");
         assert!(
-            door_body("open_local_path").contains("PROGRAM_REFUSED"),
+            gate.contains("PROGRAM_REFUSED"),
             "the macOS tree opens programs, which the Windows one refuses to do"
         );
+        let lexical = offset_of(&gate, "openable_unix_path(path)?");
+        let resolved = offset_of(&gate, "canonicalize(path)");
+        let refused = offset_of(&gate, "PROGRAM_REFUSED");
+        assert!(
+            lexical < resolved,
+            "a relative path reaches the disk before it is refused for being one"
+        );
+        assert!(
+            resolved < refused,
+            "the refusal is decided before the link is followed, so it is about the \
+             name rather than about the file that would be opened"
+        );
+
+        // ④ The door goes through that gate, ⑤ before it builds a URL and hands
+        // it over, and ⑥ the URL it builds is of the file the gate judged.
+        let door = door_body("open_local_path");
+        let gated = offset_of(&door, "openable_target(path)?");
+        let url = offset_of(&door, "file_url(");
+        let over = offset_of(&door, "hand_over(");
+        assert!(
+            gated < url && url < over,
+            "the macOS open builds a URL, or hands one over, before it has asked \
+             whether opening this would run it"
+        );
+        assert!(
+            !door.contains("file_url(path"),
+            "the URL is built from the path as given while the refusal was asked of \
+             the resolved target — the two can then disagree, which is RA-4"
+        );
+
         assert!(
             !door_body("reveal_in_explorer").contains("PROGRAM_REFUSED"),
             "the reveal refuses programs, so nobody can be shown where one is"

@@ -53468,7 +53468,7 @@ impl Runtime<'_> {
             // window by construction. The loop spends this at its own door — see
             // [`FolioApp::settle_quit`].
             shortcuts::Action::Quit => {
-                self.app.quit_requested = true;
+                self.app.ask_to_quit();
                 Ok(())
             }
             // I103's chain lives inside `close_pane`: the last pane of a tab
@@ -100862,6 +100862,23 @@ impl App {
     fn finish(&mut self) {
         self.session_store.close();
     }
+
+    /// **Ask for the quit transaction**, from whichever of the three doors the
+    /// ask arrived at.
+    ///
+    /// The debt and not the transaction, for [`Self::quit_requested`]'s own
+    /// reason: the first thing a quit does is read *every* window, so it cannot
+    /// run on the stack any one of these asks arrives on. The loop spends it at
+    /// [`FolioApp::settle_quit`].
+    ///
+    /// The three doors are the chord (`Runtime::run_shortcut`), AppKit
+    /// ([`FolioApp::begin_the_systems_quit`]) and the menu bar's own Quit row
+    /// ([`FolioApp::run_a_verb_of_the_applications`], RB-4). They are one line
+    /// each and that is exactly why they are this line: three copies of a flag
+    /// are three places for a fourth door to be written differently.
+    fn ask_to_quit(&mut self) {
+        self.quit_requested = true;
+    }
 }
 
 /// **Every open window, in the order they opened** (multiwindow slice C).
@@ -108408,12 +108425,15 @@ impl FolioApp {
                 // `run_shortcut`, which is the very function the chord reaches**;
                 // the whole of what the menu adds is the id of the row pressed.
                 //
-                // The window is the one the keyboard is on. A choice that
-                // arrives with none is dropped rather than held: the only state
-                // that reaches it is macOS's own, the application alive in the
-                // Dock with every window closed, and the bar says so meanwhile
-                // by greying every verb row (`menubar::plan`). The door that
-                // opens a window again is the reopen three arms up.
+                // The window is the one the keyboard is on. A choice for a
+                // *window* verb that arrives with none is dropped rather than
+                // held: the only state that reaches it is macOS's own, the
+                // application alive in the Dock with every window closed, and
+                // the bar says so meanwhile by greying those rows
+                // (`menubar::plan`). The door that opens a window again is the
+                // reopen three arms up. **A row that is the application's own
+                // is answered there and then** — Quit, since RB-4 — because
+                // that state is the one it is reached from.
                 //
                 // **A row of the Dock tile's menu lands here too**
                 // (T-MAC-DOCKMENU, §13.50 ③), carrying the same choice and
@@ -108436,9 +108456,15 @@ impl FolioApp {
     /// spent on the loop's own turn. A **bar** row is not routed through
     /// [`Self::a_window_for_the_delegate`], and that is the difference between
     /// it and a document: a document handed over from Finder is a request for a
-    /// window if there is none, and a bar row is not — the rows are greyed with
-    /// no window open, so a choice arriving there is a race rather than a
-    /// request.
+    /// window if there is none, and a bar row is not — the *window* rows are
+    /// greyed with no window open, so a choice arriving from one is a race
+    /// rather than a request.
+    ///
+    /// **Except the rows that are the application's**, which are answered first
+    /// and never want a window (RB-4, ruled 2026-09-15). One row is that today
+    /// and it is Quit; `menubar::is_an_application_verb` is where the bar says
+    /// which, so the enabled flag it draws and the dispatch here are two
+    /// readings of one statement rather than two statements.
     ///
     /// **A row of the Dock tile's menu is the other way round** (T-MAC-DOCKMENU,
     /// §13.50 ③), and the origin is the whole of what says so:
@@ -108462,6 +108488,27 @@ impl FolioApp {
         origin: bt_platform::AppDelegateOrigin,
         choice: bt_platform::menu::MenuChoice,
     ) -> Result<()> {
+        // **The application's own verbs are answered before a window is looked
+        // for** (RB-4, ruled 2026-09-15). The whole point of a row
+        // `menubar::is_an_application_verb` answers for is that there may be no
+        // window: Folio stays in the Dock after its last one closes (M3-1), and
+        // that is the state a reader reaches for Quit *from*. Asked below the
+        // lookup instead, the row would be enabled on the bar and then dropped
+        // on the way in.
+        //
+        // **The origin is not read here**, and that is the ruling rather than an
+        // oversight: everything below this block is about *which window* a press
+        // belongs to, and a verb that needs no window needs none from either
+        // menu. The Dock tile carries neither of these rows today — its Quit is
+        // AppKit's own and arrives as a termination request (`DOCK`, §13.50) —
+        // so this is a statement about the shape rather than a live second
+        // path.
+        if let bt_platform::menu::MenuChoice::Verb(row) = choice
+            && menubar::is_an_application_verb(row)
+        {
+            self.run_a_verb_of_the_applications(row);
+            return Ok(());
+        }
         let id = if origin == bt_platform::AppDelegateOrigin::Dock {
             let Some(id) = self.the_window_the_reader_was_last_in() else {
                 if let Some(opened) = self.a_window_for_the_delegate(event_loop)? {
@@ -108511,6 +108558,35 @@ impl FolioApp {
             }
         }
         Ok(())
+    }
+
+    /// **One verb that belongs to the application rather than to a window, run
+    /// without one** (RB-4, ruled 2026-09-15).
+    ///
+    /// [`Self::answer_a_menu_row`] asks `menubar::is_an_application_verb` and
+    /// lands here before it looks for a window, because a row of this kind is
+    /// reached precisely *from* the state where there is none — Folio stays in
+    /// the Dock after its last window closes (M3-1).
+    ///
+    /// One verb is this today and it is Quit, whose whole effect is a debt
+    /// recorded on the application: `Runtime::run_shortcut`'s own arm says why
+    /// it can be no more than that — a quit reads every window at once and a
+    /// `Runtime` is one window by construction — and both doors record it
+    /// through [`App::ask_to_quit`], so the transaction that follows is the same
+    /// one the chord starts, with zero windows exactly as with six.
+    ///
+    /// **A row this build does not know does nothing**, which is
+    /// [`Self::answer_a_menu_row`]'s own answer to the same question and for the
+    /// same reason: `menubar::every_verb_on_the_bar_names_a_row` makes it
+    /// impossible, and a menu is drawn on a frame.
+    fn run_a_verb_of_the_applications(&mut self, id: &str) {
+        let Some(app) = self.app.as_mut() else {
+            return;
+        };
+        let action = app.shortcuts.row(id).map(|row| row.action);
+        if action == Some(shortcuts::Action::Quit) {
+            app.ask_to_quit();
+        }
     }
 
     /// **The window the reader was last in**, or `None` when this run has none
@@ -108684,7 +108760,7 @@ impl FolioApp {
         }
         self.termination = Some(answer);
         if let Some(app) = self.app.as_mut() {
-            app.quit_requested = true;
+            app.ask_to_quit();
         }
     }
 
@@ -165743,6 +165819,105 @@ mod edit_menu_clipboard_tests {
                 "`{verb}` has no arm in the application menu's verb runner"
             );
         }
+    }
+}
+
+/// **Quit with no window open** (RB-4, ruled 2026-09-15).
+///
+/// Closing the last window is this platform's ordinary resting state and this
+/// port built it on purpose (M3-1) — so it is a state a reader quits *from*.
+/// Whether the row is offered is `menubar`'s and is checked there
+/// (`quit_is_in_force_with_no_window_and_nothing_else_is`); what is checked here
+/// is the other half, that a Quit chosen with the desk empty is **dispatched
+/// rather than dropped**. That is a property of control flow and no value
+/// carries it: the landing takes an `&ActiveEventLoop` and a window registry,
+/// and a `#[test]` can make neither.
+#[cfg(test)]
+mod quit_with_no_window_tests {
+    /// This file, read as text.
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The text of one method, from its signature to the next method's.
+    fn body(signature: &str) -> &'static str {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        let end = rest.find("\n    fn ").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// RED — **the application's own verbs are answered before a window is
+    /// looked for.**
+    ///
+    /// The landing used to return the moment `frontmost_window()` answered
+    /// `None`, which is every press made with no window open. Enabling the row
+    /// on the bar alone would therefore have changed nothing: `Cmd+Q` would have
+    /// stopped being swallowed and started being dropped one floor down.
+    ///
+    /// The rows that *do* need a window are still dropped there, and the last
+    /// assertion keeps that: it is the reason the early return exists.
+    ///
+    /// MUTATION: move the dispatch below the lookup and the ordering assertion
+    /// goes red — which is the bug, exactly.
+    #[test]
+    fn a_menu_quit_is_dispatched_before_the_landing_asks_for_a_window() {
+        let landing = body("    fn answer_a_menu_row(");
+        // The needles are the code's own spelling and not the prose around it:
+        // a comment that stayed put while the call moved would otherwise keep
+        // this green.
+        let dispatch = landing
+            .find("&& menubar::is_an_application_verb(row)")
+            .expect("the landing asks the bar which verbs need no window");
+        let lookup = landing
+            .find("let Some(id) = self.frontmost_window() else {")
+            .expect("the landing still asks which window has the keyboard");
+        assert!(
+            dispatch < lookup,
+            "a verb of the application's is decided after a window is looked for, so a Quit \
+             chosen with the desk empty is dropped on the way in"
+        );
+        assert!(
+            landing.contains("self.run_a_verb_of_the_applications(row);"),
+            "the landing does not run the verb it just recognised"
+        );
+        // `lookup`'s own needle is the second half of the ruling: a row that
+        // *does* need a window is still dropped when there is none, which is
+        // why that early return exists at all. It is asked for above, so a
+        // landing that stopped dropping them cannot reach this line.
+    }
+
+    /// RED — **the menu's Quit records the chord's own debt**, so what the loop
+    /// spends afterwards is one transaction with one implementation.
+    ///
+    /// `crate::quit` is untouched by this ticket: the card, the save, the
+    /// photograph of every window, the session write and the release of
+    /// `session.lock` all run exactly as they do for six windows, because the
+    /// transaction reads the window list and the list is simply empty.
+    ///
+    /// MUTATION: set the flag by hand at any of the three doors and the last
+    /// assertion names it.
+    #[test]
+    fn every_door_onto_the_quit_records_the_same_debt() {
+        assert!(
+            body("    fn run_a_verb_of_the_applications(").contains("app.ask_to_quit();"),
+            "the menu bar's Quit does not reach the quit transaction"
+        );
+        assert!(
+            body("    fn run_shortcut(").contains("self.app.ask_to_quit();"),
+            "the chord no longer records the debt through the one door"
+        );
+        assert!(
+            body("    fn begin_the_systems_quit(").contains("app.ask_to_quit();"),
+            "AppKit's own quit request no longer records it through the one door"
+        );
+        // And nothing writes the flag behind that door's back. The needle is
+        // spelled in two halves so that this line is not itself an occurrence.
+        assert_eq!(
+            SOURCE.matches(concat!("quit_requested", " = true")).count(),
+            1,
+            "the quit debt is recorded somewhere other than `App::ask_to_quit`"
+        );
     }
 }
 
