@@ -630,33 +630,56 @@ impl FocusThumbnails {
         }
     }
 
-    /// Discard numeric overshoot when a changed card can be projected. Idle
-    /// cards pay only the same revision/geometry comparisons as the draw gate.
+    /// **`card walk`** — write down what this frame is about to do with one
+    /// card's stored offset, and change nothing (T-CARD-NO-PASSIVE-CLAMP).
+    ///
+    /// **A frame is not a hand, so a frame does not move the number.** This pass
+    /// used to hold the stored offset down to what the transcript could reach
+    /// whenever a changed card could be projected, and the owner's own recording
+    /// (`BT_CARD_TRACE`, 2026-09-14) is a list of the places that costs a reader
+    /// their place: a window crossing to a display of another scale passes
+    /// through grids that belong to no display — `41x21`, then `24x21` — and a
+    /// frame that walks in that instant finds a reachable maximum of 1 and
+    /// writes it back (`skip_before=4 skip_after=1`, `skip_before=7
+    /// skip_after=1`). The grid comes back a moment later and the number does
+    /// not. The first frames after a restore do the same over a pane whose shell
+    /// has not spoken yet (`skip_before=14 skip_after=0 max=0`). So the stored
+    /// offset is taken by value here: the only clamp that writes is the one
+    /// under the reader's own hand ([`aim_card_skip`], on the way in), and
+    /// [`transcript_tail`] clamps what it draws without writing anything back.
+    ///
+    /// `skip` is therefore reported on both sides of a walk and is the same
+    /// number on both — `drawn` is where the transient grid shows up now.
     ///
     /// `site` names the card and says which caller ran the pass —
     /// `BT_CARD_TRACE` (`card walk`) and nothing else. It is a parameter rather
     /// than state on the leaf because a pane can be torn out into another tab,
     /// and a stored identity would go on naming the tab the card used to be in.
-    pub(crate) fn clamp_terminal_skip(
+    pub(crate) fn trace_card_walk(
         &self,
         tab: TabId,
         demand: &SeatDemand<'_>,
-        skip: &mut usize,
+        skip: usize,
         now: Instant,
         site: card_trace::Card,
     ) {
+        // Forensic apparatus and nothing else, so an unset variable pays one
+        // atomic load and not a damage key per card per frame. Every exit below
+        // ends in a line and in nothing else.
+        if !card_trace::is_on() {
+            return;
+        }
         // **The one field a refusing exit still has** — the grid the pane is
-        // wearing, read behind the gate because an unset variable must pay one
-        // atomic load and nothing else on a per-frame path.
+        // wearing.
         let terminal = match &demand.source {
             SeatSource::Terminal { session, .. } => Some(*session),
             _ => None,
         };
-        let refuse = |leave: &'static str, skip: usize| {
+        let refuse = |leave: &'static str| {
             trace_walk(site, leave, terminal, demand.rows, skip, skip, None);
         };
-        if *skip == 0 {
-            refuse("at-tail", *skip);
+        if skip == 0 {
+            refuse("at-tail");
             return;
         }
         if let Some(entry) = self.entries.get(&(tab, demand.id)) {
@@ -669,31 +692,26 @@ impl FocusThumbnails {
             // the picture already on the glass.
             let same_picture = entry.damage == demand.damage();
             if same_picture || (!entry.unthrottled && now.duration_since(entry.at) < MIN_INTERVAL) {
-                refuse(
-                    if same_picture {
-                        "unchanged"
-                    } else {
-                        "throttled"
-                    },
-                    *skip,
-                );
+                refuse(if same_picture {
+                    "unchanged"
+                } else {
+                    "throttled"
+                });
                 return;
             }
         }
-        let Some(session) = terminal else {
-            refuse("not-a-terminal", *skip);
+        if terminal.is_none() {
+            refuse("not-a-terminal");
             return;
-        };
-        let before = *skip;
-        clamp_card_skip(session, skip, demand.rows);
+        }
         trace_walk(
             site,
             "walked",
             terminal,
             demand.rows,
-            before,
-            *skip,
-            Some(before),
+            skip,
+            skip,
+            Some(skip),
         );
     }
 
@@ -1160,15 +1178,17 @@ fn card_climb(session: &DualPlaneSession, wanted: usize) -> Vec<String> {
     climb
 }
 
-/// **`card walk`** — one line per call of the per-frame clamp, whichever of its
-/// five exits was taken (`BT_CARD_TRACE`, T-CARD-TRACE).
+/// **`card walk`** — one line per call of the per-frame station, whichever of
+/// its five exits was taken (`BT_CARD_TRACE`, T-CARD-TRACE).
 ///
 /// `walk_from` carries the only expensive thing here: `Some(n)` takes a bounded
-/// [`card_climb`] of this station's own — the same bound `clamp_card_skip` used
-/// — so the line can report the reachable maximum, the offset the *draw* will
-/// use, and the two rows a reader is looking at. [`clamp_card_skip`] hands none
-/// of that back, and [`transcript_tail`] is a pure function with no card
-/// identity to carry, so this is where the three numbers can be compared at all.
+/// [`card_climb`] of this station's own — the same bound the draw uses — so the
+/// line can report the reachable maximum, the offset the *draw* will use, and
+/// the two rows a reader is looking at. [`transcript_tail`] is a pure function
+/// with no card identity to carry, so this is where the stored number and the
+/// drawn one can be compared at all — and since T-CARD-NO-PASSIVE-CLAMP that
+/// comparison is the whole point: `skip_before` and `skip_after` are one number
+/// on a walk, and `drawn` is the only field a transient grid moves.
 /// `None` is a refusing exit: it prints the grid and the two offsets and says
 /// `-` for everything a walk would have answered, because an absent number is
 /// not a zero.
@@ -1203,10 +1223,9 @@ fn trace_walk(
         let climb = card_climb(session, rows.saturating_add(from));
         if !climb.is_empty() {
             let max = climb.len().saturating_sub(rows);
-            // What `transcript_tail` will do with the number this clamp leaves
-            // behind. The draw's own walk is bounded by `rows + skip_after` and
-            // this one by `rows + skip_before`, which is the longer of the two,
-            // so the same answer comes out of it.
+            // What `transcript_tail` will do with the stored number. The draw's
+            // own walk is bounded by `rows + skip` and so is this one, so the
+            // same answer comes out of it.
             let at = skip_after.min(max);
             reachable = Some(max);
             drawn = Some(at);
@@ -1240,7 +1259,15 @@ fn trace_walk(
 
 /// Keep the stored offset reachable as a card grows or its transcript shrinks.
 /// A zero-height or not-yet-populated card cannot establish a useful limit.
-pub(crate) fn clamp_card_skip(session: &DualPlaneSession, skip: &mut usize, rows: usize) {
+///
+/// **The hand's clamp, and the hand's alone** (T-CARD-NO-PASSIVE-CLAMP): this is
+/// reached from [`aim_card_skip`] on the way into a notch and from nowhere else,
+/// because a card whose number a *frame* held down loses the reader's place to a
+/// grid that was on screen for an instant. A frame reports
+/// ([`FocusThumbnails::trace_card_walk`]) and the draw clamps what it draws
+/// ([`transcript_tail`]); neither writes the number back. It is private for that
+/// reason: the one caller that used to be outside this module was the frame.
+fn clamp_card_skip(session: &DualPlaneSession, skip: &mut usize, rows: usize) {
     if rows == 0 || *skip == 0 {
         return;
     }
