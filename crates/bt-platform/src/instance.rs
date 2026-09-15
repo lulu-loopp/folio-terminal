@@ -52,8 +52,12 @@
 //! with the reader's everyday Folio.
 //!
 //! **On Unix** the isolation is not in the name but in the directory the name
-//! lives in: `$TMPDIR/folio-<uid>/`, created `0700`, owner-checked and refused
-//! outright if anything but a real directory of this user's is standing there.
+//! lives in: `folio-<uid>/` under the per-user temporary directory the *system*
+//! names — **not** `$TMPDIR`, which is an environment variable and therefore a
+//! thing two processes of one user can disagree about (review RA-1, and
+//! `runtime_directory` below carries the whole of that reason). It is created
+//! `0700`, owner-checked and refused outright if anything but a real directory
+//! of this user's is standing there.
 //! And the fold is not the Windows one. `to_lowercase` on a path is correct on
 //! NTFS and wrong on a case-sensitive APFS volume, and it says nothing at all
 //! about symlinks — so the Unix arm asks the filesystem instead
@@ -257,8 +261,9 @@ pub fn canonical_path(directory: &Path) -> PathBuf {
 /// processes disagree about.
 ///
 /// Nothing here is at risk of reaching it: [`socket_path_in`] puts a sixteen
-/// character digest and a five character suffix under `$TMPDIR/folio-<uid>/`,
-/// **whatever the data directory's own path length is**, and
+/// character digest and a five character suffix under this user's runtime
+/// directory — `folio-<uid>` under the per-user temporary directory the system
+/// names — **whatever the data directory's own path length is**, and
 /// [`attention_socket_path_in`] — the longer of the two, and therefore the one
 /// the promise is really about — puts the same digest and a ten character
 /// suffix there. That is the other half of why the name is a digest.
@@ -321,20 +326,141 @@ fn lock_path_in(runtime: &Path, tag: &str) -> PathBuf {
 /// **Where this user's Folio runtime files live**, as a path and without
 /// touching the disk.
 ///
-/// `$TMPDIR` when it is set — on macOS that is already a per-user directory the
-/// system made — and `/tmp`, which is not, when it is not. The `<uid>` in the
-/// name is what makes the second case as private as the first: two users on one
-/// machine must not meet in one directory, and the one that got there first must
-/// not be able to decide what the second one finds.
+/// # Why this is not `$TMPDIR` (review RA-1)
+///
+/// The claim on a data directory is a `flock` on a file in here, and both of
+/// that directory's endpoints are files in here — so this path is half of what
+/// "one data directory, one writer" means. Two Folios that compute two
+/// different runtime directories take two different locks, **both** answer
+/// `Some(DataDirectoryClaim)`, and both write `settings.json` and
+/// `session.json` over each other; the second one cannot even find the first to
+/// hand its command line over, because it is knocking on a door in the other
+/// directory.
+///
+/// `$TMPDIR` is exactly that split, written into the product. It is an
+/// environment variable: a Folio `launchd` started has it set to this user's
+/// per-user directory, and a Folio started from an `ssh` session, from `env -i`
+/// or by a daemon does not — which used to mean `/tmp`. Same user, same
+/// `$HOME`, two runtime directories, two writers. The Windows arm cannot
+/// diverge this way, because its claim is a kernel name derived from the data
+/// directory alone.
+///
+/// # What is asked instead
+///
+/// The **system**, through [`per_user_temporary_directory`]: on macOS that is
+/// `confstr(_CS_DARWIN_USER_TEMP_DIR)`, which is the directory `launchd` reads
+/// `$TMPDIR` *out of*, so a process that inherited no environment at all gets
+/// the same answer as one that inherited a full one. Nothing in a process's
+/// environment can move it, which is the whole property this function needs.
+///
+/// The `<uid>` in the name stays, and it is what makes the `/tmp` answer as
+/// private as the per-user one: two users on one machine must not meet in one
+/// directory, and the one that got there first must not be able to decide what
+/// the second one finds — which is [`prepare_runtime_directory`]'s three
+/// refusals.
 #[cfg(unix)]
 #[must_use]
 pub fn runtime_directory() -> PathBuf {
-    let base = std::env::var_os("TMPDIR")
-        .filter(|value| !value.is_empty())
-        .map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
     // SAFETY: `geteuid` reads this process's own credentials and cannot fail.
     let uid = unsafe { libc::geteuid() };
-    base.join(format!("folio-{uid}"))
+    runtime_directory_from(per_user_temporary_directory(), uid)
+}
+
+/// **The same rule with its one impure input handed in.**
+///
+/// Pure and not gated, for [`socket_path_in`]'s reason: what it promises — that
+/// one user's runtime directory is not another's, that a path that is not
+/// rooted is refused rather than joined onto, and that what comes out of it
+/// still leaves room for an endpoint inside `sun_path` — is a claim a Windows
+/// runner can check rather than one only a Mac could.
+///
+/// Split out rather than inlined for `bt_app::attention_hooks::config_dir_from`'s
+/// reason: a process-wide variable changed from a test is changed for every
+/// other test running beside it, so the impure input is **named** instead of
+/// being reached for. Here the named input is what the system answered, and the
+/// finding this closes is that there used to be a second, unnamed one.
+///
+/// **`has_root` and not `is_absolute`**: on Unix the two are the same question,
+/// and this function is also read on a Windows host, where `is_absolute` wants
+/// a drive letter as well. A relative answer is refused rather than joined onto
+/// a working directory — a runtime directory that moved with the directory a
+/// Folio was started in would be the same split this function exists to close.
+#[must_use]
+pub fn runtime_directory_from(system_temporary_directory: Option<PathBuf>, uid: u32) -> PathBuf {
+    system_temporary_directory
+        .filter(|directory| directory.has_root())
+        .unwrap_or_else(|| PathBuf::from(SHARED_TEMPORARY_DIRECTORY))
+        .join(format!("folio-{uid}"))
+}
+
+/// **Where a runtime directory goes on a system that has no per-user temporary
+/// directory to put it in.**
+///
+/// A constant and not a second environment read: `/tmp` is the same path in
+/// every process on the machine, which is the property [`runtime_directory`] is
+/// built out of, and it is what the `<uid>` in the name and
+/// [`prepare_runtime_directory`]'s owner and symlink refusals are really for —
+/// this is the one case where the directory's parent is shared with other
+/// users.
+const SHARED_TEMPORARY_DIRECTORY: &str = "/tmp";
+
+/// **What macOS says this user's own temporary directory is**, asked of the
+/// system rather than read out of the environment (RA-1).
+///
+/// `confstr(_CS_DARWIN_USER_TEMP_DIR)` answers `/var/folders/<xx>/<digest>/T/`
+/// — per user and per boot, created by the system, owned by this user and
+/// reachable by nobody else. It is the value `launchd` puts in `$TMPDIR`, and
+/// asking for it is how a process that inherited no environment arrives at the
+/// same directory as one that did. `confstr(3)` on macOS documents the
+/// `_CS_DARWIN_USER_*` names as this user's own directories and is the whole
+/// citation for that claim.
+///
+/// `None` rather than a guess when the system has none to give: the caller's
+/// answer for that is a constant, and a second guess here would be a second way
+/// for two processes of one user to disagree.
+#[cfg(target_os = "macos")]
+#[must_use]
+fn per_user_temporary_directory() -> Option<PathBuf> {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let name = libc::_CS_DARWIN_USER_TEMP_DIR;
+    // SAFETY: a null destination with a zero length is how `confstr` is
+    // specified to be asked for the room it needs; it writes nothing at all in
+    // that call.
+    let needed = unsafe { libc::confstr(name, std::ptr::null_mut(), 0) };
+    if needed == 0 {
+        return None;
+    }
+    let mut answer = vec![0_u8; needed];
+    let room = answer.len();
+    let into = answer.as_mut_ptr().cast::<libc::c_char>();
+    // SAFETY: `into` is this vector's own buffer and `room` is that buffer's
+    // length, so the call cannot write past it.
+    let written = unsafe { libc::confstr(name, into, room) };
+    // Zero is the failure. An answer that wanted more room than it was given
+    // was truncated, and a truncated path is a *different* directory rather
+    // than a shorter spelling of the same one — so it is refused too.
+    if written == 0 || written > room {
+        return None;
+    }
+    // The count includes the terminator, which is not part of the path.
+    answer.truncate(written - 1);
+    Some(PathBuf::from(OsString::from_vec(answer)))
+}
+
+/// **The same question on a Unix that is not macOS**, which has no per-user
+/// temporary directory to ask about.
+///
+/// `XDG_RUNTIME_DIR` is the nearest thing and it is an environment variable,
+/// which is the finding this answers rather than a way round it, and
+/// `/run/user/<uid>` — what systemd sets it to — is not on every system. So the
+/// answer is `None` and `/tmp/folio-<uid>` stands: one path, the same one in
+/// every process of this user, which is the property that matters here.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[must_use]
+fn per_user_temporary_directory() -> Option<PathBuf> {
+    None
 }
 
 /// **The runtime directory, made if it is not there and refused if it is not
@@ -599,16 +725,20 @@ mod tests {
     ///
     /// Runnable on every platform because both halves of it are pure: the
     /// digest is a fixed sixteen characters and the runtime directory is the
-    /// system's, so the only number that can move is the length of `$TMPDIR` —
-    /// and the real one is measured here, not imagined. The right-hand side is
-    /// a real macOS per-user temporary directory, which is the longest of the
-    /// two `runtime_directory` can answer.
+    /// system's, so the only number that can move is the length of the per-user
+    /// temporary directory the system names — and a real macOS one is measured
+    /// here, not imagined. That is the longer of the two answers
+    /// [`runtime_directory_from`] can give, and it is built through that
+    /// function rather than written out, so the two cannot drift apart.
     ///
     /// MUTATION: put the data directory's path in the socket's name instead of
     /// the digest and this goes red at the first long path.
     #[test]
     fn the_launch_socket_fits_a_sockaddr_un_however_long_the_data_directory_is() {
-        let runtime = Path::new("/var/folders/8x/_yq1234n5abc9xyz0000gn/T/folio-501").to_path_buf();
+        let runtime = runtime_directory_from(
+            Some(PathBuf::from("/var/folders/8x/_yq1234n5abc9xyz0000gn/T")),
+            501,
+        );
         let absurd = PathBuf::from(format!("/Users/{}/Folio", "d".repeat(3_000)));
         let tag = directory_tag(&absurd);
         assert_eq!(tag.len(), 16, "the digest is a fixed width: {tag}");
@@ -839,13 +969,121 @@ mod tests {
             "nobody but this user may reach the lock or the endpoint"
         );
         // SAFETY: `geteuid` reads this process's own credentials.
-        assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
-        assert!(
-            directory.starts_with(
-                std::env::var_os("TMPDIR").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from)
-            ),
-            "it is under the system's own temporary directory: {}",
+        let uid = unsafe { libc::geteuid() };
+        assert_eq!(metadata.uid(), uid);
+        assert_eq!(
+            directory.file_name().and_then(std::ffi::OsStr::to_str),
+            Some(format!("folio-{uid}").as_str()),
+            "the directory this machine actually prepared is this user's own: {}",
             directory.display()
+        );
+        // **And this machine's real runtime directory leaves room for an
+        // endpoint** (RA-1). The pure test beside this one measures a per-user
+        // temporary directory written down in this file; this measures the one
+        // the machine running the test was actually given, which is the only
+        // place the promise can be wrong.
+        let doorbell = attention_socket_path_in(&directory, &digest(b"any data directory"));
+        assert!(
+            fits_a_socket_path(&doorbell),
+            "this machine's runtime directory leaves no room for an endpoint inside \
+             {SOCKET_PATH_LIMIT} bytes of sun_path: {}",
+            doorbell.display()
+        );
+    }
+
+    /// **PIN — one user's runtime directory is one path, and the process's
+    /// environment is not one of the things it is made of** (RA-1).
+    ///
+    /// The rule with its one impure input handed in, which is the only way to
+    /// state it without changing a process-wide variable out from under every
+    /// other test running beside this one.
+    ///
+    /// MUTATION: read `$TMPDIR` again — the shipped behaviour before this
+    /// ticket — and a Folio started by `launchd` and one started from an `ssh`
+    /// session compute two of these, take two locks on one data directory, and
+    /// both write.
+    #[test]
+    fn one_user_has_one_runtime_directory_and_it_is_short_enough_for_an_endpoint() {
+        let per_user = PathBuf::from("/var/folders/8x/_yq1234n5abc9xyz0000gn/T/");
+        let mine = runtime_directory_from(Some(per_user.clone()), 501);
+        assert_eq!(
+            mine,
+            Path::new("/var/folders/8x/_yq1234n5abc9xyz0000gn/T/folio-501"),
+            "the system's answer with this user's own name on a directory inside it \
+             — and the separator the system writes at the end of it is not doubled"
+        );
+        assert_ne!(
+            mine,
+            runtime_directory_from(Some(per_user), 502),
+            "two users on one machine are two runtime directories"
+        );
+        assert_eq!(
+            runtime_directory_from(None, 501),
+            Path::new("/tmp/folio-501"),
+            "a system with no per-user directory to give still answers one path, \
+             and it is the same one in every process of this user"
+        );
+        assert_eq!(
+            runtime_directory_from(Some(PathBuf::from("T")), 501),
+            Path::new("/tmp/folio-501"),
+            "a runtime directory that is not rooted would be a different directory \
+             for every directory a Folio was started in"
+        );
+        // **The length promise, at the location the lock and both endpoints
+        // moved to.** The digest is the same sixteen characters wherever the
+        // data directory is, and the doorbell is the longer of the two names.
+        let doorbell = attention_socket_path_in(&mine, &digest(b"/Users/somebody/Folio"));
+        assert!(
+            fits_a_socket_path(&doorbell),
+            "a per-user temporary directory plus folio-<uid> plus the doorbell does not \
+             fit {SOCKET_PATH_LIMIT} bytes of sun_path: {}",
+            doorbell.display()
+        );
+    }
+
+    /// **PIN — the runtime directory is asked of the system and not of the
+    /// environment** (RA-1).
+    ///
+    /// The half of the finding no value can state: that `$TMPDIR` is not read
+    /// *anywhere* on the way to this path. It is this file's own text for
+    /// `the_unix_claim_is_a_flock_on_a_descriptor_in_a_private_runtime_directory`'s
+    /// reason — the arm cannot be compiled by the machine most of this
+    /// repository's work is done on, and the way it rots is that somebody puts
+    /// the variable back because it is one line shorter.
+    ///
+    /// MUTATION: answer `std::env::var_os("TMPDIR")` again and this goes red on
+    /// Windows, naming the line.
+    #[test]
+    fn the_runtime_directory_is_asked_of_the_system_and_not_of_the_environment() {
+        let source = include_str!("instance.rs");
+
+        let rule = source
+            .split("#[cfg(unix)]\n#[must_use]\npub fn runtime_directory()")
+            .nth(1)
+            .expect("the Unix arm says where this user's runtime files live");
+        let rule = rule.split("\n}\n").next().unwrap_or_default();
+        assert!(
+            !rule.contains("TMPDIR") && !rule.contains("env::var"),
+            "the runtime directory is read out of the environment again, so a Folio \
+             started by launchd and one started from an ssh session take two different \
+             locks on one data directory and both write it (RA-1): {rule}"
+        );
+        assert!(
+            rule.contains("per_user_temporary_directory()"),
+            "the system is no longer the thing being asked where this user's own \
+             temporary directory is: {rule}"
+        );
+
+        let asked = source
+            .split("#[cfg(target_os = \"macos\")]\n#[must_use]\nfn per_user_temporary_directory()")
+            .nth(1)
+            .expect("the macOS arm asks the system");
+        let asked = asked.split("\n}\n").next().unwrap_or_default();
+        assert!(
+            asked.contains("libc::_CS_DARWIN_USER_TEMP_DIR"),
+            "confstr(_CS_DARWIN_USER_TEMP_DIR) is the directory launchd sets $TMPDIR \
+             from, and it is the one answer an ssh session and a launchd job agree \
+             on: {asked}"
         );
     }
 
