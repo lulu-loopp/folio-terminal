@@ -123,12 +123,6 @@ impl Card {
         )
     }
 
-    /// The same card, under a different reason.
-    #[must_use]
-    pub fn because(self, why: &'static str) -> Self {
-        Self { why, ..self }
-    }
-
     /// **A card nobody is watching** — the identity a pure test hands the clamp
     /// and the aim, which require one and never read it while the variable is
     /// unset.
