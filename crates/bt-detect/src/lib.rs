@@ -1037,7 +1037,10 @@ fn row_opens_a_block(text: &str) -> bool {
     if trimmed.starts_with('#') {
         return true;
     }
-    let digits = trimmed.len() - trimmed.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let digits = trimmed.len()
+        - trimmed
+            .trim_start_matches(|c: char| c.is_ascii_digit())
+            .len();
     digits > 0
         && trimmed
             .get(digits..)
@@ -3872,8 +3875,7 @@ mod tests {
         );
         let joined = join(SPLIT_HEAD, SPLIT_TAIL).expect("the two halves must join");
         assert_eq!(
-            joined.runs[0].source,
-            r"x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}",
+            joined.runs[0].source, r"x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}",
             "the row break becomes one space and nothing else changes"
         );
         assert_eq!(
@@ -3885,7 +3887,10 @@ mod tests {
             r"= \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}$",
             "and owns exactly the cells of its own fragment, closing delimiter included"
         );
-        assert_eq!(joined.head.text, "$x", "the fragment left above, for the placer");
+        assert_eq!(
+            joined.head.text, "$x",
+            "the fragment left above, for the placer"
+        );
         assert_eq!(
             &SPLIT_HEAD[joined.head.byte_start as usize..joined.head.byte_end as usize],
             "$x"
@@ -3978,8 +3983,16 @@ mod tests {
     #[test]
     fn a_complete_one_row_formula_is_untouched_by_the_join() {
         let lines = [
-            (TranscriptId(1), "energy $E = mc^2$ here", InlineMathSite::CommandOutput),
-            (TranscriptId(2), r"and $a_1+b_1=c_1$ too", InlineMathSite::CommandOutput),
+            (
+                TranscriptId(1),
+                "energy $E = mc^2$ here",
+                InlineMathSite::CommandOutput,
+            ),
+            (
+                TranscriptId(2),
+                r"and $a_1+b_1=c_1$ too",
+                InlineMathSite::CommandOutput,
+            ),
         ];
         let blocks = detect_math_blocks_with_sites(lines, DetectionOptions::default());
         assert_eq!(blocks.len(), 2);
@@ -4025,7 +4038,10 @@ mod tests {
         for (previous, text) in [
             (InlineMathSite::CommandOutput, InlineMathSite::Ineligible),
             (InlineMathSite::Ineligible, InlineMathSite::CommandOutput),
-            (InlineMathSite::CommandOutput, InlineMathSite::AltScreenContent),
+            (
+                InlineMathSite::CommandOutput,
+                InlineMathSite::AltScreenContent,
+            ),
             (InlineMathSite::Ineligible, InlineMathSite::Ineligible),
         ] {
             assert!(
