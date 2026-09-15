@@ -100,13 +100,16 @@ owner's Terminal.
 
 | Script | What it does |
 |---|---|
-| `bundle.sh` | Assembles `Folio.app` from a `cargo build --release` output: the plist from the renderer, the executable, `Folio.icns` built out of `assets/app-icon/` with `sips` and `iconutil`, `PkgInfo`. Then `dsymutil` into `Folio.app.dSYM` **beside** the bundle. Prints the tree and the sizes. |
-| `sign.sh` | `codesign --options runtime --timestamp --entitlements` in nested-code order, then `--verify --deep --strict`, the signature, the entitlements as signed, and what Gatekeeper says. `--identity` defaults to `-` (ad-hoc). |
-| `notarize.sh` | `notarytool submit --wait`, keeps the log beside the artifact, `stapler staple` and `stapler validate`. `--dry-run` prints the commands and uploads nothing. |
-| `dmg.sh` | Staging folder with the application and a link to `/Applications`, `hdiutil create`, sign, notarize, staple, and the `-t open` Gatekeeper assessment a download actually gets. `--dry-run` likewise. |
+| `bundle.sh` | Assembles `Folio.app` from a `cargo build --release` output: the plist from the renderer, the executable, `Folio.icns` built out of `assets/app-icon/` with `sips` and `iconutil`, `PkgInfo`, and the repository's `LICENSE-MIT`, `LICENSE-APACHE`, `THIRD-PARTY-NOTICES.md` and `TRADEMARK.md`. Then it asks the executable whether it is this version at this commit, reads the tree back and refuses a bundle that is not exactly those eight files, and runs `dsymutil` into `Folio.app.dSYM` **beside** the bundle. Prints the tree and the sizes. |
+| `sign.sh` | `codesign --options runtime --timestamp --entitlements` in nested-code order, then `--verify --deep --strict`, the signature, the entitlements as signed, and — unless `--no-spctl` — what Gatekeeper says, printed and never fatal: before notarization the answer is `rejected` by design. `--identity` defaults to `-` (ad-hoc). |
+| `notarize.sh` | `notarytool submit --wait`, keeps the log beside the artifact, `stapler staple`, `stapler validate`, and then the Gatekeeper assessment that **has** to pass: `accepted`, `source=Notarized Developer ID`. `--dry-run` prints the commands and uploads nothing. |
+| `dmg.sh` | Staging folder with the application and a link to `/Applications`, `hdiutil create`, sign, notarize (which makes the `-t open` assessment a download actually gets), staple. `--dry-run` likewise. |
+| `checksums.sh` | `SHA256SUMS-macos.txt` over the directory the release page is made of, hashed from inside it so every line is a bare file name, then read back with `shasum -c`. |
+| `cask.sh` | The Homebrew cask for a release — `version` and `sha256` — printed, or written into a copy of the tap's own file. |
 
 **There is no nested code in this bundle today** — one executable with every
-Rust crate linked into it, an `.icns`, an `Info.plist` and a `PkgInfo`, and an
+Rust crate linked into it, an `.icns`, an `Info.plist`, a `PkgInfo`, the four
+documents in `Contents/Resources/`, and an
 `otool -L` naming only `/System/Library/Frameworks` and `/usr/lib` — and
 `sign.sh` prints that fact at every run. The
 order it would use when there is any is inside out: nested code deepest first,
@@ -134,21 +137,24 @@ cargo build --release --locked -p bt-app
 # 2. Assemble the bundle and the debug information beside it.
 scripts/release/macos/bundle.sh --out dist/macos
 
-# 3. Sign. spctl says `rejected` with `source=Unnotarized Developer ID` here,
-#    which is the expected answer before step 4 and the reason this step's own
-#    exit code is the one to read rather than that line.
+# 3. Sign. `--no-spctl` because Gatekeeper is asked once, at step 5, of an
+#    artifact in the state it ships in. Asked here it would answer `rejected`
+#    with `source=Unnotarized Developer ID`, which is true of everything that
+#    has not been through step 4 and tells a reader nothing about this signature.
 scripts/release/macos/sign.sh --app dist/macos/Folio.app \
-  --identity "Developer ID Application: <name> (<TEAMID>)"
+  --identity "Developer ID Application: <name> (<TEAMID>)" --no-spctl
 
 # 4. Notarize the application and staple its ticket.
 scripts/release/macos/notarize.sh --path dist/macos/Folio.app
 
 # 5. Ask Gatekeeper again. Now: accepted, source=Notarized Developer ID.
+#    Step 4 read that same line and would have stopped on anything else; this is
+#    the same question asked where a person can see the answer.
 spctl -a -vvv dist/macos/Folio.app
 
 # 6. The disk image, from the stapled application — it is signed, notarized and
-#    stapled in its own right, and the last line is the assessment a downloaded
-#    image gets.
+#    stapled in its own right, and the assessment a downloaded image gets is
+#    made after that staple, by the notarize step inside this one.
 scripts/release/macos/dmg.sh --app dist/macos/Folio.app --out dist/macos \
   --identity "Developer ID Application: <name> (<TEAMID>)"
 ```

@@ -18,7 +18,11 @@
 # what makes it a gesture rather than an instruction. Nothing else goes in — no
 # `README`, whose relative links resolve against a repository and not against a
 # mounted volume (`scripts/release/package.ps1` makes the same refusal for the
-# same reason), and no licence file, because the application carries its own.
+# same reason), and no licence file, because the application carries all four in
+# `Contents/Resources/`: `LICENSE-MIT`, `LICENSE-APACHE`,
+# `THIRD-PARTY-NOTICES.md` and `TRADEMARK.md`, put there by `bundle.sh` and
+# sealed by `sign.sh`. A second copy on a volume the reader throws away would be
+# a second copy to keep in step with the first.
 #
 # **No background image and no window layout.** Those are set by mounting the
 # image read-write and scripting the Finder through Apple events, which needs
@@ -57,6 +61,31 @@
 # whether this *document* may be opened, which is the assessment macOS actually
 # makes when a downloaded image is double-clicked, and `-t exec` on a disk image
 # answers a question nobody asks. The plan's M5 acceptance names this exact line.
+#
+# **It is asked once, and after the staple.** `notarize.sh` makes it on whatever
+# it staples — this image included — and a refusal there is fatal, so the
+# ordinary run of this script reaches the end with the question already
+# answered. Only `--skip-notarize` asks it here, and there it is informational:
+# an image nobody notarized is refused by design.
+#
+# ## Two names for one set of bytes
+#
+# The image leaves here as `Folio.dmg` and as `Folio-macos-arm64.dmg`, and the
+# second is a copy of the first. GitHub serves
+# `/releases/latest/download/<asset>` and resolves it by asset *name*, so a
+# download link on a page outside this repository can only be written against a
+# name that is the same in every release — which the published
+# `Folio-<version>-macos-arm64.dmg` is not. The long name is still given by
+# whoever moves the image to the release page, for the reason above: a script
+# that built it would be a second reader of the version line. The copy that has
+# no version in it is made here, because here is after the ticket is stapled,
+# and a copy taken any earlier would be the file most people click and the one
+# Gatekeeper turns away offline.
+#
+# It is a copy and not a second image: `checksums.sh` hashes the directory the
+# release page is made of, so both names arrive there under one hash, and a
+# reader who fetched either can check what they have. The two are hashed against
+# each other here, because a copy nobody read back is a copy.
 
 set -eu
 
@@ -138,6 +167,7 @@ app=$(cd "$app" && pwd)
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 dmg="$out/Folio.dmg"
+stable="$out/Folio-macos-arm64.dmg"
 
 run() {
 	if [ "$dry_run" = "1" ]; then
@@ -208,28 +238,45 @@ else
 fi
 
 echo
-echo "=== spctl -a -vvv -t open --context context:primary-signature"
-if [ "$dry_run" = "1" ]; then
+if [ "$skip_notarize" = "0" ]; then
+	# `notarize.sh` asked this exact question after it stapled the ticket, and a
+	# refusal there stopped this script before it reached here. Asking it a
+	# second time would print the same verdict about the same bytes.
+	echo "=== spctl: asked and answered by notarize.sh, above, after the staple"
+elif [ "$dry_run" = "1" ]; then
+	echo "=== spctl -a -vvv -t open --context context:primary-signature"
 	run spctl -a -vvv -t open --context context:primary-signature "$dmg"
 else
+	# **Informational, because nothing here was notarized.** Gatekeeper refuses
+	# an image that has not been through the notary service however it was
+	# signed, so under `--skip-notarize` this verdict is the expected one and
+	# failing on it would be failing on the flag that was asked for.
+	echo "=== spctl -a -vvv -t open --context context:primary-signature"
 	set +e
 	spctl -a -vvv -t open --context context:primary-signature "$dmg" 2>&1
 	spctl_rc=$?
 	set -e
-	echo "spctl exit $spctl_rc"
-	if [ "$spctl_rc" != "0" ] && [ "$identity" != "-" ]; then
-		echo "dmg.sh: Gatekeeper refused the image" >&2
-		rm -rf "$staging"
-		exit 1
-	fi
+	echo "spctl exit $spctl_rc — informational: --skip-notarize, so this image is not one that ships"
 fi
 
 run rm -rf "$staging"
+
+echo
+echo "=== the copy under the name that never changes"
+run cp "$dmg" "$stable"
+if [ "$dry_run" = "0" ]; then
+	if [ "$(shasum -a 256 "$dmg" | cut -d " " -f 1)" != "$(shasum -a 256 "$stable" | cut -d " " -f 1)" ]; then
+		echo "dmg.sh: $stable is not a copy of $dmg" >&2
+		exit 1
+	fi
+	echo "$(basename "$stable"): the same bytes as $(basename "$dmg")"
+fi
 
 echo
 if [ "$dry_run" = "1" ]; then
 	echo "dmg.sh: dry run complete; nothing was written and nothing was uploaded."
 else
 	echo "dmg.sh: $dmg"
-	ls -l "$dmg"
+	echo "dmg.sh: $stable"
+	ls -l "$dmg" "$stable"
 fi

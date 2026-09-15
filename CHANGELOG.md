@@ -12,6 +12,58 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- **A typeset formula now sits in a block with room around it, and the block's
+  two marks sit inside it.** A display formula keeps whole blank lines above and
+  below it — as many as the window has room for — and a clear column on each
+  side, so it no longer touches the text it
+  stands between; hovering it lights that whole region, and the show-source and
+  copy marks stand at its right edge, on its middle line, drawn as the same
+  buttons a pane head wears. An inline formula no longer starts a few pixels
+  right of where its source began, which closes the gap that opened before it in
+  the middle of a sentence.
+
+### Fixed
+
+- **Copying a formula no longer leaves the window busy.** The tick that confirms
+  the copy has always come down after a moment on screen, but the window went on
+  asking to be woken for it for as long as it stayed open — one processor core,
+  spent on a window doing nothing. The confirmation is now finished with when it
+  leaves the screen.
+- **A formula's two marks stay with the formula.** Switching tabs or closing a
+  pane used to leave the marks from the block you had been pointing at standing
+  over whatever came next, until you moved the mouse. And in a window split into
+  panes of different sizes, the marks in an unfocused pane were placed — and
+  could be pressed — as though that pane were the size of the focused one.
+
+### Added
+
+- **Settings has an About page, and it says which Folio this is.** The last word
+  in the list on the left. It carries the version and the build it came from —
+  the same line `folio --version` prints and the same one at the top of every
+  diagnostic file, so a report about something going wrong can quote it — the
+  system and processor this copy was made for, and three rows that open in your
+  browser: the release notes, the place a defect is filed, and the licences of
+  everything Folio is made of. The licences row opens the copy that came with
+  this download where there is one, so what you read is what this copy was built
+  from. Nothing on the page is a setting, so nothing on it can be changed by
+  accident.
+
+### Changed
+
+- **The release page now also carries download files with a fixed name, so a
+  link to the latest build never goes stale.** Beside the versioned archive and
+  disk image there is now a `folio-windows-x64.zip` and a
+  `Folio-macos-arm64.dmg` — the same bytes under a name that does not change
+  from one release to the next, covered by the same checksum file.
+
+- **The checksum files on the release page can be checked where you downloaded
+  them.** Both `SHA256SUMS.txt` and `SHA256SUMS-macos.txt` now name each file
+  plainly — the hash, two spaces, the file name — so putting them next to the
+  archive or the disk image and running `sha256sum -c` or `shasum -c` answers
+  `OK` without anything being edited first. The macOS file used to carry the
+  folder it was built in ahead of the name, which sent that check looking for a
+  directory nobody downloaded.
+
 - **Two files moved out of the top of the repository.** `CONVENTIONS.md` is now
   `docs/CONVENTIONS.md`, beside the rest of the written record, and the
   `cargo-about` configuration and template — `about.toml` and `about.hbs` — are
@@ -30,6 +82,26 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **Aiming a card's window with the wheel keeps up with the hand.** On a tall
+  card over a pane with a long history, every notch used to copy out every line
+  between the bottom of the pane and the place the card was pointing at — three
+  times over, for one row of movement — so the card stuttered and the notches
+  piled up behind it. It now reads only as far as it has to and keeps only the
+  rows the card draws. Where a notch lands, and where the card stops at the top,
+  are unchanged.
+
+- **Opening Settings no longer makes the window wait.** Clicking the gear used
+  to freeze the window for several seconds on a machine with a lot of fonts
+  installed, every time it was opened. Folio was asking the system for the list
+  of monospaced families — the list the `Terminal font` picker offers — and
+  waiting for the answer before it would draw anything. It now asks in the
+  background: the page opens at once, the font row shows the family you are
+  already using, and the rest of the list fills in a moment later. `Install
+  fonts…` still does what it did — leave, install a family, come back, and it
+  is there.
+
+- A formula whose macros multiply their arguments through several levels is now refused instead of exhausting memory.
+
 - **Turning a formula into its source no longer makes the window hesitate.**
   Pressing the `‹›` mark beside a typeset block — or pressing it again to put the
   picture back — used to hitch for a moment before the block changed. Changing a
@@ -38,6 +110,13 @@ All notable changes to Folio are recorded here. The format follows
   with a long history behind you, that is the pause. It now measures the lines
   that actually changed, and the rest of your scrollback is left alone. The
   formula, the mark and the block's own tools are unchanged.
+
+- **On a Mac, Folio carries its licences with it.** The application now holds
+  the MIT and Apache-2.0 licence texts, the notices for every library it is
+  built from, and the trademark notice, inside `Folio.app` — so they travel with
+  the copy you keep rather than with a disk image you throw away. The Windows
+  download has carried the same four files since the first release; the macOS
+  one, until now, carried none of them.
 
 ## 0.4.0-preview — 2026-09-14
 

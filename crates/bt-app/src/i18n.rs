@@ -409,6 +409,31 @@ pub enum Text {
     NavTerminal,
     NavRenderedBlocks,
     NavShortcuts,
+    /// The page that says which Folio this is (GitHub issue #3). An outside
+    /// user reported a defect and had nowhere in the window to read a version
+    /// off; this is the word in the rail that answers them.
+    CategoryAbout,
+    NavAbout,
+    /// **The verb on the About page's three addresses.** One word and the `↗`
+    /// beside it, which is this dialog's standing sign that the answer arrives
+    /// outside the window — the same pair the update row's own verb wears.
+    AboutOpen,
+    /// The banner every diagnostic file opens with, said on a row: which
+    /// version, and which build of it.
+    RowAboutVersion,
+    DescAboutVersion,
+    /// Which machine this copy was made for — the half of a bug report that is
+    /// never in the log attached to it.
+    RowAboutPlatform,
+    DescAboutPlatform,
+    RowAboutReleaseNotes,
+    DescAboutReleaseNotes,
+    /// **The row the About page exists for.** The report that asked for a
+    /// version asked for it so that a defect could be filed naming one.
+    RowAboutIssues,
+    DescAboutIssues,
+    RowAboutLicences,
+    DescAboutLicences,
 
     RowTheme,
     RowCursor,
@@ -2817,6 +2842,42 @@ impl Text {
             Self::NavTerminal => pick(lang, "Terminal", "终端"),
             Self::NavRenderedBlocks => pick(lang, "Rendered blocks", "渲染块"),
             Self::NavShortcuts => pick(lang, "Shortcuts", "快捷键"),
+            // zh: pending opus46 (GitHub issue #3) — the About page's thirteen
+            // strings were written in English with the page and are listed in
+            // `CHINESE_PENDING` until the copywriter has them.
+            Self::CategoryAbout => pick(lang, "ABOUT", "ABOUT"),
+            Self::NavAbout => pick(lang, "About", "About"),
+            Self::AboutOpen => pick(lang, "Open", "Open"),
+            Self::RowAboutVersion => pick(lang, "Version", "Version"),
+            Self::DescAboutVersion => pick(
+                lang,
+                "The version this window is running, and the build it came from.",
+                "The version this window is running, and the build it came from.",
+            ),
+            Self::RowAboutPlatform => pick(lang, "Platform", "Platform"),
+            Self::DescAboutPlatform => pick(
+                lang,
+                "The system and the processor this copy was made for.",
+                "The system and the processor this copy was made for.",
+            ),
+            Self::RowAboutReleaseNotes => pick(lang, "Release notes", "Release notes"),
+            Self::DescAboutReleaseNotes => pick(
+                lang,
+                "What changed in this version, and in the ones before it.",
+                "What changed in this version, and in the ones before it.",
+            ),
+            Self::RowAboutIssues => pick(lang, "Report a defect", "Report a defect"),
+            Self::DescAboutIssues => pick(
+                lang,
+                "Where Folio's defects are filed, and where to file another.",
+                "Where Folio's defects are filed, and where to file another.",
+            ),
+            Self::RowAboutLicences => pick(lang, "Licences", "Licences"),
+            Self::DescAboutLicences => pick(
+                lang,
+                "The open-source components Folio is made of, and their licences.",
+                "The open-source components Folio is made of, and their licences.",
+            ),
 
             Self::RowTheme => pick(lang, "Theme", "主题"),
             Self::RowCursor => pick(lang, "Cursor", "光标"),
@@ -4911,7 +4972,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 670] = [
+    pub const ALL: [Self; 683] = [
         Self::PastePathEncoding,
         Self::PastePathControl,
         Self::PastePathPowerShellQuote,
@@ -4955,6 +5016,19 @@ impl Text {
         Self::NavTerminal,
         Self::NavRenderedBlocks,
         Self::NavShortcuts,
+        Self::CategoryAbout,
+        Self::NavAbout,
+        Self::AboutOpen,
+        Self::RowAboutVersion,
+        Self::DescAboutVersion,
+        Self::RowAboutPlatform,
+        Self::DescAboutPlatform,
+        Self::RowAboutReleaseNotes,
+        Self::DescAboutReleaseNotes,
+        Self::RowAboutIssues,
+        Self::DescAboutIssues,
+        Self::RowAboutLicences,
+        Self::DescAboutLicences,
         Self::RowTheme,
         Self::RowCursor,
         Self::RowFormulas,
@@ -5725,7 +5799,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 21] = [
+    const CHINESE_PENDING: [(Self, HostPlatform); 47] = [
         (Self::PastePathEncoding, HostPlatform::Windows),
         (Self::PastePathEncoding, HostPlatform::MacOs),
         (Self::PastePathControl, HostPlatform::Windows),
@@ -5746,6 +5820,39 @@ impl Text {
         (Self::PasteClipboardRead, HostPlatform::MacOs),
         (Self::PasteProfileOverride, HostPlatform::Windows),
         (Self::PasteProfileOverride, HostPlatform::MacOs),
+        // zh: pending opus46 — the About page (GitHub issue #3,
+        // T-SETTINGS-ABOUT). Thirteen strings written in English with the page,
+        // because the page answers an outside user who is waiting for it and
+        // the copy is written by one person in one sitting. Both columns of
+        // each, since none of them is platform-dependent: what a reader sees
+        // until the rewrite lands is the English, which is what this list
+        // exists to make loud rather than silent.
+        (Self::CategoryAbout, HostPlatform::Windows),
+        (Self::CategoryAbout, HostPlatform::MacOs),
+        (Self::NavAbout, HostPlatform::Windows),
+        (Self::NavAbout, HostPlatform::MacOs),
+        (Self::AboutOpen, HostPlatform::Windows),
+        (Self::AboutOpen, HostPlatform::MacOs),
+        (Self::RowAboutVersion, HostPlatform::Windows),
+        (Self::RowAboutVersion, HostPlatform::MacOs),
+        (Self::DescAboutVersion, HostPlatform::Windows),
+        (Self::DescAboutVersion, HostPlatform::MacOs),
+        (Self::RowAboutPlatform, HostPlatform::Windows),
+        (Self::RowAboutPlatform, HostPlatform::MacOs),
+        (Self::DescAboutPlatform, HostPlatform::Windows),
+        (Self::DescAboutPlatform, HostPlatform::MacOs),
+        (Self::RowAboutReleaseNotes, HostPlatform::Windows),
+        (Self::RowAboutReleaseNotes, HostPlatform::MacOs),
+        (Self::DescAboutReleaseNotes, HostPlatform::Windows),
+        (Self::DescAboutReleaseNotes, HostPlatform::MacOs),
+        (Self::RowAboutIssues, HostPlatform::Windows),
+        (Self::RowAboutIssues, HostPlatform::MacOs),
+        (Self::DescAboutIssues, HostPlatform::Windows),
+        (Self::DescAboutIssues, HostPlatform::MacOs),
+        (Self::RowAboutLicences, HostPlatform::Windows),
+        (Self::RowAboutLicences, HostPlatform::MacOs),
+        (Self::DescAboutLicences, HostPlatform::Windows),
+        (Self::DescAboutLicences, HostPlatform::MacOs),
         // zh: pending opus46 — the macOS column of the card a local file raises
         // when the engine would not take this window's rules (M4-3, §13.38 ②).
         // The Windows column beside it has had its Chinese since W2; what is
