@@ -87,9 +87,14 @@
 
 .PARAMETER Output
     Where the archive and `SHA256SUMS.txt` are written. Defaults to
-    `target/release-package`. Anything already there is hashed into
+    `target/release-package`. Anything left there is hashed into
     `SHA256SUMS.txt` alongside the archive, which is how the SBOM written by
     `sbom.ps1` before this runs ends up covered.
+
+    **It is emptied first**, apart from that SBOM. The directory is the release
+    page — `gh release create` is handed all of it — so a file the previous
+    release left behind is a file the next release publishes, which is what
+    0.4.0 nearly did with 0.3.0's archive.
 
 .PARAMETER ToolsOnly
     Find `makeappx.exe`, say which one, and stop. Nothing is read, built,
@@ -215,6 +220,38 @@ if ($ToolsOnly) {
 }
 
 if (-not $Version) { $Version = Get-WorkspaceVersion }
+
+# ── the output directory is the release page, and it starts empty ────────────
+#
+# **Everything left in it is uploaded.** `docs/RELEASING.md` hands
+# `gh release create` the whole directory rather than a list of names, which is
+# what makes it impossible to leave an asset out — and, until this block, just
+# as impossible to leave one behind. On the 0.4.0 run the directory still held
+# 0.3.0's archive and 0.3.0's `SHA256SUMS.txt` from the release before it: two
+# releases' assets under two version numbers, with nothing between them and the
+# page but somebody reading the upload list.
+#
+# So a run begins by taking the previous one away. Everything here is generated
+# — it is a directory under `target\` — and the one generated file written
+# *before* this script and needed *by* it is this version's bill of materials,
+# which `sbom.ps1` wrote minutes ago and whose line goes into `SHA256SUMS.txt`
+# below. That name is kept; the rest of the directory goes, files and folders
+# alike, which includes the macOS assets of an earlier release if somebody
+# fetched them here. **The macOS half is fetched into this directory after this
+# script has run**, and `smoke.ps1` is the second net: it refuses a package
+# directory holding a file whose name carries a version other than this one.
+#
+# Nothing outside `$Output` is reachable from here. The list comes from
+# `Get-ChildItem` on that one directory and every entry is removed by its own
+# `-LiteralPath`, so there is no pattern for a name to escape through and no
+# recursion into anything that was not already inside it.
+$sbomName = "folio-$Version.cdx.json"
+[System.IO.Directory]::CreateDirectory($Output) | Out-Null
+foreach ($previous in (Get-ChildItem -LiteralPath $Output -Force)) {
+    if ($previous.Name -eq $sbomName) { continue }
+    Write-Host "cleared from $([IO.Path]::GetFileName($Output)): $($previous.Name)"
+    Remove-Item -LiteralPath $previous.FullName -Recurse -Force
+}
 
 # The archive, in the order a person opening it should meet it: the program,
 # the two files it cannot start without, then what it is under and what that

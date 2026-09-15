@@ -75,8 +75,8 @@ run by hand exactly as it runs there:
 | script | what it produces |
 | --- | --- |
 | `scripts/release/sbom.ps1` | the bill of materials, written into the output directory |
-| `scripts/release/package.ps1` | `folio-<version>-windows-x64.zip`, with `folio.msix` and the executable both in it, and `SHA256SUMS.txt` over everything beside it |
-| `scripts/release/smoke.ps1` | starts the executable that was built and checks the seven things a green build can still be broken about |
+| `scripts/release/package.ps1` | `folio-<version>-windows-x64.zip`, with `folio.msix` and the executable both in it, and `SHA256SUMS.txt` over everything beside it — **after emptying the output directory**, apart from that bill of materials |
+| `scripts/release/smoke.ps1` | starts the executable that was built and checks the seven things a green build can still be broken about, and refuses an output directory holding a file from another release |
 
 ## What gets published
 
@@ -87,6 +87,18 @@ executable and the package, is exactly what a reader downloads. `gh release
 create` is handed that directory and no list is written down anywhere, so there
 is no second naming of assets to disagree with it, and nothing is hand-picked out
 of `dist/`.
+
+**Which is why `package.ps1` empties that directory before it writes into it.**
+Handing `gh` a directory makes it impossible to leave an asset out, and exactly
+as impossible to leave one behind: on the 0.4.0 run the directory still held
+0.3.0's archive and 0.3.0's `SHA256SUMS.txt`, and the upload was one command
+away from carrying two releases. Everything under `target/release-package` is
+generated, so everything goes — the one exception is this version's
+`folio-<version>.cdx.json`, which `sbom.ps1` wrote minutes earlier and which
+`SHA256SUMS.txt` then covers. **The macOS assets are fetched into that directory
+after `package.ps1` has run**, and `smoke.ps1` is the second net: it refuses to
+run at all if the directory holds a file whose name carries a version other than
+the one in `Cargo.toml`.
 
 The workflow builds the same directory on a runner and keeps it as a workflow
 artifact. That copy is unsigned and its file names are identical, so it is never
@@ -116,6 +128,15 @@ it is served from, and the SHA-256 `Cargo.lock` records for those bytes.
 
 `SHA256SUMS.txt` cannot carry its own hash, so it is two lines over the other
 two files.
+
+Two more assets come from the Mac and are fetched into the same directory —
+`Folio-<version>-macos-arm64.dmg` and the `SHA256SUMS-macos.txt` beside it; see
+**macOS** below. **Both checksum files carry bare file names**, the hash, two
+spaces and the name of the file, so that `sha256sum -c` or `shasum -c` works in
+the folder a reader downloaded into. That is what `package.ps1` writes and what
+`scripts/release/macos/checksums.sh` writes; 0.4.0's macOS file was made by
+`shasum` on a path instead, read `target/macos-package/Folio-…`, and had to be
+rewritten by hand before the page went up.
 
 `scripts/release/smoke-tests.ps1` is `smoke.ps1`'s own self-test, and it is
 about the one part of that script a green release does not exercise: the paths
@@ -252,6 +273,12 @@ where it packed it, *before* the archive is built and before `SHA256SUMS.txt` is
 written, so the hash published beside the archive is the hash of the signed bytes
 and the executable `smoke.ps1` starts afterwards is the executable that ships.
 
+**`package.ps1` empties `target/release-package` before it writes**, keeping only
+the `folio-<version>.cdx.json` that `sbom.ps1` just wrote, and it names every
+file it clears away. So run `sbom.ps1` first — the order above is the order —
+and do not put anything in that directory before this line: it is emptied, and
+the macOS assets belong there after it, not before.
+
 `-Msix` is needed on that last line and nowhere else, and on the release machine
 it names the **archive**. `smoke.ps1` looks for the package beside the
 executable, because that is where it is for everybody who receives one — the
@@ -377,12 +404,44 @@ which is the same answer.
 Last, and only from the machine that just signed: the release is created by hand,
 out of the directory the signed files are in.
 
+The whole order, both platforms, with the four things 0.4.0 was caught out by
+written into the steps they belong to:
+
+1. **The Mac lane** — build, `bundle.sh`, `sign.sh --no-spctl`, `notarize.sh`,
+   `dmg.sh`, the rename, `checksums.sh`. Gatekeeper is asked **once**, by
+   `notarize.sh` after it staples, and that assessment is the one that must
+   pass; `sign.sh`'s own is informational and never fatal. `bundle.sh` refuses a
+   binary that is not this version at this commit, and a bundle missing any of
+   the four documents. `checksums.sh` writes `SHA256SUMS-macos.txt` with **bare
+   file names**.
+2. **The Windows lane** — `sbom.ps1`, then `package.ps1 -Sign`, which
+   **empties `target/release-package`** before it writes, then `smoke.ps1`.
+3. **Fetch the two macOS assets** — `Folio-<version>-macos-arm64.dmg` and
+   `SHA256SUMS-macos.txt` — from the Mac into `target/release-package`. After
+   2, never before it: step 2 empties that directory.
+4. **Look at the directory.** Five files — the three from the Windows lane and
+   the two from the Mac — and every version in a name is this release's. Re-run
+   `smoke.ps1` if anything was moved in or out since it last ran: it refuses a
+   directory carrying another release's version.
+5. **`gh release create`**, below, over that directory. The body is **copied
+   from the file in `docs/plans/release/`**, with its first line — the banner
+   saying what the file is — dropped; see **Release note shape**.
+6. **winget**, and **the Homebrew tap** — `cask.sh`, under **macOS** above. Both
+   name the release page, so both come after it exists.
+
 ```powershell
+# The body, which is the repo file with its first line — the banner saying what
+# the file is — and the blank line after it taken off. See **Release note
+# shape** below.
+$note = 'docs/plans/release/release-note-v0.4.0-preview.md'
+$body = Join-Path ([IO.Path]::GetTempPath()) 'folio-release-body.md'
+[IO.File]::WriteAllText($body, (((Get-Content -LiteralPath $note) | Select-Object -Skip 2) -join "`n") + "`n")
+
 $assets = @(Get-ChildItem target/release-package -File | ForEach-Object { $_.FullName })
 $arguments = @('release', 'create', 'v0.4.0-preview') + $assets + @(
     '--draft', '--prerelease',
     '--title', 'Folio 0.4.0',
-    '--notes-file', 'docs/plans/release/release-note-v0.4.0-preview.md')
+    '--notes-file', $body)
 & gh @arguments
 ```
 
@@ -398,6 +457,57 @@ from a workflow run, so an unsigned file cannot arrive under a signed file's
 name. Compare the two if you like — the workflow artifact from the tag's run has
 the same file list, the same notices and the same version — but upload the local
 one.
+
+## Release note shape
+
+**From 0.4.1 the release body has a fixed shape, and the long prose lives in
+`CHANGELOG.md`.** A release page is read on a phone, in a notification, and by
+somebody deciding in four seconds whether this release is worth their afternoon;
+0.4.0's body ran to several screens of paragraphs, and almost all of them were
+the changelog entry again, one directory away. So the page carries the short
+form and links to the long one, and nothing is written twice.
+
+`docs/plans/release/TEMPLATE.md` is the skeleton, and
+`docs/plans/release/release-note-v<version>-preview.md` is this release's copy of
+it. **That file is the published body**, which is what its first line says:
+
+```
+> The body of the GitHub Release for this version, as published.
+```
+
+That line is the only thing in the file that is not published — it is dropped,
+with the blank line after it, on the way to `--notes-file`. There is no draft
+banner and no "not final yet" in the body, because the file is edited until it
+is right and then published as it stands.
+
+The shape, in order:
+
+1. **`# Folio <version>`**, and nothing above it.
+2. **The download line** — the zip, `(Windows 10 1809+ / 11, 64-bit)`, a middle
+   dot, the dmg, `(macOS 14+, Apple silicon)`. Then the Chinese download line,
+   and a link to the Chinese note. Both Chinese lines are written by the
+   translation lane; in `TEMPLATE.md` they are empty.
+3. **`## Highlights`** — three to five bullets, one sentence each, about what a
+   reader can now do. No file names, no flags, no crate names.
+4. **`## Changes`** — `### Added`, `### Changed`, `### Fixed`, each a short list
+   with one line per item. **No paragraphs.** An item that needs a paragraph to
+   be honest has a paragraph in `CHANGELOG.md`, and the line here is the
+   sentence that sends a reader there.
+5. **One `<details>` block**, summarised
+   `Install notes (SmartScreen, Gatekeeper, checksums)`, holding what used to be
+   the *Download and verify* section: the asset tables, the first-run warnings
+   for each system, and the commands that check a download against the checksum
+   file. Collapsed, because it is read once by the people who need it and
+   scrolled past by everybody else.
+6. **The last line**: `Full changelog:` with a link into `CHANGELOG.md` **pinned
+   to this release's tag**, at the version's own anchor, and a compare link from
+   the previous tag to this one. Pinned to the tag rather than `main` for the
+   reason no public document carries a versioned download link: a link that
+   moves is a link that tells a reader of 0.4.1 what 0.6 changed.
+
+A `## Known issues` list, when there is one, goes between **Changes** and the
+`<details>` block, under the same rule as everything above it: short bullets,
+one line each.
 
 ## The sparse MSIX package
 
@@ -649,20 +759,22 @@ rehearsal and the release page is made by a person from the signed machine.
 
 ## macOS
 
-A macOS release is four steps on the Mac and one of them needs a person: the
-Developer ID private key is in a keychain, and a keychain has to be opened by
-somebody who knows the password. Notarization is the half that does work
+A macOS release is a short sequence on the Mac and one step of it needs a
+person: the Developer ID private key is in a keychain, and a keychain has to be
+opened by somebody who knows the password. Notarization is the half that does work
 headlessly, because it authenticates with a key file rather than a keychain.
 
-`scripts/release/macos/` holds the four steps, as POSIX `sh` scripts, and the
+`scripts/release/macos/` holds those steps, as POSIX `sh` scripts, and the
 order of this list is the order they run in.
 
 | | |
 | --- | --- |
-| `bundle.sh --out <dir>` | Assembles `Folio.app` from `target/release/folio` — the rendered plist, the icon built from `assets/app-icon/folio.ico`, `PkgInfo` — and runs `dsymutil` into `Folio.app.dSYM` **beside** the bundle, never inside it. |
-| `sign.sh --app <bundle> --identity <id>` | Signs with the hardened runtime, a secure timestamp and `packaging/macos/entitlements.plist`, inside out, then reads the signature back. `--identity` defaults to `-`, which is ad-hoc: that is how the script is exercised on a machine with no certificate. |
-| `notarize.sh --path <bundle or image>` | Submits, waits, keeps the notarization log beside the artifact, and staples the ticket to it. |
+| `bundle.sh --out <dir>` | Assembles `Folio.app` from `target/release/folio` — the rendered plist, the icon built from `assets/app-icon/folio.ico`, `PkgInfo`, the two licences, the third-party notices and the trademark notice — asks the executable whether it is this version at this commit, reads the tree back and refuses a bundle that is not exactly those eight files, and runs `dsymutil` into `Folio.app.dSYM` **beside** the bundle, never inside it. |
+| `sign.sh --app <bundle> --identity <id>` | Signs with the hardened runtime, a secure timestamp and `packaging/macos/entitlements.plist`, inside out, then reads the signature back. Its Gatekeeper verdict is informational and never fatal, and `--no-spctl` skips it, which is what the recipes and the workflow pass. `--identity` defaults to `-`, which is ad-hoc: that is how the script is exercised on a machine with no certificate. |
+| `notarize.sh --path <bundle or image>` | Submits, waits, keeps the notarization log beside the artifact, staples the ticket to it, and asks Gatekeeper the one question that has to be answered `accepted`, `source=Notarized Developer ID`. |
 | `dmg.sh --app <bundle> --out <dir> --identity <id>` | Stages the application beside a link to `/Applications`, writes the compressed read-only image, and signs, notarizes and staples that too. |
+| `checksums.sh --dir <dir>` | Hashes every file in the directory the release page is made of, from inside it, into `SHA256SUMS-macos.txt`, and reads the file back with `shasum -c`. |
+| `cask.sh <version> <sha256>` | Prints the Homebrew cask for this release, so the tap is a copy rather than two fields somebody retypes. |
 
 `packaging/macos/README.md` carries the same sequence with every flag and what
 each step's output should say; it is beside the scripts so that the two cannot
@@ -714,14 +826,59 @@ export RUSTUP_TOOLCHAIN=1.94.1-aarch64-apple-darwin     # docs/BUILDING.md says 
 cargo build --release -p bt-app
 scripts/release/macos/bundle.sh --out target/macos
 scripts/release/macos/sign.sh   --app target/macos/Folio.app \
-    --identity "Developer ID Application: … (TEAMID)"
+    --identity "Developer ID Application: … (TEAMID)" --no-spctl
 scripts/release/macos/notarize.sh --path target/macos/Folio.app
 scripts/release/macos/dmg.sh    --app target/macos/Folio.app --out target/macos \
     --identity "Developer ID Application: … (TEAMID)"
+
+mkdir -p target/macos-package
+mv target/macos/Folio.dmg target/macos-package/Folio-<version>-macos-arm64.dmg
+scripts/release/macos/checksums.sh --dir target/macos-package
 ```
 
 `notarize.sh` and `dmg.sh` both take `--dry-run`, which prints every command
 with the real paths filled in and touches nothing.
+
+**Gatekeeper is asked once, and after notarization.** `--no-spctl` on the
+signing line is that decision, and it is the flag the workflow's macOS lane
+already passes: asked between signing and notarization the answer is `rejected`
+with `source=Unnotarized Developer ID`, which is true of everything that has not
+been notarized yet and says nothing about this signature. The assessment that
+decides is `notarize.sh`'s, made **after** the ticket is stapled, on the bundle
+and again on the image; a refusal there — or an `accepted` whose source is not
+`Notarized Developer ID` — stops the release.
+
+Should you run `sign.sh` without `--no-spctl`, it prints that verdict and exits
+**0** on it. It used to exit 1, and the 0.4.0 run took that for a failure and
+stopped one step before the step that fixes it; a script that fails on the
+expected answer is a script that cannot be put in a sequence.
+
+**`bundle.sh` asks the executable what it is.** `--version` has to answer
+`Folio <version> (<commit>)` with the version the plist was just rendered with
+and the short hash of `HEAD`, or the bundle is refused: the plist is written
+from this checkout and the binary is copied from wherever the build left it, and
+nothing else in the lane compares the two. Build the tree you are bundling.
+
+**`checksums.sh` runs from inside the directory, so the lines it writes are
+bare file names.** `shasum -a 256 <dir>/<file>` writes the path it was given
+back out, and a reader who has put the image and the checksum file in one folder
+is then told there is no `target/macos-package/` there — which is how 0.4.0's
+`SHA256SUMS-macos.txt` came to be rewritten by hand. The file covers everything
+in the directory except itself, in the same format `package.ps1` writes on the
+Windows side.
+
+**The two licences, the notices and the trademark notice ship inside the
+application.** `LICENSE-MIT`, `LICENSE-APACHE`, `THIRD-PARTY-NOTICES.md` and
+`TRADEMARK.md` — the same four the Windows archive carries among its nine, for
+the same reasons: MIT and Apache-2.0 both ask that the notice accompany the
+distribution, and `THIRD-PARTY-NOTICES.md` is how `option-ext`'s MPL-2.0 §3.2
+obligation is met. On macOS the only thing that survives the drag to
+`/Applications` is the bundle, so `bundle.sh` copies all four into
+`Contents/Resources/` — before signing, so the seal covers them — and refuses to
+produce a bundle that does not hold them. That is why the disk image carries no
+licence file of its own: the application carries them. **Through 0.4.0 neither
+macOS download carried any of it**, which is the one thing in this section that
+was a defect rather than a decision.
 
 **The image is written as `Folio.dmg` and published as
 `Folio-<version>-macos-arm64.dmg`.** The script writes the short name because a
@@ -746,9 +903,10 @@ uploaded:
 ```sh
 codesign --verify --deep --strict --verbose=2 target/macos/Folio.app
 spctl -a -vvv target/macos/Folio.app
-spctl -a -vvv -t open --context context:primary-signature target/macos/Folio.dmg
+dmg=target/macos-package/Folio-<version>-macos-arm64.dmg
+spctl -a -vvv -t open --context context:primary-signature "$dmg"
 xcrun stapler validate target/macos/Folio.app
-xcrun stapler validate target/macos/Folio.dmg
+xcrun stapler validate "$dmg"
 ```
 
 The second must say `accepted` **and** `source=Notarized Developer ID` — an
@@ -756,6 +914,11 @@ The second must say `accepted` **and** `source=Notarized Developer ID` — an
 on **both** the application and the image, and not on one of the two: a stapled
 image holding an unstapled application is a download that works until the reader
 is offline.
+
+`notarize.sh` reads that same `source=` line itself, on each of the two
+artifacts, and stops the release on anything else. The list is asked again here
+because here it is asked of the files that are actually about to be uploaded —
+after the renaming and the moving, of the bytes that go up.
 
 Then the clean-user pass: from a second macOS account, fetch the image over the
 network rather than copying it, open it, drag Folio to Applications and launch
@@ -782,6 +945,42 @@ Two files, archived with the tag and **not** published:
 They are kept beside the artifact rather than inside it: the `.dSYM` is several
 times the download and would be signed for no reason, and a notarization log is
 nobody's business but the project's.
+
+### The Homebrew tap
+
+`brew install --cask lulu-loopp/folio/folio` reads one file —
+`Casks/folio.rb` in the **`lulu-loopp/homebrew-folio`** repository — and two
+fields in it change at every release: `version`, which the download URL is built
+out of, and `sha256`, which Homebrew checks the image against before it unpacks
+anything. Until they are changed, `brew` installs the previous release.
+
+**This is the last step, and it happens after the release page is published**,
+because the URL the cask names has to resolve and the hash has to be the hash of
+the file that was uploaded.
+
+```sh
+gh api repos/lulu-loopp/homebrew-folio/contents/Casks/folio.rb --jq .content \
+    | base64 -d > /tmp/folio.rb
+scripts/release/macos/cask.sh <version> <the dmg's sha256> --file /tmp/folio.rb --in-place
+```
+
+Then commit `/tmp/folio.rb` to the tap as `Casks/folio.rb`, and check it with
+`brew fetch --cask lulu-loopp/folio/folio` — which downloads the image and
+compares the hash, so it either agrees with the release page or says which of
+the two is wrong.
+
+**The hash is copied out of `SHA256SUMS-macos.txt`, never recomputed from a
+second download** — the same rule winget's `InstallerSha256` follows, for the
+same reason: a hash taken from a second download is a hash of that download.
+`cask.sh` refuses anything that is not a version with no `v` and no `-preview`
+on it, and anything that is not 64 lower-case hexadecimal digits.
+
+With `--file` only those two lines are replaced and everything else in the cask
+is left exactly as the tap has it. Run without `--file`, it prints the whole
+cask from the shape this repository knows about, which is the answer to "there
+is no tap yet" and not the way to update one. The `-preview` in the URL is part
+of the **tag**, not the version; a release tagged any other way needs that line
+changed once, by hand, in the tap.
 
 ### The lane, and its four secrets
 
