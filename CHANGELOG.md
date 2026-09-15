@@ -72,6 +72,14 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **Aiming a card's window with the wheel keeps up with the hand.** On a tall
+  card over a pane with a long history, every notch used to copy out every line
+  between the bottom of the pane and the place the card was pointing at — three
+  times over, for one row of movement — so the card stuttered and the notches
+  piled up behind it. It now reads only as far as it has to and keeps only the
+  rows the card draws. Where a notch lands, and where the card stops at the top,
+  are unchanged.
+
 - **Opening Settings no longer makes the window wait.** Clicking the gear used
   to freeze the window for several seconds on a machine with a lot of fonts
   installed, every time it was opened. Folio was asking the system for the list
