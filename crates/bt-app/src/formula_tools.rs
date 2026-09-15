@@ -46,7 +46,9 @@
 
 use std::time::Instant;
 
-use bt_render::{ChromePalette, MATH_TOOL_PILL_RADIUS_LOGICAL_PX, MathToolBoxes};
+use bt_render::{
+    ChromeLabel, ChromeLabelWeight, ChromePalette, MATH_TOOL_PILL_RADIUS_LOGICAL_PX, MathToolBoxes,
+};
 use bt_viewport::{MathBlockAnchor, MathBlockDisplay};
 
 use crate::{
@@ -185,6 +187,70 @@ pub fn sprites(
         );
     }
     sprites
+}
+
+/// **The `$$…$$` source, drawn over the band while the two faces cross-fade** (owner's ruling
+/// 2026-09-15, T-MATH-TOGGLE-MOTION; `docs/DESIGN.md` §7.1.5p ⑪).
+///
+/// One label per row, in the **terminal's** face and the terminal's ink, at the positions the rows
+/// themselves will take — which is the whole of the correctness here: on the frame the change
+/// lands, the block's presented height is the rows' own height and these labels stand exactly where
+/// the transcript rows the document is about to reveal will stand, so the switch is invisible.
+/// [`bt_render::MathBandFace`] is where every one of those numbers comes from, so nothing about a
+/// row's place is decided in this module, exactly as nothing about a mark's is.
+///
+/// **Clipped down to the band and across to the pane.** A source row is an ordinary row of this
+/// terminal: it begins at column zero and runs to the pane's edge, not to the edge of the ground
+/// the picture kept around itself. What it may not do is spill onto the lines above and below the
+/// block — the band is still growing towards the room these rows need — so the clip is the band's
+/// own top and bottom and the pane's own left and right.
+///
+/// The fade itself is not here: these go on a layer, and a layer has an `opacity` (§7.1.5p ②'s own
+/// arrangement for the marks). One thing fading, and not a row at a time.
+#[must_use]
+pub fn source_face_labels(
+    face: &bt_render::MathBandFace,
+    rows: &[String],
+    ink: [u8; 3],
+    font_size_px: f32,
+) -> Vec<ChromeLabel> {
+    let [_, band_top, _, band_bottom] = face.block;
+    if band_bottom <= band_top || face.rows_right <= face.rows_left {
+        return Vec::new();
+    }
+    let mut labels = Vec::with_capacity(rows.len());
+    for (index, text) in rows.iter().enumerate() {
+        if text.is_empty() {
+            continue;
+        }
+        let top = face.rows_top + index as f32 * face.row_height;
+        let bottom = top + face.row_height;
+        // A row the band has not grown far enough to show yet, or one scrolled past the pane's
+        // edge: the clip below would draw nothing of it anyway, and an empty draw still costs a
+        // shaping pass.
+        if bottom <= band_top || top >= band_bottom {
+            continue;
+        }
+        labels.push(ChromeLabel {
+            text: text.clone(),
+            rect: [face.rows_left, top, face.rows_right, bottom],
+            clip: Some([
+                face.rows_left,
+                top.max(band_top),
+                face.rows_right,
+                bottom.min(band_bottom),
+            ]),
+            font_size_px,
+            color: ink,
+            align_right: false,
+            align_center: false,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+            mono: true,
+        });
+    }
+    labels
 }
 
 /// **One value on its way to another, on the window's own fast ease.**
@@ -377,6 +443,45 @@ impl FormulaToolFollow {
         changed
     }
 
+    /// **The band's own height is travelling, so the marks are carried on it rather than
+    /// travelling to it** (owner's ruling 2026-09-15, T-MATH-TOGGLE-MOTION; §7.1.5p ⑪).
+    ///
+    /// [`Self::follow`] exists for geometry that *jumped* — a re-wrap, a scale change, a toggle
+    /// that used to land in a single frame — and easing towards a box that is **itself** easing is
+    /// two journeys over one distance: the marks would trail the edge they are supposed to ride,
+    /// and settle a whole ninety milliseconds after the block had stopped. So while the block is
+    /// changing face the placement is settled on every frame and the *ride* is the block's own.
+    ///
+    /// Everything else is `follow`'s, unchanged: a different block is still an arrival, the
+    /// opacity's own journey still arrives, leaves and turns round on the tip's ninety
+    /// milliseconds, and the answer is still "did anything the overlay draws change".
+    pub fn ride(
+        &mut self,
+        boxes: &MathToolBoxes,
+        hovered: Option<FormulaTool>,
+        now: Instant,
+        motion: Motion,
+    ) -> bool {
+        if !self.anchor.same_block(&boxes.anchor) {
+            *self = Self::arriving(boxes, hovered, now);
+            return true;
+        }
+        self.anchor = boxes.anchor.clone();
+        let place = [boxes.block, boxes.source, boxes.copy];
+        let mut changed = self.place.at(now, motion) != place;
+        self.place = Ease::settled(place, now);
+        changed |= self.opacity.retarget(1.0, now, motion);
+        if self.display != boxes.display {
+            self.display = boxes.display;
+            changed = true;
+        }
+        if self.hovered != hovered {
+            self.hovered = hovered;
+            changed = true;
+        }
+        changed
+    }
+
     /// The band is not hovered any more: the marks go out over the same span.
     ///
     /// **This is the half of §7.1.5p ② the owner revised on the evening of
@@ -429,6 +534,181 @@ impl FormulaToolFollow {
     #[must_use]
     pub fn owes_frames(&self, now: Instant, motion: Motion) -> bool {
         self.place.owes_frames(now, motion) || self.opacity.owes_frames(now, motion)
+    }
+}
+
+/// **One block on its way from one of its faces to the other** (owner's ruling 2026-09-15,
+/// T-MATH-TOGGLE-MOTION; `docs/DESIGN.md` §7.1.5p ⑪).
+///
+/// Pressing `‹›` used to be one frame: a picture, and then four rows of `$$…$$` where it had been,
+/// with everything below jumping by the difference. The ruling is that it travels — and the whole
+/// of what makes that possible is that **the document does not change while it does**. A block is
+/// either one entry with an artifact height or the rows that entry was swallowing; there is no
+/// third thing to interpolate, and a row *count* is not a quantity with points in between. So for
+/// the ninety milliseconds the change takes, the session keeps the representation it is already in
+/// — one entry with an artifact height — and what travels is the presentation:
+///
+/// - the band is **presented** at a height on its way from one face's to the other's
+///   ([`Self::height_subpixels`]), which the projection reads where it reads any artifact's, so
+///   everything under it moves the way it will end up moving;
+/// - the picture is drawn at [`Self::picture_opacity_milli`] and the source text is drawn over the
+///   same band at what is left ([`Self::source_opacity`]) — one cross-fade over one rectangle;
+/// - and the document is told **once**, on the frame the journey lands, so that the frame after the
+///   change is the frame before it was made.
+///
+/// Which end the telling happens at is the only asymmetry, and it is not a choice: the
+/// representation that can be presented at any height is the artifact one, so a block **leaving**
+/// its picture keeps it until the far end and a block **returning** to it is switched at the near
+/// end. Both directions therefore run with the block as an artifact, and that is what makes
+/// [`Self::reverse`] free — a second press never touches the document at all, it turns the journey
+/// round from wherever it stands.
+///
+/// The curve, the span and the reduced-motion answer are [`Ease`]'s, which are the tip's: this
+/// surface keeps no second number, exactly as the marks beside it keep none.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FormulaToggleMotion {
+    /// The block, by the identity every other reader of a band keys on.
+    anchor: MathBlockAnchor,
+    /// Where this is heading. `true` is the `$$…$$` source — which the document is told about when
+    /// the journey lands — and `false` is the picture, which it was told about when it began.
+    to_source: bool,
+    /// `[the band's presented height in subpixels, how far over to the source face]`. One journey
+    /// and not two, so a reversal cannot leave the height and the cross-fade disagreeing about
+    /// where they are or how long they have left.
+    journey: Ease<[f32; 2]>,
+    /// The rows the source face draws while it is still an overlay — the pane's own answer
+    /// (`bt_viewport::ViewportProjection::math_source_face`), which is the same answer the height
+    /// this is travelling to was measured from.
+    source_rows: Vec<String>,
+}
+
+impl FormulaToggleMotion {
+    /// The change begins.
+    ///
+    /// `heights` is `[the typeset face's band height, the source rows' height]`, both in subpixels
+    /// and both measured by the pane the block is in; `source_rows` is what those rows say.
+    #[must_use]
+    pub fn begin(
+        anchor: MathBlockAnchor,
+        heights: [i64; 2],
+        to_source: bool,
+        source_rows: Vec<String>,
+        now: Instant,
+    ) -> Self {
+        let [rendered, source] = heights.map(|height| height.max(1) as f32);
+        let (picture, text) = ([rendered, 0.0], [source, 1.0]);
+        let (from, to) = if to_source {
+            (picture, text)
+        } else {
+            (text, picture)
+        };
+        Self {
+            anchor,
+            to_source,
+            journey: Ease {
+                from,
+                to,
+                since: now,
+            },
+            source_rows,
+        }
+    }
+
+    /// **The mark was pressed again before the change landed.**
+    ///
+    /// The journey turns round from the height and the strength it is actually showing
+    /// ([`Ease::retarget`]), so a hand that changes its mind half-way sees the block stop and come
+    /// back rather than snap to one end and set off from there. **The document is not touched**,
+    /// and cannot need to be: the block has been an artifact for the whole of the flight, in both
+    /// directions, so turning round only moves where the telling happens — and the caller learns
+    /// that from [`Self::switch_owed`] as it always does.
+    ///
+    /// `heights` is asked for again rather than remembered: the pane may have re-wrapped under the
+    /// first half of the journey, and the end of this one has to be the height the block will
+    /// really stand at.
+    pub fn reverse(
+        &mut self,
+        heights: [i64; 2],
+        source_rows: Vec<String>,
+        now: Instant,
+        motion: Motion,
+    ) {
+        let [rendered, source] = heights.map(|height| height.max(1) as f32);
+        self.to_source = !self.to_source;
+        self.source_rows = source_rows;
+        let to = if self.to_source {
+            [source, 1.0]
+        } else {
+            [rendered, 0.0]
+        };
+        self.journey.retarget(to, now, motion);
+    }
+
+    /// The block this belongs to.
+    #[must_use]
+    pub fn anchor(&self) -> &MathBlockAnchor {
+        &self.anchor
+    }
+
+    /// **Whether the document still owes this change** — true exactly while the block is travelling
+    /// towards its source, which is the direction whose telling happens at the far end.
+    #[must_use]
+    pub fn switch_owed(&self) -> bool {
+        self.to_source
+    }
+
+    /// Whether the journey has arrived — and under [`Motion::Reduced`] that is the frame it began.
+    #[must_use]
+    pub fn landed(&self, now: Instant, motion: Motion) -> bool {
+        !self.journey.owes_frames(now, motion)
+    }
+
+    /// Whether this is still travelling towards the height the block's face will really stand at.
+    ///
+    /// `false` once a re-wrap, a scale change or a font change has moved that height under the
+    /// flight — at which point the only honest thing left to do is land, because the end of a
+    /// journey that is not where the block ends up is the jump this whole clause exists to remove.
+    #[must_use]
+    pub fn still_measures(&self, heights: [i64; 2]) -> bool {
+        let [rendered, source] = heights;
+        let target = if self.to_source { source } else { rendered };
+        (self.journey.to[0] - target.max(1) as f32).abs() < 0.5
+    }
+
+    /// The height the band is presented at on this frame — and **exactly** the face's own height
+    /// once it has landed, which is what makes the last frame of the change and the first frame
+    /// after it one picture.
+    #[must_use]
+    pub fn height_subpixels(&self, now: Instant, motion: Motion) -> i64 {
+        self.journey.at(now, motion)[0].round() as i64
+    }
+
+    /// How far over to the source face the cross-fade has got, `0` at the picture and `1` at the
+    /// text.
+    #[must_use]
+    pub fn source_opacity(&self, now: Instant, motion: Motion) -> f32 {
+        self.journey.at(now, motion)[1].clamp(0.0, 1.0)
+    }
+
+    /// How solid the picture is drawn on this frame, in the thousandths
+    /// `bt_viewport::MathBlockPlacement::picture_opacity_milli` is counted in.
+    #[must_use]
+    pub fn picture_opacity_milli(&self, now: Instant, motion: Motion) -> u16 {
+        ((1.0 - self.source_opacity(now, motion)) * 1000.0).round() as u16
+    }
+
+    /// The rows the source face draws while it is an overlay.
+    #[must_use]
+    pub fn source_rows(&self) -> &[String] {
+        &self.source_rows
+    }
+
+    /// **Whether this still owes the glass a frame** — and under [`Motion::Reduced`] it never does,
+    /// which is the whole of that setting's answer here: the switch is made on the frame it is
+    /// asked for and nothing is ever presented at a height between the two.
+    #[must_use]
+    pub fn owes_frames(&self, now: Instant, motion: Motion) -> bool {
+        self.journey.owes_frames(now, motion)
     }
 }
 
@@ -1336,5 +1616,280 @@ mod tests {
         assert_eq!(snapped.source, source_face.source);
         assert_eq!(snapped.copy, source_face.copy);
         assert!(!still.owes_frames(now, Motion::Reduced));
+    }
+
+    /// RED (owner's ruling 2026-09-15, T-MATH-TOGGLE-MOTION): **a band whose own height is
+    /// travelling carries its marks instead of easing them towards it.**
+    ///
+    /// ⑦ iii's travel is for geometry that *jumped*, and until this ruling a toggle was such a
+    /// jump. Now the block's height is itself a ninety-millisecond journey, and easing towards a
+    /// box that is already easing is two journeys over one distance: the marks would trail the edge
+    /// they are supposed to ride and settle a whole span after the block had stopped.
+    ///
+    /// MUTATION: call `follow` for a band that is changing face — the second arm below is exactly
+    /// what the glass would then show, the marks still at the height the block has already left.
+    #[test]
+    fn a_band_that_is_travelling_carries_its_marks_rather_than_easing_them_to_it() {
+        let now = Instant::now();
+        let rendered = boxes(MathBlockDisplay::Rendered);
+        let source_face = toggled(&rendered);
+        let settled = now + tooltip::TOOLTIP_FADE;
+
+        let mut ridden = FormulaToolFollow::arriving(&rendered, None, now);
+        assert!(ridden.ride(&source_face, None, settled, Motion::Full));
+        let placed = ridden.placed(settled, Motion::Full);
+        assert_eq!(placed.block, source_face.block);
+        assert_eq!(placed.source, source_face.source);
+        assert_eq!(placed.copy, source_face.copy);
+        assert!(seated_inside_the_block(&placed));
+
+        let mut eased = FormulaToolFollow::arriving(&rendered, None, now);
+        assert!(eased.follow(&source_face, None, settled, Motion::Full));
+        assert_eq!(
+            eased.placed(settled, Motion::Full).block,
+            rendered.block,
+            "a followed band starts its own journey where the marks already were"
+        );
+
+        // And a band that has stopped moving asks the glass for nothing.
+        assert!(!ridden.ride(&source_face, None, settled, Motion::Full));
+    }
+
+    /// One cell of the grid these fixtures are measured on, in subpixels.
+    const CELL: i64 = 18 * 1024;
+
+    /// `[the typeset face's band height, the source rows' height]` — a three-row picture whose
+    /// `$$…$$` source takes five rows, which is the ordinary shape of this gesture.
+    const HEIGHTS: [i64; 2] = [3 * CELL, 5 * CELL];
+
+    fn flight_anchor() -> MathBlockAnchor {
+        MathBlockAnchor::History {
+            run: None,
+            start: bt_transcript::TranscriptId(4),
+            end: bt_transcript::TranscriptId(7),
+        }
+    }
+
+    fn source_lines() -> Vec<String> {
+        [
+            "$$",
+            "\\int_0^\\infty e^{-x^2}\\,dx",
+            "= \\frac{\\sqrt{\\pi}}{2}",
+            "$$",
+            "",
+        ]
+        .iter()
+        .map(|line| (*line).to_owned())
+        .collect()
+    }
+
+    fn flight(to_source: bool, now: Instant) -> FormulaToggleMotion {
+        FormulaToggleMotion::begin(flight_anchor(), HEIGHTS, to_source, source_lines(), now)
+    }
+
+    /// RED (owner's ruling 2026-09-15, T-MATH-TOGGLE-MOTION): **the block travels between the two
+    /// heights it really stands at, and the two faces cross-fade across the same span.**
+    ///
+    /// Both ends are *exact*, in both directions, and that is the point rather than a nicety: the
+    /// far end is the frame on which the document is told, so a band that stopped a subpixel short
+    /// of the rows' own height would put the jump back — smaller, and still a jump.
+    ///
+    /// MUTATIONS: start the journey at the face it is going to, and the first frame is the switch
+    /// this clause removes; fade the picture on a curve of its own and the halfway assertion's pair
+    /// come apart, which is the window speaking with two voices about one gesture.
+    #[test]
+    fn a_change_of_face_travels_between_the_two_heights_the_block_really_stands_at() {
+        let now = Instant::now();
+        let landing = now + tooltip::TOOLTIP_FADE;
+
+        let leaving = flight(true, now);
+        assert_eq!(leaving.height_subpixels(now, Motion::Full), HEIGHTS[0]);
+        assert_eq!(leaving.picture_opacity_milli(now, Motion::Full), 1000);
+        assert_eq!(leaving.height_subpixels(landing, Motion::Full), HEIGHTS[1]);
+        assert_eq!(leaving.picture_opacity_milli(landing, Motion::Full), 0);
+        assert!(
+            leaving.switch_owed(),
+            "a block leaving its picture is told at the far end, which is where the identity is"
+        );
+
+        let returning = flight(false, now);
+        assert_eq!(returning.height_subpixels(now, Motion::Full), HEIGHTS[1]);
+        assert_eq!(returning.picture_opacity_milli(now, Motion::Full), 0);
+        assert_eq!(
+            returning.height_subpixels(landing, Motion::Full),
+            HEIGHTS[0]
+        );
+        assert_eq!(returning.picture_opacity_milli(landing, Motion::Full), 1000);
+        assert!(
+            !returning.switch_owed(),
+            "a block returning to its picture was told at the near end and owes nothing"
+        );
+
+        // Halfway is genuinely between, on both axes and by the same amount — one journey, so the
+        // height and the cross-fade cannot be at different points of it.
+        let half = now + tooltip::TOOLTIP_FADE / 2;
+        let height = leaving.height_subpixels(half, Motion::Full);
+        assert!(height > HEIGHTS[0] && height < HEIGHTS[1], "{height}");
+        let travelled = (height - HEIGHTS[0]) as f32 / (HEIGHTS[1] - HEIGHTS[0]) as f32;
+        assert!(
+            (leaving.source_opacity(half, Motion::Full) - travelled).abs() < 0.001,
+            "the picture and the band are at different points of one journey"
+        );
+        assert!(leaving.owes_frames(half, Motion::Full));
+        assert!(!leaving.owes_frames(landing, Motion::Full));
+    }
+
+    /// RED (owner's ruling 2026-09-15, T-MATH-TOGGLE-MOTION): **a second press turns the change
+    /// round from where it stands, with no jump and without touching the document.**
+    ///
+    /// The whole reason this is possible is that the block is one entry with an artifact height for
+    /// the length of the flight *in both directions*: a reversal therefore moves only which end the
+    /// telling happens at, which is what [`FormulaToggleMotion::switch_owed`] answers.
+    ///
+    /// MUTATIONS: restart the journey from the face it set out from and the block snaps backwards
+    /// under the hand; tell the document on the reversal and the block changes twice for one press.
+    #[test]
+    fn a_second_press_turns_the_change_round_where_it_stands() {
+        let now = Instant::now();
+        let half = now + tooltip::TOOLTIP_FADE / 2;
+        let mut leaving = flight(true, now);
+
+        let at_the_press = leaving.height_subpixels(half, Motion::Full);
+        let fade_at_the_press = leaving.source_opacity(half, Motion::Full);
+        leaving.reverse(HEIGHTS, source_lines(), half, Motion::Full);
+
+        assert_eq!(
+            leaving.height_subpixels(half, Motion::Full),
+            at_the_press,
+            "the band jumped on the frame the hand changed its mind"
+        );
+        assert!(
+            (leaving.source_opacity(half, Motion::Full) - fade_at_the_press).abs() < 0.001,
+            "and so did the cross-fade"
+        );
+        assert!(
+            !leaving.switch_owed(),
+            "the block is heading back to the picture it never stopped being"
+        );
+        assert_eq!(
+            leaving.height_subpixels(half + tooltip::TOOLTIP_FADE, Motion::Full),
+            HEIGHTS[0],
+            "and it lands exactly on the face it turned round towards"
+        );
+        assert_eq!(
+            leaving.picture_opacity_milli(half + tooltip::TOOLTIP_FADE, Motion::Full),
+            1000
+        );
+    }
+
+    /// RED (owner's ruling 2026-09-15, T-MATH-TOGGLE-MOTION): **stillness is the far end on the
+    /// frame it was asked for, and no frame is owed for any of it.**
+    ///
+    /// The tip's own answer, given here by the same function the marks beside this read — so there
+    /// is no second arm to forget.
+    ///
+    /// MUTATION: pay the journey's frames under `Motion::Reduced` and a reader who asked for no
+    /// motion watches a band grow; read a span of this surface's own and the setting is honoured in
+    /// two places, one of which will drift.
+    #[test]
+    fn stillness_makes_a_change_of_face_a_single_frame() {
+        let now = Instant::now();
+        let leaving = flight(true, now);
+        assert_eq!(leaving.height_subpixels(now, Motion::Reduced), HEIGHTS[1]);
+        assert_eq!(leaving.picture_opacity_milli(now, Motion::Reduced), 0);
+        assert!(leaving.landed(now, Motion::Reduced));
+        assert!(!leaving.owes_frames(now, Motion::Reduced));
+
+        let returning = flight(false, now);
+        assert_eq!(returning.height_subpixels(now, Motion::Reduced), HEIGHTS[0]);
+        assert_eq!(returning.picture_opacity_milli(now, Motion::Reduced), 1000);
+        assert!(returning.landed(now, Motion::Reduced));
+    }
+
+    /// RED (owner's ruling 2026-09-15, T-MATH-TOGGLE-MOTION): **a change whose far end has moved
+    /// under it stops being one this window may keep flying.**
+    ///
+    /// A re-wrap, a font change or a change to the breathing a band keeps moves the height the
+    /// journey is travelling to. Landing there would put the block somewhere it does not stand, and
+    /// the switch would jump by the difference — which is the very fault this clause removes, back
+    /// again by another road. `Runtime::advance_math_toggle_if_due` asks this on every turn and
+    /// settles the change the moment the answer is no.
+    ///
+    /// MUTATION: remember the endpoints instead of re-reading them and a pane resized mid-flight
+    /// lands its block at the old width's height.
+    #[test]
+    fn a_change_whose_far_end_has_moved_is_no_longer_one_to_keep_flying() {
+        let now = Instant::now();
+        let leaving = flight(true, now);
+        assert!(leaving.still_measures(HEIGHTS));
+        assert!(!leaving.still_measures([HEIGHTS[0], HEIGHTS[1] + CELL]));
+        // The face it is *leaving* may move all it likes: the journey is already past it, and what
+        // has to be true is only where it lands.
+        assert!(leaving.still_measures([HEIGHTS[0] + CELL, HEIGHTS[1]]));
+
+        let returning = flight(false, now);
+        assert!(returning.still_measures(HEIGHTS));
+        assert!(!returning.still_measures([HEIGHTS[0] + CELL, HEIGHTS[1]]));
+    }
+
+    /// A band mid-change: five rows tall, standing 40px down the pane, in a pane 600px wide.
+    fn band_face(rows_top: f32, band_height: f32) -> bt_render::MathBandFace {
+        bt_render::MathBandFace {
+            block: [24.0, rows_top, 300.0, rows_top + band_height],
+            rows_top,
+            rows_left: 32.0,
+            rows_right: 600.0,
+            row_height: 18.0,
+            display: MathBlockDisplay::Rendered,
+        }
+    }
+
+    /// RED (owner's ruling 2026-09-15, T-MATH-TOGGLE-MOTION): **the source face stands on the rows
+    /// the block is about to reveal, and nowhere else.**
+    ///
+    /// Row `k` at `rows_top + k * row_height` is not a convention this module chose — it is where
+    /// the transcript rows themselves land, so at the far end of the journey these labels and the
+    /// real rows occupy the same boxes and the switch is invisible. Across, a source row is an
+    /// ordinary row of this terminal and runs to the pane's edge rather than to the edge of the
+    /// ground the picture kept; down, it may not spill onto the lines above and below a band that
+    /// has not finished growing.
+    ///
+    /// MUTATIONS: lay the rows out from the block's left edge and every line of the source shifts a
+    /// cell when the change lands; clip them to the *rows*' own boxes rather than to the band and a
+    /// half-grown block writes its source over the text underneath it.
+    #[test]
+    fn the_source_face_stands_on_the_rows_the_block_is_about_to_reveal() {
+        let ink = [200, 200, 200];
+        let rows = source_lines();
+
+        // The far end: the band is as tall as the five rows, so every non-empty row is drawn whole.
+        let landed = band_face(40.0, 5.0 * 18.0);
+        let labels = source_face_labels(&landed, &rows, ink, 13.0);
+        assert_eq!(labels.len(), 4, "the empty fifth row asks for no draw");
+        for (index, label) in labels.iter().enumerate() {
+            let top = 40.0 + index as f32 * 18.0;
+            assert_eq!(label.rect, [32.0, top, 600.0, top + 18.0]);
+            assert_eq!(label.clip, Some([32.0, top, 600.0, top + 18.0]));
+            assert!(
+                label.mono,
+                "a document's own bytes are set in the grid's face"
+            );
+            assert_eq!(label.color, ink);
+        }
+
+        // Half-way: the band is two rows tall, so the third row is cut by the band's own bottom and
+        // the fourth is not drawn at all.
+        let growing = band_face(40.0, 2.5 * 18.0);
+        let labels = source_face_labels(&growing, &rows, ink, 13.0);
+        assert_eq!(labels.len(), 3);
+        assert_eq!(
+            labels[2].rect,
+            [32.0, 40.0 + 2.0 * 18.0, 600.0, 40.0 + 3.0 * 18.0]
+        );
+        assert_eq!(
+            labels[2].clip,
+            Some([32.0, 40.0 + 2.0 * 18.0, 600.0, 40.0 + 2.5 * 18.0]),
+            "a row the band has not grown far enough to hold is cut by the band, not by itself"
+        );
     }
 }

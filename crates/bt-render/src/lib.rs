@@ -362,6 +362,75 @@ pub struct MathToolBoxes {
     pub copy: [f32; 4],
 }
 
+/// **Where one named band's rows stand**, in the pane body's own pixels — see
+/// [`WindowRenderer::math_band_face`].
+///
+/// A band has two faces and only ever wears one of them; this is what the other
+/// one needs to be drawn over the same region while the two cross-fade
+/// (`docs/DESIGN.md` §7.1.5p ⑪). Geometry and identity only, like
+/// [`MathToolBoxes`] beside it: *what* is written on those rows is the session's
+/// answer and *how solid* is a clock's, and a field for either here would be
+/// this crate holding an opinion about a gesture it never sees.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MathBandFace {
+    /// `[left, top, right, bottom]` of the band itself, ground included — the
+    /// region the other face is clipped to, and the same box the marks ride.
+    pub block: [f32; 4],
+    /// The top of the band's **first row**, before the pane's own clip: row `k`
+    /// stands at `rows_top + k * row_height`, which is exactly where the
+    /// transcript rows themselves land once the block stops swallowing them.
+    /// Above the pane's top edge for a band the reader has scrolled into.
+    pub rows_top: f32,
+    /// Column zero of this pane, which is where a transcript row begins — and
+    /// deliberately not the band's own left edge, which stands a whole cell
+    /// column further out (owner's ruling 2026-09-15 ⑨ i).
+    pub rows_left: f32,
+    /// The pane's own right edge, which is where a transcript row ends. A source row is an
+    /// ordinary row of this terminal and is not confined to the band's ground — the ground is as
+    /// wide as the *picture* needs, and the text that replaces it is as wide as the pane.
+    pub rows_right: f32,
+    /// One row's height.
+    pub row_height: f32,
+    /// The face this band is wearing on this picture.
+    pub display: MathBlockDisplay,
+}
+
+/// [`WindowRenderer::math_band_face`]'s arithmetic, free of the renderer for the
+/// reason [`math_block_geometry_px`] is.
+///
+/// **It does not ask for `toolbar_visible`**, which is the one place this parts
+/// company with [`math_tool_boxes_for`] above, and the difference is the point:
+/// the marks are a hover and belong to the pointer, while a block changing face
+/// is a gesture that has already happened and goes on happening if the hand
+/// moves away from it. Naming the band is still the whole of the lookup, by the
+/// identity `bt_term`'s own hover sweep keys on.
+fn math_band_face_for(
+    metrics: CellMetrics,
+    seat: SeatViewport,
+    frame: &ViewportFrame,
+    named: &MathBlockAnchor,
+) -> Option<MathBandFace> {
+    let placement = frame.math_blocks.iter().find(|placement| {
+        placement.artifact.kind == bt_viewport::RgbaArtifactKind::Math
+            && math_block_is_a_band(placement)
+            && placement.anchor.same_block(named)
+    })?;
+    let geometry = math_block_geometry_px(metrics, seat, frame, placement)?;
+    Some(MathBandFace {
+        block: geometry.block,
+        // The band's own top, taken from the placement rather than from the
+        // geometry: `MathBlockGeometry::block` is already cut to the pane, and a
+        // row list measured from a clipped top would start its first row wherever
+        // the pane's edge happens to be.
+        rows_top: metrics.padding_px + placement.top_subpixels as f32 / SUBPIXELS_PER_PX as f32,
+        rows_left: metrics.padding_px,
+        rows_right: (metrics.padding_px + frame.columns.get() as f32 * metrics.cell_width_px)
+            .min(seat.width as f32),
+        row_height: metrics.cell_height_px,
+        display: placement.display,
+    })
+}
+
 /// **The one placement a hovered anchor names, and its boxes** — see
 /// [`WindowRenderer::math_tool_boxes`], which is this with the renderer's own
 /// grid and seat filled in.
@@ -7208,6 +7277,22 @@ impl WindowRenderer {
         math_tool_boxes_for(self.metrics, seat, frame, hovered)
     }
 
+    /// **Where the named band's rows stand on this picture** — see
+    /// [`MathBandFace`], and `math_band_face_for` for the whole of the
+    /// arithmetic.
+    ///
+    /// Cut to the band's own `seat` like everything else about a band (audit
+    /// 2026-09-15, RC-2), and answered for a band whether or not its marks are
+    /// up.
+    pub fn math_band_face(
+        &self,
+        seat: SeatViewport,
+        frame: &ViewportFrame,
+        named: &MathBlockAnchor,
+    ) -> Option<MathBandFace> {
+        math_band_face_for(self.metrics, seat, frame, named)
+    }
+
     /// The pointer's half of [`Self::math_tool_boxes`], cut to the same `seat`
     /// and for the same reason (RC-2).
     pub fn math_hit_test(
@@ -9687,6 +9772,10 @@ impl WindowRenderer {
                 continue;
             };
             drawn.insert(index);
+            // **How solid this picture is drawn**, which is `1` for every block that is not in the
+            // middle of changing face (§7.1.5p ⑪). The pipeline has carried a per-vertex alpha
+            // since the hover peek; what was missing was anybody to say anything but `1.0`.
+            let picture_opacity = f32::from(placement.picture_opacity_milli) / 1000.0;
             let scale = placement.artifact.render_scale_milli as f32 / 1000.0;
             let block_top = if placement.artifact.mode == MathMode::Inline {
                 pane_top
@@ -9749,7 +9838,7 @@ impl WindowRenderer {
                     uv_bottom,
                     self.seat.width,
                     self.seat.height,
-                    1.0,
+                    picture_opacity,
                 ));
                 draws.push(MathDraw {
                     tile,
@@ -16368,6 +16457,7 @@ mod tests {
             frozen_prefix_rows: 0,
             clipped_top_rows: 0,
             clipped_bottom_rows: 0,
+            picture_opacity_milli: 1000,
             selection_spans: Vec::new(),
         }
     }
@@ -18791,6 +18881,7 @@ mod tests {
         let source = include_str!("lib.rs");
         for opening in [
             "pub fn math_tool_boxes(",
+            "pub fn math_band_face(",
             "pub fn math_hit_test(",
             "fn math_failure_geometry(",
         ] {

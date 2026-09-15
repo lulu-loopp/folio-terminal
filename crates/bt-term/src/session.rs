@@ -1138,6 +1138,46 @@ pub enum HostScreen {
     Untold,
 }
 
+/// **Both ends of one block's change of face** — see [`DualPlaneSession::math_toggle_faces`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MathToggleFaces {
+    /// The band height the typeset face stands at: the picture's own rows plus the breathing the
+    /// pane can afford it (owner's ruling 2026-09-15 ⑨ i).
+    pub rendered_height_subpixels: i64,
+    /// The rows the `$$…$$` source stands on, and what they take together.
+    pub source: bt_viewport::MathSourceFace,
+    /// Which face the block is wearing **right now** — the decoration record's own `show_source`,
+    /// which is the field [`DualPlaneSession::toggle_math_source`] flips and therefore the only
+    /// authority on the question. A caller reads it to know which way a press is going.
+    pub showing_source: bool,
+}
+
+impl MathToggleFaces {
+    /// `[the typeset face's band height, the source rows' height]`, in subpixels — the two ends of
+    /// the journey, in the order every reader of this pair takes them.
+    #[must_use]
+    pub fn heights(&self) -> [i64; 2] {
+        [self.rendered_height_subpixels, self.source.height_subpixels]
+    }
+}
+
+/// **A block presented as neither of its faces, because it is between them** — see
+/// [`DualPlaneSession::set_math_toggle_presentation`] and `docs/DESIGN.md` §7.1.5p ⑪.
+///
+/// Presentation and not document: everything here is spent on the *frame*, and the session's own
+/// answer to "which rows does this block swallow" is untouched for the whole of the span.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MathTogglePresentation {
+    /// The block, by the identity every other reader of a band keys on
+    /// ([`MathBlockAnchor::same_block`]).
+    pub anchor: MathBlockAnchor,
+    /// The height the band is presented at this frame, between the two [`MathToggleFaces`] name.
+    pub height_subpixels: i64,
+    /// How solid the picture is drawn, in thousandths — `1000` at the typeset face and `0` at the
+    /// source, with the source text drawn over the same band at what is left.
+    pub picture_opacity_milli: u16,
+}
+
 /// Per-session actor core. It is the serialized owner required by DESIGN.md §1.3 and composes
 /// terminal facts with lifecycle, transcript, detection, scheduling, and viewport policy.
 pub struct DualPlaneSession {
@@ -1176,6 +1216,9 @@ pub struct DualPlaneSession {
     cell_width_subpixels: NonZeroI64,
     ascii_baseline_subpixels: Option<NonZeroI64>,
     math_layout_options: MathLayoutOptions,
+    /// **One block changing face, while it is changing** — see [`MathTogglePresentation`] and
+    /// `docs/DESIGN.md` §7.1.5p ⑪. `None` at rest, which is every session almost all of the time.
+    math_toggle: Option<MathTogglePresentation>,
     live_screen: ScreenId,
     cursor_logical_line_memory: Option<CursorLogicalLineMemory>,
     shell_phases: BTreeMap<ScreenId, ShellIntegrationPhase>,
@@ -1673,6 +1716,7 @@ impl DualPlaneSession {
             cell_width_subpixels: NonZeroI64::new(9 * SUBPIXELS_PER_PX).unwrap(),
             ascii_baseline_subpixels: None,
             math_layout_options: MathLayoutOptions::default(),
+            math_toggle: None,
             live_screen: ScreenId::Primary,
             cursor_logical_line_memory: None,
             shell_phases: BTreeMap::new(),
@@ -7895,6 +7939,77 @@ impl DualPlaneSession {
         }
     }
 
+    /// **The two heights one display block's faces stand at, and what the other face says**
+    /// (`docs/DESIGN.md` §7.1.5p ⑪).
+    ///
+    /// Both ends of the change, answered together and from the same picture of the session, because
+    /// they are the two ends of one journey: the band's own height as the projection would give it
+    /// for the typeset face, and the rows the `$$…$$` source stands on as this pane would lay them
+    /// out. Answered whichever face the block is wearing at the moment of the question — the change
+    /// runs in both directions and a caller reversing one mid-flight asks again.
+    ///
+    /// **History blocks only, and that is a fact about the other plane rather than a shortcut**
+    /// (§7.1.5p ⑪). A live block is measured against a visible-text floor
+    /// (`live_block_box_limit_subpixels`) which `bt_viewport::sync_live_math_artifacts`
+    /// applies to the *presentation box*: a block presented taller than its own face while it grew
+    /// could be refused by that floor half-way through, and a block that vanishes mid-fade is worse
+    /// than one that changes in a single frame. A history band has no such ceiling, which is why
+    /// this one can travel.
+    #[must_use]
+    pub fn math_toggle_faces(
+        &self,
+        projection: &ViewportProjection,
+        anchor: &MathBlockAnchor,
+    ) -> Option<MathToggleFaces> {
+        let MathBlockAnchor::History { start, end, .. } = anchor else {
+            return None;
+        };
+        let record = self
+            .decorations
+            .get(start)
+            .filter(|record| record.block_end == Some(*end))?;
+        let artifact = projected_frozen_artifact(
+            record,
+            self.math_band(),
+            self.math_vertical_padding_subpixels(),
+            self.cell_height_subpixels.get(),
+        )?;
+        // An inline composite has no second face to travel to: it stands in a line of prose, it
+        // carries no marks, and there is no `‹›` on it to press (§7.1.5p ⑨ iii).
+        if artifact.mode != MathMode::Display {
+            return None;
+        }
+        Some(MathToggleFaces {
+            rendered_height_subpixels: artifact.height_subpixels,
+            source: projection.math_source_face(&self.document, *start, *end),
+            showing_source: record.show_source,
+        })
+    }
+
+    /// **Present one block at a height and a strength that are not its own**, for as long as it is
+    /// changing face (`docs/DESIGN.md` §7.1.5p ⑪).
+    ///
+    /// The document is untouched by this: the block is still the one entry with an artifact height
+    /// it was, and [`Self::toggle_math_source`] is still the only thing that changes which rows
+    /// this session holds. What this moves is the two numbers a frame is built from — the band's
+    /// height, which the projection reads where it reads any artifact's, and how solid the picture
+    /// is drawn, which the placement carries to the renderer — so that the frame on which the
+    /// document really changes is the frame the last presented one already was.
+    ///
+    /// `None` puts both back, which is what the end of the change and every interruption of it do.
+    pub fn set_math_toggle_presentation(&mut self, presentation: Option<MathTogglePresentation>) {
+        self.math_toggle = presentation;
+    }
+
+    /// What this session is presenting a changing block as, if anything — so a caller paying a
+    /// journey's frames can tell a turn that would draw something new from one that would draw
+    /// the frame already on the glass. `Ease::retarget`'s own "`false` when it was already going
+    /// there", asked of the session rather than of the clock.
+    #[must_use]
+    pub fn math_toggle_presentation(&self) -> Option<&MathTogglePresentation> {
+        self.math_toggle.as_ref()
+    }
+
     pub fn toggle_math_source(&mut self, anchor: &MathBlockAnchor) -> bool {
         let preference = match anchor {
             MathBlockAnchor::History { start, end, .. } => {
@@ -8147,6 +8262,26 @@ impl DualPlaneSession {
             self.projected_inline_image(record, artifact, *id)
                 .map(|artifact| (*id, artifact))
         }));
+        // **A block changing face is presented at a height that is neither face's** (§7.1.5p ⑪),
+        // and this is where that is said because this is the one place a band's height enters
+        // projection. Everything the band's geometry is made of comes off this number — the rows
+        // the projected line takes, their individual heights, the placement's top and clip, the
+        // ground drawn under it, the seat the two marks ride — so moving it moves all of them
+        // together, and at the far end of the journey it is the real face's height to the subpixel.
+        // The picture's own offset inside the band is not touched: both faces begin at the band's
+        // top, which is what lets them cross-fade over one rectangle.
+        if let Some(presentation) = self.math_toggle.as_ref()
+            && let MathBlockAnchor::History { start, .. } = &presentation.anchor
+        {
+            for (id, artifact) in &mut frozen_artifacts {
+                // The id alone is not the block: an OSC image anchored to the same transcript line
+                // reaches this list too, and a formula's change of face is not a thing that may
+                // move somebody else's picture.
+                if *id == *start && artifact.kind == bt_viewport::RgbaArtifactKind::Math {
+                    artifact.height_subpixels = presentation.height_subpixels.max(1);
+                }
+            }
+        }
         projection.sync_math_artifacts(frozen_artifacts);
         projection.sync_inline_path_artifacts(self.inline_images.values().filter_map(|record| {
             if !matches!(record.kind, InlineImageRecordKind::LocalPath { .. }) {
@@ -8544,6 +8679,17 @@ impl DualPlaneSession {
             {
                 placement.left_subpixels = self.display_math_left_inset_subpixels();
             }
+            // **How solid this picture is drawn** (§7.1.5p ⑪) — full for every block in every
+            // frame but the handful a change of face runs across, and this is the one writer of
+            // it. Beside the other presentation facts this loop stamps on a placement
+            // (`toolbar_visible`, the interior scroll, the clip), because it is one of them: the
+            // document says the block is a picture, and the gesture says how much of one.
+            let picture_opacity_milli = self
+                .math_toggle
+                .as_ref()
+                .filter(|presentation| presentation.anchor.same_block(&placement.anchor))
+                .map_or(1000, |presentation| presentation.picture_opacity_milli);
+            placement.picture_opacity_milli = picture_opacity_milli;
             match &placement.anchor {
                 MathBlockAnchor::History { start, .. } => {
                     let Some(record) = self.decorations.get(start) else {
@@ -8651,6 +8797,10 @@ impl DualPlaneSession {
                 frozen_prefix_rows: 0,
                 clipped_top_rows: 0,
                 clipped_bottom_rows: 0,
+                // A source face is text, not a picture: there is no raster on this placement to be
+                // drawn at any strength, and the one the change cross-fades is the Rendered
+                // placement it is replacing.
+                picture_opacity_milli: 1000,
                 // Filled in for every placement at once, after the last of them exists.
                 selection_spans: Vec::new(),
             });
@@ -8727,6 +8877,10 @@ impl DualPlaneSession {
                 frozen_prefix_rows: 0,
                 clipped_top_rows: 0,
                 clipped_bottom_rows: 0,
+                // A source face is text, not a picture: there is no raster on this placement to be
+                // drawn at any strength, and the one the change cross-fades is the Rendered
+                // placement it is replacing.
+                picture_opacity_milli: 1000,
                 // Filled in for every placement at once, after the last of them exists.
                 selection_spans: Vec::new(),
             });
@@ -8800,6 +8954,7 @@ impl DualPlaneSession {
                     frozen_prefix_rows: 0,
                     clipped_top_rows: 0,
                     clipped_bottom_rows: 0,
+                    picture_opacity_milli: 1000,
                     selection_spans: Vec::new(),
                 });
             }
@@ -8878,6 +9033,7 @@ impl DualPlaneSession {
                     frozen_prefix_rows: 0,
                     clipped_top_rows: 0,
                     clipped_bottom_rows: 0,
+                    picture_opacity_milli: 1000,
                     selection_spans: Vec::new(),
                 });
             }

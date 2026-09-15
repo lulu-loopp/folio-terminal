@@ -390,6 +390,7 @@ mod tests {
             frozen_prefix_rows: 0,
             clipped_top_rows: 0,
             clipped_bottom_rows: 0,
+            picture_opacity_milli: 1000,
             selection_spans: Vec::new(),
         });
         frame
