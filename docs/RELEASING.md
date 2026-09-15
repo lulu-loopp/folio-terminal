@@ -42,18 +42,18 @@ https://github.com/lulu-loopp/folio-terminal/releases/latest/download/Folio-maco
 ```
 
 **`/releases/latest` is the release GitHub calls latest, which is never a
-pre-release**, and every release so far has been published with `--prerelease`.
-On a repository whose releases are all pre-releases that address answers 404, so
-the names are the half this repository can settle and the other half is a
-publishing decision: the two links above begin to answer on the day a release
-goes up without `--prerelease`, or the day one is marked latest by hand. Until
-then they are correct and unanswered, and `README.md` and the two `docs/install`
-documents keep sending readers to `/releases`, which always answers. The product
-page does not wait on that flag either way: its script asks the API for the list
-of releases and takes the newest, which is the same endpoint the update check
-reads and the reason `--prerelease` was chosen in the first place — what the
-stable names buy there is a download address it does not have to rewrite each
-time.
+pre-release.** Every release up to and including v0.4.0-preview was published
+with `--prerelease`, so on that repository the address answered 404. **From
+v0.4.1 on, a release is published without `--prerelease`** (owner ruling,
+2026-09-15): the tag keeps its `-preview` suffix and the release note still
+says preview, but GitHub marks the release *Latest*, the two links above
+answer, and the repository's front page shows the newest release. The
+`-preview` suffix itself stays until 1.0. `README.md` and the two
+`docs/install` documents keep sending readers to `/releases`, which always
+answered. The product page does not depend on the flag either way: its script
+asks the API for the list of releases and takes the newest, which is the same
+endpoint the update check reads — what the stable names buy there is a download
+address it does not have to rewrite each time.
 
 ## The workflow
 
@@ -475,7 +475,7 @@ $body = Join-Path ([IO.Path]::GetTempPath()) 'folio-release-body.md'
 
 $assets = @(Get-ChildItem target/release-package -File | ForEach-Object { $_.FullName })
 $arguments = @('release', 'create', 'v0.4.0-preview') + $assets + @(
-    '--draft', '--prerelease',
+    '--draft',
     '--title', 'Folio 0.4.0',
     '--notes-file', $body)
 & gh @arguments
@@ -484,8 +484,9 @@ $arguments = @('release', 'create', 'v0.4.0-preview') + $assets + @(
 The list is built and splatted rather than written on one line: `gh` is a native
 command, and an array interpolated into one takes its own view of quoting the day
 a path has a space in it. `--draft` because a person reads the page and presses
-the button; `--prerelease` because every release so far has been one, and because
-the update check reads the list endpoint for exactly that reason.
+the button. No `--prerelease`: from v0.4.1 the release is the one GitHub calls
+latest, so `/releases/latest` answers (see **The tag** above); the update check
+reads the list endpoint and is unaffected either way.
 
 **The assets are whatever is in that directory, and the directory is the signed
 build.** Nothing is typed out, so nothing can be left out; nothing is fetched

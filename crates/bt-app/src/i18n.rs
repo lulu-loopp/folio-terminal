@@ -2842,41 +2842,38 @@ impl Text {
             Self::NavTerminal => pick(lang, "Terminal", "终端"),
             Self::NavRenderedBlocks => pick(lang, "Rendered blocks", "渲染块"),
             Self::NavShortcuts => pick(lang, "Shortcuts", "快捷键"),
-            // zh: pending opus46 (GitHub issue #3) — the About page's thirteen
-            // strings were written in English with the page and are listed in
-            // `CHINESE_PENDING` until the copywriter has them.
-            Self::CategoryAbout => pick(lang, "ABOUT", "ABOUT"),
-            Self::NavAbout => pick(lang, "About", "About"),
-            Self::AboutOpen => pick(lang, "Open", "Open"),
-            Self::RowAboutVersion => pick(lang, "Version", "Version"),
+            Self::CategoryAbout => pick(lang, "ABOUT", "关于"),
+            Self::NavAbout => pick(lang, "About", "关于"),
+            Self::AboutOpen => pick(lang, "Open", "打开"),
+            Self::RowAboutVersion => pick(lang, "Version", "版本"),
             Self::DescAboutVersion => pick(
                 lang,
                 "The version this window is running, and the build it came from.",
-                "The version this window is running, and the build it came from.",
+                "这个窗口运行的版本号，以及它出自的构建。",
             ),
-            Self::RowAboutPlatform => pick(lang, "Platform", "Platform"),
+            Self::RowAboutPlatform => pick(lang, "Platform", "平台"),
             Self::DescAboutPlatform => pick(
                 lang,
                 "The system and the processor this copy was made for.",
-                "The system and the processor this copy was made for.",
+                "这份构建的目标系统和处理器。",
             ),
-            Self::RowAboutReleaseNotes => pick(lang, "Release notes", "Release notes"),
+            Self::RowAboutReleaseNotes => pick(lang, "Release notes", "版本说明"),
             Self::DescAboutReleaseNotes => pick(
                 lang,
                 "What changed in this version, and in the ones before it.",
-                "What changed in this version, and in the ones before it.",
+                "这个版本和之前各版本的改动。",
             ),
-            Self::RowAboutIssues => pick(lang, "Report a defect", "Report a defect"),
+            Self::RowAboutIssues => pick(lang, "Report a defect", "报告缺陷"),
             Self::DescAboutIssues => pick(
                 lang,
                 "Where Folio's defects are filed, and where to file another.",
-                "Where Folio's defects are filed, and where to file another.",
+                "Folio 的缺陷在这里记录，新缺陷也在这里提交。",
             ),
-            Self::RowAboutLicences => pick(lang, "Licences", "Licences"),
+            Self::RowAboutLicences => pick(lang, "Licences", "许可证"),
             Self::DescAboutLicences => pick(
                 lang,
                 "The open-source components Folio is made of, and their licences.",
-                "The open-source components Folio is made of, and their licences.",
+                "Folio 使用的开源组件及其许可证。",
             ),
 
             Self::RowTheme => pick(lang, "Theme", "主题"),
@@ -5799,7 +5796,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 47] = [
+    const CHINESE_PENDING: [(Self, HostPlatform); 21] = [
         (Self::PastePathEncoding, HostPlatform::Windows),
         (Self::PastePathEncoding, HostPlatform::MacOs),
         (Self::PastePathControl, HostPlatform::Windows),
@@ -5820,39 +5817,6 @@ impl Text {
         (Self::PasteClipboardRead, HostPlatform::MacOs),
         (Self::PasteProfileOverride, HostPlatform::Windows),
         (Self::PasteProfileOverride, HostPlatform::MacOs),
-        // zh: pending opus46 — the About page (GitHub issue #3,
-        // T-SETTINGS-ABOUT). Thirteen strings written in English with the page,
-        // because the page answers an outside user who is waiting for it and
-        // the copy is written by one person in one sitting. Both columns of
-        // each, since none of them is platform-dependent: what a reader sees
-        // until the rewrite lands is the English, which is what this list
-        // exists to make loud rather than silent.
-        (Self::CategoryAbout, HostPlatform::Windows),
-        (Self::CategoryAbout, HostPlatform::MacOs),
-        (Self::NavAbout, HostPlatform::Windows),
-        (Self::NavAbout, HostPlatform::MacOs),
-        (Self::AboutOpen, HostPlatform::Windows),
-        (Self::AboutOpen, HostPlatform::MacOs),
-        (Self::RowAboutVersion, HostPlatform::Windows),
-        (Self::RowAboutVersion, HostPlatform::MacOs),
-        (Self::DescAboutVersion, HostPlatform::Windows),
-        (Self::DescAboutVersion, HostPlatform::MacOs),
-        (Self::RowAboutPlatform, HostPlatform::Windows),
-        (Self::RowAboutPlatform, HostPlatform::MacOs),
-        (Self::DescAboutPlatform, HostPlatform::Windows),
-        (Self::DescAboutPlatform, HostPlatform::MacOs),
-        (Self::RowAboutReleaseNotes, HostPlatform::Windows),
-        (Self::RowAboutReleaseNotes, HostPlatform::MacOs),
-        (Self::DescAboutReleaseNotes, HostPlatform::Windows),
-        (Self::DescAboutReleaseNotes, HostPlatform::MacOs),
-        (Self::RowAboutIssues, HostPlatform::Windows),
-        (Self::RowAboutIssues, HostPlatform::MacOs),
-        (Self::DescAboutIssues, HostPlatform::Windows),
-        (Self::DescAboutIssues, HostPlatform::MacOs),
-        (Self::RowAboutLicences, HostPlatform::Windows),
-        (Self::RowAboutLicences, HostPlatform::MacOs),
-        (Self::DescAboutLicences, HostPlatform::Windows),
-        (Self::DescAboutLicences, HostPlatform::MacOs),
         // zh: pending opus46 — the macOS column of the card a local file raises
         // when the engine would not take this window's rules (M4-3, §13.38 ②).
         // The Windows column beside it has had its Chinese since W2; what is

@@ -339,11 +339,47 @@ struct ThirdDoor {
     store: RefCell<Option<Retained<WKContentRuleListStore>>>,
     /// The page the list goes onto and the parked load goes to.
     page: RefCell<Option<Retained<WKWebView>>>,
+    /// **Which page this door is currently about**, moved on by every
+    /// [`WebHost::request_controller`] and by every [`ThirdDoor::let_go`].
+    ///
+    /// A compiled rule list belongs to the controller it was compiled for, and
+    /// compiling is a completion block — so a seat that asks for a second page
+    /// while the first page's list is still in flight has two pages and one
+    /// door. Before this number existed that block landed on the door it was
+    /// started from whatever had happened since: it wrote `attached` and
+    /// `stands` for a controller the host had already thrown away, and
+    /// [`WebHost::attach_delegates`] then certified the *new* page's
+    /// subresources as gated by a list that had never been put on it (RA-3).
+    /// Every effect a completion has is therefore conditional on the mint it
+    /// captured still being this one — see [`compile_is_stale`].
+    ///
+    /// It is the door's own count and not the seat's `generation`: the seat
+    /// numbers the attempts it is making, this numbers the controllers that
+    /// exist, and a close makes a new one of the second without making one of
+    /// the first.
+    mint: Cell<u64>,
     /// A [`WebEvent::Controller`] this door still owes, and the generation it is
     /// owed for.
     owed: Cell<Option<u64>>,
     wanted: RefCell<String>,
-    attached: RefCell<Option<(String, Retained<WKContentRuleList>)>>,
+    /// **What is on the page and which page it went onto** — the decision, with
+    /// no WebKit object in it, which is what lets the state machine below be
+    /// asked by a `#[test]` on a machine that cannot make one.
+    attached: RefCell<Option<Attached>>,
+    /// The objects behind [`ThirdDoor::attached`]: the controller the list was
+    /// added to, kept so that the claim can be **checked against the live page**
+    /// rather than believed, and the list itself, kept so that this door holds
+    /// its own strong reference to what the page is using.
+    ///
+    /// The two fields move together and [`ThirdDoor::list_is_on_this_page`]
+    /// demands that they agree, so a drift between them reads as *not
+    /// standing*, which is the direction a guard has to fail in.
+    on_the_page: RefCell<
+        Option<(
+            Retained<WKUserContentController>,
+            Retained<WKContentRuleList>,
+        )>,
+    >,
     parked: RefCell<Option<String>>,
     compiling: Cell<bool>,
     /// Whether a list is on the page — which is the whole of what
@@ -359,15 +395,28 @@ struct ThirdDoor {
     refused: RefCell<Option<String>>,
 }
 
+/// **A rule list that is on a page, said without naming a WebKit object.**
+///
+/// `json` is what it was compiled from — what [`ThirdDoor::settled`] compares
+/// against `wanted` — and `mint` is the page it went onto. Both are needed:
+/// the same JSON compiled for the controller before last is not on this one.
+#[derive(Debug, Eq, PartialEq)]
+struct Attached {
+    json: String,
+    mint: u64,
+}
+
 impl ThirdDoor {
     fn new(shared: Rc<Shared>) -> Self {
         Self {
             shared,
             store: RefCell::new(None),
             page: RefCell::new(None),
+            mint: Cell::new(0),
             owed: Cell::new(None),
             wanted: RefCell::new(String::new()),
             attached: RefCell::new(None),
+            on_the_page: RefCell::new(None),
             parked: RefCell::new(None),
             compiling: Cell::new(false),
             stands: Cell::new(false),
@@ -379,11 +428,49 @@ impl ThirdDoor {
     fn settled(&self) -> bool {
         let wanted = self.wanted.borrow();
         match self.attached.borrow().as_ref() {
-            Some((json, _)) => *json == *wanted,
+            Some(attached) => attached.json == *wanted,
             // A seat that has said nothing has nothing outstanding; a seat that
             // has said something and has no list has.
             None => wanted.is_empty(),
         }
+    }
+
+    /// **Whether this door's `stands` is a statement about the page it is
+    /// standing on** — the pure half of [`ThirdDoor::list_is_on_this_page`].
+    ///
+    /// `stands` alone is a flag; this is the flag together with the fact it was
+    /// set from. They can only disagree if a list is attached for a mint that
+    /// has moved on, which is precisely RA-3's shape.
+    fn stands_for_this_mint(&self) -> bool {
+        self.stands.get()
+            && self
+                .attached
+                .borrow()
+                .as_ref()
+                .is_some_and(|attached| attached.mint == self.mint.get())
+    }
+
+    /// **Whether the list this door would certify is on the page it is
+    /// certifying** — the question `WebGuards::resource_requests` really asks.
+    ///
+    /// Two answers have to agree before this says yes: the door's own
+    /// bookkeeping ([`ThirdDoor::stands_for_this_mint`]), and the **live
+    /// object** — the controller this page carries now has to be the very one
+    /// the list was added to. WebKit has no public way to ask a controller what
+    /// rule lists are on it, so the identity of the controller is what stands in
+    /// for that question, and it is a fact from outside this struct rather than
+    /// a restatement of what is in it.
+    fn list_is_on_this_page(&self) -> bool {
+        if !self.stands_for_this_mint() {
+            return false;
+        }
+        let Some(live) = self.controller() else {
+            return false;
+        };
+        self.on_the_page
+            .borrow()
+            .as_ref()
+            .is_some_and(|(on, _)| std::ptr::eq(&**on, &*live))
     }
 
     /// The content controller the list goes onto.
@@ -405,7 +492,7 @@ impl ThirdDoor {
             // **Two ways a door does not stand, and they are different
             // sentences**: a seat that stated no rule at all has nothing that
             // could have failed, and a seat whose rule would not compile has.
-            let error = if self.stands.get() {
+            let error = if self.stands_for_this_mint() {
                 None
             } else if self.wanted.borrow().is_empty() {
                 Some(String::from(
@@ -424,7 +511,7 @@ impl ThirdDoor {
             return;
         };
         let page = self.page.borrow().clone();
-        match (self.stands.get(), page) {
+        match (self.stands_for_this_mint(), page) {
             (true, Some(page)) => self.shared.load(&page, &url),
             // **Fail closed, and say so.** A navigation that cannot be judged is
             // a navigation that does not happen, and the seat hears it as the
@@ -437,14 +524,32 @@ impl ThirdDoor {
     }
 
     /// Everything this door holds, let go of.
+    ///
+    /// **Every `Cell` and `RefCell` on the struct is named in this body**, and
+    /// `let_go_names_every_cell_of_the_third_door` in `webview.rs` keeps it that
+    /// way. `compiling` is the one that was missed, and what that cost is RA-3's
+    /// second half: a `close()` while a compile was in flight left the door
+    /// latched shut — `compile` returns immediately while `compiling` is set —
+    /// for the rest of the process's life, and the block that finally landed
+    /// then wrote `attached` and `stands` for a page that no longer existed.
     fn let_go(&self) {
         *self.store.borrow_mut() = None;
         *self.page.borrow_mut() = None;
         *self.attached.borrow_mut() = None;
+        *self.on_the_page.borrow_mut() = None;
         *self.parked.borrow_mut() = None;
         *self.refused.borrow_mut() = None;
         self.owed.set(None);
+        self.compiling.set(false);
         self.stands.set(false);
+        // **And the door moves on.** Clearing `compiling` un-latches it; moving
+        // the mint is what makes the block still in flight for the page that
+        // has just gone land on a mint that is not this one, so that it cannot
+        // write the state this call has just cleared.
+        self.mint.set(self.mint.get().wrapping_add(1));
+        // `wanted` is deliberately **kept**: it is what the seat last said its
+        // policy is, and letting go of a page does not un-say it — a rebuilt
+        // page compiles the same rule again.
     }
 }
 
@@ -481,11 +586,13 @@ fn compile(door: &Rc<ThirdDoor>) {
     // A copy for the block, which outlives this call and therefore cannot
     // borrow what the call is still about to hand to the compiler.
     let compiled_from = json.clone();
+    // **And the page this compile is for**, captured beside the controller it
+    // is for. See [`ThirdDoor::mint`].
+    let mint = door.mint.get();
 
     door.compiling.set(true);
     let again = Rc::clone(door);
     let done = RcBlock::new(move |list: *mut WKContentRuleList, error: *mut NSError| {
-        again.compiling.set(false);
         let outcome = if error.is_null() {
             NonNull::new(list)
                 // SAFETY: a live rule list WebKit handed to this block; the
@@ -498,37 +605,27 @@ fn compile(door: &Rc<ThirdDoor>) {
             let error = unsafe { &*error };
             Err(error.localizedDescription().to_string())
         };
+        // **Is this still the page this compile was started for?** Everything
+        // below writes the door, and a block that has been overtaken may write
+        // none of it. This is also what clears `compiling` and starts the
+        // compile the current page is owed.
+        if compile_is_stale(&again, mint) {
+            return;
+        }
         match outcome {
             Ok(list) => {
                 // SAFETY: a live content controller and a live rule list, on the
                 // main thread — which is where WebKit answers this block.
                 unsafe { controller.removeAllContentRuleLists() };
                 unsafe { controller.addContentRuleList(&list) };
-                *again.attached.borrow_mut() = Some((compiled_from.clone(), list));
-                *again.refused.borrow_mut() = None;
-                again.stands.set(true);
-                if again.settled() {
-                    again.answer_what_waited();
-                } else {
-                    // The seat moved on while this was in flight, and what is on
-                    // the page is last mint's rule. Nothing is answered until
-                    // the list is this mint's.
-                    compile(&again);
-                }
+                *again.on_the_page.borrow_mut() = Some((controller.clone(), list));
+                rules_compiled(&again, Ok(compiled_from.clone()));
             }
             Err(reason) => {
-                // **Fail closed.** A page whose rule list would not compile has
-                // no third door, so it keeps nothing of the old one — and it is
-                // not retried, because a compile that failed on this JSON would
-                // fail on it again. The next `set_request_rules` is what starts
-                // one.
                 // SAFETY: as above.
                 unsafe { controller.removeAllContentRuleLists() };
-                *again.attached.borrow_mut() = None;
-                again.stands.set(false);
-                eprintln!("BT_MAC_WEB the page's resource rules would not compile: {reason}");
-                *again.refused.borrow_mut() = Some(reason);
-                again.answer_what_waited();
+                *again.on_the_page.borrow_mut() = None;
+                rules_compiled(&again, Err(reason));
             }
         }
     });
@@ -540,6 +637,81 @@ fn compile(door: &Rc<ThirdDoor>) {
             Some(&NSString::from_str(&json)),
             Some(&done),
         );
+    }
+}
+
+/// **Whether a finished compile is still about the page it was started for** —
+/// and the whole of what one that is not does (RA-3).
+///
+/// A rule list belongs to the controller it was compiled for. The door is
+/// shared across every controller a seat makes, so a completion that lands
+/// after [`WebHost::request_controller`] or [`ThirdDoor::let_go`] has moved the
+/// mint on is holding a list for a page that is gone, and the only honest thing
+/// it can do with it is nothing: it does not attach it, it does not say the
+/// door stands, it does not record a refusal, and it answers nobody — the
+/// [`WebEvent::Controller`] `owed` names belongs to the *current* attempt and
+/// would be a false certification of it.
+///
+/// Two things it must still do, and they are why this is a function rather than
+/// an early `return` in the block. `compiling` is cleared, because it is the
+/// latch that stops a second compile from starting and this compile is over;
+/// and [`compile`] is called, because the page that took over is owed a list of
+/// its own and nothing else is going to start one — `request_controller`
+/// already tried and found the latch set.
+fn compile_is_stale(door: &Rc<ThirdDoor>, mint: u64) -> bool {
+    door.compiling.set(false);
+    if mint == door.mint.get() {
+        return false;
+    }
+    eprintln!(
+        "BT_MAC_WEB a rule list compiled for page {mint} arrived after page {} took over; \
+         it is dropped and the current page is compiled for",
+        door.mint.get()
+    );
+    compile(door);
+    true
+}
+
+/// **What a finished compile does to the door**, once [`compile_is_stale`] has
+/// said it is this page's.
+///
+/// The whole of the state machine and **no WebKit in it**, which is what lets
+/// `door_tests` below ask it the questions X-2's in-bundle target cannot: the
+/// objects have already been put on the controller by the caller, and what is
+/// left is the bookkeeping and who gets told.
+///
+/// `Ok` carries the JSON the list was compiled from; `Err` carries what the
+/// compiler said.
+fn rules_compiled(door: &Rc<ThirdDoor>, outcome: Result<String, String>) {
+    match outcome {
+        Ok(compiled_from) => {
+            *door.attached.borrow_mut() = Some(Attached {
+                json: compiled_from,
+                mint: door.mint.get(),
+            });
+            *door.refused.borrow_mut() = None;
+            door.stands.set(true);
+            if door.settled() {
+                door.answer_what_waited();
+            } else {
+                // The seat moved on while this was in flight, and what is on
+                // the page is last mint's rule. Nothing is answered until
+                // the list is this mint's.
+                compile(door);
+            }
+        }
+        Err(reason) => {
+            // **Fail closed.** A page whose rule list would not compile has
+            // no third door, so it keeps nothing of the old one — and it is
+            // not retried, because a compile that failed on this JSON would
+            // fail on it again. The next `set_request_rules` is what starts
+            // one.
+            *door.attached.borrow_mut() = None;
+            door.stands.set(false);
+            eprintln!("BT_MAC_WEB the page's resource rules would not compile: {reason}");
+            *door.refused.borrow_mut() = Some(reason);
+            door.answer_what_waited();
+        }
     }
 }
 
@@ -1205,6 +1377,27 @@ impl WebHost {
         // for** (R2-13). One standing here belongs to an attempt this one
         // supersedes, and is closed rather than dropped.
         self.close_pending_controller();
+
+        // **A new page is a new mint, and it inherits nothing** (RA-3). The
+        // list this door was reporting went onto the controller that is being
+        // replaced; it is not on this one, so `attached`, the objects behind it
+        // and `stands` are cleared rather than carried over — otherwise
+        // `settled()` would answer true off the last page's work and this page
+        // would be certified as gated without a list ever being put on it.
+        // `refused` goes with them: it is what a compiler said about a page
+        // that is gone.
+        //
+        // **`compiling` is deliberately not cleared.** A compile really is
+        // still in flight, and clearing the latch here would start a second one
+        // beside it. Moving the mint is what makes that block harmless:
+        // `compile_is_stale` drops what it is holding, un-latches the door and
+        // compiles again, for this page.
+        self.door.mint.set(self.door.mint.get().wrapping_add(1));
+        *self.door.attached.borrow_mut() = None;
+        *self.door.on_the_page.borrow_mut() = None;
+        *self.door.refused.borrow_mut() = None;
+        self.door.stands.set(false);
+
         *self.door.page.borrow_mut() = Some(view.clone());
         self.door.owed.set(Some(generation));
         self.pending_view = Some((generation, view, gate));
@@ -1367,9 +1560,12 @@ impl WebHost {
         // The three panel methods are on the class above, so they are on every
         // instance of it.
         guards.script_dialogs = true;
-        // And the third door is the compiled list, which is on the page or is
-        // not.
-        guards.resource_requests = self.door.stands.get();
+        // And the third door is the compiled list, which is on **this** page or
+        // is not — asked rather than remembered, because this line is what puts
+        // the word *guarded* in front of a reader and in `WebInstallReport`
+        // (RA-3). See [`ThirdDoor::list_is_on_this_page`] for the two answers it
+        // makes agree.
+        guards.resource_requests = self.door.list_is_on_this_page();
         Ok(())
     }
 
@@ -1826,4 +2022,248 @@ pub fn webview2_runtime_version() -> Result<String, String> {
         .and_then(|value| value.downcast::<NSString>().ok())
         .map(|text| text.to_string());
     Ok(version.unwrap_or_else(|| String::from("WebKit")))
+}
+
+// ── the third door's arithmetic, asked without WebKit ──────────────────────
+
+/// **Which completion belongs to which page, and who is told what** (RA-3).
+///
+/// Everything WebKit is in `tests/macos_webview.rs`, which needs a bundle, a
+/// window server and the process's own `main` thread and therefore runs on one
+/// machine on purpose. What is left over is a small state machine —
+/// [`ThirdDoor`], [`compile_is_stale`] and [`rules_compiled`] — and none of it
+/// touches an Objective-C object, so it is asked here, where an ordinary
+/// `cargo test -p bt-platform` on a Mac will run it.
+#[cfg(test)]
+mod door_tests {
+    use super::*;
+
+    /// A door with no store, no page and no WebKit near it, holding the rule the
+    /// seat has stated.
+    fn a_door(wanted: &str) -> Rc<ThirdDoor> {
+        let shared = Rc::new(Shared {
+            events: RefCell::new(VecDeque::new()),
+            chords: RefCell::new(Vec::new()),
+            gate: Box::new(|_: &str| WebNavigationVerdict::Proceed),
+            request_gate: Box::new(|_: &str| WebRequestVerdict::Allow),
+            rewriting_to: RefCell::new(None),
+            last_status: Cell::new(0),
+            found: RefCell::new(String::new()),
+            found_case: Cell::new(false),
+            wake: Box::new(|| {}),
+        });
+        let door = Rc::new(ThirdDoor::new(shared));
+        *door.wanted.borrow_mut() = wanted.to_owned();
+        door
+    }
+
+    /// **The completion block's body with its two WebKit calls taken out** —
+    /// the staleness question, and then the bookkeeping. It is written here in
+    /// the same order the block writes it so that the thing under test is the
+    /// thing that ships; the calls it leaves out (`removeAllContentRuleLists`,
+    /// `addContentRuleList`) change the page, not the door.
+    fn land(door: &Rc<ThirdDoor>, mint: u64, outcome: Result<String, String>) {
+        if compile_is_stale(door, mint) {
+            return;
+        }
+        rules_compiled(door, outcome);
+    }
+
+    /// Everything the door has told the seat since it was last asked.
+    fn said(door: &Rc<ThirdDoor>) -> Vec<WebEvent> {
+        door.shared.events.borrow_mut().drain(..).collect()
+    }
+
+    /// RED — **a rule list that arrives after its page was replaced changes
+    /// nothing**, which is the whole of RA-3.
+    ///
+    /// The shape that makes this invisible without a mint: the seat's rule has
+    /// **not** changed, so the list page 1 compiled is byte-identical to the one
+    /// page 2 wants. Every test of `settled()` passes, the JSON matches, and the
+    /// list is nevertheless sitting on a controller that has been thrown away.
+    ///
+    /// MUTATION: drop the mint comparison in [`compile_is_stale`] and this goes
+    /// red on four counts at once — `stands`, `attached`, the answer page 2 is
+    /// still owed, and the `WebEvent::Controller { error: None }` that would
+    /// certify page 2 as gated by a list nothing ever put on it.
+    #[test]
+    fn a_rule_list_that_arrives_after_its_page_was_replaced_changes_nothing() {
+        let rules = r#"[{"trigger":{"url-filter":".*"},"action":{"type":"block"}}]"#;
+        let door = a_door(rules);
+
+        // Page 1 asks, and its compile goes out.
+        door.owed.set(Some(1));
+        door.compiling.set(true);
+        let first = door.mint.get();
+
+        // Page 2 takes over — `request_controller`'s effect on the door, with
+        // the seat's rule unchanged.
+        door.mint.set(first + 1);
+        *door.attached.borrow_mut() = None;
+        *door.refused.borrow_mut() = None;
+        door.stands.set(false);
+        door.owed.set(Some(2));
+
+        // Page 1's list lands, successfully, compiled from exactly what page 2
+        // wants.
+        land(&door, first, Ok(rules.to_owned()));
+
+        assert!(
+            !door.stands.get(),
+            "a list on a controller that is gone is not a door standing"
+        );
+        assert!(!door.stands_for_this_mint());
+        assert!(
+            door.attached.borrow().is_none(),
+            "nothing is attached to page 2 by page 1's compile"
+        );
+        assert!(
+            door.refused.borrow().is_none(),
+            "nothing was refused either"
+        );
+        assert_eq!(
+            door.owed.get(),
+            Some(2),
+            "page 2 is still owed its own answer"
+        );
+        assert!(
+            said(&door).is_empty(),
+            "an obsolete completion answers nobody"
+        );
+        assert!(
+            !door.compiling.get(),
+            "and it still un-latches the door, or the page that took over never \
+             gets a list at all"
+        );
+    }
+
+    /// RED — **a close during an outstanding compile ends the in-flight state
+    /// rather than latching it** (RA-3, the second half).
+    ///
+    /// `compiling` is the latch that makes [`compile`] return immediately.
+    /// Leaving it set through a `close()` means no later `set_request_rules`,
+    /// `navigate` or `request_controller` can ever start a compile again for the
+    /// life of the host — and the block that eventually lands re-sets `attached`
+    /// and `stands` for a page that no longer exists.
+    ///
+    /// MUTATION: take `compiling.set(false)` out of [`ThirdDoor::let_go`] and the
+    /// first assertion goes red; take the mint bump out and the rest do.
+    #[test]
+    fn a_close_during_a_compile_un_latches_the_door_and_its_completion_finds_nothing() {
+        let rules = "[]";
+        let door = a_door(rules);
+        door.owed.set(Some(1));
+        door.compiling.set(true);
+        let first = door.mint.get();
+
+        door.let_go();
+        assert!(!door.compiling.get(), "a close un-latches the door");
+
+        land(&door, first, Ok(rules.to_owned()));
+        assert!(!door.compiling.get());
+        assert!(
+            !door.stands.get(),
+            "a door with no page does not stand because a block landed"
+        );
+        assert!(door.attached.borrow().is_none());
+        assert!(said(&door).is_empty(), "there is nobody left to answer");
+    }
+
+    /// The path that must not regress: **one page, one compile, one answer.**
+    #[test]
+    fn a_list_compiled_for_the_page_it_is_on_answers_the_seat_and_stands() {
+        let rules = "[]";
+        let door = a_door(rules);
+        door.owed.set(Some(7));
+        door.compiling.set(true);
+        let mint = door.mint.get();
+
+        land(&door, mint, Ok(rules.to_owned()));
+
+        assert!(door.stands.get());
+        assert!(door.stands_for_this_mint());
+        assert!(door.settled());
+        assert_eq!(
+            *door.attached.borrow(),
+            Some(Attached {
+                json: rules.to_owned(),
+                mint
+            })
+        );
+        assert_eq!(
+            said(&door),
+            vec![WebEvent::Controller {
+                generation: 7,
+                error: None
+            }]
+        );
+        assert_eq!(door.owed.get(), None, "the debt is paid once");
+        assert!(!door.compiling.get());
+    }
+
+    /// **Fail closed**: a rule the compiler will not take leaves no door, and
+    /// the navigation that was waiting for it does not happen.
+    #[test]
+    fn a_rule_that_will_not_compile_cancels_what_was_parked_and_says_why() {
+        let door = a_door("[this is not a rule list]");
+        door.owed.set(Some(9));
+        door.compiling.set(true);
+        *door.parked.borrow_mut() = Some(String::from("file:///tmp/a.html"));
+        let mint = door.mint.get();
+
+        land(&door, mint, Err(String::from("rule list parse error")));
+
+        assert!(!door.stands.get());
+        assert!(!door.stands_for_this_mint());
+        assert!(door.attached.borrow().is_none());
+        let events = said(&door);
+        assert_eq!(events.len(), 2, "{events:?}");
+        match &events[0] {
+            WebEvent::Controller {
+                generation: 9,
+                error: Some(reason),
+            } => assert!(
+                reason.contains("rule list parse error"),
+                "the seat's fault line carries what the compiler said: {reason:?}"
+            ),
+            other => panic!("the seat is told its page has no third door: {other:?}"),
+        }
+        assert_eq!(
+            events[1],
+            WebEvent::NavigationStarting {
+                uri: String::from("file:///tmp/a.html"),
+                cancelled: true
+            },
+            "a navigation that cannot be judged does not happen, and the seat hears so"
+        );
+    }
+
+    /// RED — **a certification is about the page it was made for**, which is
+    /// why `attach_delegates` may not read `stands` on its own.
+    ///
+    /// `stands` is a flag and a flag remembers; the pair `stands` +
+    /// `attached.mint` is the flag together with the fact it was set from, and
+    /// that is what [`ThirdDoor::list_is_on_this_page`] asks before
+    /// `WebGuards::resource_requests` is written.
+    #[test]
+    fn a_certification_is_about_the_page_it_was_made_for() {
+        let rules = "[]";
+        let door = a_door(rules);
+        let mint = door.mint.get();
+        land(&door, mint, Ok(rules.to_owned()));
+        assert!(
+            door.stands_for_this_mint(),
+            "the list is on the page it was made for"
+        );
+
+        door.mint.set(mint + 1);
+        assert!(
+            door.stands.get(),
+            "the flag is untouched by the page moving — that is exactly the point"
+        );
+        assert!(
+            !door.stands_for_this_mint(),
+            "and the pair is not: this list is not on this page"
+        );
+    }
 }
