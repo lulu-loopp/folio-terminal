@@ -164,7 +164,7 @@ jobs:
           if-no-files-found: warn
 
       # And that is the end of it. The release itself — the tag's page, its notes
-      # and the five signed assets on it — is made by hand from the machine that
+      # and the seven signed assets on it — is made by hand from the machine that
       # signed them, with `gh release create`. `docs/RELEASING.md` has the
       # command. Nothing above this line is part of it.
 
@@ -411,6 +411,12 @@ jobs:
       # lane's**, and it is where the version and the architecture join the name
       # — the tag and the asset are one claim, and an Intel Mac has to be able
       # to tell from the name that this build is not for it.
+      #
+      # It writes a second file as well, `Folio-macos-arm64.dmg`: the same bytes
+      # under a name that is the same in every release. That one is moved across
+      # under the name it already has, because `/releases/latest/download/`
+      # resolves an asset by name and a link on a page outside this repository
+      # can only be written against a name no version moves.
       - name: the disk image
         run: |
           set -eu
@@ -423,6 +429,7 @@ jobs:
               --identity "$FOLIO_IDENTITY" --skip-notarize
           fi
           mv "$FOLIO_STAGE/Folio.dmg" "$FOLIO_PACKAGE/Folio-$VERSION-macos-arm64.dmg"
+          mv "$FOLIO_STAGE/Folio-macos-arm64.dmg" "$FOLIO_PACKAGE/Folio-macos-arm64.dmg"
           if [ -f "$FOLIO_STAGE/Folio.dmg.notarylog.json" ]; then
             mv "$FOLIO_STAGE/Folio.dmg.notarylog.json" "$FOLIO_SYMBOLS/Folio.dmg.notarylog.json"
           fi

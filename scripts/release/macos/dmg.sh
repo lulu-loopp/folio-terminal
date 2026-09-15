@@ -67,6 +67,25 @@
 # ordinary run of this script reaches the end with the question already
 # answered. Only `--skip-notarize` asks it here, and there it is informational:
 # an image nobody notarized is refused by design.
+#
+# ## Two names for one set of bytes
+#
+# The image leaves here as `Folio.dmg` and as `Folio-macos-arm64.dmg`, and the
+# second is a copy of the first. GitHub serves
+# `/releases/latest/download/<asset>` and resolves it by asset *name*, so a
+# download link on a page outside this repository can only be written against a
+# name that is the same in every release — which the published
+# `Folio-<version>-macos-arm64.dmg` is not. The long name is still given by
+# whoever moves the image to the release page, for the reason above: a script
+# that built it would be a second reader of the version line. The copy that has
+# no version in it is made here, because here is after the ticket is stapled,
+# and a copy taken any earlier would be the file most people click and the one
+# Gatekeeper turns away offline.
+#
+# It is a copy and not a second image: `checksums.sh` hashes the directory the
+# release page is made of, so both names arrive there under one hash, and a
+# reader who fetched either can check what they have. The two are hashed against
+# each other here, because a copy nobody read back is a copy.
 
 set -eu
 
@@ -148,6 +167,7 @@ app=$(cd "$app" && pwd)
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 dmg="$out/Folio.dmg"
+stable="$out/Folio-macos-arm64.dmg"
 
 run() {
 	if [ "$dry_run" = "1" ]; then
@@ -242,9 +262,21 @@ fi
 run rm -rf "$staging"
 
 echo
+echo "=== the copy under the name that never changes"
+run cp "$dmg" "$stable"
+if [ "$dry_run" = "0" ]; then
+	if [ "$(shasum -a 256 "$dmg" | cut -d " " -f 1)" != "$(shasum -a 256 "$stable" | cut -d " " -f 1)" ]; then
+		echo "dmg.sh: $stable is not a copy of $dmg" >&2
+		exit 1
+	fi
+	echo "$(basename "$stable"): the same bytes as $(basename "$dmg")"
+fi
+
+echo
 if [ "$dry_run" = "1" ]; then
 	echo "dmg.sh: dry run complete; nothing was written and nothing was uploaded."
 else
 	echo "dmg.sh: $dmg"
-	ls -l "$dmg"
+	echo "dmg.sh: $stable"
+	ls -l "$dmg" "$stable"
 fi
