@@ -3067,6 +3067,19 @@ pub fn order_monospace_families(mut families: Vec<MonospaceFamily>) -> Vec<Monos
 /// crate that can deadlock the process if its statements are reordered.
 pub mod hang;
 
+/// **What the memory manager is doing to this process** — the page-fault
+/// counter and the resident size, in one call.
+///
+/// Beside [`hang`] because it answers the other half of the same question: that
+/// module says *where* the window thread was when it stopped answering, and
+/// this one says whether the seconds it spent there were its own work or the
+/// machine paging its working set back in. It is **not** a boundary of the kind
+/// `hang` is — one kernel query about the calling process, no handle, no lock,
+/// nothing that can block — and both of its arms are in the one file for
+/// [`instance`]'s reason: the two platforms count faults differently, and that
+/// difference should be readable on one screen.
+pub mod mem;
+
 /// **Everything this product gives to the machine** — the shell, the browser,
 /// Explorer, and the helper programs it starts to ask a question.
 ///

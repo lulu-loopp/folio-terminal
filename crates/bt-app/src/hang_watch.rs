@@ -98,7 +98,12 @@
 //!   [`park`] and [`woke`], at the two ends of the platform's own wait.
 //! - **Per turn of the loop**, [`beat`] is one `Instant::now()` (which
 //!   `about_to_wait` already calls for its own clocks) plus four stores, and
-//!   [`park`] at the other end of the turn is two more.
+//!   [`park`] at the other end of the turn is two more — **plus the one kernel
+//!   query a hold opens with** ([`Heartbeat::open_footprint`], which is where
+//!   the reason it cannot be deferred is written down). It is the one kernel
+//!   query this facility deliberately makes on the window thread, it is made on
+//!   a turn that already carries a frame and a platform round trip, and a
+//!   parked thread makes none of them: no hold is open, so nothing is sampled.
 //! - **Per two seconds, forever**, the watchdog does one `Instant::now()`, four
 //!   atomic loads and a comparison, then sleeps again. **Zero allocation**: the
 //!   idle path never touches the heap, never opens a file, and never creates the
@@ -153,6 +158,26 @@
 //! window thread; the window thread's whole part is a `try_lock` it never waits
 //! on and a `push`.
 //!
+//! # Whose seconds they were
+//!
+//! A line reading `flush_wheel 1928 ms` names where the time went and cannot
+//! say **whose time it was**. Two seconds inside one call is either two seconds
+//! of this program's own work, which is repaired here, or two seconds of this
+//! program standing still while the operating system reads its working set back
+//! in, which is not a fault in this program at all — and the machines where
+//! this instrument earns its keep are exactly the ones carrying more committed
+//! memory than they have RAM. The two demand opposite repairs and, until the
+//! counters below, the log could not tell them apart.
+//!
+//! So a hold now also carries [`Paging`]: the process's page faults and
+//! resident size, sampled at the two ends of the hold and appended to the line
+//! after a middle dot. The sampling rule is the one thing worth stating twice —
+//! **the opening sample is taken at every hold and the closing one only at a
+//! hold that is being reported**, because *slow* is not known until a hold ends
+//! and a baseline read after the paging is over measures nothing. See
+//! [`Heartbeat::open_footprint`] for why the two cheaper-looking designs both
+//! print `faults +0` on the holds they exist for.
+//!
 //! The watchdog runs in the `BelowNormal` band with every other worker (§1.4).
 //! That is the right band even though its job is to run when the window thread
 //! cannot: the hangs in question are a thread that is *blocked*, not a machine
@@ -166,6 +191,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use bt_platform::mem::Footprint;
 
 pub use bt_platform::hang::Answer;
 
@@ -537,6 +564,56 @@ pub struct Pulse {
     pub park: Park,
 }
 
+/// **What the memory manager did to this process across one hold** — the other
+/// half of the account, and the half the stations cannot give.
+///
+/// A ledger that says `flush_wheel 1928 ms` names where the milliseconds were
+/// spent and says nothing about *whose* they were. Two seconds inside one call
+/// is either two seconds of this program's own work — which is repaired here —
+/// or this program standing still while the operating system reads its working
+/// set back in, which is not a fault in this program at all and is exactly what
+/// the machine the fault is reported on does when it is carrying more committed
+/// memory than it has RAM. The counters below are how a reader tells those
+/// apart without being at the machine: faults climbing by tens of thousands
+/// while the resident size climbs beside them is a second that belonged to the
+/// memory manager, and a hold that spends one with both numbers flat spent it
+/// here.
+///
+/// See [`bt_platform::mem`] for what "a fault" counts on each platform — the
+/// two are not the same quantity and the difference is written down there.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Paging {
+    /// Page faults taken between the two ends of the hold.
+    ///
+    /// A difference and not a reading: the platform's counter is cumulative
+    /// since the process started, and the only interesting number is how much
+    /// of it belongs to this hold.
+    pub faults: u64,
+    /// The resident size in bytes as the hold opened.
+    pub working_set_before: u64,
+    /// The resident size in bytes as it closed. Printed beside the one above
+    /// rather than as a difference, because the direction is not the point:
+    /// **a working set that grew is a set being read back in, and one that
+    /// shrank during a long hold is one being trimmed while the thread was
+    /// held** — and a signed delta would print the same digit for two opposite
+    /// stories.
+    pub working_set_after: u64,
+}
+
+/// One binary megabyte, which is the megabyte a reader's Task Manager and
+/// Activity Monitor both print.
+const BYTES_PER_MEGABYTE: u64 = 1024 * 1024;
+
+/// `bytes` as the megabytes the line prints, rounded to the nearest.
+///
+/// Rounded rather than truncated because the pair is read as a movement — 179
+/// to 412 — and a truncation makes a set that grew by a megabyte and a half
+/// look like one that grew by one.
+#[must_use]
+fn megabytes(bytes: u64) -> u64 {
+    bytes.saturating_add(BYTES_PER_MEGABYTE / 2) / BYTES_PER_MEGABYTE
+}
+
 /// **One hold of the window thread that ran long, and where its time went.**
 ///
 /// A hold is `woke` → `park`: everything between the platform handing this
@@ -559,6 +636,9 @@ pub struct SlowHold {
     pub held_ms: u64,
     /// Milliseconds per station, indexed by [`Station::slot`].
     pub spent_ms: [u64; STATION_COUNT],
+    /// What the machine's memory manager did while the hold ran, when this
+    /// platform counts it and both ends were sampled. See [`Paging`].
+    pub paging: Option<Paging>,
 }
 
 impl SlowHold {
@@ -601,10 +681,23 @@ impl SlowHold {
                 .collect::<Vec<_>>()
                 .join(", ")
         };
-        format!(
+        let mut line = format!(
             "Folio: the window thread held control for {} ms on turn {} — {where_}",
             self.held_ms, self.turn
-        )
+        );
+        // Appended, never interleaved, and behind a separator no station label
+        // contains: every line this instrument has ever written keeps its
+        // shape, and a reader who greps for `held control for` or for a station
+        // name finds the same lines they found before the counters existed.
+        if let Some(paging) = self.paging {
+            line.push_str(&format!(
+                " · faults +{}, working set {} → {} MB",
+                paging.faults,
+                megabytes(paging.working_set_before),
+                megabytes(paging.working_set_after),
+            ));
+        }
+        line
     }
 }
 
@@ -648,6 +741,25 @@ pub struct Heartbeat {
     slow: Mutex<Vec<SlowHold>>,
     /// Slow holds that found the queue full or busy.
     slow_dropped: AtomicU64,
+    /// **Where the two footprint readings come from.**
+    ///
+    /// A function pointer rather than a direct call to
+    /// [`bt_platform::mem::footprint`], for the reason the four `_at` verbs take
+    /// a clock: the arithmetic worth pinning is *this* module's — which sample
+    /// is taken when, and what the line says about the pair — and a test that
+    /// could only get numbers out of the real memory manager could state none of
+    /// it. A pointer and not a boxed closure, so the field costs one word, the
+    /// struct keeps its derived `Debug`, and the call is the same indirect jump
+    /// on the window thread as a direct one through a `LazyLock`.
+    footprint: fn() -> Option<Footprint>,
+    /// The process's fault count as the hold in progress opened.
+    held_faults: AtomicU64,
+    /// Its resident size at that same instant, in bytes.
+    held_working_set: AtomicU64,
+    /// Whether the two above were actually taken. A flag rather than a sentinel
+    /// in either number, because both of them have legitimate values everywhere
+    /// in their range and a platform with no arm answers nothing at all.
+    held_footprint: AtomicBool,
 }
 
 impl Default for Heartbeat {
@@ -659,7 +771,17 @@ impl Default for Heartbeat {
 impl Heartbeat {
     #[must_use]
     pub fn new() -> Self {
+        Self::sampling(bt_platform::mem::footprint)
+    }
+
+    /// [`Self::new`], with the footprint sampler named. See [`Self::footprint`].
+    #[must_use]
+    fn sampling(footprint: fn() -> Option<Footprint>) -> Self {
         Self {
+            footprint,
+            held_faults: AtomicU64::new(0),
+            held_working_set: AtomicU64::new(0),
+            held_footprint: AtomicBool::new(false),
             origin: Instant::now(),
             at_ms: AtomicU64::new(0),
             turn: AtomicU64::new(0),
@@ -733,14 +855,79 @@ impl Heartbeat {
         self.station.store(station as u8, Ordering::Relaxed);
     }
 
-    /// **A hold begins**: the ledger is emptied and the clock started.
+    /// **A hold begins**: the ledger is emptied, the footprint taken and the
+    /// clock started.
     fn open_hold(&self, now_ms: u64) {
         for spent in &self.spent_ms {
             spent.store(0, Ordering::Relaxed);
         }
+        self.open_footprint();
         self.station_since_ms.store(now_ms, Ordering::Relaxed);
         self.held_since_ms
             .store(now_ms.saturating_add(1), Ordering::Relaxed);
+    }
+
+    /// **The one system call this instrument makes on an ordinary turn**, and
+    /// it is made here — at the opening of every hold, slow or not — because
+    /// there is no later moment that could have it.
+    ///
+    /// The tempting design is to sample only the holds that turn out to be
+    /// reported, and it cannot be built: *slow* is a fact about a hold that is
+    /// not known until the hold ends, and the baseline has to have been taken
+    /// before it began. The two ways of learning about a long hold while it is
+    /// still running both fail on the case the instrument exists for:
+    ///
+    /// * **The window thread noticing at a station** — the crossing could be
+    ///   tested for free inside [`Self::move_to`], which already holds the
+    ///   clock. But a hold that is *one long call* passes no station while it
+    ///   runs; a 1928 ms `flush_wheel` would arm the sampler on its way out, the
+    ///   baseline would be read after the paging was over, and the line would
+    ///   print `faults +0` on precisely the hold it was built to explain.
+    /// * **The watchdog noticing from outside** — it wakes every
+    ///   [`WATCH_INTERVAL`], four times longer than [`SLOW_HOLD_THRESHOLD`], and
+    ///   a fault counter it reads is a fact about the moment *it* woke rather
+    ///   than about either end of somebody else's hold.
+    ///
+    /// So the bill is one kernel query per hold — a hold being a turn of the
+    /// loop — against a turn that already carries a frame, a drain and a
+    /// platform round trip, and nothing whatever on the turns in between,
+    /// because a parked thread opens no hold. The other end,
+    /// [`Self::close_footprint`], is on the reporting path alone and is reached
+    /// by roughly none of them.
+    fn open_footprint(&self) {
+        if let Some(footprint) = (self.footprint)() {
+            self.held_faults.store(footprint.faults, Ordering::Relaxed);
+            self.held_working_set
+                .store(footprint.working_set_bytes, Ordering::Relaxed);
+            self.held_footprint.store(true, Ordering::Relaxed);
+        } else {
+            self.held_footprint.store(false, Ordering::Relaxed);
+        }
+    }
+
+    /// **The second sample, taken only for a hold that is already going to be
+    /// written down.**
+    ///
+    /// `None` when this platform counts nothing, when the opening sample was
+    /// refused, or when this one is — a line that named one end of a movement
+    /// would be worse than a line that names neither.
+    #[must_use]
+    fn close_footprint(&self) -> Option<Paging> {
+        if !self.held_footprint.load(Ordering::Relaxed) {
+            return None;
+        }
+        let closing = (self.footprint)()?;
+        Some(Paging {
+            // Saturating, which is the harmless direction: the only way this
+            // subtraction can go negative is the 32-bit Windows counter having
+            // wrapped mid-hold, and a `+0` reads as "nothing to see here" while
+            // a wrapped difference would read as four billion faults.
+            faults: closing
+                .faults
+                .saturating_sub(self.held_faults.load(Ordering::Relaxed)),
+            working_set_before: self.held_working_set.load(Ordering::Relaxed),
+            working_set_after: closing.working_set_bytes,
+        })
     }
 
     /// **A hold ends**, and if it ran long it is queued for the watchdog.
@@ -761,10 +948,13 @@ impl Heartbeat {
         if held_ms < slow_hold_threshold_ms() {
             return;
         }
+        // Below the threshold this line is never reached, which is the whole of
+        // what keeps the second system call off the ordinary turn.
         let hold = SlowHold {
             turn: self.turn.load(Ordering::Relaxed),
             held_ms,
             spent_ms,
+            paging: self.close_footprint(),
         };
         // `try_lock` and never `lock`: see [`Self::slow`].
         if let Ok(mut queue) = self.slow.try_lock()
@@ -1670,13 +1860,63 @@ pub fn run_selftest_if_due() {}
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use super::{
-        Answer, HangWatch, Heartbeat, Park, Pulse, ReportFacts, STATION_COUNT, SlowHold, Station,
-        Verdict, can_come_round, prune_reports, render_healed, render_report, report_filename,
-        slow_hold_threshold_ms, utc_timestamp,
+        Answer, Footprint, HangWatch, Heartbeat, Paging, Park, Pulse, ReportFacts, STATION_COUNT,
+        SlowHold, Station, Verdict, can_come_round, prune_reports, render_healed, render_report,
+        report_filename, slow_hold_threshold_ms, utc_timestamp,
     };
+
+    /// A heartbeat on a platform that counts nothing, which is what every test
+    /// about the **stations** wants: the line it prints is the one this module
+    /// wrote before the counters existed, and the arithmetic under test is the
+    /// milliseconds.
+    fn no_footprint() -> Option<Footprint> {
+        None
+    }
+
+    /// The footprints [`fake_footprint`] hands back, in order, and how many
+    /// times it has been asked.
+    ///
+    /// Thread-local because libtest gives each case its own thread and runs them
+    /// at once: a static here would have two tests handing each other their
+    /// numbers, which is the kind of shared fixture this repository's own
+    /// conventions call a bug factory.
+    thread_local! {
+        static FAKE_FOOTPRINTS: RefCell<(Vec<Footprint>, usize)> =
+            const { RefCell::new((Vec::new(), 0)) };
+    }
+
+    /// A sampler that answers the queued footprints in turn, and nothing once
+    /// they run out.
+    fn fake_footprint() -> Option<Footprint> {
+        FAKE_FOOTPRINTS.with(|fake| {
+            let mut fake = fake.borrow_mut();
+            let asked = fake.1;
+            fake.1 += 1;
+            fake.0.get(asked).copied()
+        })
+    }
+
+    /// Queue what the fake sampler will answer, and forget what it was asked
+    /// before.
+    fn queue_footprints(footprints: &[(u64, u64)]) {
+        let queued: Vec<Footprint> = footprints
+            .iter()
+            .map(|(faults, working_set_bytes)| Footprint {
+                faults: *faults,
+                working_set_bytes: *working_set_bytes,
+            })
+            .collect();
+        FAKE_FOOTPRINTS.with(|fake| *fake.borrow_mut() = (queued, 0));
+    }
+
+    /// How many times the fake sampler has been asked since [`queue_footprints`].
+    fn footprints_asked() -> usize {
+        FAKE_FOOTPRINTS.with(|fake| fake.borrow().1)
+    }
 
     /// A thread holding control at `station`: it has not handed anything back to
     /// the platform, so the loop coming round is owed.
@@ -2642,7 +2882,7 @@ mod tests {
     /// instrument, it is the log.
     #[test]
     fn an_ordinary_hold_is_never_written_down() {
-        let heart = Heartbeat::new();
+        let heart = Heartbeat::sampling(no_footprint);
         heart.woke_at(1_000);
         heart.at_station(Station::Event, 1_001);
         heart.beat_at(1_002);
@@ -2660,7 +2900,7 @@ mod tests {
     /// five seconds nor says anything about a thread that answered.
     #[test]
     fn a_slow_hold_names_the_station_that_spent_the_time() {
-        let heart = Heartbeat::new();
+        let heart = Heartbeat::sampling(no_footprint);
         heart.woke_at(1_000);
         heart.at_station(Station::Event, 1_010);
         heart.at_station(Station::WebPage, 1_020);
@@ -2695,7 +2935,7 @@ mod tests {
     /// eighty seconds go back to `woken`, which is this assertion inverted.
     #[test]
     fn a_hold_spent_on_a_workers_answer_names_the_lane_that_landed() {
-        let heart = Heartbeat::new();
+        let heart = Heartbeat::sampling(no_footprint);
         heart.woke_at(1_000);
         // Ten milliseconds of untagged wake, then a preview body landing, then
         // the turn that draws it.
@@ -2750,7 +2990,7 @@ mod tests {
     /// this one's arithmetic said twice.
     #[test]
     fn the_ledger_is_emptied_between_holds() {
-        let heart = Heartbeat::new();
+        let heart = Heartbeat::sampling(no_footprint);
         heart.woke_at(0);
         heart.at_station(Station::WebPage, 10);
         heart.park_at(Park::Indefinite, 3_000);
@@ -2769,7 +3009,7 @@ mod tests {
     /// turn's body leaves early in six places and every one of them parks.
     #[test]
     fn a_second_park_with_no_wake_between_records_nothing() {
-        let heart = Heartbeat::new();
+        let heart = Heartbeat::sampling(no_footprint);
         heart.woke_at(0);
         heart.at_station(Station::WebPage, 10);
         heart.park_at(Park::Indefinite, 2_000);
@@ -2784,7 +3024,7 @@ mod tests {
     /// to nothing would file the whole of startup as a stall.
     #[test]
     fn a_turn_with_no_wake_before_it_opens_its_own_hold() {
-        let heart = Heartbeat::new();
+        let heart = Heartbeat::sampling(no_footprint);
         heart.beat_at(8_000);
         heart.at_station(Station::Drain, 8_010);
         heart.park_at(Park::Indefinite, 8_030);
@@ -2799,7 +3039,7 @@ mod tests {
     /// rather than from a number written down a second time.
     #[test]
     fn the_threshold_is_the_one_the_module_states() {
-        let heart = Heartbeat::new();
+        let heart = Heartbeat::sampling(no_footprint);
         let bound = slow_hold_threshold_ms();
         heart.woke_at(0);
         heart.park_at(Park::Indefinite, bound - 1);
@@ -2841,10 +3081,229 @@ mod tests {
             turn: 7,
             held_ms: 900,
             spent_ms: [0; STATION_COUNT],
+            paging: None,
         };
         assert_eq!(
             hold.line(),
             "Folio: the window thread held control for 900 ms on turn 7 — no station held it",
+        );
+    }
+
+    // ══ Whose seconds they were: the footprint at the two ends of a hold ══
+
+    /// **The line says what the memory manager did**, in the shape the ticket
+    /// fixed: everything that was there before, then a middle dot, then the
+    /// faults as a difference and the working set as a movement.
+    ///
+    /// Pure — a `SlowHold` and nothing else — which is the same rule
+    /// [`SlowHold::line`] is written to and the reason the shape of a log line
+    /// is a thing this repository can state without running a program.
+    #[test]
+    fn a_slow_holds_line_states_what_the_machine_did_to_its_memory() {
+        let mut spent_ms = [0; STATION_COUNT];
+        spent_ms[Station::Present.slot()] = 2_092;
+        spent_ms[Station::Wheel.slot()] = 1_928;
+        let hold = SlowHold {
+            turn: 3_937_579,
+            held_ms: 4_056,
+            spent_ms,
+            paging: Some(Paging {
+                faults: 38_210,
+                working_set_before: 179 * 1024 * 1024,
+                working_set_after: 412 * 1024 * 1024,
+            }),
+        };
+        assert_eq!(
+            hold.line(),
+            "Folio: the window thread held control for 4056 ms on turn 3937579 — \
+             publish_frame_inner 2092 ms, flush_wheel 1928 ms · \
+             faults +38210, working set 179 → 412 MB",
+        );
+    }
+
+    /// **A hold nobody could sample prints exactly the line it always printed.**
+    ///
+    /// The grep the whole facility is read through is `held control for`, and
+    /// the stations after it are read by eye; a platform with no counters, or a
+    /// call the kernel refused, must not move either. This is the assertion that
+    /// would go red if the new fields were ever put in the middle of the line or
+    /// printed as zeroes when there was nothing to print.
+    #[test]
+    fn a_hold_with_no_footprint_prints_the_line_it_always_printed() {
+        let mut spent_ms = [0; STATION_COUNT];
+        spent_ms[Station::Wheel.slot()] = 1_928;
+        let hold = SlowHold {
+            turn: 3_937_579,
+            held_ms: 4_056,
+            spent_ms,
+            paging: None,
+        };
+        assert_eq!(
+            hold.line(),
+            "Folio: the window thread held control for 4056 ms on turn 3937579 — \
+             flush_wheel 1928 ms",
+        );
+    }
+
+    /// **Megabytes are rounded to the nearest, and they are the ones Task
+    /// Manager prints** — 1024-based, which is the whole reason this is a
+    /// function and not an inline division somebody would write the other way
+    /// the second time.
+    #[test]
+    fn a_working_set_is_printed_in_the_megabytes_a_reader_recognises() {
+        let hold = |before: u64, after: u64| SlowHold {
+            turn: 0,
+            held_ms: 900,
+            spent_ms: [0; STATION_COUNT],
+            paging: Some(Paging {
+                faults: 0,
+                working_set_before: before,
+                working_set_after: after,
+            }),
+        };
+        // Half a megabyte short of 180 rounds up; a hair over 179 stays.
+        let before = 180 * 1024 * 1024 - 512 * 1024;
+        let after = 179 * 1024 * 1024 + 1;
+        let line = hold(before, after).line();
+        assert!(
+            line.ends_with("· faults +0, working set 180 → 179 MB"),
+            "rounded to the nearest, both ends: {line}"
+        );
+        assert!(
+            hold(0, 0).line().ends_with("working set 0 → 0 MB"),
+            "nothing resident is nothing, not a division that trapped"
+        );
+    }
+
+    /// **The counters are sampled at the two ends of the hold**, so the number
+    /// the line carries is the hold's own and not the run's.
+    ///
+    /// The fake sampler is handed two readings: one for the wake that opens the
+    /// hold, one for the park that reports it. What the line prints is their
+    /// difference and their pair — an instrument that printed the closing
+    /// reading alone would print this process's lifetime fault count, which is
+    /// in the millions and says nothing about any hold at all.
+    #[test]
+    fn a_slow_hold_carries_the_faults_taken_between_its_own_two_ends() {
+        queue_footprints(&[(1_000_000, 179 * 1024 * 1024), (1_038_210, 412 * 1024 * 1024)]);
+        let heart = Heartbeat::sampling(fake_footprint);
+        heart.woke_at(1_000);
+        heart.at_station(Station::Wheel, 1_010);
+        heart.park_at(Park::Indefinite, 2_900);
+        let (slow, _) = heart.take_slow_holds();
+        let [hold] = slow.as_slice() else {
+            panic!("one hold ran long: {slow:?}")
+        };
+        assert_eq!(
+            hold.paging,
+            Some(Paging {
+                faults: 38_210,
+                working_set_before: 179 * 1024 * 1024,
+                working_set_after: 412 * 1024 * 1024,
+            }),
+            "the difference across the hold, not the process's running total",
+        );
+        assert_eq!(footprints_asked(), 2, "one end, then the other");
+        assert!(
+            hold.line().ends_with("· faults +38210, working set 179 → 412 MB"),
+            "{}",
+            hold.line(),
+        );
+    }
+
+    /// **An ordinary hold is sampled once and never asks again** — the cost
+    /// rule, stated as a number rather than as a comment.
+    ///
+    /// Sixty turns a second each pay the opening query, because *slow* is not
+    /// known until a hold ends and a baseline taken later measures nothing (see
+    /// [`Heartbeat::open_footprint`]). What none of them pay is the second one:
+    /// it lives past the threshold check, on the path that produces a line.
+    ///
+    /// MUTATION: move `close_footprint` above that check and this reads 2.
+    #[test]
+    fn an_ordinary_hold_asks_the_sampler_once_and_the_reporting_path_twice() {
+        queue_footprints(&[(10, 1024), (20, 2048), (30, 4096)]);
+        let heart = Heartbeat::sampling(fake_footprint);
+        heart.woke_at(1_000);
+        heart.at_station(Station::Present, 1_004);
+        heart.park_at(Park::Indefinite, 1_012);
+        assert_eq!(heart.take_slow_holds(), (Vec::new(), 0));
+        assert_eq!(
+            footprints_asked(),
+            1,
+            "a hold nobody writes down takes one sample and stops",
+        );
+        let bound = slow_hold_threshold_ms();
+        heart.woke_at(2_000);
+        heart.park_at(Park::Indefinite, 2_000 + bound);
+        assert_eq!(heart.take_slow_holds().0.len(), 1);
+        assert_eq!(
+            footprints_asked(),
+            3,
+            "the slow one opened with a sample and closed with a second",
+        );
+    }
+
+    /// **A platform that counts nothing says nothing**, and a hold whose
+    /// opening sample was refused does not print the closing one on its own.
+    ///
+    /// Two different silences, and they have to read the same in the log: half
+    /// a movement printed as a whole one is the kind of number a reader would
+    /// act on.
+    #[test]
+    fn a_hold_whose_first_sample_was_refused_prints_no_counters() {
+        // Nothing queued, so the opening sample is refused; the second entry
+        // would be answered if anything asked for it.
+        queue_footprints(&[]);
+        let heart = Heartbeat::sampling(fake_footprint);
+        heart.woke_at(0);
+        heart.at_station(Station::Drain, 10);
+        heart.park_at(Park::Indefinite, 3_000);
+        let (slow, _) = heart.take_slow_holds();
+        let [hold] = slow.as_slice() else {
+            panic!("one hold ran long: {slow:?}")
+        };
+        assert_eq!(hold.paging, None);
+        assert_eq!(
+            footprints_asked(),
+            1,
+            "with no baseline there is nothing a second sample could be \
+             subtracted from, so it is not taken",
+        );
+        assert_eq!(
+            hold.line(),
+            "Folio: the window thread held control for 3000 ms on turn 0 — \
+             drain_pty 2990 ms, woken 10 ms",
+        );
+    }
+
+    /// **The baseline belongs to the hold in progress, not to the one before
+    /// it.** A run of holds each open with their own sample, so a fault taken
+    /// while the thread was parked is charged to nobody.
+    #[test]
+    fn each_hold_opens_with_its_own_baseline() {
+        queue_footprints(&[
+            // The short hold's baseline, which is the only sample it takes,
+            (100, 1024 * 1024),
+            // then the long hold's two ends.
+            (500, 2 * 1024 * 1024),
+            (700, 3 * 1024 * 1024),
+        ]);
+        let heart = Heartbeat::sampling(fake_footprint);
+        heart.woke_at(0);
+        heart.park_at(Park::Indefinite, 10);
+        assert_eq!(heart.take_slow_holds(), (Vec::new(), 0));
+        heart.woke_at(1_000);
+        heart.park_at(Park::Indefinite, 4_000);
+        let (slow, _) = heart.take_slow_holds();
+        let [hold] = slow.as_slice() else {
+            panic!("the second hold ran long: {slow:?}")
+        };
+        assert_eq!(
+            hold.paging.map(|paging| paging.faults),
+            Some(200),
+            "the 400 faults taken across the first hold and the park after it \
+             are not this hold's",
         );
     }
 }
