@@ -21,7 +21,12 @@
 //!   the menu and the hint card introduce a reader to the same verb twice and
 //!   two names would make it two verbs. Pressing it parks the row's `Action` and
 //!   the loop runs it through `run_shortcut` — the very function the chord
-//!   reaches.
+//!   reaches. [`Row::VerbNamed`] is the same row wearing the menu's name, and
+//!   [`Row::VerbAlways`] is the same row again for a verb that belongs to the
+//!   **application** rather than to a window — Quit, and nothing else today
+//!   (RB-4). That one is enabled with the desk empty and is dispatched before
+//!   `main.rs`' menu landing looks for a window, because the state it is
+//!   reached from is the one where there is none.
 //! * **[`Row::Own`]** — something this product answers that has no row in that
 //!   table. Help is the only one.
 //! * **[`Row::Standard`]** — one of AppKit's own selectors, sent with no target,
@@ -89,6 +94,25 @@ enum Row {
     /// at. It is the *name* that differs and nothing else: the verb, the chord
     /// and the scope are still the row's.
     VerbNamed(&'static str, Text),
+    /// **A verb of the table that belongs to the application and not to a
+    /// window** — in force with the desk empty, and wearing the menu's name for
+    /// [`Row::VerbNamed`]'s reason, which is the same reason: the row that is
+    /// the application's is on the application menu, and that menu names the
+    /// application.
+    ///
+    /// One row is this today and it is Quit (RB-4, ruled 2026-09-15). The
+    /// distinction is the row's own nature rather than its id, because it is a
+    /// *fact about the verb*: closing the last window is the ordinary resting
+    /// state of this application on this platform (M3-1), and a verb that ends
+    /// the application is one a reader may reach from it. A second row with the
+    /// same property — an About panel of this product's, a Check for updates —
+    /// says so here rather than adding a second patch.
+    ///
+    /// [`Row::Own`] is the neighbouring shape and is not this: those are verbs
+    /// with no row in the shortcut table at all, so they carry no chord and no
+    /// scope. This one is a row of `BINDINGS` in every other respect — the
+    /// verb, the chord and the title all still come from the table.
+    VerbAlways(&'static str, Text),
     /// A verb of this product's that has no row in that table.
     Own(Text, AppMenuAction),
     /// A row AppKit answers through the responder chain.
@@ -134,7 +158,10 @@ const BAR: &[Bar] = &[
             // in Recent; X-3 measured exactly that. The title is the menu's
             // because the platform's is `Quit Folio` and the table's row is
             // called `Quit`.
-            Row::VerbNamed("quit", Text::MenuQuitFolio),
+            //
+            // **And it is the one row of the bar that needs no window** (RB-4,
+            // ruled 2026-09-15). See [`Row::VerbAlways`].
+            Row::VerbAlways("quit", Text::MenuQuitFolio),
         ],
     },
     Bar {
@@ -517,15 +544,33 @@ fn entry(row: Row, shortcuts: &Shortcuts, focus: Option<Focus>) -> MenuEntry {
             // row of this product's that answers with every window closed.
             enabled: true,
         }),
-        Row::Verb(id) => verb_entry(id, None, shortcuts, focus),
-        Row::VerbNamed(id, title) => verb_entry(id, Some(title), shortcuts, focus),
+        Row::Verb(id) => verb_entry(id, None, WhatItNeeds::AWindow, shortcuts, focus),
+        Row::VerbNamed(id, title) => {
+            verb_entry(id, Some(title), WhatItNeeds::AWindow, shortcuts, focus)
+        }
+        Row::VerbAlways(id, title) => {
+            verb_entry(id, Some(title), WhatItNeeds::Nothing, shortcuts, focus)
+        }
     }
+}
+
+/// **What has to be standing before a verb row can be chosen**, which is the
+/// whole of what decides its enabled flag.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WhatItNeeds {
+    /// A window with the keyboard, holding the row's own scope. Every verb row
+    /// of the bar but one.
+    AWindow,
+    /// **Nothing at all**: the verb is the application's and runs with the desk
+    /// empty. See [`Row::VerbAlways`].
+    Nothing,
 }
 
 /// One row of the shortcut table, as the bar draws it.
 fn verb_entry(
     id: &'static str,
     name: Option<Text>,
+    needs: WhatItNeeds,
     shortcuts: &Shortcuts,
     focus: Option<Focus>,
 ) -> MenuEntry {
@@ -545,8 +590,32 @@ fn verb_entry(
             .filter(|row| row.scope == Scope::Window)
             .and_then(|row| row.chord.as_ref())
             .and_then(menu_chord),
-        enabled: focus.is_some_and(|focus| binding.is_some_and(|row| row.scope.holds(focus))),
+        // **A row that needs nothing is enabled with nothing standing**, and
+        // that is not a special case bolted onto the line below it — it is the
+        // question the line below asks, answered for a row whose answer does not
+        // depend on a window. With no window there is nothing to do a *window*
+        // verb to; Quit is not a window verb (RB-4).
+        enabled: match needs {
+            WhatItNeeds::Nothing => true,
+            WhatItNeeds::AWindow => {
+                focus.is_some_and(|focus| binding.is_some_and(|row| row.scope.holds(focus)))
+            }
+        },
     })
+}
+
+/// **Whether a verb is the application's rather than a window's** — asked of
+/// [`BAR`] itself, so that the bar's own statement of it is the only one (RB-4).
+///
+/// `main.rs`'s menu landing asks this before it looks for a window: a row that
+/// needs none must not be dropped because there is none. See
+/// [`Row::VerbAlways`] for what the property is and why it is the row's rather
+/// than an id's.
+#[must_use]
+pub(crate) fn is_an_application_verb(id: &str) -> bool {
+    BAR.iter()
+        .flat_map(|bar| bar.rows)
+        .any(|row| matches!(row, Row::VerbAlways(named, _) if *named == id))
 }
 
 // ── Edit ▸ Copy and Paste, once the responder chain has declined them ───────
@@ -641,7 +710,7 @@ mod tests {
         BAR.iter()
             .flat_map(|bar| bar.rows.iter())
             .filter_map(|row| match row {
-                Row::Verb(id) | Row::VerbNamed(id, _) => Some(*id),
+                Row::Verb(id) | Row::VerbNamed(id, _) | Row::VerbAlways(id, _) => Some(*id),
                 _ => None,
             })
             .collect()
@@ -776,7 +845,7 @@ mod tests {
                 .filter(|row| !matches!(row, Row::Rule | Row::Services)),
         ) {
             match row {
-                Row::Verb(id) | Row::VerbNamed(id, _) => {
+                Row::Verb(id) | Row::VerbNamed(id, _) | Row::VerbAlways(id, _) => {
                     let expected = table
                         .row(id)
                         .filter(|row| row.scope == Scope::Window)
@@ -980,6 +1049,75 @@ mod tests {
         );
     }
 
+    /// RED — **Quit answers with no window open, and it is the only verb row
+    /// that does** (RB-4, ruled 2026-09-15).
+    ///
+    /// The state is macOS's ordinary one and this port built it on purpose
+    /// (M3-1): the last window closes, Folio stays in the Dock, and the desk is
+    /// empty. Every *window* verb is rightly greyed there — there is nothing to
+    /// do one to — and until this ruling Quit was greyed with them, which meant
+    /// a reader in that state could not quit Folio from its own menu, and could
+    /// not type `Cmd+Q` either, because a greyed row still swallows its key
+    /// equivalent.
+    ///
+    /// The list is asserted **whole** rather than row by row: the claim is not
+    /// only that Quit is in force but that nothing else quietly became so, since
+    /// every other row would then be offering to act on a window that is not
+    /// there.
+    ///
+    /// MUTATIONS: put Quit back to a `Row::VerbNamed` and the first assertion
+    /// goes red; enable every verb row with no window and it goes red naming the
+    /// rest; make `Row::VerbAlways` drop the row's chord and the second does.
+    #[test]
+    fn quit_is_in_force_with_no_window_and_nothing_else_is() {
+        let table = mac_table();
+        let empty_desk = plan(&table, None);
+        let in_force: Vec<&'static str> = empty_desk
+            .rows()
+            .filter(|item| item.enabled)
+            .filter_map(|item| match item.action {
+                MenuAction::Verb(id) => Some(id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            in_force,
+            ["quit"],
+            "with no window open, exactly one verb row answers"
+        );
+
+        // **And it is still the same row it is with a window**: the name, the
+        // verb and the chord all come from the table, and only the enabled flag
+        // was ever the question here.
+        let quit_of = |focus: Option<Focus>| {
+            plan(&table, focus)
+                .rows()
+                .find(|item| item.action == MenuAction::Verb("quit"))
+                .cloned()
+                .expect("the bar has a Quit row")
+        };
+        let on_an_empty_desk = quit_of(None);
+        let with_a_window = quit_of(Some(every_focus()));
+        assert!(
+            on_an_empty_desk.chord.is_some(),
+            "Quit prints `Cmd+Q`, which is what makes the chord answer"
+        );
+        assert_eq!(on_an_empty_desk.chord, with_a_window.chord);
+        assert_eq!(on_an_empty_desk.title, with_a_window.title);
+        assert!(with_a_window.enabled);
+
+        // The other end of the same ruling: the predicate `main.rs`' menu
+        // landing asks before it looks for a window is read off this bar, so the
+        // two cannot come to disagree about which verbs need one.
+        assert!(is_an_application_verb("quit"));
+        for window_verb in ["new-tab", "new-window", "close-pane", "open-settings"] {
+            assert!(
+                !is_an_application_verb(window_verb),
+                "{window_verb} would be run with no window to run it on"
+            );
+        }
+    }
+
     /// PIN — **a row out of scope is disabled, and that is how the key gets back
     /// to the child.**
     ///
@@ -1016,9 +1154,20 @@ mod tests {
         // A window row is in force from every focus state, which is what
         // `Scope::Window` means.
         assert_eq!(enabled_of(Some(on_a_shell), "new-tab"), Some(true));
-        // And with no window at all there is nothing to do a verb to.
+        // And with no window at all there is nothing to do a *window* verb to.
         assert_eq!(enabled_of(None, "new-tab"), Some(false));
-        assert_eq!(enabled_of(None, "quit"), Some(false));
+        // **The ruling on Quit changed on 2026-09-15** (RB-4), and this is the
+        // line that used to read `Some(false)`. The sentence above it is why:
+        // there is nothing to do a *window* verb to, and Quit is not a window
+        // verb — there being no window is the state a reader quits *from*.
+        // Closing the last one is the ordinary resting state of this
+        // application on a Mac (M3-1), and the line this test pins two
+        // paragraphs up cuts the other way here: a greyed row does not run its
+        // verb **and still swallows the press**, so the old reading left a
+        // reader with an empty desk unable to quit Folio from its own menu or
+        // by `Cmd+Q` at all — only through AppKit's Dock row, which is a
+        // different quit. See `quit_is_in_force_with_no_window_and_nothing_else_is`.
+        assert_eq!(enabled_of(None, "quit"), Some(true));
     }
 
     /// PIN — **the six rows AppKit answers carry no chord, and they are the six
@@ -1146,9 +1295,10 @@ mod tests {
             }
             for row in bar.rows {
                 match row {
-                    Row::Own(text, _) | Row::Standard(text, _) | Row::VerbNamed(_, text) => {
-                        out.push(*text)
-                    }
+                    Row::Own(text, _)
+                    | Row::Standard(text, _)
+                    | Row::VerbNamed(_, text)
+                    | Row::VerbAlways(_, text) => out.push(*text),
                     Row::Verb(_) | Row::Rule | Row::Services => {}
                 }
             }
@@ -1180,10 +1330,14 @@ mod tests {
         for item in plan(&table, Some(every_focus())).rows() {
             assert!(!item.title.is_empty(), "a menu row has no title");
             if let MenuAction::Verb(id) = item.action
-                && !BAR
-                    .iter()
-                    .flat_map(|bar| bar.rows.iter())
-                    .any(|row| matches!(row, Row::VerbNamed(named, _) if *named == id))
+                && !BAR.iter().flat_map(|bar| bar.rows.iter()).any(|row| {
+                    // Both of the shapes that wear the *menu's* name rather
+                    // than the table's; see `Row::VerbNamed`.
+                    matches!(
+                        row,
+                        Row::VerbNamed(named, _) | Row::VerbAlways(named, _) if *named == id
+                    )
+                })
             {
                 assert_eq!(
                     Some(item.title),
