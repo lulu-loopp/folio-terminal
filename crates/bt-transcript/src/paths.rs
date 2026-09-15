@@ -109,6 +109,54 @@ pub enum PrintedPathNamespace {
 }
 
 impl PrintedPathNamespace {
+    /// Spell an already representable host path for insertion (paste-paths design §2.5).
+    /// This is lexical and assumes the default drive mounts; it never asks the disk or emits `~`.
+    /// Inputs outside the translation's domain keep their host spelling, including foreign shares.
+    #[must_use]
+    pub fn to_pane_spelling(&self, host: &str) -> String {
+        #[cfg(windows)]
+        {
+            if !matches!(self, Self::Windows) {
+                let bytes = host.as_bytes();
+                if bytes.len() >= 3
+                    && bytes[0].is_ascii_alphabetic()
+                    && bytes[1] == b':'
+                    && matches!(bytes[2], b'\\' | b'/')
+                {
+                    let prefix = if matches!(self, Self::Wsl { .. }) {
+                        "/mnt"
+                    } else {
+                        ""
+                    };
+                    return format!(
+                        "{prefix}/{}/{}",
+                        char::from(bytes[0]).to_ascii_lowercase(),
+                        host[3..].replace('\\', "/")
+                    );
+                }
+                if let Self::Wsl {
+                    distro: Some(distro),
+                    ..
+                } = self
+                {
+                    if let Some(share) = host.strip_prefix("\\\\") {
+                        if let Some((server, rest)) = share.split_once('\\') {
+                            let (name, tail) = rest.split_once('\\').unwrap_or((rest, ""));
+                            if (server.eq_ignore_ascii_case(WSL_DISTRIBUTION_SHARE_HOST)
+                                || server.eq_ignore_ascii_case("wsl$"))
+                                && name.eq_ignore_ascii_case(distro)
+                                && is_distribution_name(distro)
+                            {
+                                return format!("/{}", tail.replace('\\', "/"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        host.to_owned()
+    }
+
     /// Whether this pane prints a spelling the ordinary rooted scan cannot read — the one question
     /// the scan asks before it runs at all, so a Windows pane pays nothing for this rule.
     #[must_use]
@@ -7848,5 +7896,115 @@ mod locality_tests {
             may_read_unasked(hosts, PathNamer::ThisWindow),
             "a share this window minted is one it may read back",
         );
+    }
+}
+
+#[cfg(test)]
+mod insertion_spelling_tests {
+    use super::*;
+
+    #[test]
+    fn host_namespace_preserves_the_exact_spelling() {
+        for path in [
+            r"D:\Demo\a.txt",
+            r"d:\x",
+            r"\\server\share\a",
+            "/a/~b",
+            "/a/../b",
+        ] {
+            assert_eq!(PrintedPathNamespace::Windows.to_pane_spelling(path), path);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn lexical_mounts_aliases_and_untranslated_domains() {
+        let wsl = PrintedPathNamespace::Wsl {
+            distro: Some("Ubuntu".into()),
+            home: None,
+        };
+        let msys = PrintedPathNamespace::Msys { home: None };
+        for (path, expected) in [
+            (r"D:\Demo\a.txt", "/mnt/d/Demo/a.txt"),
+            (r"d:\x", "/mnt/d/x"),
+            (r"D:\x", "/mnt/d/x"),
+            ("C:\\", "/mnt/c/"),
+            (r"\\wsl.localhost\Ubuntu\home\a\x", "/home/a/x"),
+            (r"\\wsl$\Ubuntu\home\a\x", "/home/a/x"),
+        ] {
+            assert_eq!(wsl.to_pane_spelling(path), expected);
+        }
+        assert_eq!(msys.to_pane_spelling(r"D:\Demo\a.txt"), "/d/Demo/a.txt");
+        for path in [
+            r"\\server\share\a",
+            r"\\wsl.localhost\Debian\home\a",
+            "relative",
+            "/outside/drive/mount",
+        ] {
+            assert_eq!(wsl.to_pane_spelling(path), path);
+            assert_eq!(msys.to_pane_spelling(path), path);
+        }
+        assert_eq!(
+            msys.to_pane_spelling(r"\\wsl$\Ubuntu\home\a"),
+            r"\\wsl$\Ubuntu\home\a"
+        );
+        // This is a default-mount assumption, not a claim that Z: was mounted by the distribution.
+        assert_eq!(wsl.to_pane_spelling(r"Z:\unmounted"), "/mnt/z/unmounted");
+        let unknown = PrintedPathNamespace::Wsl {
+            distro: None,
+            home: None,
+        };
+        assert_eq!(
+            unknown.to_pane_spelling(r"\\wsl$\Ubuntu\home\a"),
+            r"\\wsl$\Ubuntu\home\a"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn supported_normalised_domain_round_trips() {
+        for ns in [
+            PrintedPathNamespace::Msys { home: None },
+            PrintedPathNamespace::Wsl {
+                distro: Some("Ubuntu".into()),
+                home: None,
+            },
+        ] {
+            for path in ["C:\\", r"D:\Demo\a.txt", r"Z:\中文\a b"] {
+                assert_eq!(
+                    ns.to_local_path(&ns.to_pane_spelling(path)),
+                    Some(PathBuf::from(path))
+                );
+            }
+        }
+        let wsl = PrintedPathNamespace::Wsl {
+            distro: Some("Ubuntu".into()),
+            home: None,
+        };
+        let inside = r"\\wsl.localhost\Ubuntu\home\ann\file";
+        assert_eq!(
+            wsl.to_local_path(&wsl.to_pane_spelling(inside)),
+            Some(inside.into())
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn known_non_identities_are_drive_case_alias_and_distribution_drive_mount() {
+        let wsl = PrintedPathNamespace::Wsl {
+            distro: Some("Ubuntu".into()),
+            home: None,
+        };
+        for (path, expected) in [
+            (r"d:\x", r"D:\x"),
+            (r"\\wsl.localhost\Ubuntu\mnt\d\x", r"D:\x"),
+            (r"\\wsl$\Ubuntu\home\a", r"\\wsl.localhost\Ubuntu\home\a"),
+        ] {
+            assert_ne!(path, expected);
+            assert_eq!(
+                wsl.to_local_path(&wsl.to_pane_spelling(path)),
+                Some(expected.into())
+            );
+        }
     }
 }

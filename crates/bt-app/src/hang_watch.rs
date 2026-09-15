@@ -241,7 +241,7 @@ fn slow_hold_threshold_ms() -> u64 {
 /// Held against [`Station`] by `every_station_has_a_slot_in_the_ledger`: a
 /// further variant added without widening this would have its milliseconds
 /// charged to nobody, and the line would silently stop adding up.
-const STATION_COUNT: usize = 24;
+const STATION_COUNT: usize = 25;
 
 /// How many reports are kept. The oldest beyond this are deleted.
 ///
@@ -376,6 +376,8 @@ pub enum Station {
     /// themselves ([`Self::WebOutcomes`], [`Self::WebRetire`]), so what is left
     /// against it is the drive itself and the chrome read that follows.
     WebSpoke = 23,
+    /// Synchronous clipboard acquisition may wait on another process's delayed renderer.
+    ClipboardRead = 24,
 }
 
 impl Station {
@@ -407,6 +409,7 @@ impl Station {
             Self::FileIndex => "apply_file_index_results",
             Self::Chrome => "refresh_chrome",
             Self::WebSpoke => "drive_web_page",
+            Self::ClipboardRead => "clipboard read",
         }
     }
 
@@ -451,6 +454,7 @@ impl Station {
             21 => Self::FileIndex,
             22 => Self::Chrome,
             23 => Self::WebSpoke,
+            24 => Self::ClipboardRead,
             _ => Self::Starting,
         }
     }

@@ -283,6 +283,7 @@ dependencies = [
  "pollster",
  "serde",
  "serde_json",
+ "shlex",
  "syntect",
  "toml_edit 0.22.27",
  "two-face",

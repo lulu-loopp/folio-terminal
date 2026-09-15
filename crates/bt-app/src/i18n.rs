@@ -336,6 +336,18 @@ const fn pick_platform(
 /// have to be renamed with it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Text {
+    // T-PASTE-1 refusal messages; Chinese is assigned to the copy lane.
+    PastePathEncoding,
+    PastePathControl,
+    PastePathPowerShellQuote,
+    PastePathDoubleQuote,
+    PastePathCmdPercent,
+    PastePathCmdExpansion,
+    PastePathNushell,
+    PasteClipboardPromise,
+    PasteClipboardRead,
+    PasteProfileOverride,
+
     // ── window chrome ──────────────────────────────────────────────────────
     /// The gear's tip **and** the dialog's own `h1` — one string, because they
     /// are one word for one thing and two literals is how two surfaces come to
@@ -2695,6 +2707,56 @@ impl Text {
     #[must_use]
     pub fn on(self, lang: Lang, platform: HostPlatform) -> &'static str {
         match self {
+            Self::PastePathEncoding => pick(
+                lang,
+                "This path cannot be sent as UTF-8.",
+                "This path cannot be sent as UTF-8.",
+            ), // zh: pending opus46
+            Self::PastePathControl => pick(
+                lang,
+                "This path contains a control character or line break.",
+                "This path contains a control character or line break.",
+            ), // zh: pending opus46
+            Self::PastePathPowerShellQuote => pick(
+                lang,
+                "This quote character has not been verified for path paste in this shell.",
+                "This quote character has not been verified for path paste in this shell.",
+            ), // zh: pending opus46
+            Self::PastePathDoubleQuote => pick(
+                lang,
+                "This path contains a double quote that this grammar cannot quote.",
+                "This path contains a double quote that this grammar cannot quote.",
+            ), // zh: pending opus46
+            Self::PastePathCmdPercent => pick(
+                lang,
+                "Command Prompt expands percent signs in paths.",
+                "Command Prompt expands percent signs in paths.",
+            ), // zh: pending opus46
+            Self::PastePathCmdExpansion => pick(
+                lang,
+                "Command Prompt delayed expansion changes exclamation marks in paths.",
+                "Command Prompt delayed expansion changes exclamation marks in paths.",
+            ), // zh: pending opus46
+            Self::PastePathNushell => pick(
+                lang,
+                "Nushell path paste has not been measured yet.",
+                "Nushell path paste has not been measured yet.",
+            ), // zh: pending opus46
+            Self::PasteClipboardPromise => pick(
+                lang,
+                "The clipboard offers a file promise. Copy a saved file instead.",
+                "The clipboard offers a file promise. Copy a saved file instead.",
+            ), // zh: pending opus46
+            Self::PasteClipboardRead => pick(
+                lang,
+                "The clipboard could not be read. Copy again and retry.",
+                "The clipboard could not be read. Copy again and retry.",
+            ), // zh: pending opus46
+            Self::PasteProfileOverride => pick(
+                lang,
+                "profiles.json: {id}: {key} is unsupported; the default was kept.",
+                "profiles.json: {id}: {key} is unsupported; the default was kept.",
+            ), // zh: pending opus46
             // ── window chrome ──────────────────────────────────────────────
             Self::Settings => pick(lang, "Settings", "设置"),
             // Mock-up 2270's own text, which names the verb in both directions.
@@ -4849,7 +4911,17 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 660] = [
+    pub const ALL: [Self; 670] = [
+        Self::PastePathEncoding,
+        Self::PastePathControl,
+        Self::PastePathPowerShellQuote,
+        Self::PastePathDoubleQuote,
+        Self::PastePathCmdPercent,
+        Self::PastePathCmdExpansion,
+        Self::PastePathNushell,
+        Self::PasteClipboardPromise,
+        Self::PasteClipboardRead,
+        Self::PasteProfileOverride,
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -5653,7 +5725,27 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 1] = [
+    const CHINESE_PENDING: [(Self, HostPlatform); 21] = [
+        (Self::PastePathEncoding, HostPlatform::Windows),
+        (Self::PastePathEncoding, HostPlatform::MacOs),
+        (Self::PastePathControl, HostPlatform::Windows),
+        (Self::PastePathControl, HostPlatform::MacOs),
+        (Self::PastePathPowerShellQuote, HostPlatform::Windows),
+        (Self::PastePathPowerShellQuote, HostPlatform::MacOs),
+        (Self::PastePathDoubleQuote, HostPlatform::Windows),
+        (Self::PastePathDoubleQuote, HostPlatform::MacOs),
+        (Self::PastePathCmdPercent, HostPlatform::Windows),
+        (Self::PastePathCmdPercent, HostPlatform::MacOs),
+        (Self::PastePathCmdExpansion, HostPlatform::Windows),
+        (Self::PastePathCmdExpansion, HostPlatform::MacOs),
+        (Self::PastePathNushell, HostPlatform::Windows),
+        (Self::PastePathNushell, HostPlatform::MacOs),
+        (Self::PasteClipboardPromise, HostPlatform::Windows),
+        (Self::PasteClipboardPromise, HostPlatform::MacOs),
+        (Self::PasteClipboardRead, HostPlatform::Windows),
+        (Self::PasteClipboardRead, HostPlatform::MacOs),
+        (Self::PasteProfileOverride, HostPlatform::Windows),
+        (Self::PasteProfileOverride, HostPlatform::MacOs),
         // zh: pending opus46 — the macOS column of the card a local file raises
         // when the engine would not take this window's rules (M4-3, §13.38 ②).
         // The Windows column beside it has had its Chinese since W2; what is
@@ -6377,6 +6469,10 @@ pub fn colour_name(colour: crate::marks::MarkColour) -> Text {
 #[must_use]
 pub fn profile_entry_fault(fault: &crate::profiles::ProfileFault) -> String {
     match (current(), fault) {
+        (_, crate::profiles::ProfileFault::PasteOverride { id, key }) => Text::PasteProfileOverride
+            .text()
+            .replace("{key}", key)
+            .replace("{id}", id),
         (Lang::English, crate::profiles::ProfileFault::Unusable { id }) => {
             format!("profiles.json: {id} names no program and was skipped")
         }
@@ -8092,6 +8188,50 @@ mod tests {
             }
         }
         assert_eq!(seen.len(), Text::ALL.len());
+    }
+
+    #[test]
+    fn paste_refusal_copy_fits_two_lines_and_tracks_its_pending_columns() {
+        use crate::toast;
+        let entries = [
+            Text::PastePathEncoding,
+            Text::PastePathControl,
+            Text::PastePathPowerShellQuote,
+            Text::PastePathDoubleQuote,
+            Text::PastePathCmdPercent,
+            Text::PastePathCmdExpansion,
+            Text::PastePathNushell,
+            Text::PasteClipboardPromise,
+            Text::PasteClipboardRead,
+            Text::PasteProfileOverride,
+        ];
+        let width = toast::TOAST_WINDOW_WIDTH_LOGICAL_PX
+            - 2.0
+                * (toast::TOAST_BORDER_LOGICAL_PX
+                    + toast::TOAST_PADDING_X_LOGICAL_PX
+                    + toast::TOAST_MARK_GAP_LOGICAL_PX)
+            - toast::TOAST_MARK_LOGICAL_PX
+            - toast::TOAST_CLOSE_LOGICAL_PX;
+        for entry in entries {
+            assert!(Text::ALL.contains(&entry));
+            for platform in Text::PLATFORM_COLUMNS {
+                assert_eq!(
+                    Text::CHINESE_PENDING.contains(&(entry, platform)),
+                    entry.on(Lang::English, platform) == entry.on(Lang::Chinese, platform)
+                );
+                // The deterministic half-em/CJK-em copy measure used by the settings budget.
+                // This budgets the reason, not the unbounded native filename displayed beside it.
+                for lang in [Lang::English, Lang::Chinese] {
+                    let lines = crate::tooltip::wrap(entry.on(lang, platform), width, |run| {
+                        run.chars()
+                            .map(|c| if c.is_ascii() { 0.5 } else { 1.0 })
+                            .sum::<f32>()
+                            * toast::TOAST_BODY_FONT_LOGICAL_PX
+                    });
+                    assert!(lines.len() <= 2, "{entry:?}/{lang:?}: {lines:?}");
+                }
+            }
+        }
     }
 
     /// PIN (§7.1.6b′, user rulings 2026-08-19 and 2026-08-20) — **the focus-mode

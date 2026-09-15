@@ -114,6 +114,7 @@ mod seed;
 mod settings;
 mod settling;
 mod shell_integration;
+mod shell_literal;
 mod shortcuts;
 /// Reading this crate's own source — for the pins that are about what the code
 /// says rather than about what it does. Test-only, so it is not compiled into
@@ -8821,32 +8822,6 @@ impl ChevronGates {
     }
 }
 
-/// The exact characters an `Insert path into terminal` press puts in the input
-/// line (K144).
-///
-/// Three rules, all the mock-up's (8078-8079):
-///
-/// * **A path with a space in it is quoted.** The string is about to be read by
-///   a shell, and to a shell a space is where one word ends. Quoted with `"`
-///   rather than `'` because this window's shells are Windows shells, where `'`
-///   is a literal character to `cmd` and a *different* kind of quote to
-///   PowerShell — and because a Windows path cannot itself contain a `"`, the
-///   character is illegal in a file name, so there is nothing to escape.
-/// * **A space in front**, unless there is already one there. Otherwise the path
-///   is welded onto whatever the user had typed, and `cat` becomes `catC:\…`.
-/// * **A space after**, always. The overwhelmingly common next thing is another
-///   argument, and the one case it is not — pressing Enter — does not care.
-fn inserted_path_text(path: &Path, needs_leading_space: bool) -> String {
-    let path = path.to_string_lossy();
-    let quoted = if path.chars().any(char::is_whitespace) {
-        format!("\"{path}\"")
-    } else {
-        path.into_owned()
-    };
-    let lead = if needs_leading_space { " " } else { "" };
-    format!("{lead}{quoted} ")
-}
-
 /// Whether the cell in front of the cursor is something the path would be
 /// welded onto.
 ///
@@ -10313,6 +10288,8 @@ struct LeafSession {
     /// a Git Bash pane out of a PowerShell tab produced a tab that said
     /// PowerShell over a running bash.
     profile: usize,
+    /// Captured at spawn: profile edits cannot change an already running shell’s paste grammar.
+    paste_recipient: shell_literal::Recipient,
     /// **Which shell integration door this pane's shell was started behind.**
     ///
     /// Beside [`Self::profile`] rather than read back off the table through it,
@@ -34186,6 +34163,7 @@ fn create_leaf_session(
         wake: pty.is_some().then_some(wake),
         pty,
         profile,
+        paste_recipient: profiles::paste_recipient(profile, &bt_pty::SystemShellEnvironment),
         // The door of the profile this pane actually came up as, read once,
         // here, where that profile is finally known — after both fallbacks. See
         // the field for why it is not read again later.
@@ -76927,14 +76905,31 @@ impl Runtime<'_> {
     /// **It is sent as a paste, not as typing.** The bytes are wrapped by
     /// [`input::paste_bytes`] exactly as a clipboard paste is, so a shell in
     /// bracketed-paste mode is told this arrived as one lump — which is what
-    /// stops a path from being read as anything but characters.
+    /// distinguishes the paste from typing. The path encoder separately keeps
+    /// each representable path in one argument at a fresh argument boundary.
     fn insert_path_into_terminal(&mut self, path: &Path) -> Result<()> {
         let active = self.window.active_tab;
         let Some(leaf) = self.window.tabs[active].focused() else {
             return Ok(());
         };
         let seat = self.window.tabs[active].focused_leaf;
-        let text = inserted_path_text(path, input_line_needs_a_space_first(&leaf.session));
+        let insertion = shell_literal::paths_text(
+            &[path.to_path_buf()],
+            &leaf.paste_recipient,
+            input_line_needs_a_space_first(&leaf.session),
+        );
+        if let Some(notice) = shell_literal::refusal_notice(&insertion.refused) {
+            self.toast(
+                toast::ToastKind::Error,
+                toast::ToastAnchor::Window,
+                None,
+                notice,
+            )?;
+        }
+        if insertion.text.is_empty() {
+            return Ok(());
+        }
+        let text = insertion.text;
 
         // The keyboard goes back to the shell before the characters do. The
         // press that raised this menu very likely came from a column that had
@@ -96311,9 +96306,26 @@ impl Runtime<'_> {
     /// not move the focus.
     fn paste_from_clipboard_into(&mut self, seat: SeatId) -> Result<()> {
         let active = self.window.active_tab;
-        // Destructured rather than reached through three derefs: the paste needs
-        // the shell's screen, its projection and its pipe held at once, and they
-        // are three fields of one leaf.
+        let Some(leaf) = self.window.tabs[active].sessions.get(&seat) else {
+            return Ok(());
+        };
+        let recipient = leaf.paste_recipient.clone();
+        let leading_space = input_line_needs_a_space_first(&leaf.session);
+        let leaving = hang_watch::enter(hang_watch::Station::ClipboardRead);
+        let payload = bt_platform::clipboard_payload();
+        hang_watch::at(leaving);
+        let prepared = prepare_clipboard_paste(payload, &recipient, leading_space);
+        if let Some(notice) = prepared.notice {
+            self.toast(
+                toast::ToastKind::Error,
+                toast::ToastAnchor::Window,
+                None,
+                notice,
+            )?;
+        }
+        let Some(text) = prepared.text else {
+            return Ok(());
+        };
         let Some(LeafSession {
             pty,
             session,
@@ -96323,18 +96335,9 @@ impl Runtime<'_> {
         else {
             return Ok(());
         };
-        if !paste_from_clipboard(
-            session,
-            projection,
-            || {
-                bt_platform::clipboard_text()
-                    .map_err(|error| anyhow!(error))
-                    .context("read clipboard text")
-            },
-            |bytes| write_pty_input(pty.as_ref(), bytes, "write clipboard paste to PTY"),
-        )? {
-            return Ok(());
-        }
+        paste_text(session, projection, &text, |bytes| {
+            write_pty_input(pty.as_ref(), bytes, "write clipboard paste to PTY")
+        })?;
         // A paste is one gesture landing in one named pane, so it answers whatever that pane was
         // asking — and it is the pane the clipboard went into, not the one holding the keyboard
         // (`attention` plan §10.3.2 row 3).
@@ -110677,22 +110680,54 @@ fn recoverable_clipboard_write(result: Result<()>, action: &str) -> bool {
     }
 }
 
-fn paste_from_clipboard(
-    session: &mut DualPlaneSession,
-    projection: &mut ViewportProjection,
-    read: impl FnOnce() -> Result<String>,
-    write: impl FnOnce(&[u8]) -> Result<()>,
-) -> Result<bool> {
-    let Some(text) = recoverable_clipboard_read(read()) else {
-        return Ok(false);
-    };
-    paste_text(session, projection, &text, write)?;
-    Ok(true)
+/// The payload and later path refusals are separate causes, both delivered to the app's toast host.
+struct PreparedClipboardPaste {
+    text: Option<String>,
+    notice: Option<String>,
+}
+
+fn prepare_clipboard_paste(
+    payload: std::result::Result<bt_platform::ClipboardPayload, String>,
+    recipient: &shell_literal::Recipient,
+    leading_space: bool,
+) -> PreparedClipboardPaste {
+    use bt_platform::ClipboardPayload;
+    match payload {
+        Ok(ClipboardPayload::Files(paths)) => {
+            let insertion = shell_literal::paths_text(&paths, recipient, leading_space);
+            PreparedClipboardPaste {
+                text: (!insertion.text.is_empty()).then_some(insertion.text),
+                notice: shell_literal::refusal_notice(&insertion.refused),
+            }
+        }
+        Ok(ClipboardPayload::Text(text)) => PreparedClipboardPaste {
+            text: Some(text),
+            notice: None,
+        },
+        Ok(ClipboardPayload::Nothing | ClipboardPayload::Picture(_)) => PreparedClipboardPaste {
+            text: None,
+            notice: None,
+        },
+        Ok(ClipboardPayload::Refused(bt_platform::UnsupportedKind::Promise)) => {
+            PreparedClipboardPaste {
+                text: None,
+                notice: Some(i18n::Text::PasteClipboardPromise.text().to_owned()),
+            }
+        }
+        Err(_) => {
+            // Native error strings never need to carry the source's names or text into diagnostics.
+            eprintln!("clipboard acquisition failed; paste ignored");
+            PreparedClipboardPaste {
+                text: None,
+                notice: Some(i18n::Text::PasteClipboardRead.text().to_owned()),
+            }
+        }
+    }
 }
 
 /// Deliver one string to a shell the way a paste is delivered.
 ///
-/// Split out of [`paste_from_clipboard`] rather than copied because the files
+/// Shared by terminal clipboard routing and K144 rather than copied because the files
 /// tree's `Insert path into terminal` (K144) is a paste in every respect that
 /// matters to the shell and to the view — the selection goes, the view returns
 /// to the bottom, the bytes are bracketed if the shell asked for bracketing, and
@@ -110719,16 +110754,6 @@ fn paste_text(
     projection.set_selection(None);
     projection.scroll_to_bottom();
     write(&bytes)
-}
-
-fn recoverable_clipboard_read(result: Result<String>) -> Option<String> {
-    match result {
-        Ok(text) => Some(text),
-        Err(error) => {
-            eprintln!("clipboard does not contain readable text; paste ignored: {error:#}");
-            None
-        }
-    }
 }
 
 /// **Which shape a recalled command's arrival takes** (DESIGN.md §7.55 ⑨).
@@ -130476,34 +130501,39 @@ mod tests {
         projection.set_selection(Some(selection));
         let mut pty_writes = Vec::new();
 
-        assert!(
-            !paste_from_clipboard(
-                &mut session,
-                &mut projection,
-                || Err(anyhow!("injected clipboard owner contention")),
-                |chunk| {
-                    pty_writes.extend_from_slice(chunk);
-                    Ok(())
-                },
-            )
-            .unwrap()
-        );
+        let recipient = shell_literal::Recipient {
+            encoder: shell_literal::Encoder {
+                grammar: shell_literal::ShellGrammar::Posix,
+                named_cmd: false,
+                delayed_expansion: false,
+                powershell_doubled_quotes: &[],
+            },
+            namespace: bt_transcript::paths::PrintedPathNamespace::Windows,
+            spelling: None,
+            wsl_distribution: None,
+        };
+        let unavailable =
+            prepare_clipboard_paste(Err("injected contention".into()), &recipient, false);
+        assert!(unavailable.text.is_none());
+        assert!(unavailable.notice.is_some());
         assert!(pty_writes.is_empty());
         assert!(session.view_selection().is_some());
         assert!(projection.selection().is_some());
-
-        assert!(
-            paste_from_clipboard(
-                &mut session,
-                &mut projection,
-                || Ok("paste me".to_owned()),
-                |chunk| {
-                    pty_writes.extend_from_slice(chunk);
-                    Ok(())
-                },
-            )
-            .unwrap()
+        let retry = prepare_clipboard_paste(
+            Ok(bt_platform::ClipboardPayload::Text("paste me".into())),
+            &recipient,
+            false,
         );
+        paste_text(
+            &mut session,
+            &mut projection,
+            retry.text.as_deref().unwrap(),
+            |bytes| {
+                pty_writes.extend_from_slice(bytes);
+                Ok(())
+            },
+        )
+        .unwrap();
         assert_eq!(pty_writes, b"paste me");
         assert!(session.view_selection().is_none());
         assert!(projection.selection().is_none());
@@ -152559,29 +152589,31 @@ mod tests {
     /// command; and the trailing one is what lets the next argument be typed
     /// without reaching for the space bar first.
     #[test]
-    fn an_inserted_path_is_quoted_when_it_has_to_be_and_spaced_on_both_sides() {
-        let plain = Path::new(r"C:\work\notes.md");
-        assert_eq!(inserted_path_text(plain, false), r"C:\work\notes.md ");
-        assert_eq!(inserted_path_text(plain, true), r" C:\work\notes.md ");
-
-        let spaced = Path::new(r"C:\Program Files\thing.exe");
-        assert_eq!(
-            inserted_path_text(spaced, false),
-            "\"C:\\Program Files\\thing.exe\" ",
-            "a space in a path is where a shell would end the word"
-        );
-        assert_eq!(
-            inserted_path_text(spaced, true),
-            " \"C:\\Program Files\\thing.exe\" "
-        );
-        assert!(
-            inserted_path_text(plain, false).ends_with(' '),
-            "always a space after, so the next argument can just be typed"
-        );
-        assert!(
-            !inserted_path_text(plain, false).starts_with(' '),
-            "and never one in front when the input line already ends in one"
-        );
+    fn an_inserted_path_is_always_quoted_and_spaced_on_both_sides() {
+        let recipient = shell_literal::Recipient {
+            encoder: shell_literal::Encoder {
+                grammar: shell_literal::ShellGrammar::PowerShell,
+                named_cmd: false,
+                delayed_expansion: false,
+                powershell_doubled_quotes: &[],
+            },
+            namespace: bt_transcript::paths::PrintedPathNamespace::Windows,
+            spelling: None,
+            wsl_distribution: None,
+        };
+        for path in [
+            r"C:\work\notes.md",
+            r"C:\Program Files\thing.exe",
+            r"C:\$RECYCLE.BIN",
+        ] {
+            for leading in [false, true] {
+                let insertion = shell_literal::paths_text(&[path.into()], &recipient, leading);
+                assert_eq!(
+                    insertion.text,
+                    format!("{}'{path}' ", if leading { " " } else { "" })
+                );
+            }
+        }
     }
 
     /// PIN — K144's leading space, read off the screen the shell drew.
@@ -155575,6 +155607,10 @@ mod tests {
             // panes exist to carry scrollback, and the default profile is what
             // the pane they stand in for would have been started as.
             profile: profiles::fallback_profile(),
+            paste_recipient: profiles::paste_recipient(
+                profiles::fallback_profile(),
+                &bt_pty::SystemShellEnvironment,
+            ),
             // And the door that profile is served through, which is the one the
             // spawn would have read for it.
             integration: profiles::row(profiles::fallback_profile())
@@ -165833,5 +165869,181 @@ mod field_command_tests {
         // enter this program is through `bt-platform`. That is where M3-2's menu
         // bar is hung, and where the rule is kept:
         // `macos_menu::tests::the_menu_bar_does_not_end_the_process_where_it_stands`.
+    }
+}
+
+#[cfg(test)]
+mod clipboard_path_tests {
+    use super::*;
+    use bt_platform::clipboard::{Candidate, ClipboardPort, ClipboardTypes};
+
+    struct MemoryClipboard {
+        files: Vec<PathBuf>,
+        text: String,
+        fetched: Vec<&'static str>,
+    }
+    impl ClipboardPort for MemoryClipboard {
+        fn begin(&mut self) -> std::result::Result<(), String> {
+            Ok(())
+        }
+        fn survey(&mut self) -> std::result::Result<ClipboardTypes, String> {
+            Ok(ClipboardTypes {
+                files: true,
+                text: true,
+                picture: true,
+                promise: false,
+            })
+        }
+        fn files(&mut self) -> Candidate<Vec<PathBuf>> {
+            self.fetched.push("files");
+            Candidate::Present(self.files.clone())
+        }
+        fn text(&mut self) -> Candidate<String> {
+            self.fetched.push("text");
+            Candidate::Present(self.text.clone())
+        }
+        fn finish(&mut self) -> std::result::Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn recipient() -> shell_literal::Recipient {
+        shell_literal::Recipient {
+            encoder: shell_literal::Encoder {
+                grammar: shell_literal::ShellGrammar::Posix,
+                named_cmd: false,
+                delayed_expansion: false,
+                powershell_doubled_quotes: &[],
+            },
+            namespace: bt_transcript::paths::PrintedPathNamespace::Windows,
+            spelling: None,
+            wsl_distribution: None,
+        }
+    }
+
+    #[test]
+    fn fake_clipboard_reaches_one_paste_write_and_inherits_the_terminal_bracketing() {
+        for bracketed in [false, true] {
+            let mut clipboard = MemoryClipboard {
+                files: vec![
+                    "/first".into(),
+                    "/bad\nname".into(),
+                    "/second space".into(),
+                    "/third".into(),
+                ],
+                text: "Finder leaf name".into(),
+                fetched: Vec::new(),
+            };
+            let mut session =
+                DualPlaneSession::new(NonZeroU32::new(40).unwrap(), NonZeroU32::new(4).unwrap());
+            session.feed(b"cat").unwrap();
+            if bracketed {
+                session.feed(b"\x1b[?2004h").unwrap();
+            }
+            let prepared = prepare_clipboard_paste(
+                bt_platform::clipboard::read_payload(&mut clipboard),
+                &recipient(),
+                input_line_needs_a_space_first(&session),
+            );
+            assert_eq!(clipboard.fetched, ["files"]);
+            assert!(prepared.notice.unwrap().contains("bad\\nname"));
+            let text = prepared.text.unwrap();
+            assert_eq!(text, " '/first' '/second space' '/third' ");
+            let mut projection = session.new_projection(session.layout_key());
+            let mut writes = Vec::new();
+            paste_text(&mut session, &mut projection, &text, |bytes| {
+                writes.push(bytes.to_vec());
+                Ok(())
+            })
+            .unwrap();
+            let expected = if bracketed {
+                format!("\x1b[200~{text}\x1b[201~").into_bytes()
+            } else {
+                text.into_bytes()
+            };
+            assert_eq!(writes, [expected]);
+            assert!(!writes[0].contains(&b'\r'));
+        }
+    }
+
+    #[test]
+    fn text_is_unchanged_and_empty_text_does_not_fall_through() {
+        for text in [
+            "",
+            "\"D:\\Copy as path\\a.txt\"",
+            "ordinary\ntext\twith controls",
+        ] {
+            let mut clipboard = MemoryClipboard {
+                files: Vec::new(),
+                text: text.into(),
+                fetched: Vec::new(),
+            };
+            let prepared = prepare_clipboard_paste(
+                bt_platform::clipboard::read_payload(&mut clipboard),
+                &recipient(),
+                true,
+            );
+            assert_eq!(prepared.text.as_deref(), Some(text));
+            assert!(prepared.notice.is_none());
+            assert_eq!(clipboard.fetched, ["files", "text"]);
+        }
+    }
+
+    #[test]
+    fn nothing_is_silent_and_payload_refusal_acquisition_error_and_path_error_each_report() {
+        use bt_platform::{ClipboardPayload, UnsupportedKind};
+        for payload in [
+            ClipboardPayload::Nothing,
+            ClipboardPayload::Picture(Vec::new()),
+        ] {
+            let prepared = prepare_clipboard_paste(Ok(payload), &recipient(), false);
+            assert!(prepared.text.is_none());
+            assert!(prepared.notice.is_none());
+        }
+        for result in [
+            Ok(ClipboardPayload::Refused(UnsupportedKind::Promise)),
+            Err("injected read failure".into()),
+            Ok(ClipboardPayload::Files(vec!["/bad\tname".into()])),
+        ] {
+            let prepared = prepare_clipboard_paste(result, &recipient(), true);
+            assert!(prepared.text.is_none());
+            assert!(prepared.notice.is_some());
+        }
+    }
+
+    #[test]
+    fn terminal_is_the_only_new_clipboard_caller_and_k144_keeps_focus() {
+        let source = include_str!("main.rs");
+        let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
+        assert_eq!(
+            before_this_fixture
+                .matches("bt_platform::clipboard_payload()")
+                .count(),
+            1
+        );
+        let paste = source
+            .split_once("    fn paste_from_clipboard_into(")
+            .unwrap()
+            .1
+            .split_once("    /// A composition event")
+            .unwrap()
+            .0;
+        assert!(paste.contains("bt_platform::clipboard_payload()"));
+        assert!(paste.contains("hang_watch::Station::ClipboardRead"));
+        assert!(paste.contains("leaf.paste_recipient.clone()"));
+        assert!(!paste.contains("set_focus("));
+        assert!(!paste.contains("set_files_keyboard("));
+        let k144 = source
+            .split_once("    fn insert_path_into_terminal(")
+            .unwrap()
+            .1
+            .split_once("    // ── the floating window")
+            .unwrap()
+            .0;
+        assert!(k144.contains("shell_literal::paths_text("));
+        assert!(k144.contains("set_files_keyboard(None"));
+        assert!(k144.contains("self.seats.set_focus(seat)"));
+        assert!(k144.contains("paste_text("));
+        assert!(!k144.contains("to_string_lossy"));
     }
 }
