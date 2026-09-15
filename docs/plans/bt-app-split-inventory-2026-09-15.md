@@ -5,7 +5,7 @@ Taken against `main` at `76ca0788` in the worktree
 `docs/plans/bt-app-split.md`; that document cites these tables and does not
 restate the method.
 
-**Revision 3**, after two adversarial reviews.
+**Revision 4**, after three adversarial reviews.
 
 Round 1 — `docs/plans/review/bt-app-split-review-2026-09-15.md` — rebuilt the
 dependency graph independently with tree-sitter and NetworkX, re-ran the
@@ -22,7 +22,20 @@ percentages (§0.3), the churn number's provenance (§2.3), the classification o
 the 91 source pins (§3.1), and one subtraction (§3.2). The same rule applies:
 the corrected number is used and the wrong one is kept beside it.
 
-Nothing here was built: no `cargo build`, no `cargo check`, no `cargo test`.
+Round 3 — `docs/plans/review/bt-app-split-review-3-2026-09-15.md` — found this
+file **still stating four readings the plan had withdrawn**, as current
+conclusions rather than as rejected history (R3-6). **An evidence file that
+contradicts the plan it is evidence for is worse than no evidence file**, so
+this revision corrects all four in place and marks each: **§2's "sharing no
+artifacts"**, **§6.3's ~124 MiB attribution**, **§7's platform-array work
+order**, and **§5's definition of the graph and of "free"**. It also corrects
+§3.1's binding census. **The operative rule for a ticket writer: where this file
+and `docs/plans/bt-app-split.md` still disagree about what to do, the plan is
+operative and this file is evidence.** In particular, §7's platform work order
+is withdrawn and must not be imported into Step 2a.
+
+Nothing here was built: no `cargo build`, no `cargo check`, no `cargo test`. No
+script under `scripts/dev/` was edited in this pass.
 
 **How to read the labels.** A number marked *measured* came out of a tool run on
 this tree and can be reproduced. A number marked *estimated* is a model with its
@@ -228,9 +241,18 @@ opt-level = 1` is at `Cargo.toml:193–194`**, and **there is no `[profile.dev]`
 in this workspace** — the only `^[profile` lines in the manifest are 193
 (`[profile.test]`) and 199 (`[profile.release]`). So dev is the built-in default
 at `opt-level = 0`, and `cargo build` and `cargo test` compile the entire graph
-— dependencies included — at two different optimisation levels, sharing no
-artifacts. `.cargo/config.toml` on this machine sets `jobs = 19` and carries
+— dependencies included — at two different optimisation levels.
+`.cargo/config.toml` on this machine sets `jobs = 19` and carries
 `target-feature=+crt-static` at line 39.
+
+***"Sharing no artifacts" is withdrawn*** (round 3, R3-6; the plan withdrew it
+at §4.3 and this file did not follow). The defensible statement is the
+mechanism, not the total: **a differing profile setting changes a unit's
+fingerprint, so units compiled under it are not reused**, and reuse is
+conditional on matching target, mode, features, profile **and** flags together.
+What is shared under the two commands is therefore a **measurement** — plan
+§4.2's artefact records take it — and not a quantity this file may assert. The
+plan's §4.3 trial exists to record which units actually become fresh.
 
 ### 2.1 Source size
 
@@ -366,7 +388,11 @@ holding 770 of the file's 1,043 `#[test]` functions**. The next largest are
 **The 91 source-reading pins, corrected.** `include_str!("main.rs")` appears
 **91 times as a macro invocation — 53 inside functions and 38 at module level
 inside a test module. They are not 91 independent tests**; a shared `SOURCE` can
-serve several. 87 bind it to a `const SOURCE`, two to `MAIN`, two to `source`.
+serve several. **89 bind it to a `const` — 87 named `SOURCE`, two named `MAIN` —
+and two bind it to a `let`**, at `main.rs:125096` and `:157543` (round 3,
+R3-4). Revision 3 wrote "87 `SOURCE`, two `MAIN`, two `source`" as though all
+four groups were constants, which matters to any enumerator that filters by
+declaration kind.
 
 **None of the 91 uses `source_pin::source_region`.** The first draft said that
 helper was already the mechanism; `source_region(` appears zero times in
@@ -391,16 +417,22 @@ counts are given beside them:
 this file does not supply a new one: the counts above are a re-count at one
 snapshot, not an audit by subject. The plan's §6.2(b) says what the audit is and
 requires it to happen during implementation, with every converted guard's scope
-recorded and mutation-checked.
+recorded and mutation-checked **by class** — round 3's R3-4 shows one mutation
+rule cannot serve all four, because a whole-source negative is green *because*
+its forbidden text is absent, and an arity assertion narrowed to one file can
+keep its count while losing its reach. The four rules are in the plan, not here.
 
 Note also that three of the four negatives assemble their needles rather than
 writing them — `:15767` and `:113781` with `concat!`, `:105701` with a built
 escape — precisely because a file that reads itself matches its own text. Any
 assertion converted to a whole-crate scan has to keep that discipline.
 
-A multi-file pin already exists in the tree — `main.rs:165696` reads both
-`main.rs` and `preview_edit.rs` — so the `const SOURCES: &[&str]` form has
-precedent. Nine other modules pin themselves with `include_str!` of their *own*
+A multi-file pin already exists in the tree — `main.rs:165696–165697`, where one
+test module reads both `main.rs` and `preview_edit.rs`. **It is two separate
+constants, `SOURCE` and `PREVIEW_EDIT`, not a slice**, and `const SOURCES`
+appears nowhere in `main.rs` (round 3, R3-4). So it is precedent for one module
+reading two files, and **not** for the `const SOURCES: &[&str]` shape the plan
+may still design. Nine other modules pin themselves with `include_str!` of their *own*
 file, which is the pattern that survives a move. And a single `SOURCE` can serve
 several subjects bound for different files, which is why "one include
 replacement per invocation" is not a general rule.
@@ -588,8 +620,13 @@ unaccounted for they invited exactly the conclusion the review struck.
 
 ## 5. The module graph — two graphs, and only one of them is the crate graph
 
-*Measured by `scripts/dev/bt-app-graph.py`, over `crates/bt-app/src` with
-`main.rs` excluded as a node and each directory-module folded into one.*
+*Measured by `scripts/dev/bt-app-graph.py`, over `crates/bt-app/src`, with each
+directory-module folded into one node.*
+
+***Corrected*** (round 3, R3-6): revision 3 said here that the graph excludes
+`main.rs` as a node. **It does not — in the `root_prod` variants `main.rs` is
+present as the node `@root`**, which is the entire reason those variants are the
+ones a crate split has to obey. Only the `regex_*` variants leave it out.
 
 Six variants are emitted. Two matter here:
 
@@ -624,13 +661,25 @@ ownership, "all of it" is nearly the whole crate.
 
 ### 5.2 The cut table, both graphs
 
-*Measured.* "Free" means: this module's transitive closure never enters the
-largest component, so it could leave.
+*Measured.* **The builder emits two different measures and revision 3 printed
+one under the other's name** (round 3, R3-6). They are:
 
-| Cut | `regex_full` free | `root_prod` free | `root_prod` largest |
-| --- | --- | --- | --- |
-| baseline | 33 / 24,572 | **16 / 11,761** | 80 / 442,903 |
-| after the `i18n` cut | 51 / 66,273 | **22 / 31,358** | 74 / 423,306 |
+| Measure | What the script computes |
+| --- | --- |
+| **`free`** — strict, and the one the plan uses | a module is free when it is in **no** nontrivial strongly connected component and is an ancestor of none, and (in the `root_*` variants) is not an ancestor of `@root`. It **rejects every cycle**, not only the biggest one. |
+| **`avoid_largest`** | a module is counted when it is outside the **largest** component and is not an ancestor of it. It tolerates membership of, or dependence on, a smaller cycle. |
+
+| Cut | `regex_full` free | `regex_full` avoid-largest | `root_prod` free | `root_prod` largest |
+| --- | --- | --- | --- | --- |
+| baseline | 33 / 24,572 | 33 / 24,572 | **16 / 11,761** | 80 / 442,903 |
+| after the `i18n` cut | **48 / 55,302** | 51 / 66,273 | **22 / 31,358** | 74 / 423,306 |
+
+**So the "51 / 66,273" this file printed as `regex_full` free is the
+avoid-largest figure**; strict free is **48 / 55,302**. It changes nothing in
+the `root_prod` column — the two measures coincide on every row there, which is
+why the plan's arithmetic is unaffected — but it does change the reproduction of
+the historical comparison, and the general definition of "free" this file
+publishes.
 
 **The multiplier the `i18n` cut buys survives the correction almost exactly —
 2.67× against 2.70×. The absolute mass does not: 31,358 / 456,556 is 6.9% of the
@@ -761,10 +810,20 @@ symbols are in the PDB and not the image (`Cargo.toml:212`, `:236`, `:239`). So:
 
 - the **654.6 MiB PDB** is debug information, and `debug = "line-tables-only"`
   is aimed at it;
-- the **209.8 MiB image** is code, of which the ~124 MiB over the bin is the
-  crate's own test code plus `libtest`;
-- `bt-render` and `winit` monomorphisation is in **both** images, so it is not
-  what makes the harness the larger one.
+- the **209.8 MiB image** is code, and **the ~124 MiB by which it exceeds the
+  bin is unattributed.**
+
+***The decomposition is withdrawn*** (round 3, R3-6; the plan withdrew it at
+§4.4b and this file did not follow). Revision 3 wrote here that the excess "is
+the crate's own test code plus `libtest`", and that `bt-render`/`winit`
+monomorphisation cannot explain it because it appears in both images. **Neither
+claim is supported by what was measured.** The two figures are historical
+binaries from **different profiles and different builds**, compared without
+symbol or section analysis; and a shared generic library appearing in both
+images says nothing about how much *instantiated or reachable* machine code each
+image contains. The honest form is the plan's: **the PDB is the principal
+target, the image is not expected to move much, and the trial measures the image
+rather than predicting it.**
 
 **They are two separate wins on two separate quantities and must not be added
 together**, which the first draft did.
@@ -795,26 +854,40 @@ budgets.
 
 | Coupling | Count | What it does on a split |
 | --- | ---: | --- |
-| `include_str!("main.rs")` macro invocations in its own tests | 91 (53 in fns, 38 at module level) | ~88 fail loudly on a fragment; **3 pass vacuously** (§3.1) |
-| `FILES_THAT_MAY_NAME_A_PLATFORM` at `main.rs:163012` | 1 array of 11 | **must be edited** — see below |
+| `include_str!("main.rs")` macro invocations in its own tests | 91 (89 `const`, 2 `let`; 53 in fns, 38 at module level) | most fail loudly on a fragment; **3 whole-source negatives pass vacuously**, and one scoped negative was misfiled among them (§3.1) |
+| `FILES_THAT_MAY_NAME_A_PLATFORM` at `main.rs:163012` | 1 array of 11 | **no edit under the plan's Step 2a** — see below |
 | `the_shell_page_is_gone` at `main.rs:161410` | 1 | scans `src` with **non-recursive** `read_dir`; a `runtime/` subdirectory silently leaves its scope |
 | `scripts/check-portable-core.ps1` | 1 | parses the array out of `main.rs` by regex (`:227`), requires ≥5 entries (`:240`), walks `src` **recursively** (`:248`) |
 | references to `main.rs` in `docs/DESIGN.md` | 151 | path references in prose, not line numbers |
 | references to `main.rs` across `docs/` | 209 | as above |
 | `[[bin]] path = "src/main.rs"` | 1 | stays correct while `main.rs` is the crate root |
 
-**The platform array is the hard one, and the first draft got it wrong.** It
-said the array stays in `main.rs` and the script is untouched, "the cheapest
-possible answer". The array lives inside `#[cfg(test)] mod platform_gate_tests`
-(`:163007`); one of its eleven entries is `"main.rs"` itself, admitted for the
-startup path and the five platform calls M1-1 made non-fatal — code a theme
-split moves into `runtime/launch.rs`. Its test,
+**The platform array is the hard one, and the first draft got it wrong** — but
+so did this file's answer, twice over. What is **measured** here stands; **the
+work order that used to follow it is withdrawn** (round 3, R3-6).
+
+*The measurements.* The array lives inside `#[cfg(test)] mod
+platform_gate_tests` (`:163007`), declared `[&str; 11]`, and one of its eleven
+entries is `"main.rs"` itself. Its test,
 `only_the_named_files_decide_what_platform_this_is` (`:163103`), walks
 `sources()` (`:163045`) recursively with `\`→`/` normalised relative names, so a
-moved file arrives as `runtime/launch.rs`. **And it asserts in both directions**
-— `strangers` empty (a new file naming a platform fails) *and* `silent` empty (a
-listed name that has stopped naming one fails). Moving any platform `cfg` out of
-`main.rs` trips both at once, and the PowerShell twin fails the same way.
+moved file would arrive as `runtime/launch.rs`. **And it asserts in both
+directions** — `strangers` empty (a new file naming a platform fails) *and*
+`silent` empty (a listed name that has stopped naming one fails).
+`scripts/check-portable-core.ps1` is its twin: it parses the array out of
+`main.rs` by regex (`:227`), requires at least five entries (`:240`), walks the
+same tree recursively (`:248`), and applies the same two checks at `:276–288`.
+
+*Three statements this file used to make, and what replaces each.*
+
+| Withdrawn | What is true |
+| --- | --- |
+| "the array **must be edited**" | **Not under the plan's Step 2a**, which moves the two `impl Runtime<'_>` blocks and nothing else — so no entry is admitted, none goes silent, and the arity stays 11. The plan's §6.2(a) decides that `platform_gate_tests` **keeps its physical home in `main.rs`**, with a written 2b exception, because the PowerShell twin reads the array out of that file by name. |
+| "the launch code moves into `runtime/launch.rs`" | That is a **possible later scope**, not this plan's. `fn main` can never leave `main.rs` and it holds two of the eleven matches, so `"main.rs"` stays listed on its own merits either way. |
+| "moving any platform `cfg` out of `main.rs` trips both directions at once" | **Only one direction, and only on the last one.** A listed file goes `silent` when its **last** real use is removed; moving one of several changes nothing. And the eleven matches are **ten compiler `cfg` attributes plus one line of test code** (`:163322`) that merely contains the spellings as literals — so the guard counts `main.rs` as naming a platform from its own test text, and cannot tell anyone that `main.rs`'s production platform code has left. |
+
+**A ticket writer must not import this section's old work order into Step 2a.**
+The operative instruction is the plan's §6.2(a).
 
 Note the disagreement sitting in one file: one whole-program guard walks `src`
 recursively and the other does not.

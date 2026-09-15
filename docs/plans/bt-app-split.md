@@ -1,11 +1,12 @@
 # Splitting `bt-app` — the plan
 
-2026-09-15, revised twice the same day after two adversarial reviews. Written
-against `main` at `76ca0788`, in the worktree
-`D:\Developer\bt-wt\bt-app-split-plan`.
+2026-09-15, revised three times the same day after three adversarial reviews.
+Written against `main` at `76ca0788`, in the worktree
+`D:\Developer\bt-wt\bt-app-split-plan`; the caller references in §5 are
+refreshed against `main` at `ee771130`, which is where the tickets will be cut.
 
-**Revision 3.** Two read-only adversarial reviews have been answered, and the
-ledger in §12 has a half for each.
+**Revision 4.** Three read-only adversarial reviews have been answered, and the
+ledger in §12 has a section for each.
 
 - **Round 1** — `docs/plans/review/bt-app-split-review-2026-09-15.md`, phases
   1–3 by Codex and phases 4–5 by an Opus reviewer after that session hit its
@@ -28,12 +29,36 @@ ledger in §12 has a half for each.
   these follow" table is not six sufficient cuts** (R2-3). The first is why §6.2
   and §6.5 are rewritten; the third is why §7.3 is now a queue of prerequisites
   instead of a table of unlocks.
+- **Round 3** — `docs/plans/review/bt-app-split-review-3-2026-09-15.md`, Codex
+  again, read against revision 3 at `d91b66ca`. It re-ran both scripts, checked
+  every one of revision 3's twelve R2 ledger rows against the body — **three
+  closed, nine partially closed** — reproduced the pin census by AST, re-derived
+  the two-impl scope and the eleven platform lines, and raised **eight findings,
+  R3-1 to R3-8: three blocking dispatch (R3-1, R3-4, R3-5)**, answered in
+  **§12.3**. It also returns a **per-step dispatch verdict**, and its two
+  load-bearing answers are the ones this revision is written for: **the Step 0
+  baseline ticket and the Step 1 cut ticket are not dispatchable verbatim from
+  revision 3**, and it says exactly what each needs. Its load-bearing
+  corrections: **§4.2's evidence table asks stable Cargo for a link boundary it
+  does not expose, and for a unit census verbose logs do not contain** (R3-1);
+  **§0.1's gate table requires a ticket's own output as permission to dispatch
+  it** (R3-2); and **one remove-the-subject mutation rule can validate neither a
+  negative assertion nor an arity assertion** (R3-4).
+
+**What this revision is for.** This plan executes **after 0.4.1 ships**. The
+immediate goal of revision 4 is narrow, and it is stated so it can be checked:
+**Step 0's baseline ticket and Step 1's five-file cut ticket become dispatchable
+as written, with entry gates a person can tick off** — the two "Dispatchable
+now" boxes at the head of §4 and §5. **Steps 2, 3 and 4 stay revised plans**,
+not tickets; their gates are tightened where round 3 says they must be, and
+nothing in them is dispatched by this document.
 
 **What this revision does not reopen.** Step 4 stays withheld. No constants
 crate and no whole-`AppEvent` library is introduced to preserve a line count.
 And Step 0's first item — the shortcut scripts' workspace selection — is no
 longer a Step 0 commit: it has landed elsewhere, and §4.1 records what landed
-rather than proposing it.
+rather than proposing it. No script under `scripts/dev/` is edited in this pass;
+the two known defects in the retained generator stay recorded in §7.1.
 
 Numbers come from `docs/plans/bt-app-split-inventory-2026-09-15.md`, revised in
 the same pass. Where a section leans on a measurement it names the inventory
@@ -104,19 +129,42 @@ before it can follow.
 | Step 2 | **Step 3** — extract crates in dependency order | rethink the table, then row by row | the table is regenerated from the root-aware graph and the generator is retained in the tree (findings 1, 2, 3, 13, 15) |
 | Step 3 | **Step 4** — the orchestrator boundary | **rethink; do not dispatch** | it is a design prompt, not a boundary; and "switched off" has no mechanism in this workspace (findings 14, 22) |
 
-**And what each step has to show before it is dispatched.** Round 2 kept every
-round-1 verdict and attached a condition to each. Those conditions are this
+**And what each step has to show before it is dispatched.** Rounds 2 and 3 kept
+every round-1 verdict and attached conditions to each. Those conditions are this
 plan's own gates now, and each is restated at the end of the step it governs.
-Nothing goes to an implementer until its row here is satisfied.
 
-| Step | Round-2 verdict | The gate this plan now sets for it |
-| --- | --- | --- |
-| **0** | go with changes | The workspace-selection fix is landed and its ownership settled (§4.1). Then a measured unit-and-link baseline that asks stable Cargo only for what it emits (§4.2); the diagnostic source guard as a **separate** reviewed prerequisite with its own gate (§4.4); each profile trial measured alone **and** the chosen combination measured again (§4.2–§4.5). |
-| **1** | go with changes | The five-file cut of §5 is taken as tabled, or the file list is revised in writing before dispatch; the receiving tests and the output fixtures are named; the ticket is refreshed against whatever release work landed in the meantime. |
-| **2a** | go with changes | §6.2's preparatory order is the one that can land green; every converted source pin's scope is recorded and mutation-checked rather than assumed; an item-level relocation manifest exists; the freeze is bounded and release-aware (§6.5). The strict two-impl residue is **102,328** lines. |
-| **2b** | go with changes | An exact old→new map of target plus full test identity, carrying `cfg`, `#[ignore]` and multiplicity; a written decision on the physical owner of `FILES_THAT_MAY_NAME_A_PLATFORM`; every file-relative `include_str!` and exact-path selector updated **in the commit that moves its subject**; proof the child body ran. |
-| **3** | go with changes for the thirteen free rows; **rethink** the six-root unlocking table | A free row is ticketed only once its public API, features, tests, fixtures and receiving owner are fixed. All 23 blocked modules stay blocked until each has its own written contract (§7.3); grouped cycles and build identity cannot be inferred away. |
-| **4** | **rethink; do not dispatch** | Withheld. A read/write/call audit of one bounded candidate, and an executable identity/order/lifetime/publication contract, before any substitution is promised (§8.3). |
+**Three columns, not one** (R3-2). Revision 3 wrote one gate per step and put
+into it everything the step owed, including work the step's own ticket is
+supposed to produce — so row 0 demanded a measured baseline before it would let
+anyone go and measure the baseline. That is circular, and it is the reason two
+tickets that are otherwise ready were not dispatchable. The table below
+therefore separates:
+
+- **Entry** — what must be **true before dispatch**, checkable by reading the
+  tree and the ticket. Nothing here is produced by the ticket.
+- **Acceptance** — what the implementer must **produce and show** for the work
+  to be accepted. These are the ticket's outputs.
+- **Landing** — what must hold **before the result is merged**, which for the
+  relocation steps is a different and later question than acceptance.
+
+**Nothing goes to an implementer until its Entry cell is satisfied. Nothing is
+accepted until its Acceptance cell is, and no ticket's own Acceptance or Landing
+item may appear in its Entry cell.**
+
+| Step | Round-3 verdict | Entry — true before dispatch | Acceptance — the ticket's own outputs | Landing |
+| --- | --- | --- | --- | --- |
+| **0 · baseline** (§4.2) | go with changes | §4.0's seven boxes: a released green base containing **both** `8e6cf0cc` and `5fd6f935`, recorded by hash; a named owner; a named runner machine with its **own** target directory; §4.2's exact command sequence; its repeat/reset procedure; its literal edit-and-restore; and its evidence schema. **All seven are document- and tree-checkable today.** | the baseline itself: the per-case artefact records of §4.2, with link-only time either measured by the named instrumentation or **reported as unmeasured**. | nothing lands; the baseline is a record. |
+| **0 · `opt-level` trial** (§4.3) | go with changes | the baseline above exists and is recorded. | the isolated trial, with the margin against each of §4.3's five limits. | manifest change reviewed on its own. |
+| **0 · diagnostic guard** (§4.4a) | go with changes | separately reviewed as its own source ticket; it does **not** wait on the trials. | a contained panic resolving a frame **to a named function in this crate and to a source location**; a real hang sample against the **matching** image and PDB; proof it fires. | lands before the §6.5 freeze window, not inside it. |
+| **0 · `debug` trial** (§4.4b) | go with changes | §4.4a's guard is landed and green. | PDB bytes, image bytes and link seconds separately. | manifest change reviewed on its own. |
+| **0 · linker trial** (§4.5) | go with changes | the baseline exists; the override is scoped to the trial's own command environment. | driver, flavor, PDB identity, resolution still working. | nothing persistent. |
+| **0 · the chosen combination** (§4.2) | go with changes | the three trials are each measured alone. | the combination measured again; **never the sum of three separate wins**. | the retained settings. |
+| **1** (§5) | go with changes | §5.1's five-file cut is taken as tabled, or the file list is revised **in writing**; §5.2's test identities and fixtures are in the ticket; the five caller references are refreshed against the release base. **All three are document-checkable today.** | the cut as one commit; §5.2's before/after comparisons; the graph **rebuilt from the actual cut**, not the simulation. | one commit, separate from `bt-i18n`'s extraction (§7.2 row 1). |
+| **2a** | go with changes; **not ready for relocation dispatch** | *Preparation* may be ticketed now on the current topology (§6.2's first column). *Relocation* may not: it needs the item-level destination/visibility map, §6.2(b)'s class-specific pin evidence, §6.2's corrected scheduling columns and §6.5's **populated** freeze fields. | the two `impl Runtime<'_>` blocks moved; strict residue **102,328**; no platform-array change. | §6.5's bounded window, gated on the tree actually merged. |
+| **2b** | go with changes; **not ready** | the exact old→new map of target plus full test identity carrying `cfg`, `#[ignore]` and multiplicity; the written `FILES_THAT_MAY_NAME_A_PLATFORM` exception (§6.2a, already decided). | every file-relative `include_str!` and exact-path selector updated **in the commit that moves its subject**. | **proof the child body ran** — landing evidence, not a pre-implementation result. |
+| **3, free rows** | go with changes | per row: public API, features, tests, fixtures, receiving owner and build inputs fixed; the graph rebuilt after Step 2 on the recorded source commit. **A generated row is not a dispatch contract.** | the extraction, with the row's own public API reviewed. | dependency order recorded for the revert. |
+| **3, blocked queue** | **rethink** | **none. Do not dispatch.** A–F are contract **briefs** (§7.3); each needs its owner and API selected, an item/test/build-input manifest, and a **remeasured** extent first. | — | — |
+| **4** | **rethink; do not dispatch** | **Withheld.** A read/write/call audit of one bounded candidate, and an executable identity/order/lifetime/publication contract, before any substitution is promised (§8.3). | — | — |
 
 ---
 
@@ -276,28 +324,99 @@ starts from rather than what Step 4 concludes:
 
 ## 4. Step 0 — the baseline, the diagnostic guard, and the profile trials
 
+### 4.0 Dispatchable now — the baseline ticket
+
+> **This box is the entry gate for the §4.2 baseline ticket, and nothing else in
+> Step 0.** Every line is checkable by reading the tree and the ticket, before
+> anyone builds anything. Tick all seven and dispatch; leave one and do not.
+>
+> - [ ] **A released green base, recorded by hash**, on which 0.4.1 has shipped
+>       — and which contains **both** `8e6cf0cc` (the shortcut scripts' feature
+>       selection, §4.1) and `5fd6f935` (the build script's
+>       `rev-parse --git-path`, §4.1). Verify by `git merge-base --is-ancestor`
+>       on the base, not by assuming. Measuring on a base missing either one
+>       measures a fixed bug.
+> - [ ] **A named owner and a named runner machine.** The 60–90-minute gate is
+>       reported from one machine; the baseline is only comparable to itself.
+> - [ ] **A worktree with its own `target` directory**, named in the ticket.
+>       Never a shared `CARGO_TARGET_DIR` (§9.4).
+> - [ ] **The exact command sequence of §4.2**, written into the ticket in
+>       order, with the three cases named.
+> - [ ] **The repeat/reset procedure**: for each of the three repetitions, what
+>       is reset and what is kept — §4.2 says which, and the ticket copies it.
+> - [ ] **The app-only edit and its restoration**, written literally: which line
+>       of `main.rs`, what the edit is, how it is undone.
+> - [ ] **The evidence schema of §4.2's table**, with the link-only row either
+>       naming its instrumentation or declaring link time **unmeasured**.
+>
+> **What this ticket does *not* wait for:** the diagnostic guard (§4.4a), any
+> profile trial, and Step 1. It produces the baseline; the baseline is what
+> authorises the `opt-level` trial. The guard is its own separately reviewed
+> ticket, and it authorises the debug trial — not this one.
+
 **Independently landable.** The first item on revision 2's list is gone from it:
 it has landed on another branch, and what is left is a baseline, one source
 guard and three trials, in that order.
 
-**The order, and it is the order** (round 2's execution prescription, in this
-plan's voice): the landed selection fix (§4.1) → the baseline (§4.2) → the
-isolated `opt-level` trial (§4.3) → **the diagnostic source-guard prerequisite
-(§4.4a), which is a Step 0 item of its own and touches `main.rs`** → the debug
-trial (§4.4b) → the scoped linker trial (§4.5). Each result and each revert
-stays separable from the others.
+**The order** (round 2's execution prescription, in this plan's voice): the
+landed selection fix (§4.1) → the baseline (§4.2) → the isolated `opt-level`
+trial (§4.3) → **the diagnostic source-guard prerequisite (§4.4a), which is a
+Step 0 item of its own and touches `main.rs`** → the debug trial (§4.4b) → the
+scoped linker trial (§4.5). Each result and each revert stays separable from the
+others.
+
+**These are six tickets, not one, and each has its own entry and its own
+output** (R3-2). The order above is a *dependency* order between their outputs,
+not a queue a person has to walk before the first one can start: the baseline
+needs nothing but §4.0's seven boxes, and §4.4a's guard is reviewed on its own
+merits and does not wait for a trial. §0.1's six Step 0 rows are the authority
+on what each may be dispatched against.
 
 ### 4.1 The shortcut scripts already select what the gate selects
 
-*Finding 17, corrected by R2-7. This is the "third compile", and it was not a
-sequencing accident — the first draft's guess was wrong and its proposed
-`Measure-Command` would have confirmed the wrong cause.*
+*Finding 17, corrected by R2-7, and **narrowed again by R3-8**. This is **part
+of** the "third compile", and it was not a sequencing accident — the first
+draft's guess was wrong and its proposed `Measure-Command` would have confirmed
+the wrong cause.*
+
+**Part of, because a second cause has since been found and fixed, and it was
+probably the larger one.** `crates/bt-app/build.rs` located `HEAD` and the
+branch tip by joining names onto `rev-parse --absolute-git-dir`. In a **linked
+worktree** — which is how every branch in this project is developed, this plan's
+own included — `HEAD` lives under `.git/worktrees/<name>/` while the branch tip
+lives in the *common* `.git/refs/heads/`, so the joined path named a file that
+existed in neither place; and once `git gc` packs a ref the loose file is gone
+even in the main checkout. **A `cargo:rerun-if-changed` path that does not exist
+makes the build script always dirty**, so `bt-app` — the workspace's longest
+link — was rebuilt on *every* `cargo` invocation, gate or not. That is fixed on
+`main` at **`5fd6f935`**, which asks git where each file lives with
+`rev-parse --git-path` and declares the loose ref only when it is really there,
+with `packed-refs` alongside it.
+
+**So the "third compile" had two causes with different shapes, and §4.2's
+baseline must contain both fixes or it measures neither.** The feature
+difference (`8e6cf0cc`) rebuilt the graph above `vte` when a shortcut script
+ran; the build-script bug rebuilt `bt-app` on every invocation in every
+worktree. Neither is an estimate this plan gets to claim a number for: a
+before/after figure needs comparable runs on both configurations, and §4.2 runs
+only the after. **What the baseline establishes is the floor as it stands
+today**, not the size of either win.
 
 **This is no longer a Step 0 commit.** It landed on
-`chore/root-tidy-and-one-feature-set` at **`8e6cf0cc`**, which is being gated
-now. R2-7 asked that ownership be reconciled with that branch before anyone
-wrote the same fix twice; the reconciliation is that the branch owns it. What
-this section records is what landed, and what it does not do.
+`chore/root-tidy-and-one-feature-set` at **`8e6cf0cc`**, and that branch is now
+**merged into `main`**. R2-7 asked that ownership be reconciled with that branch
+before anyone wrote the same fix twice; the reconciliation is that the branch
+owned it and has landed it. What this section records is what landed, and what
+it does not do. *(The same commit is the root tidy: `CONVENTIONS.md` is now
+`docs/CONVENTIONS.md`, and `about.hbs`/`about.toml` moved under `licenses/`.
+**It does not touch `main.rs`** — revision 3 said it did, and R3-7 is right that
+its file list does not contain it.)*
+
+**The two shortcut scripts in this worktree still carry the old selection**,
+because this branch is based on `76ca0788`, which predates the fix. That is a
+property of the worktree and not a second bug: **the fix is not to be written
+again here.** §4.2's baseline is run on a release base that contains
+`8e6cf0cc`, which the §4.0 checklist requires by hash.
 
 `scripts/check-shortcuts-table.ps1:31` and `scripts/generate-shortcuts-table.ps1:32`
 ran `cargo test --package bt-app --bin folio --locked`, while the gate runs
@@ -333,10 +452,18 @@ written beside it.
 
 1. It is wider than R2-7 prescribed. R2-7 asked for `--workspace --bin folio
    --locked`, keeping the target selector; what landed drops `--bin folio`. Both
-   select the same *features*, which is where the whole win is — feature
-   resolution is what fingerprints the units, so either form makes every unit
-   `Fresh` after the gate. The difference is that the landed form also builds
-   every other workspace test target and runs each under the `--exact` filter.
+   select the same *features*, which is where the identified problem was —
+   feature resolution is part of a unit's fingerprint, so a feature mismatch
+   forced a rebuild and **the selection change removes that mismatch**. The
+   difference between the two forms is that the landed one also builds every
+   other workspace test target and runs each under the `--exact` filter.
+
+   **What this plan does not say is that either form "makes every unit
+   `Fresh`"** (R3-8). Reuse is conditional on matching target, mode, profile,
+   features **and** flags — §4.3 says so about `opt-level` and the same
+   conditions apply here. Removing one mismatch removes one cause of rebuilding;
+   what is actually reused is a measurement, and §4.2's artefact records are
+   where it is read.
 2. **A filter that matches nothing exits 0.** If the renderer test is ever
    renamed, `check-shortcuts-table.ps1` goes quiet rather than red, because the
    only thing it reads is `$LASTEXITCODE`. `generate-shortcuts-table.ps1` is
@@ -375,34 +502,76 @@ so this was entirely the owner's local gate, which is the gate §10 is about.
 ### 4.2 First: the baseline
 
 Everything in §10 is a model and should not be trusted a day longer than it
-takes to replace. Run this **after** §4.1's fix is in the tree, so that what it
-measures is sequencing rather than the feature difference.
+takes to replace. Run this on a base that already contains **both** of §4.1's
+fixes, so that what it measures is the floor as it stands rather than either
+bug.
 
-Three cases, three runs each, on the owner's machine in a worktree with its own
-`target`: **cold** (dependencies unbuilt), **warm with no edit**, and
-**app-only edit** (touch one line of `main.rs`). For each: `cargo build
---workspace --locked`, `cargo test --workspace --locked --no-run`,
-`cargo clippy --workspace --all-targets --locked -- -D warnings`, and the suite
-run.
+Three cases, three repetitions each, on the named runner machine in a worktree
+with its own `target`: **cold** (dependencies unbuilt), **warm with no edit**,
+and **app-only edit** (one named line of `main.rs` changed and restored). For
+each case, this sequence and this order:
 
-**Ask stable Cargo only for what stable Cargo emits** (R2-9). Revision 2 asked
-for "`--timings` JSON" and said the HTML "names the link step alone". Neither is
-true of the pinned stable toolchain, and the plan does not quietly move to
-nightly to make them true: `-Z` options are not available here.
+```powershell
+cargo build   --workspace --locked --timings -v
+cargo test    --workspace --locked --no-run --timings -v --message-format=json
+cargo clippy  --workspace --all-targets --locked --timings -v -- -D warnings
+cargo test    --workspace --locked                      # the suite run
+```
 
-| Quantity the plan argues about | Where it actually comes from |
-| --- | --- |
-| which units each command compiled, and each unit's wall time | `--timings`, the **HTML** report, kept per run with a timestamp. It reports **compiler units**; it is not a supported machine-readable JSON artifact on stable, and it does not isolate the linker as a process. |
-| the unit *set*, fresh against dirty | `-v` output, kept as a log beside the report |
-| link time | the tail of the binary's own unit in that report — a figure for the codegen-and-link unit, not a linker-process trace |
-| link-only seconds and peak memory, **if** they are acceptance inputs | a separate Windows process-time/RSS measurement around the link, named in the ticket as its own procedure. It is not a Cargo output and must not be quoted as one. |
-| `folio.exe`, harness image and `folio.pdb` sizes | the filesystem, after the run |
-| suite wall-clock | the run itself |
+**Ask stable Cargo only for what stable Cargo emits** (R2-9), **and only for
+boundaries it exposes** (R3-1). Revision 2 asked for "`--timings` JSON" and said
+the HTML "names the link step alone"; revision 3 replaced that with the HTML but
+kept reading link time off "the tail of the binary's own unit" and treating
+`-v`'s `Fresh` lines as a complete artefact census. **Both of those are
+withdrawn.** Cargo's HTML report has no observable codegen-start boundary inside
+a binary unit, so a "tail" has no edge to be measured from; and the installed
+Cargo emits `Fresh` **per package**, conditionally and deduplicated — one
+package can have a reused normal bin and a rebuilt test harness and print one
+line for both. `-Z` options are not available on the pinned stable toolchain and
+the plan does not move to nightly to make them so.
+
+**The evidence schema. Each row names the command, the artefact, and the field
+read from it — and nothing in it is inferred from a boundary Cargo does not
+draw.**
+
+| Quantity | Command that produces it | Artefact, and the exact field read |
+| --- | --- | --- |
+| **whole compiler-unit elapsed time** — never called "link time" | any of the three `--timings` commands above | the timestamped HTML report, saved per run as `target/cargo-timings/cargo-timing-<stamp>.html`. Read the per-unit **total elapsed** for each unit, and the report's own unit list. A unit is a compiler invocation; it includes that unit's codegen and, for a binary unit, its link, and **the report exposes no boundary between them**. |
+| **the unit census: package, target, profile/test mode, features, artefacts, fresh status** | `cargo test --workspace --locked --no-run --message-format=json` (and the same flag on `build`) | the stable **compiler-artifact** records on stdout, saved verbatim as `<case>-<rep>-artifacts.jsonl`. Per record read `package_id`, `target.name`, `target.kind`, `target.test`, `profile.opt_level`, `profile.debuginfo`, `profile.test`, `features`, `filenames`, `fresh`. **These records are what make the census complete**: one per built target, rather than one conditional line per package. |
+| **command context** — target triple, toolchain, effective `rustc` flags, `jobs`, target directory, resolved features | the same commands with `-v` | the verbose log, saved as `<case>-<rep>-verbose.log`, kept **beside** the JSON rather than instead of it. The `Fresh <pkg>` lines are retained as corroboration and are **not** read as the census. |
+| **link-only seconds and peak memory** | a named Windows process trace or an instrumented linker invocation — **not Cargo** | the trace record, saved as `<case>-<rep>-link.csv`, one row per linker process, with PID, parent PID, image path, full argument list, start and end timestamps, CPU time **and** wall time separately, and a **peak-memory metric named in the ticket** (state which: peak working set, or peak private commit — they are different numbers). Associate each row with the EXE and PDB it produced by path. |
+| `folio.exe`, harness image and `folio.pdb` sizes | the filesystem, immediately after the run and before any later command replaces an uplifted image | size in bytes, with the file's own path and mtime recorded so the artefact's identity is preserved. |
+| suite wall-clock | the final `cargo test` of the sequence, identified separately | elapsed wall time of that one command. **It is not a compiler timing** and is never added to one. |
+
+**If the link instrumentation is not set up, report link-only time as
+`unmeasured`.** That is an acceptable baseline result and a checkable one. What
+is not acceptable is a number read off a boundary that does not exist — and
+**§4.4b's "measure the link on its own" cannot be claimed complete until this
+row is really measured.**
+
+**Do not treat the JSON as a serialized Cargo unit graph.** Compiler-artifact
+records describe the targets that were built or reused; they are not Cargo's
+internal unit graph, they are distinct from the unstable timing JSON, and they
+are distinct from libtest's JSON output.
+
+**The three repetitions, spelled out so that three invocations are not silently
+one cold run and two warm ones** (R3-2):
+
+- **Cold** — before *each* of the three repetitions, delete the whole target
+  directory, then run the **full** four-command sequence. Resetting only the
+  first command would leave repetitions two and three warm while all three are
+  labelled cold.
+- **Warm, no edit** — establish the warm cache once by running the full
+  sequence to green and discarding that run's records; then run the sequence
+  three times with nothing touched between them.
+- **App-only edit** — from the same warm cache, before each repetition make the
+  one named edit to `main.rs`, run the sequence, then restore the file
+  byte-for-byte. The ticket writes the line, the edit and the restoration
+  literally; "touch one line" is not a procedure.
 
 Record the target triple, the toolchain, the effective flags, `jobs`, the target
 directory and the resolved feature set, and **hold all six constant across the
-three cases**; write down the exact edit-and-restore procedure the app-only case
-uses, so the third case is repeatable rather than approximately repeated.
+three cases**, along with the declared source state and the command order.
 
 **The trials are not additive** (R2-9). §4.3, §4.4b and §4.5 are each measured
 alone, and then **the chosen combination is measured again**: changing test
@@ -537,7 +706,12 @@ size, "because MSVC never put the symbols in the executable — they are in
 
 So the target is **the 654.6 MiB PDB and the link's debug-info work**. State the
 expected win in PDB bytes, image bytes and link seconds **separately**, and
-measure the link on its own.
+measure the link on its own — **by §4.2's link row and its named
+instrumentation, which is the only thing in this plan that can see a linker
+process**. Until that instrumentation exists, this item's link claim is
+**unmeasured**, not estimated: there is no Cargo artefact to read it off
+(R3-1). The PDB and image rows are filesystem sizes and are available either
+way.
 
 **What is not established, and is no longer asserted** (R2-8). Revision 2 said
 the ~124 MiB by which the harness image exceeds the 85.8 MiB bin "is the crate's
@@ -604,11 +778,42 @@ and §4.5 touch the manifest and no `crates/` source. **§4.4a touches `main.rs`
 and so competes with every branch §6.5 lists — it is small, it is early, and it
 should land before the freeze window rather than inside it.
 
-**Dispatch gate for Step 0:** §0.1's row 0.
+**Dispatch gates for Step 0:** §0.1's six Step 0 rows — Entry, Acceptance and
+Landing are three different columns. The baseline ticket's entry gate is the
+checklist at §4.0 and it is satisfiable today.
 
 ---
 
 ## 5. Step 1 — the `i18n` cut: three functions, five files
+
+### 5.0 Dispatchable now — the five-file cut ticket
+
+> **This box is the entry gate for the §5.1 cut.** Every line is checkable by
+> reading the tree and the ticket. Tick all five and dispatch; leave one and do
+> not.
+>
+> - [ ] **§5.1's five destinations are taken as tabled** — `colour_name` to
+>       `settings`, `profile_entry_fault` to `profiles`, the pixel formatter to
+>       `i18n` with a `preview` re-export — **or the file list is revised in
+>       writing first.** No destination is left as "the picker or the type
+>       owner".
+> - [ ] **§5.2's test table is copied into the ticket**, with every row's target,
+>       full test identity, existing-or-new marking, exact inputs and expected
+>       output source. No category descriptions.
+> - [ ] **Every line reference in §5 is refreshed against the release base.**
+>       They are refreshed here against `main` at `ee771130` and one had moved;
+>       refresh them again at dispatch, because `main.rs` moves daily.
+> - [ ] **The global-language route is chosen per test** — §5.2: reach both
+>       languages through `Text::in_lang` (`i18n.rs:2689`) where it exists; for
+>       `profile_entry_fault`, which reads `current()` directly, either add a
+>       `lang`-taking inner or run the case in a **contained child process**. A
+>       mutex that only the new tests take does not protect existing readers.
+> - [ ] **One commit, and not the same commit as extracting `bt-i18n`**
+>       (§7.2 row 1).
+>
+> **What this ticket does *not* wait for:** any crate-design decision, Step 0's
+> baseline or trials, Step 2's freeze, and all of Step 4. It waits only for
+> 0.4.1 to ship, like everything else here.
 
 **Independently landable. No intended behaviour change. One to two days.**
 
@@ -646,10 +851,22 @@ carries.*
 | `crates/bt-app/src/main.rs` | Retarget the two fault-formatting calls at `:36750` and `:51453`. |
 
 **No new crate, no manifest edit, no lockfile edit, and no `file_peek` edit.**
-`file_peek.rs:2852`, `main.rs:22723` and `main.rs:69698` call
+`file_peek.rs:2852`, `main.rs:22723` and **`main.rs:69720`** call
 `preview::format_pixel_size` and go on doing so through the re-export; so does
 `preview.rs:4320`. One independently gated commit, and **not** the same commit
 as extracting `bt-i18n` (§7.2 row 1), which lands later.
+
+**Every line reference in this step re-verified against `main` at `ee771130`**
+— the tip after `chore/root-tidy-and-one-feature-set`, the release script fixes
+and the `build.rs` rerun fix landed. All of them hold but one:
+**`main.rs:69698` has become `main.rs:69720`**, corrected above. Three path facts moved with the root tidy and matter to whoever writes
+the ticket: **`CONVENTIONS.md` is now `docs/CONVENTIONS.md`**, the handoff is
+still `docs/handoff/HANDOFF-2026-08-21.md` and is the only file in that
+directory, and `crates/bt-app/build.rs` has been rewritten (`5fd6f935`) —
+nothing in this step touches it, which is worth knowing because a dirty build
+script is what made `bt-app` look like it rebuilt for no reason. **Re-verify at
+dispatch anyway**: `main.rs` moved 22 lines under this one call in the days
+between these two readings, and nothing in this plan makes that stop.
 
 What the cut buys, on the graph a crate split has to obey:
 
@@ -669,27 +886,61 @@ that number rather than the first draft's 66,273.
 three out-edges deleted. **Rebuild the graph from the actual cut** and compare,
 rather than accepting the simulation as proof (R2-5).
 
-### 5.2 Acceptance: the receiving tests and the output fixtures, named
+### 5.2 Acceptance: the receiving tests and the output fixtures, by name
 
 The first draft proposed "an identical `cargo test … -- i18n` list". That is not
 viable: a moved test changes its qualified path, so the list is *expected* to
 change, and the filter does not reach the `profiles` caller test or the two
-`main.rs` call sites. What the ticket compares instead, before and after:
+`main.rs` call sites.
 
-- **All eight colour mappings, in both languages** — `Blue`, `Teal`, `Green`,
-  `Amber`, `Red`, `Magenta`, `Violet`, `Slate`, through `settings.rs:4083`'s
-  own path, `.text()` included.
-- **Both `ProfileFault` variants with representative ids**, as exact output and
-  not a substring. The test at `profiles.rs:23009` only asserts the sentence
-  `contains("fish")`; that is a containment check and it is not an exact-output
-  comparison, so the ticket adds one rather than leaning on it.
-- **The pixel formatter's exact output** — `width`, a space, U+00D7, a space,
-  `height` (`preview.rs:4238`) — including boundary numbers, and
-  `picture_shown_at`'s full sentence around it.
+**Revision 3 replaced it with categories — "representative ids", "boundary
+numbers", "the full tables" — and its ledger then claimed the tests and fixtures
+had been named. R3-3 is right that they had not.** Here they are. Every row's
+Cargo target is `bt-app --bin folio`; there is no other target these can live
+in, because `bt-app` has no `[lib]`. **Every test below lives inside one of the
+five files of §5.1**, and adding one anywhere else needs the file list revised
+in writing first.
+
+| Test identity | Existing or new | Inputs | Expected output, and where the oracle is |
+| --- | --- | --- | --- |
+| `settings::tests::profile_colour_labels_preserve_both_languages` | **new** | all eight `MarkColour::ALL` entries (`marks.rs:72`), each in English and in Chinese | the eight literal pairs at `i18n.rs:3462–3469` — `Blue`/蓝, `Teal`/青, `Green`/绿, `Amber`/琥珀, `Red`/红, `Magenta`/品红, `Violet`/紫, `Slate`/灰蓝 — reached **through the picker path at `settings.rs:4083`**, `.text()` included, so the test exercises the caller and not only the moved function |
+| `profiles::tests::an_entry_that_is_neither_a_builtin_nor_a_program_is_dropped_and_named` | **existing**, at `profiles.rs:22990–23013` — **retarget, do not delete** | the same `merge(shipped(), &file(vec![named("pwsh"), named("fish"), named("cmd")]))` | unchanged behaviour; only the path `crate::i18n::profile_entry_fault` becomes the local one. **It asserts `contains("fish")` and nothing more**, so it is a caller-reaches-formatter check and is not the exact-output evidence. |
+| `profiles::tests::profile_entry_fault_preserves_exact_outputs` | **new** | both `ProfileFault` variants — `Unusable { id }` and `Duplicate { id }` — with the fixed ids `fish` and `profile-42`, each in both languages | the four format strings at `i18n.rs:6380–6391`, **frozen as the oracle** and compared with `assert_eq!`, not `contains`: `profiles.json: {id} names no program and was skipped`, `profiles.json：{id} 没有写程序，已跳过`, `profiles.json: {id} appears twice; the first was kept`, `profiles.json：{id} 出现了两次，保留了第一条`. Note the ASCII colon-space in English and the full-width `：` in Chinese; that difference is part of the fixture. |
+| `i18n::tests::pixel_size_preserves_exact_output` | **new** | `(0, 0)`, `(1, 1)`, `(1180, 800)`, `(u32::MAX, u32::MAX)` | `{width} U+00D7 {height}` with **one ASCII space on each side of the multiplication sign** (`preview.rs:4238`), compared exactly — `0 × 0`, `1 × 1`, `1180 × 800`, `4294967295 × 4294967295` |
+| `i18n::tests::picture_shown_at_preserves_exact_output` | **new** | the same four pairs, in both languages | the whole sentence `picture_shown_at` builds (`i18n.rs:6550`): `Text::PictureShownAt.text()`, one space, then the pixel size. Compare the **full** sentence, not the tail. |
+| `preview::tests::pixel_size_reexport_preserves_output` | **new** | `(1180, 800)`, the pair `file_peek.rs:2852` already uses | `preview::format_pixel_size` continues to resolve and to return the same string through the re-export. This is the test that would catch the re-export being written as a wrapper with different behaviour. |
+| the two `main.rs` call sites at `:36750` and `:51453` | **no existing unit test reaches them** | — | **Do not invent an identity for them.** Either add the smallest honest seam in `main.rs`, or record an explicitly bounded source-and-caller comparison — the two call sites' text before and after, against the `profiles` formatter test above — and name it as that rather than as coverage. The plan does not claim a test that does not exist. |
+
+**Beyond the table, what the ticket also compares, before and after:**
+
 - **The full English and Chinese `Text` tables**, unchanged: exact spaces,
   punctuation, id interpolation, and the timing of `current()`.
-- **Change no `Text` variant and no public string.**
-- Run the receiving modules' suites and the `main.rs` call-site tests by name.
+- **Change no `Text` variant and no table literal token**, and keep **one**
+  `current()` read per call in the moved fault formatter — the moved function
+  must not acquire a second language read or move it to a different point.
+
+**The global-language hazard, and the rule it imposes.** `i18n::CURRENT` is a
+process-global `static` (`i18n.rs:248`) written through `set` at `:259`, and
+every one of these tests runs in the **one** `bt-app` harness alongside 3,809
+other `#[test]` attributes. A test that really switches the current language
+perturbs every other test that reads it, and libtest gives no ordering
+guarantee.
+
+**So: prefer the language-parameterised form, and contain what cannot use it.**
+
+- **`Text` already has one** — `Text::in_lang(lang)` at `i18n.rs:2689`, whose
+  doc comment names it the entry point for tests that read more than one column.
+  The colour-label row and the `Text::PictureShownAt` half of `picture_shown_at`
+  reach both languages through it and **switch nothing**.
+- **`profile_entry_fault` has none**: it matches on `current()` directly
+  (`i18n.rs:6379`). The ticket therefore does one of two things, and says which:
+  give the moved formatter a `lang`-taking inner that the public one calls with
+  `current()` — preserving the one read per call — and test the inner; **or**
+  run the two-language case **in a contained child process**.
+- **Any coverage that really switches the language runs in a contained child
+  process**, or under an equally effective isolation mechanism named in writing.
+  **A mutex taken only by the new tests is not one** — it does not protect the
+  existing readers, which take nothing.
 
 **Record a known-ineffective guard rather than leaning on it:**
 `no_profile_title_has_been_pulled_into_the_language_table` (`i18n.rs:8848`)
@@ -701,7 +952,8 @@ it is a separate ticket; the gap is recorded here so nobody cites it.
 while no later consumer depends on the cut. After `bt-i18n` is extracted,
 rollback follows dependency order rather than reverting one commit.
 
-**Dispatch gate for Step 1:** §0.1's row 1.
+**Dispatch gate for Step 1:** §0.1's row 1, whose Entry cell is the checklist at
+§5.0.
 
 ---
 
@@ -709,11 +961,18 @@ rollback follows dependency order rather than reverting one commit.
 
 **Independently landable. No intended behaviour change in the *product*. Days.**
 
-Both rounds return *go with changes* for both halves. The changes are
+All three rounds return *go with changes* for both halves. The changes are
 substantial and they all point the same way: **this step is not the purely
 mechanical move the first draft described**, and revision 2's attempt to make it
 one — by landing the non-relocation work first — produced an order that cannot
 land green (R2-1). That order is replaced below.
+
+**And it is not dispatchable as a relocation ticket, on this revision's own
+account** (round 3). What *can* be ticketed today is §6.2's first column — the
+guard preparation, on the topology that exists. The move itself waits on an
+item-level destination and visibility map, §6.2(b)'s class-specific pin
+evidence, and §6.5's **populated** freeze fields. §0.1's Entry column says this
+per half; this section is the plan behind it, not the ticket.
 
 ### 6.1 What moves, and the scope this plan picks
 
@@ -749,9 +1008,12 @@ reasons, and the third is the one that decides it:
 2. Every added scope is a different residue, a different file list and a
    different set of guards to edit, and none of those has been measured.
 3. **It moves no platform `cfg` at all**, which takes the whole of revision 2's
-   §6.2(a) out of 2a. Measured at this snapshot, `main.rs` has **eleven** lines
-   that name a platform to the compiler, and every one of them is outside both
-   impl blocks: `:112433` and `:112442` in `set_option_as_alt`; `:114252`,
+   §6.2(a) out of 2a. Measured at this snapshot, the guard's own lexical rule
+   matches **eleven** lines of `main.rs` — **ten compiler `cfg` attributes, plus
+   one line of test code that merely contains the spellings as string literals**
+   (R3-6; revision 3 called all eleven platform attributes). Every one of them
+   is outside both impl blocks: `:112433` and `:112442` in
+   `set_option_as_alt`; `:114252`,
    `:114261`, `:114272` and `:114293` around `window_surface_target`; `:114545`
    and `:114547` in `native_window`; `:116199` and `:116223` in **`fn main`**;
    and one test needle at `:163322`. **A strict two-impl 2a moves none of
@@ -795,7 +1057,17 @@ methods needs the visibility, import and path edits §6.1 lists.
 | a precise pin **subject map** — each `include_str!` invocation, its binding, its subjects, the scope each assertion covers, and the file each subject is going to | every `include_str!` path change |
 | a **missing-subject failure** on every pin: a guard whose subject is absent fails loudly instead of passing on a fragment | every exact-path test selector |
 | the child's **completion proof, under its current identity** | every count/arity assertion whose count the move changes |
-| narrowly enumerated visibility and import changes, reviewed as part of the move they serve | — |
+| — | **every visibility and import change**, narrowly enumerated and reviewed as part of the move it serves |
+
+**The visibility row moved columns in this revision** (R3-7). Revision 3 listed
+it on the left, which contradicted both §6.1 — where the `pub(crate)` a method
+needs is decided by where its *caller* ends up — and §6.5's own rule that each
+move carries its own visibility and import edits. A visibility widening applied
+before its method moves is a widening with no reason on the tree it lands on,
+and a reviewer cannot check it against anything. **Only demonstrably
+topology-compatible work belongs in the left column**, and the test for that is
+the one `the_shell_page_is_gone` passes below: it changes nothing today and is
+correct afterwards.
 
 **Both failure directions must be demonstrated during implementation**, not
 asserted: plant a platform `cfg` in a new `runtime/*.rs` file and watch the Rust
@@ -842,8 +1114,8 @@ same commit — is refused for three reasons:
    that file — and that script is the one that runs in five seconds on a tree
    that does not compile, which is the reason it exists.
 3. Moving it buys a tidier test tree and costs a script rewrite or a second
-   source of truth for the same list. `CONVENTIONS.md`'s standing complaint is
-   about lists that live in two files.
+   source of truth for the same list. `docs/CONVENTIONS.md`'s standing complaint
+   is about lists that live in two files.
 
 **Write the rule where the next person will read it**, in the module's own doc
 comment: this module stays in `main.rs` when the other inline test modules
@@ -874,9 +1146,13 @@ catches an error revision 2 inherited and ratified.*
 What reproduces: **none of the 91 uses `source_pin::source_region`.** That
 helper's three users are `first_run.rs`, `profiles.rs` and
 `shell_integration.rs`; `source_region(` appears zero times in `main.rs`. All 91
-are `include_str!("main.rs")` bound to a `const` — 87 named `SOURCE`, two
-`MAIN`, two `source` — 38 at module level inside a test module and 53 inside a
-function, so **they are 91 macro invocations, not 91 independent tests**. Most
+are `include_str!("main.rs")` — 38 at module level inside a test module and 53
+inside a function, so **they are 91 macro invocations, not 91 independent
+tests**. **The binding census, corrected by R3-4: 89 are `const` — 87 named
+`SOURCE`, two named `MAIN` — and two are `let`**, at `main.rs:125096` and
+`:157543`. Revision 3 wrote "87 `SOURCE`, two `MAIN`, two `source`" as though
+all four groups were constants; they are not, and the difference matters to a
+manifest enumerator that filters by declaration kind. Most
 slice the string with hand-rolled `body(signature)` helpers that
 `panic!("{signature} is declared in this file")` when the header is gone, which
 is loud, and which is the argument *for* re-pointing rather than rewriting.
@@ -912,21 +1188,52 @@ The method, which is the pin subject map of §6.2's first column:
 2. Record the destination file of each subject. **A shared `SOURCE` can host
    several subjects bound for different files**, so "one include replacement per
    invocation" is not generally sufficient; some invocations become a
-   `const SOURCES: &[&str]` (the form already has precedent at `main.rs:165696`,
-   which reads `main.rs` and `preview_edit.rs`), and some split.
-3. **Mutation-check every converted guard**: remove its subject, watch it fail,
-   restore. A guard that passes with its subject removed has been converted into
-   decoration.
-4. For any assertion converted to a whole-crate scan, define **test-literal and
+   `const SOURCES: &[&str]` slice, and some split. **That slice is a shape to be
+   designed, not one already in the tree** (R3-4): `main.rs:165696–165697`
+   declares **two separate constants**, `SOURCE` and `PREVIEW_EDIT`, and
+   `const SOURCES` occurs nowhere in `main.rs`. It is precedent for one test
+   module reading two files, and nothing more.
+3. **Mutation-check every converted guard, by class.** Revision 3 wrote one
+   rule — remove the subject and watch it fail — and R3-4 shows that rule is
+   wrong for two of the four classes. **A negative assertion is green precisely
+   because its forbidden text is absent**, so removing the subject changes
+   nothing: `main.rs:113789` would pass a mutation that was supposed to break
+   it. And an arity assertion narrowed to one destination file can keep its
+   expected count and still stop seeing an unauthorised caller added in another
+   fragment of the former `main.rs`. So:
+
+   | Guard class | The mutation evidence that class requires |
+   | --- | --- |
+   | **named body / positive requirement** (the `body(signature)` majority) | Remove **or rename** the unique subject and require failure; separately remove the required condition **inside the correct subject** and require failure. Reject a missing subject, reject a duplicated subject, and reject a match that landed on a test literal rather than the real declaration. |
+   | **whole-source prohibition** (`:15772`, `:105705`, `:113789`) | **Inject one forbidden spelling into each covered destination class** and require failure; remove it and require recovery. Then, separately, **prove the enumeration is complete** — that every source file the guard is supposed to cover is really in the set it reads. A negative that reads four files out of five is green for the wrong reason. |
+   | **arity / uniqueness** (the ten count sites) | **Delete a required occurrence** and require failure; **and add an unauthorised occurrence in a different covered fragment** and require failure. Record the expected production and test occurrences **separately, each with its owner**, so the count can be re-derived rather than guessed. |
+   | **scoped negative** (`:103570`) | Both of the named-body rules, plus: inject a forbidden name **inside** `mini_source`'s body and require failure, and inject the same name **outside** it and require the guard stays green. That asymmetry is the guard's whole meaning. |
+
+4. **Define the covered union, and do not let it drift.** It is the original
+   `main.rs` scope **and its relocated descendants** — the files Step 2 creates
+   out of it. Extending a whole-source guard to unrelated existing modules is a
+   semantic decision about what the program forbids and needs an explicit
+   ruling; it is not a side effect of a file move.
+5. For any assertion converted to a whole-crate scan, define **test-literal and
    comment handling**, because a whole-crate scan matches its own text. The
    crate already knows this — `:15767`, `:105701` and `:113781` assemble their
    needles with `concat!` or `format!` for exactly that reason — and a converted
    guard has to keep the discipline.
-5. **Arity assertions belong to the move that changes their count.**
-   `main.rs:105784` expects `SOURCE.matches("commit_leaf_resize(").count() == 6`
-   and its own comment says the six are the declaration, one production caller
-   and **four test callers**. When 2b moves those test callers out of `main.rs`,
-   that six is wrong — in the same commit, not before it and not after it.
+6. **Preserve whole-source coverage across 2a and 2b, or replace it in writing.**
+   A negative that covered all of `main.rs` before the split must still cover all
+   of `main.rs` **plus** `runtime/*.rs` after it — or be replaced by named
+   production and test invariants of equal intended strength, each stated.
+   Silently narrowing a prohibition to whichever file the subject ended up in is
+   the failure mode this rule exists for.
+7. **Arity assertions belong to the move that changes their count, and the
+   change is derived, not lowered.** `main.rs:105784` expects
+   `SOURCE.matches("commit_leaf_resize(").count() == 6`, and its own comment at
+   `:105785–105787` says the six are the declaration, one production release and
+   **four test callers**. When 2b moves those test callers out of `main.rs`, six
+   is wrong — and the fix is **not** "lower it to the number left in this file".
+   The ticket either keeps the union (count across the moved set) or splits the
+   assertion into a production invariant and a test invariant with the owners
+   written down. In the same commit, not before it and not after it.
 
 #### (c) Every other source-reading and exact-path consumer
 
@@ -1042,13 +1349,19 @@ optimised test runs.
 
 ### 6.5 The landing window: bounded, release-aware, and abortable
 
-**The freeze is right and the churn arithmetic supports it.** Of the last 150
-non-merge commits touching `crates/bt-app`, 112 touch `main.rs`, so most open
-branches will have to be rebased against the split. One freeze costs each open
-branch **one** rebase; twenty-six independently landed theme commits cost each
-open branch up to twenty-six, because each moves lines out from under it again —
-and 26 independently gated landings cost 26–39 hours of gate time by themselves
-at the reported 60–90 minutes.
+**The freeze is right, and the argument for it is structural rather than
+historical.** One freeze costs each open branch **one** rebase; twenty-six
+independently landed theme commits cost each open branch up to twenty-six,
+because each moves lines out from under it again — and 26 independently gated
+landings cost 26–39 hours of gate time by themselves at the reported 60–90
+minutes. That comparison does not depend on how many branches are open.
+
+**And the historical number is not evidence about them** (R3-7). Revision 3
+wrote "112 of 150 … so most open branches will have to be rebased", which is the
+inference its own step 2 below forbids: 112 of 150 is a frequency over a closed
+window of past commits, not a probability for the branches that exist on the day
+the window opens. **That sentence is withdrawn.** What decides how many rebases
+a freeze costs is the populated inventory of step 2, and nothing else.
 
 **So: keep the freeze, and make the window short rather than the landings
 small.** What revision 2 did not supply, and R2-10 requires, is a bound.
@@ -1061,9 +1374,12 @@ small.** What revision 2 did not supply, and R2-10 requires, is a bound.
    ticket: owner, base and tip, the items it touches, its outstanding
    acceptance, and its disposition — *land before* or *rebase after*. 112 of 150
    is a historical frequency and **not** a probability for the branches that are
-   actually open; look at them. Note that the in-tree handoff
-   (`docs/handoff/HANDOFF-2026-08-21.md`) mixes landed and pending states and is
-   not a live ticket census.
+   actually open; look at them. **And the inventory is owner-confirmed, not
+   ref-derived**: a branch with no commits on it is not evidence that its owner
+   has no work, because unpublished work is by definition not in the refs. Note
+   that the in-tree handoff (`docs/handoff/HANDOFF-2026-08-21.md`, the only file
+   in that directory) mixes landed and pending states and is not a live ticket
+   census.
 3. **Prepare outside the window.** §6.2's before-the-freeze column — recursive
    enumeration, the pin subject map, missing-subject failures, the child's
    completion proof under its current identity, and §4.4a's diagnostic guard —
@@ -1080,31 +1396,47 @@ small.** What revision 2 did not supply, and R2-10 requires, is a bound.
    item map; then each affected branch rebases **once** and revalidates its
    tests *and* its meaningful platform or UI acceptance.
 7. **The abort rule.** If the gate fails or the recorded window expires,
-   **abandon the unmerged batch and reopen the window**. Never land a partial
-   tree to save a deadline. If the owner/base/acceptance facts of step 2 cannot
-   be obtained, **delay the split** rather than blocking release lanes
-   indefinitely.
+   **abandon the unmerged batch, then lift the merge freeze and resume the
+   affected merges; schedule any retry separately, as a new window with its own
+   agreed maximum duration.** Never land a partial tree to save a deadline.
+   *("Reopen the window", revision 3's wording, could be read as automatically
+   restarting an expired freeze — which is the one thing an expiry must not
+   do.)* If the owner/base/acceptance facts of step 2 cannot be obtained,
+   **delay the split** rather than blocking release lanes indefinitely.
 
 #### The 0.4.1 lanes this window must not damage
 
-*Observed local refs, 2026-09-15 — evidence of what exists, not a census of all
-current work, and not a licence to inspect anybody's worktree. `main` is at
-`4893e2a4`. **`feature/math-block-polish`, `feature/settings-open-stall`,
-`fix/card-wheel-lag` and `chore/release-script-fixes` all sit at `6a414963`
-with no commits on them yet** — they are branch points, so the freeze costs them
-nothing today and more every day. `docs/paste-paths-design` is at `55cd5f9f`
-(design and review files, third review answered), and
-`chore/root-tidy-and-one-feature-set` is at `8e6cf0cc`, §4.1's landed fix, which
-also touches `main.rs` and `Cargo.toml`. **This is exactly the window in which
-the split is cheapest, and it is the argument for inventorying at dispatch
-rather than quoting this paragraph later.***
+**These are the lanes. They are not the inventory, and this paragraph is not a
+substitute for taking one.** The list is dated, it is read from refs, and refs
+are not a census of current work — **an empty branch is not evidence that its
+owner has nothing**, which is the deduction R3-7 struck from revision 3.
+
+*The 0.4.1 branches alive on 2026-09-15, against `main` at `ee771130`:*
+
+| Branch | State today | What it touches |
+| --- | --- | --- |
+| **`feature/settings-open-stall`** | **3 commits — this is the gating lane for 0.4.1** | `main.rs`, `settings.rs`, `i18n.rs`, `version.rs`, `hang_watch.rs` |
+| **`feature/math-block-polish`** | at a branch point, no commits yet | — (expected: `main.rs` math/input/frame, `formula_tools`, `preview`, `seats`) |
+| **`fix/card-wheel-lag`** | at a branch point, no commits yet | — (expected: `main.rs` input/frame/resize, `focus_thumb`, `web_thumb`, `seats`) |
+| **`feature/paste-paths-1`** | 1 commit | `main.rs`, `i18n.rs`, `profiles.rs`, `shell_literal.rs`, `hang_watch.rs`, `bt-platform`, `bt-persist`, `bt-transcript`, `scripts/ci/ignored-tests.txt` |
+| **`fix/macro-budget-amplification`** | 1 commit | `crates/bt-math/src/macro_budget.rs` only — **no `bt-app` overlap** |
+| **`fix/mac-audit3`** | merged into `main` | — |
+
+**Two lanes revision 3 listed have landed** and are no longer freeze exposure:
+`chore/release-script-fixes` and `chore/root-tidy-and-one-feature-set` (the root
+tidy, which carried §4.1's selection fix at `8e6cf0cc`) are both in `main`.
+`fix/build-gitdir-rerun` landed too, carrying `5fd6f935`. **`main` is at
+`ee771130`, not the `4893e2a4` revision 3 recorded**, and the working assumption
+that the split's window is cheap because three lanes are empty is exactly the
+assumption step 2 forbids: take the inventory.
 
 | 0.4.1 lane | Overlap to map before the window | Acceptance to retain after the one controlled rebase |
 | --- | --- | --- |
+| **`feature/settings-open-stall`** — the gating lane | `main.rs` settings and frame paths; `settings`, `i18n`, `version`, `hang_watch` | open latency on the measured path, no new first-frame stall, and the About rows' exhaustive matches |
 | **`feature/math-block-polish`** — formula block, toggle, hover | `main.rs` math/input/frame methods; `formula_tools`, `preview`, `seats`; the robustness child of §4.4a | per-block gesture and hover identity, source toggle and copy, result routing, stale results and worker survival; the existing regression evidence is preserved, not re-derived |
 | **`fix/card-wheel-lag`** — card, thumbnail, wheel | `main.rs` input/frame/resize methods; `focus_thumb`, `web_thumb`, `seats` | reflow and content anchors, mixed-DPI and fullscreen transitions, reverse-wheel response; the real-window checks stay real |
-| **`feature/settings-open-stall`** | `main.rs` settings and frame paths; `settings`, `profiles` | open latency on the measured path, and no new first-frame stall |
-| **paste tickets — issues #1 and #2, files and images** (`docs/paste-paths-design`) | `main.rs` keyboard/clipboard/drag routes; `profiles`, `settings`; the platform clipboard and drop interfaces | payload precedence and quoting, active-leaf and namespace ownership, cancellation and stale completion, app-focus behaviour; design decisions awaiting implementation survive the rebase |
+| **`feature/paste-paths-1`** — issues #1 and #2, files and images | `main.rs` keyboard/clipboard/drag routes; `profiles`, `shell_literal`, `i18n`; the platform clipboard and drop interfaces; **`scripts/ci/ignored-tests.txt`**, which §6.2(c) also touches | payload precedence and quoting, active-leaf and namespace ownership, cancellation and stale completion, app-focus behaviour; the native acceptance in `docs/plans/T-PASTE-1-native-acceptance.md` is manual and is re-run, not inferred |
+| **`fix/macro-budget-amplification`** | none in `bt-app` | nothing to retain here; listed so it is not frozen for no reason |
 | **T-REMOTE-INPUT / TSF** | `main.rs` event dispatch, focus and IME state; the native platform adapter | real text-service input, composition and focus, candidate behaviour. **Synthetic keys and unit gates do not prove the TSF path**; that acceptance is manual and must be re-run, not inferred. |
 
 #### Rollback
@@ -1275,9 +1607,11 @@ ticket carries:
 
 ### 7.3 What needs a named root item moved first — and what each of those costs
 
-Nothing below can be ticketed as a crate extraction until the item in the third
-column has a home **and a written contract**. These are the prerequisites the
-first draft's table hid.
+**Nothing in this section is dispatchable, and round 3 says so in as many
+words.** Nothing below can be ticketed as a crate extraction until the item in
+the third column has a home, an owner, an API and an item-level manifest — what
+§7.3's briefs below call promotion. These are the prerequisites the first
+draft's table hid.
 
 | Module | Lines | Blocked by |
 | --- | ---: | --- |
@@ -1308,7 +1642,7 @@ first draft's table hid.
 
 [E0116]: https://doc.rust-lang.org/stable/error_codes/E0116.html
 
-#### The six headings are work categories, not six sufficient cuts
+#### The six headings are work categories, not six sufficient cuts — and what replaces them is six briefs, not six contracts
 
 *R2-3, which is blocking for this table. Revision 2 read the 23 rows as "six
 prerequisites" and published a table of the form "move this root item and these
@@ -1317,18 +1651,57 @@ written**, and the six subtotals add to 31,479 — exactly **1,194 short** of th
 32,673 above, because `formula_tools` was waved through as "behind `marks`"
 without its other edges being satisfied.*
 
-**What replaces it is a queue of contracts.** Each names the exact items, the
-receiving owner, the API change, the test and build inputs, the adapters that
-stay in the app, and — separately — **the extent that actually moves**, counting
-only modules whose every edge the contract really satisfies. **All 23 modules
-stay blocked until the contract that frees them exists.** The thirteen free rows
-of §7.2 are a **separate queue** and wait for none of this.
+**What replaces it is a queue of six contract *briefs*, A–F.** R3-5 is blocking
+here, and the correction is a label rather than a rewrite: **revision 3 claimed
+each of these "names exact items, owner, API, tests/build inputs and actual
+moved extent", and none of them does all five.** B leaves its receiving library
+open; E explicitly chooses neither owner and offers a cheaper alternative; A
+names a callback without selecting the library that receives it or the
+executable signature it has. So:
+
+> **A brief says what the problem is, which items are implicated, and what must
+> be preserved. It is not a dispatch contract, and no row of §7.3 may be
+> ticketed off one.**
+
+**What each brief must become before its extraction can be ticketed** — this is
+the promotion step, and it is the same five items in every case:
+
+1. **The receiving owner and the public API, selected in writing** — not "an
+   existing suitable library or a deliberately expanded animation crate".
+2. **A dependency list** for the receiving crate, checked for cycles.
+3. **An item/test/build-input manifest**: every item that moves, every test that
+   moves, every test that **stays** as an app-crossing test against the new
+   public API, every fixture, and every build-script input.
+4. **The app-retained adapters named**, with the added root-item spans they
+   cost — a contract that moves a type usually adds lines to `main.rs`, and none
+   of the arithmetic below counts those.
+5. **A remeasurement.** Rebuild the graph on the recorded source commit and
+   recount the **actual moved spans** under the selected option. Do not carry
+   the whole-file figures below into a ticket; they are the mass associated with
+   the brief, not a relocation manifest.
+
+**All 23 modules stay blocked until their brief has been promoted.** The
+thirteen free rows of §7.2 are a **separate queue** and wait for none of this.
+
+**And two of the briefs carry tests that reach into the binary's private
+modules**, which is the concrete form of promotion item 3 and which the sums
+below do not account for:
+
+| Brief | Directly inspected test ownership still unresolved |
+| --- | --- |
+| **C** | `icons.rs` is under `#[cfg(test)] mod tests` from `:1034`. `draw_sites` (`:1051–1384`) reads `seats` constants from `:1124` on, `git_panel` at `:1253` and `git_graph` at `:1278`; `head_runs` (`:1599–1629`) reads app layout constants. Their callers at `:1502`, `:1530` and `:1656` are not addressed by moving `StatusDot`. |
+| **D** | `update::tests::the_row_offers_the_release_page_whatever_machine_this_is` (`update.rs:1344–1426`) calls `settings` at `:1400–1414`. `persist::tests::the_storage_directory_is_named_for_the_product` (`persist.rs:2030–2033`) reads root `APP_NAME`. The `schemes` test at `:1550–1607` calls `seats::push_corner_tag` at `:1582`. **None of these is `version`'s cross-product test**, so subtracting `version`'s 305 lines does not account for them. |
+
+**The rule for those tests:** keep an app-crossing test in `bt-app`, testing the
+extracted crate's **public** API, or redesign its inputs explicitly. **Never add
+a reverse dependency from a library back onto the bin-only app** — there is
+nothing to depend on.
 
 ---
 
-**Contract A — a wake adapter, in place of `AppEvent`.** *Frees: `dir_news` 190,
-`files_watch` 455, `git_watch` 573, `preview_watch` 1,039, `palette_index`
-1,212 — **3,469 lines**.*
+**Brief A — a wake adapter, in place of `AppEvent`.** *Whole-file mass,
+conditional: `dir_news` 190, `files_watch` 455, `git_watch` 573,
+`preview_watch` 1,039, `palette_index` 1,212 — **3,469 lines**.*
 
 `AppEvent` is at `main.rs:302`. **It does not move, and no whole-`AppEvent`
 library is created to make a line count work**: moving the application's event
@@ -1344,11 +1717,11 @@ worker lifetime and cancellation. *These are lifecycle services, not pure
 leaves* — this is interface design. It need not wait for a whole-app Step 4, and
 it cannot hide inside a Step 3 move.
 
-**Contract B — a motion policy, for `Motion` + `RevealTween` + `cubic_bezier`.**
-*Frees now: `settling` 642. **Not** `arrival`.*
+**Brief B — a motion policy, for `Motion` + `RevealTween` + `cubic_bezier`.**
+*Whole-file mass, conditional: `settling` 642. **Not** `arrival`.*
 
 Cutting `settling`'s and `arrival`'s root edges frees only `settling`: arrival
-still reaches `marks`, so its **767** lines follow Contract C, not this one.
+still reaches `marks`, so its **767** lines follow Brief C, not this one.
 Definitions are `Motion` at `main.rs:24847`, `RevealTween` at `:26053`,
 `cubic_bezier` at `:24711`; the default curve `EASE` is already re-exported from
 `bt_render::motion` at `:24764`. *Receiving owner:* a motion-policy module with
@@ -1359,8 +1732,8 @@ the required tween methods, their visibility and their tests. *Stays in the
 app:* the native preference reads, and `Motion::from_client_area_animation`'s
 semantics.
 
-**Contract C — a value type for `StatusDot`, and the `{marks, icons}` bundle.**
-*Frees: `marks` 7,002 + `icons` 3,199 = **10,201 lines**, together and not
+**Brief C — a value type for `StatusDot`, and the `{marks, icons}` bundle.**
+*Whole-file mass, conditional: `marks` 7,002 + `icons` 3,199 = **10,201 lines**, together and not
 separately.*
 
 `StatusDot` is two plain fields — `ink: [u8; 3]` and `hollow: bool`,
@@ -1369,15 +1742,15 @@ concrete cut places the value type with `marks` and re-exports or imports it at
 the root; **`StatusClaim::dot`'s policy stays in the app.** `marks` and `icons`
 are a two-cycle, so **two mutually dependent crates cannot leave separately**:
 this is one move or none, and §7.1's generator cannot express it. *And
-`formula_tools` does not follow.* It needs Contract B's `Motion`, and it needs
+`formula_tools` does not follow.* It needs Brief B's `Motion`, and it needs
 `tooltip`, which reaches root `EASE`, `Motion`, `cubic_bezier`
 (`tooltip.rs:29`), root `PreviewSurface` and `PreviewChipAt` (`:391`, `:530`)
 and the modules `git_graph` and `seats` (`:478`, `:517`) — that is the component
 itself. **`formula_tools`' 1,194 lines are behind the whole cycle and are
 counted nowhere in this queue.**
 
-**Contract D — build identity, for `APP_NAME`.** *Frees, conditionally: `version`
-305, `update` 1,427, `hang_watch` 2,850, `persist` 2,150, `schemes` 1,608,
+**Brief D — build identity, for `APP_NAME`.** *Whole-file mass, conditional:
+`version` 305, `update` 1,427, `hang_watch` 2,850, `persist` 2,150, `schemes` 1,608,
 `pins` 548, `diagnostics` 981, `menubar` 1,260 — **11,129 lines**, of which
 **10,824** actually move under the option this plan prefers.*
 
@@ -1408,8 +1781,9 @@ So there are two honest options and **a constants crate is neither of them**:
 watchdog and channel state; startup order; and banner formatting. **No new crate
 exists solely to hold one string.**
 
-**Contract E — a shared identity owner, for `TabId` and `LeafId`.** *Frees:
-`card_trace` 750 + `web_thumb` 1,651 = **2,401 lines**.*
+**Brief E — a shared identity owner, for `TabId` and `LeafId`.** *Whole-file
+mass under the shared-owner option only: `card_trace` 750 + `web_thumb` 1,651 =
+**2,401 lines**.*
 
 Both types are in **`main.rs`**, not in `bt-layout`: `pub(crate) struct
 TabId(u64)` at `:672` and a private `struct LeafId { tab: TabId, seat: SeatId }`
@@ -1428,9 +1802,9 @@ thumbnail cache by an **opaque key**; `web_thumb.rs:89` and its tests from
 `:856` onward are what that touches. Either way it is an API change with its own
 tests.
 
-**Contract F — the preview document model.** *Frees: **nothing yet**, and the
-"2,870 lines" revision 2 advertised are three file sizes rather than an unlocked
-library surface.*
+**Brief F — the preview document model.** *Whole-file mass: **nothing yet**, and
+the "2,870 lines" revision 2 advertised are three file sizes rather than an
+unlocked library surface.*
 
 Removing the three named root types is **not a sufficient cut**.
 `preview_wrap.rs:3–6` imports `markdown_prose_face`, `measure_markdown_local`,
@@ -1446,24 +1820,45 @@ that design exists this contract's extent is zero.
 
 ---
 
-**What the queue adds up to, counted honestly:**
+**What the briefs are associated with, and what that number is not.**
 
-| Contract | Extent it actually moves |
+Revision 3 printed this table under the heading "the extent it actually moves"
+and totalled it as an unlocked surface. **That claim is withdrawn** (R3-5). Every
+figure below is the **sum of whole-file physical line counts** taken from the
+graph's `stats`, for modules whose graph edges the brief would satisfy. It is
+not an item manifest, it does not count the root definitions and methods a
+contract has to move *into* the new crate, and it does not subtract the tests
+above that cannot leave with their file.
+
+| Brief | Conditional whole-file mass associated with it |
 | --- | ---: |
 | A — wake adapter | 3,469 |
 | B — motion policy (`settling`) | 642 |
 | C — `StatusDot` and the `{marks, icons}` bundle | 10,201 |
 | C then B — `arrival` | 767 |
-| D — build identity, option 1 | 10,824 |
-| E — shared identity | 2,401 |
+| D — build identity, option 1 (`version` retained) | 10,824 |
+| E — shared identity, **shared-owner option only** | 2,401 |
 | F — preview document model | — |
-| | **28,304** |
+| | **28,304 — conditional whole-file mass, not a moved extent** |
 
-The 32,673 of the blocked table minus that 28,304 is **4,369 lines with no
-contract**: `version` 305, which option 1 deliberately leaves with its build
-resource; `formula_tools` 1,194, behind the whole component through `tooltip`;
-and the preview trio's 2,870, which has no measured extent until Contract F is
-designed.
+The 32,673 of the blocked table minus that 28,304 is **4,369 lines of excluded
+whole-file mass under the preferred options**: `version` 305, which option 1
+deliberately leaves with its build resource; `formula_tools` 1,194, behind the
+whole component through `tooltip`; and the preview trio's 2,870, which has no
+measured extent until Brief F is designed.
+
+**Brief E needs two extents, not one.** The shared-identity option and the
+retain-`card_trace`-as-an-adapter option free different sets, and 2,401 belongs
+only to the first. The brief offers both and selects neither, so **neither
+number is available until the owner is chosen** — which is promotion item 1.
+
+**What is contracted and what is measured, said once so the distinction
+survives:** *contracted* is what a promoted brief will guarantee — the owner,
+the API, the manifest, the retained adapters. *Measured* is the physical line
+count of whole files as they stand today. **28,304 is measured mass attached to
+unpromoted briefs. It is not a plan's worth of extractable code, and no schedule,
+estimate or §10 row may be derived from it.** The actual moved spans are
+recounted after each brief's owner and API are selected — promotion item 5.
 
 **`APP_NAME` is still the highest-leverage root item in the crate**, and it is
 still a string constant. What changed is that "move a `&'static str`" is now
@@ -1490,17 +1885,22 @@ four stops being entirely test code.
 
 *Estimated. Replace with Step 0's measurements before anyone spends a week on it.*
 
-The first pass costs the same or slightly more: the same code, plus thirteen more
-crate boundaries and their metadata. What changes afterwards:
+The first pass costs the same or slightly more: the same code, plus **eleven**
+new crates and their metadata, plus the per-row manifest and module overhead
+each one adds. *(Revision 3 wrote "thirteen more crate boundaries"; §7.2 is
+**eleven new crates and two placements**, and one of the placements rides inside
+row 1 — R3-8.)* What changes afterwards:
 
 1. **Parallelism.** Rows 2–10 are largely independent, so cargo can build
    several where it built one — over 31,336 of 455,336 lines. This is the
    thirteen free rows and nothing else: §7.3's blocked 32,673 are **not** on any
    schedule, because "six root items unlock the rest" is not established and
-   §7.3 now prices each contract separately.
+   §7.3's briefs have no measured extent until they are promoted.
 2. **Not rebuilding.** An edit in `main.rs` today recompiles 455,336 lines;
-   after Step 3 it recompiles about 424,000. **Estimated gain: 6.9% of the
-   crate's compile, on every edit** — not the first draft's 14.5%.
+   after Step 3 it recompiles about 424,000. **6.9% is a source-line fraction,
+   and the compile-work claim built on it is a labelled hypothesis** — not the
+   first draft's 14.5%, and not a measured gain. §4.2's baseline is what would
+   turn it into one, per gate, separately.
 3. **The test binary.** 13,130 of the 31,336 extracted lines are `#[cfg(test)]`;
    each extracted crate links its own, much smaller, harness. **This is a
    separate win on a separate quantity from §4.4b's PDB reduction, and the two
@@ -1520,7 +1920,7 @@ production lines of string formatting. The true gain could plausibly be half of
 | a row is ticketed and turns out to need a root item mid-flight | `bt-app-split-table.py` exits 1 **when the rebuilt graph shows it** — so rebuild the graph from the recorded source commit and then run the generator, per §7.1, and remember that its exit status is set agreement and not an extraction licence |
 | a `pub(crate)` becomes `pub` and the surface silently widens | each ticket lists the exact public API; read the new crate's `cargo doc` once |
 | **a library acquires doctests the bin never had** | scan each new crate for doctests, newly public docs, intra-doc links and package-relative fixture paths |
-| a new crate is added without `[lints] workspace = true` | `CONVENTIONS.md` records the incident where a lint table inherited into nothing and clippy became a green empty gate. Adding a crate without that line **is** that incident repeating. |
+| a new crate is added without `[lints] workspace = true` | `docs/CONVENTIONS.md` records the incident where a lint table inherited into nothing and clippy became a green empty gate. Adding a crate without that line **is** that incident repeating. |
 | a new portable crate is not in CI's lists | add it deliberately to the portable-crate lists at `ci.yml:497`/`:649` and to the packaging allow-lists; Linux excludes `bt-app` today and will not catch it |
 | `THIRD-PARTY-NOTICES.md` drift | `check-notices.ps1` walks `cargo metadata`; a `publish = false` first-party crate adds nothing, and the check proves it |
 
@@ -1574,7 +1974,7 @@ table — the only one in the tree is `vendor/alacritty_terminal/Cargo.toml:40`.
 `crates/bt-app/src` contains no `cfg(feature` at all, and CI has no
 feature-matrix job. **"Compiled out" is not implementable today**, and
 implementing it means a second build configuration the three gates do not cover
-— which is the exact shape of the incident `CONVENTIONS.md` records.
+— which is the exact shape of the incident `docs/CONVENTIONS.md` records.
 
 So the word is redefined, once, and the plan uses only this:
 
@@ -1691,31 +2091,40 @@ compile.** Nothing here measured that; it is taken as given.
   the codegen-and-link half.
 - The shortcut scripts forced a full harness rebuild through a feature
   difference (§4.1), and run nowhere in CI. **That one is fixed and landed**
-  (`8e6cf0cc`); the model row below is kept so the size of the win can be
-  measured against §4.2's baseline rather than assumed.
+  (`8e6cf0cc`).
+- **`bt-app`'s build script was unconditionally dirty in every linked worktree**
+  until `5fd6f935` (§4.1), so `bt-app` — the workspace's longest link — was
+  rebuilt on every `cargo` invocation. That is the second half of the observed
+  "third compile", and probably the larger half.
+- **Neither of those two rows has a measured size, and this plan will not give
+  them one** (R3-8). A before/after figure needs comparable runs on **both**
+  configurations, and §4.2 is run only on the fixed base. The rows are kept so
+  the mechanism is on the record, not so a saving can be quoted.
 
 *The model, per step, with each row naming which gate it moves:*
 
 | Step | Gate it reaches | Effect |
 | --- | --- | --- |
-| **0 §4.1** the script selection fix — **landed, `8e6cf0cc`** | `cargo test`, and only when a shortcut script runs | removes one full `bt-app` codegen **and one 209.8 MiB link** from every gate run that includes the scripts. *Free, independent of the split, and out of this plan's hands; §4.2's baseline measures what it was worth.* |
+| **0 §4.1** the script selection fix — **landed, `8e6cf0cc`** | `cargo test`, and only when a shortcut script runs | removes the identified feature mismatch, and with it one full `bt-app` codegen and one link from a gate run that includes the scripts. *Free, independent of the split, and out of this plan's hands.* **Not sized here:** §4.2 measures the fixed configuration only, so no before/after number is claimed. |
+| **0 §4.1** the build-script rerun fix — **landed, `5fd6f935`** | every `cargo` invocation in a linked worktree | stops `bt-app` being rebuilt for a `rerun-if-changed` path that does not exist. **Also not sized here**, and for the same reason. |
 | **0 §4.3** `opt-level` overrides | `cargo test` | *estimated*: lets `cargo test` reuse what `cargo build` just built. On the owner's build-run-test loop this is plausibly the largest item in the document, and it is the reason it was promoted. |
 | **0 §4.4a** the diagnostic source guard | none | **zero, and it costs a little.** It is a prerequisite, not a win: without it no existing test can see a debug-info regression. |
 | **0 §4.4b** `debug = "line-tables-only"` | `cargo test`'s link | *estimated*: aimed at the **654.6 MiB PDB** and the link's debug-info work. The image is measured, not predicted. |
 | **0 §4.5** `rust-lld` | `cargo test`'s link | *estimated*, commonly large on MSVC links this size; trial only |
 | **1** the `i18n` cut | none | **zero.** It buys Step 3. |
 | **2** `main.rs` → `runtime/*.rs` | none | **zero to very slightly negative, and the plan says so.** It buys navigation and merges. |
-| **3** eleven crates, 31,336 lines out | all three | *estimated* **6.9% off every rebuild** — half the first draft's claim — plausibly as little as 3.5%, because the extracted code is the simplest in the crate. Clippy and fmt benefit too, which no Step 0 item does. |
+| **3** eleven crates, 31,336 lines out | `cargo test` and `cargo clippy`; **not `cargo fmt`** | **6.9% is a source-line fraction**, and the compile-work gain is a *hypothesis* built on it — half the first draft's claim, plausibly as little as 3.5%, because the extracted code is the simplest in the crate. **Measure each gate separately**, and net off the added manifest and module overhead. The fmt gate is `cargo fmt --all -- --check` (`CONTRIBUTING.md:18`): extraction keeps that source inside the workspace, so it is still formatted and **the line fraction establishes no formatting saving** (R3-8). |
 | **4** the orchestrator boundary | none | **zero.** Correctness and reviewability, not speed. |
 
 **The honest summary for the owner: no step in this plan makes the gate fast,
-and the one item that was free has already landed somewhere else.** Step 0's
+and both items that were free have already landed somewhere else.** Step 0's
 remaining items reach one gate of three, and one of them — §4.4a — is a cost
-rather than a win. Step 3 compounds across all three but at half the advertised
-rate, and only over the thirteen free rows; §7.3's blocked 32,673 lines are not
-on any schedule until their contracts exist. Steps 1, 2 and 4 buy correctness,
-navigability and the ability to run two tickets in parallel — a different
-currency, and at 112 of 150 arguably the more expensive one.
+rather than a win. Step 3's hypothesis compounds across two gates rather than
+three, at half the advertised rate, and only over the thirteen free rows;
+§7.3's blocked 32,673 lines are not on any schedule until their briefs are
+promoted. Steps 1, 2 and 4 buy correctness, navigability and the ability to run
+two tickets in parallel — a different currency, and on the evidence of 112 of
+150 commits landing in one file, arguably the more expensive one.
 
 ---
 
@@ -1732,17 +2141,17 @@ the rest. What is still open, and what a third review should attack:
    row's public API can be written without widening something. Each row's ticket
    still needs its own read.
 2. ~~**Is `APP_NAME` really the cheap unlock it looks like?**~~ **Answered** by
-   §7.3's Contract D: the 11,129 is real conditionally, `version`'s two
+   §7.3's Brief D: the 11,129 is real conditionally, `version`'s two
    build-script environment variables and its app-owned cross-product test are
    the condition, and the preferred option leaves `version` in `bt-app` and
    moves 10,824.
 3. **Is a wake adapter for `AppEvent` a Step 3 prerequisite or a Step 4
-   design?** Still open, and §7.3's Contract A narrows it: the adapter, not the
+   design?** Still open, and §7.3's Brief A narrows it: the adapter, not the
    enum, is what would move, and it is interface design either way. The question
    is only whether that design is allowed to happen before Step 4's audit.
 4. **Does `preview_viewport`'s inherent `impl Runtime` (`:994`) have an owner
    after Step 2?** Still open, and now known to be **the smaller half** of the
-   question: §7.3's Contract F shows `preview_wrap` and `table_block` also need
+   question: §7.3's Brief F shows `preview_wrap` and `table_block` also need
    `markdown_prose_face`, `measure_markdown_local`, `markdown_table_columns`,
    `push_markdown_table`, `preview` and `seats`, so the adapter's home does not
    by itself make the preview-text group extractable.
@@ -1758,23 +2167,31 @@ the rest. What is still open, and what a third review should attack:
    and §7.2's row 13 ruling adds a constraint to it: `context_menu` goes with
    the identity area, not with the strings.
 7. **Is the freeze still the right protocol** now that §6.2's before-the-freeze
-   column is smaller than revision 2 assumed? Round 2 says yes and prices the
-   alternative at 26–39 hours of gate time. Re-check that arithmetic against
-   whatever Step 0 actually does to the gate, and against §6.5's observation
-   that three of the four 0.4.1 lanes are still empty branch points — the window
-   is cheapest now and gets dearer daily.
-8. **New: what is the residue after 2b, and is "roughly 40,000" still the right
+   column is smaller than revision 2 assumed — and smaller again since the
+   visibility row moved out of it (R3-7)? Round 2 says yes and prices the
+   alternative at 26–39 hours of gate time; that comparison is structural and
+   does not depend on the branch count. Re-check it against whatever Step 0
+   actually does to the gate. **What is *not* an input to the answer is how many
+   branches happen to be empty on any given day**; §6.5 step 2 settles that by
+   inventory, not by observation of refs.
+8. **What is the residue after 2b, and is "roughly 40,000" still the right
    shape for it?** 2a's residue is measured at 102,328. 2b's depends on which
    inline test modules move and which, like `platform_gate_tests` (§6.2a), are
    deliberately kept. Nobody has counted it.
+9. **New: what is link-only time on this machine, and what instrumentation
+   measures it?** §4.2's link row is the only row in the evidence schema that
+   has no Cargo source, and until the ticket names a Windows process trace or an
+   instrumented linker invocation, §4.4b's and §4.5's link claims are
+   **unmeasured** rather than small (R3-1). Choosing that instrumentation is
+   cheap and it unblocks two of Step 0's three trials.
 
 ---
 
 ## 12. Review ledgers
 
-Two rounds, one half each. **Accepted** means the plan changed; **accepted in
-part** means some of it changed and the rest is argued; **refused** means it did
-not, with the reason.
+Three rounds, one section each. **Accepted** means the plan changed; **accepted
+in part** means some of it changed and the rest is argued; **refused** means it
+did not, with the reason.
 
 ### 12.1 First review — the 24 findings, and what round 2 found of them
 
@@ -1854,6 +2271,37 @@ rollback-before and rollback-after cases and the lockfile rule in §6.5; and
 Step 3's per-row and reverse-order rollback in §7.6. The per-step dispatch
 conditions are the gate table in §0.1, restated at the end of each step.
 
+**What round 3 said about those twelve rows**, checked against revision 3's
+body: **three closed — R2-4, R2-7 and R2-11 — and nine partially closed.** Every
+one of the nine remainders is the subject of a finding below, so §12.3 is where
+they are answered; there is no residue this section still owes. Round 3's own
+definition is worth keeping: *closed* there means a consistent documentary
+correction, **not** implemented code or a passing runtime gate.
+
+### 12.3 Third review ledger — R3-1 to R3-8
+
+Every finding in `docs/plans/review/bt-app-split-review-3-2026-09-15.md`, what
+this revision did about it, and where.
+
+| # | Severity | Finding, in short | Decision | What changed, and where |
+| ---: | --- | --- | --- | --- |
+| **R3-1** | **blocking for Step 0 baseline dispatch** | the evidence table still assigns link time to a binary unit's "tail", which Cargo exposes no boundary for, and treats package-level `Fresh` lines as a complete artefact census | **accepted** | §4.2's table is rewritten row by row, and every row now names **the command, the artefact and the exact field read**. The HTML figure is renamed **whole compiler-unit elapsed time** and the sentence claiming a link figure inside it is **struck** — Cargo draws no codegen/link boundary there. The unit census moves to stable **`--message-format=json` compiler-artifact records**, read per record for `package_id`, `target.name`, `target.kind`, `target.test`, `profile.*`, `features`, `filenames` and `fresh`, with the `-v` log kept **beside** it for command context and explicitly **not** read as the census; the JSON is labelled as artefact records, not Cargo's internal unit graph. Link-only time gets a named Windows process trace — PID/parent, image and arguments, start/end, **CPU versus wall separately**, and a peak-memory metric the ticket must name as working set or private commit — associated with the EXE and PDB it produced. **If that instrumentation is absent, link time is reported `unmeasured`**, and §4.4b may not claim "measure the link on its own" is complete. §4.5's and §10's link rows carry the same limit. |
+| **R3-2** | **should-fix, required before dispatch** | the gate table mixes entry requirements with ticket outputs, so row 0 demands a measured baseline before it will authorise measuring the baseline | **accepted** | §0.1's single gate column becomes **three: Entry, Acceptance, Landing**, with the rule stated above it — *no ticket's own Acceptance or Landing item may appear in its Entry cell*. Step 0 is split into **six rows** (baseline, `opt-level`, guard, `debug`, linker, combination), each with its own entry and its own output, and the guard is explicitly **not** a prerequisite of the baseline. Step 2's preparation is separated from its relocation, and 2b's "proof the child body ran" is moved to **Landing**. The concrete entry gates are the two checklists at **§4.0** and **§5.0**. §4.2 also fills the procedural fields round 3 names: named owner and runner, isolated target directory, the exact command sequence, and **the three repetitions spelled out** — full reset per cold repetition, a discarded warm-up run before the warm case, and the app-only edit and its byte-for-byte restoration written literally — so three invocations cannot become one cold run and two warm ones under one label. |
+| **R3-3** | should-fix for Step 1 | the five-file cut is fixed, but its acceptance is still categories, and the R2-5 ledger row claims tests and fixtures were named when they were not | **accepted** | §5.2 is replaced by a **table of seven test identities**, each marked existing or new, with inputs, the expected-output source and the caller it reaches: `settings::tests::profile_colour_labels_preserve_both_languages` against the eight literal pairs at `i18n.rs:3462–3469` **through the picker at `settings.rs:4083`**; the existing `profiles::tests::an_entry_that_is_neither_a_builtin_nor_a_program_is_dropped_and_named` (`profiles.rs:22990–23013`) **retargeted, not deleted**, and recorded as a `contains` check; a new `profiles::tests::profile_entry_fault_preserves_exact_outputs` over both variants with ids `fish` and `profile-42` against the four format strings at `i18n.rs:6380–6391`; `i18n::tests::pixel_size_preserves_exact_output` and `…::picture_shown_at_preserves_exact_output` over `(0,0)`, `(1,1)`, `(1180,800)`, `(u32::MAX, u32::MAX)`; and `preview::tests::pixel_size_reexport_preserves_output`. **No identity is invented for the two `main.rs` call sites** — the plan says so and offers a bounded source-and-caller comparison instead. The `i18n::CURRENT` hazard (`i18n.rs:248`, set at `:259`) gets a rule: use `Text::in_lang` (`:2689`) where it exists, give the moved fault formatter a `lang`-taking inner or **run it in a contained child process**, and never rely on a mutex the existing readers do not take. Every line reference in §5 is re-verified against `main` at `ee771130`: **`main.rs:69698` → `:69720`**, `docs/CONVENTIONS.md`'s new path and `build.rs`'s rewrite recorded, and re-verification at dispatch required anyway. |
+| **R3-4** | **blocking for Step 2 guard conversion** | one remove-the-subject mutation rule cannot validate a negative assertion or preserve an arity assertion's scope; and the binding census and the multi-file precedent are both misstated | **accepted** | §6.2(b)'s single mutation instruction becomes a **four-row table, one rule per guard class**. Named body: remove *or rename* the subject, and separately remove the required condition inside the correct subject; reject missing, duplicate and test-literal matches. Whole-source prohibition: **inject a forbidden spelling into each covered destination class** and require failure, then **separately prove the enumeration is complete** — because `main.rs:113789` is green precisely *because* its four withdrawn spellings are absent, and removing them proves nothing. Arity: delete a required occurrence **and** add an unauthorised one in another covered fragment; record production and test occurrences separately with owners. Scoped negative: both named-body rules plus the inside/outside asymmetry that is `:103570`'s whole meaning. Two new rules follow: the **covered union** is the original `main.rs` scope plus its relocated descendants, and widening it to unrelated modules is a semantic decision, not a side effect; and whole-source coverage is **preserved across 2a/2b or replaced by named production and test invariants** — `:105784`'s six is re-derived, **never lowered to whatever is left in one file**. Census corrected to **89 `const` plus two `let`** at `:125096` and `:157543`, and `main.rs:165696–165697` described as **two separate constants**, with `const SOURCES` marked as a shape to design rather than one in the tree. |
+| **R3-5** | **blocking for the blocked Step 3 queue** | A–F are still briefs, not contracts, and 28,304 is not an actual moved extent | **accepted** | A–F are **relabelled Briefs A–F** throughout §7.3 and every cross-reference, under a box saying a brief is not a dispatch contract and no row may be ticketed from one. A five-item **promotion step** is added — owner and API selected in writing, dependency list, item/test/build-input manifest, app-retained adapters with the root-item spans they add, and a **remeasurement** on the recorded source commit. The queue table is retitled **conditional whole-file mass**, its total labelled *"28,304 — conditional whole-file mass, not a moved extent"*, and 4,369 becomes **excluded whole-file mass under the preferred options**; a paragraph states what is contracted versus what is measured, and forbids deriving any schedule or §10 row from the sum. **Brief E now owes two extents**, one per option, and 2,401 is marked as belonging only to the shared-owner one. The unresolved app-crossing tests round 3 inspected are tabled: `icons.rs`'s `draw_sites` and `head_runs` reaching `seats`, `git_panel` and `git_graph`; `update::tests::the_row_offers_the_release_page_whatever_machine_this_is` reaching `settings`; `persist::tests::the_storage_directory_is_named_for_the_product` reading root `APP_NAME`; the `schemes` test calling `seats::push_corner_tag` — with the rule that such a test **stays in `bt-app` against the extracted public API** and that **no library may depend back on the bin-only app**. All 23 modules stay blocked. |
+| **R3-6** | should-fix | the inventory still presents four withdrawn readings as current conclusions | **accepted** | The inventory is brought into agreement with the operative plan, each contradiction kept only as explicitly rejected history: **§2's "sharing no artifacts"** now says a differing profile setting changes a unit's fingerprint and that reuse is conditional on target, mode, features, profile and flags (plan §4.3); **§6.3's ~124 MiB attribution** is withdrawn as an uncomparable, unsectioned comparison of two historical binaries (plan §4.4b); **§7's platform-array section** is rewritten around strict 2a — no array edit, `platform_gate_tests` staying physically in `main.rs`, the eleven matches read as **ten compiler `cfg` attributes plus one test-needle line**, and "moving any `cfg` makes both directions fail" corrected to *only removal of a listed file's last real use makes it silent*; and **§5's graph description** now says `main.rs` is a node — `@root` — in `root_prod`, and separates the two measures: strict **`free`** rejects every nontrivial cycle, **`avoid_largest`** only the largest component. `regex_full` after the `i18n` cut is **48 / 55,302 free** and **51 / 66,273 avoid-largest**; the plan's `root_prod` rows are unaffected because the two coincide there. The plan carries the ten-plus-one correction at §6.1 too. **Ticket writers must not import inventory §7's obsolete platform work into Step 2a**, and the inventory now says so. No script was edited. |
+| **R3-7** | should-fix before a freeze | the scheduling table and the live-branch claims conflict with the freeze protocol | **accepted** | §6.2's division table moves **every visibility and import change into the with-move column**, with the reason: a widening applied before its method moves has nothing a reviewer can check it against, and it contradicts §6.1 and §6.5's own rule. Only demonstrably topology-compatible work stays on the left, and `the_shell_page_is_gone`'s recursion is the test of that. §6.5's **"112 of 150, so most open branches will have to be rebased" is withdrawn** — the freeze argument is restated structurally, as one rebase against up to twenty-six — and the inference of zero cost from empty refs is withdrawn with it: an empty branch is not evidence that its owner has no work, so the inventory is **owner-confirmed**. The lane list is replaced with the branches actually alive against `main` at `ee771130`: **`feature/settings-open-stall` (3 commits, the gating lane)**, `feature/math-block-polish` and `fix/card-wheel-lag` at branch points, `feature/paste-paths-1` (1 commit, and it touches `scripts/ci/ignored-tests.txt`), `fix/macro-budget-amplification` (1 commit, **no `bt-app` overlap**), and `fix/mac-audit3` merged; `chore/release-script-fixes`, the root tidy and `fix/build-gitdir-rerun` have **landed**. The abort rule is respelled **"lift the merge freeze and resume affected merges; schedule any retry separately"**, so an expiry cannot be read as an automatic restart, and the coordinator, agreed maximum duration, final-tree gate and no-partial-landing rule are all preserved. §4.1 also records that **`8e6cf0cc` does not touch `main.rs`**, contrary to revision 3. |
+| **R3-8** | should-fix | the compile model claims more than the evidence supports | **accepted** | §4.1's "either form makes every unit `Fresh` after the gate" is **withdrawn**: the selection change removes **the identified feature mismatch**, and what is actually reused is a measurement §4.2's artefact records take. §4.1 and §10 now carry the **second cause of the "third compile"** — `bt-app`'s build script was unconditionally dirty in every linked worktree, because it joined names onto `--absolute-git-dir` and a `rerun-if-changed` path that does not exist makes a build script always dirty; fixed on `main` at **`5fd6f935`** with `git rev-parse --git-path`, and **probably the larger half**. Neither fix is given a size: a before/after figure needs comparable runs on both configurations and §4.2 runs only the fixed one, which is said plainly in both places. §7.5 counts **eleven new crates** rather than thirteen boundaries. §10's Step 3 row keeps **6.9% as a source fraction and a labelled compiler-work hypothesis**, restricts it to `cargo test` and `cargo clippy`, requires each gate measured separately and the added manifest/module overhead netted off, and **removes the fmt claim** — the fmt gate is `cargo fmt --all -- --check` (`CONTRIBUTING.md:18`) and extraction keeps the source inside the workspace, so a line fraction establishes no formatting saving. |
+
+**The two dispatch questions round 3 asked, answered in this revision's own
+voice.** *Step 0's baseline ticket, after 0.4.1 ships:* **yes, once §4.0's seven
+boxes are ticked** — they are all checkable against the tree and the ticket, and
+none of them is produced by the ticket. *Step 1's cut ticket, after 0.4.1
+ships:* **yes, once §5.0's five boxes are ticked**, the largest of which is
+copying §5.2's test table into the ticket and refreshing the five caller
+references one more time. Everything else in this plan stays undispatched.
+
 ---
 
 ## Review record
@@ -1884,7 +2332,27 @@ dispatch conditions into §0.1's gate table.
 
 Its named first action — reconcile and land one workspace-selection fix for the
 two shortcut scripts — **is done, on another branch**: `8e6cf0cc` on
-`chore/root-tidy-and-one-feature-set`, which is being gated now. §4.1 records
-what landed, including where it differs from what the review prescribed.
+`chore/root-tidy-and-one-feature-set`, now merged into `main`. §4.1 records what
+landed, including where it differs from what the review prescribed.
 
-*(Round 3: empty. This revision has not been re-reviewed.)*
+**Round 3 — 2026-09-15, `docs/plans/review/bt-app-split-review-3-2026-09-15.md`.**
+Read-only, documentation only, by Codex, against revision 3 at `d91b66ca`. It
+re-ran both retained scripts — 102 files parsed with no parse-error flags, all
+thirteen free rows reproducing in membership and in both numeric columns, and
+the 23 blocked module sizes summing to 32,673 — reproduced the pin census by
+AST, re-derived the two-impl scope (**63,487**, residue **102,328**) and the
+eleven platform matches, confirmed the installed Cargo at **1.94.1**, and
+checked all twelve of revision 3's ledger rows against the body: **three closed,
+nine partially closed**. **8 findings: three blocking dispatch (R3-1, R3-4,
+R3-5) and five should-fix.** Verdicts: Steps 0, 1, 2a, 2b and Step 3's free rows
+*go with changes*; Step 3's blocked queue *rethink*; Step 4 *rethink; do not
+dispatch*. It answered two dispatch questions directly — **neither the Step 0
+baseline ticket nor the Step 1 cut ticket was dispatchable verbatim** — and said
+what each needed. This revision answers all eight in §12.3, and §0.1's gate
+table is rebuilt as Entry / Acceptance / Landing because of R3-2.
+
+Its two named first actions are done: **§4.2's evidence schema is rewritten
+around observable stable-Cargo output**, and **the two entry gates are written
+as checklists** at §4.0 and §5.0.
+
+*(Round 4: empty. This revision has not been re-reviewed.)*
