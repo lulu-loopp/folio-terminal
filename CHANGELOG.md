@@ -6,39 +6,9 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
-### Added
+Nothing yet.
 
-- A copied file or a copied path from Explorer/Finder pastes as one quoted argument in the shell’s own spelling.
-
-### Changed
-
-- **Switching a formula between its typeset and source forms now animates
-  instead of jumping.** The block grows or shrinks to the height of the other
-  form while the picture and the `$$…$$` text cross-fade, and its two marks ride
-  along with it; if you have asked your system to reduce motion, the change still
-  happens in a single frame.
-- **A typeset formula now sits in a block with room around it, and the block's
-  two marks sit inside it.** A display formula keeps whole blank lines above and
-  below it — as many as the window has room for — and a clear column on each
-  side, so it no longer touches the text it
-  stands between; hovering it lights that whole region, and the show-source and
-  copy marks stand at its right edge, on its middle line, drawn as the same
-  buttons a pane head wears. An inline formula no longer starts a few pixels
-  right of where its source began, which closes the gap that opened before it in
-  the middle of a sentence.
-
-### Fixed
-
-- **Copying a formula no longer leaves the window busy.** The tick that confirms
-  the copy has always come down after a moment on screen, but the window went on
-  asking to be woken for it for as long as it stayed open — one processor core,
-  spent on a window doing nothing. The confirmation is now finished with when it
-  leaves the screen.
-- **A formula's two marks stay with the formula.** Switching tabs or closing a
-  pane used to leave the marks from the block you had been pointing at standing
-  over whatever came next, until you moved the mouse. And in a window split into
-  panes of different sizes, the marks in an unfocused pane were placed — and
-  could be pressed — as though that pane were the size of the focused one.
+## 0.4.1-preview — 2026-09-16
 
 ### Added
 
@@ -53,7 +23,25 @@ All notable changes to Folio are recorded here. The format follows
   from. Nothing on the page is a setting, so nothing on it can be changed by
   accident.
 
+- A copied file or a copied path from Explorer/Finder pastes as one quoted
+  argument in the shell’s own spelling.
+
 ### Changed
+
+- **A typeset formula now sits in a block with room around it, and the block's
+  two marks sit inside it.** A display formula keeps whole blank lines above and
+  below it — as many as the window has room for — and a clear column on each
+  side, so it no longer touches the text it stands between; hovering it lights
+  that whole region, and the show-source and copy marks stand at its right edge,
+  on its middle line, drawn as the same buttons a pane head wears. An inline formula no longer starts a few pixels
+  right of where its source began, which closes the gap that opened before it in
+  the middle of a sentence.
+
+- **Switching a formula between its typeset and source forms now animates
+  instead of jumping.** The block grows or shrinks to the height of the other
+  form while the picture and the `$$…$$` text cross-fade, and its two marks ride
+  along with it; if you have asked your system to reduce motion, the change still
+  happens in a single frame.
 
 - **The release page now also carries download files with a fixed name, so a
   link to the latest build never goes stale.** Beside the versioned archive and
@@ -96,6 +84,56 @@ All notable changes to Folio are recorded here. The format follows
   lands wherever you are typing: the shell, the search box, a file being edited,
   a tab you are renaming.
 
+- **Opening Settings no longer makes the window wait.** Clicking the gear used
+  to freeze the window for several seconds on a machine with a lot of fonts
+  installed, every time it was opened. Folio was asking the system for the list
+  of monospaced families — the list the `Terminal font` picker offers — and
+  waiting for the answer before it would draw anything. It now asks in the
+  background: the page opens at once, the font row shows the family you are
+  already using, and the rest of the list fills in a moment later. `Install
+  fonts…` still does what it did — leave, install a family, come back, and it
+  is there.
+
+- **Copying a formula no longer leaves the window busy.** The tick that confirms
+  the copy has always come down after a moment on screen, but the window went on
+  asking to be woken for it for as long as it stayed open — one processor core,
+  spent on a window doing nothing. The confirmation is now finished with when it
+  leaves the screen.
+
+- **Turning a formula into its source no longer makes the window hesitate.**
+  Pressing the `‹›` mark beside a typeset block — or pressing it again to put the
+  picture back — used to hitch for a moment before the block changed. Changing a
+  formula makes the lines under it move, and the window was measuring the width
+  of every line in the whole scrollback again to find out where they landed;
+  with a long history behind you, that is the pause. It now measures the lines
+  that actually changed, and the rest of your scrollback is left alone. The
+  formula, the mark and the block's own tools are unchanged.
+
+- A formula whose macros expand into more and more text is now refused instead
+  of exhausting memory.
+
+- **A formula's two marks stay with the formula.** Switching tabs or closing a
+  pane used to leave the marks from the block you had been pointing at standing
+  over whatever came next, until you moved the mouse. And in a window split into
+  panes of different sizes, the marks in an unfocused pane were placed — and
+  could be pressed — as though that pane were the size of the focused one.
+
+- Inner products and bra-kets written with `\langle … \rangle` now typeset.
+
+- **Aiming a card's window with the wheel keeps up with the hand.** On a tall
+  card over a pane with a long history, every notch used to copy out every line
+  between the bottom of the pane and the place the card was pointing at — three
+  times over, for one row of movement — so the card stuttered and the notches
+  piled up behind it. It now reads only as far as it has to and keeps only the
+  rows the card draws. Where a notch lands, and where the card stops at the top,
+  are unchanged.
+
+- **On a Mac, Folio can be quit with no window open.** With the last window
+  closed — where Folio stays in the Dock — `Quit Folio` in the menu bar was
+  greyed out and `Cmd+Q` did nothing, so the only way out was the Dock icon's
+  own menu. Quit now answers from an empty desk, and it is the same quit as
+  always: what you were working on is written down before Folio goes.
+
 - **On a Mac, opening a shortcut from the files column opens what it points at.**
   The files column does not run programs, and a shortcut whose name gave nothing
   away — a link called `notes` pointing at an application — used to get past that
@@ -110,43 +148,6 @@ All notable changes to Folio are recorded here. The format follows
   the new page was covered by them. A page now only counts as guarded when its
   own rules are on it, and closing a preview while its rules were still being
   prepared no longer leaves that preview unable to prepare them again.
-
-- **On a Mac, Folio can be quit with no window open.** With the last window
-  closed — where Folio stays in the Dock — `Quit Folio` in the menu bar was
-  greyed out and `Cmd+Q` did nothing, so the only way out was the Dock icon's
-  own menu. Quit now answers from an empty desk, and it is the same quit as
-  always: what you were working on is written down before Folio goes.
-
-- Inner products and bra-kets written with `\langle … \rangle` now typeset.
-
-- **Aiming a card's window with the wheel keeps up with the hand.** On a tall
-  card over a pane with a long history, every notch used to copy out every line
-  between the bottom of the pane and the place the card was pointing at — three
-  times over, for one row of movement — so the card stuttered and the notches
-  piled up behind it. It now reads only as far as it has to and keeps only the
-  rows the card draws. Where a notch lands, and where the card stops at the top,
-  are unchanged.
-
-- **Opening Settings no longer makes the window wait.** Clicking the gear used
-  to freeze the window for several seconds on a machine with a lot of fonts
-  installed, every time it was opened. Folio was asking the system for the list
-  of monospaced families — the list the `Terminal font` picker offers — and
-  waiting for the answer before it would draw anything. It now asks in the
-  background: the page opens at once, the font row shows the family you are
-  already using, and the rest of the list fills in a moment later. `Install
-  fonts…` still does what it did — leave, install a family, come back, and it
-  is there.
-
-- A formula whose macros multiply their arguments through several levels is now refused instead of exhausting memory.
-
-- **Turning a formula into its source no longer makes the window hesitate.**
-  Pressing the `‹›` mark beside a typeset block — or pressing it again to put the
-  picture back — used to hitch for a moment before the block changed. Changing a
-  formula makes the lines under it move, and the window was measuring the width
-  of every line in the whole scrollback again to find out where they landed;
-  with a long history behind you, that is the pause. It now measures the lines
-  that actually changed, and the rest of your scrollback is left alone. The
-  formula, the mark and the block's own tools are unchanged.
 
 - **On a Mac, Folio carries its licences with it.** The application now holds
   the MIT and Apache-2.0 licence texts, the notices for every library it is
