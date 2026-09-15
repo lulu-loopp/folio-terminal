@@ -20,7 +20,7 @@ Folio 是一个开源的 Windows 和 macOS 终端。公式在命令输出中原�
 
 **Windows**——从[发布页](https://github.com/lulu-loopp/folio-terminal/releases)下载压缩包，解压后运行 `folio.exe`。无需安装，文件保持在同一文件夹中即可。Windows 10 1809 及以上，64 位。
 
-**macOS**——从同一页面下载 DMG，将 **Folio** 拖入 Applications。需要 Apple silicon Mac，macOS 14 及以上。也可以用 Homebrew：
+**macOS**——从[发布页](https://github.com/lulu-loopp/folio-terminal/releases)下载 DMG，将 **Folio** 拖入 Applications。需要 Apple silicon Mac，macOS 14 及以上。也可以用 Homebrew：
 
 ```sh
 brew install --cask lulu-loopp/folio/folio

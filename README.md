@@ -27,7 +27,7 @@ move freely, and marks the tab of an agent that is waiting for you.
 and run `folio.exe`. No installer; the files in it belong together, so keep the
 folder as it came. Windows 10 1809 or newer, 64-bit.
 
-**macOS** — take the DMG from the same page and drag **Folio** to Applications.
+**macOS** — take the DMG from the [releases page](https://github.com/lulu-loopp/folio-terminal/releases) and drag **Folio** to Applications.
 Needs an Apple silicon Mac running macOS 14 or newer. Or, with Homebrew:
 
 ```sh
