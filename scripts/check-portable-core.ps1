@@ -219,24 +219,343 @@ if (-not (Test-Path -LiteralPath $pin)) {
     throw "crates/bt-app/src/main.rs is not in the tree - there is no list to read"
 }
 
-# The array as `main.rs` writes it, from the opening bracket to the `];` that
-# closes it. Read rather than repeated: see the note above.
+# ── reading that array as Rust reads it ───────────────────────────────────
+#
+# The list is read out of `main.rs` and not copied, so the reader has to read
+# Rust the way Rust does. A regex that runs to the first `]` ends the array
+# inside the first comment that spells `#[cfg(windows)]`, names a type as
+# `[&str; 11]` or carries a link in brackets — and then this gate says a file
+# that plainly declares the list no longer declares it, which is a sentence
+# nobody can act on. These four functions walk the source instead: line
+# comments, block comments (nested, as Rust's nest), character literals,
+# strings and raw strings are read and stepped over, so that a `[` or a `]`
+# counts only where it is one.
+#
+# The walk crosses eight megabytes of `main.rs` to reach the list, so it jumps
+# between the characters that can begin something rather than reading every
+# one, and it spells out what a literal *says* only for the entries themselves.
+
+# The characters that can open something that is not code, and the two that can
+# end a string. Hoisted because the walk asks for them a hundred thousand
+# times; and the newline and the quote are `[char]` rather than one-character
+# strings because `IndexOf(string, int)` compares by culture, which costs a
+# collation pass over the rest of an eight-megabyte file every time it is
+# asked, while `IndexOf(char, int)` is the ordinal search this wants.
+$openers = [char[]]@("/", '"', "'")
+$quoteOrBackslash = [char[]]@('"', "\")
+$newline = [char]"`n"
+$quote = [char]'"'
+
+# The escape that starts at the backslash `$index`, as the character it stands
+# for and the index just past it. A backslash before a newline is Rust's line
+# continuation and stands for nothing at all.
+function Read-RustEscape([string]$text, [int]$index) {
+    $at = $index + 1
+    if ($at -ge $text.Length) { return [pscustomobject]@{ Value = ""; Next = $at } }
+    $c = $text[$at]
+    if ($c -eq "n") { return [pscustomobject]@{ Value = "`n"; Next = $at + 1 } }
+    if ($c -eq "r") { return [pscustomobject]@{ Value = "`r"; Next = $at + 1 } }
+    if ($c -eq "t") { return [pscustomobject]@{ Value = "`t"; Next = $at + 1 } }
+    if ($c -eq "0") { return [pscustomobject]@{ Value = "`0"; Next = $at + 1 } }
+    if ($c -eq "x") {
+        $hex = [regex]::Match($text.Substring($at, [Math]::Min(4, $text.Length - $at)),
+            '^x([0-9a-fA-F]{2})')
+        if ($hex.Success) {
+            return [pscustomobject]@{
+                Value = [string][char][Convert]::ToInt32($hex.Groups[1].Value, 16)
+                Next  = $at + $hex.Length
+            }
+        }
+    }
+    if ($c -eq "u") {
+        $point = [regex]::Match($text.Substring($at, [Math]::Min(16, $text.Length - $at)),
+            '^u\{([0-9a-fA-F_]{1,6})\}')
+        if ($point.Success) {
+            $digits = $point.Groups[1].Value -replace "_", ""
+            return [pscustomobject]@{
+                Value = [char]::ConvertFromUtf32([Convert]::ToInt32($digits, 16))
+                Next  = $at + $point.Length
+            }
+        }
+    }
+    if ($c -eq "`n" -or $c -eq "`r") {
+        # A `\` at the end of a line eats the line break and the indentation
+        # that follows it.
+        while ($at -lt $text.Length -and [char]::IsWhiteSpace($text[$at])) { $at++ }
+        return [pscustomobject]@{ Value = ""; Next = $at }
+    }
+    return [pscustomobject]@{ Value = [string]$c; Next = $at + 1 }
+}
+
+# The string literal whose opening quote is at `$index` — `"…"`, `b"…"`,
+# `r"…"`, `r#"…"#` and their byte forms, since a raw string wears its prefix in
+# front of the quote — as the index just past its closing quote, and, when
+# `$withValue`, the text it stands for. `$null` when that quote opens no
+# string.
+#
+# Stepping over a literal is the whole job nearly every time it is asked, and
+# reading one character at a time to build a value nobody wants is what makes
+# a walk over a large file slow, so without `$withValue` the search jumps quote
+# to quote and spells nothing out.
+function Read-RustString([string]$text, [int]$index, [bool]$withValue) {
+    if ($text[$index] -ne '"') { return $null }
+
+    # The prefix is read backwards: any number of `#`, then `r`, then an
+    # optional `b`, and in front of all of it something that is not part of an
+    # identifier — otherwise the `"` in `ready"` would open a raw string.
+    $hashes = 0
+    $before = $index - 1
+    while ($before -ge 0 -and $text[$before] -eq "#") { $hashes++; $before-- }
+    $raw = $false
+    if ($before -ge 0 -and $text[$before] -eq "r") {
+        $front = $before - 1
+        if ($front -ge 0 -and $text[$front] -eq "b") { $front-- }
+        if ($front -lt 0 -or -not ([char]::IsLetterOrDigit($text[$front]) -or $text[$front] -eq "_")) {
+            $raw = $true
+        }
+    }
+    if (-not $raw) { $hashes = 0 }
+
+    $at = $index + 1
+    if ($raw) {
+        # A raw string has no escapes: it ends at the first quote followed by
+        # as many `#` as opened it.
+        while ($true) {
+            $closing = $text.IndexOf($quote, $at)
+            if ($closing -lt 0) { break }
+            $closes = $true
+            for ($h = 1; $h -le $hashes; $h++) {
+                if ($closing + $h -ge $text.Length -or $text[$closing + $h] -ne "#") { $closes = $false; break }
+            }
+            if ($closes) {
+                $value = $null
+                if ($withValue) { $value = $text.Substring($index + 1, $closing - $index - 1) }
+                return [pscustomobject]@{ Value = $value; Next = $closing + 1 + $hashes }
+            }
+            $at = $closing + 1
+        }
+        # An unterminated literal is not Rust; the walk stops where the file does.
+        return [pscustomobject]@{ Value = $null; Next = $text.Length }
+    }
+
+    if (-not $withValue) {
+        while ($true) {
+            $next = $text.IndexOfAny($quoteOrBackslash, $at)
+            if ($next -lt 0) { return [pscustomobject]@{ Value = $null; Next = $text.Length } }
+            if ($text[$next] -eq '"') { return [pscustomobject]@{ Value = $null; Next = $next + 1 } }
+            # A backslash spends the character after it, whatever it is.
+            $at = $next + 2
+        }
+    }
+
+    $value = New-Object System.Text.StringBuilder
+    while ($at -lt $text.Length) {
+        $c = $text[$at]
+        if ($c -eq "\") {
+            $escape = Read-RustEscape $text $at
+            [void]$value.Append($escape.Value)
+            $at = $escape.Next
+            continue
+        }
+        if ($c -eq '"') { return [pscustomobject]@{ Value = $value.ToString(); Next = $at + 1 } }
+        [void]$value.Append($c)
+        $at++
+    }
+    return [pscustomobject]@{ Value = $value.ToString(); Next = $text.Length }
+}
+
+# The index just past the character literal that opens at `$index`, or `$null`
+# when the quote opens a lifetime (`'static`) rather than a literal.
+function Read-RustChar([string]$text, [int]$index) {
+    $window = $text.Substring($index, [Math]::Min(24, $text.Length - $index))
+    $literal = [regex]::Match($window, "^'(\\(x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]{1,6}\}|.)|[^'\\]{1,2})'")
+    if (-not $literal.Success) { return $null }
+    return $index + $literal.Length
+}
+
+# The comment or literal that starts at `$index`, stepped over: the index of
+# the first character after it. A `/` that is division and a `'` that opens a
+# lifetime are code and carry no span, so they come back as `$index` itself.
+function Skip-RustNonCode([string]$text, [int]$index) {
+    $c = $text[$index]
+    if ($c -eq "/") {
+        if ($index + 1 -ge $text.Length) { return $index }
+        $second = $text[$index + 1]
+        if ($second -eq "/") {
+            $end = $text.IndexOf($newline, $index)
+            if ($end -lt 0) { return $text.Length }
+            return $end + 1
+        }
+        if ($second -eq "*") {
+            # Rust's block comments nest, and a `*/` inside a deeper one does
+            # not end the outer.
+            $nesting = 1
+            $at = $index + 2
+            while ($at + 1 -lt $text.Length -and $nesting -gt 0) {
+                if ($text[$at] -eq "/" -and $text[$at + 1] -eq "*") { $nesting++; $at += 2; continue }
+                if ($text[$at] -eq "*" -and $text[$at + 1] -eq "/") { $nesting--; $at += 2; continue }
+                $at++
+            }
+            if ($nesting -gt 0) { return $text.Length }
+            return $at
+        }
+        return $index
+    }
+    if ($c -eq '"') {
+        $literal = Read-RustString $text $index $false
+        if ($null -eq $literal) { return $index }
+        return $literal.Next
+    }
+    if ($c -eq "'") {
+        $character = Read-RustChar $text $index
+        if ($null -eq $character) { return $index }
+        return $character
+    }
+    return $index
+}
+
+# The entries of `const $name: [&str; N] = [ … ];`, read out of `$source`.
+#
+# `$null` when the source does not declare that constant in code — a comment
+# quoting the declaration is not a declaration, which is why the search walks
+# from the top of the file rather than trusting the first match. Otherwise
+# `Entries` is what the array holds and `Closed` says whether the array the
+# declaration opened was closed, so that "there is no such list" and "there is
+# one and it is not a closed array of names" stay two different sentences.
+function Read-RustStringArray([string]$source, [string]$name) {
+    $candidates = [regex]::Matches($source, 'const\s+' + [regex]::Escape($name) + '\s*:')
+    if ($candidates.Count -eq 0) { return $null }
+
+    # The first candidate the walk reaches while it is in code is the
+    # declaration; one the walk steps over on its way is a comment about it.
+    $at = 0
+    $start = -1
+    foreach ($candidate in $candidates) {
+        if ($candidate.Index -lt $at) { continue }
+        $buried = $false
+        while ($true) {
+            $next = $source.IndexOfAny($openers, $at)
+            if ($next -lt 0 -or $next -ge $candidate.Index) { break }
+            $step = Skip-RustNonCode $source $next
+            $at = if ($step -gt $next) { $step } else { $next + 1 }
+            if ($at -gt $candidate.Index) { $buried = $true; break }
+        }
+        if (-not $buried) { $start = $candidate.Index + $candidate.Length; break }
+    }
+    if ($start -lt 0) { return $null }
+
+    # `type` walks the constant's type to the `=` that ends it, `array` walks
+    # the array itself, and `depth` is how many brackets deep that walk is: the
+    # entries are the strings lying directly inside the first one.
+    $entries = New-Object System.Collections.Generic.List[string]
+    $stage = "type"
+    $nesting = 0
+    $depth = 0
+    $at = $start
+    while ($at -lt $source.Length) {
+        $c = $source[$at]
+
+        if ($c -eq "/" -or $c -eq '"' -or $c -eq "'") {
+            if ($stage -eq "array" -and $depth -eq 1 -and $c -eq '"') {
+                $literal = Read-RustString $source $at $true
+                if ($null -ne $literal) {
+                    [void]$entries.Add($literal.Value)
+                    $at = $literal.Next
+                    continue
+                }
+            }
+            $step = Skip-RustNonCode $source $at
+            $at = if ($step -gt $at) { $step } else { $at + 1 }
+            continue
+        }
+
+        if ($stage -eq "type") {
+            # `->` is an arrow in `fn() -> T`, not a bracket coming back.
+            if ($c -eq "-" -and $at + 1 -lt $source.Length -and $source[$at + 1] -eq ">") {
+                $at += 2
+                continue
+            }
+            if ($c -eq "[" -or $c -eq "(" -or $c -eq "<") { $nesting++; $at++; continue }
+            if ($c -eq "]" -or $c -eq ")" -or $c -eq ">") { $nesting--; $at++; continue }
+            if ($nesting -le 0 -and $c -eq "=") { $stage = "equals"; $at++; continue }
+            if ($nesting -le 0 -and $c -eq ";") {
+                return [pscustomobject]@{ Entries = @(); Closed = $false }
+            }
+            $at++
+            continue
+        }
+
+        if ($stage -eq "equals") {
+            if ($c -eq "[") { $stage = "array"; $depth = 1; $at++; continue }
+            if ([char]::IsWhiteSpace($c)) { $at++; continue }
+            # The constant is declared and its value is not an array literal.
+            return [pscustomobject]@{ Entries = @(); Closed = $false }
+        }
+
+        if ($c -eq "[") { $depth++; $at++; continue }
+        if ($c -eq "]") {
+            $depth--
+            $at++
+            if ($depth -le 0) {
+                return [pscustomobject]@{ Entries = $entries.ToArray(); Closed = $true }
+            }
+            continue
+        }
+        $at++
+    }
+    return [pscustomobject]@{ Entries = $entries.ToArray(); Closed = $false }
+}
+
+# ── the reader's own fixture, which runs every time this gate does ─────────
+#
+# Red against the regex this replaced, which ended the array at the `]` in the
+# first line comment and came back with one name. Every bracket and quote below
+# is somewhere it must not count: a line comment, a nested block comment, a
+# name, the type, and a second constant the walk must never reach.
+$fixture = @'
+mod platform_gate_tests {
+    /// The list, typed `[&str; 4]`, named in a doc link [main.rs] and in an
+    /// attribute spelling, `#[cfg(windows)]`.
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 4] = [
+        // `#[cfg(windows)]` — a bracket in a line comment.
+        "attention_copilot.rs",
+        /* a block comment holding `]`, /* a nested one holding "]", */ and an
+           unpaired quote: " */
+        "cli.rs",
+        // A name is whatever it says it is, brackets and quotes included.
+        "explorer]\"menu.rs",
+        r#"raw]"name.rs"#,
+    ];
+    const NOT_THIS_ONE: [&str; 1] = ["the walk stopped at the ] above"];
+}
+'@
+$fixtureWanted = @("attention_copilot.rs", "cli.rs", "explorer]`"menu.rs", "raw]`"name.rs")
+$fixtureRead = @((Read-RustStringArray $fixture "FILES_THAT_MAY_NAME_A_PLATFORM").Entries)
+$fixtureAgrees = $fixtureRead.Count -eq $fixtureWanted.Count
+for ($i = 0; $fixtureAgrees -and $i -lt $fixtureWanted.Count; $i++) {
+    if ($fixtureRead[$i] -cne $fixtureWanted[$i]) { $fixtureAgrees = $false }
+}
+if (-not $fixtureAgrees) {
+    throw ("the reader of FILES_THAT_MAY_NAME_A_PLATFORM cannot read its own fixture, whose " +
+        "comments, names and type all contain a bracket: it should have read " +
+        ($fixtureWanted -join ", ") + " and read " + ($fixtureRead -join ", ") +
+        ". Nothing this gate says below that line is worth reading until it can.")
+}
+
+# The list as `main.rs` declares it. Read rather than repeated: see the note
+# above.
 $pinText = [IO.File]::ReadAllText($pin)
-$match = [regex]::Match(
-    $pinText,
-    'const\s+FILES_THAT_MAY_NAME_A_PLATFORM\s*:\s*\[&str;\s*\d+\]\s*=\s*\[(?<body>[^\]]*)\]\s*;'
-)
-if (-not $match.Success) {
+$list = Read-RustStringArray $pinText "FILES_THAT_MAY_NAME_A_PLATFORM"
+if ($null -eq $list) {
     throw ("crates/bt-app/src/main.rs no longer declares FILES_THAT_MAY_NAME_A_PLATFORM, which " +
         "is the list this gate and its Rust twin both read. If the pin moved, move this with it.")
 }
-# Every entry carries a comment saying why it is on the list, and those comments
-# contain quoted English. The names are the strings in the *code*, so the
-# comments go first - the same reading every other walk in this file takes.
-$body = ($match.Groups["body"].Value -split "`n" |
-    ForEach-Object { $_ -replace '//.*$', '' }) -join "`n"
-$allowed = [regex]::Matches($body, '"(?<name>[^"]+)"') |
-    ForEach-Object { $_.Groups["name"].Value }
+if (-not $list.Closed) {
+    throw ("crates/bt-app/src/main.rs declares FILES_THAT_MAY_NAME_A_PLATFORM and then does not " +
+        "give it a closed array of names, so there is nothing here for this gate to read. Rust " +
+        "will not take that source either.")
+}
+$allowed = @($list.Entries)
 if ($allowed.Count -lt 5) {
     throw "the list read out of main.rs has $($allowed.Count) entries, which is not that list"
 }
