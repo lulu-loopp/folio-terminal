@@ -47133,7 +47133,18 @@ impl Runtime<'_> {
             | Row::ProfileArgs
             | Row::ProfileEnv
             | Row::ProfileHyperlink
-            | Row::ProfileIntegration => {}
+            | Row::ProfileIntegration
+            // And the five that hold no value at all (T-SETTINGS-ABOUT). The
+            // About page has no Advanced group to be handed out of, and that is
+            // the smaller half: what its rows say — which build this is, which
+            // machine it was made for, and three addresses — is not a
+            // preference, so there is no default for `Reset to defaults` to put
+            // back. Named rather than swept into a `_`, on this arm's own rule.
+            | Row::AboutVersion
+            | Row::AboutPlatform
+            | Row::AboutReleaseNotes
+            | Row::AboutIssues
+            | Row::AboutLicences => {}
         }
         Ok(())
     }
@@ -48238,7 +48249,14 @@ impl Runtime<'_> {
             | settings::SettingsTarget::ProfileDown(_)
             | settings::SettingsTarget::MenuAction(_)
             | settings::SettingsTarget::MenuItemEdit(..)
-            | settings::SettingsTarget::MenuItemDelete(..)) => {
+            | settings::SettingsTarget::MenuItemDelete(..)
+            // The About page's three doors, on that rule exactly
+            // (T-SETTINGS-ABOUT): the pointer and `Enter` open the same address
+            // or the same file, because both arrive at
+            // `apply_settings_choice`'s `Link` arm and neither carries a body of
+            // its own. No `close_menu` beside it, unlike the run below — the
+            // page this target can be drawn on holds no picker to close.
+            | settings::SettingsTarget::Link(_)) => {
                 self.apply_settings_choice(target)?;
             }
             // A press on the dialog's own body, or inside the open menu but on
