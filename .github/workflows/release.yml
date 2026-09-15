@@ -263,7 +263,10 @@ jobs:
 
       # `bundle.sh` assembles `Folio.app` around that binary — the plist from
       # `render-info-plist`, the icon resampled from `assets/app-icon/`,
-      # `PkgInfo` — and runs `dsymutil` into `Folio.app.dSYM` beside it.
+      # `PkgInfo`, and the four documents the Windows archive also carries —
+      # asks the executable it just copied in whether it is this version at this
+      # commit, reads the tree back and refuses a bundle that is not exactly
+      # those eight files, and runs `dsymutil` into `Folio.app.dSYM` beside it.
       # Nothing in it signs.
       - name: the bundle
         run: scripts/release/macos/bundle.sh --out "$FOLIO_STAGE"
@@ -688,6 +691,20 @@ jobs:
           dmg="downloaded/$FOLIO_DMG"
 
           codesign --verify --deep --strict --verbose=2 "$app"
+
+          # The four documents the licences ask to travel with the binary, asked
+          # of the copies that actually travelled: assembled by `bundle.sh`,
+          # sealed by `sign.sh`, packed into the image, uploaded and fetched
+          # back. They are inside the seal, so the line above would already have
+          # refused a bundle one was taken out of — this names the file, rather
+          # than leaving a reader with "a sealed resource is missing", and it
+          # asks for bytes as well as for a name.
+          for document in LICENSE-MIT LICENSE-APACHE THIRD-PARTY-NOTICES.md TRADEMARK.md; do
+            if [ ! -s "$app/Contents/Resources/$document" ]; then
+              echo "the application carries no $document" >&2
+              exit 1
+            fi
+          done
 
           set +e
           spctl -a -vvv -t open --context context:primary-signature "$dmg" \

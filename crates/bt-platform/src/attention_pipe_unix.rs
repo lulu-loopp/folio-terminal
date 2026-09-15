@@ -263,7 +263,7 @@ pub struct AttentionPipe {
 impl AttentionPipe {
     /// Open this process's endpoint for `directory` and start listening.
     ///
-    /// **It returns already listening**, which is `CONVENTIONS.md`'s rule for
+    /// **It returns already listening**, which is `docs/CONVENTIONS.md`'s rule for
     /// anything shaped like a subscription and is load-bearing here for the
     /// Windows arm's reason: the first pane's shell is spawned within a frame
     /// of this returning, and a hook that fired against an endpoint that was

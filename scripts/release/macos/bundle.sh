@@ -94,6 +94,37 @@
 # 5. **No home directory is assumed.** A GitHub macOS runner has none worth
 # assuming and neither does anyone else's machine; every path here is either
 # resolved from this script's own location or given on the command line.
+#
+# 6. **The four documents travel inside the bundle.** `LICENSE-MIT`,
+# `LICENSE-APACHE`, `THIRD-PARTY-NOTICES.md` and `TRADEMARK.md` — the same four
+# the Windows archive carries, for the same reasons
+# (`scripts/release/package.ps1`): MIT and Apache-2.0 both ask that the notice
+# accompany the distribution, `THIRD-PARTY-NOTICES.md` is how `option-ext`'s
+# MPL-2.0 §3.2 obligation is met, and `TRADEMARK.md` says what the two licences
+# do not grant.
+#
+# On macOS there is nowhere else to put them. The disk image is a delivery van
+# the reader throws away — `dmg.sh` carries no document of its own, because two
+# copies of a licence in one download is a question nobody can answer — and what
+# survives the drag to `/Applications` is `Folio.app`. So they are copied into
+# `Contents/Resources/` from the repository root, where `check-notices.ps1` has
+# already proved that the notices match `Cargo.lock`, and they are copied
+# **before** any signing, so they are inside the seal: a licence a
+# `codesign --verify` would not miss is a licence nobody can remove without the
+# removal showing. Through 0.4.0 neither macOS download carried any of them.
+#
+# 7. **The binary is asked what it is, and a stale one is refused.** The plist
+# is rendered from *this* checkout's manifest and the executable is copied from
+# wherever `--binary` points; nothing but this check stands between the two
+# being about different builds, and the manual route — build, bundle, sign,
+# notarize, publish — never asked. It is the comparison
+# `.github/workflows/release.yml` makes after its own build, moved to where both
+# routes pass through it: `--version` must answer `Folio <version> (<commit>)`
+# with the version the plist just received and the short hash of `HEAD`.
+#
+# The expected version is read back out of the rendered `Info.plist` rather than
+# out of `Cargo.toml`, so 1 above still holds — there is no second reader of the
+# manifest here, only a reader of what the renderer wrote.
 
 set -eu
 
@@ -284,6 +315,27 @@ fi
 cp "$binary" "$app/Contents/MacOS/folio"
 chmod 755 "$app/Contents/MacOS/folio"
 
+# **Ask the executable what it is** — 7 above. Asked of the copy in the bundle,
+# because that is the one that gets signed, notarized and published, and asked
+# with the plist already rendered, because the answer it is compared against is
+# the renderer's and not a second reading of `Cargo.toml`.
+stamped=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")
+# The rule `crates/bt-app/build.rs` follows, spelled the same way: the short
+# hash of `HEAD`, and the word `unknown` where there is no git to ask — so a
+# checkout without one compares `unknown` with `unknown` rather than failing
+# over a fact neither side has.
+commit=$(git -C "$repo" rev-parse --short=10 HEAD 2>/dev/null || echo unknown)
+expected="Folio $stamped ($commit)"
+answered=$("$app/Contents/MacOS/folio" --version)
+echo "  says   $answered"
+if [ "$answered" != "$expected" ]; then
+	echo "bundle.sh: the binary says '$answered'; this checkout is '$expected'" >&2
+	echo "           Build this tree before bundling it — the plist is written from" >&2
+	echo "           the manifest, and a bundle whose program is older is a release" >&2
+	echo "           wearing a version it was not built at." >&2
+	exit 1
+fi
+
 # `Contents/PkgInfo` — eight bytes, no newline. Launch Services reads the
 # package type out of `Info.plist`; this file is the older place it looked, it
 # costs nothing, and its absence is the kind of thing a bundle inspector
@@ -294,6 +346,43 @@ printf 'APPL????' >"$app/Contents/PkgInfo"
 # `Contents/Resources/Folio.icns` — 3 above, in a temporary iconset that is
 # removed whether or not `iconutil` succeeds.
 build_icns "$icon" "$app/Contents/Resources/Folio.icns"
+
+# `Contents/Resources/` and the four documents — 6 above. Copied before anything
+# is signed, so that they are inside the seal rather than beside it. A name that
+# is not in the checkout stops the run here, with `cp` naming the file: these
+# are the same four the Windows archive carries, and a release that quietly drops
+# one is a release that distributes the crates without their notices.
+for document in LICENSE-MIT LICENSE-APACHE THIRD-PARTY-NOTICES.md TRADEMARK.md; do
+	cp "$repo/$document" "$app/Contents/Resources/$document"
+done
+
+# **Read back what was assembled**, rather than trusting eight copies that each
+# reported success. The bundle is the artifact; the commands above are not. This
+# is the same refusal `scripts/release/package.ps1` makes of the Windows
+# archive — every name on the list is there, and nothing else is — and it is
+# what makes the list a list rather than a comment: a file that stops being
+# copied, or one that arrives without being asked for (a `.DS_Store` a Finder
+# window left behind is the ordinary one, and it would be signed along with the
+# rest), is found here and not by a reader.
+contents='Contents/Info.plist
+Contents/MacOS/folio
+Contents/PkgInfo
+Contents/Resources/Folio.icns
+Contents/Resources/LICENSE-APACHE
+Contents/Resources/LICENSE-MIT
+Contents/Resources/THIRD-PARTY-NOTICES.md
+Contents/Resources/TRADEMARK.md'
+
+assembled=$(cd "$app" && find . -type f | sed 's|^\./||' | LC_ALL=C sort)
+listed=$(printf '%s\n' "$contents" | LC_ALL=C sort)
+if [ "$assembled" != "$listed" ]; then
+	echo "bundle.sh: Folio.app does not hold exactly the listed files" >&2
+	echo "listed:" >&2
+	printf '%s\n' "$listed" | sed 's|^|  |' >&2
+	echo "assembled:" >&2
+	printf '%s\n' "$assembled" | sed 's|^|  |' >&2
+	exit 1
+fi
 
 # `Folio.app.dSYM` — 4 above. Read off the copy that ships, so that the UUID in
 # the archived debug information is the UUID of the image a reader's crash
