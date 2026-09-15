@@ -1,11 +1,11 @@
 # Splitting `bt-app` — the plan
 
-2026-09-15, revised three times the same day after three adversarial reviews.
+2026-09-15, revised four times the same day after four adversarial reviews.
 Written against `main` at `76ca0788`, in the worktree
 `D:\Developer\bt-wt\bt-app-split-plan`; the caller references in §5 are
 refreshed against `main` at `ee771130`, which is where the tickets will be cut.
 
-**Revision 4.** Three read-only adversarial reviews have been answered, and the
+**Revision 5.** Four read-only adversarial reviews have been answered, and the
 ledger in §12 has a section for each.
 
 - **Round 1** — `docs/plans/review/bt-app-split-review-2026-09-15.md`, phases
@@ -44,13 +44,34 @@ ledger in §12 has a section for each.
   **§0.1's gate table requires a ticket's own output as permission to dispatch
   it** (R3-2); and **one remove-the-subject mutation rule can validate neither a
   negative assertion nor an arity assertion** (R3-4).
+- **Round 4** — `docs/plans/review/bt-app-split-review-4-2026-09-15.md`, Codex
+  again, read against revision 4 at `1aac358c` and scoped to **the two entry
+  gates and nothing else**. It checked §4.0's seven boxes and §5.0's five
+  against the tree, verified every row of §4.2's evidence schema against the
+  **installed** Cargo — 1.94.1, commit `29ea6fb6` — by reading that version's
+  own serializers and report writer, re-checked the five destination edits and
+  all six §5.2 test identities at `ee771130`, and checked every one of revision
+  4's eight R3 ledger rows against the body — **two closed, six partially
+  closed**. **6 findings: R4-1 and R4-2 blocking Step 0's dispatch, R4-3
+  blocking Step 1's, and three should-fix**, answered in **§12.4**. Its
+  load-bearing corrections: **the command sequence a ticket would copy cannot
+  produce the evidence the table beside it promises** (R4-1); **the literal
+  app-only edit the entry box requires was delegated rather than supplied, and
+  restoring a file's bytes does not restore the build state the next repetition
+  starts from** (R4-2); and **§5.2 asks two rows to reach both languages
+  through a caller that reads `current()` itself, which the isolation rule on
+  the same page forbids** (R4-3).
 
 **What this revision is for.** This plan executes **after 0.4.1 ships**. The
-immediate goal of revision 4 is narrow, and it is stated so it can be checked:
+immediate goal of revision 5 is the one revision 4 declared and did not reach:
 **Step 0's baseline ticket and Step 1's five-file cut ticket become dispatchable
 as written, with entry gates a person can tick off** — the two "Dispatchable
-now" boxes at the head of §4 and §5. **Steps 2, 3 and 4 stay revised plans**,
-not tickets; their gates are tightened where round 3 says they must be, and
+now" boxes at the head of §4 and §5. Round 4 read those two gates and nothing
+else, and all three of its blocking findings are inside them: what was still
+delegated to a ticket writer — the commands that produce the evidence, the
+literal edit with its repetition procedure, and one execution path per named
+test — is written here instead. **Steps 2, 3 and 4 stay revised plans**, not
+tickets; their gates are tightened where rounds 3 and 4 say they must be, and
 nothing in them is dispatched by this document.
 
 **What this revision does not reopen.** Step 4 stays withheld. No constants
@@ -153,13 +174,13 @@ item may appear in its Entry cell.**
 
 | Step | Round-3 verdict | Entry — true before dispatch | Acceptance — the ticket's own outputs | Landing |
 | --- | --- | --- | --- | --- |
-| **0 · baseline** (§4.2) | go with changes | §4.0's seven boxes: a released green base containing **both** `8e6cf0cc` and `5fd6f935`, recorded by hash; a named owner; a named runner machine with its **own** target directory; §4.2's exact command sequence; its repeat/reset procedure; its literal edit-and-restore; and its evidence schema. **All seven are document- and tree-checkable today.** | the baseline itself: the per-case artefact records of §4.2, with link-only time either measured by the named instrumentation or **reported as unmeasured**. | nothing lands; the baseline is a record. |
+| **0 · baseline** (§4.2) | go with changes | §4.0's seven boxes: a released green base containing **both** `8e6cf0cc` and `5fd6f935`, recorded by hash; §4.2's field table filled — owner, runner machine, worktree, an **absolute** target directory and an evidence directory outside it; §4.2's exact command sequence, all three preparation commands carrying `--message-format=json` and both streams captured apart; its repeat/reset procedure, including the discarded re-priming run between edited repetitions; **§4.2's literal edit, copied as bytes**; and its evidence schema. **All seven are document- and tree-checkable today**, and §4.2 now supplies the three that round 4 found were still delegated to the ticket writer. | the baseline itself: the per-case artefact records of §4.2, with link-only time either measured by the named instrumentation or **reported as unmeasured**. | nothing lands; the baseline is a record. |
 | **0 · `opt-level` trial** (§4.3) | go with changes | the baseline above exists and is recorded. | the isolated trial, with the margin against each of §4.3's five limits. | manifest change reviewed on its own. |
 | **0 · diagnostic guard** (§4.4a) | go with changes | separately reviewed as its own source ticket; it does **not** wait on the trials. | a contained panic resolving a frame **to a named function in this crate and to a source location**; a real hang sample against the **matching** image and PDB; proof it fires. | lands before the §6.5 freeze window, not inside it. |
 | **0 · `debug` trial** (§4.4b) | go with changes | §4.4a's guard is landed and green. | PDB bytes, image bytes and link seconds separately. | manifest change reviewed on its own. |
 | **0 · linker trial** (§4.5) | go with changes | the baseline exists; the override is scoped to the trial's own command environment. | driver, flavor, PDB identity, resolution still working. | nothing persistent. |
 | **0 · the chosen combination** (§4.2) | go with changes | the three trials are each measured alone. | the combination measured again; **never the sum of three separate wins**. | the retained settings. |
-| **1** (§5) | go with changes | §5.1's five-file cut is taken as tabled, or the file list is revised **in writing**; §5.2's test identities and fixtures are in the ticket; the five caller references are refreshed against the release base. **All three are document-checkable today.** | the cut as one commit; §5.2's before/after comparisons; the graph **rebuilt from the actual cut**, not the simulation. | one commit, separate from `bt-i18n`'s extraction (§7.2 row 1). |
+| **1** (§5) | go with changes | §5.1's five-file cut is taken as tabled, or the file list is revised **in writing**; §5.2's test identities, **execution paths** and frozen fixtures are in the ticket, with no row left as "either"; the five caller references are refreshed against the release base. **All three are document-checkable today.** | the cut as one commit; §5.2's before/after comparisons; the graph **rebuilt from the actual cut**, not the simulation. | one commit, separate from `bt-i18n`'s extraction (§7.2 row 1). |
 | **2a** | go with changes; **not ready for relocation dispatch** | *Preparation* may be ticketed now on the current topology (§6.2's first column). *Relocation* may not: it needs the item-level destination/visibility map, §6.2(b)'s class-specific pin evidence, §6.2's corrected scheduling columns and §6.5's **populated** freeze fields. | the two `impl Runtime<'_>` blocks moved; strict residue **102,328**; no platform-array change. | §6.5's bounded window, gated on the tree actually merged. |
 | **2b** | go with changes; **not ready** | the exact old→new map of target plus full test identity carrying `cfg`, `#[ignore]` and multiplicity; the written `FILES_THAT_MAY_NAME_A_PLATFORM` exception (§6.2a, already decided). | every file-relative `include_str!` and exact-path selector updated **in the commit that moves its subject**. | **proof the child body ran** — landing evidence, not a pre-implementation result. |
 | **3, free rows** | go with changes | per row: public API, features, tests, fixtures, receiving owner and build inputs fixed; the graph rebuilt after Step 2 on the recorded source commit. **A generated row is not a dispatch contract.** | the extraction, with the row's own public API reviewed. | dependency order recorded for the revert. |
@@ -334,20 +355,31 @@ starts from rather than what Step 4 concludes:
 >       — and which contains **both** `8e6cf0cc` (the shortcut scripts' feature
 >       selection, §4.1) and `5fd6f935` (the build script's
 >       `rev-parse --git-path`, §4.1). Verify by `git merge-base --is-ancestor`
->       on the base, not by assuming. Measuring on a base missing either one
->       measures a fixed bug.
-> - [ ] **A named owner and a named runner machine.** The 60–90-minute gate is
->       reported from one machine; the baseline is only comparable to itself.
-> - [ ] **A worktree with its own `target` directory**, named in the ticket.
->       Never a shared `CARGO_TARGET_DIR` (§9.4).
+>       on the base, not by assuming, and record both exits. Measuring on a base
+>       missing either one measures a fixed bug.
+> - [ ] **A named owner and a named runner machine**, both **filled in** —
+>       §4.2's field table is the list, and a blank in it is a reason not to
+>       dispatch. The 60–90-minute gate is reported from one machine; the
+>       baseline is only comparable to itself.
+> - [ ] **A worktree with its own `target` directory**, named in the ticket as an
+>       **absolute path**, with `CARGO_TARGET_DIR` recorded as unset or as that
+>       same path. Never a shared one (§9.4). **And an evidence directory
+>       outside it**, because the cold reset deletes everything inside.
 > - [ ] **The exact command sequence of §4.2**, written into the ticket in
->       order, with the three cases named.
-> - [ ] **The repeat/reset procedure**: for each of the three repetitions, what
->       is reset and what is kept — §4.2 says which, and the ticket copies it.
-> - [ ] **The app-only edit and its restoration**, written literally: which line
->       of `main.rs`, what the edit is, how it is undone.
+>       order, with the three cases named, **`--message-format=json` on each of
+>       the three preparation commands**, and the two output streams captured
+>       apart under names carrying case, repetition and command.
+> - [ ] **The repeat/reset procedure of §4.2**: what is deleted before each cold
+>       repetition and what is kept, how the warm case is primed, and the
+>       **discarded re-priming run** that puts an edited repetition's cache back
+>       where the previous one found it. The ticket copies it.
+> - [ ] **§4.2's literal app-only edit**, copied as bytes: the anchor line, the
+>       inserted line, the replacement-count assertion and the byte-for-byte
+>       restore — with the anchor re-located against the release base and
+>       asserted to match exactly once.
 > - [ ] **The evidence schema of §4.2's table**, with the link-only row either
->       naming its instrumentation or declaring link time **unmeasured**.
+>       naming its instrumentation or declaring **both** link-only time and
+>       linker peak memory **unmeasured**.
 >
 > **What this ticket does *not* wait for:** the diagnostic guard (§4.4a), any
 > profile trial, and Step 1. It produces the baseline; the baseline is what
@@ -379,8 +411,11 @@ of** the "third compile", and it was not a sequencing accident — the first
 draft's guess was wrong and its proposed `Measure-Command` would have confirmed
 the wrong cause.*
 
-**Part of, because a second cause has since been found and fixed, and it was
-probably the larger one.** `crates/bt-app/build.rs` located `HEAD` and the
+**Part of, because a second cause has since been found and fixed.** *Which of
+the two cost more is not something this plan knows* (R4-6): both of them
+invalidated the same crate, so the work one of them removed can be work the
+other had already caused, and a ranking needs the matched before/after runs
+§4.2 does not make. `crates/bt-app/build.rs` located `HEAD` and the
 branch tip by joining names onto `rev-parse --absolute-git-dir`. In a **linked
 worktree** — which is how every branch in this project is developed, this plan's
 own included — `HEAD` lives under `.git/worktrees/<name>/` while the branch tip
@@ -508,15 +543,131 @@ bug.
 
 Three cases, three repetitions each, on the named runner machine in a worktree
 with its own `target`: **cold** (dependencies unbuilt), **warm with no edit**,
-and **app-only edit** (one named line of `main.rs` changed and restored). For
-each case, this sequence and this order:
+and **app-only edit** (one named line of `main.rs` changed and restored).
+
+**The fields the ticket carries filled in, before it is dispatched** (R4-2).
+None of them is produced by the run, which is why they belong to the entry gate;
+a blank is a reason not to dispatch.
+
+| Field | Written into the ticket as |
+| --- | --- |
+| owner | a person |
+| runner machine | a machine name, its OS build, its core count and its RAM |
+| release base | the full commit hash of the released green 0.4.1 base, with §4.0's two `--is-ancestor` exits recorded beside it |
+| gate evidence | where that base's green release gate is recorded |
+| worktree | an absolute path |
+| target directory | an **absolute** path inside that worktree, with `CARGO_TARGET_DIR` recorded as unset or as that same path |
+| evidence directory | an absolute path **outside** the target directory, because the cold reset deletes everything inside it |
+| shell | the shell and version the evidence was captured from (see the capture checks below) |
+
+For each case and each repetition, this sequence and this order — both streams
+captured, under names carrying **case, repetition and command**:
 
 ```powershell
-cargo build   --workspace --locked --timings -v
-cargo test    --workspace --locked --no-run --timings -v --message-format=json
-cargo clippy  --workspace --all-targets --locked --timings -v -- -D warnings
-cargo test    --workspace --locked                      # the suite run
+# $ev is this repetition's evidence directory, created empty first,
+# and it is not inside the target directory.
+$ev = "<evidence directory>\<case>-<rep>"
+
+cargo build  --workspace --locked --timings -v --message-format=json `
+    1> "$ev\1-build-artifacts.jsonl" 2> "$ev\1-build-verbose.log"
+
+cargo test   --workspace --locked --no-run --timings -v --message-format=json `
+    1> "$ev\2-testbuild-artifacts.jsonl" 2> "$ev\2-testbuild-verbose.log"
+
+cargo clippy --workspace --all-targets --locked --timings -v --message-format=json -- -D warnings `
+    1> "$ev\3-clippy-artifacts.jsonl" 2> "$ev\3-clippy-verbose.log"
+
+# the suite run, and the only one of the four that executes tests
+cargo test   --workspace --locked `
+    1> "$ev\4-suite-stdout.log" 2> "$ev\4-suite-stderr.log"
 ```
+
+**What each flag does on the installed toolchain, checked against that
+toolchain rather than remembered** (R4-1). Cargo is **1.94.1**, the version
+`rust-toolchain.toml` pins, and the manual shipped beside it is the citation.
+
+- **`--timings` writes HTML, and only HTML.** That version's own manual page
+  (`share/man/man1/cargo-build.1`, and the same paragraph in `cargo-test.1`)
+  says a file `cargo-timing.html` is written to the **`target/cargo-timings`**
+  directory at the end of the build, that an additional report **with a
+  timestamp in its filename** is written beside it, and that these reports
+  "are suitable for human consumption only, and **do not provide
+  machine-readable timing data**". The timestamp is UTC, `YYYYMMDDTHHMMSSZ`.
+- **So there is no machine-readable timing output on this channel.** The `json`
+  form — `--timings=json` — is an unstable option behind `-Z unstable-options`
+  on nightly; the stable flag is the bare `--timings`, which means `html`. **This
+  plan does not move to nightly**, so the HTML report is the whole of the timing
+  evidence and the numbers below are read out of it by hand.
+- **`--message-format=json` is a different flag and it is stable.** It is not a
+  form of `--timings`, it does not imply `--timings`, and `--timings` does not
+  imply it: it changes the **diagnostic output format** and puts Cargo's machine
+  messages on **stdout**, one JSON object per line. The census rows below need
+  it and the timing row needs `--timings`, so **each of the three preparation
+  commands carries both**. Revision 4 put the JSON flag on one command of three,
+  which left `build` and `clippy` with no artefact census at all. On clippy it
+  goes **before the `--`**, because everything after `--` belongs to
+  `clippy-driver`; the redirections are the shell's and may sit anywhere.
+- **`-v` writes to stderr**, which is why the two streams are captured apart
+  rather than merged: the JSON is the census, and a verbose line inside the
+  `.jsonl` file makes it unparseable.
+- **Read a record's kind before its fields.** Every line carries a `reason`.
+  `"reason":"compiler-artifact"` lines are the artefact census;
+  **`"reason":"build-script-executed"` lines are build-script executions and are
+  a separate population** — never counted as compilations and never summed with
+  them (R4-1). `compiler-message` and `build-finished` lines are neither.
+
+**Two checks on the capture itself, because a shell can destroy it silently.**
+Windows PowerShell 5.1 writes redirected output as **UTF-16LE** and turns a
+native command's stderr into error records; the artefact stream survives
+neither. So record the shell and `$PSVersionTable.PSVersion` in the run record,
+and after the first command of the first repetition check two properties once:
+the `.jsonl` file begins with the bytes `{"`, has no BOM and no interleaved NUL,
+and **every one of its lines parses as JSON**; and the `-verbose.log` beside it
+contains **no** JSON line. If either fails, capture from PowerShell 7 or
+`cmd.exe` instead and say in the record which shell produced the evidence.
+
+**Archive after every command, not after the run** (R4-1). The HTML lands
+**inside** the target directory, which the cold case deletes in full before each
+repetition, and `cargo-timing.html` is overwritten by the next `--timings`
+command in the same repetition. So, immediately after each of the three
+preparation commands and **before the next one runs**:
+
+1. **Copy the newest `cargo-timing-*.html`** out of `<target>\cargo-timings\`
+   into `$ev` as `<n>-<command>-timing.html`, and record **its original
+   timestamped filename** beside the copy — that name, not the copy's, is the
+   report's identity. Do not archive `cargo-timing.html`: it is a duplicate of
+   whichever report ran last, and it is the file that proves nothing about which
+   command produced it.
+2. **Record the image sizes that command produced**, each as **path, size in
+   bytes and mtime**: after command 1, `target\debug\folio.exe` and
+   `target\debug\folio.pdb`; after command 2, those two paths **again** — cargo
+   uplifts the test-profile bin over them (§4.4b) — plus the harness executable,
+   whose path is read from that command's own `compiler-artifact` record for
+   `bt-app` with `profile.test` true, through its `filenames`.
+3. **Append one row to the run record**: the command as typed, the working
+   directory, the exit status, the UTC start and end timestamps, and the elapsed
+   difference between them.
+
+**Time each command with timestamps taken around it** —
+`(Get-Date).ToUniversalTime().ToString("o")` before and after, subtracted — and
+**do not use `Measure-Command`**: it consumes the output stream the JSON capture
+needs, which is how the first draft of this plan proposed to measure the wrong
+thing in the first place.
+
+**Record the command context explicitly; do not reconstruct it from the log**
+(R4-1). A `-v` log shows the commands that actually ran, so it says nothing
+about the effective settings of a unit that did not run, and a reused unit is
+exactly the case this baseline is about. Independently of the log, once per
+repetition, capture into `$ev`: `cargo --version --verbose` and `rustc -vV`;
+`rustup show active-toolchain`; the repository's `.cargo\config.toml` **and**
+the machine's `%USERPROFILE%\.cargo\config.toml`, which carries this project's
+standing `jobs` ruling and is therefore part of the measurement; the value of
+`RUSTFLAGS`, `CARGO_BUILD_JOBS`, `CARGO_TARGET_DIR`, `CARGO_INCREMENTAL` and
+every `CARGO_PROFILE_*` variable, each recorded as **set-to** or **unset**;
+`git rev-parse HEAD` and `git status --porcelain` for the source state; and the
+resolved target triple. The **feature** evidence is not taken from the log
+either — it is the `features` field of the `compiler-artifact` records, which is
+per target rather than per package.
 
 **Ask stable Cargo only for what stable Cargo emits** (R2-9), **and only for
 boundaries it exposes** (R3-1). Revision 2 asked for "`--timings` JSON" and said
@@ -536,16 +687,17 @@ draw.**
 
 | Quantity | Command that produces it | Artefact, and the exact field read |
 | --- | --- | --- |
-| **whole compiler-unit elapsed time** — never called "link time" | any of the three `--timings` commands above | the timestamped HTML report, saved per run as `target/cargo-timings/cargo-timing-<stamp>.html`. Read the per-unit **total elapsed** for each unit, and the report's own unit list. A unit is a compiler invocation; it includes that unit's codegen and, for a binary unit, its link, and **the report exposes no boundary between them**. |
-| **the unit census: package, target, profile/test mode, features, artefacts, fresh status** | `cargo test --workspace --locked --no-run --message-format=json` (and the same flag on `build`) | the stable **compiler-artifact** records on stdout, saved verbatim as `<case>-<rep>-artifacts.jsonl`. Per record read `package_id`, `target.name`, `target.kind`, `target.test`, `profile.opt_level`, `profile.debuginfo`, `profile.test`, `features`, `filenames`, `fresh`. **These records are what make the census complete**: one per built target, rather than one conditional line per package. |
-| **command context** — target triple, toolchain, effective `rustc` flags, `jobs`, target directory, resolved features | the same commands with `-v` | the verbose log, saved as `<case>-<rep>-verbose.log`, kept **beside** the JSON rather than instead of it. The `Fresh <pkg>` lines are retained as corroboration and are **not** read as the census. |
+| **whole compiler-unit elapsed time** — never called "link time" | any of the three `--timings` commands above | the timestamped HTML report, written by Cargo to `<target>/cargo-timings/cargo-timing-<YYYYMMDDTHHMMSSZ>.html` and archived to `$ev` before the next command runs. The unit table's elapsed column is headed **`Total`** and is rounded to one decimal; the same figure to centiseconds is in the report's own embedded **`UNIT_DATA[].duration`**, in seconds, and that is the number the record quotes. **Only units that actually ran have an entry** — a fresh unit contributes to the report's counts and has **no individual timing entry**, which is a thing to write down rather than a gap to fill. **A build script's execution is itself a timed unit** and is never read as a compilation. A unit is a compiler invocation; it includes that unit's codegen and, for a binary unit, its link, and **the report exposes no boundary between them**. |
+| **the artefact census: package, target, profile/test mode, features, artefacts, fresh status** | **each** of the three preparation commands, all of which carry `--message-format=json` | the stable **`"reason":"compiler-artifact"`** records on stdout, saved verbatim as `<n>-<command>-artifacts.jsonl` — **one file per command**, so that clippy's census is not overwritten by the build's and the three are comparable. Per record read `package_id`, `target.name`, `target.kind`, `target.test`, `profile.opt_level`, `profile.debuginfo`, `profile.test`, `features`, `filenames`, `fresh`. **`target.test` is the target's test eligibility and `profile.test` is the invocation's test mode** — different questions, recorded separately. **These records are what make the census complete**: one per built target, rather than one conditional line per package. They are an artefact census and **not an enumeration of every internal unit**: build-script executions arrive as `"reason":"build-script-executed"` records and are counted on their own. |
+| **command context** — target triple, toolchain, effective `rustc` flags, `jobs`, target directory, configuration, resolved features | **captured on its own**, by the context list above; the `-v` stderr log is kept beside it | `<n>-<command>-verbose.log` for the commands that ran, **plus** the independently captured toolchain, configuration and environment records. **A verbose log does not serialize the settings of a unit that did not run**, so nothing in this row is reconstructed from it, and the `Fresh <pkg>` lines stay corroboration — never the census (R4-1). |
 | **link-only seconds and peak memory** | a named Windows process trace or an instrumented linker invocation — **not Cargo** | the trace record, saved as `<case>-<rep>-link.csv`, one row per linker process, with PID, parent PID, image path, full argument list, start and end timestamps, CPU time **and** wall time separately, and a **peak-memory metric named in the ticket** (state which: peak working set, or peak private commit — they are different numbers). Associate each row with the EXE and PDB it produced by path. |
-| `folio.exe`, harness image and `folio.pdb` sizes | the filesystem, immediately after the run and before any later command replaces an uplifted image | size in bytes, with the file's own path and mtime recorded so the artefact's identity is preserved. |
-| suite wall-clock | the final `cargo test` of the sequence, identified separately | elapsed wall time of that one command. **It is not a compiler timing** and is never added to one. |
+| `folio.exe`, harness image and `folio.pdb` sizes | the filesystem, **immediately after each command** and before the next one replaces an uplifted image | size in bytes, with the file's own path and mtime recorded. A path and an mtime identify **an observation, not a kept copy**: nothing here preserves the bytes of an image a later command overwrites, so an unarchived size is a number that cannot be re-read. |
+| suite wall-clock | the final `cargo test` of the sequence, identified separately | elapsed wall time of that one command, from the timestamps taken around it. **It is not a compiler timing** and is never added to one — and it is not test-execution time either: it includes whatever preparation or rebuild that command performs before the first test runs. |
 
-**If the link instrumentation is not set up, report link-only time as
-`unmeasured`.** That is an acceptable baseline result and a checkable one. What
-is not acceptable is a number read off a boundary that does not exist — and
+**If the link instrumentation is not set up, report link-only time and linker
+peak memory as `unmeasured`, both of them, in writing.** That is an acceptable
+baseline result and a checkable one. What is not acceptable is a number read off
+a boundary that does not exist — and
 **§4.4b's "measure the link on its own" cannot be claimed complete until this
 row is really measured.**
 
@@ -555,23 +707,111 @@ internal unit graph, they are distinct from the unstable timing JSON, and they
 are distinct from libtest's JSON output.
 
 **The three repetitions, spelled out so that three invocations are not silently
-one cold run and two warm ones** (R3-2):
+one cold run and two warm ones** (R3-2), **and so that every repetition of a
+case starts from the same build state as the one before it** (R4-2):
 
-- **Cold** — before *each* of the three repetitions, delete the whole target
-  directory, then run the **full** four-command sequence. Resetting only the
-  first command would leave repetitions two and three warm while all three are
-  labelled cold.
-- **Warm, no edit** — establish the warm cache once by running the full
-  sequence to green and discarding that run's records; then run the sequence
-  three times with nothing touched between them.
-- **App-only edit** — from the same warm cache, before each repetition make the
-  one named edit to `main.rs`, run the sequence, then restore the file
-  byte-for-byte. The ticket writes the line, the edit and the restoration
-  literally; "touch one line" is not a procedure.
+- **Cold** — before *each* of the three repetitions, delete the **whole** target
+  directory named in the ticket, then run the **full** four-command sequence.
+  Resetting only the first command would leave repetitions two and three warm
+  while all three are labelled cold. **What is not deleted is the package
+  cache**: `%USERPROFILE%\.cargo\registry` and `\git` stay, so "cold" means *no
+  compiled artefacts*, not *no downloads*, and the figure does not contain
+  network time. Record whether the commands ran `--offline`, and hold that
+  constant across all three cases.
+- **Warm, no edit** — establish the warm cache once by running the full sequence
+  to green **from a deleted target directory**, and discard that run's records;
+  then run the sequence three times with nothing touched between them.
+  "Nothing touched" is a checkable claim, not an intention: no file in the
+  worktree is written — `git status --porcelain` is empty before and after, and
+  no source file's mtime moves — no branch or toolchain is switched, no second
+  Cargo process runs against that target directory, and the environment of the
+  three runs is the one recorded above. Because the priming run is the same four
+  commands, each of the three repetitions starts from an identical, fully built
+  cache.
+- **App-only edit** — each measured repetition runs from the **unedited warm
+  state**, never from the state its predecessor left behind. One repetition is
+  therefore four steps: **(1)** a discarded **re-priming** run of the full
+  sequence on the *unedited* source, to green — this is what puts the cache
+  back, because **restoring the file's bytes does not undo the compilation the
+  edited build performed**, and without it repetitions two and three measure a
+  rebuild of an already-edited crate; **(2)** apply the literal edit below;
+  **(3)** run the measured sequence; **(4)** restore the file byte-for-byte.
+  Repetition one may take the warm case's priming run as its re-priming run if
+  nothing has been built in between; repetitions two and three may not.
+
+**The cache regime is named, and it is this one: source restore plus a discarded
+re-priming run.** No snapshot of the target directory is taken. A ticket that
+prefers a snapshot restore instead must restore the **whole** target tree with
+mtimes preserved and **prove the restore worked** — a `cargo build --workspace
+--locked` on the restored tree that compiles **nothing** — and say so in
+writing. An unverified directory copy is not a restored cache: Cargo's freshness
+decision reads mtimes, and a copy that moves them turns a warm cache into an
+expensive one. **Every re-priming run is discarded, labelled as a re-priming run
+in the record, and never counted as a repetition.**
 
 Record the target triple, the toolchain, the effective flags, `jobs`, the target
-directory and the resolved feature set, and **hold all six constant across the
-three cases**, along with the declared source state and the command order.
+directory and the resolved feature set — the context list above is what collects
+them — and **hold all six constant across the three cases**, along with
+`CARGO_INCREMENTAL`, the declared source state and the command order.
+
+#### The app-only edit, literally
+
+*§4.0's sixth box requires this, and revisions 3 and 4 told the ticket writer to
+supply it rather than supplying it (R4-2). Here it is, as bytes.*
+
+**It is a production-code edit inside one function body, and not a comment.**
+Which it is has to be said, because the two measure different things: the dev
+profile is incremental and `[profile.test]` inherits that, so a comment-only
+change lets the incremental cache skip most of the crate's codegen — a real
+number, and the cheapest one available. A statement inside a function body
+invalidates that function's work and everything downstream of it inside the
+crate, and forces the link. **What it still is not** is an edit to a widely
+referenced item or a public signature, which invalidates more of the incremental
+cache; this case is the common one — one developer, one function — and the
+record says so rather than generalising from it.
+
+- **File** — `crates/bt-app/src/main.rs`.
+- **Anchor** — the single line `fn main() -> Result<()> {`. At `ee771130` it is
+  line **116069**. At the release base, **find it by its text and assert it
+  matches exactly once** (`Select-String -SimpleMatch "fn main() -> Result<()> {"`
+  returns one line), then record the line number the run actually used. The
+  anchor is unique today: the file's other `fn main` spellings are the test
+  literals `fn main() {}`, which do not match it.
+- **The insertion** — one new line **immediately after** the anchor line, with
+  four leading spaces and terminated by a single `\n`:
+
+  ```rust
+      let _baseline_rep: u8 = std::hint::black_box(0);
+  ```
+
+  `std::hint::black_box` is already used in this file (`main.rs:151289` at
+  `ee771130`), so the idiom compiles here and there is no import to add; the
+  underscore-prefixed binding draws no `unused` lint under the gate's
+  `-D warnings`; and the annotated type makes the call monomorphic, so the
+  statement is really codegen'd rather than folded away.
+- **The removal** — delete that one line. Nothing else in the file is touched at
+  any point, and the file is **LF** (`.gitattributes`): an editor that rewrites
+  it as CRLF fails the hash check below, and takes the source pins with it.
+- **The assertions**, in this order. *Before the edit:*
+  `git status --porcelain crates/bt-app/src/main.rs` is empty, and
+  `git hash-object crates/bt-app/src/main.rs` and the file's line count are
+  recorded. *After the edit:* `git diff --numstat -- crates/bt-app/src/main.rs`
+  reports **one line added, zero removed, for that one path**, and the line count
+  is exactly one greater — that is the replacement-count assertion, and it is
+  what catches an editor that reformatted something else on the way past.
+  *After the restore:* `git restore --source=HEAD -- crates/bt-app/src/main.rs`,
+  then `git status --porcelain` empty again **and** `git hash-object` equal to
+  the recorded hash. A restore that does not reproduce the hash is a failed
+  repetition, not a rounding error.
+- **The edit must leave the suite green, and the sequence's fourth command is
+  what proves it.** `main.rs` is read as text by 91 `include_str!` pins
+  (§6.2b): three of them forbid named spellings over the whole source and ten
+  count occurrences of a needle. The probe line is chosen to be inert against
+  all of them — it contains none of the withdrawn spellings and adds no
+  occurrence of any counted needle — but **the guarantee is the run, not the
+  argument**: if a measured repetition goes red, the probe is wrong, the
+  repetition is discarded, and the fix is a different inert line. **Never a
+  changed pin.**
 
 **The trials are not additive** (R2-9). §4.3, §4.4b and §4.5 are each measured
 alone, and then **the chosen combination is measured again**: changing test
@@ -798,16 +1038,20 @@ checklist at §4.0 and it is satisfiable today.
 >       writing first.** No destination is left as "the picker or the type
 >       owner".
 > - [ ] **§5.2's test table is copied into the ticket**, with every row's target,
->       full test identity, existing-or-new marking, exact inputs and expected
->       output source. No category descriptions.
+>       full test identity, existing-or-new marking, execution path, exact inputs
+>       and expected output source. No category descriptions.
 > - [ ] **Every line reference in §5 is refreshed against the release base.**
->       They are refreshed here against `main` at `ee771130` and one had moved;
->       refresh them again at dispatch, because `main.rs` moves daily.
-> - [ ] **The global-language route is chosen per test** — §5.2: reach both
->       languages through `Text::in_lang` (`i18n.rs:2689`) where it exists; for
->       `profile_entry_fault`, which reads `current()` directly, either add a
->       `lang`-taking inner or run the case in a **contained child process**. A
->       mutex that only the new tests take does not protect existing readers.
+>       They are refreshed here against `main` at `ee771130`, one had moved and
+>       round 4 corrected three more (`CURRENT` at `:249`, the ineffective guard
+>       at `:8849`, and the multi-column doc comment belonging to `on` at
+>       `:2693`); refresh them again at dispatch, because `main.rs` moves daily.
+> - [ ] **§5.2's execution-path column is copied with the table**, one route per
+>       row and **no row left as "either"**: four rows are pure and run in the
+>       parent harness without installing a language, one is an existing test
+>       that switches nothing, **two run in a contained child process** because
+>       the function they cover reads `current()` itself, and one is not a test
+>       at all. A mutex that only the new tests take is not one of the routes —
+>       it does not protect the existing readers.
 > - [ ] **One commit, and not the same commit as extracting `bt-i18n`**
 >       (§7.2 row 1).
 >
@@ -901,15 +1145,53 @@ in, because `bt-app` has no `[lib]`. **Every test below lives inside one of the
 five files of §5.1**, and adding one anywhere else needs the file list revised
 in writing first.
 
-| Test identity | Existing or new | Inputs | Expected output, and where the oracle is |
-| --- | --- | --- | --- |
-| `settings::tests::profile_colour_labels_preserve_both_languages` | **new** | all eight `MarkColour::ALL` entries (`marks.rs:72`), each in English and in Chinese | the eight literal pairs at `i18n.rs:3462–3469` — `Blue`/蓝, `Teal`/青, `Green`/绿, `Amber`/琥珀, `Red`/红, `Magenta`/品红, `Violet`/紫, `Slate`/灰蓝 — reached **through the picker path at `settings.rs:4083`**, `.text()` included, so the test exercises the caller and not only the moved function |
-| `profiles::tests::an_entry_that_is_neither_a_builtin_nor_a_program_is_dropped_and_named` | **existing**, at `profiles.rs:22990–23013` — **retarget, do not delete** | the same `merge(shipped(), &file(vec![named("pwsh"), named("fish"), named("cmd")]))` | unchanged behaviour; only the path `crate::i18n::profile_entry_fault` becomes the local one. **It asserts `contains("fish")` and nothing more**, so it is a caller-reaches-formatter check and is not the exact-output evidence. |
-| `profiles::tests::profile_entry_fault_preserves_exact_outputs` | **new** | both `ProfileFault` variants — `Unusable { id }` and `Duplicate { id }` — with the fixed ids `fish` and `profile-42`, each in both languages | the four format strings at `i18n.rs:6380–6391`, **frozen as the oracle** and compared with `assert_eq!`, not `contains`: `profiles.json: {id} names no program and was skipped`, `profiles.json：{id} 没有写程序，已跳过`, `profiles.json: {id} appears twice; the first was kept`, `profiles.json：{id} 出现了两次，保留了第一条`. Note the ASCII colon-space in English and the full-width `：` in Chinese; that difference is part of the fixture. |
-| `i18n::tests::pixel_size_preserves_exact_output` | **new** | `(0, 0)`, `(1, 1)`, `(1180, 800)`, `(u32::MAX, u32::MAX)` | `{width} U+00D7 {height}` with **one ASCII space on each side of the multiplication sign** (`preview.rs:4238`), compared exactly — `0 × 0`, `1 × 1`, `1180 × 800`, `4294967295 × 4294967295` |
-| `i18n::tests::picture_shown_at_preserves_exact_output` | **new** | the same four pairs, in both languages | the whole sentence `picture_shown_at` builds (`i18n.rs:6550`): `Text::PictureShownAt.text()`, one space, then the pixel size. Compare the **full** sentence, not the tail. |
-| `preview::tests::pixel_size_reexport_preserves_output` | **new** | `(1180, 800)`, the pair `file_peek.rs:2852` already uses | `preview::format_pixel_size` continues to resolve and to return the same string through the re-export. This is the test that would catch the re-export being written as a wrapper with different behaviour. |
-| the two `main.rs` call sites at `:36750` and `:51453` | **no existing unit test reaches them** | — | **Do not invent an identity for them.** Either add the smallest honest seam in `main.rs`, or record an explicitly bounded source-and-caller comparison — the two call sites' text before and after, against the `profiles` formatter test above — and name it as that rather than as coverage. The plan does not claim a test that does not exist. |
+| Test identity | Existing or new | **Execution path** | Inputs | Expected output, and where the oracle is |
+| --- | --- | --- | --- | --- |
+| `settings::tests::profile_colour_labels_match_both_table_columns` | **new** | **parent harness, no language installed** — pure table reads through `colour_name(colour).in_lang(lang)` | all eight `MarkColour::ALL` entries (`marks.rs:72`), each against `Lang::English` and `Lang::Chinese` | the eight literal pairs at `i18n.rs:3462–3469` — `Blue`/蓝, `Teal`/青, `Green`/绿, `Amber`/琥珀, `Red`/红, `Magenta`/品红, `Violet`/紫, `Slate`/灰蓝 — frozen as literals. **This row is the table check and does not reach the picker**; it is what R4-3 calls the additional pure check. |
+| `settings::tests::profile_colour_labels_preserve_both_languages` | **new** | **contained child process** — the protocol below. It cannot be pure: the picker calls `.text()` (`settings.rs:4083`) and `.text()` is `self.in_lang(current())` (`i18n.rs:2678–2679`), so `in_lang` cannot set what this caller observes | in the child, per language: `i18n::install(Lang::English)`, then `SettingsRow::ProfileColour.option_labels()` collected in order; then the same for `Lang::Chinese` | the same eight literals, in `MarkColour::ALL` order, compared with `assert_eq!`. **This is the row that exercises the caller at `settings.rs:4083`, `.text()` included**, which is the whole reason it exists beside the pure one. |
+| `profiles::tests::an_entry_that_is_neither_a_builtin_nor_a_program_is_dropped_and_named` | **existing**, at `profiles.rs:22990–23013` — **retarget, do not delete** | **parent harness, ambient language, nothing installed** — its assertion is id-only and therefore language-independent | the same `merge(shipped(), &file(vec![named("pwsh"), named("fish"), named("cmd")]))` | unchanged behaviour; only the path `crate::i18n::profile_entry_fault` becomes the local one. **It asserts `contains("fish")` and nothing more**, so it is a caller-reaches-formatter check and is not the exact-output evidence. |
+| `profiles::tests::profile_entry_fault_preserves_exact_outputs` | **new** | **parent harness, no language installed** — through the `lang`-taking inner. **The route is chosen, not offered** (R4-3): the moved formatter becomes `fn profile_entry_fault_in(lang: Lang, fault: &ProfileFault) -> String`, matching on `(lang, fault)` exactly as it matches on `(current(), fault)` today, and the public `profile_entry_fault` is `profile_entry_fault_in(current(), fault)` — **one `current()` read per call, at the point it is read today**. The test calls the inner | both `ProfileFault` variants — `Unusable { id }` and `Duplicate { id }` — with the fixed ids `fish` and `profile-42`, each against `Lang::English` and `Lang::Chinese` | the four format strings at `i18n.rs:6380–6391`, **frozen as the oracle** and compared with `assert_eq!`, not `contains`: `profiles.json: {id} names no program and was skipped`, `profiles.json：{id} 没有写程序，已跳过`, `profiles.json: {id} appears twice; the first was kept`, `profiles.json：{id} 出现了两次，保留了第一条`. Note the ASCII colon-space in English and the full-width `：` in Chinese; that difference is part of the fixture. |
+| `i18n::tests::pixel_size_preserves_exact_output` | **new** | **parent harness** — the formatter takes no language and reads none | `(0, 0)`, `(1, 1)`, `(1180, 800)`, `(u32::MAX, u32::MAX)` | `{width} U+00D7 {height}` with **one ASCII space on each side of the multiplication sign** (`preview.rs:4238`), compared exactly — `0 × 0`, `1 × 1`, `1180 × 800`, `4294967295 × 4294967295` |
+| `i18n::tests::picture_shown_at_preserves_exact_output` | **new** | **contained child process** — the same protocol. `picture_shown_at` calls `.text()` internally (`i18n.rs:6553`), so assembling its two-language answer from `Text::PictureShownAt.in_lang` would test a reconstruction of the function rather than the function | in the child, per language: `i18n::install(…)`, then `i18n::picture_shown_at(w, h)` for the same four pairs | the **eight frozen sentences** tabled below — stored as literals in the test, independently of both the `Text` table and the formatter. **Not** `Text::PictureShownAt.text()` plus a space plus the size, which is the function supplying its own oracle. |
+| `preview::tests::pixel_size_reexport_preserves_output` | **new** | **parent harness** — language-independent | `(1180, 800)`, the pair `file_peek.rs:2852` already uses | `preview::format_pixel_size` continues to resolve and to return the same string through the re-export. This is the test that would catch the re-export being written as a wrapper with different behaviour. |
+| the two `main.rs` call sites at `:36750` and `:51453` | **no existing unit test reaches them** | **not executed** — this row is a source comparison and not a test identity | — | **Do not invent an identity for them.** Either add the smallest honest seam in `main.rs`, or record an explicitly bounded source-and-caller comparison — the two call sites' text before and after, against the `profiles` formatter test above — and name it as that rather than as coverage. The plan does not claim a test that does not exist. |
+
+**The picture oracle is frozen, not derived** (R4-3). It comes from
+`i18n.rs:3248` — `Self::PictureShownAt => pick(lang, "shown at", "显示为")` — and
+the `format!("{} {}", …)` at `:6551`, and it is written into the test as eight
+literals:
+
+| Language | The four expected sentences |
+| --- | --- |
+| English | `shown at 0 × 0`, `shown at 1 × 1`, `shown at 1180 × 800`, `shown at 4294967295 × 4294967295` |
+| Chinese | `显示为 0 × 0`, `显示为 1 × 1`, `显示为 1180 × 800`, `显示为 4294967295 × 4294967295` |
+
+One ASCII space after the prefix, one ASCII space on each side of the U+00D7,
+and no other spacing anywhere — in either language.
+
+**The contained-child protocol, written once for the two rows that use it.**
+Both run the **same test identity** in a child copy of the harness, and the
+parent switches nothing.
+
+1. **The parent never installs a language.** Its whole body is spawn, wait,
+   check — which is what keeps the 3,809 other tests out of it.
+2. It launches `std::env::current_exe()` with the **full test identity** and
+   `--exact` — for example
+   `["settings::tests::profile_colour_labels_preserve_both_languages", "--exact",
+   "--nocapture"]` — so that exactly one test is selected.
+3. It sets a **child marker** environment variable whose value is the path of a
+   completion-marker file. With the marker set the test body takes the child
+   branch and does the language work; without it, the body is the parent branch.
+   **That is what stops the child spawning a grandchild.**
+4. It requires the child to **exit successfully** *and* the completion marker to
+   exist, written **after the child's last assertion**. Success alone is not
+   acceptance: **a libtest run that matches no test exits 0** (§6.2c), so a
+   renamed identity would otherwise leave a green parent testing nothing.
+5. It **bounds** the child with a named timeout, kills it on expiry and fails.
+6. The child installs one language, asserts every case for it, installs the
+   other, asserts again, and only then writes the marker. It may install
+   languages freely: it is a process of its own, and `CURRENT` in it is nobody
+   else's.
 
 **Beyond the table, what the ticket also compares, before and after:**
 
@@ -920,30 +1202,43 @@ in writing first.
   must not acquire a second language read or move it to a different point.
 
 **The global-language hazard, and the rule it imposes.** `i18n::CURRENT` is a
-process-global `static` (`i18n.rs:248`) written through `set` at `:259`, and
-every one of these tests runs in the **one** `bt-app` harness alongside 3,809
-other `#[test]` attributes. A test that really switches the current language
-perturbs every other test that reads it, and libtest gives no ordering
-guarantee.
+process-global `static` (`i18n.rs:249`; `:248` is its doc comment), installed
+through the public `i18n::install` at `:253`, which calls `CURRENT.set` at
+`:259` — and every one of these tests runs in the **one** `bt-app` harness
+alongside 3,809 other `#[test]` attributes. A test that really switches the
+current language perturbs every other test that reads it, and libtest gives no
+ordering guarantee.
 
-**So: prefer the language-parameterised form, and contain what cannot use it.**
+**So: prefer the language-parameterised form, and contain what cannot use it —
+and say per row which of the two it is** (R4-3).
 
-- **`Text` already has one** — `Text::in_lang(lang)` at `i18n.rs:2689`, whose
-  doc comment names it the entry point for tests that read more than one column.
-  The colour-label row and the `Text::PictureShownAt` half of `picture_shown_at`
-  reach both languages through it and **switch nothing**.
-- **`profile_entry_fault` has none**: it matches on `current()` directly
-  (`i18n.rs:6379`). The ticket therefore does one of two things, and says which:
-  give the moved formatter a `lang`-taking inner that the public one calls with
-  `current()` — preserving the one read per call — and test the inner; **or**
-  run the two-language case **in a contained child process**.
-- **Any coverage that really switches the language runs in a contained child
-  process**, or under an equally effective isolation mechanism named in writing.
-  **A mutex taken only by the new tests is not one** — it does not protect the
-  existing readers, which take nothing.
+- **A pure table read is the first choice, and it is `Text::in_lang(lang)`**
+  (`i18n.rs:2689`), which forwards to `Text::on(lang, platform)` at `:2693`. The
+  doc comment naming the entry point for a test that reads more than one column
+  belongs to **`on` (`:2693–2696`)**, not to `in_lang` — R4-3's locator
+  correction, recorded so the ticket quotes the right line. Rows that only have
+  to read the table take this route and **switch nothing**.
+- **But `in_lang` cannot cover a caller that reads `current()` itself.**
+  `SettingsRow::option_label` calls `.text()` (`settings.rs:4083`) and `.text()`
+  is `self.in_lang(current())` (`i18n.rs:2678–2679`); `picture_shown_at` calls
+  `.text()` internally (`:6553`). Building either function's two-language answer
+  out of `in_lang` tests a reconstruction of it, not it. **Both therefore go to
+  a contained child**, which is the protocol above, and the pure table check
+  stays beside the picker one rather than replacing it.
+- **`profile_entry_fault` gets the inner instead** — it matches on `current()`
+  directly (`i18n.rs:6379`), it is being moved anyway, and the seam costs
+  nothing: `profile_entry_fault_in(lang, fault)`, with the public function
+  reading `current()` once, where it reads it today. **This is a decision, not
+  an option**; the child route is no longer offered for this row.
+- **Nothing else installs a language in the parent harness.** Any coverage that
+  really switches it runs in a contained child process, or under an equally
+  effective isolation mechanism named in writing. **A mutex taken only by the new
+  tests is not one** — it does not protect the existing readers, which take
+  nothing.
 
 **Record a known-ineffective guard rather than leaning on it:**
-`no_profile_title_has_been_pulled_into_the_language_table` (`i18n.rs:8848`)
+`no_profile_title_has_been_pulled_into_the_language_table` (`i18n.rs:8849`;
+`:8848` is its `#[test]` attribute)
 stops at the first `#[cfg(test)]`, near the top of the file, and never sees the
 table it is named for. Its green is not evidence for this move. Whether to fix
 it is a separate ticket; the gap is recorded here so nobody cites it.
@@ -1055,9 +1350,22 @@ methods needs the visibility, import and path edits §6.1 lists.
 | --- | --- |
 | recursive enumeration in every guard that walks the source tree | every `FILES_THAT_MAY_NAME_A_PLATFORM` entry, removal and arity change |
 | a precise pin **subject map** — each `include_str!` invocation, its binding, its subjects, the scope each assertion covers, and the file each subject is going to | every `include_str!` path change |
-| a **missing-subject failure** on every pin: a guard whose subject is absent fails loudly instead of passing on a fragment | every exact-path test selector |
+| **class-specific preparation, per §6.2(b)'s four-row table**: unique subject and loud absence for the named-body and scoped guards, **complete source enumeration** for the whole-source negatives, and preserved scope and count ownership for the arity sites | every exact-path test selector |
 | the child's **completion proof, under its current identity** | every count/arity assertion whose count the move changes |
 | — | **every visibility and import change**, narrowly enumerated and reviewed as part of the move it serves |
+
+**Not "a missing-subject failure on every pin"** (R4-4). Revision 4 wrote that
+rule into this row and into §6.5's freeze protocol, and it is the rule R3-4
+already rejected for half the classes. **A whole-source prohibition has no
+subject to remove** — it is green precisely because its forbidden text is
+absent — so what it needs prepared is forbidden-text injection into each covered
+destination class, plus proof that its enumeration really reads every source
+file it is supposed to cover. **An arity assertion owns a scope and a count**,
+and a preparation that narrows either of them silently is the defect, not the
+guard. And for any negative, **a missing input source and an absent forbidden
+spelling are different facts**: a guard that reads nothing must fail loudly
+rather than pass. §6.2(b)'s table is the authority for every class, and a
+preparation ticket copies that table rather than this row.
 
 **The visibility row moved columns in this revision** (R3-7). Revision 3 listed
 it on the left, which contradicted both §6.1 — where the `pub(crate)` a method
@@ -1381,9 +1689,13 @@ small.** What revision 2 did not supply, and R2-10 requires, is a bound.
    in that directory) mixes landed and pending states and is not a live ticket
    census.
 3. **Prepare outside the window.** §6.2's before-the-freeze column — recursive
-   enumeration, the pin subject map, missing-subject failures, the child's
-   completion proof under its current identity, and §4.4a's diagnostic guard —
-   all land as ordinary reviewed commits before anything is frozen. Then refresh
+   enumeration, the pin subject map, **the class-specific preparation of
+   §6.2(b)** (unique subject and loud absence for the named-body and scoped
+   guards, complete source enumeration for the whole-source negatives, scope and
+   count ownership for the arity sites — **not one missing-subject rule applied
+   to all four classes**, R4-4), the child's completion proof under its current
+   identity, and §4.4a's diagnostic guard — all land as ordinary reviewed
+   commits before anything is frozen. Then refresh
    the relocation manifest against a single green base and record that commit.
 4. **Freeze merges that touch the manifest**, not the repository. One named
    coordinator, a recorded maximum duration agreed before the window opens, and
@@ -1752,7 +2064,12 @@ counted nowhere in this queue.**
 **Brief D — build identity, for `APP_NAME`.** *Whole-file mass, conditional:
 `version` 305, `update` 1,427, `hang_watch` 2,850, `persist` 2,150, `schemes` 1,608,
 `pins` 548, `diagnostics` 981, `menubar` 1,260 — **11,129 lines**, of which
-**10,824** actually move under the option this plan prefers.*
+**10,824 is the conditional whole-file mass that remains after option 1 leaves
+`version` behind**. **It is not an extent that moves** (R4-5): the app-crossing
+tests this brief must keep in `bt-app` are inside those files, §7.3's exclusion
+rules apply to them like every other row, and the root-owned items a build-
+identity contract has to move *into* the new crate are not in the figure at all.
+A moved extent exists only after promotion item 5 has remeasured one.*
 
 **The 11,129 is real, conditionally**, and it is worth saying which conditions.
 `version`'s only production root edge is `crate::APP_NAME` at `version.rs:50`,
@@ -1770,9 +2087,15 @@ So there are two honest options and **a constants crate is neither of them**:
 1. **Preferred: keep `version` and the build-resource verification in `bt-app`**,
    and inject the build identity, the banner and the app name into the
    consumers. `hang_watch.rs:1217` writes `crate::version::banner()` into every
-   report and `diagnostics.rs:194–214` does the same for a run header — that is
-   the caller work. **Then `version`'s 305 lines are not counted as moved**, and
-   the extent is 10,824.
+   report and `diagnostics.rs:194–214` does the same for a run header — **and
+   `update.rs:517` and `update.rs:641` read `crate::version::VERSION` in
+   production**, which R3-5 named and revision 4 left out of this account
+   (R4-5). Those are the caller work this option owes, and **Brief D's required
+   caller inventory is incomplete until the two `update` consumers are in it**
+   — they are production reads, not the test reads at `update.rs:1205` and
+   `:1345`. **Then `version`'s 305 lines are not counted as moved**, and the
+   conditional mass associated with the brief is 10,824 — a mass, not a
+   relocation manifest.
 2. Justify a build-identity library **with** its own correct commit-refresh
    inputs, its manifest, lockfile and CI work, and the cross-product tests left
    in the app where the resource is.
@@ -2094,19 +2417,25 @@ compile.** Nothing here measured that; it is taken as given.
   (`8e6cf0cc`).
 - **`bt-app`'s build script was unconditionally dirty in every linked worktree**
   until `5fd6f935` (§4.1), so `bt-app` — the workspace's longest link — was
-  rebuilt on every `cargo` invocation. That is the second half of the observed
-  "third compile", and probably the larger half.
+  rebuilt on every `cargo` invocation. That is the second cause of the observed
+  "third compile".
 - **Neither of those two rows has a measured size, and this plan will not give
   them one** (R3-8). A before/after figure needs comparable runs on **both**
   configurations, and §4.2 is run only on the fixed base. The rows are kept so
   the mechanism is on the record, not so a saving can be quoted.
+- **And the two are not ranked against each other, nor assigned an invocation
+  count** (R4-6). They made the same crate dirty by different routes, so their
+  removed work overlaps by an unknown amount; "which was the larger half" and
+  "how many codegens and links each one removed" are both answers to a matched
+  before/after command sequence, not readings of a mechanism. §4.1 and the two
+  rows below say so in the same words.
 
 *The model, per step, with each row naming which gate it moves:*
 
 | Step | Gate it reaches | Effect |
 | --- | --- | --- |
-| **0 §4.1** the script selection fix — **landed, `8e6cf0cc`** | `cargo test`, and only when a shortcut script runs | removes the identified feature mismatch, and with it one full `bt-app` codegen and one link from a gate run that includes the scripts. *Free, independent of the split, and out of this plan's hands.* **Not sized here:** §4.2 measures the fixed configuration only, so no before/after number is claimed. |
-| **0 §4.1** the build-script rerun fix — **landed, `5fd6f935`** | every `cargo` invocation in a linked worktree | stops `bt-app` being rebuilt for a `rerun-if-changed` path that does not exist. **Also not sized here**, and for the same reason. |
+| **0 §4.1** the script selection fix — **landed, `8e6cf0cc`** | `cargo test`, and only when a shortcut script runs | removes the identified feature mismatch, which is **one cause of `bt-app` being rebuilt** when the scripts run. *Free, independent of the split, and out of this plan's hands.* **No invocation count is claimed** (R4-6): the build-script cause in the row below made the same crate dirty, so the two can invalidate the same work, and how many codegens and links either one removed is a matched before/after measurement rather than a property of the mechanism. **Not sized here:** §4.2 measures the fixed configuration only. |
+| **0 §4.1** the build-script rerun fix — **landed, `5fd6f935`** | every `cargo` invocation in a linked worktree | stops `bt-app` being rebuilt for a `rerun-if-changed` path that does not exist. **Also not sized here, and not ranked against the row above**, for the same reason. |
 | **0 §4.3** `opt-level` overrides | `cargo test` | *estimated*: lets `cargo test` reuse what `cargo build` just built. On the owner's build-run-test loop this is plausibly the largest item in the document, and it is the reason it was promoted. |
 | **0 §4.4a** the diagnostic source guard | none | **zero, and it costs a little.** It is a prerequisite, not a win: without it no existing test can see a debug-info regression. |
 | **0 §4.4b** `debug = "line-tables-only"` | `cargo test`'s link | *estimated*: aimed at the **654.6 MiB PDB** and the link's debug-info work. The image is measured, not predicted. |
@@ -2249,7 +2578,7 @@ this revision did about it, and where.
 
 | # | Severity | Finding, in short | Decision | What changed, and where |
 | ---: | --- | --- | --- | --- |
-| **R2-1** | blocking | Step 2's prescribed preparatory commits cannot land green: an allow-list entry, an include path or a child selector aimed at a future topology fails or passes silently before the move | **accepted** | §6.2 replaces the ordering with a **division**: only topology-compatible guard infrastructure lands before the freeze — recursive enumeration, the pin **subject map**, missing-subject failures, and the child's completion proof **under its current identity** — while every path, selector, allow-list and arity change lands **atomically with the move it belongs to**. §6.1 states the 2a scope in writing: **the two `impl Runtime<'_>` blocks and nothing else**, which moves none of `main.rs`'s eleven platform `cfg` lines. §6.2(a) keeps the array **physically in `main.rs`** with a written 2b exception. Narrowly enumerated visibility and import changes are permitted during relocation (§6.1, §6.2). Both failure directions must be demonstrated (§6.2). Commits are reviewed separately and merged as **one validated batch** (§6.2, §6.5). |
+| **R2-1** | blocking | Step 2's prescribed preparatory commits cannot land green: an allow-list entry, an include path or a child selector aimed at a future topology fails or passes silently before the move | **accepted** | §6.2 replaces the ordering with a **division**: only topology-compatible guard infrastructure lands before the freeze — recursive enumeration, the pin **subject map**, guard preparation (**qualified by class in revision 5**, R4-4), and the child's completion proof **under its current identity** — while every path, selector, allow-list and arity change lands **atomically with the move it belongs to**. §6.1 states the 2a scope in writing: **the two `impl Runtime<'_>` blocks and nothing else**, which moves none of `main.rs`'s eleven platform `cfg` lines. §6.2(a) keeps the array **physically in `main.rs`** with a written 2b exception. Narrowly enumerated visibility and import changes are permitted during relocation (§6.1, §6.2). Both failure directions must be demonstrated (§6.2). Commits are reviewed separately and merged as **one validated batch** (§6.2, §6.5). |
 | **R2-2** | blocking | `main.rs:103570` is a scoped negative on `mini_source`'s body, not a whole-crate negative; "88 loud + three global" is not a proven partition | **accepted, and extended** | §6.2(b) keeps `:103570` **scoped to `mini_source`**, with a required **unique** subject and a loud failure when it is absent, and says why converting it would either reject the current program or force somebody to weaken the guard. `:15772` and `:105705` keep full-`SOURCE` coverage. "88 loud + three global" is **withdrawn**; in its place is the honest statement that **all 91 invocations must be reclassified by subject during implementation**, with the method written out — record binding, subjects and scope; record each subject's destination; **mutation-check every converted guard**; define test-literal handling for any whole-crate scan; and put arity edits in the move that changes the count. A shared `SOURCE` hosting several subjects is named as the reason one include replacement per invocation is not generally enough. **Extended:** a re-count for this revision found a **third** whole-source negative at `:113789` (`!MAIN.contains(…)`, `const MAIN` at `:113779`) and **ten** arity assertions rather than seven — neither review's partition contains them, which is evidence for the finding rather than against it. |
 | **R2-3** | blocking | six headings are not six sufficient cuts; `formula_tools`' 1,194 lines are omitted numerically while implied; `ChromeSprite` ownership is wrong; the 11,129 includes tests that cannot leave their build-resource owner | **accepted** | §7.3's unlock table is replaced by **six contracts, A–F**, each naming exact items, receiving owner, API changes, test and build inputs, retained adapters — and **a separately counted extent**. `ChromeSprite` is corrected to `marks.rs:1617` in the blocked table (and the retained script's stale note is recorded in §7.1). Contract D leaves `version`'s 305 lines and its cross-product test with `bt-app` and counts **10,824**, not 11,129. Contract C states the `{marks, icons}` cycle as one move or none and excludes `formula_tools`, which is behind `tooltip` and the component. Contract F's extent is **zero** until the document model is designed. The queue totals **28,304**, leaving **4,369 with no contract**, said plainly. All 23 modules stay blocked until contracted; the thirteen free rows are named a separate queue that waits for none of it. **Refused, per the owner's ruling and §9.1: no constants crate, and no whole-`AppEvent` library, to preserve a line count.** |
 | **R2-4** | should-fix | the generator is presented as a broader safety net than it implements; `context_menu`'s home is undecided | **accepted in part** | §7.1 states the contract as **set and `cfg` agreement between a manifest and one JSON file**, with a table of what it checks and what it does not — row order among the latter — and requires **builder then generator on the recorded source commit**. **A passing run is not approval to extract.** The grouped-SCC limit is named. §7.2 decides `context_menu`: **`bt-i18n`, riding with row 1**, because `bt-persist` declares only `serde`, `serde_json` and `thiserror` and would gain **two** dependency edges, while `bt-i18n` already imports `bt_platform::HostPlatform` (`i18n.rs:91`) and gains **none**; the remit change is stated rather than hidden. **In part:** the scripts are left unedited this pass, so the generator's stale `formula_tools` note and row-13 label are recorded as known defects in §7.1 instead of fixed. |
@@ -2285,14 +2614,14 @@ this revision did about it, and where.
 
 | # | Severity | Finding, in short | Decision | What changed, and where |
 | ---: | --- | --- | --- | --- |
-| **R3-1** | **blocking for Step 0 baseline dispatch** | the evidence table still assigns link time to a binary unit's "tail", which Cargo exposes no boundary for, and treats package-level `Fresh` lines as a complete artefact census | **accepted** | §4.2's table is rewritten row by row, and every row now names **the command, the artefact and the exact field read**. The HTML figure is renamed **whole compiler-unit elapsed time** and the sentence claiming a link figure inside it is **struck** — Cargo draws no codegen/link boundary there. The unit census moves to stable **`--message-format=json` compiler-artifact records**, read per record for `package_id`, `target.name`, `target.kind`, `target.test`, `profile.*`, `features`, `filenames` and `fresh`, with the `-v` log kept **beside** it for command context and explicitly **not** read as the census; the JSON is labelled as artefact records, not Cargo's internal unit graph. Link-only time gets a named Windows process trace — PID/parent, image and arguments, start/end, **CPU versus wall separately**, and a peak-memory metric the ticket must name as working set or private commit — associated with the EXE and PDB it produced. **If that instrumentation is absent, link time is reported `unmeasured`**, and §4.4b may not claim "measure the link on its own" is complete. §4.5's and §10's link rows carry the same limit. |
-| **R3-2** | **should-fix, required before dispatch** | the gate table mixes entry requirements with ticket outputs, so row 0 demands a measured baseline before it will authorise measuring the baseline | **accepted** | §0.1's single gate column becomes **three: Entry, Acceptance, Landing**, with the rule stated above it — *no ticket's own Acceptance or Landing item may appear in its Entry cell*. Step 0 is split into **six rows** (baseline, `opt-level`, guard, `debug`, linker, combination), each with its own entry and its own output, and the guard is explicitly **not** a prerequisite of the baseline. Step 2's preparation is separated from its relocation, and 2b's "proof the child body ran" is moved to **Landing**. The concrete entry gates are the two checklists at **§4.0** and **§5.0**. §4.2 also fills the procedural fields round 3 names: named owner and runner, isolated target directory, the exact command sequence, and **the three repetitions spelled out** — full reset per cold repetition, a discarded warm-up run before the warm case, and the app-only edit and its byte-for-byte restoration written literally — so three invocations cannot become one cold run and two warm ones under one label. |
-| **R3-3** | should-fix for Step 1 | the five-file cut is fixed, but its acceptance is still categories, and the R2-5 ledger row claims tests and fixtures were named when they were not | **accepted** | §5.2 is replaced by a **table of seven test identities**, each marked existing or new, with inputs, the expected-output source and the caller it reaches: `settings::tests::profile_colour_labels_preserve_both_languages` against the eight literal pairs at `i18n.rs:3462–3469` **through the picker at `settings.rs:4083`**; the existing `profiles::tests::an_entry_that_is_neither_a_builtin_nor_a_program_is_dropped_and_named` (`profiles.rs:22990–23013`) **retargeted, not deleted**, and recorded as a `contains` check; a new `profiles::tests::profile_entry_fault_preserves_exact_outputs` over both variants with ids `fish` and `profile-42` against the four format strings at `i18n.rs:6380–6391`; `i18n::tests::pixel_size_preserves_exact_output` and `…::picture_shown_at_preserves_exact_output` over `(0,0)`, `(1,1)`, `(1180,800)`, `(u32::MAX, u32::MAX)`; and `preview::tests::pixel_size_reexport_preserves_output`. **No identity is invented for the two `main.rs` call sites** — the plan says so and offers a bounded source-and-caller comparison instead. The `i18n::CURRENT` hazard (`i18n.rs:248`, set at `:259`) gets a rule: use `Text::in_lang` (`:2689`) where it exists, give the moved fault formatter a `lang`-taking inner or **run it in a contained child process**, and never rely on a mutex the existing readers do not take. Every line reference in §5 is re-verified against `main` at `ee771130`: **`main.rs:69698` → `:69720`**, `docs/CONVENTIONS.md`'s new path and `build.rs`'s rewrite recorded, and re-verification at dispatch required anyway. |
+| **R3-1** | **blocking for Step 0 baseline dispatch** | the evidence table still assigns link time to a binary unit's "tail", which Cargo exposes no boundary for, and treats package-level `Fresh` lines as a complete artefact census | **accepted** | §4.2's table is rewritten row by row, and every row now names **the command, the artefact and the exact field read**. The HTML figure is renamed **whole compiler-unit elapsed time** and the sentence claiming a link figure inside it is **struck** — Cargo draws no codegen/link boundary there. The unit census moves to stable **`--message-format=json` compiler-artifact records**, read per record for `package_id`, `target.name`, `target.kind`, `target.test`, `profile.*`, `features`, `filenames` and `fresh`, with the `-v` log kept **beside** it for command context and explicitly **not** read as the census; the JSON is labelled as artefact records, not Cargo's internal unit graph. Link-only time gets a named Windows process trace — PID/parent, image and arguments, start/end, **CPU versus wall separately**, and a peak-memory metric the ticket must name as working set or private commit — associated with the EXE and PDB it produced. **If that instrumentation is absent, link time is reported `unmeasured`**, and §4.4b may not claim "measure the link on its own" is complete. §4.5's and §10's link rows carry the same limit. **Completed in revision 5** (R4-1): the commands that produce each of those artefacts are written out, the JSON flag is on all three preparation commands, the two streams are captured apart, the HTML figure is named (`Total`, `UNIT_DATA[].duration`) with fresh units marked as having no entry, build-script executions are kept out of the artefact census, and the link row's two quantities are both declared `unmeasured` when the instrumentation is absent. |
+| **R3-2** | **should-fix, required before dispatch** | the gate table mixes entry requirements with ticket outputs, so row 0 demands a measured baseline before it will authorise measuring the baseline | **accepted** | §0.1's single gate column becomes **three: Entry, Acceptance, Landing**, with the rule stated above it — *no ticket's own Acceptance or Landing item may appear in its Entry cell*. Step 0 is split into **six rows** (baseline, `opt-level`, guard, `debug`, linker, combination), each with its own entry and its own output, and the guard is explicitly **not** a prerequisite of the baseline. Step 2's preparation is separated from its relocation, and 2b's "proof the child body ran" is moved to **Landing**. The concrete entry gates are the two checklists at **§4.0** and **§5.0**. §4.2 also fills the procedural fields round 3 names: named owner and runner, isolated target directory, the exact command sequence, and **the three repetitions spelled out** — full reset per cold repetition, a discarded warm-up run before the warm case, and the app-only edit and its byte-for-byte restoration written literally — so three invocations cannot become one cold run and two warm ones under one label. **This row overstated what revision 4 contained, and round 4 was right** (R4-2): the literal edit was *required* by §4.0 and *delegated* by §4.2, not written. Revision 5 writes it as bytes — file, anchor, inserted line, replacement-count assertion, byte-for-byte restore — and adds the discarded re-priming run that makes an edited repetition start where its predecessor started. |
+| **R3-3** | should-fix for Step 1 | the five-file cut is fixed, but its acceptance is still categories, and the R2-5 ledger row claims tests and fixtures were named when they were not | **accepted** | §5.2 is replaced by a **table of seven test identities**, each marked existing or new, with inputs, the expected-output source and the caller it reaches: `settings::tests::profile_colour_labels_preserve_both_languages` against the eight literal pairs at `i18n.rs:3462–3469` **through the picker at `settings.rs:4083`**; the existing `profiles::tests::an_entry_that_is_neither_a_builtin_nor_a_program_is_dropped_and_named` (`profiles.rs:22990–23013`) **retargeted, not deleted**, and recorded as a `contains` check; a new `profiles::tests::profile_entry_fault_preserves_exact_outputs` over both variants with ids `fish` and `profile-42` against the four format strings at `i18n.rs:6380–6391`; `i18n::tests::pixel_size_preserves_exact_output` and `…::picture_shown_at_preserves_exact_output` over `(0,0)`, `(1,1)`, `(1180,800)`, `(u32::MAX, u32::MAX)`; and `preview::tests::pixel_size_reexport_preserves_output`. **No identity is invented for the two `main.rs` call sites** — the plan says so and offers a bounded source-and-caller comparison instead. The `i18n::CURRENT` hazard (`i18n.rs:249`, installed through `install` at `:253`) gets a rule: use `Text::in_lang` (`:2689`) where it exists, give the moved fault formatter a `lang`-taking inner or **run it in a contained child process**, and never rely on a mutex the existing readers do not take — **which revision 5 turns from a menu into a decision per row** (R4-3): the picker row and `picture_shown_at` go to a contained child because their subject reads `current()` itself, the fault formatter gets the `lang`-taking inner, the pure rows stay in the parent, and the picture oracle is frozen as eight literals instead of being read back out of the `Text` table. Every line reference in §5 is re-verified against `main` at `ee771130`: **`main.rs:69698` → `:69720`**, `docs/CONVENTIONS.md`'s new path and `build.rs`'s rewrite recorded, and re-verification at dispatch required anyway. |
 | **R3-4** | **blocking for Step 2 guard conversion** | one remove-the-subject mutation rule cannot validate a negative assertion or preserve an arity assertion's scope; and the binding census and the multi-file precedent are both misstated | **accepted** | §6.2(b)'s single mutation instruction becomes a **four-row table, one rule per guard class**. Named body: remove *or rename* the subject, and separately remove the required condition inside the correct subject; reject missing, duplicate and test-literal matches. Whole-source prohibition: **inject a forbidden spelling into each covered destination class** and require failure, then **separately prove the enumeration is complete** — because `main.rs:113789` is green precisely *because* its four withdrawn spellings are absent, and removing them proves nothing. Arity: delete a required occurrence **and** add an unauthorised one in another covered fragment; record production and test occurrences separately with owners. Scoped negative: both named-body rules plus the inside/outside asymmetry that is `:103570`'s whole meaning. Two new rules follow: the **covered union** is the original `main.rs` scope plus its relocated descendants, and widening it to unrelated modules is a semantic decision, not a side effect; and whole-source coverage is **preserved across 2a/2b or replaced by named production and test invariants** — `:105784`'s six is re-derived, **never lowered to whatever is left in one file**. Census corrected to **89 `const` plus two `let`** at `:125096` and `:157543`, and `main.rs:165696–165697` described as **two separate constants**, with `const SOURCES` marked as a shape to design rather than one in the tree. |
 | **R3-5** | **blocking for the blocked Step 3 queue** | A–F are still briefs, not contracts, and 28,304 is not an actual moved extent | **accepted** | A–F are **relabelled Briefs A–F** throughout §7.3 and every cross-reference, under a box saying a brief is not a dispatch contract and no row may be ticketed from one. A five-item **promotion step** is added — owner and API selected in writing, dependency list, item/test/build-input manifest, app-retained adapters with the root-item spans they add, and a **remeasurement** on the recorded source commit. The queue table is retitled **conditional whole-file mass**, its total labelled *"28,304 — conditional whole-file mass, not a moved extent"*, and 4,369 becomes **excluded whole-file mass under the preferred options**; a paragraph states what is contracted versus what is measured, and forbids deriving any schedule or §10 row from the sum. **Brief E now owes two extents**, one per option, and 2,401 is marked as belonging only to the shared-owner one. The unresolved app-crossing tests round 3 inspected are tabled: `icons.rs`'s `draw_sites` and `head_runs` reaching `seats`, `git_panel` and `git_graph`; `update::tests::the_row_offers_the_release_page_whatever_machine_this_is` reaching `settings`; `persist::tests::the_storage_directory_is_named_for_the_product` reading root `APP_NAME`; the `schemes` test calling `seats::push_corner_tag` — with the rule that such a test **stays in `bt-app` against the extracted public API** and that **no library may depend back on the bin-only app**. All 23 modules stay blocked. |
 | **R3-6** | should-fix | the inventory still presents four withdrawn readings as current conclusions | **accepted** | The inventory is brought into agreement with the operative plan, each contradiction kept only as explicitly rejected history: **§2's "sharing no artifacts"** now says a differing profile setting changes a unit's fingerprint and that reuse is conditional on target, mode, features, profile and flags (plan §4.3); **§6.3's ~124 MiB attribution** is withdrawn as an uncomparable, unsectioned comparison of two historical binaries (plan §4.4b); **§7's platform-array section** is rewritten around strict 2a — no array edit, `platform_gate_tests` staying physically in `main.rs`, the eleven matches read as **ten compiler `cfg` attributes plus one test-needle line**, and "moving any `cfg` makes both directions fail" corrected to *only removal of a listed file's last real use makes it silent*; and **§5's graph description** now says `main.rs` is a node — `@root` — in `root_prod`, and separates the two measures: strict **`free`** rejects every nontrivial cycle, **`avoid_largest`** only the largest component. `regex_full` after the `i18n` cut is **48 / 55,302 free** and **51 / 66,273 avoid-largest**; the plan's `root_prod` rows are unaffected because the two coincide there. The plan carries the ten-plus-one correction at §6.1 too. **Ticket writers must not import inventory §7's obsolete platform work into Step 2a**, and the inventory now says so. No script was edited. |
 | **R3-7** | should-fix before a freeze | the scheduling table and the live-branch claims conflict with the freeze protocol | **accepted** | §6.2's division table moves **every visibility and import change into the with-move column**, with the reason: a widening applied before its method moves has nothing a reviewer can check it against, and it contradicts §6.1 and §6.5's own rule. Only demonstrably topology-compatible work stays on the left, and `the_shell_page_is_gone`'s recursion is the test of that. §6.5's **"112 of 150, so most open branches will have to be rebased" is withdrawn** — the freeze argument is restated structurally, as one rebase against up to twenty-six — and the inference of zero cost from empty refs is withdrawn with it: an empty branch is not evidence that its owner has no work, so the inventory is **owner-confirmed**. The lane list is replaced with the branches actually alive against `main` at `ee771130`: **`feature/settings-open-stall` (3 commits, the gating lane)**, `feature/math-block-polish` and `fix/card-wheel-lag` at branch points, `feature/paste-paths-1` (1 commit, and it touches `scripts/ci/ignored-tests.txt`), `fix/macro-budget-amplification` (1 commit, **no `bt-app` overlap**), and `fix/mac-audit3` merged; `chore/release-script-fixes`, the root tidy and `fix/build-gitdir-rerun` have **landed**. The abort rule is respelled **"lift the merge freeze and resume affected merges; schedule any retry separately"**, so an expiry cannot be read as an automatic restart, and the coordinator, agreed maximum duration, final-tree gate and no-partial-landing rule are all preserved. §4.1 also records that **`8e6cf0cc` does not touch `main.rs`**, contrary to revision 3. |
-| **R3-8** | should-fix | the compile model claims more than the evidence supports | **accepted** | §4.1's "either form makes every unit `Fresh` after the gate" is **withdrawn**: the selection change removes **the identified feature mismatch**, and what is actually reused is a measurement §4.2's artefact records take. §4.1 and §10 now carry the **second cause of the "third compile"** — `bt-app`'s build script was unconditionally dirty in every linked worktree, because it joined names onto `--absolute-git-dir` and a `rerun-if-changed` path that does not exist makes a build script always dirty; fixed on `main` at **`5fd6f935`** with `git rev-parse --git-path`, and **probably the larger half**. Neither fix is given a size: a before/after figure needs comparable runs on both configurations and §4.2 runs only the fixed one, which is said plainly in both places. §7.5 counts **eleven new crates** rather than thirteen boundaries. §10's Step 3 row keeps **6.9% as a source fraction and a labelled compiler-work hypothesis**, restricts it to `cargo test` and `cargo clippy`, requires each gate measured separately and the added manifest/module overhead netted off, and **removes the fmt claim** — the fmt gate is `cargo fmt --all -- --check` (`CONTRIBUTING.md:18`) and extraction keeps the source inside the workspace, so a line fraction establishes no formatting saving. |
+| **R3-8** | should-fix | the compile model claims more than the evidence supports | **accepted** | §4.1's "either form makes every unit `Fresh` after the gate" is **withdrawn**: the selection change removes **the identified feature mismatch**, and what is actually reused is a measurement §4.2's artefact records take. §4.1 and §10 now carry the **second cause of the "third compile"** — `bt-app`'s build script was unconditionally dirty in every linked worktree, because it joined names onto `--absolute-git-dir` and a `rerun-if-changed` path that does not exist makes a build script always dirty; fixed on `main` at **`5fd6f935`** with `git rev-parse --git-path`. **Corrected in revision 5** (R4-6): the two causes are no longer ranked against each other and no removed-invocation count is claimed for either. Neither fix is given a size: a before/after figure needs comparable runs on both configurations and §4.2 runs only the fixed one, which is said plainly in both places. §7.5 counts **eleven new crates** rather than thirteen boundaries. §10's Step 3 row keeps **6.9% as a source fraction and a labelled compiler-work hypothesis**, restricts it to `cargo test` and `cargo clippy`, requires each gate measured separately and the added manifest/module overhead netted off, and **removes the fmt claim** — the fmt gate is `cargo fmt --all -- --check` (`CONTRIBUTING.md:18`) and extraction keeps the source inside the workspace, so a line fraction establishes no formatting saving. |
 
 **The two dispatch questions round 3 asked, answered in this revision's own
 voice.** *Step 0's baseline ticket, after 0.4.1 ships:* **yes, once §4.0's seven
@@ -2301,6 +2630,28 @@ none of them is produced by the ticket. *Step 1's cut ticket, after 0.4.1
 ships:* **yes, once §5.0's five boxes are ticked**, the largest of which is
 copying §5.2's test table into the ticket and refreshing the five caller
 references one more time. Everything else in this plan stays undispatched.
+
+*Round 4 then checked those twelve boxes against the tree and found three of
+them not satisfiable as revision 4 had written them — the command sequence, the
+repeat/reset procedure and the literal edit — and one §5.2 column at war with
+the isolation rule on the same page. §12.4 is where that is answered; §4.2 and
+§5.2 are where it is fixed.*
+
+### 12.4 Fourth review ledger — R4-1 to R4-6
+
+Every finding in `docs/plans/review/bt-app-split-review-4-2026-09-15.md`, what
+this revision did about it, and where. Round 4 read **the two entry gates and
+nothing else**, so this ledger is shorter than its predecessors and every row
+lands in §4, §5 or the two boxes above them.
+
+| # | Severity | Finding, in short | Decision | What changed, and where |
+| ---: | --- | --- | --- | --- |
+| **R4-1** | **blocking Step 0 dispatch** | the copied command sequence cannot deliver the evidence bundle its own table promises: no JSON on `build` or `clippy`, one file name per repetition for every command, HTML retained only inside the directory the cold reset deletes, and all context attributed to `-v` | **accepted** | §4.2's command block is rewritten: **all three preparation commands carry `--message-format=json`** (on clippy, before `-- -D warnings`), each command's **stdout and stderr are captured apart** under a name carrying case, repetition and command, and the suite run is captured too. A flag-by-flag paragraph records what the **installed** Cargo 1.94.1 actually emits, cited to the manual shipped with it: `--timings` writes `cargo-timing.html` **plus a timestamped copy** into `<target>/cargo-timings`, and those reports are "suitable for human consumption only" and **do not provide machine-readable timing data** — so **`--timings=json` is unstable, nightly-only behind `-Z unstable-options`, and is not used**, and `--message-format=json` is a **separate stable flag** that neither implies nor is implied by `--timings`. The HTML row now names **`Total`** and the embedded **`UNIT_DATA[].duration`**, says a **fresh unit has no individual timing entry**, and says a **build script's execution is itself a timed unit**. The census row reads `"reason":"compiler-artifact"` records, **one file per command**, and keeps **`"reason":"build-script-executed"`** as a separate population; `target.test` and `profile.test` are distinguished. An **archive-after-every-command** rule moves each timestamped HTML and each image-size observation into an **evidence directory outside the target directory** before the next command runs. Context — toolchain, config files, `RUSTFLAGS`, `jobs`, `CARGO_INCREMENTAL`, target directory, source state, triple — is **captured independently**, never reconstructed from `Fresh` lines; features come from the JSON. Two capture checks catch a shell that writes UTF-16 or mangles stderr, and timing uses timestamps rather than `Measure-Command`. The link row declares **both** its quantities `unmeasured` when the instrumentation is absent. |
+| **R4-2** | **blocking verbatim Step 0 dispatch** | the literal edit §4.0 requires is delegated to the ticket, and restoring source bytes does not restore the build state the next repetition starts from | **accepted** | §4.2 gains **"The app-only edit, literally"**: file `crates/bt-app/src/main.rs`, anchor `fn main() -> Result<()> {` (line **116069** at `ee771130`, re-located by text and **asserted unique** at the release base), the inserted line `    let _baseline_rep: u8 = std::hint::black_box(0);` immediately after it, the deletion that undoes it, and the assertions around all three — clean status and recorded `git hash-object` before, **one line added and none removed** after, status clean and **hash equal** after the restore. It is labelled a **production-code edit, not a comment**, with the incremental-cache reason written down, and it must leave the suite green because `main.rs` is read by 91 `include_str!` pins — a red repetition means a different inert line, **never a changed pin**. The repetition procedure now says what a cold reset deletes (**the whole target directory**) and what it keeps (**the package cache**, so "cold" is not "downloading"), makes "nothing touched" checkable for the warm case, and gives the edited case a **discarded re-priming run on the unedited source before each measured repetition** — with the **cache regime named** and the snapshot alternative allowed only if it restores mtimes and proves itself with a build that compiles nothing. A **field table** (owner, runner, release base, gate evidence, worktree, absolute target directory, evidence directory, shell) is what the ticket carries filled, and §4.0's boxes now point at it. The §12.3 R3-2 row's claim that the literal procedure was already supplied is **withdrawn in place**. |
+| **R4-3** | **blocking Step 1 dispatch** | §5.2's table and its isolation rule require different execution paths for the same test: the picker and `picture_shown_at` reach `current()` through `.text()`, which `in_lang` cannot set | **accepted** | §5.2's table gains an **execution-path column with one route per row**, and the "either/or" is gone. `profile_colour_labels_preserve_both_languages` and `picture_shown_at_preserves_exact_output` run in a **contained child process**, installing English and Chinese in turn and calling **`SettingsRow::ProfileColour.option_labels()`** and **`i18n::picture_shown_at`** — the real callers. A **new pure row**, `settings::tests::profile_colour_labels_match_both_table_columns`, keeps the `in_lang` table check beside the picker one rather than instead of it. `profile_entry_fault_preserves_exact_outputs` takes **the inner route, chosen not offered**: `profile_entry_fault_in(lang, fault)` with the public function reading `current()` once where it reads it today. The **child protocol** is written once: the parent installs nothing, launches `current_exe()` with the full identity and `--exact`, uses a **child marker** to prevent recursion, and requires **exit success *and* a completion marker written after the last assertion** — because a zero-match libtest run exits 0 — under a named timeout. The picture oracle is **frozen as eight literals** from `i18n.rs:3248` and the `format!` at `:6551`, not read back from `Text::PictureShownAt`. Round 4's locator corrections land too: `CURRENT` at **`:249`**, the ineffective guard at **`:8849`**, and the multi-column doc comment belonging to **`on` at `:2693–2696`** rather than `in_lang`. §5.0's fourth box now asks for the column instead of a choice. |
+| **R4-4** | should-fix before Step 2 preparation | the scheduling table still demands a missing-subject failure **on every pin**, reinstating the universal rule R3-4 rejected | **accepted** | §6.2's division table replaces that row with **class-specific preparation per §6.2(b)**: unique subject and loud absence for named-body and scoped guards, **complete source enumeration** for whole-source negatives, and preserved scope and count ownership for the arity sites. A paragraph beside it says why — a whole-source prohibition has **no subject to remove**, and **a missing input source and an absent forbidden spelling are different facts** — and sends preparation tickets to §6.2(b)'s table rather than to the scheduling row. §6.5's freeze protocol step 3 carries the same qualification. |
+| **R4-5** | should-fix for the withheld Step 3 queue | Brief D still calls whole-file mass an actual moved extent, and its caller account still omits two production `VERSION` consumers | **accepted** | Brief D's figure is relabelled: 10,824 is **the conditional whole-file mass left after option 1 leaves `version` behind**, explicitly **not an extent that moves**, subject to the promoted item/test/build-input manifest and §7.3's exclusion rules; a moved extent exists only after promotion item 5. Option 1's caller work now names **`update.rs:517` and `update.rs:641`**, the two production `crate::version::VERSION` reads, distinguished from the test reads at `:1205` and `:1345`, and says the brief's caller inventory is incomplete without them. All 23 modules stay blocked and the dispatch withholding is untouched. |
+| **R4-6** | should-fix | the compile model ranks and counts a saving nobody measured | **accepted** | §4.1's "probably the larger one" and §10's "probably the larger half" are **both withdrawn**, and the §12.3 R3-8 row's copy of the phrase with them. §10's script-fix row no longer promises the removal of **one codegen and one link**: it says the fix removes **one cause** of `bt-app` being rebuilt, and that no invocation count is claimed — the two causes made the same crate dirty, so their removed work overlaps by an unknown amount and both questions are answered by matched before/after sequences §4.2 does not run. A new bullet in §10 says it once for both rows. The eleven-crate correction and the removal of the fmt saving are untouched. |
 
 ---
 
@@ -2355,4 +2706,27 @@ Its two named first actions are done: **§4.2's evidence schema is rewritten
 around observable stable-Cargo output**, and **the two entry gates are written
 as checklists** at §4.0 and §5.0.
 
-*(Round 4: empty. This revision has not been re-reviewed.)*
+**Round 4 — 2026-09-15, `docs/plans/review/bt-app-split-review-4-2026-09-15.md`.**
+Read-only, documentation only, by Codex, against revision 4 at `1aac358c`, and
+**scoped to the two entry gates**: §4.0's seven boxes, §5.0's five, and the
+sections they gate. It checked every row of §4.2's evidence schema against the
+**installed** Cargo — 1.94.1, commit `29ea6fb6`, host `x86_64-pc-windows-msvc`,
+matching `rust-toolchain.toml` — by reading that version's own machine-message
+serializers and timing report writer rather than by running a build; confirmed
+that **every JSON field §4.2 names exists**; re-verified the five destination
+edits and all six §5.2 test identities at `ee771130`, including three locator
+corrections; and checked all eight of revision 4's R3 ledger rows against the
+body: **two closed, six partially closed**. **6 findings: R4-1 and R4-2 blocking
+Step 0's dispatch, R4-3 blocking Step 1's, and three should-fix.** Its verdict
+is the one this revision is written to answer: **neither entry ticket was
+dispatchable verbatim from revision 4** — the Step 0 ticket because its commands
+could not produce its own evidence bundle and its literal edit was missing, the
+Step 1 ticket because two rows of its test table and its isolation rule
+prescribed different execution paths. This revision answers all six in §12.4.
+
+Its named first actions are done: **§4.2's commands, capture, archiving and
+repetition procedure are written against what the installed Cargo emits**, **the
+app-only edit is in the plan as bytes**, and **§5.2 carries one execution path
+per row**.
+
+*(Round 5: empty. This revision has not been re-reviewed.)*
