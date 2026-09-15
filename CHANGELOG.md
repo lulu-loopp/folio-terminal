@@ -78,6 +78,8 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- Inner products and bra-kets written with `\langle … \rangle` now typeset.
+
 - **Aiming a card's window with the wheel keeps up with the hand.** On a tall
   card over a pane with a long history, every notch used to copy out every line
   between the bottom of the pane and the place the card was pointing at — three
