@@ -21,12 +21,12 @@
 //!   the menu and the hint card introduce a reader to the same verb twice and
 //!   two names would make it two verbs. Pressing it parks the row's `Action` and
 //!   the loop runs it through `run_shortcut` — the very function the chord
-//!   reaches. [`Row::VerbNamed`] is the same row wearing the menu's name, and
-//!   [`Row::VerbAlways`] is the same row again for a verb that belongs to the
-//!   **application** rather than to a window — Quit, and nothing else today
-//!   (RB-4). That one is enabled with the desk empty and is dispatched before
-//!   `main.rs`' menu landing looks for a window, because the state it is
-//!   reached from is the one where there is none.
+//!   reaches. [`Row::VerbAlways`] is the same row for a verb that belongs to
+//!   the **application** rather than to a window — Quit, and nothing else
+//!   today (RB-4): it wears the menu's own name, it is enabled with the desk
+//!   empty, and it is dispatched before `main.rs`' menu landing looks for a
+//!   window, because the state it is reached from is the one where there is
+//!   none.
 //! * **[`Row::Own`]** — something this product answers that has no row in that
 //!   table. Help is the only one.
 //! * **[`Row::Standard`]** — one of AppKit's own selectors, sent with no target,
@@ -85,20 +85,17 @@ enum BarTitle {
 enum Row {
     /// A row of [`crate::shortcuts::BINDINGS`], by its stable id.
     Verb(&'static str),
-    /// The same, wearing the **menu's** name instead of the table's.
+    /// **A verb of the table that belongs to the application and not to a
+    /// window**, in force with the desk empty — and the one shape that wears
+    /// the **menu's** name instead of the table's.
     ///
+    /// The two properties travel together here because the same row has both.
     /// Three rows of the application menu name the application — `About Folio`,
     /// `Hide Folio`, `Quit Folio` — because that is what every application menu
     /// on this platform is, and the one row of the three that is a verb of the
     /// table cannot read `Quit` alone without being the one row a reader stops
     /// at. It is the *name* that differs and nothing else: the verb, the chord
     /// and the scope are still the row's.
-    VerbNamed(&'static str, Text),
-    /// **A verb of the table that belongs to the application and not to a
-    /// window** — in force with the desk empty, and wearing the menu's name for
-    /// [`Row::VerbNamed`]'s reason, which is the same reason: the row that is
-    /// the application's is on the application menu, and that menu names the
-    /// application.
     ///
     /// One row is this today and it is Quit (RB-4, ruled 2026-09-15). The
     /// distinction is the row's own nature rather than its id, because it is a
@@ -112,6 +109,13 @@ enum Row {
     /// with no row in the shortcut table at all, so they carry no chord and no
     /// scope. This one is a row of `BINDINGS` in every other respect — the
     /// verb, the chord and the title all still come from the table.
+    ///
+    /// **There was a `VerbNamed` beside this** — the naming without the
+    /// application-wide part — and it was deleted on 2026-09-15, when Quit,
+    /// the only row that had ever been one, moved here. A variant nothing
+    /// constructs is dead code whatever shape it reserves for later, and
+    /// `clippy -D warnings` says so; the row that wants the naming without the
+    /// rest brings it back, with its own name, on the day it exists.
     VerbAlways(&'static str, Text),
     /// A verb of this product's that has no row in that table.
     Own(Text, AppMenuAction),
@@ -545,9 +549,6 @@ fn entry(row: Row, shortcuts: &Shortcuts, focus: Option<Focus>) -> MenuEntry {
             enabled: true,
         }),
         Row::Verb(id) => verb_entry(id, None, WhatItNeeds::AWindow, shortcuts, focus),
-        Row::VerbNamed(id, title) => {
-            verb_entry(id, Some(title), WhatItNeeds::AWindow, shortcuts, focus)
-        }
         Row::VerbAlways(id, title) => {
             verb_entry(id, Some(title), WhatItNeeds::Nothing, shortcuts, focus)
         }
@@ -710,7 +711,7 @@ mod tests {
         BAR.iter()
             .flat_map(|bar| bar.rows.iter())
             .filter_map(|row| match row {
-                Row::Verb(id) | Row::VerbNamed(id, _) | Row::VerbAlways(id, _) => Some(*id),
+                Row::Verb(id) | Row::VerbAlways(id, _) => Some(*id),
                 _ => None,
             })
             .collect()
@@ -845,7 +846,7 @@ mod tests {
                 .filter(|row| !matches!(row, Row::Rule | Row::Services)),
         ) {
             match row {
-                Row::Verb(id) | Row::VerbNamed(id, _) | Row::VerbAlways(id, _) => {
+                Row::Verb(id) | Row::VerbAlways(id, _) => {
                     let expected = table
                         .row(id)
                         .filter(|row| row.scope == Scope::Window)
@@ -1065,9 +1066,11 @@ mod tests {
     /// every other row would then be offering to act on a window that is not
     /// there.
     ///
-    /// MUTATIONS: put Quit back to a `Row::VerbNamed` and the first assertion
-    /// goes red; enable every verb row with no window and it goes red naming the
-    /// rest; make `Row::VerbAlways` drop the row's chord and the second does.
+    /// MUTATIONS: make Quit an ordinary `Row::Verb` — which is what it was
+    /// before this ruling, less the menu's own name — and the first assertion
+    /// goes red; enable every verb row with no window and it goes red naming
+    /// the rest; make `Row::VerbAlways` drop the row's chord and the second
+    /// does.
     #[test]
     fn quit_is_in_force_with_no_window_and_nothing_else_is() {
         let table = mac_table();
@@ -1295,10 +1298,9 @@ mod tests {
             }
             for row in bar.rows {
                 match row {
-                    Row::Own(text, _)
-                    | Row::Standard(text, _)
-                    | Row::VerbNamed(_, text)
-                    | Row::VerbAlways(_, text) => out.push(*text),
+                    Row::Own(text, _) | Row::Standard(text, _) | Row::VerbAlways(_, text) => {
+                        out.push(*text)
+                    }
                     Row::Verb(_) | Row::Rule | Row::Services => {}
                 }
             }
@@ -1331,12 +1333,9 @@ mod tests {
             assert!(!item.title.is_empty(), "a menu row has no title");
             if let MenuAction::Verb(id) = item.action
                 && !BAR.iter().flat_map(|bar| bar.rows.iter()).any(|row| {
-                    // Both of the shapes that wear the *menu's* name rather
-                    // than the table's; see `Row::VerbNamed`.
-                    matches!(
-                        row,
-                        Row::VerbNamed(named, _) | Row::VerbAlways(named, _) if *named == id
-                    )
+                    // The one shape that wears the *menu's* name rather than
+                    // the table's; see [`Row::VerbAlways`].
+                    matches!(row, Row::VerbAlways(named, _) if *named == id)
                 })
             {
                 assert_eq!(
