@@ -1,13 +1,15 @@
 # A file on the clipboard, a file on the pointer, and a picture with no name
 
 Design for 0.4.1 — GitHub issues #1 and #2. 2026-09-15, branch
-`docs/paste-paths-design` off `main` at `76ca0788`. **Revised three times**:
+`docs/paste-paths-design` off `main` at `76ca0788`. **Revised four times**:
 against `docs/plans/review/paste-paths-review-2026-09-15.md` (24 findings, 7
 blocking), then against `docs/plans/review/paste-paths-review-2-2026-09-15.md`
-(23 findings, 4 blocking), and now against
+(23 findings, 4 blocking), then against
 `docs/plans/review/paste-paths-review-3-2026-09-15.md` (20 findings, 7
-blocking). §10 carries all three ledgers, and the rulings below are the
-thrice-revised ones. **Docs only**: nothing here is built, no crate is touched,
+blocking), and now against
+`docs/plans/review/paste-paths-review-4-2026-09-15.md` (12 findings, 4
+blocking). §10 carries all four ledgers, and the rulings below are the
+four-times-revised ones. **Docs only**: nothing here is built, no crate is touched,
 and every claim about this codebase carries a `path:line` so that the ticket
 which implements it can check the claim before it trusts it.
 
@@ -249,9 +251,18 @@ deadline as though it were the whole of what Win32 does.
   * **The forbidden repair.** If a read does come back incoherent the answer is a
     visible refusal. Never a silent reopen — that would deliver a different
     clipboard under the same gesture.
-  * **The fixture is the check.** §6.2 carries a **delayed-render success** row —
-    a source that renders on demand, whose *first* paste must succeed — beside a
-    real replacement row in which the clipboard genuinely changes under the read.
+  * **The fixture is the check, and on Windows it checks the exclusion rather
+    than a refusal** (revised, fourth review finding 2). §6.2 carries a
+    **delayed-render success** row — a source that renders on demand, whose
+    *first* paste must succeed — beside a **concurrent-copy** row in which
+    another process tries to copy while Folio holds the clipboard: its
+    `OpenClipboard` **fails**, Folio's snapshot completes, and its replacement is
+    what the **next** gesture reads. The earlier "real replacement under the read"
+    row asked for an event this interval excludes; the *interval* is the
+    guarantee, so the fixture asserts the interval. macOS keeps a genuine
+    replacement-and-refusal row against `changeCount`, because AppKit promises no
+    exclusion. The visible refusal above stands for any incoherence that is ever
+    actually observed, named with its own failure mode.
 * **The thread is winit's event-loop thread**, because that is where
   `register_clipboard_owner`'s window lives (`lib.rs:5845`, `:5927` — "all calls
   run on winit's event-loop thread") and because the paste is a keystroke
@@ -464,8 +475,12 @@ refused — a defensible default **at an argument boundary** (§5.2), not a proo
 about the reader. A row whose recipient is a language REPL is precisely what
 `"paste_as"` exists for, and no Python or JavaScript literal mode is offered
 until one is measured and added. §6.2 asserts the `Cmd` encoder against a
-**defined CRT command-line consumer** — a native argv printer run from a `cmd`
-row — and not against a Python or Node prompt.
+**defined CRT command-line consumer** — a native argv printer handed the encoded
+command line **with no interpreter between**, by `CreateProcessW` from the test
+harness — and not against a Python or Node prompt, and **not through a `cmd`
+row**: a `cmd` row's recipient is cmd's interactive line, which refuses `%`
+(§2.3) and would be testing the interpreter rather than the encoder. §6.2's own
+two rows say which is which.
 
 ### 2.3 The grammar table
 
@@ -478,13 +493,13 @@ Terminal's own issue #8109 makes the same argument for drops.
 | Row | Grammar | Literal | Escape inside |
 | --- | --- | --- | --- |
 | `pwsh`, `winps`, `powershell`/`pwsh` stems, `PowerShellSeven` | `PowerShell` | `'…'` | every character PowerShell reads as a single quote, doubled — **PROBE 2** |
-| `cmd` | `Cmd` **+ the `cmd.exe` interpreter rules** | `"…"` | trailing backslashes doubled (2N); `%` refused; `!` refused when the row's own args turn delayed expansion on |
+| `cmd`, or any row that **names** `"paste_as": "cmd"` | `Cmd` **+ the `cmd.exe` interpreter rules** | `"…"` | trailing backslashes doubled (2N); **`"` refused** (the literal has no escape for one); `%` refused; `!` refused when the row's own args turn delayed expansion on |
 | `bash`, `zsh`, `sh`, `dash`, `ksh`, `wsl`, `gitbash` | `Posix` | `'…'` | `'` → `'\''` |
 | `fish` | `Fish` | `'…'` | `\` → `\\`, `'` → `\'` |
 | `nu` | `Nushell` | `r` + *n* `#` + `'` + path + `'` + *n* `#`; at *n* = 1 that is `r#'C:\Demo\a.txt'#`, at *n* = 2 `r##'…'##` | none; the fence grows — **PROBE 10**, and the arm does not ship at all until a pinned nushell version is measured |
-| the seven `AGENT_IDS` rows, **Windows path** | `Agent` | `"…"` | nothing — `"` is illegal in a Windows name |
-| the seven `AGENT_IDS` rows, **POSIX path** | `Agent` | `'…'` | `'` → `'\''` |
-| anything else | `Posix` on Unix, the `Cmd` **encoder only** on Windows — a **best-effort default**, ruling ⑩ | as above | as above — **no `%` or `!` refusal** |
+| the seven `AGENT_IDS` rows, **emitted string is a Windows path** | `Agent` | `"…"` | nothing to escape; **`"` refused**, as in `Cmd` — unreachable from a Windows filename, reachable through §2.5's override |
+| the seven `AGENT_IDS` rows, **emitted string is a POSIX path** | `Agent` | `'…'` | `'` → `'\''` |
+| anything else | `Posix` on Unix, the `Cmd` **encoder only** on Windows — a **best-effort default**, ruling ⑩ | as above | as above — **no `%` or `!` refusal**; the `"` refusal is the encoder's and stays |
 
 **PowerShell — single quotes, and the quote character is not only `U+0027`.**
 Inside single quotes PowerShell expands nothing: no `$`, no backtick, no
@@ -512,8 +527,18 @@ point it finds outside the list is not a narrowing but a finding, and it stops t
 ticket.
 
 **`cmd` — double quotes, and the interpreter and the argv parser are two
-consumers.** `"` is illegal in a Windows filename, so nothing inside the quotes
-needs escaping for `cmd` itself. What needs care is everything else:
+consumers.** The double-quoted literal has **no escape for a double quote**:
+`\"` is a *CRT* rule, read by a native child's own argv parser after `cmd` has
+already finished lexing the line, so it does not protect the interpreter's quote
+state. The earlier draft turned that into "`"` is illegal in a Windows filename,
+so nothing inside the quotes needs escaping", which is a fact about **one
+domain** rather than about the encoder — and §2.5's spelling override, §2.4's
+gate and a `"paste_as": "cmd"` row on a Unix host all put strings in front of
+this encoder that are not Windows filenames. **Ruling: the `Cmd` encoder refuses
+any string containing `"`**, with a toast naming the file, and the same refusal
+governs the `Agent` arm's Windows literal (§2.5's composition table, rule C2).
+On a Windows path the case stays unreachable, which is why no row has ever hit
+it; it is now closed rather than assumed away. What needs care besides:
 
 * **Trailing backslashes: 2N, not one extra.** The C runtime's parser — which is
   what a *native* child of `cmd` uses — reads `\"` as a literal quote, so
@@ -528,14 +553,23 @@ needs escaping for `cmd` itself. What needs care is everything else:
   line** (the `%%` form is a batch-file rule). **Ruling: a path containing `%` is
   refused in a `cmd.exe` pane — and only there**, not in every pane that happens
   to use the `Cmd` encoder (ruling ⑩), with a toast naming the file and the
-  reason. Quoting
+  reason. **"A `cmd.exe` pane" means a row whose grammar is `Cmd` because it was
+  *named*** — derived from a row that resolves to `cmd.exe`, or written as
+  `"paste_as": "cmd"` — **and never a row that fell into the `Cmd` encoder as
+  ruling ⑩'s unknown-program default.** An explicit `"paste_as": "cmd"` on a
+  wrapper row is the reader naming the program that reads the line, which is what
+  ruling ⑨ says a carried key means and the only reading that makes the key usable
+  for the wrapper it exists for (`cmd.exe /c …`, a `.cmd` shim); so it selects the
+  **interpreter** as well as the encoder, `%` and all. Quoting
   it would hand the reader a mangled name that looks like it worked, and this
   product's standing rule is that a visible refusal beats a silent wrong answer.
 * **`!NAME!` expands only under delayed expansion**, which is off by default and
   which this window *can* read for the one case that matters: a row whose own
   `args` carry `/v:on` or `/v on`. A path containing `!` is refused in such a
   row and allowed elsewhere, with the residue stated — a reader who turned
-  delayed expansion on from inside the shell is outside what the row can say.
+  delayed expansion on from inside the shell is outside what the row can say. It
+  reads the same row's `args` whether the `Cmd` grammar was derived or named, and
+  like `%` it does not fire for ruling ⑩'s unknown-program default.
 * **`^` is not escaped.** Inside a double-quoted argument `^` is an ordinary
   character; escaping it would insert a caret into the name.
 
@@ -626,7 +660,16 @@ point different ways:
   to a probe; it is not a suspicion, it is what the code does.
 
 **Ruling: the `Agent` literal is double-quoted for a Windows path and POSIX
-single-quoted for a POSIX path.** `"C:\a'b.png"` strips to `C:\a'b.png`, which
+single-quoted for a POSIX path — and the path that decides is the *emitted
+string*, the one the spelling produced, not the host path behind it.** The
+recipient's branch order is run over what reaches it, and
+`normalize_windows_path` asks one question of that string: does it begin with a
+drive letter or `\\`. So `/mnt/d/Demo/a.txt` takes the POSIX arm however Windows
+its origin, `D:/Demo/a.txt` takes the Windows arm because `X:` then `/` is
+exactly what the recogniser accepts, and a path the spelling could not translate
+takes the arm its **host** form belongs to, that host form being the string that
+is emitted (§2.5's composition table, rule B). §4.4's picture path is the same
+rule read on the same string, not a second one. `"C:\a'b.png"` strips to `C:\a'b.png`, which
 the recogniser returns unchanged and correctly; `"` needs no escape because it is
 illegal in a Windows name; and the double-quoted form is additionally the
 spelling Explorer's own *Copy as path* produces, which is what these tools are
@@ -826,24 +869,58 @@ Windows' own packaging installs a `compat-bash.exe` at that path while the
 runtime sits under `usr\bin\` beside `usr\bin\bash.exe`. **A check beside the
 wrapper is a check beside a wrapper, and finds neither DLL.** So the rule is a
 table over the evidence beside the resolved program *and* beside its
-`..\usr\bin\` sibling, and every outcome has an answer:
+`..\usr\bin\` sibling, and every outcome has an answer.
 
-| Evidence | Answer |
+**Eligibility comes first, and no DLL is read for a program outside it.** A
+sibling DLL says what was installed in a directory; it says nothing about a
+program that does not print a Cygwin spelling in the first place, and a
+`cygwin1.dll` sitting beside somebody's `rsync.exe` or `python.exe` is not a
+reason to change how this window spells a path for it. So the classifier asks
+one question before it touches the disk: **is the resolved program one of the
+shells a Cygwin installation ships and whose printed paths would be Cygwin's
+own?** The eligible set is the leaf's lower-cased stem — read exactly as
+`derive_integration` reads it (`profiles.rs:826`–`:829`) — in
+`bash`, `sh`, `dash`, `zsh`, `ksh`, `mksh`, `tcsh`, `fish`. Every other program
+**keeps today's answer with no directory listing and no `stat` at all**, which
+is also the cheaper rule: the classifier is a derivation that runs per row.
+
+**Evidence from the two locations is aggregated, not raced.** Each of the two —
+the resolved program's own directory and its `..\usr\bin\` sibling — yields a
+local verdict: which runtime DLLs it holds, or that it could not be read. A
+location that **does not exist** is not a failed read; it contributes nothing.
+A location that exists and cannot be listed, or whose entries cannot be stated,
+is a **partial read** and stops the classification. Then:
+
+| Evidence, over the eligible program's two locations | Answer |
 | --- | --- |
-| the row resolved to a Folio-shipped Git Bash candidate (`<Git>\bin\bash.exe`) | today's answer, by the standing derivation; the classifier is not consulted for a program this table already knows |
-| `cygwin1.dll` present, `msys-2.0.dll` absent, at either level | **`Cygwin`** — the one positive match |
-| `msys-2.0.dll` present, `cygwin1.dll` absent | today's answer |
-| **both** present | today's answer; ambiguous evidence decides nothing |
-| **neither** present | today's answer |
-| the directory cannot be listed or read | today's answer. This is a derivation, not a gesture, so it raises no toast |
+| the row resolved to a Folio-shipped Git Bash candidate (`<Git>\bin\bash.exe`) | today's answer, by the standing derivation; the classifier is not consulted for a program this table already knows, and no location is read |
+| the program is not in the eligible set above | today's answer; no location is read |
+| **either** location was a partial read | today's answer. The half that could not be read is the half that might have held the contradicting DLL, so an incomplete survey decides nothing |
+| both read, and the **union** of the runtimes seen is exactly `cygwin1.dll` | **`Cygwin`** — the one positive match |
+| both read, union is exactly `msys-2.0.dll` | today's answer |
+| both read, union is **both** — including a Cygwin-only directory beside an MSYS-only `usr\bin\` | today's answer; ambiguous evidence decides nothing |
+| both read, union is **empty** | today's answer |
 
-Only the second row changes any behaviour. **Until PROBE 11 has run, that row is
-not enabled**: an unrun probe must not switch on an unverified positive match, so
-an unprobed build answers "today's answer" in every row and the arm ships dark.
-PROBE 11 confirms the test on a real Cygwin installation and a real MSYS2 one,
-and records what actually sits beside the Git for Windows wrapper; §6.2 carries
-the wrapper row, the integration-off Cygwin row, the ambiguous both-DLL row and a
-moved-prefix row.
+The union is what makes the rule **order-independent**: examining the executable's
+directory first and its sibling first give the same answer, which a
+first-match-wins rule over the two locations would not. And every row but the
+positive one is today's answer, so a mixed installation loses nothing it had.
+This is a derivation, not a gesture, so none of these rows raises a toast.
+
+**Until PROBE 11 has run the whole arm is dark — the automatic match and the
+explicit override alike.** An unrun probe must not switch on an unverified
+positive match, so an unprobed build answers "today's answer" in every row above.
+And `"paste_paths_as": "cygwin"` is refused in that state too, with a toast
+saying the Cygwin spelling is unmeasured — the same shape as the `nu` row's
+unmeasured-lane refusal (§2.3), and for the same reason: **one gate, not two.**
+An arm that is dark for the classifier and live for the override is not dark.
+The remedy costs the reader who wrote that key one line: `"windows"` spells
+`D:\Demo\a.txt`, which §2.5's own Cygwin paragraph records that Cygwin tools
+accept. PROBE 11 confirms the test on a real Cygwin installation and a real MSYS2
+one, and records what actually sits beside the Git for Windows wrapper; §6.2
+carries the wrapper row, the integration-off Cygwin row, the ambiguous both-DLL
+row, the non-shell row, the cross-level mixed row, the partial-read row, the
+unrun-override row and a moved-prefix row.
 
 **Where this change lives: its own ticket, T-PASTE-CYG** (§8). It adds a variant
 to `PrintedPathNamespace` — `paths.rs:61` has none today — teaches the detector a
@@ -871,10 +948,13 @@ Four values name namespaces this codebase has or gains; the fifth,
 — which is the one spelling no namespace produces and which ruling ⑭ needs. The
 key is **insertion only**: it never reaches the detector, which keeps reading the
 pane by the standing derivation, and it changes no environment variable (red line
-12). A row that carries it is believed, exactly as `"paste_as"` is, and it is not
-on the Settings page for ruling ⑨'s reason. `"paste_paths_as": "cygwin"` is
-accepted only once T-PASTE-CYG has added the arm; before that the value is
-refused with the same message an unknown key gets.
+12). A row that carries it is believed, exactly as `"paste_as"` is — within the
+domain ruling ⑫b's rule E gives it — and it is not on the Settings page for
+ruling ⑨'s reason. `"paste_paths_as": "cygwin"` is accepted only once
+T-PASTE-CYG has added the arm **and** PROBE 11 has run: before the arm exists the
+value is refused with the same message an unknown key gets, and while the arm is
+dark it is refused with the unmeasured-spelling message the classifier's own
+paragraph defines.
 
 So the configuration ruling ⑭'s fallback promises is one row, written out:
 
@@ -886,6 +966,104 @@ which emits `'D:/Demo/a.txt'` — POSIX single quotes, because the row's grammar
 untouched, around a Windows path spelled with forward slashes. Nothing about the
 reader's environment or the detector moves. That is exactly what PROBE 4's unrun
 fallback names, and §6.2 asserts it as a row.
+
+#### The composition contract — grammar × spelling
+
+**Ruling ⑫b: the two keys compose over one string, and the product is specified
+rather than left to be inferred.** Two independent keys make thirty
+configurations, and the third review's "the two are asserted independently" fixed
+only that neither key reads the other's value. It did not say what a `wsl`
+spelling means on a row that is not WSL, which quoting arm a translated string
+takes, or whether an explicit `cmd` grammar brings cmd's interpreter with it.
+Those are the questions an implementer would otherwise have to invent an answer
+to, so they are answered here.
+
+**Rule A — the order, and what each stage may see.** The spelling runs first and
+produces **one string**; the grammar then encodes *that string* and reads nothing
+else — not the host path, not the row's namespace, not the pane. §2.4's
+representability gate runs ahead of both, on the host path, unchanged. This one
+sentence is what makes the table below short: a cell is a composition of two
+stages that do not consult each other.
+
+**Rule B — what the spelling produces, and what context it needs.** Every value
+is a **lexical** rule over the host path, by ruling ⑬'s own separation of lexical
+rules from mount facts:
+
+| `paste_paths_as` | Emitted string's kind | Context it needs, and where it comes from |
+| --- | --- | --- |
+| `windows` | Windows | none |
+| `windows-slash` | Windows, `/` separators | none |
+| `wsl` | POSIX | a **distribution name**, and only for `\\wsl.localhost\<d>\…` / `\\wsl$\<d>\…` inputs, which are translated only when `<d>` is this row's own. Source: `wsl_distribution(index)` (`profiles.rs:3237`–`:3243`) — the row's own `-d` / `--distribution` argument, else the machine's default from `wsl::facts()`, three registry reads at startup and no process. On a row that carries neither, it is `None`, and then a distribution share is **not translated** and falls to rule D. Drive-rooted paths need none of this. **`home` is never needed**, because ruling ⑬ never emits `~` |
+| `msys` | POSIX | none. `Msys { home }` (`paths.rs:75`) carries a home for `~` in the *reading* direction; insertion never writes one |
+| `cygwin` | POSIX | none — the `/cygdrive` prefix is ruling ⑫a's stated default-mount assumption. **T-PASTE-CYG only**, and dark until PROBE 11 |
+
+So a `wsl` spelling on a wrapper row, a `pwsh` row or any other non-WSL row is
+**accepted** and spells drive-rooted paths by the mount rule, with the
+distribution taken from the row or the machine exactly as a real WSL row's is.
+Nothing is invented and nothing is guessed: the same function answers for both.
+
+**Rule C — the refusals, which are properties of the emitted string and fire in
+every cell of a grammar's row.** C1: PowerShell's documented single-quote class
+(§2.3), refused whole until PROBE 2 narrows it. C2: a `"` anywhere in the string,
+under `Cmd` and under `Agent`'s Windows arm, because those literals have no
+escape for one (§2.3). It is reachable three ways, all of them through the
+override: a POSIX spelling of a distribution-internal path whose Linux name
+carries a `"`; rule D's host fallback for that same path, which is a UNC string
+carrying one; and a `"paste_as": "cmd"` row on a Unix host. It is closed by the
+encoder rather than by a claim about which characters a filename may hold. C3: `%`, and `!` under a `/v:on` row,
+under a **named** `cmd` grammar only (§2.3), never under ruling ⑩'s
+unknown-program `Cmd` default. C4: the whole `Nushell` arm, until §2.3's baseline
+is measured.
+
+**Rule D — the fallback string is the host path, and the grammar reads it the
+same way.** When a spelling has no translation for an input — a UNC share, a
+foreign distribution's share, a `wsl`/`msys`/`cygwin` value in front of a path
+that is not drive-rooted — ruling ⑬'s existing answer stands: **the host path is
+emitted, quoted.** Its kind is the host's, so rule A's "the grammar sees the
+emitted string" resolves the branch without a second rule. That is how the
+`Agent` arm is selected (§2.3), and it is the reason §4.4's picture path cites
+the spelled string rather than the temp path.
+
+**Rule E — the key is a Windows key.** `PrintedPathNamespace`'s translation is
+`#[cfg(windows)]` (`paths.rs:132`–`:134`), and all five values name Windows-side
+spellings of Windows paths. On a Unix host **every value is refused where the row
+is read**, once, with the message an unusable key gets, and the pane keeps the
+host's own spelling. One refusal at load beats five refusals per paste.
+
+**The product.** Rows are grammars, columns are spellings; the cells say only
+what differs, since rules A–E cover the rest. Every cell not naming a refusal is
+**accepted**.
+
+| Grammar ↓ / spelling → | `windows` | `windows-slash` | `wsl` | `msys` | `cygwin` |
+| --- | --- | --- | --- | --- | --- |
+| `PowerShell` | `'…'`, C1 | `'…'`, C1 | `'…'`, C1 | `'…'`, C1 | C1; CYG |
+| `Cmd` | `"…"`, 2N trailing `\`, C3 | `"…"`, C3 | `"…"`, **C2**, C3 | `"…"`, **C2**, C3 | **C2**, C3; CYG |
+| `Posix` | `'…'`, `'`→`'\''` | as left | as left | as left | CYG |
+| `Fish` | `'…'`; every `\` doubles, so `D:\Demo` is `'D:\\Demo'` | `'…'` | `'…'` | `'…'` | CYG |
+| `Nushell` | C4 | C4 | C4 | C4 | C4; CYG |
+| `Agent` | `"…"` (Windows arm), **C2** | `"…"` (Windows arm — `X:` then `/` is what `normalize_windows_path` accepts), **C2** | `'…'`, `'`→`'\''` (POSIX arm) | as left | as left; CYG |
+
+"CYG" is rule B's last row: the whole column is T-PASTE-CYG's and refuses while
+PROBE 11 is unrun. A cell whose spelling could not translate the input is rule
+D's, and is then read as that host string's own cell in the same row — a UNC path
+under `Agent` × `wsl` is the `Agent` × `windows` cell, C2 included.
+
+**Fixtures for the product** (§6.1, and §6.2 where a program must run):
+`D:\John's Archive\a.txt` × `wsl` × `PowerShell` → `'/mnt/d/John''s Archive/a.txt'`,
+an apostrophe doubled inside a POSIX string under a Windows grammar. The drive
+root `D:\` × `Cmd` across the columns → `"D:\\"`, `"D:/"`, `"/mnt/d/"` — the 2N
+rule fires in one column only, because it is the only one whose string ends in a
+backslash. `D:\` × `windows` × `Agent` → the `"C:\"`-shaped literal §2.3 exempts
+from shlex identity. `\\server\share\a.txt` × `wsl` → rule D, the host string,
+so `Agent` takes its Windows arm. `\\wsl.localhost\Ubuntu\home\ann\a"b.txt`
+× `msys` → rule D (MSYS has no distribution share), a host string containing `"`,
+which `Posix` accepts and `Cmd` and `Agent`-Windows **refuse** by C2. The same
+path × `wsl` on that distribution's own row → `/home/ann/a"b.txt`, accepted under
+`Posix` and refused under `Cmd`. `{"id": "gitbash", "paste_as": "cmd",
+"paste_paths_as": "msys"}` with `D:\Data\100%\r.csv` → **refused**, because `cmd`
+was named; drop `"paste_as"` and the same row emits `'/d/Data/100%/r.csv'`. And
+any `"paste_paths_as"` on a macOS row → refused at the row by rule E, the pane's
+spelling unchanged.
 
 **Ruling ⑬: the mount rule, not `wslpath`, and the translation is partial over a
 normalised domain.** A WSL pane is handed `/mnt/d/Demo/a.txt` and a Git Bash pane
@@ -1249,14 +1427,28 @@ properties of the *path*. The refusals that come after it are properties of the
 **pane**: `%` in a `cmd.exe` row, an unprobed PowerShell quote character, a
 Nushell fence the measured baseline does not cover. A valid UTF-8 `%TEMP%`
 containing `%`, redirected there by policy, passes the directory gate perfectly
-and is then refused by the encoder — after the picture has been written. So the
-job's **captured recipient** (ruling ㉖) is used to run the prospective output
-name through that recipient's namespace and grammar **before the write**, and a
-refusal there refuses the lane with the encoder's own toast and creates nothing.
-The distinction is kept rather than collapsed: a globally vetted directory can be
-perfectly usable for one pane and refused for another, so this is a per-job check
-and not a second property of the directory. §6.2 carries a redirected-`%TEMP%`
-`%` row and an unmeasured-grammar row.
+and is then refused by the encoder — after the picture has been written. So a
+**`TerminalInsertion` job's captured recipient** (ruling ㉖) is used to run the
+prospective output name through that recipient's namespace and grammar **before
+the write**, and a refusal there refuses the lane with the encoder's own toast
+and creates nothing. The distinction is kept rather than collapsed: a globally
+vetted directory can be perfectly usable for one pane and refused for another, so
+this is a per-job check and not a second property of the directory. §6.2 carries
+a redirected-`%TEMP%` `%` row and an unmeasured-grammar row, **each paired with a
+recipient that encodes the same directory successfully**, so that a directory
+refused for everybody cannot pass the test by accident.
+
+**The other two destinations get the check that is meaningful for them, and not
+this one** (fourth review finding 6). A `PreviewRetarget` and a `LayoutSplit`
+open the file; they do not spell it for a shell, and there is no recipient whose
+encoder could refuse. Their pre-write check is therefore the **native file-open
+validation** ruling ㉖ names: the prospective path is absolute, lies below the
+directory vetted two paragraphs above, is within the platform's own path-length
+limit, and carries no character the platform's file API refuses. It runs at the
+same moment, refuses the same way — a toast and no file — and it is the whole of
+the preflight there. Borrowing a terminal's grammar to stand in for it is
+refused: a picture dropped on a preview must not fail because some unrelated
+pane's row is a `cmd.exe`.
 
 **Every post-write failure to deliver deletes the file.** Not only the
 representability case the second review asked for: an encoder refusal, a
@@ -1277,12 +1469,22 @@ precedent in this codebase is `instance::prepare_runtime_directory`
 foreign uid, and **repairs an existing mode** rather than refusing the claim.
 This lane follows it:
 
-* **Unix.** `DirBuilder::mode(0o700)` for `Folio` **and** for `clipboard` —
-  both, because an intermediate directory of ours redirected by a link
-  redirects the final one that is not a link. Then, for each level:
-  `symlink_metadata`, not a symlink, is a directory, `uid == geteuid()`, and mode
-  repaired to `0700` if it is anything else. A same-owner world-readable
-  directory does **not** pass. Files are created `0600`.
+* **Unix.** The two levels are `runtime_directory()`'s own
+  **`folio-<uid>`** — `$TMPDIR` when it is set and non-empty, else `/tmp`,
+  then `folio-{uid}` (`instance.rs:331`–`:337`) — **and** the `clipboard` child
+  beneath it. `Folio` is the **Windows** name and appears at no level here; the
+  earlier recipe said `Folio` and disagreed with the path this lane selects three
+  paragraphs above, with `PRIVACY.md`'s row and with the delete command §4.5
+  publishes. `DirBuilder::mode(0o700)` for **both**, because an intermediate
+  directory of ours redirected by a link redirects the final one that is not a
+  link. Then, for each of the two levels: `symlink_metadata`, not a symlink, is a
+  directory, `uid == geteuid()`, and mode repaired to `0700` if it is anything
+  else — which is `prepare_runtime_directory`'s own recipe (`instance.rs:360`)
+  applied at both levels rather than borrowed for one. A same-owner
+  world-readable directory does **not** pass. Files are created `0600`. The
+  fail-closed squatting limitation of §4.1's discovery paragraph is unchanged:
+  a `folio-<uid>` precreated by another local user is refused here, and the lane
+  is dead for that account until it is removed.
 * **Windows.** There is no uid, and the counterparts are stated in full rather
   than left implied — because `CreateDirectoryW` applies the security descriptor
   it is handed **only when it creates the directory**: an existing one comes back
@@ -1290,20 +1492,48 @@ This lane follows it:
   has effect at all only on a filesystem that keeps persistent ACLs. Asking for a
   restricted descriptor at creation therefore proves nothing about a directory
   that was already there, which is the case this design has to survive. At **each
-  of the two levels**, existing or created:
+  of the two levels**, existing or created. **The earlier draft of this list got
+  the protection flag backwards** — it required the directory *not* to be
+  protected, on the theory that protection "would let a later descriptor widen
+  what a file gets". `SE_DACL_PROTECTED` does the opposite: it stops the
+  descriptor's DACL being modified by **inheritable ACEs from the parent**, which
+  is the one thing this directory needs, since its parent is a temp directory
+  whose ACEs Folio does not choose. Propagation to children is a different
+  mechanism entirely — the `OBJECT_INHERIT_ACE` / `CONTAINER_INHERIT_ACE` flags
+  on this directory's own ACE. The two are now stated apart, and the flag is
+  **required** rather than forbidden:
+  * **One principal, and it is the token's user SID.** The permitted DACL is
+    exactly one allow ACE for the **current user's SID** — `TOKEN_USER`, the
+    account — with `FILE_ALL_ACCESS`, and nothing else: no `Administrators`, no
+    `SYSTEM`, no `Everyone`. That is the counterpart of Unix's `0700`, and it is
+    what §4.5's "readable only by you" says. The earlier draft admitted "the
+    system's own administrative identities" at the directory while requiring the
+    file to grant the owner **only**, so an admitted administrative ACE would
+    have propagated to the file and then failed the file's own read-back; the two
+    contracts now name one principal set. **It is the *user* SID and not the
+    *logon* SID.** `SECURITY.md:39`–`:45` scopes the attention pipe to the logon
+    session on purpose — a live IPC endpoint belongs to one desktop session —
+    but these are files that must still open after a logoff and a fresh logon, so
+    a logon-SID ACE would make the reader's own pictures unreadable tomorrow.
+    The pipe is cited here for **one** thing, its fail-closed rule: if the token's
+    user SID cannot be read, or the descriptor cannot be constructed, the lane
+    **refuses and opens nothing**, exactly as the pipe refuses rather than falling
+    back to a default descriptor.
+  * **Protected, and inheriting to children.** Each of the two directory levels
+    carries, in SDDL, `D:P(A;OICI;FA;;;<user SID>)` — `P` is
+    `SE_DACL_PROTECTED`, the boundary against whatever `%TEMP%`'s parent chain
+    would otherwise push down; `OICI` is `OBJECT_INHERIT_ACE` +
+    `CONTAINER_INHERIT_ACE`, so a file created beneath with no descriptor of its
+    own still lands on the one principal. Both are **checked**, not assumed: a
+    level missing `P` is one an inheritable parent ACE can reach.
   * **Owner.** Read the security descriptor's owner SID and require it to be the
     current user's. A directory somebody else owns is **refused**, never
     repaired: repairing a foreign directory is either impossible or an act of
     privilege this lane has no business performing.
-  * **DACL.** Require a DACL that grants no access to any principal outside the
-    owner and the system's own administrative identities, in the way
-    `SECURITY.md` records for the launch pipe. A broader one on a directory the
-    current user **owns** is repaired to that footing — the counterpart of Unix's
-    mode repair; on one they do not own, refused (the row above).
-  * **Inheritance.** Require that the entries carry inheritance to new children,
-    and that the directory does not carry a protected-inherit flag that would let
-    a later descriptor widen what a file gets, so that "files inherit it" is a
-    checked property and not an assumption.
+  * **Repair, on a directory the user owns.** A DACL that is broader than the one
+    ACE, or that is not protected, is **rewritten to the exact form above** — the
+    counterpart of Unix's mode repair. On a directory they do not own, refused
+    (the row above).
   * **Reparse points** are refused at either level, as before.
   * **A filesystem that cannot enforce it is refused.** If the volume does not
     support persistent ACLs — a redirected `%TEMP%` on a FAT or exFAT stick, or a
@@ -1311,9 +1541,19 @@ This lane follows it:
     the lane refuses with a toast rather than writing a picture into a place it
     has told the reader is private. §4.5's "readable only by you" is a promise,
     and this is the check that makes it one.
-  * **The created file is verified, not assumed.** After `create_new`, the new
-    file's own DACL is read back and required to grant the owner only. An
-    inheritance that did not take is a refusal and a delete, not a shipped file.
+  * **The created file is verified against the same principal policy.** It is
+    created with an explicit `D:P(A;;FA;;;<user SID>)` — the same single
+    principal, protected, and no inherit flags, a file having no children — so it
+    does not depend on the parent's propagation having worked; and then its own
+    DACL is **read back before a single picture byte is written** and required to
+    be exactly that. Creation and validation therefore ask the identical
+    question, which the earlier draft's two lists did not. A read-back that
+    disagrees is a refusal and a delete, not a shipped file.
+  * **The residue, stated.** An owner-only DACL does not defend against a
+    principal who can take ownership or who holds `SeBackupPrivilege`: a local
+    administrator can read these files whatever this descriptor says, and no
+    descriptor Folio can write changes that. §4.5 says "readable only by you" of
+    ordinary access, which is what the check enforces.
 * **Before every operation, not once.** The vetting runs before each create and
   before each sweep, because a directory replaced after the first check redirects
   everything after it. `create_new` protects a *name*; it protects no parent.
@@ -1492,9 +1732,22 @@ again while it runs.
 
 **Every job carries, whatever its destination**: a **request sequence number**,
 globally unique in the way `CONVENTIONS.md:154` requires of worker addresses,
-with one owner for the answer; the **window and tab**; the captured
-**recipient** used by §4.1's pre-write encoder check; and the setting of §4.6 as
-it stood when the gesture was made.
+with one owner for the answer; the **window and tab**; and the setting of §4.6 as
+it stood when the gesture was made. **The captured *recipient* is not on that
+list** (revised, fourth review finding 6). The earlier draft put it there and
+said every job runs §4.1's pre-write encoder check — while two paragraphs later
+saying that a Preview retarget and a layout split have no shell. A job with no
+shell cannot satisfy a mandatory shell preflight, and the only ways out were to
+invent a recipient or to borrow the focused pane's, which would make a picture
+dropped on a preview refuse because some unrelated terminal's grammar cannot
+spell `%`. **A surrogate recipient is never chosen.** So the recipient, its
+namespace and its grammar move **into the terminal destination**, and each of
+the other two gets the validation that is actually meaningful for it.
+
+**What stays common to all three**: §4.1's directory vetting and its
+representability gate on the directory, ruling ㉕'s size caps and quota lock, the
+modal gate, the §4.6 setting, revalidation of the typed destination, cancellation,
+and the rule that any failure to deliver removes the file through the owned path.
 
 **And then it carries one of three destinations, because §3.4 admits three.**
 The earlier draft described a terminal insertion and applied it to "a delayed
@@ -1502,22 +1755,54 @@ picture drop" as well — but a picture dropped on a Preview centre is a
 `Retarget` and one dropped on a seat edge is a `Split`, and neither has a shell.
 `LeafSession` is a Terminal leaf's own PTY and screen (`main.rs:10283`–`:10292`);
 a Preview pane has no incarnation of that kind, and a split's destination seat
-does not exist yet when the hand opens. So the destination is typed:
+does not exist yet when the hand opens. So the destination is typed, and **each
+variant names its own pre-write check and its own revalidation**:
 
-* **`TerminalInsertion { leaf, incarnation, input_generation }`** — the seat, its
-  **session incarnation** (so that a restarted shell in the same seat is a
-  different recipient and a reused `SeatId` cannot be mistaken for the original),
-  and the input generation below.
+* **`TerminalInsertion { leaf, incarnation, input_generation, recipient }`** — the
+  seat, its **session incarnation** (so that a restarted shell in the same seat is
+  a different recipient and a reused `SeatId` cannot be mistaken for the
+  original), the input generation below, and the **captured recipient**: the
+  pane's namespace and grammar as they stood at the gesture. *Pre-write:* §4.1's
+  encoder preflight, run against this recipient, refusing before any file exists.
+  *Revalidation:* the leaf exists, the incarnation matches, the input generation
+  is unchanged.
 * **`PreviewRetarget { leaf, content_generation }`** — the Preview pane and a
-  counter of what it has been pointed at. If the reader has since opened
-  something else there, by any route, the generation has moved and the picture
-  does not steal the pane back.
-* **`LayoutSplit { anchor_seat, side, layout_generation }`** — the seat the edge
-  belonged to and which side of it, captured at the drop, plus the tab's layout
-  generation. At completion the anchor must still exist, still be in the captured
-  tab, and still admit a split on that side; the landing is **not recomputed**
-  from anything current, because recomputing would open the picture where the
-  layout has since moved to rather than where the hand let go.
+  counter of what it has been pointed at. *Pre-write:* **no shell check, because
+  there is no shell.** What this destination will do with the file is open it, so
+  what is checked is that it can be opened: the prospective path must be one this
+  window can name to the platform's own file API — an absolute path, below the
+  vetted directory, within the platform's length limit, and carrying no character
+  the file API refuses. §2.4's gate has already refused an unspellable *name*;
+  this is the open-side counterpart of the terminal's encoder preflight, and it is
+  the whole of the pre-write check here. *Revalidation:* the pane exists and the content
+  generation is unchanged — if the reader has since opened something else there,
+  by any route, the picture does not steal the pane back.
+* **`LayoutSplit { anchor, layout_generation }`** — where the hand let go, the
+  side being carried by the anchor below, plus the tab's layout generation. *Pre-write:* the same native file-open check
+  as `PreviewRetarget`, for the same reason. *Revalidation:* per the anchor
+  variant below; the landing is **not recomputed** from anything current, because
+  recomputing would open the picture where the layout has since moved to rather
+  than where the hand let go.
+
+**A split anchor is not always a seat, and the earlier draft had no shape for the
+case it already admitted.** `anchor_seat` could only name a pane, but §3.4's own
+matrix admits a raw picture on a **root rim** as well as on a seat edge, and a
+rim has no seat: `DropLanding::RootRim { edge }` (`main.rs:28787`) carries an edge
+and nothing else, `layout_aim` maps it to `seats::LayoutAim::Rim(edge)`
+(`main.rs:28848`), and `aimed_at` answers `None` for it because — in that code's
+own words — "the rim aims at the layout as a whole … there is no pane to point
+at". So the anchor is two-valued, and revalidation differs per variant:
+
+| `anchor` | Captured | Revalidated at completion |
+| --- | --- | --- |
+| `SeatEdge { seat, side }` | the seat the edge belonged to, and which side | the seat still exists, is still in the captured tab, and still admits a split on that side |
+| `TabRoot { side }` (the rim) | the tab and the side; **no seat**, which is the whole point of the gesture | the captured tab still exists, and its **root** still admits a split on that side. Nothing is asked about any pane, because the gesture was never about one |
+
+Both carry the tab's `layout_generation`, and a moved generation is a
+cancellation for either: the layout the hand aimed at is not the layout on the
+screen. A rim job is **never** repaired into a seat job by picking whichever pane
+now sits at that edge — that is the same surrogate the recipient rule refuses,
+one surface over.
 
 **The input generation, and why a unique address is not enough** (third review
 finding 16). A job's address proves the *seat* is the one that asked. It proves
@@ -1526,24 +1811,74 @@ while the encode runs, and every check the earlier draft listed — leaf exists,
 incarnation matches, no modal, setting on — still passes, so the path would land
 in the next command or in a running program's stdin. That is not a delayed
 answer to the reader's gesture; it is a different gesture's line being edited by
-this one. So a terminal destination captures a **per-target input generation**
-that advances on every one of: submitted input (Enter or any other line
-submission), typed characters, an ordinary text paste — which the code already
-records as the reader putting bytes in (`main.rs:96320`–`:96322`) — a K144
-insertion, a drop insertion, and any other path insertion. **If the generation has
-moved when the job completes, the job is invalidated**: nothing is delivered, the
-file is removed through the owned path, and a toast says the picture was not
-inserted because the line moved on. The alternative contract — "the path goes
-into whatever line is current" — was considered and rejected: it makes a keystroke
-from three hundred milliseconds ago edit a command the reader has since started,
-which is the one thing an asynchronous insertion must not do.
+this one. So a terminal destination captures a **per-target input generation**.
 
-**At completion**, then, a job revalidates: the destination's existence and its
-typed generation (incarnation plus input generation, content generation, or
-layout generation), the modal gate, and the setting of §4.6. **Cancellation** is
-explicit when the pane closes, the shell restarts, the window closes, the
-Preview pane is retargeted, the anchor seat goes away, or the setting is turned
-off. On any invalidation or cancellation the file is deleted through the owned
+**And the list of events that advance it is not an enumeration of keys** (revised,
+fourth review finding 5). The third revision listed submission, typed characters,
+a text paste, a K144 insertion and a drop insertion — which leaves every
+*editing* input out. An `ArrowLeft` moves the cursor into the middle of an
+existing token; `Home` moves it to the front of the line; `Up` recalls a different
+command entirely; `Backspace` removes the character the insertion was going to sit
+after; `Tab` asks the shell to complete and rewrite what is there; `Ctrl+C`
+abandons the line and starts a new one. None of them types a printable character,
+and all of them change the line the path was going to be appended to — so a list
+built from "typing or submission" would let the job land on a line the reader has
+since edited, which is the exact case the ruling exists to prevent. **Inferring
+line stability from printable characters is the error; the rule is stated over
+the input's origin instead:**
+
+> **The generation advances on every user-originated byte this window puts into
+> that target's PTY.** Navigation and editing keys, control keys, history recall,
+> a Tab, an IME commit, a paste, a K144 or drop insertion, a submission — all of
+> them, because all of them are the reader's own hand on that line.
+
+**It is one boundary, and this codebase already has it.** The encoder is
+`input::keyboard_bytes` (`crates/bt-app/src/input.rs:530`–`:632`): the arrow,
+`Home`, `End`, `Insert`, `Delete`, `PageUp` and `PageDown` sequences are at
+`:567`–`:582`, `Enter`, `Backspace`, `Tab` and `Escape` at `:619`–`:622`, `Ctrl+C`
+at `:540`–`:544` and the rest of the control alphabet at `:558`–`:563`. Every one
+of those is a user keystroke by construction, and the function answers `None` for
+what is not — a paste shortcut, `NamedKey::Process` mid-composition, an unclaimed
+chord. The **target-specific** half is one seat-taking call beside it:
+`Runtime::note_user_typing(seat)` (`main.rs:85381`), whose own header states the
+scope this ruling needs — it is "called from the four doors a person's own input
+reaches a shell through — the keyboard, a paste, an IME commit and a files-row
+insert — and from nowhere else", and explicitly not for "a wheel forwarded to a
+full-screen program … a terminal protocol reply, a resize repair chord, or the one
+line a restored pane puts back on the prompt" (`main.rs:85368`–`:85375`). Those
+four doors are `main.rs:96160` (keyboard), `:96322` (paste), `:96482` (IME commit)
+and `:76953` (files row), and the drop insertion of §3.2 becomes the fifth, since
+it is the same gesture through a different hand. **The generation advances
+exactly there** — one line beside an existing per-seat call that already means
+"the reader's own bytes went into this pane" — and nowhere else.
+
+**What is deliberately excluded, and why each.** *Terminal replies* — the
+`take_pty_writes` drains at `main.rs:35630` and `:35665`, which answer a program's
+own query — are this window speaking on the child's behalf, not the reader
+typing. *Mouse forwarding* to a tracking program (`UserInputKind::MouseButton` /
+`MouseWheel` / `MouseMotion`, `main.rs:18590`–`:18606`) writes through
+`send_user_input` without passing `note_user_typing`, and a program in mouse
+tracking is not at a prompt. *The PSReadLine resize-repair chord* (`main.rs:83223`)
+and *a restored pane's replayed command line* (`main.rs:35702`) are this window's
+own bookkeeping. *Local-only UI actions* — scrolling, selecting, opening a menu,
+switching tabs — put no byte in the pipe at all and are outside the rule by
+construction. Each exclusion is a decision, not an omission.
+
+**If the generation has moved when the job completes, the job is invalidated**:
+nothing is delivered, the file is removed through the owned path, and a toast says
+the picture was not inserted because the line moved on. The alternative contract —
+"the path goes into whatever line is current" — was considered and rejected: it
+makes a keystroke from three hundred milliseconds ago edit a command the reader
+has since started, which is the one thing an asynchronous insertion must not do.
+
+**At completion**, then, a job revalidates **its own variant's** conditions — the
+table above and the three destination bullets are the whole of the list:
+incarnation plus input generation for a terminal, content generation for a
+Preview, layout generation plus the anchor's own condition for a split — together
+with the modal gate and the setting of §4.6. **Cancellation** is explicit when
+the pane closes, the shell restarts, the window closes, the Preview pane is
+retargeted, the anchor seat goes away, the captured tab or its root goes away, or
+the setting is turned off. On any invalidation or cancellation the file is deleted through the owned
 path rather than left for the sweep — that is the same rule §4.1 states for every
 post-write failure to deliver. Ordering is unnecessary because only one job is
 ever in flight (ruling ㉕), which is a second reason for that rule. The
@@ -1614,8 +1949,10 @@ at a directory of our own files, on a timer, and reads no clipboard.
 the representability gate, the pane's spelling, the pane's grammar. A picture
 pasted into a WSL pane arrives as
 `/mnt/c/Users/ann/AppData/Local/Temp/Folio/clipboard/clip-20260915-140233.png`,
-and into an agent pane **by §2.3's platform split** — double-quoted when the
-temp path is a Windows path, POSIX single-quoted when it is a POSIX one. The
+and into an agent pane **by §2.3's platform split, read on the string that is
+emitted** — double-quoted when the spelled temp path is a Windows path, POSIX
+single-quoted when it is a POSIX one, which under a `"paste_paths_as"` row is
+the *spelled* form and not the host form the file was created at. The
 earlier sentence here said "single-quoted" flatly, which was the withdrawn
 one-form rule surviving in a second place; it is corrected. There is no second
 rule for pictures, which is the point of writing the file at all: after the
@@ -1702,10 +2039,15 @@ bt-transcript   PrintedPathNamespace::to_pane_spelling()   — beside to_local_p
                 PrintedPathNamespace::Cygwin  — T-PASTE-CYG only, both directions
 
 bt-app          shell_literal.rs     representability gate + ShellGrammar + encoders  [pure]
+                                     spelling-then-grammar composition, ruling 12b
                 profiles::grammar()  — derive_integration's twin, plus "paste_as"
-                profiles             "paste_paths_as" — the spelling override (§2.5)
+                                       (reads the row's program; the NAMESPACE
+                                        resolver is the one that does not)
+                profiles             "paste_paths_as" — the spelling override (§2.5),
+                                     Windows-only, insertion-only
                 main.rs              paste routing, drop landing, picture lane + typed
-                                     job destinations and generations
+                                     job destinations and generations; the captured
+                                     recipient lives on TerminalInsertion alone
                                      inserted_path_text (K144) absorbed and repaired
                 the picture worker   decode, encode, write, the cross-process quota
                                      lock — and the hourly sweep
@@ -1828,21 +2170,69 @@ grammar does not read integration. **A `gitbash` row with integration `None`
 is `Windows` for spelling**, which is the standing 2026-09-07 derivation the
 owner confirmed on 2026-09-15 (ruling ⑫), and the test carries that expectation
 with the ruling's date beside it so that whoever changes it knows what they are
-changing. The suite asserts that **no derivation reads a program**: a
-program-keyed `derive_namespace` is not called because it does not exist.
+changing. **The assertion is scoped to the namespace resolver, and the earlier
+blanket sentence is struck** (fourth review finding 11). It said "no derivation
+reads a program", which would have forbidden `derive_grammar(&ProgramSource)`
+(§2.2 ruling ⑧) — the thing T-PASTE-1 ships beside it. The owner's ruling settles
+**namespace** derivation, not grammar derivation, so the three claims are tested
+as three:
+
+* **Namespace.** The resolver T-PASTE-1 uses is `printed_path_namespace`, which
+  reads `(paths(index), integration(index))` and nothing else; no program-keyed
+  `derive_namespace` is called, because none exists.
+* **Grammar.** `derive_grammar` **does** read the row's resolved program, and the
+  test asserts that it does — `PowerShellSeven` without a file name, a `FirstOf`
+  row off its first candidate, `served_by` never consulted.
+* **Spelling override.** `"paste_paths_as"` affects insertion only, and the
+  detector's answer for the same pane is unchanged.
+
 `wsl.exe -e nu` without an override is `Posix` and **the test says so, naming it
 as the spawn-time default**; a `"paste_as"` row is believed, a
-`"paste_paths_as"` row is believed, and the two are asserted **independently** —
+`"paste_paths_as"` row is believed, and the two keys are asserted **not to read
+each other** —
 `{"id": "gitbash", "paste_paths_as": "windows-slash"}` emits `'D:/Demo/a.txt'`,
 POSIX quotes around a forward-slash Windows path, and leaves the detector's
 answer for that pane unchanged. An unknown value of either key is refused.
 
+**The grammar × spelling product** (ruling ⑫b), which independence does not
+cover. Rules A–E are asserted as rules and the table's cells as their
+consequences: `D:\John's Archive\a.txt` × `wsl` × `PowerShell` →
+`'/mnt/d/John''s Archive/a.txt'`; the drive root `D:\` × `Cmd` across the columns
+→ `"D:\\"`, `"D:/"`, `"/mnt/d/"`, so the 2N rule fires in one column only; `D:\`
+× `windows` × `Agent` → the `"C:\"`-shaped literal, exempt from shlex identity;
+`\\server\share\a.txt` × `wsl` → the host string by rule D, taking `Agent`'s
+**Windows** arm; `\\wsl.localhost\Ubuntu\home\ann\a"b.txt` × `msys` → the host
+string by rule D, accepted under `Posix` and **refused under `Cmd` and under
+`Agent`'s Windows arm** by rule C2; the same path × `wsl` on that distribution's
+own row → `/home/ann/a"b.txt`, `Posix` accepts and `Cmd` refuses; a `wsl`
+spelling on a **non-WSL** row spells `/mnt/d/…` with the distribution
+`wsl_distribution` answers and, with neither a row argument nor a machine
+default, leaves a distribution share untranslated rather than guessing;
+`{"paste_as": "cmd", "paste_paths_as": "msys"}` refuses `D:\Data\100%\r.csv` and
+the same row without `"paste_as"` emits `'/d/Data/100%/r.csv'`; and on a Unix
+seed platform every value of `"paste_paths_as"` is refused at the row by rule E,
+once, with the pane's spelling unchanged.
+
 **The Cygwin arm, in T-PASTE-CYG's own suite** (ruling ⑫a): a positive row
 spells `/cygdrive/d` and is recognised back; the classifier's table is asserted
-over all six of its outcomes — shipped Git Bash candidate, Cygwin DLL only, MSYS
-DLL only, both, neither, unreadable — with only the second changing any answer;
-and **with PROBE 11 unrun, every outcome including the positive one keeps today's
-answer**, which is the test that stops an unmeasured build enabling the match.
+over all of its outcomes — shipped Git Bash candidate, ineligible program,
+partial read, Cygwin-only union, MSYS-only union, both, empty — with only the
+Cygwin-only union changing any answer. **Eligibility is tested before the
+disk**: a non-shell executable sitting beside `cygwin1.dll` keeps today's answer
+**and reads no directory at all**, which the fixture asserts by counting the
+listings the classifier performed, so that a later refactor cannot turn the
+cheap rule into an expensive one that happens to answer the same. **Aggregation
+is tested for order-independence**: a Cygwin-only executable directory beside an
+MSYS-only `..\usr\bin\` answers today's answer whichever location the fixture
+presents first, and the mirror pair answers the same. **A partial read stops the
+classification**: one readable Cygwin-only directory beside a sibling that exists
+and cannot be listed keeps today's answer, while the same Cygwin-only directory
+beside a sibling that **does not exist** is the positive match, because an absent
+location is not a failed read. And **with PROBE 11 unrun, every outcome including
+the positive one keeps today's answer, and `"paste_paths_as": "cygwin"` is
+refused with the unmeasured-spelling message** — one gate covering the automatic
+match and the explicit override alike, which is the test that stops an unmeasured
+build enabling either.
 
 **Rung semantics.** A fake clipboard described by each rung's answer —
 `Absent` / `Present` / `Unreadable`, and `Present`-but-empty — across every
@@ -1861,12 +2251,32 @@ survey-decides-everything ladder could not reach; that a macOS URL representatio
 whose items are all non-file URLs behaves the same way; and that in the ordinary
 case exactly one rung is fetched.
 
-**Coherence, per platform.** On the macOS fake, a moved `changeCount` discards
-and refuses. On the Windows fake, a **sequence number that moved because the
-delayed format rendered** does **not** discard — the paste succeeds — which is
-the fixture that pins ruling ④'s correction; and a genuinely replaced clipboard
-still refuses, by the rule that is not sequence equality. No path in the suite
-reopens the clipboard after a discard.
+**Coherence, per platform — and the two platforms are asserted for different
+things, because the two APIs promise different things** (revised, fourth review
+finding 2). On the macOS fake, a moved `changeCount` discards and refuses: AppKit
+makes no exclusion promise, so a replacement under the read is a real event with
+a real refusal. On the **Windows** fake the assertion is the **exclusion
+guarantee itself**, which is what ruling ④ made the coherence rule:
+
+* a **sequence number that moved because the delayed format rendered** does
+  **not** discard — the paste succeeds — which is the fixture that pins ruling
+  ④'s correction;
+* while Folio holds the clipboard open, a competing process's `OpenClipboard`
+  **fails**, and the fake asserts that failure rather than modelling it away;
+* Folio's own acquired snapshot **completes** under that held interval and is
+  delivered;
+* the competing process's replacement, made after the close, is what the
+  **next** gesture reads — a second paste answers the new contents.
+
+The earlier fixture required "a genuinely replaced clipboard" to refuse "by the
+rule that is not sequence equality", and there is no such rule: inside the open
+interval the API does not permit the replacement, and a replacement outside it is
+simply a different clipboard for a different gesture. A fake that let another
+process write while Folio held the clipboard would be modelling an API guarantee
+away in order to test a refusal the design does not have. **No sequence equality
+is asserted anywhere**, and no path in the suite reopens the clipboard after a
+discard. If a real Windows invalidation is ever found, it enters here as a named
+observable failure with its own refusal path — not as a restored equality test.
 
 **The picture.** Known-pixel fixtures per supported DIB layout — top-down and
 bottom-up, `BI_RGB` and `BI_BITFIELDS`, V5 with and without a real alpha mask,
@@ -1900,21 +2310,57 @@ insert and deletes its file**; **whose path is refused by the captured
 recipient's encoder is never written at all**, because that check runs before the
 write (§4.1); and a second picture paste while one is pending is refused.
 
-**The input generation, which is the case a unique address does not cover.**
-Enter pressed before completion invalidates the job — nothing is inserted, the
-file is deleted, the toast says the line moved on; the same for a typed
-character, for an ordinary text paste (the path the code already records as the
-reader putting bytes in, `main.rs:96320`–`:96322`), for a K144 insertion and for
-a drop insertion; and a completion with the generation **unchanged** still
-inserts, so the check is not simply a refusal machine.
+**The input generation, which is the case a unique address does not cover — and
+the editing half a list of typed characters does not cover either** (revised,
+fourth review finding 5). Each of these, delivered to the job's own target before
+completion, invalidates it: nothing is inserted, the file is deleted through the
+owned path, and the toast says the line moved on.
+
+* **Submission and typing.** Enter; a typed character; an ordinary text paste (the
+  path the code already records as the reader putting bytes in,
+  `main.rs:96320`–`:96322`); a K144 insertion; a drop insertion.
+* **Navigation.** `Left`, and `Home` — each of which moves the cursor inside the
+  line the job was going to be appended to without changing a character of it.
+  These are the rows that would have passed under the third revision's list.
+* **History recall.** `Up` at the prompt, which replaces the whole line with a
+  different command.
+* **Editing and completion.** `Backspace`, which removes the character the
+  leading-space rule was going to be asked about; and `Tab`, which asks the shell
+  to rewrite what is there.
+* **Control keys.** `Ctrl+C`, which abandons the line, and `Ctrl+U`, which clears
+  it.
+* **An IME commit** into that target.
+
+And three negative rows, so the check is a check and not a refusal machine: a
+completion with the generation **unchanged** still inserts; **a terminal reply**
+drained back to the child (`main.rs:35630`) does not advance it; and **the same
+keys pressed in another pane** do not advance this target's generation, the job
+completing normally — which is what makes it per-target rather than global. A
+**mouse report** forwarded to a tracking program in the same pane likewise does
+not advance it.
 
 **The other two destinations.** A `PreviewRetarget` whose pane has since been
 pointed at something else does not retarget and deletes its file; one whose
-content generation is unchanged does. A `LayoutSplit` whose anchor seat is gone,
-whose tab has changed layout generation, or whose side no longer admits a split,
-does not split and deletes its file; one whose anchor is intact splits **on the
-captured side**, and the test asserts that the landing was not recomputed from
-the current pointer or the current layout.
+content generation is unchanged does. A `LayoutSplit` carrying a
+`SeatEdge` anchor whose seat is gone, whose tab has changed layout generation, or
+whose side no longer admits a split, does not split and deletes its file; one
+whose anchor is intact splits **on the captured side**, and the test asserts that
+the landing was not recomputed from the current pointer or the current layout.
+**And the `TabRoot` anchor gets its own pair** (fourth review finding 6): a
+delayed picture dropped on a **root rim** whose tab and root are untouched
+**splits the root on the captured edge** — the success case the earlier fixtures
+had no shape for — while one whose captured tab has closed, or whose layout
+generation has moved because the root was restructured under it, **cancels and
+deletes its file**, and is asserted **not** to have been repaired into a
+`SeatEdge` against whichever pane now occupies that edge.
+
+**Neither nonterminal destination runs a shell preflight**, which is asserted
+directly: a `PreviewRetarget` and a `LayoutSplit` created while every open
+terminal is a `cmd.exe` row, into a temp directory whose name contains `%`, still
+write their file and complete — the case that would fail if the common preflight
+had stayed common or if a focused pane were borrowed as a surrogate recipient.
+What they do run is the native file-open check, asserted by a prospective path
+over the platform's length limit refusing with no file created.
 
 **The line put at the prompt.** A leading space only when the cell left of the
 cursor is not blank (the shape at `main.rs:152531`); a trailing space always;
@@ -1945,9 +2391,19 @@ bridge version.
 when asked — Excel's copy-as-picture and a browser's *Copy image* are the
 candidates PROBE 1 names — where the **first** paste after the copy must succeed,
 because that is the paste the withdrawn sequence-number test would have refused.
-Beside it a **real replacement** row, where the clipboard is genuinely rewritten
-by another process while the read is in flight, which must refuse and must not
-reopen. And on macOS the same pair against `changeCount`.
+
+Beside it, a **concurrent copy** row that asserts what the API actually
+guarantees rather than a refusal it makes impossible (revised, fourth review
+finding 2). A second process attempts a copy while Folio is inside its open
+interval, and the row records all four of: that process's `OpenClipboard`
+**failed**; Folio's snapshot **completed** and the paste landed; the second
+process's copy succeeded once Folio had closed; and the **next** paste gesture
+delivered that new content. No sequence equality and no ordering assertion — the
+row is four observations, each independently checkable, and it is the same row on
+a physical machine that the §6.1 fake pins in the small. On **macOS** the pair is
+different and stays different: `changeCount` before and after, a genuine
+replacement under the read, which must **refuse** and must not reopen, because
+AppKit makes no exclusion promise for Folio to assert.
 
 **The shell matrix.** A file whose name has a space, an apostrophe, `$`, `%`,
 `!`, a PowerShell smart quote and CJK, into `pwsh`, `winps`, `cmd`, `gitbash`,
@@ -1956,14 +2412,35 @@ file compared.
 
 * **Under `cmd`**, a builtin (`cd`, `type`) *and* a native child (`findstr`, a
   tiny argv printer) for the trailing-backslash rows, with `/v:on` and without.
-* **The `Cmd` encoder outside `cmd.exe`** (ruling ⑩) is asserted against a
-  **defined CRT command-line consumer** — the same argv printer, launched from a
-  `cmd` row, with `%` in the name, which must *work* rather than refuse. The
-  earlier row asked a `python` or `node` **profile** to open the file, which
-  tested a REPL's string-literal grammar rather than the platform's argument
-  convention and would have failed on `\n` and `\t` for reasons that are not this
-  encoder's; §2.2 explains the withdrawal, and no REPL acceptance row replaces
-  it until a REPL grammar is added.
+* **The `Cmd` encoder outside `cmd.exe`** (ruling ⑩) is **two rows, not one**
+  (revised, fourth review finding 3). The third revision had a single row that
+  launched the argv printer "from a `cmd` row, with `%` in the name, which must
+  *work* rather than refuse" — while §2.3 requires a percent-bearing path to be
+  **refused** in a `cmd.exe` pane. Choosing a native child does not get past
+  Folio's row-based refusal or past cmd's own interpretation, so that row either
+  failed its own gate or asked for an exception to the behaviour it was testing.
+  The two questions are separated:
+  * **The encoder, with no interpreter.** The test harness builds the encoded
+    command line and hands it **straight to `CreateProcessW`** — the argv printer
+    as the image, the encoded line as the command line, no `cmd.exe` anywhere —
+    and compares the argv the printer reports against the intended path. This is
+    the platform's own process-creation convention, read by the CRT parser it
+    belongs to, which is exactly what ruling ⑩ promises. Rows: one, two and three
+    trailing backslashes; a space; an apostrophe; a lone `%`; **a paired
+    `%NAME%`**, which is the row that distinguishes cmd's expansion from a
+    harmless percent sign and which the encoder must pass through unchanged
+    because it has no interpreter in front of it.
+  * **Terminal acceptance, in a `cmd` profile.** A lone `%` and a paired `%NAME%`
+    are each **refused** with the toast §2.3 names, and no bytes reach the pane.
+    That is Folio's row-based rule, and it is asserted where it lives.
+
+  The earlier row before both of these asked a `python` or `node` **profile** to
+  open the file, which tested a REPL's string-literal grammar rather than the
+  platform's argument convention and would have failed on `\n` and `\t` for
+  reasons that are not this encoder's; §2.2 explains the withdrawal, and no REPL
+  acceptance row replaces it until a REPL grammar is added. If a non-cmd
+  *interactive* row is ever used for an encoder row, it must be one whose input
+  protocol actually consumes the grammar under test, named in the row.
 * **Under PowerShell**, 5.1 and 7, with PSReadLine default and with bracketing
   off. Under zsh, default and with `bracketed-paste-magic`.
 * **Under `nu`** — the baseline run, which is a prerequisite of the arm existing
@@ -1979,9 +2456,17 @@ file compared.
 * **Cygwin rows, in T-PASTE-CYG** (ruling ⑫a): a Cygwin `bash.exe` row with
   integration left automatic and one with integration `None`; the Folio-shipped
   Git Bash wrapper, to show what actually sits beside `<Git>\bin\bash.exe`; a
-  machine carrying both runtime DLLs; and a Cygwin whose cygdrive prefix has been
-  moved, which must be a disclosed wrong answer repaired by
-  `"paste_paths_as"` rather than a silent one.
+  machine carrying both runtime DLLs; **a non-shell executable installed beside
+  `cygwin1.dll`** — a Cygwin `rsync.exe` or `python.exe` as a profile's program —
+  which must keep today's answer for the eligibility reason and not for a DLL
+  one; **a cross-level mixed installation**, Cygwin-only in the executable's
+  directory and MSYS-only in `..\usr\bin\`, which must answer today's answer from
+  either direction; **a sibling directory that exists and cannot be listed**,
+  which must keep today's answer while the same row with **no** sibling directory
+  at all is the positive match; **the explicit `"paste_paths_as": "cygwin"` on a
+  build whose PROBE 11 is unrun**, which must refuse with the unmeasured-spelling
+  message; and a Cygwin whose cygdrive prefix has been moved, which must be a
+  disclosed wrong answer repaired by `"paste_paths_as"` rather than a silent one.
 
 **The agents (PROBE 3).** Claude Code, Codex and Copilot CLI, versions recorded:
 a spaced path, **an apostrophe path on both platforms**, **a Windows drive root
@@ -2023,18 +2508,59 @@ winit still initialises COM on** (`platform/windows.rs:493`); a DPI-changing
 monitor, to pin the coordinate conversion; and a source that would have accepted
 a move, to prove the effect returned.
 
-**The storage.** On Unix: a world-readable existing directory is repaired; a
-foreign-uid directory refuses; a symlink at either level refuses; a file lands
-`0600`. On Windows, one row per clause of ruling ㉓: an **existing directory with
-a broad DACL** that the current user owns is repaired and then passes; one owned
-by **another SID** refuses and is not repaired; a directory whose entries do not
-carry inheritance to children refuses; a **reparse point** at either level
-refuses; the **created file's own DACL is read back** and must grant the owner
-only, with an inheritance that did not take causing a refusal and a delete; and a
-`%TEMP%` redirected to a volume that **cannot keep persistent ACLs** — an exFAT
-stick, a share that does not carry them — refuses the lane rather than writing a
-file it cannot make private. A `%TEMP%` redirected to a share that *can* keep
-them writes there and is disclosed.
+**The storage.** On Unix, the two levels are `runtime_directory()`'s
+`folio-<uid>` and its `clipboard` child, and each row is run at **both**: a
+world-readable existing directory is repaired; a foreign-uid directory refuses; a
+symlink at either level refuses; a file lands `0600`.
+
+On Windows, one row per clause of ruling ㉓, and **the protection flag is
+asserted in the direction the API defines** (revised, fourth review finding 4):
+
+* **A protected directory succeeds.** A `Folio` or `clipboard` level already
+  carrying `D:P(A;OICI;FA;;;<user SID>)` — protected, one ACE, inheriting —
+  **passes untouched**. This is the row the third revision's rule got backwards:
+  it required the directory *not* to be protected, so the most securely
+  configured directory on the machine was the one that refused.
+* **A permissive parent does not reach in.** The `%TEMP%` parent is given a
+  broad inheritable ACE — `Everyone`, or a second local account — *after* Folio's
+  two levels exist, and the row asserts that the two levels' effective DACLs are
+  **unchanged**, because `SE_DACL_PROTECTED` is what stops an inheritable ACE
+  arriving. Then a picture is written and its file's DACL read back: still the
+  one principal.
+* **Repair, and refusal.** An existing directory with a **broad DACL**, or with
+  the one ACE but **not protected**, that the current user owns is rewritten to
+  the exact form and then passes; one owned by **another SID** refuses and is not
+  repaired.
+* **Inheritance flags are checked, not assumed.** A level whose ACE lacks
+  `OBJECT_INHERIT_ACE` / `CONTAINER_INHERIT_ACE` refuses.
+* **Principal identity.** A directory whose single ACE names the **logon** SID
+  rather than the user SID refuses — the row that keeps the two apart, and that
+  would otherwise make the reader's own pictures unopenable after the next logon.
+* **Reparse points** at either level refuse.
+* **The created file** is written with its own explicit protected descriptor, its
+  DACL is **read back before any picture byte is written**, and it must grant the
+  user SID only; a read-back that disagrees is a refusal and a delete.
+* **Storage that cannot enforce it.** A `%TEMP%` redirected to a volume that
+  **cannot keep persistent ACLs** — an exFAT stick, a share that does not carry
+  them — refuses the lane rather than writing a file it cannot make private. A
+  `%TEMP%` redirected to a share that *can* keep them writes there and is
+  disclosed.
+
+**The picture job's own preflight, at §6.1's contract and on a real machine**
+(fourth review finding 9). Two refusal rows, each **paired with an acceptance row
+over the same directory**, so that a directory refused for every pane cannot
+satisfy the test by accident:
+
+| Directory | Recipient | Expected |
+| --- | --- | --- |
+| a valid, vetted `%TEMP%` **redirected to a path containing `%`** | a `cmd.exe` row | **refused before the write**; the encoder's own toast; `clipboard\` contains **no new file** |
+| the same directory | a `pwsh` row | written, and the path inserted — the pairing that proves the refusal was the recipient's |
+| an ordinary valid directory | a **`nu` row with no measured baseline** (§2.3) | **refused before the write**; the unmeasured-lane toast; **no file created** |
+| the same directory | a `bash` row | written, and the path inserted |
+
+Both refusal rows assert **file absence**, not merely that nothing was inserted:
+the whole point of moving the check before the write is that no picture reaches
+the disk. T-PASTE-2b's gates name these four rows.
 
 **Both.** The Markdown editor, the palette, the search field and the settings
 fields still paste **text** when the clipboard holds a file — the regression this
@@ -2110,9 +2636,28 @@ keep an ACL), an output the captured recipient's encoder refuses, a promise-only
 payload, an over-count drop, and a picture job **invalidated because the line
 moved on** — is a toast that names what was refused and why, in both languages.
 
-These reach the reader through the lane's own error channel, which is not the
-payload's `Refused` value (§1.2): the two are different causes arriving at the
-same surface, and §5 says which is which.
+**Which channel each of those uses, split correctly** (revised, fourth review
+finding 10). The sentence that stood here said "these" — the whole list above,
+promise-only included — "reach the reader through the lane's own error channel,
+which is not the payload's `Refused` value", which contradicted §1.2 and §5,
+where a promise-only clipboard **is** `ClipboardPayload::Refused(Promise)`. The
+list has two kinds in it:
+
+* **The payload's own value.** A **promise-only clipboard** is
+  `Refused(Promise)`, the one payload value that raises a toast (§1.2). That is
+  its routing, here and in §1.2 and §5, and it is not the lane's error channel.
+* **The error paths.** An **acquisition** failure is the rung's `Unreadable`
+  verdict (ruling ③), reported through the acquisition error path §5 names. Every
+  **later** failure — the representability gate, `%` in a `cmd` pane, an
+  unmeasured `nu` row, an unsupported bitmap layout, an unvalidatable animation,
+  an over-cap picture, a busy job, a full quota, a contended quota lock, a vetting
+  failure, an output the captured recipient's encoder refuses, an over-count drop,
+  and a picture job invalidated because the line moved on — reports through the
+  picture lane's own error channel.
+
+All three reach the same toast surface for different causes, which is why a
+caller that collapsed them would have to guess what happened; §5 carries the same
+split in the crate map, and no required toast and no silent `Nothing` changes.
 
 ### 7.3 What is disclosed rather than forbidden
 
@@ -2170,7 +2715,9 @@ as a known risk — not a refusal, which is a product decision the grammar table
 does not carry, **and that is the policy at every release size, including a
 T-PASTE-1-only one**; PROBE 4 answered or the `"paste_paths_as": "windows-slash"`
 row of §6.2 demonstrated; PROBE 10 answered on a named nushell version or the
-`Nushell` arm not shipping at all. **Does not ship:** pictures, drops, the
+`Nushell` arm not shipping at all; **and §6.1's grammar × spelling product rows
+(ruling ⑫b) green** — the composition contract is this ticket's, because it ships
+both keys. **Does not ship:** pictures, drops, the
 `Cygwin` namespace. A clipboard picture is `Absent`, which makes the whole
 payload `Nothing` and therefore **silent** — ruling ② keeps `Nothing` silent, so
 this ticket does not add a "nothing to paste" message that the reader would see
@@ -2186,11 +2733,13 @@ ruling ⑫a with all six of its outcomes, the `"paste_paths_as": "cygwin"` value
 and §6.1's and §6.2's Cygwin rows.
 
 **Gates:** PROBE 11 answered on a real Cygwin and a real MSYS2 installation,
-**including what sits beside the Folio-shipped Git Bash wrapper**; with the probe
-unrun, every classifier outcome keeps today's answer and the arm ships dark, which
-is itself a test. **Does not ship:** any change to the `(paths, integration)`
-derivation itself (ruling ⑫), MinGW as a namespace, or any reading of
-`/proc/cygdrive` at paste time. **Nothing depends on it**: T-PASTE-1, 2 and 3
+**including what sits beside the Folio-shipped Git Bash wrapper**; the
+eligibility, cross-level aggregation and partial-read rows of §6.1 and §6.2
+green; with the probe unrun, every classifier outcome keeps today's answer, the
+explicit `"paste_paths_as": "cygwin"` refuses, and the arm ships dark — all three
+of which are themselves tests. **Does not ship:** any change to the
+`(paths, integration)` derivation itself (ruling ⑫), MinGW as a namespace, or any
+reading of `/proc/cygdrive` at paste time. **Nothing depends on it**: T-PASTE-1, 2 and 3
 ship with or without it.
 
 ### T-PASTE-2 — a picture becomes a file
@@ -2225,11 +2774,17 @@ generation, the pre-write encoder preflight of §4.1, the one-in-flight rule, th
 `Settings ▸ General` row in both languages, `PRIVACY.md` and the README clause,
 PROBE 9.
 
-**Gates:** the storage rows of §6.2, Windows ACL rows included; a written picture
-compared pixel-for-pixel against its source for each supported layout; a refused
-layout refuses; the Enter-before-completion and text-paste-before-completion
-fixtures; a contended lock refusing rather than overshooting. **Does not ship:**
-TIFF (a named debt with its notices work), promises, drops.
+**Gates:** the storage rows of §6.2, Windows ACL rows included — the
+**protected-directory success** row and the **permissive-parent inheritance** row
+among them; a written picture compared pixel-for-pixel against its source for
+each supported layout; a refused layout refuses; **§6.2's four picture-job
+preflight rows** — the redirected-`%`-temp directory refused for a `cmd`
+recipient and accepted for a `pwsh` one, and the valid directory refused for an
+unmeasured `nu` recipient and accepted for a `bash` one, each refusal asserting
+that **no file was created**; the input-generation fixtures of §6.1 **including
+the navigation, history-recall, editing and control-key rows**, not only Enter
+and text paste; a contended lock refusing rather than overshooting. **Does not
+ship:** TIFF (a named debt with its notices work), promises, drops.
 
 ### T-PASTE-3 — the drop door
 
@@ -2251,8 +2806,10 @@ T-PASTE-2's lane for raw pictures; PROBE 6.
 file-versus-folder cells on Preview and Files centres, a second window and a
 fullscreen transition — and, for any raw-picture landing it admits, the **typed
 destination** its completion needs (ruling ㉖): a delayed Preview retarget, a
-delayed edge split with its captured side, and the invalidation fixtures for
-both. **Does not ship:** the *reading* of promises (they are registered only to
+delayed **seat-edge** split with its captured side, a delayed **root-rim** split
+on its captured edge, and the invalidation fixtures for all three — including the
+changed-root cancellation that must not be repaired into a seat. **Does not
+ship:** the *reading* of promises (they are registered only to
 be refused), strip verbs for OS drops.
 
 **If PROBE 5 finds no acceptable shape, T-PASTE-3 ships Windows only.** That is
@@ -2289,7 +2846,7 @@ without a measured baseline, a `%` path in a `cmd.exe` pane, and everything else
 | **PROBE 8** | the **distribution** of delayed-render latency for common Windows sources | whether the transaction must move off the event loop (§9.2's debt) | the transaction stays on the loop, with no Folio deadline, with the `ClipboardRead` station |
 | **PROBE 9** | **whether any TCC prompt appears on the paths this lane writes** | §4.1 | **the lane ships enabled on macOS on a recorded assumption** — the package is unsandboxed and `$TMPDIR` is this account's own — and an actual denial at write time is a refusal with a toast, never a fallback copy elsewhere. An unrun experiment cannot answer a per-request access decision, so the unrun state is "assume, and handle the error", not "disable" |
 | **PROBE 10** | nushell, on a version this document names: (a) maximum raw-string fence width, (b) whether a raw string is accepted in a builtin's and in an external command's argument position | whether the `Nushell` arm exists at all, and how wide it goes | **the arm does not ship**: a `nu` row refuses every path and says the lane is unmeasured. Half (a) alone does not enable it |
-| **PROBE 11** | `cygwin1.dll` / `msys-2.0.dll` beside the resolved program and beside `..\usr\bin\`, on a real Cygwin, a real MSYS2 and the Folio-shipped Git Bash wrapper | ruling ⑫a's classifier | **every outcome keeps today's answer, the positive match included** — an unrun probe enables no new match — so T-PASTE-CYG's arm ships dark |
+| **PROBE 11** | `cygwin1.dll` / `msys-2.0.dll` beside the resolved **eligible** program and beside `..\usr\bin\`, on a real Cygwin, a real MSYS2 and the Folio-shipped Git Bash wrapper | ruling ⑫a's classifier | **every outcome keeps today's answer, the positive match included, and `"paste_paths_as": "cygwin"` is refused with the unmeasured-spelling message** — an unrun probe enables no new match by either route — so T-PASTE-CYG's arm ships dark |
 
 **PROBE 9 was narrowed, and its old half is gone from the body as well.** Its
 first half — can a child of a Folio row read a file under `$TMPDIR` — is not an
@@ -2371,6 +2928,15 @@ Every claim about this codebase is cited in place. The outside ones:
   descriptor it is handed applies **only to a directory it creates** (an existing
   one returns `ERROR_ALREADY_EXISTS` untouched), and it has effect only on a
   filesystem that keeps persistent ACLs.
+* Microsoft's *Security Descriptor Control* and *ACE Inheritance Rules* — the
+  pair that reversed ruling ㉓'s protection flag. `SE_DACL_PROTECTED` **prevents
+  the descriptor's DACL being modified by inheritable ACEs**, which is the
+  boundary this lane wants against its temp parent; what propagates a vetted ACE
+  *down* to new children is `OBJECT_INHERIT_ACE` / `CONTAINER_INHERIT_ACE`. The
+  third revision had the first of these doing the second's job and forbade it.
+  And `SECURITY.md:39`–`:45`, cited for its **fail-closed** rule alone — its
+  principal is the **logon** SID, deliberately, which is not the **user** SID
+  these files need.
 * Rust's `std::env::temp_dir` platform behaviour — Darwin's system-provided
   directory and Windows' environment-based selection, with `TMP` ahead of `TEMP`
   — which is why §4.1 calls the `/tmp`-on-empty-`TMPDIR` rule **Folio's own**
@@ -2419,6 +2985,14 @@ Every claim about this codebase is cited in place. The outside ones:
 Every one is answered below: **accepted** means the design changed, and the
 section says where.
 
+**These rows are a historical record of what the *first* revision did, not a
+statement of current policy** (fourth review finding 12). Three later reviews
+moved several of them, and a reader who took an accepted row for a live
+instruction would implement a withdrawn rule. Where that is the case the obsolete
+clause is **struck in place** and the current ruling is named beside it; the rest
+of the row stands. §10.2, §10.3 and §10.4 are the later decisions, and where they
+disagree with anything below, they win.
+
 | # | Verdict | What changed |
 | --- | --- | --- |
 | **1** | accepted | §2.3, §2.4. The universal safe set is **gone**: there is no bare form, every grammar always quotes. POSIX backslash is no longer assumed inert; PowerShell's Unicode quote characters are doubled and **PROBE 2** must prove the doubling before the arm ships, with refusal as the fallback. Non-ASCII whitespace is no longer assumed lexically inert. §6.1 asserts argument identity by running a lexer over the output, and the table carries Unicode delimiter attacks beside CJK and emoji. |
@@ -2431,7 +3005,7 @@ section says where.
 | **8** | accepted | §2.5 ruling ⑭: MSYS2's own argument conversion is named, `MSYS2_ARG_CONV_EXCL` is named, quotes do not disable it, §6.2 carries MSYS and native consumers with the variable unset and set (**PROBE 4**), the forward-slash Windows spelling is the documented per-row fallback through the override, and red line 12 forbids changing the reader's environment. |
 | **9** | accepted — the earlier ruling is **reversed**, and this row was corrected twice more | §2.3. Codex's `normalize_pasted_path` at revision `a8964cb1…` was read: it strips one surrounding quote pair, tries a `file:` URL, tries a Windows recogniser, and only then requires exactly one shlex token — so a **bare spaced POSIX path attaches nothing** and the quoted one works. **`Agent` is the POSIX single-quoted form for a POSIX path and the double-quoted form for a Windows path** (second review, finding 4); this row's earlier sentence "the POSIX single-quoted form on both platforms" was left standing after that change and is now **struck**, which is what third-review finding 7 asked for. The "quotes make agents seek apostrophe-prefixed names" claim is withdrawn. Prose references and automatic attachments are separated; Claude Code's prose/`@` and Copilot CLI's `@` are recorded as documented behaviour that says **nothing** about escaped apostrophes; **multi-file automatic attachment is not guaranteed**, stated without claiming every branch returns `None`, since a Windows multi-path line can reach the recogniser before shlex. Shlex identity is asserted for POSIX outputs only. **PROBE 3** measures spaces, apostrophes, roots and multiples per agent, with versions. |
 | **10** | accepted | §1.2 ruling ② now states the order as a **preference with a named loss**, not a deduction about intent; the "screenshot tools offer no text at all" claim is struck. The losing case gets a **Paste picture** verb (menu row plus bindable command) rather than a second setting. §6.2 carries the versioned source/gesture/format/result matrix (**PROBE 1**). No ShareX default is claimed — the product is not cited at all, only the mixed-workflow *case*. The files-versus-text order is stated once, in ruling ①, and the contradictory sentence in the setting's rationale is rewritten (§4.6). |
-| **11** | accepted | §1.2 ruling ③ defines **Absent / Present / Unreadable**, with empty-`HDROP` as absent and empty text as present, and `Unreadable` stopping the ladder; encoding-level fallback is allowed only *within* the picture rung. Ruling ④ adds a coherent snapshot with `GetClipboardSequenceNumber` / `changeCount` before and after. §1.3 extracts a shared, log-free file-URL decoder beneath `paths_on` rather than reusing the service helper. §1.1 corrects the `Result`/`Option` descriptions. WSL/RDP bridged formats are covered by PROBE 1's "record what is advertised"; no file identity is inferred from arbitrary text. |
+| **11** | accepted | §1.2 ruling ③ defines **Absent / Present / Unreadable**, with empty-`HDROP` as absent and empty text as present, and `Unreadable` stopping the ladder; encoding-level fallback is allowed only *within* the picture rung. ~~Ruling ④ adds a coherent snapshot with `GetClipboardSequenceNumber` / `changeCount` before and after.~~ **Superseded by the third revision (§10.3 row 1):** the Windows before-and-after equality test is withdrawn — the number is read once, before the open, as diagnostic context only, and coherence there is the single open interval; macOS keeps `changeCount` on its own justification. §1.2 ruling ④ is the current rule. §1.3 extracts a shared, log-free file-URL decoder beneath `paths_on` rather than reusing the service helper. §1.1 corrects the `Result`/`Option` descriptions. WSL/RDP bridged formats are covered by PROBE 1's "record what is advertised"; no file identity is inferred from arbitrary text. |
 | **12** | accepted | §5.2 is a new section: the promise is limited to a **fresh argument boundary**, and inside-token, mid-quote and wrapped-column-zero behaviour is documented as outside it. zsh `bracketed-paste-magic`, PSReadLine and `$PSNativeCommandArgumentPassing` are named as later stages; §6.2 asserts the argument received and the file opened, on 5.1 and 7, default and custom zsh, bracketing on and off. Bracketed inheritance is kept and is explicitly not disabled to bypass hooks (§5.1). |
 | **13** | accepted | §4.2 ruling ㉖. A job carries window, tab, leaf, **session incarnation** and a globally unique **request sequence** (`CONVENTIONS.md:154`), revalidates target, modal gate and setting at completion, cancels on ownership or setting change and deletes its file through the owned path. Ordering is removed as a problem by ruling ㉕'s one-in-flight rule. The same applies to delayed drops. |
 | **14** | accepted | §3.1 rebuilt. The first draft's "winit's content-view class" is **corrected**: `NSDraggingDestination` is implemented on `WindowDelegate` (`window_delegate.rs:367`) and registration is on the window (`:666`); the methods are entered/prepare/perform/conclude/exited with **no `draggingUpdated:`**, which is why winit's route cannot feed a following highlight. **PROBE 5** now prefers an application-owned destination `NSView` first and a narrow upstream extension second, with class-wide replacement last and only with a written per-window lifetime contract; it must verify hit testing, responder/IME, the `CAMetalLayer` and the web panes, and specify the full method set, native ABI return types, teardown and the AppKit-to-physical conversion. |
@@ -2439,10 +3013,10 @@ section says where.
 | **16** | accepted | §3.2. The strip row is **removed from the table** and described accurately: `row_verb`'s strip arm is unreachable (`main.rs:28995`) and the strip's verbs live on `row_strip_landing` (`:29555`) and its two commits, which are untouched; only an *OS* drop on the strip is refused, at the strip's own routing. Ruling ⑱ defines batch admission — many on a terminal centre, one-item verbs refuse a multi-item drop **while hovering**, mixed kinds, a 64-item cap, partial failure. Ruling ⑲ makes drop insertion target-specific and focus-free while **preserving K144's focus move** (`main.rs:76921`), which the first draft misdescribed. |
 | **17** | accepted; the promise half **superseded by second-review finding 2** | §3.4 ruling ㉑ gives drops their own admitted-type matrix: raw picture types are registered explicitly, picture drops on preview and edge are defined, and decoders and insertion are shared. The unconditional Safari claim is **withdrawn** and replaced by **PROBE 6**. The first revision left promises *unregistered* while still promising a visible refusal; they are now registered **only so that the refusal can be drawn**. |
 | **18** | accepted | §4.2. The synthesised `BITMAPFILEHEADER` is **withdrawn** in favour of `image`'s audited `BmpDecoder::new_without_file_header` (`decoder.rs:534`, written for `CF_DIB`). **TIFF is removed from 0.4.1** and becomes a named debt with its feature, lockfile and notices work, since `tiff` is a separate feature (`image-0.25.10/Cargo.toml:120`) the workspace does not enable. Ruling ㉔ makes alpha a property of compression and mask, not of the format id, covers premultiplication and undefined legacy alpha, refuses unsupported layouts, and adds known-pixel fixtures and **PROBE 7**. |
-| **19** | accepted | §4.2 ruling ㉕. Native length checked **before** copying (`GlobalSize`), with the macOS residue stated; dimensions checked before allocation; the cap expressed in decode bytes rather than an RGBA8 multiplication; a 512 MiB aggregate directory quota with oldest-first eviction; **one job in flight**, a second refused; write/flush/close failures delete the partial file; disk pressure refuses; full-decode validation with original-byte write replaces "header check"; first-frame policy stated; **PROBE 8** gives acquisition a measured latency contract. |
-| **20** | accepted | §4.1 ruling ㉓. The socket precedent is replaced by the **directory** precedent `instance.rs:360`, including **repair of an existing mode**; a same-owner world-readable directory no longer passes; both Folio-made levels are vetted, so an intermediate link cannot redirect a non-link leaf; vetting runs **before every operation**, not once per run; files are owner-only; operations are anchored to a verified handle with no-follow on Unix, with the Windows residue stated; Windows gets reparse-point refusal and an owner-only DACL as the uid counterpart; temp discovery is `std::env::temp_dir()` and macOS's `/var` alias is explicitly not rejected; failures are closed and sanitised. |
+| **19** | accepted | §4.2 ruling ㉕. Native length checked **before** copying (`GlobalSize`), with the macOS residue stated; dimensions checked before allocation; the cap expressed in decode bytes rather than an RGBA8 multiplication; a 512 MiB aggregate directory quota with oldest-first eviction; **one job in flight**, a second refused; write/flush/close failures delete the partial file; disk pressure refuses; full-decode validation with original-byte write replaces "header check"; ~~first-frame policy stated~~; ~~**PROBE 8** gives acquisition a measured latency contract~~. **Two clauses superseded:** the first-frame policy is **struck** by the third revision (§10.3 row 18) — an animated PNG is written whole and validated frame by frame (§4.2); and PROBE 8 gives acquisition **no** latency contract (§10.3 row 2) — it measures a distribution and decides where the transaction runs, while Folio sets no deadline at all (§1.2 ruling ④, §4.2 ruling ㉕). |
+| **20** | accepted | §4.1 ruling ㉓. The socket precedent is replaced by the **directory** precedent `instance.rs:360`, including **repair of an existing mode**; a same-owner world-readable directory no longer passes; both Folio-made levels are vetted, so an intermediate link cannot redirect a non-link leaf; vetting runs **before every operation**, not once per run; files are owner-only; operations are anchored to a verified handle with no-follow on Unix, with the Windows residue stated; Windows gets reparse-point refusal and an owner-only DACL as the uid counterpart **— rewritten twice since: by the third revision into owner/DACL/inheritance checks at both levels (§10.3 row 12), and by the fourth into one principal (the token's user SID), a *required* `SE_DACL_PROTECTED` and explicit `OI`/`CI` propagation (§10.4 row 4, §4.1)**; ~~temp discovery is `std::env::temp_dir()`~~ **— superseded (§10.3 row 11): Windows is `std::env::temp_dir()` *configured, then vetted*, while Unix is Folio's own `instance::runtime_directory()` policy, `folio-<uid>` under `$TMPDIR` or `/tmp` (§4.1)** — and macOS's `/var` alias is explicitly not rejected; failures are closed and sanitised. |
 | **21** | accepted | §4.3 ruling ㉗. The "seven days exceeds any session" and "preserves history" claims are **struck**. Retention is best-effort with a real maximum from the quota; the sweep runs at startup **and hourly**; the system may remove files sooner; the exact owned-name grammar excludes `clip-family.png`; age is mtime; active writes are excluded; failures are reported once. A path in history is explicitly not a promise the file exists, and how to keep a picture permanently is stated. The text says the sweep is not clipboard watching. |
-| **22** | accepted | §4.6 ruling ㉙ makes the switch cover **clipboard and drop** pictures and cancel pending jobs; inserting an existing file's path is explicitly outside it. Red line 3 carries the **named storage exception**; red line 1 is narrowed to feature-initiated requests, with UNC and network-volume I/O described as the reader's own gesture; §7.3 separates `BT_PTY_DUMP` (opt-in, already disclosed at `PRIVACY.md:186`) from this feature's storage. §4.5 discloses drops, original PNG metadata, cleanup limits, redirected `%TEMP%`, and that deleting the directory does not undo history, agent records or recipient copies. No sandbox blocker is invented — `entitlements.plist:20` says the package is unsandboxed — and child access and TCC become **PROBE 9** with refusal, not a fallback copy, if it fails. |
+| **22** | accepted | §4.6 ruling ㉙ makes the switch cover **clipboard and drop** pictures and cancel pending jobs; inserting an existing file's path is explicitly outside it. Red line 3 carries the **named storage exception**; red line 1 is narrowed to feature-initiated requests, with UNC and network-volume I/O described as the reader's own gesture; §7.3 separates `BT_PTY_DUMP` (opt-in, already disclosed at `PRIVACY.md:186`) from this feature's storage. §4.5 discloses drops, original PNG metadata, cleanup limits, redirected `%TEMP%`, and that deleting the directory does not undo history, agent records or recipient copies. No sandbox blocker is invented — `entitlements.plist:20` says the package is unsandboxed — and ~~child access and~~ TCC become **PROBE 9** with refusal, not a fallback copy, if it fails. **The child-access half is superseded** by the second and third revisions (§10.2 row 18, §10.3 row 15): it is not an open question — the package is unsandboxed, children inherit `TMPDIR`, and the per-run socket already depends on that answer — so PROBE 9 is the TCC half alone (§7.3, §9.1). |
 | **23** | accepted | §8. T-PASTE-1 is **L**; T-PASTE-2 is **L–XL** and splits into 2a acquisition/decoding and 2b storage/delivery/settings; T-PASTE-3 is **L–XL** with three separately reviewable parts and opens with a bounded probe that does not preselect swizzling. §6.1 no longer claims to be the whole specification, and §6.2 adds native argv, recipient versions, async ownership, storage attacks and decoder fixtures. The picture rows move to T-PASTE-2 — **but the i18n row does not move, and this sentence was corrected in the second pass**: every ticket that adds a string keeps an i18n row, and T-PASTE-1 ships at least six refusal toasts. Each ticket states the lane it does not ship and its gates. K144 stays in T-PASTE-1 and its Windows defect is written out (§2.1). |
 | **24** | accepted | §1.4 and §9.3. The adoption inference from WT's report timing is removed; Ghostty #10517 is narrowed to **SSH image paste**; the WezTerm recipe is marked **unverified**; WT's history is cited as examples rather than as proof of the grammar table; the Codex citation carries its revision. **On the `usershell` anchor**: the sentence carrying the wrong `profiles.rs:1541` was rewritten away by ruling ⑦, so there is no anchor in the body to correct — `USER_SHELL_ID` is at `profiles.rs:1512` and this row records that rather than pointing at a line the body no longer has. |
 
@@ -2459,19 +3033,26 @@ re-checked all 24 rows above against the body and found none ledger-only; its
 Part 2 raised 23 new findings. Every one is answered below. **One is declined in
 part, on evidence**, and it is marked as such.
 
+**Each cell here is the *second* revision's answer, and several were themselves
+superseded by the third or the fourth** (fourth review finding 12). Where a cell
+ends in a **Closed by the third revision** sentence, that sentence is the current
+decision and the text before it is the historical record of how the row got
+there; where an obsolete instruction was still written in the present tense, it is
+now **struck in place** with the current ruling named beside it.
+
 | # | Verdict | What changed |
 | --- | --- | --- |
-| **1** | accepted | §1.2 ruling ④ rewritten. The transaction is **two steps** — survey the advertised type list (which renders nothing), then fetch **one** rung — so the exposure is no longer multiplied by five. The thread is named (winit's event loop, `lib.rs:5927`, `main.rs:96290`), a delayed render is stated to be **unbounded** with no timeout and no cancellation, and it gets a new `hang_watch` station **`ClipboardRead`** beside `PtyResize` / `WebPage` / `WebRetire`. The word "bounded" is gone. **PROBE 8 is redefined** from "measure a bound" to "measure the distribution and decide whether the transaction must move off the loop", and the worker-thread variant is written down in §9.2 with its real cost — a second message-pumping clipboard owner window, because `OpenClipboard` wants a window of the *calling* thread (`lib.rs:5838`). **Closed by the third revision.** The measured bound this row left standing in §4.2's acquisition bullet is struck there as well as in ruling ④; Windows coherence is no longer sequence equality across `GetClipboardData`, macOS keeps `changeCount` on its own justification, and the survey is candidate selection — so "exactly one rung" and the empty-`HDROP` rule stopped contradicting each other (third review, findings 1–3). |
+| **1** | accepted | §1.2 ruling ④ rewritten. The transaction is **two steps** — survey the advertised type list (which renders nothing), then fetch **one** rung — so the exposure is no longer multiplied by five. The thread is named (winit's event loop, `lib.rs:5927`, `main.rs:96290`), ~~a delayed render is stated to be **unbounded** with no timeout and no cancellation~~ — **superseded (§10.3 row 2): Folio imposes no responsive deadline, while the *system* has a documented ~30-second give-up-and-return-`NULL` backstop; "unbounded" and "bounded" are both withdrawn (§1.2 ruling ④)** — and it gets a new `hang_watch` station **`ClipboardRead`** beside `PtyResize` / `WebPage` / `WebRetire`. **PROBE 8 is redefined** from "measure a bound" to "measure the distribution and decide whether the transaction must move off the loop", and the worker-thread variant is written down in §9.2 with its real cost — a second message-pumping clipboard owner window, ~~because `OpenClipboard` wants a window of the *calling* thread (`lib.rs:5838`)~~ — **superseded (§10.3 row 2): `OpenClipboard` accepts a null `HWND`; the window is *this codebase's helper* (`lib.rs:5903`–`:5919`), not a Win32 law about reading, so the debt has two shapes (§9.2)**. **Closed by the third revision.** The measured bound this row left standing in §4.2's acquisition bullet is struck there as well as in ruling ④; Windows coherence is no longer sequence equality across `GetClipboardData`, macOS keeps `changeCount` on its own justification, and the survey is candidate selection — so "exactly one rung" and the empty-`HDROP` rule stopped contradicting each other (third review, findings 1–3). |
 | **2** | accepted | §1.2 gains a fifth variant, **`ClipboardPayload::Refused(UnsupportedKind)`**, set when a kind is advertised and deliberately not read; only it raises a toast, `Nothing` stays silent, so `Ctrl+V` on an empty clipboard says nothing. On the drop side the decision is taken and stated: **promise types are registered after all**, purely so the destination is offered the drag and can trace the refusal box, with `performDragOperation:` never entered and `receivePromisedFiles` never called. §3.4's matrix carries the row. **Closed by the third revision.** §5's crate map carries all five payload values and names the two report channels apart, and T-PASTE-1's unimplemented picture rung is silent `Nothing` rather than the "nothing to paste" message §1.2 forbids for it (third review, finding 4). |
 | **3** | accepted | §2.5's ruling ⑫ is **withdrawn into a proposal**. The standing 2026-09-07 derivation is kept and cited (`docs/plans/shell-matrix-2026-09-07.md:365`, `profiles.rs:3193`), T-PASTE-1 calls `printed_path_namespace` as it stands, the detector is **not** re-pointed, and the change is marked **OWNER RULING NEEDED** with both sides written out. The document's own scope paragraph now names that marker. **Cygwin** gets ruling ⑫a — a `Cygwin { home }` arm spelling `/cygdrive/<letter>`, detected by the runtime DLL beside the program, **PROBE 11** — and the section states that the Cygwin hole exists under the **standing** rule too, in the detector, so it is not something the proposal introduced. MinGW is explicitly out, with the reason: it is separator style, not a namespace. **Closed by the third revision.** The owner ruled on 2026-09-15 — the standing derivation stands, the program-keyed alternative is rejected and recorded as rejected — and §2.5, §5, §8, §6.1 and all three ledgers now say that one thing. The Cygwin half became **T-PASTE-CYG** with a classifier table complete over its six outcomes, a dark unrun state, and no undefined `home` field (third review, findings 5–6). |
 | **4** | **accepted in part, declined in part — on the parser's own text** | §2.3's `Agent` arm rewritten with the four branches quoted and the revision pinned. **Declined:** the POSIX half is not wrong. `normalize_windows_path` returns `None` unless the string starts with a drive letter or `\\`, so for `'/Users/ann/John'\''s Papers/a.png'` the URL and Windows branches both decline, control reaches `shlex::Shlex::new(pasted)` over the **original**, and one token comes back carrying the true name. The quote-strip branch does not "win" for a path the recogniser rejects. **Accepted:** the Windows half is wrong and worse than the first revision admitted — `'C:\a'\''b.png'` strips to something that *does* start with a drive letter, so the recogniser returns `C:\a'\''b.png` verbatim. That is not a suspicion to probe; it is what the code does. **The `Agent` literal is now double-quoted for a Windows path and POSIX single-quoted for a POSIX path**, which both branches read correctly and which is additionally *Copy as path*'s own spelling. PROBE 3 keeps the apostrophe row on both platforms as the check on this reading. **Closed by the third revision.** §4.4's flat "single-quoted" and first-ledger row 9 now carry the platform split; shlex identity is scoped to POSIX outputs, because a Windows root `"C:\"` is not a shlex input; and the multi-path claim is narrowed to what the recipient's branch order actually supports (third review, finding 7). |
 | **5** | accepted | §2.2 ruling ⑩ and §2.3. The **encoder** and the **interpreter** are separated: `Cmd` is the CRT-quoting encoder, and `%` / `!` refusal is a property of the **`cmd.exe` row specifically**. A `python` or `node` row on Windows gets CRT quoting with no expansion refusals, and §6.2 gains a row asserting that `D:\Data\100%\report.csv` **works** there rather than refusing. **Closed by the third revision.** Ruling ⑩'s unknown-program encoding is labelled a best-effort default with **no literal-identity guarantee**, the "works perfectly in those panes" sentence is struck, and §6.2's Python/Node acceptance row is replaced by a defined CRT command-line consumer (third review, finding 8). |
 | **6** | accepted | §1.2. The picture rung is fetched as an **ordered list** — every advertised encoding copied inside the one transaction — so `bt-app` can fall to `CF_DIB` after a failed PNG decode without a second snapshot. The earlier within-rung fallback was unreachable exactly as the finding says. `Unreadable` is narrowed to an **acquisition** verdict and "malformed content" is struck from its definition, since the layer that reports it does not decode. The list's total size sits inside ruling ㉕'s bound, and a decode failure past a truncated list is terminal and says so. |
-| **7** | accepted | §4.2 ruling ㉕ and §4.3. The quota gains a **24-hour eviction floor** — never evict a file younger than that, refuse the write instead — so eviction cannot reach a path sitting in an unsubmitted command line. The read-evict-write sequence is **serialised across windows and processes** by an owner-only `clipboard/.lock` taken with `create_new`, with a 10-second staleness rule; a lock it cannot take means the write proceeds without evicting and the quota may overshoot, stated rather than pretended away. §4.3's disclaimer is widened from history to "a path on your screen", naming the unsubmitted line. **Closed by the third revision.** Ruling ㉕ now carries **one** quota contract: a crash-released OS lock held over the whole accounting-and-write sequence, contention waited off the loop with a two-second limit and then refused, no age stealing and no bypass. The 24-hour floor became a **retention floor on every eviction path**, and §4.3's implied protection of every live prompt is withdrawn (third review, finding 10). |
+| **7** | accepted | §4.2 ruling ㉕ and §4.3. The quota gains a **24-hour eviction floor** — never evict a file younger than that, refuse the write instead — so eviction cannot reach a path sitting in an unsubmitted command line. The read-evict-write sequence is **serialised across windows and processes** by an owner-only `clipboard/.lock` taken with `create_new`, ~~with a 10-second staleness rule; a lock it cannot take means the write proceeds without evicting and the quota may overshoot, stated rather than pretended away.~~ **Superseded (§10.3 row 10): the staleness rule, the age steal and the bypass-on-contention are all withdrawn — the lock is a crash-released OS handle, contention waits off the loop for two seconds and then *refuses*, and 512 MiB is a real bound (§4.2 ruling ㉕).** §4.3's disclaimer is widened from history to "a path on your screen", naming the unsubmitted line. **Closed by the third revision.** Ruling ㉕ now carries **one** quota contract: a crash-released OS lock held over the whole accounting-and-write sequence, contention waited off the loop with a two-second limit and then refused, no age stealing and no bypass. The 24-hour floor became a **retention floor on every eviction path**, and §4.3's implied protection of every live prompt is withdrawn (third review, finding 10). |
 | **8** | accepted | Red line 2 is rewritten as **one rule with one positively stated permission** — the *type list* may be read when the terminal's right-click menu is raised; the *content* only on a paste, a Paste picture or a drop. A failed type-list read **disables** the row rather than hiding it. **Paste picture** is moved to the terminal context menu only and explicitly kept out of the macOS menu bar, because `validateMenuItem:` fires on menu opening and key-equivalent dispatch at moments the application does not schedule (§5.3). §4.6 states that with the switch off the row is **disabled**, not enabled-then-apologising. |
 | **9** | accepted | §4.1 takes `instance.rs:331`'s **naming** as well as its vetting: on macOS the directory is `folio-<uid>/clipboard` under `$TMPDIR` **or `/tmp`** — the `/tmp` fallback is now stated, where the earlier draft asserted `$TMPDIR` and called it per-account. The squat-then-fail-forever path is named as the reason. Windows keeps `%TEMP%\Folio\clipboard`, whose temp is already per-account. **Closed by the third revision.** `folio-<uid>` reaches the vetting, the sweep and `PRIVACY.md`; the `/tmp`-on-empty-`TMPDIR` rule is named as **Folio's own policy** (`instance.rs:331`–`:337`) rather than as `std`'s; Windows temp is described as configured-then-vetted, with `TMP` ahead of `TEMP`; and the uid suffix is explicitly **not** offered as proof against squatting (third review, finding 11). |
 | **10** | accepted | §8. T-PASTE-1's scope **keeps an i18n row** (it ships six refusal toasts), and first-ledger row 23 is corrected in place rather than left to disagree. The PROBE 3 gate is restated as what it is: Codex is the measured recipient, the six others **inherit** its spelling, and the gate is *measure, or record the inheritance as a known risk* — not a refusal the grammar table does not carry. **Closed by the third revision.** §8's shrink paragraph no longer contradicts T-PASTE-1's own gate: unmeasured agent recipients inherit Codex's spelling with the inheritance recorded, **at every release size** (third review, finding 15). |
-| **11** | accepted | §2.3's nushell paragraph. **One spelling** — `r` + *n* `#` + `'…'` + *n* `#` — replaces the two the section carried; the growth rule is stated; the Nushell book's raw-string sentence is quoted in §9.3; and the totality claim is **withdrawn** as the same error just admitted for fish. **PROBE 10** covers the maximum fence width and, separately, whether a raw string is accepted in *argument* position, which the book does not document. Unprobed, a `nu` pane refuses anything needing a wider fence than one. **Closed by the third revision.** The `Nushell` arm does not ship at all until a named nushell version answers **both** halves of PROBE 10, the grammar table's row carries a literal and the construction formula instead of an ellipsis, and the fence-growth test is gated on the measured maximum (third review, finding 14). |
+| **11** | accepted | §2.3's nushell paragraph. **One spelling** — `r` + *n* `#` + `'…'` + *n* `#` — replaces the two the section carried; the growth rule is stated; the Nushell book's raw-string sentence is quoted in §9.3; and the totality claim is **withdrawn** as the same error just admitted for fish. **PROBE 10** covers the maximum fence width and, separately, whether a raw string is accepted in *argument* position, which the book does not document. ~~Unprobed, a `nu` pane refuses anything needing a wider fence than one.~~ **Superseded (§10.3 row 14): until a named nushell version answers *both* halves of PROBE 10, the whole `Nushell` arm does not ship and a `nu` row refuses every path — a width-one arm answers half (a) and says nothing about argument position (§2.3).** **Closed by the third revision.** The `Nushell` arm does not ship at all until a named nushell version answers **both** halves of PROBE 10, the grammar table's row carries a literal and the construction formula instead of an ellipsis, and the fence-growth test is gated on the measured maximum (third review, finding 14). |
 | **12** | accepted | §3.1's Windows half names winit's **third** COM owner: `platform/windows.rs:493`'s own warning that "winit may still attempt to initialize COM API regardless of this option", and `window.rs:1432`'s `thread_local! { COM_INITIALIZED }` with its `CoUninitialize` in a thread-local destructor. The ordering rule is written: Folio's `OleInitialize` before any window, and its `OleUninitialize` before winit's destructor or deliberately not at all. §6.2 gains a **fullscreen transition with a target registered**. |
 | **13** | accepted | §3.4's matrix now carries §3.2's **four landings plus `Placeholder`** (a real `SeatKind`, `crates/bt-layout/src/tree.rs:26`) and names every cell with §3.2's own verb — `Insert` / `Retarget` / `Split` / `Refused` — instead of paraphrasing. The rim cell says `Split`, not "open the one file". §6.2 gains a `Placeholder` drop row. **Closed by the third revision.** §3.4's file-URL row is split into a **file** row and a **folder** row, so Preview centre no longer carries two verbs for a folder, and the split governs the hover as well as the commit (third review, finding 13). |
 | **14** | accepted | PROBE 1's own list gains the three bridged-clipboard rows — a file copied in a WSLg GUI file manager, `clip.exe` text from a WSL shell, and a file and an image copied inside an RDP session — so the ledger's claim and the matrix agree. |
@@ -2502,17 +3083,17 @@ the body; **one is accepted in part**, and it is marked as such with the reason.
 
 | # | Decision | What changed, and where |
 | --- | --- | --- |
-| **1** (blocking) | accepted | §1.2 ruling ④. Coherence is spelled **per platform**: macOS keeps `changeCount` equality on its own justification; Windows **withdraws the sequence-number equality test across `GetClipboardData`**, because the documented contract says a delayed render does not bump the number until it is rendered — so a successful first fetch is itself a cause of a change, and the test could not tell the feared event from the requested one. What carries coherence on Windows is the single open interval plus the rule that a rendering owner must not open the clipboard. The number is read once, before the open, as diagnostic context only. A **delayed-render success fixture** — first paste must succeed — is added to §6.1's Windows fake and §6.2's source matrix, beside a real-replacement row. The forbidden repair (a silent reopen) is stated. |
-| **2** | accepted | §1.2 ruling ④ and §4.2 ruling ㉕. The measured bound is removed **everywhere**, including the acquisition bullet that still asked PROBE 8 for a number. The flat "there is no timeout" is also struck: Folio imposes no responsive deadline and no cancellation, and the *system*'s documented ~30-second give-up-and-return-`NULL` backstop is named as a failure mode rather than a bound. The worker-thread owner window is redescribed as **a cost of this codebase's helper, not a Win32 law about reading** — `OpenClipboard` accepts a null `HWND`, and `lib.rs:5832`–`:5840` explains the window in terms of `EmptyClipboard`/`SetClipboardData`, while `:5903`–`:5919` is the helper that insists on one. §9.2 carries both shapes of the debt. |
+| **1** (blocking) | accepted | §1.2 ruling ④. Coherence is spelled **per platform**: macOS keeps `changeCount` equality on its own justification; Windows **withdraws the sequence-number equality test across `GetClipboardData`**, because the documented contract says a delayed render does not bump the number until it is rendered — so a successful first fetch is itself a cause of a change, and the test could not tell the feared event from the requested one. What carries coherence on Windows is the single open interval plus the rule that a rendering owner must not open the clipboard. The number is read once, before the open, as diagnostic context only. A **delayed-render success fixture** — first paste must succeed — is added to §6.1's Windows fake and §6.2's source matrix, ~~beside a real-replacement row~~ — **that half is superseded (§10.4 row 2): a legitimate competing copier cannot replace the clipboard inside the open interval, so the Windows row asserts the *exclusion* instead; macOS keeps its replacement refusal**. The forbidden repair (a silent reopen) is stated. |
+| **2** | accepted | §1.2 ruling ④ and §4.2 ruling ㉕. The measured bound is removed from the body — the acquisition bullet that still asked PROBE 8 for a number included. **"Everywhere" was not true when this row was written**: §10.1 row 19 still gave PROBE 8 "a measured latency contract", which the fourth revision struck there (§10.4 row 12). The flat "there is no timeout" is also struck: Folio imposes no responsive deadline and no cancellation, and the *system*'s documented ~30-second give-up-and-return-`NULL` backstop is named as a failure mode rather than a bound. The worker-thread owner window is redescribed as **a cost of this codebase's helper, not a Win32 law about reading** — `OpenClipboard` accepts a null `HWND`, and `lib.rs:5832`–`:5840` explains the window in terms of `EmptyClipboard`/`SetClipboardData`, while `:5903`–`:5919` is the helper that insists on one. §9.2 carries both shapes of the debt. |
 | **3** | accepted | §1.2. The survey is redefined as **candidate selection**: candidates are fetched in rung order until one is `Present` or `Unreadable`, and a second rung is fetched only after acquired content proved the first `Absent`. The empty-`HDROP` and all-non-file-URL cases are named as the two `Absent` verdicts a type list cannot reach. "Exactly one rung" is restated as the ordinary case, and §6.1 tests **empty `HDROP` beside readable text** by name. |
 | **4** | accepted | §5's crate map now carries the **five-state** payload, the per-platform coherence rules and the acquisition-error channel, and a paragraph beneath it states that `Refused` is the only *payload* value that toasts while `Unreadable` and the picture lane's failures report separately (§1.2 says the same, scoped). §8's T-PASTE-1 no longer asks for a "nothing to paste" message on an unimplemented picture rung: an absent rung with nothing else makes the payload `Nothing`, which is **silent**. |
-| **5** (blocking) | **accepted in part** | **Accepted:** the contradiction is gone. The owner ruled on 2026-09-15, §2.5 records the rejection of the program-keyed alternative as a rejection, and §5 (no `derive_namespace`), §8 (not "a two-direction namespace change", no `Cygwin` arm inside T-PASTE-1), §6.1 (the derivation suite asserts that nothing reads a program) and all three ledgers were made consistent with it. Cygwin is named in both of its configurations — automatic `BashInitFile` → `Msys`, explicit `None` → `Windows` — as the review's assessment asked, and is scoped as a separate change. **Declined in part, with the reason:** the correction also asks for "a specified resolution table with an explicit detector migration" for the alternative, and for the design to "give the owner two concrete scopes". That is a request to keep the choice open; the owner has taken it. Writing a full input-to-namespace table for a derivation this document is not going to build would be documenting a rejected design as though it were still a candidate, which is the opposite of what the rest of this finding asks for. What the body keeps instead is a short paragraph on why the alternative was considered and why it lost. |
+| **5** (blocking) | **accepted in part** | **Accepted:** the contradiction is gone. The owner ruled on 2026-09-15, §2.5 records the rejection of the program-keyed alternative as a rejection, and §5 (no `derive_namespace`), §8 (not "a two-direction namespace change", no `Cygwin` arm inside T-PASTE-1), §6.1 and all three ledgers were made consistent with it. **One sentence of that §6.1 change was overbroad and the fourth revision corrected it** (§10.4 row 11): "the suite asserts that nothing reads a program" would have forbidden `derive_grammar(&ProgramSource)`, which the same ticket ships. The assertion is scoped to the **namespace** resolver; grammar keeps its program input. Cygwin is named in both of its configurations — automatic `BashInitFile` → `Msys`, explicit `None` → `Windows` — as the review's assessment asked, and is scoped as a separate change. **Declined in part, with the reason:** the correction also asks for "a specified resolution table with an explicit detector migration" for the alternative, and for the design to "give the owner two concrete scopes". That is a request to keep the choice open; the owner has taken it. Writing a full input-to-namespace table for a derivation this document is not going to build would be documenting a rejected design as though it were still a candidate, which is the opposite of what the rest of this finding asks for. What the body keeps instead is a short paragraph on why the alternative was considered and why it lost. |
 | **6** | accepted | §2.5. The sibling DLL is demoted to an **installation hint**; the shipped Git Bash candidate `<Git>\bin\bash.exe` is handled explicitly as the wrapper `profiles.rs:1119`–`:1137` says it is, with Git for Windows' `compat-bash.exe` and its `usr\bin\` runtime cited; the classifier becomes a table complete over six outcomes — shipped candidate, Cygwin DLL only, MSYS DLL only, both, neither, unreadable — with **one** positive row, and **with PROBE 11 unrun every row keeps today's answer**, so no unverified positive match is enabled. `Cygwin { home }` loses its undefined field and becomes `Cygwin`; home-based detection is declined. `/cygdrive` is stated as the documented **default** prefix and an assumption, `/proc/cygdrive` is named and explicitly not read at paste time, and no mount fact is inferred for the detector. §6.2 gains the wrapper, integration-off, both-DLL and moved-prefix rows. |
 | **7** | accepted | §2.3, §4.4 and first-ledger row 9. The platform split reaches the picture path and the ledger; **shlex identity is asserted for POSIX outputs only**, because `"C:\"` is a legal Windows literal that shlex would mis-lex; the multi-path claim becomes "multi-file automatic attachment is not guaranteed" rather than "every branch returns `None`", since a Windows combined line can reach the recogniser first; and Claude Code's and Copilot CLI's documentation is recorded as saying nothing about escaped apostrophes — an **unverified inheritance**, measured by PROBE 3. §6.2's agent rows are asserted against the recipient's branch order and gain a drive root and a UNC root. |
 | **8** | accepted | §2.2 ruling ⑩ and §6.2. Unknown-program Windows encoding is labelled a **best-effort default with no literal-identity guarantee**: the CRT convention is process creation, not the recipient's interactive language, and a Python REPL reads `\n` and `\t` out of the same string. The "works perfectly in those panes" sentence is struck. The Python/Node acceptance row is **replaced** by a defined CRT command-line consumer — an argv printer launched from a `cmd` row — and a REPL grammar is booked as a debt in §9.2 rather than assumed. |
 | **9** (blocking) | accepted | §2.5 defines **`"paste_paths_as"`**, a per-row *spelling* override taking `windows` / `windows-slash` / `wsl` / `msys` / `cygwin`, insertion-only, detector-untouched, environment-untouched; §2.2's ruling ⑨ points at it. The exact configuration is written out — `{"id": "gitbash", "paste_paths_as": "windows-slash"}` → `'D:/Demo/a.txt'`, POSIX quotes around a forward-slash Windows path — and carried into ruling ⑭, PROBE 4's table row, §6.1 and §6.2. One key, four existing namespace names plus the one spelling no namespace produces; no settings-page question. |
 | **10** (blocking) | accepted | §4.2 ruling ㉕ picks **one** contract: a hard 512 MiB bound serialised across processes by a **crash-released OS lock** — `flock` on an open fd on Unix, a no-sharing handle (or `LockFileEx`) on Windows — held over accounting, eviction, reservation, write and the quota sweep. The ten-second staleness rule, the age steal and the bypass-on-contention are all **withdrawn**; contention waits **off the loop** for at most two seconds and then **refuses**. `.lock` is created once and never deleted, is outside the owned-name grammar and outside the quota. The 24-hour floor becomes a **retention floor on every eviction path** — quota, startup sweep, hourly sweep — and §4.3 drops the implication that it protects every live prompt. §6.1's lock tests are rewritten. |
-| **11** | accepted | §4.1, §4.3 and §4.5. `folio-<uid>` is used in creation, vetting, sweeping, privacy text and the delete command; the `/tmp`-on-empty-`TMPDIR` rule is identified as **Folio's own policy** in `instance::runtime_directory()` (`instance.rs:331`–`:337`) and the false "which is what `std::env::temp_dir()` answers there" is struck; Windows temp is **configured, then vetted**, with `TMP` ahead of `TEMP` and no per-account claim; and the uid suffix is explicitly **not** proof against squatting, with the fail-closed limitation kept. |
+| **11** | accepted, **and one half of it was not actually done until the fourth revision** | §4.1, §4.3 and §4.5. `folio-<uid>` was used in the selected path, the sweep, the privacy text and the delete command — but **the vetting recipe still said `Folio`** at the Unix level, so this row's "used in creation, vetting" was false when written and the fourth revision repaired it against `runtime_directory()`, both levels (§10.4 row 8); the `/tmp`-on-empty-`TMPDIR` rule is identified as **Folio's own policy** in `instance::runtime_directory()` (`instance.rs:331`–`:337`) and the false "which is what `std::env::temp_dir()` answers there" is struck; Windows temp is **configured, then vetted**, with `TMP` ahead of `TEMP` and no per-account claim; and the uid suffix is explicitly **not** proof against squatting, with the fail-closed limitation kept. |
 | **12** (blocking) | accepted | §4.1 ruling ㉓'s Windows arm is rewritten: `CreateDirectoryW` applies a descriptor **only to a directory it creates**, so both existing levels are checked for **owner SID**, **DACL** and **inheritance to children**; a directory the user owns is repaired, one owned by another SID is **refused, never repaired**; storage that cannot keep persistent ACLs is **refused** rather than written to under a privacy promise it cannot keep; and the created file's own DACL is **read back** instead of assumed from the parent. §6.2 gains the broad-DACL, foreign-owner, no-inheritance, ACL-incapable and file-read-back rows beside the reparse fixture. |
 | **13** | accepted | §3.4's `file URLs` row is split into a **file** row and a **folder** row, matching `row_verb` (`main.rs:28988`–`:28993`): Preview centre is `Retarget` for a file and `Refused` for a folder, Files centre the mirror. The distinction governs the **hover** as well as the commit, and §6.2 gains the held-folder-over-Preview row and its mirror. `Placeholder` and edge/rim cells are unchanged. |
 | **14** | accepted | §2.3. PROBE 10's two halves are stated as independent, and the unrun fallback becomes **the whole arm not shipping**: without a named nushell version answering both width and argument position — builtin and external — a `nu` row refuses every path and says the lane is unmeasured. Narrowing the fence answers only half (a). The grammar table's row gains a literal and the construction formula instead of the repeated ellipsis, and §6.1's fence-growth test is gated on the measured maximum. |
@@ -2520,10 +3101,59 @@ the body; **one is accepted in part**, and it is marked as such with the reason.
 | **16** (blocking) | accepted | §4.2 ruling ㉖ adds a **per-target input generation** that advances on submitted input, typing, an ordinary paste (`main.rs:96320`–`:96322`), a K144 insertion, a drop insertion and any other path insertion. A completion whose generation moved is invalidated: nothing is delivered, the file is cleaned up through the owned path, and a toast says the line moved on. The alternative contract — insertion into the then-current line — is named and **rejected**, with the reason. §6.1 gains Enter-before-completion and text-paste-before-completion fixtures, plus an unchanged-generation fixture so the check is not one-sided. |
 | **17** (blocking) | accepted | §4.2 ruling ㉖ gives a job a **typed destination**: `TerminalInsertion` with session incarnation and input generation, `PreviewRetarget` with the pane and a content generation, `LayoutSplit` with the captured anchor seat, the captured side and the tab's layout generation — the last revalidated rather than recomputed, so a delayed split lands where the hand let go. Cancellation and file cleanup are stated for each target change. §6.2 gains delayed Preview and delayed edge fixtures, and T-PASTE-3's gates name them. `LeafSession` being a Terminal leaf's own PTY (`main.rs:10283`–`:10292`) is the cited reason a Preview target cannot carry an incarnation. |
 | **18** | accepted | §4.2. The policy chosen is **preserve the complete animation**: original bytes are written, so an animated PNG stays animated, and validation decodes the default image **and** every animation frame under ruling ㉕'s caps applied to their sum — a truncated animation refuses, an over-cap one refuses rather than being flattened, and the toast reports that the file is animated. The first-frame rule is **struck**, along with the GIF example, which named a container neither platform's rung list offers. §6.1 gains an APNG fixture whose default image differs from animation frame one. |
-| **19** | accepted | §4.1. Representability and **encodability** are kept apart: the directory gate stays as it is, and the job's **captured recipient** is used to run the prospective output through that pane's namespace and grammar **before the write**, so a `%`-bearing redirected `%TEMP%` or an unmeasured-grammar pane refuses without creating a file. Every post-write failure to deliver — encoder refusal, revalidation, cancellation, switch off, unspellable path — deletes the file through the owned path. §6.2 gains the redirected-temp `%` row and the unmeasured-grammar row. |
+| **19** | accepted | §4.1. Representability and **encodability** are kept apart: the directory gate stays as it is, and the job's **captured recipient** is used to run the prospective output through that pane's namespace and grammar **before the write**, so a `%`-bearing redirected `%TEMP%` or an unmeasured-grammar pane refuses without creating a file. Every post-write failure to deliver — encoder refusal, revalidation, cancellation, switch off, unspellable path — deletes the file through the owned path. §6.2 was said to gain the redirected-temp `%` row and the unmeasured-grammar row — **it did not, and the fourth revision added them**, each paired with a recipient that encodes the same directory successfully and each asserting that no file was created (§10.4 row 9). **And the mandatory common preflight this row created was wrong for two of the three destinations**, which the fourth revision moved onto `TerminalInsertion` (§10.4 row 6). |
 | **20** | accepted | §8. T-PASTE-2a's scope now **enables `image/bmp`**: `BmpDecoder::new_without_file_header` is gated on that feature (`image-0.25.10/src/lib.rs:245`–`:246`, `Cargo.toml:70`) and this workspace enables only `gif, jpeg, png, webp` (`Cargo.toml:107`), so the decoder the design names cannot be imported as the manifest stands. The dependency, lockfile and notices impact is checked **for `bmp` specifically** rather than inherited from TIFF's, and the whole DIB lane is made contingent on the feature: without it, a DIB-only clipboard is `Absent`. §9.3 cites the gate. |
 
 **One accepted in part, nothing refused.** Finding 5's request to keep two scopes
 open for the owner is the only thing this revision does not do, because the owner
-closed the question; everything else in the third review is accepted, and the
-blocking seven are resolved in the body rather than in this table.
+closed the question; everything else in the third review is accepted.
+
+**And the closure claim this paragraph made is recomputed** (fourth review finding
+12). It said the blocking seven were "resolved in the body rather than in this
+table". The fourth review verified the twenty rows above and found **eight closed
+and twelve partially closed**, four of them blocking: the replacement fixture
+demanded an event the open interval excludes (row 1 → §10.4 row 2), the Windows
+DACL rule reversed the protection flag (row 12 → §10.4 row 4), the generation list
+omitted every editing input (row 16 → §10.4 row 5), and the common encoder
+preflight could not be satisfied by two of the three destinations it created (rows
+17 and 19 → §10.4 rows 6 and 9). So the honest statement is this: **the third
+revision moved every one of the twenty in the body, and eight of them all the way;
+the other twelve needed the fourth revision to finish, and §10.4 is where each of
+those landed.** No row of this table was refused, and none is reopened.
+
+### 10.4 Fourth review — `paste-paths-review-4-2026-09-15.md`, 12 findings
+
+Four blocking, eight should-fix, and a ledger of the third review's 20 rows in
+which eight were closed and twelve partially closed, plus eleven second-ledger
+closure sentences of which six were complete. §10.1, §10.2 and §10.3 now carry
+what the fourth revision changed in each of the rows it touched. **Every finding
+below is accepted**, and every one of them lands in the body — §10.4 records
+where, it does not stand in for the change. Nothing is declined and nothing the
+owner settled is reopened: the standing `(paths, integration)` namespace
+derivation, the rejection of the program-keyed alternative, `"paste_paths_as"` as
+an insertion-only spelling override, and Cygwin as T-PASTE-CYG dark until PROBE
+11 are all taken as given below rather than re-argued.
+
+| # | Decision | What changed, and where |
+| --- | --- | --- |
+| **1** (blocking) | accepted | §2.5 gains **ruling ⑫b, the composition contract** — a new subsection after the override's definition. Five rules carry it: **A**, the spelling runs first and produces one string and the grammar then encodes *that string* and reads nothing else; **B**, a table giving each spelling its emitted **path kind** and the namespace context it needs, with `wsl`'s distribution sourced from `wsl_distribution(index)` (`profiles.rs:3237`–`:3243`) — the row's own `-d`, else the machine default from `wsl::facts()` — so a `wsl` spelling on a non-WSL row is **accepted** rather than invented, `None` leaving a distribution share untranslated, and with `home` explicitly never needed because ruling ⑬ never emits `~`; **C**, four refusals that are properties of the emitted string (PowerShell's quote class; a `"` under `Cmd` and `Agent`-Windows; `%` and `!` under a **named** `cmd` grammar only; the unmeasured `Nushell` arm); **D**, the fallback string is the host path and the grammar reads its kind, which is how §2.3's **`Agent` branch is selected — by the emitted string, not the host path** (§4.4 corrected to match); **E**, the key is Windows-only and is refused at the row on a Unix host, once. The **6 × 5 product table** states the cells, and §2.3's `cmd` paragraph now refuses `"` as an **encoder** rule instead of asserting that no filename contains one. §6.1 gains the combination fixtures — apostrophes, drive and UNC roots, an embedded `"`, `paste_as: cmd` over an `msys` spelling, and the Unix-host refusal — and T-PASTE-1's gates name them. |
+| **2** | accepted | §6.1's **Coherence, per platform** paragraph and §6.2's delayed-rendering rows are rewritten to assert what `OpenClipboard` guarantees. The Windows fixture now asserts four things: a competing `OpenClipboard` **fails** while Folio holds the clipboard, Folio's snapshot **completes**, the other process's copy succeeds after the close, and the **next** gesture reads it. Delayed-render first-paste success is kept; macOS keeps its separate `changeCount` replacement refusal, because AppKit makes no exclusion promise. **No sequence equality and no ordering assertion anywhere**, and the paragraph says that a future real Windows invalidation enters as a named observable failure rather than as a restored equality test. |
+| **3** | accepted | §6.2's `Cmd`-encoder row becomes **two rows**. The encoder row hands the encoded command line **straight to `CreateProcessW`** with the argv printer as the image and **no `cmd.exe` between** — trailing backslashes, a space, an apostrophe, a lone `%` and **a paired `%NAME%`** — and the acceptance row keeps §2.3's **percent refusal in a `cmd` profile**, for both the lone and the paired form. §2.2's sentence that sent the encoder row through a `cmd` row is corrected at its source. No REPL guarantee is restored, and any future non-cmd interactive row must name a recipient whose input protocol consumes the grammar under test. |
+| **4** (blocking) | accepted | §4.1 ruling ㉓'s Windows arm is rewritten. **`SE_DACL_PROTECTED` is required, not forbidden** — it is the boundary against inheritable ACEs from the `%TEMP%` parent chain — and propagation to children is stated as the separate mechanism it is, `OBJECT_INHERIT_ACE` + `CONTAINER_INHERIT_ACE`, both checked. **One principal at every level**: the token's **user SID** with `FILE_ALL_ACCESS`, no administrative identities, spelled `D:P(A;OICI;FA;;;<user SID>)` for the two directories and `D:P(A;;FA;;;<user SID>)` for the file — so creation and read-back ask the identical question, which the third revision's two lists did not. The **user SID is kept distinct from the logon SID**, with the reason (files must open after the next logon), and `SECURITY.md:39`–`:45` is cited for **one** thing, its fail-closed rule. The take-ownership and `SeBackupPrivilege` residue is stated. §6.2 gains a **protected-directory success** row and a **permissive-parent inheritance** row beside the existing ACL fixtures, plus a logon-SID refusal row; T-PASTE-2b's gates name the first two. |
+| **5** (blocking) | accepted | §4.2 ruling ㉖'s generation list is replaced by a rule over the input's **origin**: the generation advances on **every user-originated byte this window puts into that target's PTY** — navigation, editing, control keys, history recall, Tab, IME commits, pastes and insertions alike. The boundary is named and cited: `input::keyboard_bytes` (`input.rs:530`–`:632`, arrows and `Home`/`End`/`Delete` at `:567`–`:582`, `Enter`/`Backspace`/`Tab`/`Escape` at `:619`–`:622`, `Ctrl+C` at `:540`–`:544`, the control alphabet at `:558`–`:563`) is the encoder, and the **target-specific** call is `note_user_typing(seat)` (`main.rs:85381`), whose own header already scopes it to "the four doors a person's own input reaches a shell through" and excludes replies, mouse forwarding and the resize-repair chord (`main.rs:85368`–`:85375`); the drop insertion becomes the fifth door. Terminal replies (`main.rs:35630`), mouse forwarding (`main.rs:18590`–`:18606`), the PSReadLine chord (`:83223`), a restored pane's replayed line (`:35702`) and local-only UI actions are **excluded deliberately**, each with its reason. §6.1 gains Left/Home, `Up` history recall, Backspace/Tab, `Ctrl+C`/`Ctrl+U` and an IME commit, plus three negatives — unchanged generation, a terminal reply, and the same keys in **another pane**. T-PASTE-2b's gates name them. |
+| **6** (blocking) | accepted | §4.2 ruling ㉖ moves the **captured recipient off the common job** and onto `TerminalInsertion { leaf, incarnation, input_generation, recipient }`, which is the only destination with a shell; §4.1 scopes the pre-write encoder check to it. `PreviewRetarget` and `LayoutSplit` get the check that is meaningful for them — **native file-open/path validation**: absolute, below the vetted directory, inside the platform's length limit, no character the file API refuses. Security, size, cancellation and cleanup stay common. **A surrogate recipient is never chosen**, said in as many words. The split anchor becomes two-valued — `SeatEdge { seat, side }` and **`TabRoot { side }`** — because §3.4 admits a raw picture on a root rim and `DropLanding::RootRim { edge }` has no seat (`main.rs:28787`, mapped to `seats::LayoutAim::Rim(edge)` at `:28848`, `aimed_at` answering `None`); each variant gets its own revalidation, and a rim job is **never** repaired into a seat job. §6.1 gains **delayed root-rim success** and **changed-root cancellation** beside the Preview and edge fixtures, and a row proving the two nonterminal destinations complete with every terminal on the machine a `cmd.exe` row. T-PASTE-3's gates name them. |
+| **7** | accepted | §2.5's classifier gains **eligibility before evidence**: only a resolved program whose lower-cased stem (read as `derive_integration` reads it, `profiles.rs:826`–`:829`) is one of `bash`, `sh`, `dash`, `zsh`, `ksh`, `mksh`, `tcsh`, `fish` is classified at all — everything else keeps today's answer **with no directory read**. Evidence from the executable's directory and its `..\usr\bin\` sibling is **aggregated as a union**, which makes the rule order-independent; a location that does not exist contributes nothing, while one that exists and cannot be read is a **partial read that stops the classification**. Only a union of exactly `cygwin1.dll` is positive. The **unrun-probe policy covers the explicit override too**: while PROBE 11 is unrun, `"paste_paths_as": "cygwin"` is refused with an unmeasured-spelling toast — one gate, not two, because an arm live for the override is not dark — and the reader's remedy is `"windows"`, which Cygwin tools accept. Fixtures for non-shell, cross-level mixed, partial-read and unrun-override cases in §6.1 and §6.2. **All of it inside T-PASTE-CYG**, whose gates name the new rows; T-PASTE-1 is untouched. |
+| **8** | accepted | §4.1's Unix vetting recipe names `runtime_directory()`'s **`folio-<uid>`** — `$TMPDIR` when set and non-empty, else `/tmp` (`instance.rs:331`–`:337`) — and its `clipboard` child, **both levels vetted**, with `Folio` identified as the Windows name that appears at no Unix level. `prepare_runtime_directory` (`instance.rs:360`) is cited as the recipe being applied at both levels rather than borrowed for one, and the fail-closed squatting limitation is kept. §10.3 row 11's false "used in creation, vetting" is corrected in place, and §6.2's Unix storage rows say the two levels by name. |
+| **9** | accepted | §6.2 gains the two picture-job rows the third ledger claimed: a **valid `%TEMP%` redirected to a path containing `%` with a `cmd.exe` recipient**, and a **valid directory with an unmeasured `nu` recipient** — each **refused before the write** with **no file created**, and each **paired with a recipient that encodes the same directory successfully** (`pwsh` and `bash`), so a directory refused for everybody cannot satisfy the test by accident. §4.1's own sentence gains the pairing requirement, and **T-PASTE-2b's gates name all four rows**. |
+| **10** | accepted | §7.2's routing sentence is split. A **promise-only clipboard is the payload's `Refused(Promise)` value** — §1.2's and §5's answer, not the lane's error channel; an **acquisition** failure is the rung's `Unreadable`; and every **later** gate, decode, storage, quota, vetting, encoder or delivery failure uses the picture lane's error path. All three reach the same toast surface for different causes. No required toast changes and silent `Nothing` is unchanged. |
+| **11** | accepted | §6.1's blanket "the suite asserts that no derivation reads a program" is **struck** and replaced by three scoped assertions: the **namespace** resolver is `printed_path_namespace` and no program-keyed `derive_namespace` is called because none exists; **`derive_grammar` does read the row's resolved program** and the test asserts that it does (`PowerShellSeven` without a file name, `FirstOf` off its first candidate, `served_by` never consulted); and the spelling override affects insertion only. §5's crate map carries the same distinction, and §10.3 row 5's overbroad closure sentence is corrected in place. No program-keyed namespace design is added. |
+| **12** | accepted | §10.1 gains a lead-in saying its rows are the **first** revision's historical record, and five superseded clauses are **struck in place** with the current ruling named: row 11's before-and-after sequence check, row 19's first-frame policy **and** its "measured latency contract" for PROBE 8, row 20's `std::env::temp_dir()` Unix discovery **and** its owner-only-DACL sentence, and row 22's child-read half of PROBE 9. §10.2 gains the same lead-in and strikes three: row 1's "unbounded" delayed render and its calling-thread-window claim, row 7's ten-second staleness rule with its age steal and quota bypass, and row 11's width-one `nu` arm. §10.3's four overstated closure claims — rows 2, 5, 11 and 19 — are corrected in place, and its closing paragraph is **recomputed** against the fourth review's own count: eight closed, twelve partially closed, four of them blocking, each named with the §10.4 row that finished it. |
+
+**Nothing is declined, and nothing is refused.** Two findings were answered by
+reversing a rule the previous revision had stated backwards — **4**, where
+`SE_DACL_PROTECTED` is the protection rather than the hole, and **2**, where the
+API's own exclusion guarantee replaced a refusal it makes impossible — and two by
+moving a check to where it can actually be satisfied: **6**, the shell preflight
+onto the one destination that has a shell, and **5**, the generation from a list
+of keys to the origin of the bytes. The four blocking findings are resolved in
+§2.5, §4.1, §4.2 and §6.1–§6.2 respectively, not in this table.
