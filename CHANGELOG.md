@@ -6,17 +6,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
-### Fixed
-
-- **The two marks beside a typeset formula behave like the rest of the window's
-  buttons.** Pointing at `‹›` or `⧉` now lights that mark the way a pane head's
-  buttons light, so you can see which one a click would reach. Turning a block
-  into its source makes it taller — the marks move with it straight away,
-  instead of staying beside the shape the block used to have until you took the
-  pointer off the formula and brought it back; the same is true when a window
-  resize re-wraps the block or the display scale changes. And they arrive, move
-  and leave gently rather than blinking in and out. If you have asked your
-  system for less motion, they simply appear and disappear where they belong.
+Nothing yet.
 
 ## 0.4.0-preview — 2026-09-14
 
@@ -168,6 +158,26 @@ All notable changes to Folio are recorded here. The format follows
   be refused in the same way.
 
 ### Fixed
+
+- **The two marks beside a typeset formula behave like the rest of the window's
+  buttons.** Pointing at `‹›` or `⧉` now lights that mark the way a pane head's
+  buttons light, so you can see which one a click would reach. Turning a block
+  into its source makes it taller — the marks move with it straight away,
+  instead of staying beside the shape the block used to have until you took the
+  pointer off the formula and brought it back; the same is true when a window
+  resize re-wraps the block or the display scale changes. And they arrive, move
+  and leave gently rather than blinking in and out. If you have asked your
+  system for less motion, they simply appear and disappear where they belong.
+
+- **A focus card's head now rests the way a tab does.** The pane-count badge on
+  a card in the sidebar sat where it belongs only while the pointer is on the
+  card, one slot in from the end of the head, with an empty gap beside it where
+  the pin would appear. At rest the badge now stands at the end of the head,
+  against the close button's own place; bring the pointer onto the card and it
+  slides aside to let the pin and the `×` in, and slides back when the pointer
+  leaves — the same movement, over the same time, that a tab has always used.
+  A pinned card keeps its pin on show at rest, as it did. Reduced motion settles
+  it in one frame, as before.
 
 - **Hovering a typeset formula puts that formula's two buttons beside it.** The
   `<>` and copy buttons had stopped arriving at all, and where a second formula
