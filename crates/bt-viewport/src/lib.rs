@@ -14,7 +14,7 @@ use std::{
 
 use bt_doc::{
     AnchorError, Bias, ContentAnchor, DetectionRevision, GridGeneration, GridPoint,
-    HistoryDocument, LayoutKey, MathMode, ScreenId, ViewGeneration, compare_anchors,
+    HistoryDocument, HistoryEntry, LayoutKey, MathMode, ScreenId, ViewGeneration, compare_anchors,
 };
 use bt_transcript::{
     CapturedCell, CapturedRow, CellFlags, CellHyperlink, FrozenLine, GraphemeOffset,
@@ -61,10 +61,23 @@ pub struct LayoutCacheKey {
     pub layout: LayoutKey,
 }
 
+/// Everything one projected line costs a walk of its own text to learn, measured once and kept
+/// under the key that governs all three: the line's own generation, the detection revision and
+/// the layout.
+///
+/// **`columns` is here and not asked for again per rebuild** (T-MATH-TOGGLE-STUTTER). It is the
+/// flattened line's presentable width — `text_width`, which segments the whole line by UAX #29
+/// grapheme clusters — and until this ticket [`ViewportProjection::project`] measured it for
+/// *every* line in history on every rebuild, cache hit or not. A rebuild is not rare: any change
+/// to the set of suppressed ids takes that road, and turning one formula into its source is
+/// exactly such a change, so the price of the gesture was one grapheme walk of the whole
+/// scrollback. The width does not depend on the viewport at all, so it belongs beside the height
+/// the same key already protects.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MeasuredLayout {
     pub height: i64,
     pub visual_lines: u32,
+    pub columns: ContentColumn,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1740,6 +1753,14 @@ pub struct ViewportProjection {
     source_generation: SourceGeneration,
     grid_generation: GridGeneration,
     cache_misses: u64,
+    /// How many lines this projection has walked the *text* of.
+    ///
+    /// The one counter that makes the price of a rebuild visible without a GPU or a clock
+    /// (T-MATH-TOGGLE-STUTTER). `cache_misses` counts measurements that had to be *computed*;
+    /// this counts the grapheme walks they cost, and the two are equal exactly while every walk
+    /// is behind the cache. A rebuild that re-segments lines it already knows shows up here as a
+    /// count proportional to the scrollback, which is what the toggle's stutter was.
+    line_text_measurements: u64,
     scroll_offset_subpixels: i64,
     pending_scroll_offset_subpixels: Option<i64>,
     /// A review offset preserved across an application transcript rewrite. Codex-style TUIs
@@ -1925,6 +1946,7 @@ impl ViewportProjection {
             source_generation,
             grid_generation,
             cache_misses: 0,
+            line_text_measurements: 0,
             scroll_offset_subpixels: 0,
             pending_scroll_offset_subpixels: None,
             displaced_review_subpixels: None,
@@ -2072,6 +2094,19 @@ impl ViewportProjection {
     }
     pub fn cache_misses(&self) -> u64 {
         self.cache_misses
+    }
+    /// How many lines this projection has segmented the text of since it was built.
+    ///
+    /// The measurable side of T-MATH-TOGGLE-STUTTER: a rebuild that carries its measurements
+    /// across moves this by the number of lines that actually changed, and one that re-measures
+    /// history moves it by the size of history.
+    pub fn line_text_measurements(&self) -> u64 {
+        self.line_text_measurements
+    }
+    /// How many history lines this projection is currently laying out — the denominator the
+    /// number above is only meaningful against.
+    pub fn projected_line_count(&self) -> usize {
+        self.ordered_ids.len()
     }
     pub fn scroll_anchor(&self) -> Option<&ScrollAnchor> {
         match &self.scroll_state {
@@ -4109,13 +4144,20 @@ impl ViewportProjection {
     }
 
     pub fn project(&mut self, document: &HistoryDocument) {
+        // **One ordered walk of history, carrying each line with its id.** The loop at the foot
+        // needs the entry itself — its generation keys the measurement — and asking the map for it
+        // again by id is a second descent of a `BTreeMap` this walk has already passed the pointer
+        // of. Cheap per line, and this walk is every line there is.
         let mut next_ids = Vec::new();
+        let mut next_entries: Vec<&HistoryEntry> = Vec::new();
         let mut suppressed_through = None;
-        for id in document.entries().keys().copied() {
+        for (id, entry) in document.entries() {
+            let id = *id;
             if suppressed_through.is_some_and(|end| id <= end) {
                 continue;
             }
             next_ids.push(id);
+            next_entries.push(entry);
             suppressed_through = self.math_artifacts.get(&id).map(|artifact| artifact.end);
         }
         let append_only = !self.projection_dirty
@@ -4133,6 +4175,7 @@ impl ViewportProjection {
             // more than the microsecond it costs to keep. Both lists are in ascending id order, so
             // one merge finds everything that left.
             let mut surviving = next_ids.iter().copied().peekable();
+            let mut departed = HashSet::new();
             for id in &self.ordered_ids {
                 while surviving.peek().is_some_and(|next| next < id) {
                     surviving.next();
@@ -4141,9 +4184,18 @@ impl ViewportProjection {
                     surviving.next();
                 } else {
                     self.horizontal_index.release_history(*id);
-                    self.inference
-                        .retain(|key, _| !matches!(key, LineKey::History(line, _) if line == id));
+                    departed.insert(*id);
                 }
+            }
+            // **One sweep of the inference map for the whole diff, and none at all when nothing
+            // left** (T-MATH-TOGGLE-STUTTER). `retain` reads every entry it is asked about, so
+            // calling it inside the loop above charged one walk of every inferred line *per
+            // departing id* — and a formula going back to its picture retires exactly the handful
+            // of source lines it swallows, which is the shape that multiplied worst.
+            if !departed.is_empty() {
+                self.inference.retain(
+                    |key, _| !matches!(key, LineKey::History(line, _) if departed.contains(line)),
+                );
             }
             // The extent is cleared with the row counts it stands beside and refilled by the same
             // loop below, so admitting a width and withdrawing one are the one `push` rather than
@@ -4155,10 +4207,8 @@ impl ViewportProjection {
             self.heights.rebuild([]);
             self.extent.clear();
         }
-        for id in next_ids.iter().skip(start) {
-            let entry = &document.entries()[id];
+        for (id, entry) in next_ids.iter().zip(&next_entries).skip(start) {
             self.ordered_ids.push(*id);
-            self.extent.insert(presentable_end_column(&entry.line.text));
             let cache_key = LayoutCacheKey {
                 span: TranscriptSpan {
                     start: *id,
@@ -4175,6 +4225,11 @@ impl ViewportProjection {
                 measured
             } else {
                 self.cache_misses += 1;
+                // The line's own text is walked here and nowhere else in this loop: both the
+                // width and the wrapped row count are facts about this line under this key, so a
+                // line the key still fits is never segmented twice.
+                self.line_text_measurements = self.line_text_measurements.saturating_add(1);
+                let columns = presentable_end_column(&entry.line.text);
                 let measured = {
                     if let Some(height) = self.artifact_heights.get(id).copied() {
                         let visual_lines = height
@@ -4184,6 +4239,7 @@ impl ViewportProjection {
                         MeasuredLayout {
                             visual_lines: u32::try_from(visual_lines).unwrap_or(u32::MAX),
                             height,
+                            columns,
                         }
                     } else {
                         let source_visual_lines = frozen_visual_line_count(
@@ -4216,12 +4272,14 @@ impl ViewportProjection {
                             height: i64::from(source_visual_lines)
                                 .saturating_mul(self.cell_height_subpixels.get())
                                 .saturating_add(image_height),
+                            columns,
                         }
                     }
                 };
                 self.cache.insert(cache_key, measured);
                 measured
             };
+            self.extent.insert(measured.columns);
             self.visual_rows.push(measured.visual_lines as usize);
             self.visual_row_heights
                 .push(i64::from(measured.visual_lines));
@@ -5621,7 +5679,7 @@ mod tests {
 
     use super::*;
     use bt_doc::{Bias, GridGeneration, GridPoint, ScreenId};
-    use bt_transcript::{CapturedRow, GraphemeOffset, StagingId, TranscriptStore};
+    use bt_transcript::{CapturedRow, FinalizedLine, GraphemeOffset, StagingId, TranscriptStore};
     use std::{collections::BTreeMap, num::NonZeroU32, num::NonZeroUsize, path::Path};
 
     fn nz32(value: u32) -> NonZeroU32 {
@@ -10942,6 +11000,176 @@ mod tests {
             projection.scroll_anchor().unwrap().local_offset,
             exact_local
         );
+    }
+
+    /// The scrollback a source toggle is priced against: long enough that measuring all of it and
+    /// measuring what changed are different numbers by two orders of magnitude, which is the whole
+    /// of T-MATH-TOGGLE-STUTTER.
+    fn toggle_fixture() -> (TranscriptStore, HistoryDocument, Vec<TranscriptId>) {
+        let mut store = TranscriptStore::new(NonZeroUsize::new(1024).unwrap());
+        let mut document = HistoryDocument::default();
+        let mut ids = Vec::new();
+        for index in 0..200 {
+            // Mixed script on purpose: the width of a line is a UAX #29 grapheme walk, and a
+            // scrollback of ASCII would understate what the walk this ticket removed cost.
+            let text = if index == 5 {
+                "\\int_0^\\infty e^{-x^2}\\,dx = \\frac{\\sqrt{\\pi}}{2} ".repeat(4)
+            } else {
+                format!("line-{index:03} 中文混排 and some ordinary text")
+            };
+            let finalized = store.capture(fixture_row(&text, false)).finalized.remove(0);
+            ids.push(finalized.line.id);
+            document.finalize_transaction(finalized);
+        }
+        (store, document, ids)
+    }
+
+    /// The block in that fixture: it starts on `ids[4]` and swallows `ids[5..=7]` while it is a
+    /// picture, which is exactly the id-set change the `‹›` mark makes.
+    fn toggle_block(end: TranscriptId) -> ProjectedMathArtifact {
+        ProjectedMathArtifact {
+            inline_runs: Vec::new(),
+            key: "math-toggle-stutter".to_owned(),
+            end,
+            rgba: Arc::from(vec![255; 4]),
+            width_px: 1,
+            height_px: 1,
+            height_subpixels: cell_height().get() * 3,
+            baseline_subpixels: 0,
+            mode: MathMode::Display,
+            kind: RgbaArtifactKind::Math,
+            vertical_padding_subpixels: 0,
+            render_scale_milli: 1000,
+            source: "\\int_0^\\infty e^{-x^2}\\,dx".to_owned(),
+        }
+    }
+
+    fn unwrapped(width_cells: u32) -> LayoutKey {
+        LayoutKey {
+            line_wrapping: false,
+            ..key(width_cells)
+        }
+    }
+
+    fn toggle_projection(store: &TranscriptStore) -> ViewportProjection {
+        ViewportProjection::new(
+            unwrapped(64),
+            DetectionRevision(1),
+            nz32(6),
+            cell_height(),
+            store.source_generation(),
+            GridGeneration(1),
+        )
+    }
+
+    #[test]
+    fn a_formula_turning_into_its_source_re_measures_only_the_lines_it_changed() {
+        let (store, document, ids) = toggle_fixture();
+        let mut projection = toggle_projection(&store);
+
+        // The formula as a picture: it suppresses the three source lines under its opener, so 197
+        // of the 200 lines are projected and every one of them is measured for the first time.
+        projection.sync_math_artifacts([(ids[4], toggle_block(ids[7]))]);
+        projection.project(&document);
+        assert_eq!(projection.line_text_measurements(), 197);
+
+        // **The press.** The block leaves `math_artifacts`, its three source lines come back, and
+        // the projected id list changes — which is a rebuild. Before this ticket the rebuild
+        // re-segmented all 200 lines; what actually changed is the opener's own measurement (its
+        // cache key lost the span) and the three lines that had never been projected at all.
+        projection.sync_math_artifacts([]);
+        projection.project(&document);
+        assert_eq!(
+            projection.line_text_measurements(),
+            201,
+            "a toggle to source measured the scrollback, not the four lines it changed"
+        );
+
+        // And back, which is the same rebuild in the other direction: only the opener, whose key
+        // carries the span again, is measured.
+        projection.sync_math_artifacts([(ids[4], toggle_block(ids[7]))]);
+        projection.project(&document);
+        assert_eq!(
+            projection.line_text_measurements(),
+            202,
+            "a toggle back to the picture measured the scrollback again instead of one line"
+        );
+    }
+
+    #[test]
+    fn carrying_a_line_width_across_a_toggle_gives_the_axis_a_fresh_projection_would() {
+        let (store, document, ids) = toggle_fixture();
+        // `ids[5]` is the widest line in the fixture and it lives *inside* the block, so the
+        // horizontal axis is genuinely different in the two states: a width carried across a
+        // rebuild has to be withdrawn when the picture swallows its source and admitted again
+        // when the source comes back.
+        let mut toggled = toggle_projection(&store);
+        toggled.sync_math_artifacts([(ids[4], toggle_block(ids[7]))]);
+        toggled.project(&document);
+        let rendered_axis = toggled.horizontal();
+
+        toggled.sync_math_artifacts([]);
+        toggled.project(&document);
+        let source_axis = toggled.horizontal();
+        assert_ne!(
+            rendered_axis, source_axis,
+            "the widest line of this fixture is inside the block, so the axis must move with it"
+        );
+
+        let mut fresh_source = toggle_projection(&store);
+        fresh_source.project(&document);
+        assert_eq!(source_axis, fresh_source.horizontal());
+
+        toggled.sync_math_artifacts([(ids[4], toggle_block(ids[7]))]);
+        toggled.project(&document);
+        let mut fresh_rendered = toggle_projection(&store);
+        fresh_rendered.sync_math_artifacts([(ids[4], toggle_block(ids[7]))]);
+        fresh_rendered.project(&document);
+        assert_eq!(toggled.horizontal(), fresh_rendered.horizontal());
+        assert_eq!(toggled.horizontal(), rendered_axis);
+    }
+
+    #[test]
+    fn a_rewritten_line_is_measured_again_rather_than_carried_across() {
+        // The carried width is only as sound as the key that governs it — which is the key the
+        // height has always been kept under. A line whose text is replaced arrives with a new
+        // source generation, so its key misses and its width is taken again; this is the
+        // guarantee the extent used to buy by re-measuring the whole scrollback.
+        let (store, mut document, ids) = toggle_fixture();
+        let mut projection = toggle_projection(&store);
+        projection.sync_math_artifacts([(ids[4], toggle_block(ids[7]))]);
+        projection.project(&document);
+        let before = projection.horizontal();
+
+        // `ids[9]` stands outside the block and is projected in both states. Rewritten, it is by
+        // far the widest line in the fixture, so a width wrongly carried over from the text it
+        // used to hold is an axis that disagrees with a projection built from scratch.
+        let widened = "w".repeat(400);
+        document.finalize_transaction(FinalizedLine {
+            line: FrozenLine {
+                id: ids[9],
+                source_generation: SourceGeneration(store.source_generation().0 + 1),
+                grapheme_boundaries: (0..=widened.len() as u32).collect(),
+                text: widened,
+                styles: Vec::new(),
+                fragments: Vec::new(),
+                shell_marks: Vec::new(),
+                wrap_split: false,
+            },
+            mappings: Vec::new(),
+        });
+        // The press, which is what asks for the rebuild that reads the rewritten line.
+        projection.sync_math_artifacts([]);
+        projection.project(&document);
+
+        let mut fresh = toggle_projection(&store);
+        fresh.project(&document);
+        assert_eq!(
+            projection.horizontal(),
+            fresh.horizontal(),
+            "a rewritten line kept the width measured for text it no longer holds"
+        );
+        assert_ne!(projection.horizontal(), before);
     }
 
     #[test]

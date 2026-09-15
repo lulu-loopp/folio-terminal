@@ -6,7 +6,16 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
-Nothing yet.
+### Fixed
+
+- **Turning a formula into its source no longer makes the window hesitate.**
+  Pressing the `‹›` mark beside a typeset block — or pressing it again to put the
+  picture back — used to hitch for a moment before the block changed. Changing a
+  formula makes the lines under it move, and the window was measuring the width
+  of every line in the whole scrollback again to find out where they landed;
+  with a long history behind you, that is the pause. It now measures the lines
+  that actually changed, and the rest of your scrollback is left alone. The
+  formula, the mark and the block's own tools are unchanged.
 
 ## 0.4.0-preview — 2026-09-14
 
