@@ -8,6 +8,14 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **Aiming a card's window with the wheel keeps up with the hand.** On a tall
+  card over a pane with a long history, every notch used to copy out every line
+  between the bottom of the pane and the place the card was pointing at — three
+  times over, for one row of movement — so the card stuttered and the notches
+  piled up behind it. It now reads only as far as it has to and keeps only the
+  rows the card draws. Where a notch lands, and where the card stops at the top,
+  are unchanged.
+
 - **Turning a formula into its source no longer makes the window hesitate.**
   Pressing the `‹›` mark beside a typeset block — or pressing it again to put the
   picture back — used to hitch for a moment before the block changed. Changing a
