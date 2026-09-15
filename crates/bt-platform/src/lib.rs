@@ -1769,7 +1769,7 @@ mod visual_layer_tests {
 /// of the two has to become the other, and the translation is the only place the
 /// whole thing can go wrong: a `%20` left undecoded opens nothing, a `%2e%2e`
 /// decoded twice opens the wrong thing, and a lenient reading of a stray `%`
-/// would be exactly the guessing `CONVENTIONS.md` §1 forbids. So it is written
+/// would be exactly the guessing `docs/CONVENTIONS.md` §1 forbids. So it is written
 /// once, next to [`reveal_arguments`] and for its reason — the one thing that can
 /// be wrong here is the string — and it is a pure function with its own tests
 /// rather than a step inside a bridge that can only be exercised by launching

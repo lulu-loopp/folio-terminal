@@ -3562,7 +3562,7 @@ impl WebSeat {
     /// **And this seat no longer keeps a `zoom` of its own.** It kept one so
     /// that a notch would not cost a COM read; now that the read is the answer,
     /// a second copy would be a number nothing reads and everything has to
-    /// remember to update — the "只写字段 = 死规格" of `CONVENTIONS.md` §3, one
+    /// remember to update — the "只写字段 = 死规格" of `docs/CONVENTIONS.md` §3, one
     /// field wide.
     pub(crate) fn zoom_by(&mut self, up: bool) -> Result<Option<f64>, String> {
         let current = self.host.zoom();
@@ -5737,7 +5737,7 @@ mod fault_tests {
     /// `self.zoom` field and assigned the asked-for rung to it, so that field was
     /// this window's memory of its own request and the engine was never asked at
     /// all. The field is gone with this change — a second copy of a number the
-    /// engine now answers is `CONVENTIONS.md` §3's write-only field.
+    /// engine now answers is `docs/CONVENTIONS.md` §3's write-only field.
     #[test]
     fn a_zoom_notch_reports_the_factor_the_engine_ended_up_at() {
         let source: String = include_str!("webhost.rs")

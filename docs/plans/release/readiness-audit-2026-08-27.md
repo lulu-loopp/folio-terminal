@@ -333,7 +333,7 @@ v0.2 写的新键就没了。
 `git grep -l AppData` **30 个文件**,其中 `crates/bt-transcript/src/paths.rs:1740-1746` 与
 `crates/bt-viewport/src/lib.rs:7161-7232` 用的是 **Claude scratchpad 的完整路径**做长路径截断夹具。
 **建议**:
-- **公开 `docs/DESIGN.md`、`CONVENTIONS.md`、`docs/shell-integration.md`、`assets/schemes/README.md`、`vendor/conpty/README.md`** —— 这几份是真正的技术资产,透明度收益大于噪音。
+- **公开 `docs/DESIGN.md`、`docs/CONVENTIONS.md`、`docs/shell-integration.md`、`assets/schemes/README.md`、`vendor/conpty/README.md`** —— 这几份是真正的技术资产,透明度收益大于噪音。
 - **`docs/prompts/` 建议不公开**(52 份 AI 任务单,与产品无关且会主导读者印象);`docs/plans/*/evidence*` 那些 jsonl / 截图可以留在私仓。
 - **`crates/` 里的 `Weiyi` 夹具建议统一换成 `dev`** —— 这是**唯一一处会随源码永久流传的个人痕迹**,而且改起来零风险。
 - 中文文档本身**不必翻译**,但 README 要用英文,并说明"设计文档为中文"。

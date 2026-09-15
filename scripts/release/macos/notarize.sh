@@ -58,6 +58,16 @@
 # back. A stapled `.app` and a stapled `.dmg` are two separate staples of two
 # separate tickets, which is why this script is run once per artifact rather
 # than once per release.
+#
+# ## The one assessment that has to pass
+#
+# `spctl` runs last, after the staple, and a refusal there is this script's
+# failure. It is the only place in the lane where Gatekeeper can be expected to
+# say yes: `sign.sh` asks the same question before notarization, where the
+# answer is `source=Unnotarized Developer ID` by design, so that one prints its
+# verdict and exits 0. `accepted` is not sufficient on its own either — the
+# source has to say `Notarized Developer ID`, which is the claim the release
+# page makes.
 
 set -eu
 
@@ -178,6 +188,27 @@ if [ "$dry_run" = "1" ]; then
 fi
 echo
 
+# **The Gatekeeper question, which is not the same question for the two
+# artifacts.** `spctl -a -vvv` asks whether a bundle may *execute*;
+# `-t open --context context:primary-signature` asks whether a document may be
+# *opened*, which is what macOS actually asks when a downloaded disk image is
+# double-clicked, and `-t exec` on an image answers a question nobody asks.
+#
+# It is asked here and not in `sign.sh`, because this is the first moment it can
+# be passed: before the ticket is stapled even a real Developer ID signature is
+# refused with `source=Unnotarized Developer ID`, so the assessment made there
+# is informational and this one is the one that decides.
+assess() {
+	case "$path" in
+	*.dmg)
+		run spctl -a -vvv -t open --context context:primary-signature "$path"
+		;;
+	*)
+		run spctl -a -vvv "$path"
+		;;
+	esac
+}
+
 upload="$path"
 zip=""
 case "$path" in
@@ -197,9 +228,12 @@ if [ "$dry_run" = "1" ]; then
 		--wait --output-format json
 	echo "  # the submission id is read out of that JSON, and then:"
 	run xcrun notarytool log "<submission-id>" \
-		--key "$key" --key-id "$KEY_ID" --issuer "$ISSUER_ID" "$log"
+		--key "$key" --key-id "$KEY_ID" --issuer "$ISSUER_ID" "$log.partial"
+	echo "  # and only a fetch that succeeded is moved into place:"
+	run mv "$log.partial" "$log"
 	run xcrun stapler staple "$path"
 	run xcrun stapler validate "$path"
+	assess
 	[ -z "$zip" ] || run rm -f "$zip"
 	echo
 	echo "notarize.sh: dry run complete; nothing was uploaded."
@@ -223,26 +257,77 @@ cat "$submission"
 # `plutil` reads JSON as well as it reads a plist and is in `/usr/bin` on every
 # macOS, which a JSON parser of this script's own would not be.
 id=$(/usr/bin/plutil -extract id raw -o - -- "$submission" 2>/dev/null || true)
+
+# **A log that was not fetched is not a log that was kept.** Whatever is at
+# `$log` goes first: an earlier submission's document left at that path is the
+# one thing worse than no document, because the release lane archives it under
+# this submission's name. Then the fetch writes a file of its own, and only a
+# fetch that succeeded — and that answers about the submission this run made —
+# is moved into place and announced.
+rm -f "$log"
+fetched="$log.partial"
+rm -f "$fetched"
+kept=0
+
 if [ -n "$id" ]; then
 	echo
 	echo "=== notarytool log $id"
-	xcrun notarytool log "$id" \
-		--key "$key" --key-id "$KEY_ID" --issuer "$ISSUER_ID" "$log" || true
-	echo "notarize.sh: log kept at $log"
+	if xcrun notarytool log "$id" \
+		--key "$key" --key-id "$KEY_ID" --issuer "$ISSUER_ID" "$fetched"; then
+		# The document names the submission it is about. `plutil` answers
+		# nothing on a shape that has no `jobId`, and a log that does not say is
+		# taken at its word rather than thrown away — what is refused is a log
+		# that says it is about a different submission.
+		about=$(/usr/bin/plutil -extract jobId raw -o - -- "$fetched" 2>/dev/null || true)
+		if [ -n "$about" ] && [ "$about" != "$id" ]; then
+			echo "notarize.sh: the log fetched is about submission $about, not $id" >&2
+		else
+			mv "$fetched" "$log"
+			kept=1
+			echo "notarize.sh: log kept at $log"
+		fi
+	else
+		echo "notarize.sh: notarytool log $id failed; no log was kept" >&2
+	fi
+	rm -f "$fetched"
 else
 	echo "notarize.sh: the submission answered no id — no log to fetch" >&2
 fi
 
 [ -z "$zip" ] || rm -f "$zip"
 
+# A refusal says where to read about itself, and it says it only if there is
+# something there: the log is what names the binary the service objected to, and
+# pointing at a path the fetch above did not write is how an hour goes missing.
+where() {
+	if [ "$kept" = "1" ]; then
+		echo "see $log"
+	else
+		echo "and its log was not fetched, so there is nothing to read about it"
+	fi
+}
+
 if [ "$submit_rc" != "0" ]; then
-	echo "notarize.sh: the notary service did not accept this artifact; see $log" >&2
+	echo "notarize.sh: the notary service did not accept this artifact; $(where)" >&2
 	exit "$submit_rc"
 fi
 
 status=$(/usr/bin/plutil -extract status raw -o - -- "$submission" 2>/dev/null || true)
 if [ "$status" != "Accepted" ]; then
-	echo "notarize.sh: status is '$status', not 'Accepted'; see $log" >&2
+	echo "notarize.sh: status is '$status', not 'Accepted'; $(where)" >&2
+	exit 1
+fi
+
+# The log is part of what a release produces, and `docs/RELEASING.md` says it is
+# archived once per submission. A submission that was accepted and whose log was
+# not kept has lost the only record of what the service looked at — and Apple
+# keeps it for a limited time, so it is lost for good. That is a failed release,
+# and it fails here rather than three steps later where nobody connects the two.
+# A *rejected* submission has already exited above with its own code, which is
+# the failure worth reporting.
+if [ "$kept" != "1" ]; then
+	echo "notarize.sh: $path was accepted and its log was not kept; the submission is" >&2
+	echo "             $id — fetch it with 'xcrun notarytool log' before it ages out." >&2
 	exit 1
 fi
 
@@ -254,5 +339,34 @@ echo
 echo "=== stapler validate"
 xcrun stapler validate "$path"
 
+# **This is the assessment that must pass**, and it is the last thing this
+# script does: the ticket is stapled, so the answer here is the answer a
+# reader's machine gives with the network off.
+#
+# `accepted` alone is not enough. Gatekeeper accepts for more than one reason,
+# and the only one this release claims is a notarized Developer ID build — an
+# `accepted` whose `source=` says anything else is a different claim, and
+# `docs/RELEASING.md` has asked a person to read that line since M5. Reading it
+# here means nobody has to.
 echo
-echo "notarize.sh: $path is notarized and stapled; the log is at $log"
+echo "=== spctl, after stapling"
+set +e
+verdict=$(assess 2>&1)
+spctl_rc=$?
+set -e
+echo "$verdict"
+if [ "$spctl_rc" != "0" ]; then
+	echo "notarize.sh: Gatekeeper refused $path after it was stapled — this build does not ship" >&2
+	exit 1
+fi
+case "$verdict" in
+*"source=Notarized Developer ID"*) ;;
+*)
+	echo "notarize.sh: Gatekeeper accepted $path, but not as a notarized Developer ID build" >&2
+	echo "             — the source above is not the claim this release makes." >&2
+	exit 1
+	;;
+esac
+
+echo
+echo "notarize.sh: $path is notarized, stapled and accepted; the log is at $log"

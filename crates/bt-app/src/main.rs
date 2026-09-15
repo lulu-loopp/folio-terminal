@@ -415,6 +415,21 @@ enum AppEvent {
     /// `explorer_menu::state()` and `explorer_menu::take_outcome()` by the time
     /// this is sent, and this says only that something did.
     ExplorerPackageChanged,
+    /// **The machine listed its monospaced families** (GitHub issue #3).
+    ///
+    /// The tenth of the same family and the newest, and it is owed a wake for
+    /// [`Self::CopilotProbed`]'s reason with one more on top: the walk was
+    /// started by the press that opened the dialog, so the reader is looking at
+    /// a picker that is holding one row — the family in force — and waiting for
+    /// the rest. Nothing else is going to produce the frame that fills it in,
+    /// because a modal is up.
+    ///
+    /// Carries nothing, on `UpdateChecked`'s footing: the answer is in
+    /// `settings`' own mailbox by the time this is sent, and the handler is the
+    /// **one place** allowed to move it onto the screen — see
+    /// `settings::adopt_scanned_families` for why it has to be between two
+    /// frames rather than on the worker.
+    FontsScanned,
     /// **Something spoke into this process's attention endpoint** (`attention_wire`).
     ///
     /// The same family again and the same reason for a wake of its own, in its strongest form: the
@@ -584,6 +599,7 @@ impl AppEvent {
             | Self::CopilotProbed
             | Self::UpdateChecked
             | Self::ExplorerPackageChanged
+            | Self::FontsScanned
             | Self::SchemesChanged
             | Self::StorageChanged
             | Self::SystemPreferencesChanged
@@ -33782,15 +33798,14 @@ fn apply_stored_terminal_font(
     // never opens the system font collection at startup, which is the cost
     // `bt_render::terminal_font_system` refuses to pay and this must not
     // reintroduce.
-    let files = if family.is_empty() {
-        Vec::new()
-    } else {
-        settings::monospace_families()
-            .iter()
-            .find(|candidate| candidate.name.eq_ignore_ascii_case(family))
-            .map(|candidate| candidate.files.clone())
-            .unwrap_or_default()
-    };
+    //
+    // **The one door in this process that is allowed to wait for the machine**,
+    // and it is this one because there is no frame yet to put a placeholder in:
+    // the face `settings.json` names has to be loaded before the first grid is
+    // measured. Every other reader of the family list — the whole of the
+    // Settings dialog — goes through `settings::monospace_families`, which
+    // cannot walk anything. See `settings::monospace_family_files`.
+    let files = settings::monospace_family_files(family);
     // **Clamped here and nowhere else** (review row R4-2). This is the one place
     // a stored size crosses into the renderer, and a `0` past it is an assertion
     // inside the text layer before there is a window to report it on. See
@@ -36692,6 +36707,18 @@ impl Runtime<'_> {
             let proxy = proxy.clone();
             explorer_menu::install_wake(move || {
                 let _ = proxy.send_event(AppEvent::ExplorerPackageChanged);
+            });
+        }
+        // **And the sixth's** (GitHub issue #3), which is the only one of them
+        // that is started by a *press* rather than by startup or by a pane: the
+        // gear asks the machine for its monospaced families, and the picker is
+        // holding one row until the answer lands. Owed a wake for the PSReadLine
+        // probe's reason in its strongest form — a modal is up, so there is no
+        // output, no hover and no keystroke coming.
+        {
+            let proxy = proxy.clone();
+            settings::install_font_scan_wake(move || {
+                let _ = proxy.send_event(AppEvent::FontsScanned);
             });
         }
         explorer_menu::begin_probe();
@@ -43976,6 +44003,13 @@ impl Runtime<'_> {
         if !self.window.settings.is_open() {
             return None;
         }
+        // **The dialog's own lane** (GitHub issue #3 — see
+        // [`hang_watch::Station::Settings`]). Every road that draws, hovers or
+        // hit-tests this page comes through here, and until this slice the
+        // milliseconds it spends were charged to whichever of `window_event` and
+        // `publish_frame_inner` happened to enclose it — two true labels, neither
+        // of which named the dialog to the reader of a slow-hold line.
+        let leaving_station = hang_watch::enter(hang_watch::Station::Settings);
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let scale = self.window.renderer.metrics().scale_factor as f32;
         // Read fresh every time rather than cached: the Sidebar row appears and
@@ -44026,7 +44060,7 @@ impl Runtime<'_> {
         // it is told.
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
-        settings::layout_for_menus(
+        let laid = settings::layout_for_menus(
             width as f32,
             height as f32,
             scale,
@@ -44037,7 +44071,9 @@ impl Runtime<'_> {
             scroll,
             menu_scroll,
             &mut measure,
-        )
+        );
+        hang_watch::at(leaving_station);
+        laid
     }
 
     /// The dialog's contents this frame, for the callers that need them beside a
@@ -46580,12 +46616,20 @@ impl Runtime<'_> {
         // owes the reader: the gesture it starts — leave, drop a file on a
         // Windows page, come back — crosses exactly this call.
         //
-        // Marked before the content is read, so the very frame that opens the
-        // dialog is already measuring the new list; and marked whether the press
-        // opens or closes, because a mark costs nothing and asking which way
-        // this press went would be a second reading of `is_open` between two
-        // frames that disagree about it.
-        settings::rescan_monospace_families();
+        // **Asked for, not paid for** (GitHub issue #3). Until 2026-09-15 this
+        // was a mark, and the first reader after it walked the machine's whole
+        // font collection on this thread — and the first reader is the very next
+        // statement, because `settings_values` asks which family is ticked. That
+        // is the several seconds an outside user reported as the window freezing
+        // when the gear is clicked. The walk is now a worker's, the seed this
+        // hands it is the family in force so no picker is ever drawn blank, and
+        // the answer arrives as `AppEvent::FontsScanned`.
+        //
+        // Started whether the press opens or closes, because starting costs
+        // nothing that is not already coalesced and asking which way this press
+        // went would be a second reading of `is_open` between two frames that
+        // disagree about it.
+        settings::begin_monospace_scan(&self.app.settings_store.loaded().terminal_font_family);
         let (rows, shortcuts, profile_lines, scheme_files, values) = self.settings_content();
         self.window.settings.toggle(self.settings_dialog(
             &rows,
@@ -46843,6 +46887,33 @@ impl Runtime<'_> {
             settings::SettingsTarget::MenuItemDelete(row, index) => {
                 self.delete_scheme_at(row, index)?;
             }
+            // **The About page's three doors** (GitHub issue #3). One arm and
+            // not three, because the destination is the row's own answer — see
+            // `settings::SettingsRow::link_destination`, where a row added
+            // tomorrow says where it goes and this router does not have to be
+            // told.
+            //
+            // **Two doors and not one** (owner ruling 2026-09-15). An address
+            // goes through the hand-off every other address in this window
+            // leaves through, which is what keeps one policy about what a
+            // browser is handed. A file goes through `open_local_path`, which is
+            // this window's one door out to the machine that takes a path and
+            // the one that will not start a program: the licences row opens the
+            // copy that shipped with this build where there is one, because
+            // those are the notices this binary was actually linked against.
+            settings::SettingsTarget::Link(row) => match row.link_destination() {
+                Some(settings::LinkDestination::Address(url)) => {
+                    self.hand_url_to_the_browser(url)?;
+                }
+                // `open_local_path` reports its own failure the way the files
+                // column's rows do — a window that stopped working because a
+                // text editor would not start is a worse answer than a row that
+                // quietly did nothing.
+                Some(settings::LinkDestination::File(path)) => {
+                    self.open_local_path(path);
+                }
+                None => {}
+            },
             _ => {}
         }
         // Tab layout is the one choice that changes which rows exist, and the
@@ -47071,7 +47142,18 @@ impl Runtime<'_> {
             | Row::ProfileArgs
             | Row::ProfileEnv
             | Row::ProfileHyperlink
-            | Row::ProfileIntegration => {}
+            | Row::ProfileIntegration
+            // And the five that hold no value at all (T-SETTINGS-ABOUT). The
+            // About page has no Advanced group to be handed out of, and that is
+            // the smaller half: what its rows say — which build this is, which
+            // machine it was made for, and three addresses — is not a
+            // preference, so there is no default for `Reset to defaults` to put
+            // back. Named rather than swept into a `_`, on this arm's own rule.
+            | Row::AboutVersion
+            | Row::AboutPlatform
+            | Row::AboutReleaseNotes
+            | Row::AboutIssues
+            | Row::AboutLicences => {}
         }
         Ok(())
     }
@@ -48176,7 +48258,14 @@ impl Runtime<'_> {
             | settings::SettingsTarget::ProfileDown(_)
             | settings::SettingsTarget::MenuAction(_)
             | settings::SettingsTarget::MenuItemEdit(..)
-            | settings::SettingsTarget::MenuItemDelete(..)) => {
+            | settings::SettingsTarget::MenuItemDelete(..)
+            // The About page's three doors, on that rule exactly
+            // (T-SETTINGS-ABOUT): the pointer and `Enter` open the same address
+            // or the same file, because both arrive at
+            // `apply_settings_choice`'s `Link` arm and neither carries a body of
+            // its own. No `close_menu` beside it, unlike the run below — the
+            // page this target can be drawn on holds no picker to close.
+            | settings::SettingsTarget::Link(_)) => {
                 self.apply_settings_choice(target)?;
             }
             // A press on the dialog's own body, or inside the open menu but on
@@ -50572,8 +50661,11 @@ impl Runtime<'_> {
     /// **The dialog stays open**, unlike the two scheme verbs beside it. What
     /// this opens is another program's window, not a document of ours, and a
     /// reader who installs a face is coming straight back to this picker to
-    /// choose it. `rescan_monospace_families` runs at the next open, so the
-    /// round trip is: press, install, close, reopen, choose.
+    /// choose it. `settings::begin_monospace_scan` runs at the next open, so the
+    /// round trip is: press, install, close, reopen, choose — and since the walk
+    /// it starts is a worker's, the reopen costs nothing and the new family
+    /// appears in the list a moment later, on the frame `AppEvent::FontsScanned`
+    /// asks for.
     ///
     /// A refusal is a card and not a silence, because the reader is looking at
     /// this window and the answer arrived somewhere else: nothing appearing at
@@ -110457,6 +110549,31 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     }
                 })
             }
+            // **The one place the family list moves onto the screen.** The walk
+            // finished on a worker and left its answer in `settings`' mailbox;
+            // this is between two frames, which is the whole reason the worker
+            // was not allowed to publish it itself — `settings_layout` is called
+            // several times within one frame and every one of them has to read
+            // the same list. See `settings::adopt_scanned_families`.
+            //
+            // A walk that found the families the machine already had changes
+            // nothing and owes no frame, which is every walk but the one after
+            // somebody installs a font. Every window when it does, because the
+            // list is a fact about the machine and any of them may be showing a
+            // picker drawn from it.
+            AppEvent::FontsScanned => {
+                if settings::adopt_scanned_families() {
+                    self.for_each_window(|runtime| {
+                        if runtime.refresh_chrome() {
+                            runtime.present_chrome_change()
+                        } else {
+                            Ok(())
+                        }
+                    })
+                } else {
+                    Ok(())
+                }
+            }
             AppEvent::CopilotProbed => {
                 if let Some(app) = self.app.as_mut() {
                     app.copilot_readiness = attention_copilot::readiness();
@@ -118488,38 +118605,53 @@ mod tests {
         std::fs::remove_dir_all(&directory).ok();
     }
 
-    /// PIN (user ruling 2026-08-19) — **the font list is re-enumerated when the
-    /// key moves, and not otherwise.**
+    /// PIN (GitHub issue #3) — **opening the dialog asks the machine for
+    /// nothing.**
     ///
-    /// The picker ends in a door onto Windows' own Fonts page, so a reader is
-    /// expected to leave, install a family and come back — and the list they come
-    /// back to has to be the machine's, not the one this process cached at
-    /// launch. The other half matters just as much: a dialog that redraws on
-    /// hover must not open a font collection every frame.
+    /// An outside user reported the window freezing for seconds when the gear is
+    /// clicked. The cause was one line of this file: `settings_values` asks
+    /// `settings::family_index` which family is ticked, on the press that opens
+    /// the dialog, and the list behind it had just been marked stale by the same
+    /// press — so every open walked DirectWrite's whole system font collection on
+    /// this thread, opening a font face per family to name its files.
     ///
-    /// Red gate: make `monospace_families` a `OnceLock` again and the second
-    /// assertion goes red; enumerate on every call and the first pointer
-    /// comparison does.
+    /// What this pins is the negative, which is the only half a counter can
+    /// state and the only half that was ever in doubt: **reading the list a
+    /// frame draws performs no walk**. That covers the press, the hover, the hit
+    /// test and the draw, because all four reach the list through exactly these
+    /// two functions.
+    ///
+    /// A delta and not a total, because the counter belongs to the process and
+    /// this binary's other tests share it.
+    ///
+    /// Red gate: put the enumeration back behind `monospace_families` — the
+    /// revision-keyed `MonospaceFamilySlot::get` this replaced — and the count
+    /// moves on the first line. See `settings::MonospaceFamilySlot` for the
+    /// shape that keeps it still, and the three tests beside it for the halves a
+    /// counter cannot state.
     #[test]
-    fn the_font_list_is_re_enumerated_exactly_when_the_dialog_reopens() {
-        let first = settings::monospace_families();
+    fn opening_the_dialog_asks_the_machine_for_no_fonts() {
+        let before = settings::monospace_scans();
+        let list = settings::monospace_families();
+        // Every road the dialog takes to the list, in the order the press takes
+        // them: which row is ticked, how many rows there are, and what each one
+        // reads.
+        let ticked = settings::family_index(bt_platform::DEFAULT_MONOSPACE_FAMILY);
+        let drawn: Vec<&str> = list.iter().map(|family| family.name.as_str()).collect();
         let again = settings::monospace_families();
         assert_eq!(
-            first.as_ptr(),
+            settings::monospace_scans(),
+            before,
+            "the dialog read the family list {} times and walked no font \
+             collection to do it (ticked row {ticked}, {} families drawn)",
+            drawn.len() + 3,
+            drawn.len(),
+        );
+        assert_eq!(
+            list.as_ptr(),
             again.as_ptr(),
-            "two reads inside one dialog are one enumeration"
-        );
-        settings::rescan_monospace_families();
-        let after = settings::monospace_families();
-        assert_eq!(
-            first, after,
-            "a machine whose fonts did not change lists the same families"
-        );
-        assert_eq!(
-            first.as_ptr(),
-            after.as_ptr(),
-            "and keeps the slice it already leaked, so the rescan that finds \
-             nothing new costs nothing"
+            "and two reads are one list, so a page redrawn on hover cannot be \
+             drawn from two"
         );
     }
 

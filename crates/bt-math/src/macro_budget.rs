@@ -2,13 +2,17 @@
 //!
 //! Use its *plain* lexer so comments, escaped commands and starred names have
 //! exactly the converter's token boundaries. Accept only complete, literal
-//! command definitions. A definition may take parameters (`[n]`), on one
-//! condition that keeps the name graph honest: an argument handed to such a
-//! macro may not mention a defined macro, because a parameter is the one way
-//! to smuggle recursion past the graph (`\newcommand{\a}[1]{#1}\a{\a}`).
-//! With that door shut an argument expands no further, so its cost is its
-//! bytes times the parameter uses in the body. Custom environments and
-//! generated declarations need a different proof and are refused.
+//! command definitions. A definition may take parameters (`[n]`), but a call
+//! to a parameterised user-defined macro inside any definition body is refused,
+//! including through redefinition. Otherwise argument copies can multiply along
+//! an acyclic chain, which the additive DAG cost does not bound. Formula-level
+//! calls with literal arguments and chains of zero-parameter macros still work.
+//! An argument handed to a parameterised macro may not mention a defined macro,
+//! because it could smuggle recursion past the graph
+//! (`\newcommand{\a}[1]{#1}\a{\a}`). With both rules enforced, argument copying
+//! cannot compound through user macros: charge its source bytes times the
+//! parameter uses in the body. Custom environments and generated declarations
+//! need a different proof and are refused.
 //! Duplicate definitions contribute the union of their edges and the sum of
 //! their costs, covering every scope/redefinition order conservatively.
 //!
@@ -172,6 +176,18 @@ pub(super) fn validate(source: &str) -> Result<(), MathRenderError> {
         }
     }
 
+    // Check the complete graph: a forward declaration or any redefinition can
+    // make a referenced macro parameterised. `params` is the maximum over all
+    // definitions of that name, and `references` retains every definition body.
+    if definitions.values().any(|definition| {
+        definition
+            .references
+            .iter()
+            .any(|name| definitions.get(name).is_some_and(|child| child.params > 0))
+    }) {
+        return Err(MathRenderError::UnboundedMacro);
+    }
+
     // Iterative topological evaluation avoids a recursive validator stack.
     let mut costs = BTreeMap::<&str, usize>::new();
     while costs.len() < definitions.len() {
@@ -202,10 +218,10 @@ pub(super) fn validate(source: &str) -> Result<(), MathRenderError> {
         .filter_map(|name| costs.get(name))
         .fold(source.len(), |total, cost| total.saturating_add(*cost));
 
-    // The arguments. Every use of a parameterised macro — in the formula and
-    // inside other definitions alike — reads its `params` groups. An argument
-    // that names a defined macro is refused outright; the rest are literal
-    // text copied `uses` times, and that is what they cost.
+    // The arguments. The graph check leaves parameterised user-macro calls
+    // only in the formula, so their arguments cannot contain caller parameters
+    // substituted by another definition. An argument that names a defined macro
+    // is refused outright; charge the remaining literal text `uses` times.
     let mut at = 0;
     while at < tokens.len() {
         let token = tokens[at];
@@ -259,6 +275,82 @@ pub(super) fn validate(source: &str) -> Result<(), MathRenderError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn eight_level_parameter_amplification_is_refused() {
+        // The audit's 360-byte counter-example, including its seven newlines.
+        // Only validate it: the unfixed engine would materialise 10^8 tokens.
+        let source = concat!(
+            "\\newcommand{\\a}[1]{\\b{#1#1#1#1#1#1#1#1#1#1}}\n",
+            "\\newcommand{\\b}[1]{\\c{#1#1#1#1#1#1#1#1#1#1}}\n",
+            "\\newcommand{\\c}[1]{\\d{#1#1#1#1#1#1#1#1#1#1}}\n",
+            "\\newcommand{\\d}[1]{\\e{#1#1#1#1#1#1#1#1#1#1}}\n",
+            "\\newcommand{\\e}[1]{\\f{#1#1#1#1#1#1#1#1#1#1}}\n",
+            "\\newcommand{\\f}[1]{\\g{#1#1#1#1#1#1#1#1#1#1}}\n",
+            "\\newcommand{\\g}[1]{\\h{#1#1#1#1#1#1#1#1#1#1}}\n",
+            r"\newcommand{\h}[1]{#1#1#1#1#1#1#1#1#1#1}\a{x}",
+        );
+        assert_eq!(source.len(), 360);
+        assert_eq!(validate(source), Err(MathRenderError::UnboundedMacro));
+    }
+
+    #[test]
+    fn two_level_parameter_amplification_is_refused() {
+        let source = concat!(
+            r"\newcommand{\a}[1]{\b{#1#1#1#1#1#1#1#1#1#1}}",
+            r"\newcommand{\b}[1]{#1#1#1#1#1#1#1#1#1#1}\a{x}",
+        );
+        assert_eq!(validate(source), Err(MathRenderError::UnboundedMacro));
+    }
+
+    #[test]
+    fn body_calls_to_parameterised_macros_include_redefinitions() {
+        for source in [
+            // Literal arguments inside a definition are also refused.
+            r"\newcommand{\a}[1]{#1}\newcommand{\b}{\a{x}}\b",
+            // A call can take its argument from outside the definition body.
+            r"\newcommand{\a}{\b}\newcommand{\b}[1]{#1}\a{x}",
+            // Neither forward definitions nor unused bodies bypass the rule.
+            r"\newcommand{\a}{\b{x}}\newcommand{\b}[1]{#1}",
+            r"\newcommand{\a}{x}\renewcommand{\a}{\b{x}}\newcommand{\b}[1]{#1}\a",
+            r"\newcommand{\a}{\b{x}}\newcommand{\b}{x}\renewcommand{\b}[1]{#1}\a",
+            // Retain earlier parameter counts and edges when later ones differ.
+            r"\newcommand{\b}[1]{#1}\newcommand{\a}{\b{x}}\renewcommand{\b}{x}\a",
+            r"\newcommand{\a}{\b{x}}\renewcommand{\a}{x}\newcommand{\b}[1]{#1}\a",
+            r"\def\a{\b{x}}\newcommand{\b}[1]{#1}\a",
+            r"\newcommand{\a}{\b{x}}\providecommand{\b}[1]{#1}\a",
+            // Calls nested in ordinary braces remain definition-body edges.
+            r"\newcommand{\a}{{\mathbf{\b{x}}}}\newcommand{\b}[1]{#1}\a",
+        ] {
+            assert_eq!(
+                validate(source),
+                Err(MathRenderError::UnboundedMacro),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn legitimate_macros_still_validate_and_convert() {
+        let vectors = format!(
+            r"\newcommand{{\vec}}[1]{{\mathbf{{#1}}}}{}",
+            r"\vec{x}+".repeat(9) + r"\vec{x}"
+        );
+        for source in [
+            r"\newcommand{\R}{\mathbb{R}}\R",
+            r"\newcommand{\norm}[1]{\left\lVert#1\right\rVert}\norm{x}",
+            r"\newcommand{\a}{\b}\newcommand{\b}{\c}\newcommand{\c}{\d}\newcommand{\d}{\e}\newcommand{\e}{x}\a",
+            r"\newcommand{\f}[2]{\frac{#1}{#2}}\f{a+b}{c+d}",
+            // A parameterised formula call may still use a zero-parameter child.
+            r"\newcommand{\a}[1]{\b+#1}\newcommand{\b}{x}\a{y}",
+            r"\newcommand{\a}{\b}\newcommand{\b}{x}\renewcommand{\b}{y}\a",
+            &vectors,
+        ] {
+            assert_eq!(validate(source), Ok(()), "{source}");
+            let converted = crate::convert_math(source);
+            assert!(converted.is_ok(), "{source}: {converted:?}");
+        }
+    }
 
     #[test]
     fn macro_cycles_include_redefinitions_and_def() {
@@ -318,7 +410,6 @@ mod tests {
         for source in [
             r"\newcommand{\vect}[1]{\mathbf{#1}} \vect{v_0} \cdot \vect{w_1}",
             r"\newcommand{\f}[2]{\frac{#1}{#2}} \f{a}{b} + \f x y",
-            r"\newcommand{\a}[1]{#1}\newcommand{\b}{\a{x}}\b",
         ] {
             assert_eq!(validate(source), Ok(()), "{source}");
         }

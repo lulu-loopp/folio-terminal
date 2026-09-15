@@ -9,7 +9,7 @@
 //!      of what order the source file used.
 //!
 //! Only default-valued fixtures would miss the field-order/drop bugs this
-//! test exists to catch (`CONVENTIONS.md` §三 "默认值会掩盖 bug") — every
+//! test exists to catch (`docs/CONVENTIONS.md` §三 "默认值会掩盖 bug") — every
 //! field below carries a non-default, distinguishable value.
 
 use std::path::PathBuf;
@@ -177,7 +177,7 @@ fn messy_input_parses_clean_and_matches_canonical_struct() {
 /// so "the pool is a history, not a list of what is on screen" cannot collapse
 /// into "the pool is the panes" without this failing.
 ///
-/// Every field is non-default (`CONVENTIONS.md` §三): light theme, block cursor,
+/// Every field is non-default (`docs/CONVENTIONS.md` §三): light theme, block cursor,
 /// a vertical strip, an icon rail — a preview fixture written in defaults would
 /// pass while the reader dropped four fields on the way past.
 #[test]
@@ -289,7 +289,7 @@ fn a_preview_pane_keeps_its_pin_in_the_tree_and_its_file_in_the_content_section(
 /// not the one the reader left.
 ///
 /// **Every one of the five moved keys carries a non-default value**
-/// (`CONVENTIONS.md` §三): a maximized window at 144 DPI on the second monitor, a
+/// (`docs/CONVENTIONS.md` §三): a maximized window at 144 DPI on the second monitor, a
 /// vertical strip, an icon rail, two tabs and `active_tab: 1`. A migration that
 /// forgot any of them would otherwise land on that key's default and pass.
 ///
@@ -404,7 +404,7 @@ fn two_windows_round_trip_with_their_own_geometry_rail_and_tabs() {
 /// The bump exists for a variant that no v7 document can contain, so the honest
 /// step touches no field — and "touches no field" is exactly the claim a
 /// migration test is for. The fixture carries a non-default value in every older
-/// field (`CONVENTIONS.md` §三) and a `term` vault entry with a `previews` list,
+/// field (`docs/CONVENTIONS.md` §三) and a `term` vault entry with a `previews` list,
 /// which is the row a step that rewrote seeds would most easily damage.
 #[test]
 fn a_v7_vault_arrives_at_v8_with_nothing_but_its_version_changed() {
@@ -854,7 +854,7 @@ fn writing_the_parsed_session_produces_the_canonical_bytes_on_disk() {
 fn display_formulas_round_trips_through_the_public_settings_api() {
     // Both states, not just the non-default one: a getter that ignored the
     // stored value and always answered `true` would still pass a one-sided
-    // test (`CONVENTIONS.md` §三 "默认值会掩盖 bug").
+    // test (`docs/CONVENTIONS.md` §三 "默认值会掩盖 bug").
     for display_formulas in [false, true] {
         let dir = std::env::temp_dir().join(format!(
             "bt-persist-display-formulas-roundtrip-{}-{display_formulas}",

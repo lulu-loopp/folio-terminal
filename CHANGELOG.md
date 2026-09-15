@@ -30,6 +30,59 @@ All notable changes to Folio are recorded here. The format follows
   panes of different sizes, the marks in an unfocused pane were placed — and
   could be pressed — as though that pane were the size of the focused one.
 
+### Added
+
+- **Settings has an About page, and it says which Folio this is.** The last word
+  in the list on the left. It carries the version and the build it came from —
+  the same line `folio --version` prints and the same one at the top of every
+  diagnostic file, so a report about something going wrong can quote it — the
+  system and processor this copy was made for, and three rows that open in your
+  browser: the release notes, the place a defect is filed, and the licences of
+  everything Folio is made of. The licences row opens the copy that came with
+  this download where there is one, so what you read is what this copy was built
+  from. Nothing on the page is a setting, so nothing on it can be changed by
+  accident.
+
+### Changed
+
+- **The checksum files on the release page can be checked where you downloaded
+  them.** Both `SHA256SUMS.txt` and `SHA256SUMS-macos.txt` now name each file
+  plainly — the hash, two spaces, the file name — so putting them next to the
+  archive or the disk image and running `sha256sum -c` or `shasum -c` answers
+  `OK` without anything being edited first. The macOS file used to carry the
+  folder it was built in ahead of the name, which sent that check looking for a
+  directory nobody downloaded.
+
+- **Two files moved out of the top of the repository.** `CONVENTIONS.md` is now
+  `docs/CONVENTIONS.md`, beside the rest of the written record, and the
+  `cargo-about` configuration and template — `about.toml` and `about.hbs` — are
+  now `licenses/about.toml` and `licenses/about.hbs`, beside the licence texts
+  they assemble into `THIRD-PARTY-NOTICES.md`. Nothing about any of them changed
+  except where they are; a fork that names one by path updates the path.
+
+- **The gates that compile now all compile the same thing.** The shortcut-table
+  script and its generator asked cargo for a narrower set of crates than the test
+  gate does, and one dependency came out with one feature more under one of them
+  than the other — enough to make every crate above it, up to and including the
+  test executable, a different thing to build. So each script rebuilt what the
+  run before it had just finished building. They now ask for what the gate asks
+  for, and the feature is named outright rather than arriving by accident, so a
+  script run after a green gate has nothing left to compile.
+
+### Fixed
+
+- **Opening Settings no longer makes the window wait.** Clicking the gear used
+  to freeze the window for several seconds on a machine with a lot of fonts
+  installed, every time it was opened. Folio was asking the system for the list
+  of monospaced families — the list the `Terminal font` picker offers — and
+  waiting for the answer before it would draw anything. It now asks in the
+  background: the page opens at once, the font row shows the family you are
+  already using, and the rest of the list fills in a moment later. `Install
+  fonts…` still does what it did — leave, install a family, come back, and it
+  is there.
+
+- A formula whose macros multiply their arguments through several levels is now refused instead of exhausting memory.
+
 - **Turning a formula into its source no longer makes the window hesitate.**
   Pressing the `‹›` mark beside a typeset block — or pressing it again to put the
   picture back — used to hitch for a moment before the block changed. Changing a
@@ -38,6 +91,13 @@ All notable changes to Folio are recorded here. The format follows
   with a long history behind you, that is the pause. It now measures the lines
   that actually changed, and the rest of your scrollback is left alone. The
   formula, the mark and the block's own tools are unchanged.
+
+- **On a Mac, Folio carries its licences with it.** The application now holds
+  the MIT and Apache-2.0 licence texts, the notices for every library it is
+  built from, and the trademark notice, inside `Folio.app` — so they travel with
+  the copy you keep rather than with a disk image you throw away. The Windows
+  download has carried the same four files since the first release; the macOS
+  one, until now, carried none of them.
 
 ## 0.4.0-preview — 2026-09-14
 

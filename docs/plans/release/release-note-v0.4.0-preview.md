@@ -1,10 +1,10 @@
-> Draft for the GitHub Release body. The published text is settled by the user at release time. 草稿，发布时由用户审定。
+> The body of the GitHub Release for this version, as published.
 
 # Folio 0.4.0-preview
 
 **Download:** [zip](https://github.com/lulu-loopp/folio-terminal/releases/download/v0.4.0-preview/folio-0.4.0-windows-x64.zip) (Windows 10 1809+ / 11, 64-bit) · [dmg](https://github.com/lulu-loopp/folio-terminal/releases/download/v0.4.0-preview/Folio-0.4.0-macos-arm64.dmg) (macOS 14+, Apple silicon)
 
-**下载:**上方 zip 与 dmg 即为完整下载,其余为校验和、物料清单与源码。[中文版发布说明](https://github.com/lulu-loopp/folio-terminal/blob/main/docs/plans/release/release-note-v0.4.0-preview.zh-CN.md)
+**下载：** 上方 zip 与 dmg 即为完整下载,其余为校验和、物料清单与源码。[中文版发布说明](https://github.com/lulu-loopp/folio-terminal/blob/main/docs/plans/release/release-note-v0.4.0-preview.zh-CN.md)
 
 0.4 is the first release for two systems. Folio runs on macOS: the same program,
 built for Apple silicon, asking for macOS 14 or newer, with the panes, the files

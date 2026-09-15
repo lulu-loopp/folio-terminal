@@ -1,7 +1,7 @@
 # M-1 Task 00b —— 00 的小返工（与 spike 并行，M0 开工前合入）
 
 > 前置：commit `2bc91de` "chore: harden M-1 baseline"（Task 00）。
-> 权威：`docs/DESIGN.md` §1.2 crate 划分、**§3.1 生命周期事件表**；`CONVENTIONS.md` §0/§2/§3.2/§3.3/§5。
+> 权威：`docs/DESIGN.md` §1.2 crate 划分、**§3.1 生命周期事件表**；`docs/CONVENTIONS.md` §0/§2/§3.2/§3.3/§5。
 > 这不是推翻 00。00 的护栏是真的活了，下面第一节说明哪些不要动。
 
 ## 零、先说做对的，别动它们
@@ -26,7 +26,7 @@
 **要求**：
 - `cell_capture.rs:201` 的 flags round-trip 改为**穷尽映射表全部 12 个 flag**，且必须能让**任意单个 flag 映射错**被抓到（不是只测 `Flags::all()` 的并集——那样 DIM→HIDDEN 仍可能因并集相同而漏）。想清楚：单点错怎么才必然可见。
 - 颜色同理：29 个 `NamedColor` 变体目前只测了 2 个，改为穷尽。
-- 依据：`CONVENTIONS.md` §3.2 规则 2 "多字段的键：每个字段都必须有一个能让它单独失效的测试"——**bitflags 就是 12 个字段的键**。
+- 依据：`docs/CONVENTIONS.md` §3.2 规则 2 "多字段的键：每个字段都必须有一个能让它单独失效的测试"——**bitflags 就是 12 个字段的键**。
 - 交付时请说明：你怎么验证新测试**会红**（照 §3.3，逐个 flag 手改一遍不现实，但至少给出你实际改坏验证过的那几个）。
 
 > **这一半是任务书的锅**：00.3 只说"补 round-trip 测试"，没说"穷尽所有变体"。§3.2 规则 2 覆盖了，但要你把 bitflags 认成"多字段的键"是个跳跃。
@@ -39,7 +39,7 @@
 - 所以 `directive()` 永远返回 `Some`；而 `directive` 是**从 event 推出来的**，`session.rs:304` 的 `match (directive, event)` 配对永远自洽。
 - **结论：这张表是 enum 的同义反复。改表不改变任何行为**，只能让一个永远走不到的分支返回错误。它是一层可以整个删掉而行为不变的间接。
 - **DESIGN §3.1 有 14 行语义规则**（DECSTBM 掉出行不捕获、用户上滚只动 viewport、resize 变高不回填、变矮丢空行、soft-wrap 片段不定稿、最后一行永不冻结、ED3/配额同一删除管线……）——**`lifecycle.rs` 里一行都没有**。
-- 而它头上写着 `/// DESIGN.md §3.1 executable lifecycle table`。按 `CONVENTIONS.md` §5，**这是撒谎注释**。
+- 而它头上写着 `/// DESIGN.md §3.1 executable lifecycle table`。按 `docs/CONVENTIONS.md` §5，**这是撒谎注释**。
 
 **要求（倾向 (a)，但你可以按 §0 从规格反驳）**：
 
@@ -54,7 +54,7 @@
 
 **位置**：`adapter.rs:201`、`:205`、`:222`、`:228`
 
-- `:201` `cause == ScrollOutCause::Resize && row_is_blank(&row.cells)` → 不捕获。**这就是 §3.1"resize 变矮"那一行**（"光标下方空行被裁剪时直接丢弃"）。按 `CONVENTIONS.md` §2 的判据——"适配层只回答 alacritty 发生了什么，不回答我们要拿它怎么办"——**"这行是空的所以我们丢掉它"属于后者**。
+- `:201` `cause == ScrollOutCause::Resize && row_is_blank(&row.cells)` → 不捕获。**这就是 §3.1"resize 变矮"那一行**（"光标下方空行被裁剪时直接丢弃"）。按 `docs/CONVENTIONS.md` §2 的判据——"适配层只回答 alacritty 发生了什么，不回答我们要拿它怎么办"——**"这行是空的所以我们丢掉它"属于后者**。
 - `:205 capture()` / `:222 clear_history()` / `:228 invalidate_staging()`：适配层**直接执行**转录侧变更，而 session 的 directive 分派只管 document 侧。**同一条规格的两半住在两层**，且执行顺序是"adapter 先做完转录、session 事后补 document"。
 
 **要求**：与第二条一起做。`AdapterEvent` 携带**事实**（cause + cells），判定与转录写入都上移到 §3.1 表 / session。
@@ -79,7 +79,7 @@
 
 ## 五、【返工】00b.5 §2 的 crate 边界目前是空门
 
-`CONVENTIONS.md` §2 说"适配层不得依赖 bt-doc / bt-detect / bt-viewport，CI 可 grep 它们的 use"。但 `bt-term/Cargo.toml` 依赖这三个 crate，所以在 `adapter.rs` 里写 `use bt_doc::...` **编译照过**，而 `.github/workflows/ci.yml` 里**没有这个 job**（唯一的静态检查是 vendor 的 `cargo metadata` 守卫，不覆盖这条）。
+`docs/CONVENTIONS.md` §2 说"适配层不得依赖 bt-doc / bt-detect / bt-viewport，CI 可 grep 它们的 use"。但 `bt-term/Cargo.toml` 依赖这三个 crate，所以在 `adapter.rs` 里写 `use bt_doc::...` **编译照过**，而 `.github/workflows/ci.yml` 里**没有这个 job**（唯一的静态检查是 vendor 的 `cargo metadata` 守卫，不覆盖这条）。
 
 `docs/reviews/00-baseline.md:68` 称这些清理"由……静态依赖检查共同守护"——**这句话在 CI 里没有对应物**。
 

@@ -39,6 +39,31 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// `HEAD` moves, so it cannot go stale while the binary stays.
 pub const COMMIT: &str = env!("FOLIO_COMMIT");
 
+/// **The tag this build was released under** — `v0.4.0-preview`.
+///
+/// # Why this is not `v` and the version
+///
+/// `docs/RELEASING.md` opens with the rule: a tag is `v<version>` or
+/// `v<version>-preview`, over a manifest that carries no suffix at all. Every
+/// release this repository has published has taken the second shape —
+/// `v0.1.0-preview` over `0.1.0`, `v0.4.0-preview` over `0.4.0` — because the
+/// suffix is a **channel**, which says who a build is for, and a channel is not
+/// a second version claim. So a URL assembled from [`VERSION`] alone names a tag
+/// that has never existed, and it fails the way a wrong address always fails:
+/// silently, on somebody else's machine, months later.
+///
+/// **One literal, and it is this one.** `concat!` needs literals, so the channel
+/// is spelled here rather than composed out of a constant beside it — which is
+/// the whole point of the constant being *here*: the day the channel ends, this
+/// line is the one that changes, and
+/// [`the_release_tag_is_the_version_under_this_channel`](tests) is what goes red
+/// if the shape drifts from the rule `docs/RELEASING.md` states.
+///
+/// Its one reader is the About page's licences row, which points at this build's
+/// own `THIRD-PARTY-NOTICES.md` when it cannot find the copy that shipped beside
+/// the executable — see `settings::notices_page`.
+pub const RELEASE_TAG: &str = concat!("v", env!("CARGO_PKG_VERSION"), "-preview");
+
 /// **The one sentence.** `Folio 0.1.0 (0a1b2c3d4e)`.
 ///
 /// What `--version` answers, and the first line of all three diagnostic files.
@@ -52,7 +77,7 @@ pub fn banner() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{COMMIT, VERSION, banner};
+    use super::{COMMIT, RELEASE_TAG, VERSION, banner};
 
     /// The `VERSIONINFO` resource `build.rs` produced for this very build.
     ///
@@ -82,6 +107,42 @@ mod tests {
             .nth(1)
             .expect("the version is a quoted string")
             .to_owned()
+    }
+
+    /// PIN (T-SETTINGS-ABOUT) — **the release tag is the version under this
+    /// repository's channel**, and it is assembled from the manifest like
+    /// everything else here.
+    ///
+    /// `docs/RELEASING.md`'s opening rule is `v<version>` or
+    /// `v<version>-preview`, and every release so far has been the second. What
+    /// this holds is the pair of claims a wrong address would break: the tag is
+    /// the manifest's version with a `v` in front, and it names a channel rather
+    /// than inventing a second version number.
+    ///
+    /// Red gate: write the version into [`RELEASE_TAG`] by hand and the first
+    /// assertion goes red at the next bump — which is precisely when nobody is
+    /// looking, and is the same failure
+    /// `the_version_is_the_manifests_and_nothing_elses` exists for.
+    #[test]
+    fn the_release_tag_is_the_version_under_this_channel() {
+        assert!(
+            RELEASE_TAG.starts_with('v'),
+            "a tag of this repository begins with `v`: {RELEASE_TAG}"
+        );
+        assert!(
+            RELEASE_TAG[1..].starts_with(VERSION),
+            "{RELEASE_TAG} does not name the version this binary is, {VERSION}"
+        );
+        assert_eq!(
+            &RELEASE_TAG[1 + VERSION.len()..],
+            "-preview",
+            "what follows the version is a channel and not a second version"
+        );
+        assert_eq!(
+            RELEASE_TAG,
+            format!("v{VERSION}-preview"),
+            "the tag is assembled from the manifest, like everything else here"
+        );
     }
 
     /// PIN — **one version, in four places, from one line.**
