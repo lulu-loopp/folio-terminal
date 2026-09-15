@@ -4148,3 +4148,90 @@ mod guard_naming_tests {
         }
     }
 }
+
+/// **The one rule about the macOS door that a machine without WebKit can
+/// keep** (RA-3).
+#[cfg(test)]
+mod third_door_shape_tests {
+    /// The macOS file read as text, which is why this pin runs everywhere.
+    ///
+    /// `macos_webview.rs` and its own `#[cfg(test)]` module are
+    /// `#[cfg(target_os = "macos")]`, so a rule held only in there is a rule
+    /// nobody working on Windows can break *and see*. This one is about the
+    /// shape of the source, so it does not need the platform — the same move
+    /// `app_delegate.rs` makes over `macos_services.rs`.
+    const DOOR: &str = include_str!("macos_webview.rs");
+
+    /// RED — **`ThirdDoor::let_go` names every cell on the struct.**
+    ///
+    /// `compiling` was the field it did not name, and that omission is half of
+    /// RA-3: a `close()` during a compile left the latch set for the rest of the
+    /// process's life, and the completion that finally landed wrote `attached`
+    /// and `stands` for a page that had been let go of. A field added to the
+    /// door later is exactly as easy to forget, so the list is asked of the
+    /// source rather than remembered.
+    ///
+    /// **Named, not necessarily cleared.** `wanted` is deliberately kept — it is
+    /// what the seat last said its policy is — and it is named in a comment in
+    /// the body saying so. That is the point of the pin: a new field has to be
+    /// *decided about* in `let_go`, one way or the other.
+    ///
+    /// MUTATION: delete any one line of `let_go` and this goes red on that
+    /// field's name; add a cell to `ThirdDoor` without touching `let_go` and the
+    /// list comparison goes red first, naming it.
+    #[test]
+    fn let_go_names_every_cell_of_the_third_door() {
+        let after = |needle: &str| {
+            DOOR.split_once(needle)
+                .unwrap_or_else(|| panic!("`{needle}` is in macos_webview.rs"))
+                .1
+        };
+        let declaration = after("struct ThirdDoor {")
+            .split_once("\n}")
+            .expect("the struct's own closing brace")
+            .0;
+        let cells = declaration
+            .lines()
+            .map(str::trim)
+            .filter_map(|line| line.split_once(": "))
+            .filter(|(_, held)| held.starts_with("Cell<") || held.starts_with("RefCell<"))
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            cells,
+            [
+                "store",
+                "page",
+                "mint",
+                "owed",
+                "wanted",
+                "attached",
+                "on_the_page",
+                "parked",
+                "compiling",
+                "stands",
+                "refused",
+            ],
+            "a cell was added to, removed from or renamed on `ThirdDoor`: say what \
+             `let_go` does with it, then list it here"
+        );
+
+        let let_go = after("fn let_go(&self) {")
+            .split_once("\n    }")
+            .expect("the method's own closing brace")
+            .0;
+        for cell in cells {
+            // Written out rather than matched loosely, because `page` is a
+            // substring of `on_the_page` and a pin that a neighbour can satisfy
+            // is not a pin. Either the body touches the field, or it names it in
+            // backticks to say why it does not.
+            let touched = format!("self.{cell}.");
+            let named = format!("`{cell}`");
+            assert!(
+                let_go.contains(&touched) || let_go.contains(&named),
+                "`ThirdDoor::{cell}` is not named in `let_go` — clear it there, or \
+                 say in the body why letting go of the page leaves it standing"
+            );
+        }
+    }
+}
