@@ -1,6 +1,6 @@
 use bt_platform::HostPlatform;
 use winit::event::{ElementState, MouseButton};
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::keyboard::{Key, ModifiersState, NamedKey, PhysicalKey};
 
 // ── The routing rule, and the one sentence it is (M1-7, probe X-3 §4) ───────
 //
@@ -527,6 +527,106 @@ pub(crate) fn is_a_keystroke(state: ElementState, is_synthetic: bool) -> bool {
     state == ElementState::Pressed && !is_synthetic
 }
 
+/// **The key a program that types for you meant**, for an event that carries
+/// text and names no key at all (T-REMOTE-INPUT-PACKET).
+///
+/// # What arrives
+///
+/// Something that types *for* you does not press keys. The phone keyboard in
+/// OPPO's O+ Connect, a remote-desktop client, an accessibility tool, a
+/// password manager, `SendKeys` in a script — all of them hand the OS a Unicode
+/// code unit and ask it to deliver that. On Windows the vehicle is `SendInput`
+/// with `KEYEVENTF_UNICODE`, and what the window gets is one triple per
+/// character, measured on 2026-09-15 in a bare Win32 window:
+///
+/// ```text
+/// WM_KEYDOWN wParam=0x00E7 lParam=0x00000001   (VK_PACKET, scancode 0)
+/// WM_CHAR    wParam=0x6BD4                     ('比')
+/// WM_KEYUP   wParam=0x00E7 lParam=0xC0000001
+/// ```
+///
+/// winit delivers that press faithfully, and it delivers it **empty of a key**.
+/// Its builder pairs the `WM_CHAR` with the keydown and puts the character in
+/// `text` (`keyboard.rs` `WM_CHAR` arm: `event_info.text =
+/// PartialText::System(event_info.utf16parts.clone())`), but the two key fields
+/// have nothing to say: the scancode is zero, so `physical_key` is
+/// `Unidentified`, and `VK_PACKET` sits in the layout's non-printable table
+/// (`keyboard_layout.rs`: `VK_PACKET => Key::Unidentified(native_code)`), so
+/// `logical_key` is `Unidentified` too.
+///
+/// # Why the text was lost
+///
+/// **Every rung of this window routes a keystroke by its key.** `keyboard_bytes`
+/// matches on `Key` and falls to `None`; the search capsule, the rename editor,
+/// the preview's quick edit and the files column all match on
+/// `event.logical_key`. An `Unidentified` key is a key none of them has a verb
+/// for, so the character fell off the bottom of the ladder and the pane stayed
+/// empty — while the same phone in "PC keyboard" mode, which drives the local
+/// IME and produces ordinary keys, worked.
+///
+/// # What this says
+///
+/// **A character that arrived with no key is the key that would have produced
+/// it.** Said once, here, and applied by rewriting the event's `logical_key` at
+/// the top of the ladder (`Runtime::keyboard_input`), so that every
+/// rung below goes on reading one field and none of them learns a second way to
+/// find out what was typed. That is also what keeps the modifier policy honest:
+/// a rewritten event answers [`types_a_character`] and the `Ctrl`/`Super` guards
+/// exactly as a typed one does.
+///
+/// **A control code is not a character; it is the key behind one.** The four an
+/// injector can send have exactly one key each, and they are spelled out rather
+/// than passed through, because `Key::Character("\r")` is a value no rung
+/// answers — `keyboard_bytes`' character arm excludes control characters by
+/// construction. Alone, or not at all: a control code inside a run of text is
+/// neither a key press nor text.
+///
+/// **Asked of both key fields, not of `VK_PACKET`.** The virtual key is a
+/// Windows fact and this is a statement about events, not about one platform's
+/// injection API: any event that names no key and carries text means the text.
+/// There is no key to lose by taking this road — an event winit could identify
+/// is not one of these.
+///
+/// # What this cannot recover
+///
+/// A character outside the BMP is injected as two packets, one per UTF-16
+/// surrogate, and winit finalises each on its own: `OsString::from_wide` of a
+/// lone surrogate fails to become a `String`, so `text` is `None` on both halves
+/// and the code units are gone before any event exists. Astral characters
+/// (emoji) typed from a phone therefore still do not arrive; that loss is inside
+/// the builder and cannot be seen from here.
+#[must_use]
+pub(crate) fn injected_logical_key(
+    physical_key: PhysicalKey,
+    logical_key: &Key,
+    text: Option<&str>,
+) -> Option<Key> {
+    if !matches!(physical_key, PhysicalKey::Unidentified(_))
+        || !matches!(logical_key, Key::Unidentified(_))
+    {
+        return None;
+    }
+    let text = text?;
+    let mut rest = text.chars();
+    let first = rest.next()?;
+    if first.is_control() {
+        if rest.next().is_some() {
+            return None;
+        }
+        return match first {
+            '\r' | '\n' => Some(Key::Named(NamedKey::Enter)),
+            '\t' => Some(Key::Named(NamedKey::Tab)),
+            '\u{8}' => Some(Key::Named(NamedKey::Backspace)),
+            '\u{1b}' => Some(Key::Named(NamedKey::Escape)),
+            _ => None,
+        };
+    }
+    if rest.any(char::is_control) {
+        return None;
+    }
+    Some(Key::Character(text.into()))
+}
+
 pub(crate) fn keyboard_bytes(
     key: &Key,
     modifiers: ModifiersState,
@@ -734,6 +834,9 @@ fn sanitize_paste(text: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The three spellings a key can have when the platform could not name it,
+    // and one it could — only the tests need to build these by hand.
+    use winit::keyboard::{KeyCode, NativeKey, NativeKeyCode};
 
     const MODIFIERS: [ModifiersState; 8] = [
         ModifiersState::empty(),
@@ -747,6 +850,130 @@ mod tests {
             .union(ModifiersState::ALT)
             .union(ModifiersState::CONTROL),
     ];
+
+    // ── Text that arrived with no key (T-REMOTE-INPUT-PACKET) ──────────────
+    //
+    // `winit::event::KeyEvent` cannot be built outside winit — its
+    // `platform_specific` field is `pub(crate)`, so there is no synthetic event
+    // to hand a rung. What these hold is the decision the rung is handed, which
+    // is the whole of what this ticket added: the three fields in, the key out.
+
+    /// The two key fields exactly as winit fills them for a `VK_PACKET` press:
+    /// scancode zero, and `VK_PACKET` (0xE7) as the virtual key.
+    fn injected(text: Option<&str>) -> Option<Key> {
+        injected_logical_key(
+            PhysicalKey::Unidentified(NativeKeyCode::Windows(0)),
+            &Key::Unidentified(NativeKey::Windows(0xE7)),
+            text,
+        )
+    }
+
+    /// The ticket itself: `这` sent from a phone keyboard is the key that would
+    /// have typed `这`, and so reaches the child as its own UTF-8.
+    #[test]
+    fn an_injected_character_is_the_key_that_would_have_typed_it() {
+        let key = injected(Some("这")).expect("a character with no key is that character's key");
+        assert_eq!(key, Key::Character("这".into()));
+        assert_eq!(
+            keyboard_bytes(&key, ModifiersState::empty(), false),
+            Some("这".as_bytes().to_vec()),
+            "the encoder had no verb for the key winit reported, which is where the text was lost"
+        );
+    }
+
+    /// Several characters delivered as one press are one insert, not none: an
+    /// injector is free to hand over a whole word.
+    #[test]
+    fn injected_text_longer_than_a_character_is_still_that_text() {
+        assert_eq!(injected(Some("你好")), Some(Key::Character("你好".into())));
+        assert_eq!(
+            keyboard_bytes(
+                &Key::Character("你好".into()),
+                ModifiersState::empty(),
+                false
+            ),
+            Some("你好".as_bytes().to_vec())
+        );
+    }
+
+    /// **A key winit could name is never rewritten**, in either field. This is
+    /// what keeps the rule from touching ordinary typing at all.
+    #[test]
+    fn a_key_that_names_itself_is_left_alone() {
+        assert_eq!(
+            injected_logical_key(
+                PhysicalKey::Code(KeyCode::KeyA),
+                &Key::Unidentified(NativeKey::Windows(0xE7)),
+                Some("a"),
+            ),
+            None,
+            "a press with a physical key is a press, whatever its logical key says"
+        );
+        assert_eq!(
+            injected_logical_key(
+                PhysicalKey::Unidentified(NativeKeyCode::Windows(0)),
+                &Key::Character("a".into()),
+                Some("a"),
+            ),
+            None,
+            "and a press the ladder can already route must not be rewritten under it"
+        );
+        assert_eq!(
+            injected_logical_key(
+                PhysicalKey::Unidentified(NativeKeyCode::Windows(0)),
+                &Key::Named(NamedKey::Enter),
+                Some("\r"),
+            ),
+            None
+        );
+    }
+
+    /// An event with no key **and** no text is nothing this rule has anything to
+    /// say about — every dead key and modifier report on every platform.
+    #[test]
+    fn a_key_with_no_text_stays_unidentified() {
+        assert_eq!(injected(None), None);
+        assert_eq!(injected(Some("")), None);
+    }
+
+    /// **A control code is the key behind it, alone or not at all.**
+    /// `Key::Character("\r")` is a value no rung in this window answers —
+    /// `keyboard_bytes`' character arm excludes control characters — so an
+    /// injected newline would be swallowed by the very arm it was routed to.
+    #[test]
+    fn an_injected_control_code_is_the_key_that_produces_it() {
+        for (text, key) in [
+            ("\r", NamedKey::Enter),
+            ("\n", NamedKey::Enter),
+            ("\t", NamedKey::Tab),
+            ("\u{8}", NamedKey::Backspace),
+            ("\u{1b}", NamedKey::Escape),
+        ] {
+            assert_eq!(
+                injected(Some(text)),
+                Some(Key::Named(key)),
+                "injected {text:?} is {key:?}"
+            );
+            assert!(
+                keyboard_bytes(&Key::Named(key), ModifiersState::empty(), false).is_some(),
+                "and {key:?} is a key the encoder answers"
+            );
+        }
+        assert_eq!(
+            injected(Some("\u{7}")),
+            None,
+            "a control code with no key behind it names none"
+        );
+    }
+
+    /// A control code inside a run of text is neither a key press nor text, and
+    /// guessing which half to keep would be this window inventing keystrokes.
+    #[test]
+    fn injected_text_with_a_control_code_in_it_is_refused() {
+        for text in ["a\rb", "\r\n", "\rx", "x\n"] {
+            assert_eq!(injected(Some(text)), None, "injected {text:?}");
+        }
+    }
 
     #[test]
     fn cursor_home_end_matrix_covers_decckm_and_every_xterm_modifier() {
