@@ -5,14 +5,22 @@ Taken against `main` at `76ca0788` in the worktree
 `docs/plans/bt-app-split.md`; that document cites these tables and does not
 restate the method.
 
-**Revision 2**, after the adversarial review at
-`docs/plans/review/bt-app-split-review-2026-09-15.md`. The reviewer rebuilt the
+**Revision 3**, after two adversarial reviews.
+
+Round 1 — `docs/plans/review/bt-app-split-review-2026-09-15.md` — rebuilt the
 dependency graph independently with tree-sitter and NetworkX, re-ran the
 counting, and disagreed with this file in nine places. **Where the review's
 count differs, the review's is used and the first draft's is kept beside it with
 the reason** — a measurement that was wrong once is worth being able to
 recognise again. The largest correction is §5: the graph this file first
 published is not the graph a crate split has to obey.
+
+Round 2 — `docs/plans/review/bt-app-split-review-2-2026-09-15.md` — re-ran both
+retained scripts against revision 2 and reproduced their output, and corrected
+this file in four more places, each marked below: the theme sort's two
+percentages (§0.3), the churn number's provenance (§2.3), the classification of
+the 91 source pins (§3.1), and one subtraction (§3.2). The same rule applies:
+the corrected number is used and the wrong one is kept beside it.
 
 Nothing here was built: no `cargo build`, no `cargo check`, no `cargo test`.
 
@@ -116,11 +124,24 @@ launch & CLI              (launch|cli|seed|arrival|startup|create)
 i18n                      (i18n|lang|translat|localis|localiz)
 ```
 
-**It is a sort, not an audit.** It places 95.7% of the methods and leaves 4.3%
-(99 methods, 2,086 lines) unclassified rather than forcing them. It will misfile
+**It is a sort, not an audit.** It places **1,211 of the 1,310 methods** and
+leaves **99** unclassified rather than forcing them. *Two shares, because they
+are two quantities and revision 2 printed one of them as the other* (round 2,
+R2-12):
+
+| Share | Value |
+| --- | ---: |
+| methods classified | 1,211 / 1,310 = **92.44%** |
+| methods **un**classified | 99 / 1,310 = **7.56%** |
+| body lines unclassified | 2,086 / 48,879 = **4.27%** |
+
+Revision 2 said "95.7% placed, 4.3% unclassified", which mixed the line share
+into the method sentence; 4.3% was never the method figure. It will also misfile
 some — `apply_row_verb` sits in `unclassified` and is really a settings method.
 The theme table is a map of roughly where the mass is, accurate to a few percent
-per row, and **is not a work order for any individual function.**
+per row, and **is not a work order for any individual function.** No method
+share, however high, is a substitute for the item-level relocation manifest
+Step 2 carries.
 
 ---
 
@@ -288,17 +309,23 @@ module, not a stylistic one.
 **+34,764 lines in fifteen days.** The in-tree handoff still describes `main.rs`
 as 79,000 lines.
 
-**The churn number, corrected.** The first draft published "98 of the last 150
-commits", and it reproduces under no reading of `git log`. Four readings of the
-same window, each `-- crates/bt-app --name-only`, counting commits whose file
-list contains `crates/bt-app/src/main.rs`:
+**The churn number, corrected twice.** Revision 2 published 112 of 150 and said
+the first draft's "98 of 150" reproduces under no reading of `git log`. **That
+second half is wrong** (round 2, R2-12): 98 is what you get by enumerating the
+hashes under **default** history simplification and then running `git show
+--name-only` on each. A churn number needs three things stated — the revision
+range, the traversal, **and the file-display procedure** — because those three
+choices span 45 to 119 over one window. All five readings, each over the 150
+most recent commits touching `crates/bt-app` ending at `76ca0788`, counting
+commits whose file list contains `crates/bt-app/src/main.rs`:
 
-| Command | touches `main.rs` |
+| Reading | touches `main.rs` |
 | --- | ---: |
-| `git log -150` (default simplification; merges list no files) | 56 / 150 |
-| `git log -150 --full-history` | 45 / 150 |
-| **`git log -150 --no-merges`** | **112 / 150 (75%)** |
-| `git log -150 --first-parent` | 119 / 150 |
+| inline `git log -150 --name-only` (default simplification; merges list no files) | 56 / 150 |
+| inline `git log -150 --full-history --name-only` | 45 / 150 |
+| inline `git log -150 --first-parent --name-only` | 119 / 150 |
+| enumerate `git log -150 --format=%H` (default), then `git show --name-only` on each | **98 / 150** — the first draft's number, reproduced |
+| **enumerate `git log -150 --no-merges --format=%H`, then `git show --name-only` on each** | **112 / 150 (75%)** |
 
 **The plan quotes 112 of 150 `--no-merges`** — one developer commit, one answer.
 The exact command:
@@ -313,8 +340,11 @@ The same pass over the same 150 commits: `seats.rs` **29**, `i18n.rs` **24**,
 `preview.rs` **17**, `settings.rs` **12**.
 
 **What the number is and is not.** It is a historical frequency over merged
-work. It is **not** a probability for the branches that happen to be open on the
-day Step 2 is dispatched; that has to be looked at rather than inferred.
+work, in that window, under that traversal and that file-display procedure. It
+says nothing about lines, nothing about merges, and nothing about commits
+outside the window. It is **not** a probability for the branches that happen to
+be open on the day Step 2 is dispatched; that has to be looked at rather than
+inferred, which is what the plan's §6.5 does.
 
 ---
 
@@ -345,18 +375,35 @@ helper was already the mechanism; `source_region(` appears zero times in
 `body(signature)` helpers that `panic!("{signature} is declared in this file")`
 when the header is gone — **loud**, which is why re-pointing them is safe.
 
-The genuinely silent class is small and enumerable:
+**The classification of the 91, corrected** (round 2, R2-2). Revision 2
+published the table below as a partition, with three "genuinely silent"
+whole-crate negatives. **Two of its three cells are wrong**, and the corrected
+counts are given beside them:
 
-| Class | Count | Behaviour on a fragment |
+| Class | Revision 2 | Corrected, at this snapshot |
 | --- | ---: | --- |
-| `body(signature)` slicing helpers | ~81 | panic loudly |
-| `SOURCE.matches(..).count() == N`, `N > 0` | 7 | fail loudly |
-| **`!SOURCE.contains(…)`** | **3** — `main.rs:15772`, `:103570`, `:105705` | **pass vacuously** |
+| `body(signature)` slicing helpers | ~81 | unchanged in kind: they panic loudly with `"{signature} is declared in this file"` when the header is gone |
+| `SOURCE.matches(..).count() == N`, `N > 0` | 7 | **10** — `main.rs:14201`, `:14217`, `:103965`, `:104432`, `:104975`, `:105163`, `:105784`, `:131933`, `:151992`, `:152393`, with `N` of 1, 2 or 6. All fail loudly. |
+| whole-source negative, passes vacuously on a fragment | 3 — `:15772`, `:103570`, `:105705` | **3, but not those three.** `:15772` and `:105705` are `!SOURCE.contains(…)` over the whole file, and `:113789` is `!MAIN.contains(…)` over `const MAIN` at `:113779` — **which neither review's partition contains.** |
+| **scoped** negative, misfiled as whole-source | — | **`:103570`** is `!source.contains(fetch)` where `source = body("    fn mini_source")` at `:103555`, beside a positive assertion at `:103557`. It forbids five worker names **inside one projection method**, where they are legitimate elsewhere in the crate. |
+
+**So there is no published partition of the 91 that survives inspection**, and
+this file does not supply a new one: the counts above are a re-count at one
+snapshot, not an audit by subject. The plan's §6.2(b) says what the audit is and
+requires it to happen during implementation, with every converted guard's scope
+recorded and mutation-checked.
+
+Note also that three of the four negatives assemble their needles rather than
+writing them — `:15767` and `:113781` with `concat!`, `:105701` with a built
+escape — precisely because a file that reads itself matches its own text. Any
+assertion converted to a whole-crate scan has to keep that discipline.
 
 A multi-file pin already exists in the tree — `main.rs:165696` reads both
 `main.rs` and `preview_edit.rs` — so the `const SOURCES: &[&str]` form has
 precedent. Nine other modules pin themselves with `include_str!` of their *own*
-file, which is the pattern that survives a move.
+file, which is the pattern that survives a move. And a single `SOURCE` can serve
+several subjects bound for different files, which is why "one include
+replacement per invocation" is not a general rule.
 
 ### 3.2 The top-level items
 
@@ -376,10 +423,13 @@ The two largest are both `impl Runtime<'_>`: **L36598–61746 (25,149)** and
 Next: `impl FolioApp` (2,951) and `impl ApplicationHandler<AppEvent> for
 FolioApp` (743).
 
-**165,815 − 63,487 = 102,329.** That is what stays in `main.rs` after the two
-impl blocks move and before any module or import lines are added — the plan's
-first draft said "roughly 40,000", which is a possible post-test-move scale, not
-a post-2a one.
+**165,815 − 63,487 = 102,328.** That is what stays in `main.rs` after the two
+impl blocks move and before any module or import lines are added. Revision 2
+printed 102,329, keeping a newline-plus-one minuend from an earlier count (round
+2, R2-12); the file is 165,815 lines by `wc -l`. The plan's first draft said
+"roughly 40,000", which is a possible post-test-move scale and was never a
+post-2a one — and it is the number Step 2a's residue is measured against,
+because the plan takes 2a to be **the two impl blocks and nothing else**.
 
 The largest free functions: `new_window_runtime` (331), `main` (269),
 `drain_leaf_pty` (177).
@@ -434,7 +484,7 @@ The twenty largest methods:
 
 *Measured for the counts; the sort is §0.3's regex list.*
 
-| Theme | Methods | Lines | Share |
+| Theme | Methods | Lines | Share of the 48,879 body lines |
 | --- | ---: | ---: | ---: |
 | preview & documents | 270 | 9,033 | 18.5% |
 | input: mouse & drag | 59 | 5,064 | 10.4% |
