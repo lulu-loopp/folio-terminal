@@ -8,6 +8,14 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- **The checksum files on the release page can be checked where you downloaded
+  them.** Both `SHA256SUMS.txt` and `SHA256SUMS-macos.txt` now name each file
+  plainly — the hash, two spaces, the file name — so putting them next to the
+  archive or the disk image and running `sha256sum -c` or `shasum -c` answers
+  `OK` without anything being edited first. The macOS file used to carry the
+  folder it was built in ahead of the name, which sent that check looking for a
+  directory nobody downloaded.
+
 - **Two files moved out of the top of the repository.** `CONVENTIONS.md` is now
   `docs/CONVENTIONS.md`, beside the rest of the written record, and the
   `cargo-about` configuration and template — `about.toml` and `about.hbs` — are
@@ -34,6 +42,13 @@ All notable changes to Folio are recorded here. The format follows
   with a long history behind you, that is the pause. It now measures the lines
   that actually changed, and the rest of your scrollback is left alone. The
   formula, the mark and the block's own tools are unchanged.
+
+- **On a Mac, Folio carries its licences with it.** The application now holds
+  the MIT and Apache-2.0 licence texts, the notices for every library it is
+  built from, and the trademark notice, inside `Folio.app` — so they travel with
+  the copy you keep rather than with a disk image you throw away. The Windows
+  download has carried the same four files since the first release; the macOS
+  one, until now, carried none of them.
 
 ## 0.4.0-preview — 2026-09-14
 
