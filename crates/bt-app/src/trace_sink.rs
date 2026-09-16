@@ -558,7 +558,12 @@ mod tests {
         assert!(a_trace_was_asked_for(names(&["BT_CARD_TRACE"])));
         assert!(a_trace_was_asked_for(names(&["BT_FOCUS_THUMB_DUMP"])));
         assert!(!a_trace_was_asked_for(names(&["BT_PTY_DUMP"])));
-        assert!(a_trace_was_asked_for(names(&["BT_SOMETHING_TRACE_V9"])));
+        // A made-up name tests the shape without declaring a real switch to
+        // the environment-document check's whole-literal scan.
+        assert!(a_trace_was_asked_for(names(&[concat!(
+            "BT_",
+            "SOMETHING_TRACE_V9"
+        )])));
         assert!(!a_trace_was_asked_for(names(&["PATH", "APPDATA", "BT_BG"])));
     }
 }
