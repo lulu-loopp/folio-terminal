@@ -6,6 +6,14 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Fixed
+
+- **A wheel notch at the end of a pane no longer asks for the same frame.**
+  When the view and its contents stay put, the wheel skips the terminal frame
+  and leaves the next keystroke or pointer move less work to wait behind.
+  A scroll that moves the view still draws it, and the scrollbar still gets
+  its own frame when its thumb or fade changes.
+
 ## 0.4.1-preview — 2026-09-16
 
 ### Added
