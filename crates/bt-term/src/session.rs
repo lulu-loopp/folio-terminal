@@ -7986,6 +7986,47 @@ impl DualPlaneSession {
         })
     }
 
+    /// **[`Self::math_toggle_faces`]' two heights, without the other face's rows**
+    /// — `[the typeset face's band height, the source rows' height]`, the pair
+    /// [`MathToggleFaces::heights`] answers with.
+    ///
+    /// The same block, the same two ends and the same refusals; what it does not
+    /// do is lay the `$$…$$` rows out. §7.1.5p ⑪ iv re-reads the far end on
+    /// **every turn** of the loop, and a turn is not an animation frame — a
+    /// talkative shell has many of them inside one frame's worth of the ninety
+    /// milliseconds. Building a `Vec<String>` of the block's rows on each of
+    /// them, to read one integer off it, is the per-turn cost the owner's
+    /// stutter report of 2026-09-15 names. The rows are still asked for where
+    /// they are used: once when the change begins, and once more if a second
+    /// press turns it round.
+    #[must_use]
+    pub fn math_toggle_heights(
+        &self,
+        projection: &ViewportProjection,
+        anchor: &MathBlockAnchor,
+    ) -> Option<[i64; 2]> {
+        let MathBlockAnchor::History { start, end, .. } = anchor else {
+            return None;
+        };
+        let record = self
+            .decorations
+            .get(start)
+            .filter(|record| record.block_end == Some(*end))?;
+        let artifact = projected_frozen_artifact(
+            record,
+            self.math_band(),
+            self.math_vertical_padding_subpixels(),
+            self.cell_height_subpixels.get(),
+        )?;
+        if artifact.mode != MathMode::Display {
+            return None;
+        }
+        Some([
+            artifact.height_subpixels,
+            projection.math_source_height_subpixels(&self.document, *start, *end),
+        ])
+    }
+
     /// **Present one block at a height and a strength that are not its own**, for as long as it is
     /// changing face (`docs/DESIGN.md` §7.1.5p ⑪).
     ///

@@ -509,6 +509,14 @@ struct MathBlockGeometry {
     /// actually become visible (owner's ruling 2026-09-15 ①). An inline
     /// composite keeps no region of its own: it stands in a line of prose, and
     /// its block *is* its ink.
+    ///
+    /// **A band wearing its source face keeps no ground either, for the opposite
+    /// reason: it has no picture to keep it around.** Its region is the band its
+    /// rows stand on — column zero to the pane's right edge, top to bottom of
+    /// the rows the projection gave it — which is the same band
+    /// [`MathBandFace`] answers with and the same rows the terminal itself is
+    /// drawing (§7.1.5p ⑪ iii; owner's report 2026-09-15,
+    /// T-MATH-MARKS-IN-SOURCE-FACE).
     block: [f32; 4],
     /// **The formula's own pixels** — where the raster begins and ends.
     ///
@@ -559,6 +567,11 @@ fn math_block_geometry_px(
         // room for the two verbs drawn inside the box in that milestone; the room they need is
         // stated once now, in `math_block_ground_bounds`' right inset, and adding it here as well
         // would be a block reserving the same cells twice.
+        //
+        // **This is the ink and no longer the region** (T-MATH-MARKS-IN-SOURCE-FACE): a source
+        // face's region is the band its rows stand on, which is the pane, and only `ink` — the
+        // one field that means *the substance* rather than *the room round it* — is measured
+        // from this text. Nothing seats a mark or draws a floor from it any more.
         placement
             .source
             .lines()
@@ -613,18 +626,46 @@ fn math_block_geometry_px(
     // the whole band the projection reserved, which is the ink plus the whole cell rows of
     // breathing above and below it. An inline composite's region is its ink, so the two agree and
     // nothing about a line of prose changes.
-    let block = if math_block_is_a_band(placement) {
+    //
+    // **A source face's region is the band its rows stand on, and that band is the pane**
+    // (owner's report 2026-09-15, T-MATH-MARKS-IN-SOURCE-FACE; §7.1.5p ⑨ i read against ⑪ iii).
+    // ⑨ i's ground is room a *picture* keeps around itself, and it is measured from the picture's
+    // ink. A block wearing its `$$…$$` face has no picture: what stands on those rows is ordinary
+    // terminal text, and ⑪ iii already says so in the one other place this crate answers for a
+    // source face — [`MathBandFace::rows_left`] is column zero and `rows_right` is the pane's own
+    // right edge, "because a source row is an ordinary row of this terminal and is not confined to
+    // the ground the picture kept around itself". The two answers have to be one answer, and the
+    // one that matches the rows is the band's.
+    //
+    // Measuring it the other way is what the report is a picture of: the region was
+    // `math_block_ground_bounds` around `visible_right`, and `visible_right` for a source face is
+    // the longest line of `placement.source` — the block's **pre-wrap original grid text**, `$$`
+    // delimiters and all, which is neither the rows the pane lays out nor anything drawn. So the
+    // marks were seated against a width nobody draws while the floor under them was the band, and
+    // they stood short of the block's right edge by whatever the difference happened to be.
+    let source_face = placement.display == MathBlockDisplay::Source;
+    let block = if !math_block_is_a_band(placement) {
+        ink
+    } else if source_face {
+        [pane_left, clip_top, pane_right, clip_bottom]
+    } else {
         let (ground_left, ground_right) = math_block_ground_bounds(
             metrics,
             [visible_left, visible_right],
             [pane_left, pane_right],
         );
         [ground_left, clip_top, ground_right, clip_bottom]
-    } else {
-        ink
     };
     let (eye, copy) = if placement.toolbar_visible {
-        let (source, copy) = math_tool_boxes_px(block, visible_right, metrics.scale_factor as f32);
+        // **What the marks must not stand on.** For a picture that is the raster's right edge, and
+        // the whole of ⑨ ii's "centred in the reserve" is the room between it and the block's own
+        // edge. For a source face there is no reserve to centre in — the rows run to the pane's
+        // edge — so the band's own right edge is handed in and ⑨ ii's first degradation applies:
+        // the pair is pushed flush against the block's right edge, on its midline. That is one
+        // rule spoken about two faces, not a second placement.
+        let marks_ink_right = if source_face { block[2] } else { visible_right };
+        let (source, copy) =
+            math_tool_boxes_px(block, marks_ink_right, metrics.scale_factor as f32);
         (Some(source), Some(copy))
     } else {
         (None, None)
@@ -18780,6 +18821,94 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// The same band after a press on `‹›`: three rows of `$$…$$` where the
+    /// picture stood, lit.
+    ///
+    /// Its `source` is the untouched grid text the detector kept, and it is
+    /// deliberately far narrower than the pane — that is the width the region
+    /// used to be measured from, so it is the number the pin below must be able
+    /// to prove nothing is seated against.
+    fn seat_test_source_face(first_row: u32, rows: u32) -> MathBlockPlacement {
+        let mut placement = seat_test_band(first_row, rows, true);
+        placement.display = MathBlockDisplay::Source;
+        placement.source = "$$\n\\frac{1}{2}\n$$".to_owned();
+        placement
+    }
+
+    /// PIN (owner's report 2026-09-15, T-MATH-MARKS-IN-SOURCE-FACE; §7.1.5p ⑨
+    /// ii read against ⑪ iii): **a block wearing its source face is the band its
+    /// rows stand on, and its two marks stand inside that band at its right
+    /// edge, on its midline.**
+    ///
+    /// The report is a picture of the two disagreeing: the floor under the three
+    /// `$$…$$` rows ran the width of the pane, and the marks stood well short of
+    /// its right edge and low of its middle — seated, as the owner read it,
+    /// against the picture's own extents rather than against the rows. The cause
+    /// is one number: the region was `math_block_ground_bounds` around
+    /// `visible_right`, and `visible_right` for a source face is the longest
+    /// line of `placement.source` — the block's **pre-wrap original grid text**,
+    /// delimiters and all, which is neither a picture nor the rows the pane lays
+    /// out. This crate's other answer about a source face
+    /// ([`MathBandFace::rows_left`] / `rows_right`) had said the band was the
+    /// pane all along, and the two were never reconciled.
+    ///
+    /// MUTATIONS: hand `math_tool_boxes_px` `visible_right` again and ② and ③
+    /// fall — the marks come back to the end of a string nobody draws. Give a
+    /// source face the picture's ground and ① falls. Hang the pair from the
+    /// band's top and ④ falls.
+    #[test]
+    fn a_source_faces_marks_stand_in_the_rows_own_band_at_its_right_edge() {
+        let metrics = fade_metrics();
+        let seat = seat_test_seat();
+        let mut frame = wash_frame(30, 8);
+        let placement = seat_test_source_face(1, 3);
+        let anchor = placement.anchor.clone();
+        frame.math_blocks = vec![placement];
+        let geometry = math_block_geometry_px(metrics, seat, &frame, &frame.math_blocks[0])
+            .expect("a source face on screen has a box");
+        let boxes = seat_test_boxes(&frame, &anchor).expect("a lit source face has its marks");
+
+        // ① The region is the rows' own band: column zero to the pane's right
+        //    edge, and the whole of the rows the projection gave it. The same
+        //    band `math_band_face` answers with, and the same rectangle the
+        //    ground is drawn under.
+        let pane_right = metrics.padding_px + 30.0 * metrics.cell_width_px;
+        assert_eq!(geometry.block, [metrics.padding_px, 28.0, pane_right, 88.0]);
+        assert_eq!(boxes.block, geometry.block);
+        assert!(
+            math_block_ground_is_drawn(&frame.math_blocks[0], false),
+            "a source face draws its floor under exactly that band"
+        );
+
+        // ② And it is *not* the source string's own width: the marks stand well
+        //    right of where that text stops, which is where they used to stand.
+        assert!(
+            geometry.ink[2] < geometry.block[2],
+            "the fixture must make the two answers different: ink={:?} block={:?}",
+            geometry.ink,
+            geometry.block
+        );
+        assert!(
+            boxes.source[0] > geometry.ink[2],
+            "{:?} is seated against the source text rather than against the band",
+            boxes.source
+        );
+
+        // ③ Flush with the band's right edge — ⑨ ii's first degradation, which
+        //    is the whole of the answer here: rows that run to the pane's edge
+        //    leave no reserve to be centred in.
+        assert_eq!(boxes.copy[2], geometry.block[2]);
+        assert_eq!(boxes.copy[0] - boxes.source[2], MATH_TOOL_GAP_LOGICAL_PX);
+
+        // ④ On the band's midline, and inside it top and bottom.
+        let midline = (geometry.block[1] + geometry.block[3]) / 2.0;
+        for mark in [boxes.source, boxes.copy] {
+            assert_eq!((mark[1] + mark[3]) / 2.0, midline, "{mark:?} left the midline");
+            assert!(mark[1] >= geometry.block[1] && mark[3] <= geometry.block[3]);
+            assert_eq!(mark[3] - mark[1], MATH_TOOL_BUTTON_LOGICAL_PX);
         }
     }
 

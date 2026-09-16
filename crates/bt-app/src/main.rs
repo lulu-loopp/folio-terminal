@@ -64761,6 +64761,13 @@ impl Runtime<'_> {
         // and the reading costs one `u64` load when it is not.
         let trace_perf = self.app.trace_perf;
         let measurements_before = self.shell().projection.line_text_measurements();
+        // **Which road the projection took**, beside how many lines it measured
+        // (T-MATH-MARKS-IN-SOURCE-FACE). A frame of a change of face measures no
+        // lines at all either way — the cache answers for every one of them — so
+        // `lines_measured` alone cannot tell a band moved where it stands from a
+        // band that made the whole document be pushed through two trees again.
+        let rebuilds_before = self.shell().projection.rebuilds();
+        let bands_moved_before = self.shell().projection.bands_moved();
         let mut terminal_frame = {
             // Bound once, to the focused leaf: `session` and `projection` are
             // two fields of one shell, and reaching each through its own deref
@@ -64771,13 +64778,15 @@ impl Runtime<'_> {
             leaf.session.refresh_projection(&mut leaf.projection);
             if let Some(started_at) = projection_started_at {
                 eprintln!(
-                    "BT_PERF_TRACE projection source={:?} refresh_us={} lines_measured={} projected_lines={}",
+                    "BT_PERF_TRACE projection source={:?} refresh_us={} lines_measured={} projected_lines={} rebuilt={} band_moved={}",
                     trigger.source,
                     started_at.elapsed().as_micros(),
                     leaf.projection
                         .line_text_measurements()
                         .saturating_sub(measurements_before),
                     leaf.projection.projected_line_count(),
+                    leaf.projection.rebuilds().saturating_sub(rebuilds_before),
+                    leaf.projection.bands_moved().saturating_sub(bands_moved_before),
                 );
             }
             let frame = leaf
@@ -85487,6 +85496,23 @@ impl Runtime<'_> {
         })
     }
 
+    /// **[`Self::math_toggle_faces`] without the other face's rows** — the pane
+    /// and the two heights, and nothing laid out.
+    ///
+    /// The advancer's door, and the reason it is a second one: §7.1.5p ⑪ iv
+    /// re-reads the far end on every turn, and a turn is not a frame. Building
+    /// the `$$…$$` rows there to read one integer off them is the per-turn cost
+    /// the owner's stutter report of 2026-09-15 names
+    /// (`bt_term::DualPlaneSession::math_toggle_heights`). The rows belong to
+    /// the press, which asks for them once.
+    fn math_toggle_heights(&self, anchor: &MathBlockAnchor) -> Option<(SeatId, [i64; 2])> {
+        self.sessions.iter().find_map(|(seat, leaf)| {
+            leaf.session
+                .math_toggle_heights(&leaf.projection, anchor)
+                .map(|heights| (*seat, heights))
+        })
+    }
+
     /// **The `‹›` mark was pressed** — see [`formula_tools::FormulaToggleMotion`] for what the
     /// ninety milliseconds after it are made of.
     fn press_math_toggle(&mut self, anchor: &MathBlockAnchor) -> Result<()> {
@@ -85616,8 +85642,11 @@ impl Runtime<'_> {
         let Some(flight) = self.window.math_toggle.take() else {
             return Ok(());
         };
+        // The heights and not the faces: all this door wants is *which pane still answers for the
+        // block*, and it is the last thing that runs before the change lands (T-MATH-MARKS-IN-
+        // SOURCE-FACE).
         let Some(seat) = self
-            .math_toggle_faces(flight.anchor())
+            .math_toggle_heights(flight.anchor())
             .map(|(seat, _)| seat)
         else {
             // No session in this tab can answer for the block any more — it was rewritten, or the
@@ -85662,6 +85691,14 @@ impl Runtime<'_> {
     /// journey is travelling *to*, and a journey that lands somewhere the block does not stand is
     /// the jump this clause exists to remove. Asking is one measurement of one block's own lines,
     /// and only while something is in flight.
+    ///
+    /// **And it asks for the heights, not for the faces** (owner's report 2026-09-15,
+    /// T-MATH-MARKS-IN-SOURCE-FACE). A turn is not a frame: the loop passes here on every wake-up
+    /// a talkative shell causes, and `math_toggle_faces` lays the block's `$$…$$` rows out — one
+    /// `layout_frozen_line` per line, every cluster materialized, a `String` per row — to have
+    /// `heights()` read one integer pair off it and drop the rest. [`Self::math_toggle_heights`]
+    /// is that pair, counted rather than laid out. The rows are the press's business and the
+    /// press asks for them once.
     fn advance_math_toggle_if_due(&mut self, now: Instant) -> Result<()> {
         let motion = self.app.motion;
         let Some((anchor, landed)) = self
@@ -85672,14 +85709,14 @@ impl Runtime<'_> {
         else {
             return Ok(());
         };
-        let Some((seat, faces)) = self.math_toggle_faces(&anchor) else {
+        let Some((seat, heights)) = self.math_toggle_heights(&anchor) else {
             return self.settle_math_toggle();
         };
         let still_measures = self
             .window
             .math_toggle
             .as_ref()
-            .is_some_and(|flight| flight.still_measures(faces.heights()));
+            .is_some_and(|flight| flight.still_measures(heights));
         if landed || !still_measures {
             return self.settle_math_toggle();
         }
@@ -104163,8 +104200,18 @@ mod formula_tool_seat_tests {
             .concat(),
         );
         assert!(
-            advancer.contains("still_measures(faces.heights())"),
+            advancer.contains("still_measures(heights)"),
             "a pane that re-wrapped mid-flight moves the height the journey lands on:\n{advancer}"
+        );
+        // **And it re-reads them without laying the other face out** (T-MATH-MARKS-IN-SOURCE-FACE).
+        // A turn is not a frame; `math_toggle_faces` builds a `String` per row of the block to have
+        // one integer pair read off it, and this door runs on every pass of the loop while a change
+        // is in flight. MUTATION: put `math_toggle_faces` back here and the tween pays a full
+        // `layout_frozen_line` of every line of the block per wake-up.
+        assert!(
+            advancer.contains("self.math_toggle_heights(&anchor)")
+                && !advancer.contains("math_toggle_faces"),
+            "the advancer re-measures the other face's rows on every turn:\n{advancer}"
         );
 
         // Stillness and the live plane take the one-frame switch, in the press's own door.
@@ -104196,6 +104243,58 @@ mod formula_tool_seat_tests {
         assert!(
             lane.contains("leaf.last_presented_frame.as_ref()"),
             "and it is the picture the pane has actually shown, as every band reader here is"
+        );
+    }
+
+    /// RED GATE — **the other face's rows are measured once per change, not once per frame**
+    /// (owner's report 2026-09-15, T-MATH-MARKS-IN-SOURCE-FACE; §7.1.5p ⑪ ii and iii).
+    ///
+    /// ⑪ ii settles the whole clause on one answer, `ViewportProjection::math_source_face`, and
+    /// ⑪ iii draws the overlay from it. What the report is about is *how often it is asked*. This
+    /// lane runs on every rebuild of the window's chrome for the whole of the ninety
+    /// milliseconds, and the only honest place for a `layout_frozen_line` of the block's every
+    /// line is the press — so the rows it draws must come off the flight, which was handed them
+    /// when the change began (`FormulaToggleMotion::begin`) or turned round
+    /// (`FormulaToggleMotion::reverse`), and never off the projection again.
+    ///
+    /// The other half is the fade: it is the **layer's** and not a label's, so a frame of the
+    /// change moves an opacity rather than restriking anything (⑪ iii, ② and ⑦ iii's own
+    /// arrangement) — and the rows the band has not grown far enough to show are dropped before
+    /// they are shaped, so what the chrome text path is handed grows with the band rather than
+    /// being the whole block from the first frame.
+    ///
+    /// MUTATIONS: ask the session for the source face here — `math_source_face`, or
+    /// `math_toggle_faces` around it — and every frame of the change lays the block's rows out
+    /// again for a `Vec<String>` it already has. Put the fade on the labels and the layer's one
+    /// number becomes one per row.
+    #[test]
+    fn the_other_faces_rows_are_measured_once_per_change_and_not_once_per_frame() {
+        let lane = body(&["    fn formula_toggle", "_layers(&self, now: Instant)"].concat());
+        assert!(
+            lane.contains("flight.source_rows()"),
+            "the overlay draws the rows the flight was handed when it began:\n{lane}"
+        );
+        assert!(
+            !lane.contains("math_source_face") && !lane.contains("math_toggle_faces"),
+            "a frame of the change re-measures the other face:\n{lane}"
+        );
+        assert_eq!(
+            lane.matches("source_opacity(").count(),
+            1,
+            "the fade is read once for the whole layer:\n{lane}"
+        );
+        assert!(
+            lane.contains("            opacity,"),
+            "and it is the layer's own number, not a label's:\n{lane}"
+        );
+
+        // And the rows are laid out in exactly the two places a change acquires them: setting out,
+        // and turning round.
+        let press = body(&["    fn press_math", "_toggle(&mut self, anchor"].concat());
+        assert_eq!(
+            press.matches("faces.source.rows").count(),
+            2,
+            "the press is the one place the block's rows are laid out:\n{press}"
         );
     }
 }
