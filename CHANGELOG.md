@@ -20,6 +20,16 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **On a Mac, Shift+wheel now scrolls the rows a formula pushed out of view.**
+  A typeset formula is taller than the line it was typed on, so it lifts the
+  rows above it off the top of the pane; the chip under a full-screen program
+  counts them and offers Shift+wheel to go back and read them. On a Mac that
+  gesture did nothing at all. macOS turns Shift plus a wheel into a sideways
+  scroll before Folio is shown it, so the notch arrived pointing along a line
+  instead of up a document, and a pane asked to move up by nothing moved by
+  nothing. Folio now reads it as the turn your hand made. Shift+wheel over a
+  line longer than the pane still scrolls sideways, and on a Mac it now goes
+  the way it has always gone on Windows rather than the opposite way.
 - **On a Mac, a second Folio started from a terminal now hands over instead of
   becoming a second writer.** Which Folio is allowed to write your settings and
   your saved session was decided in a directory whose location came from
