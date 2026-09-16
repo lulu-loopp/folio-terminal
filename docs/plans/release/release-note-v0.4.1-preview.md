@@ -14,9 +14,10 @@
 - Text that arrives with no keystroke behind it — from a phone keyboard, from
   dictation, from a program that types on your behalf — now lands wherever you
   are typing.
-- Settings opens the moment you click the gear, however many fonts are
-  installed, and a new About page says which Folio this is and where to read the
-  notes, report a defect or read the licences.
+- Typing stays responsive while a pane prints a lot, searching while it prints
+  no longer pauses, and Settings opens the moment you click the gear, however
+  many fonts are installed. A new About page says which Folio this is and where
+  to read the notes, report a defect or read the licences.
 - A typeset formula now stands in a block with room around it, and turning it
   between the picture and its source grows or shrinks into place instead of
   jumping.
@@ -53,6 +54,12 @@
 
 ### Fixed
 
+- **Typing stays responsive while a pane prints a lot.** A build log or a long
+  answer scrolling past no longer holds the window for seconds at a time.
+- **With the search box open, typing while a pane is printing no longer pauses**
+  while the whole history is searched again.
+- **On a Mac, a covered or hidden window no longer keeps drawing at full speed**,
+  and the pictures it prepared while hidden no longer pile up on the GPU.
 - **Text sent from a phone keyboard, or by a program that types for you, now
   reaches the terminal**, and lands wherever you are typing.
 - **Opening Settings no longer freezes the window** on a machine with a lot of
