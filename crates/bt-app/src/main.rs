@@ -114,6 +114,7 @@ mod seed;
 mod settings;
 mod settling;
 mod shell_integration;
+mod shell_literal;
 mod shortcuts;
 /// Reading this crate's own source — for the pins that are about what the code
 /// says rather than about what it does. Test-only, so it is not compiled into
@@ -169,7 +170,7 @@ use bt_term::{
     TerminalPalette, normalized_local_image_path_key, render_detection_task,
     render_live_detection_task,
 };
-use bt_transcript::{DEFAULT_STAGING_QUOTA, SourceGeneration, TranscriptId};
+use bt_transcript::DEFAULT_STAGING_QUOTA;
 use bt_viewport::{
     HyperlinkHit, MathBlockAnchor, ViewSelection, ViewportFrame, ViewportProjection,
     horizontal::ContentColumn,
@@ -8837,32 +8838,6 @@ impl ChevronGates {
     }
 }
 
-/// The exact characters an `Insert path into terminal` press puts in the input
-/// line (K144).
-///
-/// Three rules, all the mock-up's (8078-8079):
-///
-/// * **A path with a space in it is quoted.** The string is about to be read by
-///   a shell, and to a shell a space is where one word ends. Quoted with `"`
-///   rather than `'` because this window's shells are Windows shells, where `'`
-///   is a literal character to `cmd` and a *different* kind of quote to
-///   PowerShell — and because a Windows path cannot itself contain a `"`, the
-///   character is illegal in a file name, so there is nothing to escape.
-/// * **A space in front**, unless there is already one there. Otherwise the path
-///   is welded onto whatever the user had typed, and `cat` becomes `catC:\…`.
-/// * **A space after**, always. The overwhelmingly common next thing is another
-///   argument, and the one case it is not — pressing Enter — does not care.
-fn inserted_path_text(path: &Path, needs_leading_space: bool) -> String {
-    let path = path.to_string_lossy();
-    let quoted = if path.chars().any(char::is_whitespace) {
-        format!("\"{path}\"")
-    } else {
-        path.into_owned()
-    };
-    let lead = if needs_leading_space { " " } else { "" };
-    format!("{lead}{quoted} ")
-}
-
 /// Whether the cell in front of the cursor is something the path would be
 /// welded onto.
 ///
@@ -10329,6 +10304,8 @@ struct LeafSession {
     /// a Git Bash pane out of a PowerShell tab produced a tab that said
     /// PowerShell over a running bash.
     profile: usize,
+    /// Captured at spawn: profile edits cannot change an already running shell’s paste grammar.
+    paste_recipient: shell_literal::Recipient,
     /// **Which shell integration door this pane's shell was started behind.**
     ///
     /// Beside [`Self::profile`] rather than read back off the table through it,
@@ -12605,6 +12582,22 @@ struct WindowRuntime {
     /// extended by the evening's report to every picture in which the band's
     /// geometry differs from the one they were placed from.
     math_tools: Option<formula_tools::FormulaToolFollow>,
+    /// **The block that is changing face, while it is changing** (owner's ruling
+    /// 2026-09-15, T-MATH-TOGGLE-MOTION; §7.1.5p ⑪).
+    ///
+    /// A press on `‹›` used to be one frame; it is now a ninety-millisecond
+    /// journey of a band's presented height and a cross-fade between the picture
+    /// and the rows of `$$…$$` underneath it, and this is the whole of what the
+    /// window remembers about it. The *document* remembers nothing extra: the
+    /// block stays one entry with an artifact height for the length of the
+    /// flight, and `DualPlaneSession::toggle_math_source` is told once, at the
+    /// end the direction puts it at — see
+    /// [`formula_tools::FormulaToggleMotion`].
+    ///
+    /// One field and not one per pane because there is one hand: a block changes
+    /// face because somebody pressed its mark, and a second press anywhere lands
+    /// the first change before it begins its own.
+    math_toggle: Option<formula_tools::FormulaToggleMotion>,
     /// **The mark a button is being held down on**, with the band it belongs to.
     ///
     /// The band is carried because a press latches `MouseRoute::MathBlock` and
@@ -19625,37 +19618,36 @@ enum FlashBand {
     Pane,
 }
 
-/// What a search scan was of, so the next one can skip the half that has not moved.
+/// What a search scan was of, so the next one can skip everything that has not moved.
 ///
 /// # The incremental rule, and why it is drawn here rather than inside the engine
 ///
-/// A hundred thousand frozen lines take about twelve milliseconds to scan (S1-data measured it),
-/// and the ticket's own instruction is that a keystroke's result must be on the *next* frame — no
-/// debounce, no timer. Both are affordable at once because the two things that change do not change
-/// together: **history grows at the bottom and is otherwise immutable**, while the live grid and
-/// the staged rows change with every character the shell echoes and are fifty rows between them.
+/// A keystroke's result must be on the *next* frame — no debounce, no timer — while the frozen
+/// plane may hold a hundred thousand lines. Both are affordable at once because the three planes do
+/// not change together: **history only grows at the bottom and loses lines off the top**, while the
+/// live grid and the staged rows change with every character the shell echoes and are fifty rows
+/// between them.
 ///
-/// So the scan is split by plane. History is re-scanned only when [`Self::history`] moves — which
-/// it does when a line freezes, when a line is evicted, or when ED3 empties the whole thing — and
-/// the two volatile planes are re-scanned every time the search is asked, because doing so costs
-/// microseconds. What makes that *correct* rather than merely fast is that the frozen plane is
-/// append-and-evict-only: no line already in it can change its text without the transcript's own
-/// generation moving, which is one of the four numbers below.
+/// So the scan is split by plane, and the history half is split again by *how much of it moved*.
+/// The two volatile planes are re-scanned every time the search is asked, because fifty rows cost
+/// microseconds. History is carried forward through [`search::scan_history_after`]: a line
+/// freezing costs that one line, an eviction costs dropping its hits, and only a changed question —
+/// a pattern, a toggle, another pane — is worth reading the plane again.
+///
+/// **That is the whole of this ticket.** Under the old key — length, both end ids and the store's
+/// generation — every one of those was equally invalidating, so a shell printing while the capsule
+/// was open re-ran the pattern over the entire history on the next frame, once per line printed.
+/// Typing into a busy pane is exactly the case where those two coincide, and the hold logger billed
+/// it to the scan.
 #[derive(Clone, Debug, PartialEq)]
 struct SearchScanCache {
     seat: SeatId,
     /// [`WindowRuntime::search_revision`] — what was typed and how it was switched.
     revision: u64,
-    /// The frozen plane's identity: how many lines, which ones the ends are, and the generation
-    /// their text belongs to. Any edit history can undergo moves at least one of the four.
-    history: (
-        usize,
-        Option<TranscriptId>,
-        Option<TranscriptId>,
-        SourceGeneration,
-    ),
-    /// The hits history held at that identity, kept so a volatile-only rescan can re-use them.
-    history_hits: Vec<search::Hit>,
+    /// The frozen plane's hits and the window of line ids they were found over — what the next
+    /// scan starts from instead of starting again. The window is also what says whether history
+    /// moved at all, which is half of the "nothing happened" test below.
+    history: search::HistoryScan,
     /// The hits the two volatile planes held, kept so a rescan that found the same ones can decide
     /// that nothing happened and leave the current match — and the highlight buffers — alone.
     volatile_hits: Vec<search::Hit>,
@@ -34201,6 +34193,7 @@ fn create_leaf_session(
         wake: pty.is_some().then_some(wake),
         pty,
         profile,
+        paste_recipient: profiles::paste_recipient(profile, &bt_pty::SystemShellEnvironment),
         // The door of the profile this pane actually came up as, read once,
         // here, where that profile is finally known — after both fallbacks. See
         // the field for why it is not read again later.
@@ -35466,6 +35459,70 @@ fn absorb_tab_into_layout(
     ejected
 }
 
+/// **How long one turn may spend reading shells before it hands the window
+/// back** (T-DRAIN-BURST).
+///
+/// The defect this is the repair for: a turn was bounded in *bytes* — one
+/// [`bt_pty::TERM_READ_QUANTUM`] per pane — and in nothing else. The owner's
+/// `diagnostics.log` for the night of 2026-09-15 carries a run of window-thread
+/// holds charged almost entirely to this one station: `4386 ms — drain_pty
+/// 4386`, `2791 — drain_pty 2787`, `1862 — drain_pty 1858`, `3112 — drain_pty
+/// 2213, advance_web_page 895`, and many between 600 and 1000 ms, all of them
+/// with the 0.4.1 page-fault column reading near zero beside them. Nothing was
+/// paging; the thread was parsing. What the reader feels is that typed
+/// characters do not appear for seconds while a pane prints a build log.
+///
+/// **A number of bytes cannot bound a length of time here**, because what a
+/// quantum of output costs is not what its bytes cost. A quarter megabyte of a
+/// build log is some three thousand logical lines, and every line that leaves
+/// the top of the screen is frozen into the transcript, given a decoration
+/// record, put to the math and table arming prefilters, scanned for image and
+/// link references and offered to the detection scheduler. That is the work the
+/// holds above are made of, and it scales with lines, not with the read.
+///
+/// So the turn is given a clock as well. **Eight milliseconds — half of a 60 Hz
+/// frame** — because the other half is the frame this same turn publishes
+/// ([`Runtime::publish_pty_drain_frame`], at the tail of the drain) plus the
+/// platform round trip. A turn that keeps to both halves answers a keypress in
+/// the frame after the one it arrived in; the budget is the whole of what makes
+/// the first half true.
+///
+/// It is a floor for a turn's usefulness, not a ceiling on throughput: a turn
+/// takes as many slices as fit, so on content that parses quickly a turn still
+/// carries its whole quantum, and only content that is genuinely expensive per
+/// byte gets cut short — which is exactly the content the reader was waiting
+/// through.
+const DRAIN_TURN_BUDGET: Duration = Duration::from_millis(8);
+
+/// **How many slices a turn may take from one pane before the quantum is
+/// spent** (T-DRAIN-BURST).
+///
+/// Derived rather than written down, because the two figures it stands between
+/// are the ones with meanings: `DESIGN.md` §1.3's quantum is still exactly what
+/// one turn may carry out of one pane, and [`bt_pty::TERM_READ_SLICE`] is how
+/// finely the turn is allowed to look at the clock while carrying it. This is
+/// their quotient and must not become a third independent number.
+const DRAIN_SLICES_PER_TURN: usize =
+    bt_pty::TERM_READ_QUANTUM.get() / bt_pty::TERM_READ_SLICE.get();
+
+/// **May the drain go round again?** — the whole of T-DRAIN-BURST's decision, in
+/// one function so that it can be put to a test without a window.
+///
+/// `slices_taken` counts passes over every pane, not reads of one pane: the
+/// panes are drained round-robin so that a quiet pane's few hundred bytes are
+/// not stuck behind a noisy sibling's quarter megabyte, and a pass is therefore
+/// the unit both halves of this budget are spent in.
+///
+/// Both bounds are "whichever comes first", and each is there for a case the
+/// other does not cover. The clock is the one that matters while a pane prints;
+/// the slice count is what keeps a turn from carrying more than §1.3 says it
+/// may when the output is cheap enough that the clock never runs out —
+/// megabytes of blank lines would otherwise be drained in a single turn, and a
+/// turn that long is the defect however fast it parsed.
+fn drain_may_take_another_slice(slices_taken: usize, elapsed: Duration) -> bool {
+    slices_taken < DRAIN_SLICES_PER_TURN && elapsed < DRAIN_TURN_BUDGET
+}
+
 /// What one drain turned up, beyond the bytes.
 ///
 /// Separate answers rather than a `bool` tuple because they drive different
@@ -35480,10 +35537,12 @@ struct DrainOutcome {
     /// **A pane's ring still held bytes when its turn was over.**
     ///
     /// The turn is bounded — [`drain_leaf_pty`] takes one
-    /// [`bt_pty::TERM_READ_QUANTUM`] out of a pane and goes back to the message
-    /// pump — so the loop has to be told that there is more, or a shell printing
-    /// faster than the window drains would sit in a full ring with nobody coming
-    /// back for it. [`PtyWakeSignal::raise`] is what this becomes, and the reason
+    /// [`bt_pty::TERM_READ_SLICE`] out of a pane and returns, and
+    /// [`Runtime::drain_pty`] stops going round at [`DRAIN_TURN_BUDGET`] or
+    /// [`DRAIN_SLICES_PER_TURN`], whichever comes first — so the loop has to be
+    /// told that there is more, or a shell printing faster than the window
+    /// drains would sit in a full ring with nobody coming back for it.
+    /// [`PtyWakeSignal::raise`] is what this becomes, and the reason
     /// it cannot simply be left to the reader thread is that a thread blocked in
     /// `bt_pty::OutputRing::push` is a thread that will not raise anything: it is
     /// waiting for the very drain it would be asking for.
@@ -35602,10 +35661,10 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
     // and only for a pane that asked to hear about it (DEC 2031).
     leaf.session.set_color_palette(terminal_palette_in_force());
     let mut changed = false;
-    // **One quantum, and then back to the message pump.**
+    // **One slice, and then back to the caller that is holding the clock.**
     //
     // This was `loop { read; if empty { break } ; feed }`, and the exit it named
-    // is one a busy pane never reaches. `read_output` is
+    // is one a busy pane never reaches. The read is
     // [`bt_pty::OutputRing::try_pop`] over a one-MiB ring that a *reader thread*
     // refills while this runs, so "the ring is empty" is a question about one
     // instant, and while the child prints at least as fast as `feed_at` absorbs
@@ -35631,13 +35690,50 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
     // the wake. A pane that outruns the window is throttled by the ring and the
     // pipe behind it, which is what backpressure is for and what the ring was
     // built to do.
+    //
+    // **What T-DRAIN-BURST changed is the size of the ask, and nothing else in
+    // this function.** A quantum bounds a turn in *bytes*, and the owner's
+    // diagnostics log says what that is worth: holds of 4386, 2791, 1862 and
+    // 3112 ms charged to `drain_pty`, page faults near zero beside them, while
+    // a pane printed a build log. A number of bytes is not a length of time,
+    // because the time a quantum costs is the time its *lines* cost — see
+    // [`DRAIN_TURN_BUDGET`] for the account. So the read is a
+    // [`bt_pty::TERM_READ_SLICE`] now, and the quantum is spent a slice at a
+    // time by [`Runtime::drain_pty`], which looks at the clock in between. One
+    // read per call is unchanged and load-bearing: the caller cannot stop a call
+    // it is already inside, so the loop that repeats this one lives up there,
+    // where the deadline is.
     let bytes = leaf
         .pty
         .as_ref()
         .expect("PTY mode checked above")
-        .read_output();
+        .read_output_slice();
     if !bytes.is_empty() {
-        debug_assert!(bytes.len() <= bt_pty::TERM_READ_QUANTUM.get());
+        debug_assert!(bytes.len() <= bt_pty::TERM_READ_SLICE.get());
+        // **One thing a smaller read touches that is not in this crate, written
+        // down here because silence is how it gets lost.**
+        // `DualPlaneSession::feed_at` opens a repaint-preservation window when
+        // the bytes it is given carry a clear+home, an erase storm or a DEC 2026
+        // BSU, and closes it at the end of the same call unless a synchronized
+        // update is still open. That window is therefore scoped to *one read*,
+        // and always was: a reprint longer than the read splits across two, and
+        // the second half repaints with no window standing. A smaller read makes
+        // that split likelier — 8 KiB rather than 256 KiB of head room — so what
+        // used to be a quantum-boundary rarity is now an 8 KiB-boundary one.
+        //
+        // What it does **not** do is put a half-repainted picture on the glass:
+        // no frame is published between the slices of a turn
+        // ([`Runtime::drain_pty`] publishes once, at its tail), and records the
+        // reprojection cannot place are held off-band and re-anchored by exact
+        // source equality on the next slice. What is left is a record whose rows
+        // are rewritten in the slice *after* the window closed: it goes to source
+        // until re-detection.
+        //
+        // The repair is to scope that window to the turn rather than to the read
+        // — `feed_at` deferring its two `finish_*_repaint` calls to an explicit
+        // end-of-turn settle — and it belongs in `bt-term` beside
+        // `repaint_flash_oracle`, which is the gate that can prove it. T-DRAIN-BURST
+        // deliberately does not reach into that contract.
         leaf.session
             .feed_at(&bytes, Instant::now())
             .context("apply PTY output")?;
@@ -36257,6 +36353,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         math_hover_anchor: None,
         math_hover_clear_at: None,
         math_tools: None,
+        math_toggle: None,
         math_tool_pressed: None,
         math_copied: None,
         pending_math_context_anchor: None,
@@ -39305,6 +39402,20 @@ impl Runtime<'_> {
     /// Rebuild the chrome quads and labels from the current solve. Returns
     /// whether anything visible changed.
     fn refresh_chrome(&mut self) -> bool {
+        // **The one heavy call in this window that borrowed whichever name
+        // happened to be standing** (T-STATION-SPLIT). It is reached from two
+        // hundred-odd doors — a keystroke, a hover, a press, a probe's answer,
+        // every frame that changes the furniture — and it rebuilds the whole of
+        // the chrome: the strip, the rail, every pane head, every preview card's
+        // measured verb, and the focus column's thumbnails. None of those doors
+        // stamped a station, so a hold in here was reported as the last call
+        // before it, which on the owner's typing recording was `flush_wheel`.
+        //
+        // `enter` and not `at`, on that function's own rule: this stands inside
+        // somebody else's function every time, so the caller's name is handed
+        // back at the end rather than kept. There is no early return in this
+        // body — the bracket is exact.
+        let leaving_station = hang_watch::enter(hang_watch::Station::Chrome);
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let (width, _) = self.window.renderer.presentation_geometry().swapchain_size;
         // **The window's own drag handler is told what the bar is wearing now**
@@ -40321,6 +40432,7 @@ impl Runtime<'_> {
         // it, so every path that already knew to repaint on a resize, a DPI
         // change or a theme switch carries the dialog with it for free.
         let overlay_changed = self.refresh_overlay();
+        hang_watch::at(leaving_station);
         chrome_changed || overlay_changed
     }
 
@@ -42297,22 +42409,24 @@ impl Runtime<'_> {
         let revision = self.window.search_revision;
         let leaf = self.sessions.get(&seat).expect("the seat was just checked");
         let transcript = leaf.session.transcript();
-        let frozen = transcript.frozen();
-        let history_key = (
-            frozen.len(),
-            frozen.front().map(|line| line.id),
-            frozen.back().map(|line| line.id),
-            transcript.source_generation(),
-        );
-        let reusable = self
+        // **The previous answer, and only while it is an answer to the same question.** Seat and
+        // revision are what "the same question" means here; the plane having moved under it is not
+        // a reason to throw it away, it is the reason it is passed in.
+        let previous = self
             .window
             .search_scan
             .as_ref()
-            .filter(|cache| {
-                cache.seat == seat && cache.revision == revision && cache.history == history_key
-            })
-            .map(|cache| cache.history_hits.clone());
-        let history_hits = reusable.unwrap_or_else(|| search::scan_history(&compiled, transcript));
+            .filter(|cache| cache.seat == seat && cache.revision == revision);
+        let scan_started = self.app.trace_perf.then(Instant::now);
+        // **The pattern over the frozen lines, under its own name** (T-STATION-SPLIT) — see
+        // [`hang_watch::Station::SearchScan`]. Bracketed around the scan itself and not around
+        // this function, which leaves through eight doors; there is no early return between
+        // these two lines.
+        let leaving_history = hang_watch::enter(hang_watch::Station::SearchScan);
+        let history =
+            search::scan_history_after(&compiled, transcript, previous.map(|cache| &cache.history));
+        hang_watch::at(leaving_history);
+        let history_us = scan_started.map_or(0, |at| at.elapsed().as_micros());
         // The two volatile planes, every time: fifty rows of grid and whatever has scrolled out but
         // not frozen. Their cost is a property of the screen, so re-scanning them unconditionally
         // is what buys "the word you are typing is findable the instant it is echoed".
@@ -42323,13 +42437,30 @@ impl Runtime<'_> {
             .enumerate()
             .map(|(row, captured)| search::live_row(row as u32, &captured.cells))
             .collect();
+        let leaving_scan = hang_watch::enter(hang_watch::Station::SearchScan);
         let volatile_hits =
             search::scan_volatile(&compiled, transcript, &live, leaf.session.grid_generation());
-        let unchanged = self.window.search_scan.as_ref().is_some_and(|cache| {
-            cache.seat == seat
-                && cache.revision == revision
-                && cache.history == history_key
-                && cache.volatile_hits == volatile_hits
+        hang_watch::at(leaving_scan);
+        // **What the scan cost, and how much of it was new** — one line per frame the capsule is
+        // open on a terminal. `lines_scanned` is the number this split exists to hold down: the
+        // whole plane on the frame a question changes, and the lines the shell has frozen since on
+        // every other one. A recording where it tracks `frozen_lines` while a shell prints is the
+        // incremental step having been lost.
+        if self.app.trace_perf {
+            eprintln!(
+                "BT_PERF_TRACE search_scan lines_scanned={} frozen_lines={} history_us={history_us} history_hits={} live_rows={} volatile_hits={}",
+                history.lines_scanned,
+                history.scan.window().len,
+                history.scan.hits().len(),
+                live.len(),
+                volatile_hits.len(),
+            );
+        }
+        // Nothing happened when the question, the plane's window and the volatile hits are all the
+        // ones the last scan saw. The window stands in for the history hits because it is what they
+        // are a function of: same seat, same revision, same window, same answer.
+        let unchanged = previous.is_some_and(|cache| {
+            cache.history.window() == history.scan.window() && cache.volatile_hits == volatile_hits
         });
         if unchanged && !forced {
             return Ok(());
@@ -42341,7 +42472,7 @@ impl Runtime<'_> {
             .projection
             .scroll_anchor()
             .map(|anchor| anchor.source.clone());
-        let mut hits = history_hits.clone();
+        let mut hits = history.scan.hits().to_vec();
         hits.extend(volatile_hits.iter().cloned());
         self.window
             .search
@@ -42349,8 +42480,7 @@ impl Runtime<'_> {
         self.window.search_scan = Some(SearchScanCache {
             seat,
             revision,
-            history: history_key,
-            history_hits,
+            history: history.scan,
             volatile_hits,
         });
         self.install_search_highlights(seat);
@@ -44584,7 +44714,15 @@ impl Runtime<'_> {
             // and below everything a menu can drop over a pane (owner's ruling
             // 2026-09-14 ②). Empty on every frame no pointer is on a formula,
             // which is almost all of them.
-            formula_tools: self.formula_tool_layers(now),
+            //
+            // **And, under them, the other face of a band that is changing into
+            // it** (§7.1.5p ⑪): one block, one lane, and the marks stand on the
+            // source text exactly as they stand on the picture it is replacing.
+            formula_tools: self
+                .formula_toggle_layers(now)
+                .into_iter()
+                .chain(self.formula_tool_layers(now))
+                .collect(),
             rail: self.rail_overlay_layers(),
             // **Directly above the list it came out of** (§7.1.6b″). At full
             // opacity and never at the rail's fold: the fold is what a panel
@@ -57982,6 +58120,9 @@ impl Runtime<'_> {
     /// setter of its own, so the clamp stays in the one place that owns it —
     /// the drag and the wheel end up at the same extent by the same arithmetic.
     fn scroll_seat_to_subpixels(&mut self, seat: SeatId, wanted: i64) -> Result<()> {
+        // The bar moves the view like any other scroll, so it lands a band that is still changing
+        // face like any other scroll (§7.1.5p ⑪).
+        self.settle_math_toggle()?;
         let active = self.window.active_tab;
         let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) else {
             return Ok(());
@@ -64755,6 +64896,13 @@ impl Runtime<'_> {
         // and the reading costs one `u64` load when it is not.
         let trace_perf = self.app.trace_perf;
         let measurements_before = self.shell().projection.line_text_measurements();
+        // **Which road the projection took**, beside how many lines it measured
+        // (T-MATH-MARKS-IN-SOURCE-FACE). A frame of a change of face measures no
+        // lines at all either way — the cache answers for every one of them — so
+        // `lines_measured` alone cannot tell a band moved where it stands from a
+        // band that made the whole document be pushed through two trees again.
+        let rebuilds_before = self.shell().projection.rebuilds();
+        let bands_moved_before = self.shell().projection.bands_moved();
         let mut terminal_frame = {
             // Bound once, to the focused leaf: `session` and `projection` are
             // two fields of one shell, and reaching each through its own deref
@@ -64765,13 +64913,17 @@ impl Runtime<'_> {
             leaf.session.refresh_projection(&mut leaf.projection);
             if let Some(started_at) = projection_started_at {
                 eprintln!(
-                    "BT_PERF_TRACE projection source={:?} refresh_us={} lines_measured={} projected_lines={}",
+                    "BT_PERF_TRACE projection source={:?} refresh_us={} lines_measured={} projected_lines={} rebuilt={} band_moved={}",
                     trigger.source,
                     started_at.elapsed().as_micros(),
                     leaf.projection
                         .line_text_measurements()
                         .saturating_sub(measurements_before),
                     leaf.projection.projected_line_count(),
+                    leaf.projection.rebuilds().saturating_sub(rebuilds_before),
+                    leaf.projection
+                        .bands_moved()
+                        .saturating_sub(bands_moved_before),
                 );
             }
             let frame = leaf
@@ -74517,9 +74669,12 @@ impl Runtime<'_> {
             self.window.last_presented_frame = None;
         }
         // The capsule's hits were cut from a transcript that no longer exists,
-        // and so was the cache that decides whether to re-cut them: its key is a
-        // count and a pair of ids, and an empty transcript's key is the same
-        // whichever shell emptied it. Both go.
+        // and so was the cache the next scan would have carried forward: its
+        // line ids name lines *inside one transcript*, and the fresh one hands
+        // the same ids to different text. **This is the guarantee
+        // [`search::scan_history_after`] names**, and it is why it is discharged
+        // here rather than guessed at there — nothing about two windows of ids
+        // can tell a reader which transcript minted them. Both go.
         self.clear_search_highlights(seat);
         self.window.search_scan = None;
         self.settle_seat_set_change()?;
@@ -77046,14 +77201,31 @@ impl Runtime<'_> {
     /// **It is sent as a paste, not as typing.** The bytes are wrapped by
     /// [`input::paste_bytes`] exactly as a clipboard paste is, so a shell in
     /// bracketed-paste mode is told this arrived as one lump — which is what
-    /// stops a path from being read as anything but characters.
+    /// distinguishes the paste from typing. The path encoder separately keeps
+    /// each representable path in one argument at a fresh argument boundary.
     fn insert_path_into_terminal(&mut self, path: &Path) -> Result<()> {
         let active = self.window.active_tab;
         let Some(leaf) = self.window.tabs[active].focused() else {
             return Ok(());
         };
         let seat = self.window.tabs[active].focused_leaf;
-        let text = inserted_path_text(path, input_line_needs_a_space_first(&leaf.session));
+        let insertion = shell_literal::paths_text(
+            &[path.to_path_buf()],
+            &leaf.paste_recipient,
+            input_line_needs_a_space_first(&leaf.session),
+        );
+        if let Some(notice) = shell_literal::refusal_notice(&insertion.refused) {
+            self.toast(
+                toast::ToastKind::Error,
+                toast::ToastAnchor::Window,
+                None,
+                notice,
+            )?;
+        }
+        if insertion.text.is_empty() {
+            return Ok(());
+        }
+        let text = insertion.text;
 
         // The keyboard goes back to the shell before the characters do. The
         // press that raised this menu very likely came from a column that had
@@ -82151,7 +82323,6 @@ impl Runtime<'_> {
         let mut moved = false;
         let mut command_ends: Vec<PathBuf> = Vec::new();
         let mut raised: Vec<AttentionDelivery> = Vec::new();
-        let mut pending = false;
         // **The two window-wide bits of [`seat_holds_the_keyboard`], read once**
         // — this window has the desktop's keyboard, and what has it here is a
         // shell rather than a page, a files tree, a search capsule or a menu.
@@ -82221,10 +82392,53 @@ impl Runtime<'_> {
         // column is up and its debt is not already standing.
         let mut spoke: Vec<usize> = Vec::new();
         let collect_speakers = self.collecting_card_speakers();
+        // **The reading half of the turn, and it is the half that is on a clock**
+        // (T-DRAIN-BURST).
+        //
+        // Every pane is asked for one [`bt_pty::TERM_READ_SLICE`], in tab order,
+        // and then — if any of them still had more to say and the turn has spent
+        // neither its [`DRAIN_TURN_BUDGET`] nor its [`DRAIN_SLICES_PER_TURN`] —
+        // every pane is asked again. Round-robin rather than pane-at-a-time, so
+        // that a pane with two hundred bytes to say is not behind a sibling's
+        // quarter megabyte; the passes preserve each pane's own byte order
+        // because [`bt_pty::OutputRing::try_pop`] is a queue.
+        //
+        // The clock is read once per pass, between two calls and never inside
+        // one: a read already under way cannot be shortened, which is the whole
+        // reason the slice is small. So a turn overruns its budget by at most
+        // what one pass costs, and that is the number
+        // [`bt_pty::TERM_READ_SLICE`] was chosen to bound.
+        //
+        // **What each tab said is gathered and acted on once**, below, rather
+        // than on every pass. Two reasons, and the second is the ticket's:
+        // `deliver_osc_attention` stamps the pane a program spoke in with the
+        // turn's single `now`, so passes are not turns as far as it is
+        // concerned; and `active_changed` is an *assignment* — a later pass that
+        // drained nothing would otherwise erase the earlier pass that did. One
+        // small allocation per turn buys both, against a turn that already
+        // samples the window's placement through the kernel and publishes a
+        // frame.
+        let mut outcomes = vec![DrainOutcome::default(); self.window.tabs.len()];
+        let mut slices_taken = 0_usize;
+        // The *last* pass's answer and not the accumulated one: a pane that had
+        // a leftover two passes ago and has since gone quiet owes this window
+        // nothing, and a wake raised for it would be a turn that drains nothing
+        // and publishes a frame nobody asked for.
+        let pending = loop {
+            let mut slice_pending = false;
+            for (index, tab) in self.window.tabs.iter_mut().enumerate() {
+                let outcome =
+                    drain_tab_pty(tab, window_focused, index == active_tab, owner_is_a_shell)?;
+                slice_pending |= outcome.pending;
+                outcomes[index].merge(outcome);
+            }
+            slices_taken += 1;
+            if !slice_pending || !drain_may_take_another_slice(slices_taken, now.elapsed()) {
+                break slice_pending;
+            }
+        };
         for (index, tab) in self.window.tabs.iter_mut().enumerate() {
-            let outcome =
-                drain_tab_pty(tab, window_focused, index == active_tab, owner_is_a_shell)?;
-            pending |= outcome.pending;
+            let outcome = &mut outcomes[index];
             // **The OSC lane's turn, on the turn the bytes arrived.** A standing request a program
             // wrote down its own tty becomes an episode here, a message it wrote beside one lends
             // that request its words, and a message on a pane with nothing standing is an event of
@@ -82242,14 +82456,14 @@ impl Runtime<'_> {
                 attention_trace::global(),
                 &mut raised,
             );
-            if index == self.window.active_tab {
+            if index == active_tab {
                 active_changed = outcome.arrived;
                 active_changed_off_focus = outcome.arrived_off_focus;
                 // **Only the tab on screen** (R31): a Git page in a tab nobody is
                 // looking at is not a surface looking at a repository, and the
                 // first frame after that tab is switched to asks its own
                 // questions anyway.
-                command_ends = outcome.command_ends;
+                command_ends = std::mem::take(&mut outcome.command_ends);
             }
             chrome_changed |= outcome.renamed;
             moved |= outcome.moved;
@@ -82278,8 +82492,9 @@ impl Runtime<'_> {
         self.panes_spoke(&spoke, now);
         // **A ring that still holds bytes is a turn this window owes itself.**
         //
-        // [`drain_leaf_pty`] takes one quantum from a pane and returns, so the
-        // rest of a burst is answered by coming back — and coming back has to be
+        // [`drain_leaf_pty`] takes one slice from a pane and returns, and the
+        // loop above stops going round at [`DRAIN_TURN_BUDGET`], so the rest of
+        // a burst is answered by coming back — and coming back has to be
         // asked for here, because the thread that would otherwise ask is the
         // reader, and a reader with a full ring is blocked inside
         // [`bt_pty::OutputRing::push`] waiting for this very drain. Left to it,
@@ -85083,8 +85298,20 @@ impl Runtime<'_> {
                 .is_some_and(|follow| follow.leave(now, motion))
         } else if let Some(boxes) = self.math_tool_placement() {
             let hovered = self.hovered_math_tool();
+            // **A band whose own height is travelling carries its marks** rather than having them
+            // travel to it (§7.1.5p ⑪): two journeys over one distance would leave the marks
+            // trailing the edge they ride and settling ninety milliseconds after it stopped.
+            let riding = self
+                .window
+                .math_toggle
+                .as_ref()
+                .is_some_and(|flight| flight.anchor().same_block(&boxes.anchor));
             if let Some(follow) = self.window.math_tools.as_mut() {
-                follow.follow(&boxes, hovered, now, motion)
+                if riding {
+                    follow.ride(&boxes, hovered, now, motion)
+                } else {
+                    follow.follow(&boxes, hovered, now, motion)
+                }
             } else {
                 self.window.math_tools = Some(formula_tools::FormulaToolFollow::arriving(
                     &boxes, hovered, now,
@@ -85399,9 +85626,16 @@ impl Runtime<'_> {
             && self.window.math_hover_clear_at.is_none()
             && self.window.math_tools.is_none()
             && self.window.math_tool_pressed.is_none()
+            && self.window.math_toggle.is_none()
         {
             return Ok(());
         }
+        // **And a block still changing face lands here.** This is the door a tab switch, a pane
+        // close and a focus change come through (audit 2026-09-15, RB-3), and all three take the
+        // band off the screen; a journey carried across one would go on presenting a height for a
+        // document nobody can see, and land — or not — against a picture from another tab. The end
+        // state is what such a change is carried across as (§7.1.5p ⑪).
+        self.settle_math_toggle()?;
         self.window.math_hover_clear_at = None;
         self.window.math_hover_anchor = None;
         let motion = self.app.motion;
@@ -85420,6 +85654,334 @@ impl Runtime<'_> {
             self.present_chrome_change()?;
         }
         Ok(())
+    }
+
+    /// **The pane of this tab whose session knows this block, and what its two faces measure**
+    /// (owner's ruling 2026-09-15, T-MATH-TOGGLE-MOTION).
+    ///
+    /// The seat comes back with the answer for the reason RC-2 made a band's boxes take one
+    /// (§7.1.5p ⑩ iii): a block belongs to a pane, and every step of a change — the height it is
+    /// presented at, the document being told, the frame that carries it to the glass — has to be
+    /// spent on **that** pane and not on whichever one happens to hold the keyboard when the clock
+    /// next ticks. The press arrives on the focused pane, but a flight outlives the press.
+    ///
+    /// `None` for a block no session in this tab can measure between two faces: a live block (for
+    /// which §7.1.5p ⑪ gives the reason), an inline run, a block whose record went away, and every
+    /// block in a tab with no shell at all (§7.1.6h).
+    fn math_toggle_faces(
+        &self,
+        anchor: &MathBlockAnchor,
+    ) -> Option<(SeatId, bt_term::MathToggleFaces)> {
+        self.sessions.iter().find_map(|(seat, leaf)| {
+            leaf.session
+                .math_toggle_faces(&leaf.projection, anchor)
+                .map(|faces| (*seat, faces))
+        })
+    }
+
+    /// **[`Self::math_toggle_faces`] without the other face's rows** — the pane
+    /// and the two heights, and nothing laid out.
+    ///
+    /// The advancer's door, and the reason it is a second one: §7.1.5p ⑪ iv
+    /// re-reads the far end on every turn, and a turn is not a frame. Building
+    /// the `$$…$$` rows there to read one integer off them is the per-turn cost
+    /// the owner's stutter report of 2026-09-15 names
+    /// (`bt_term::DualPlaneSession::math_toggle_heights`). The rows belong to
+    /// the press, which asks for them once.
+    fn math_toggle_heights(&self, anchor: &MathBlockAnchor) -> Option<(SeatId, [i64; 2])> {
+        self.sessions.iter().find_map(|(seat, leaf)| {
+            leaf.session
+                .math_toggle_heights(&leaf.projection, anchor)
+                .map(|heights| (*seat, heights))
+        })
+    }
+
+    /// **The `‹›` mark was pressed** — see [`formula_tools::FormulaToggleMotion`] for what the
+    /// ninety milliseconds after it are made of.
+    fn press_math_toggle(&mut self, anchor: &MathBlockAnchor) -> Result<()> {
+        let now = Instant::now();
+        let motion = self.app.motion;
+        if let Some(mut flight) = self.window.math_toggle.take() {
+            if flight.anchor().same_block(anchor) {
+                // **A second press turns the journey round where it stands.** The document is not
+                // touched and cannot need to be: the block has been one entry with an artifact
+                // height for the whole of the flight, in *both* directions, so changing where it
+                // is heading only moves which end the telling happens at.
+                let Some((seat, faces)) = self.math_toggle_faces(anchor) else {
+                    // The session stopped being able to measure this block between the two
+                    // presses. Landing it is the only answer that leaves the picture and the
+                    // document agreeing.
+                    self.window.math_toggle = Some(flight);
+                    return self.settle_math_toggle();
+                };
+                flight.reverse(faces.heights(), faces.source.rows, now, motion);
+                self.window.math_toggle = Some(flight);
+                return self.present_math_toggle(seat, now);
+            }
+            // A press on a **different** block lands the one in flight first: two bands are two
+            // surfaces (§7.1.5p ⑦ iii's own reading of crossing from one to the next), and this
+            // window tells one story about its document at a time.
+            self.window.math_toggle = Some(flight);
+            self.settle_math_toggle()?;
+        }
+        let Some((seat, faces)) = self.math_toggle_faces(anchor) else {
+            // Not a history display band. It changes in the one frame it always did.
+            return self.switch_math_source_now(anchor);
+        };
+        if motion == Motion::Reduced {
+            // **Stillness lands the change on the frame it is asked for** and wakes the loop for
+            // none of it — the answer every other surface in this window gives, given here by
+            // never starting a journey rather than by a second reading of the setting.
+            return self.switch_math_source_now(anchor);
+        }
+        let to_source = !faces.showing_source;
+        if !to_source {
+            // **A block going back to its picture is told so now.** The representation that can be
+            // presented at any height is the artifact one, so this direction switches at the near
+            // end and is then presented at the rows' own height on this very frame — which is the
+            // same identity the other direction gets at the far end, read from the other side.
+            let Some(leaf) = self.sessions.get_mut(&seat) else {
+                return Ok(());
+            };
+            if !leaf.session.toggle_math_source(anchor) {
+                return Ok(());
+            }
+        }
+        self.clear_selection();
+        self.window.math_toggle = Some(formula_tools::FormulaToggleMotion::begin(
+            anchor.clone(),
+            faces.heights(),
+            to_source,
+            faces.source.rows,
+            now,
+        ));
+        self.present_math_toggle(seat, now)
+    }
+
+    /// **The change made in a single frame** — what pressing `‹›` was before this clause, and what
+    /// it still is under [`Motion::Reduced`], on the live plane, and wherever the two faces cannot
+    /// be measured.
+    fn switch_math_source_now(&mut self, anchor: &MathBlockAnchor) -> Result<()> {
+        // `math_hit()` answered, so a shell drew the block that was clicked and this tab has one
+        // (§7.1.6h).
+        if self.shell_mut().session.toggle_math_source(anchor) {
+            self.clear_selection();
+            self.publish_interaction_frame()?;
+        }
+        Ok(())
+    }
+
+    /// **Put the flight's own frame on the glass**: the band at the height it has reached, the
+    /// picture at the strength it has reached, and the overlay that carries the other face rebuilt
+    /// against the same instant.
+    ///
+    /// One instant for both halves, for the reason [`Self::refresh_overlay`] takes one: the band
+    /// the projection draws and the source text laid over it must not disagree about what time it
+    /// is, and two `Instant::now()` calls in one frame can.
+    fn present_math_toggle(&mut self, seat: SeatId, now: Instant) -> Result<()> {
+        let motion = self.app.motion;
+        let presentation =
+            self.window
+                .math_toggle
+                .as_ref()
+                .map(|flight| bt_term::MathTogglePresentation {
+                    anchor: flight.anchor().clone(),
+                    height_subpixels: flight.height_subpixels(now, motion),
+                    picture_opacity_milli: flight.picture_opacity_milli(now, motion),
+                });
+        let Some(leaf) = self.sessions.get_mut(&seat) else {
+            return Ok(());
+        };
+        // **A turn that would draw the frame already on the glass asks for nothing.** `turn` runs
+        // on every pass of the loop, which under a talkative shell is far more often than the
+        // ninety milliseconds has frames in it; what decides whether this one is worth a picture is
+        // whether the band would actually stand anywhere new — `Ease::retarget`'s own rule, asked
+        // of the session rather than of the clock.
+        if leaf.session.math_toggle_presentation() == presentation.as_ref() {
+            return Ok(());
+        }
+        leaf.session.set_math_toggle_presentation(presentation);
+        self.repaint_pane_change(seat)?;
+        // The other face is an overlay layer, so nothing of it is on the glass until the overlay
+        // is rebuilt — `leave_hovered_math`'s own idiom, for the same reason.
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// **End the change now, wherever it had got to**: the far face on the glass, the document told
+    /// if the telling was still owed, and the presentation put back.
+    ///
+    /// **The one door, and every ending comes through it** — the journey landing on its own clock,
+    /// a press on another block, a wheel notch, a re-wrap that moved the height it was travelling
+    /// to, and the band leaving the screen altogether ([`Self::leave_hovered_math`], which is how a
+    /// tab switch, a pane close and a focus change reach here). A half-animated block is not
+    /// something to carry into a view that has changed under it; the end state is.
+    ///
+    /// It refuses before it does anything at all when nothing is in flight, so a window nobody has
+    /// pressed a formula in pays one `Option` read for every door it ever passes through.
+    fn settle_math_toggle(&mut self) -> Result<()> {
+        let Some(flight) = self.window.math_toggle.take() else {
+            return Ok(());
+        };
+        // The heights and not the faces: all this door wants is *which pane still answers for the
+        // block*, and it is the last thing that runs before the change lands (T-MATH-MARKS-IN-
+        // SOURCE-FACE).
+        let Some(seat) = self
+            .math_toggle_heights(flight.anchor())
+            .map(|(seat, _)| seat)
+        else {
+            // No session in this tab can answer for the block any more — it was rewritten, or the
+            // pane holding it went away. There is nothing left to tell and nothing to land on, but
+            // a presentation is a thing a session is *holding*, so every leaf is told to let go of
+            // one rather than the one this flight believes it is on: a leak here would present a
+            // band at a height that stopped meaning anything, for the life of the window.
+            for (_, leaf) in self.leaves_mut() {
+                leaf.session.set_math_toggle_presentation(None);
+            }
+            return Ok(());
+        };
+        let switched = flight.switch_owed();
+        if let Some(leaf) = self.sessions.get_mut(&seat) {
+            leaf.session.set_math_toggle_presentation(None);
+            if switched {
+                leaf.session.toggle_math_source(flight.anchor());
+            }
+        }
+        if switched {
+            // The rows a selection was taken from are about to stop existing, which is why the
+            // one-frame switch has always cleared it. The other direction cleared it at the press.
+            self.clear_selection();
+        }
+        self.repaint_pane_change(seat)?;
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// **Pay the frames a change of face owes**, and land it on the frame it is due.
+    ///
+    /// The marks' own advancer beside it ([`Self::advance_math_tools_if_due`]) and on the same
+    /// terms: a surface whose content is a function of a clock is redrawn by something that keeps
+    /// looking, or it is drawn once and left there. What is different here is that the picture this
+    /// one owes is a **terminal** frame and not an overlay — the band's height is part of the
+    /// document's layout — so it republishes the pane rather than rebuilding chrome over it.
+    ///
+    /// **The endpoints are re-read on every turn.** A pane that re-wrapped, a font that changed
+    /// size, a setting that changed the breathing a band keeps: any of them moves the height this
+    /// journey is travelling *to*, and a journey that lands somewhere the block does not stand is
+    /// the jump this clause exists to remove. Asking is one measurement of one block's own lines,
+    /// and only while something is in flight.
+    ///
+    /// **And it asks for the heights, not for the faces** (owner's report 2026-09-15,
+    /// T-MATH-MARKS-IN-SOURCE-FACE). A turn is not a frame: the loop passes here on every wake-up
+    /// a talkative shell causes, and `math_toggle_faces` lays the block's `$$…$$` rows out — one
+    /// `layout_frozen_line` per line, every cluster materialized, a `String` per row — to have
+    /// `heights()` read one integer pair off it and drop the rest. [`Self::math_toggle_heights`]
+    /// is that pair, counted rather than laid out. The rows are the press's business and the
+    /// press asks for them once.
+    fn advance_math_toggle_if_due(&mut self, now: Instant) -> Result<()> {
+        let motion = self.app.motion;
+        let Some((anchor, landed)) = self
+            .window
+            .math_toggle
+            .as_ref()
+            .map(|flight| (flight.anchor().clone(), flight.landed(now, motion)))
+        else {
+            return Ok(());
+        };
+        let Some((seat, heights)) = self.math_toggle_heights(&anchor) else {
+            return self.settle_math_toggle();
+        };
+        let still_measures = self
+            .window
+            .math_toggle
+            .as_ref()
+            .is_some_and(|flight| flight.still_measures(heights));
+        if landed || !still_measures {
+            return self.settle_math_toggle();
+        }
+        self.present_math_toggle(seat, now)
+    }
+
+    /// **The next frame a running change of face is owed**, and nothing at all once it has landed.
+    ///
+    /// The tip's own arrangement, through the marks': the next frame rather than the end of the
+    /// span, so the ninety milliseconds is drawn rather than merely begun and finished. No span is
+    /// spelled here either.
+    fn math_toggle_deadline(&self, now: Instant) -> Option<Instant> {
+        self.window
+            .math_toggle
+            .as_ref()
+            .is_some_and(|flight| flight.owes_frames(now, self.app.motion))
+            .then(|| now + STRIP_ANIMATION_FRAME)
+    }
+
+    /// **The other face of a block that is changing, over the band it is changing in.**
+    ///
+    /// The source text as an overlay, on its own layer under the marks': the two are drawn in one
+    /// lane because they belong to one block, and the marks stand *on* the source text exactly as
+    /// they stand on the picture (§7.1.5p ⑨ ii).
+    ///
+    /// Empty whenever nothing is in flight, when the fade has not left the picture yet, and when
+    /// the picture in hand does not know the band — which is §7.1.5p ⑥'s answer unchanged: a frame
+    /// that has not caught up says nothing rather than drawing this block's source over somebody
+    /// else's rows.
+    fn formula_toggle_layers(&self, now: Instant) -> Vec<marks::OverlayLayer> {
+        let Some(flight) = self.window.math_toggle.as_ref() else {
+            return Vec::new();
+        };
+        let opacity = flight.source_opacity(now, self.app.motion);
+        if opacity <= 0.0 {
+            return Vec::new();
+        }
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let Some((body, mut face)) = self.sessions.iter().find_map(|(seat, leaf)| {
+            let frame = leaf.last_presented_frame.as_ref()?;
+            let body = seats::pane_body_viewport(&self.seats, &self.seat_layout, *seat, scale)?;
+            Some((
+                body,
+                self.window
+                    .renderer
+                    .math_band_face(body, frame, flight.anchor())?,
+            ))
+        }) else {
+            return Vec::new();
+        };
+        if face.display == bt_viewport::MathBlockDisplay::Source {
+            // **The picture in hand is already drawing these very rows.** A block returning to its
+            // typeset face is told at the near end, and the pane keeps the last frame it presented
+            // — so for the frame between the telling and the next present, the terminal is still
+            // painting the source itself. Laying the overlay over that would strike the same text
+            // twice, in the same face, at the same place.
+            return Vec::new();
+        }
+        let (dx, dy) = (body.x as f32, body.y as f32);
+        face.block = [
+            face.block[0] + dx,
+            face.block[1] + dy,
+            face.block[2] + dx,
+            face.block[3] + dy,
+        ];
+        face.rows_top += dy;
+        face.rows_left += dx;
+        face.rows_right += dx;
+        let labels = formula_tools::source_face_labels(
+            &face,
+            flight.source_rows(),
+            bt_render::foreground_rgb(),
+            self.window.renderer.metrics().font_size_px,
+        );
+        if labels.is_empty() {
+            return Vec::new();
+        }
+        vec![marks::OverlayLayer {
+            labels,
+            opacity,
+            ..marks::OverlayLayer::default()
+        }]
     }
 
     fn copy_math_latex(&mut self, anchor: &MathBlockAnchor) {
@@ -85495,11 +86057,25 @@ impl Runtime<'_> {
     /// that pane's own projection. Nothing is invented for the held pane; the
     /// panes that have something new to show simply stop being hostage to it.
     fn repaint_pane_change(&mut self, seat: SeatId) -> Result<()> {
+        self.repaint_pane_change_inner(seat, None)
+    }
+
+    /// A wheel can leave the view at its clamp; other pane changes still owe
+    /// their unconditional frame. The focused frame's digest cannot tell us
+    /// whether an unfocused view moved, so carry that answer from the scroll.
+    fn repaint_pane_change_inner(
+        &mut self,
+        seat: SeatId,
+        wheel_view_moved: Option<bool>,
+    ) -> Result<()> {
         let trigger = FrameTrigger {
             occurred_at: Instant::now(),
             source: FrameSource::Expose,
         };
-        if self.publish_frame_inner(trigger, false)? || seat == self.focused_leaf {
+        if self.publish_frame_inner(trigger, wheel_view_moved.is_some())?
+            || seat == self.focused_leaf
+            || wheel_view_moved == Some(false)
+        {
             return Ok(());
         }
         self.represent_on_screen_frame(trigger)
@@ -85679,6 +86255,10 @@ impl Runtime<'_> {
         if self.focused().is_none() {
             return Ok(());
         }
+        // A band still changing face lands before the view moves under it (§7.1.5p ⑪): two
+        // motions on one surface is not what the ruling asked for, and the end state is what a
+        // change is carried into a new view as.
+        self.settle_math_toggle()?;
         let leaf = self.shell_mut();
         let subpixels =
             i64::from(rows).saturating_mul(leaf.projection.cell_height_subpixels().get());
@@ -91933,16 +92513,12 @@ impl Runtime<'_> {
             }
             match (button, math_hit.target) {
                 (MouseButton::Left, MathHitTarget::ToggleSource) => {
-                    // `math_hit()` answered, so a shell drew the block that was
-                    // clicked and this tab has one (§7.1.6h).
-                    if self
-                        .shell_mut()
-                        .session
-                        .toggle_math_source(&math_hit.anchor)
-                    {
-                        self.clear_selection();
-                        self.publish_interaction_frame()?;
-                    }
+                    // **And it travels rather than jumping** (owner's ruling
+                    // 2026-09-15, §7.1.5p ⑪). The one-frame switch this used to
+                    // be still happens — under `Motion::Reduced`, on the live
+                    // plane, and wherever the two faces cannot be measured — and
+                    // it happens inside this door rather than beside it.
+                    self.press_math_toggle(&math_hit.anchor)?;
                 }
                 (MouseButton::Left, MathHitTarget::CopyLatex) => {
                     self.copy_math_latex(&math_hit.anchor);
@@ -94825,13 +95401,25 @@ impl Runtime<'_> {
     /// `window_event` for every event that is not itself a notch, and the top of
     /// `about_to_wait`. Free — one `Option` read — for the overwhelming majority
     /// of turns, in which nobody touched the wheel.
+    ///
+    /// **The station is entered only when there is a notch to spend, and it is
+    /// given back on the way out** (T-STATION-SPLIT). It used to be stamped
+    /// unconditionally and never restored, and this door stands at the top of
+    /// `window_event` — so every keystroke, every press and every resize ran
+    /// under the name of a wheel nobody had turned, and the owner's own
+    /// recording says so out loud: `held control for 1261 ms — flush_wheel
+    /// 1104 ms` on a turn where the hand was typing. `enter`'s own rule
+    /// ([`hang_watch::enter`]): a station that stands inside another's function
+    /// hands the enclosing one back rather than keeping the rest of it.
     fn flush_wheel(&mut self) -> Result<()> {
-        hang_watch::at(hang_watch::Station::Wheel);
         let Some(burst) = self.window.wheel_burst.take() else {
             return Ok(());
         };
+        let leaving = hang_watch::enter(hang_watch::Station::Wheel);
         self.window.wheel_routings = self.window.wheel_routings.saturating_add(1);
-        self.mouse_wheel(burst.delta())
+        let spent = self.mouse_wheel(burst.delta());
+        hang_watch::at(leaving);
+        spent
     }
 
     fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {
@@ -95364,7 +95952,9 @@ impl Runtime<'_> {
             }
             WheelRoute::Local => match self.wheel_columns(target_seat, delta) {
                 Some(columns) => self.scroll_seat_by_columns(target_seat, columns),
-                None => self.scroll_view_exact_in(target_seat, event_subpixels),
+                None => self
+                    .scroll_view_exact_in(target_seat, event_subpixels)
+                    .map(|_| ()),
             },
             WheelRoute::Nothing => Ok(()),
         }
@@ -95494,27 +96084,34 @@ impl Runtime<'_> {
     /// The remainder accumulator stays window-wide: it holds the fraction of a
     /// subpixel one physical notch left over, and a notch is a property of the
     /// mouse, not of the pane it landed on.
+    /// Returns whether the clamped view moved, independently of thumb changes.
     fn scroll_view_exact_in(
         &mut self,
         seat: bt_layout::SeatId,
         event_subpixels: f64,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         self.window.local_wheel_subpixel_remainder += event_subpixels;
         let take = drain_whole_units(&mut self.window.local_wheel_subpixel_remainder, 1.0);
         if take == 0 {
-            return Ok(());
+            return Ok(false);
         }
+        // A notch lands a band that is still changing face, for `scroll_view`'s reason.
+        self.settle_math_toggle()?;
         let active = self.window.active_tab;
         let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) else {
-            return Ok(());
+            return Ok(false);
         };
+        let before = leaf.projection.scroll_offset_subpixels();
         leaf.projection.scroll_by_subpixels(take);
+        let moved = leaf.projection.scroll_offset_subpixels() != before;
+        self.repaint_pane_change_inner(seat, Some(moved))?;
         // A notch is a reason for the bar to be up, and a moved view is a moved
         // thumb: the overlay is built on demand, so a wheel that only
         // republished the pane would slide the text under a mark that stayed
-        // where it was (P2-9 slice 1).
+        // where it was (P2-9 slice 1). Publish the view first so the thumb can
+        // share that frame; at a clamp a changed fade still owes its own frame.
         self.woke_terminal_thumb(seat)?;
-        self.repaint_pane_change(seat)
+        Ok(moved)
     }
 
     /// **Every key this window is told about, and the one gate above the
@@ -95531,6 +96128,44 @@ impl Runtime<'_> {
         if !input::is_a_keystroke(event.state, is_synthetic) {
             return Ok(());
         }
+        // **A program that types for you is still typing** (T-REMOTE-INPUT-PACKET,
+        // user report 2026-09-15: a sentence sent from an OPPO phone through
+        // O+ Connect's phone keyboard never appeared in the pane).
+        //
+        // Such a program sends characters, not key presses, and the press winit
+        // hands on for one carries the character in `text` and nothing in either
+        // key field. Every rung below this line reads `logical_key` — the
+        // encoder, the four one-line fields, the quick edit, the column — so the
+        // character had no rung and was dropped. [`input::injected_logical_key`]
+        // has the measurements and the whole argument; what matters here is
+        // *where* it is applied.
+        //
+        // **On the event, once, above the ladder**, and not as a rung of its own.
+        // A rung would have to be placed, and there is no placement that is
+        // right: put it high and a character typed into the settings sheet stops
+        // reaching the sheet, put it low and every field above has already
+        // swallowed the press. Rewriting the key instead leaves the ladder
+        // exactly as it is — one field to read, one modifier policy, one door to
+        // the child — and the event arrives at whichever rung owns the keyboard
+        // indistinguishable from the same character typed by a hand. That is
+        // also what records it as typing: the encoder's own
+        // `send_user_input(.., UserInputKind::Keyboard)` and the
+        // `note_user_typing` above it, rather than a second road to the pipe with
+        // a paste's bracketing or a provenance of its own.
+        //
+        // Below the gate, because a release needs no key: the `WM_KEYUP` half of
+        // every injected character is one, and it has already returned.
+        let injected = input::injected_logical_key(
+            event.physical_key,
+            &event.logical_key,
+            event.text.as_deref(),
+        )
+        .map(|key| {
+            let mut event = event.clone();
+            event.logical_key = key;
+            event
+        });
+        let event = injected.as_ref().unwrap_or(event);
         let now = Instant::now();
         // **The hint card is spent by the first key that is not a modifier**
         // (§7.1.5e′), and this is the top of the function for the one reason
@@ -96516,9 +97151,26 @@ impl Runtime<'_> {
     /// not move the focus.
     fn paste_from_clipboard_into(&mut self, seat: SeatId) -> Result<()> {
         let active = self.window.active_tab;
-        // Destructured rather than reached through three derefs: the paste needs
-        // the shell's screen, its projection and its pipe held at once, and they
-        // are three fields of one leaf.
+        let Some(leaf) = self.window.tabs[active].sessions.get(&seat) else {
+            return Ok(());
+        };
+        let recipient = leaf.paste_recipient.clone();
+        let leading_space = input_line_needs_a_space_first(&leaf.session);
+        let leaving = hang_watch::enter(hang_watch::Station::ClipboardRead);
+        let payload = bt_platform::clipboard_payload();
+        hang_watch::at(leaving);
+        let prepared = prepare_clipboard_paste(payload, &recipient, leading_space);
+        if let Some(notice) = prepared.notice {
+            self.toast(
+                toast::ToastKind::Error,
+                toast::ToastAnchor::Window,
+                None,
+                notice,
+            )?;
+        }
+        let Some(text) = prepared.text else {
+            return Ok(());
+        };
         let Some(LeafSession {
             pty,
             session,
@@ -96528,18 +97180,9 @@ impl Runtime<'_> {
         else {
             return Ok(());
         };
-        if !paste_from_clipboard(
-            session,
-            projection,
-            || {
-                bt_platform::clipboard_text()
-                    .map_err(|error| anyhow!(error))
-                    .context("read clipboard text")
-            },
-            |bytes| write_pty_input(pty.as_ref(), bytes, "write clipboard paste to PTY"),
-        )? {
-            return Ok(());
-        }
+        paste_text(session, projection, &text, |bytes| {
+            write_pty_input(pty.as_ref(), bytes, "write clipboard paste to PTY")
+        })?;
         // A paste is one gesture landing in one named pane, so it answers whatever that pane was
         // asking — and it is the pane the clipboard went into, not the one holding the keyboard
         // (`attention` plan §10.3.2 row 3).
@@ -99782,8 +100425,14 @@ impl Runtime<'_> {
             // the same reason and re-filed the same way: what is on the glass is
             // not the picture this window means to be showing, and the atlas the
             // renderer trimmed on its way out has room for it next time.
+            //
+            // A window that is not on screen re-files the debt with the rest of
+            // them — the picture it owes is unchanged by being invisible — and
+            // differs only in that `may_ask_again` will not ask for the turn
+            // that pays it. See [`ask_again_after`].
             outcome @ (PresentOutcome::PresentedWithoutText(_)
             | PresentOutcome::Skipped
+            | PresentOutcome::SkippedNotVisible
             | PresentOutcome::Reconfigure) => {
                 self.window.chrome_present_pending = true;
                 if self.window.may_ask_again(&outcome) {
@@ -100044,8 +100693,14 @@ impl Runtime<'_> {
             // recording it as presented would leave `presented_picture_revision`
             // claiming the glass holds a frame it does not — which is the licence
             // the animation path reads before answering a tick from the screen.
+            //
+            // The frame a window that is off screen composed goes back in the
+            // slot with the rest of them, and waits there: `may_ask_again` is
+            // what declines to ask for the turn, not this arm. See
+            // [`ask_again_after`].
             outcome @ (PresentOutcome::PresentedWithoutText(_)
             | PresentOutcome::Skipped
+            | PresentOutcome::SkippedNotVisible
             | PresentOutcome::Reconfigure) => {
                 self.window
                     .pending_frames
@@ -100084,6 +100739,12 @@ impl Runtime<'_> {
         // publishes a frame would publish that one. The hand has let go by the
         // time this returns true, so nothing here is done to a window that is
         // still moving.
+        //
+        // **And it says its own name from here** (T-STATION-SPLIT): the stretch
+        // between the wheel's door and the drain used to be charged to
+        // `flush_wheel`, which is the one call in it that had nothing to do with
+        // a display move.
+        hang_watch::at(hang_watch::Station::DpiSettle);
         self.settle_deferred_dpi()?;
         // **And directly after that one**, for the half of a DPI change that is
         // owed to a rectangle rather than to a hand (T-CARD-ANCHOR-DPI). Every
@@ -100092,6 +100753,9 @@ impl Runtime<'_> {
         // hand is the one the window is keeping. It is a no-op on every road
         // where a `Resized` did arrive, which is most of them.
         self.settle_dpi_rectangle()?;
+        // The three answers a platform modal can have left behind, under their
+        // own name (T-STATION-SPLIT) — see [`hang_watch::Station::Pickers`].
+        hang_watch::at(hang_watch::Station::Pickers);
         self.apply_math_context_menu_result();
         self.apply_folder_pick_result()?;
         self.apply_image_pick_result()?;
@@ -100101,6 +100765,11 @@ impl Runtime<'_> {
         // time, and whether an OSC 133 has landed. Polled here rather than
         // pushed from the probe's thread for the reason the invitation below is:
         // this changes a pane's height, and the panes are this thread's.
+        //
+        // **The drain's name stops here** (T-STATION-SPLIT). Everything from
+        // this line to the page below used to be charged to `drain_pty`, which
+        // is the one call in the run that is about a shell's output.
+        hang_watch::at(hang_watch::Station::PaneRows);
         self.settle_pane_notices()?;
         // **And the row under a preview head, on the same terms** (user ruling
         // 2026-08-24). It is polled beside the notice strip because it is the
@@ -100115,12 +100784,19 @@ impl Runtime<'_> {
         // **The first-run card is asked first**, because it is the one surface
         // that can be owed on a launch where nothing has happened yet, and
         // because its own gate closes the moment it goes up.
+        //
+        // **The clock run begins here** — see [`hang_watch::Station::Clocks`].
+        hang_watch::at(hang_watch::Station::Clocks);
         self.raise_first_run_if_due()?;
         self.raise_psreadline_invite_if_due()?;
         self.advance_cursor_blink_if_due(now)?;
         if application_clocks {
+            // A poll of the world outside this process, put back on the clock
+            // run's name the moment it returns (T-STATION-SPLIT).
+            let leaving = hang_watch::enter(hang_watch::Station::Watches);
             self.advance_scheme_watch(now)?;
             self.advance_storage_watch(now)?;
+            hang_watch::at(leaving);
         }
         self.advance_rename_blink_if_due(now)?;
         // The preview seats' own watch (W2 slice 5). This window's and not the
@@ -100128,6 +100804,7 @@ impl Runtime<'_> {
         // two above because it is the same shape: a clock that asks for a
         // wake-up only while it is holding news, over subscriptions that are
         // brought level with what the seats are showing on the same turn.
+        hang_watch::at(hang_watch::Station::Watches);
         self.advance_preview_watch(now)?;
         // And the file trees', beside it and on the same terms: this window's
         // and not the application's, because which folders are on the glass is a
@@ -100141,8 +100818,12 @@ impl Runtime<'_> {
         // Ahead of the strip's own animation tick: paying the press's promise
         // activates a tab, and the strip that is redrawn afterwards should be
         // the one the switch produced.
+        hang_watch::at(hang_watch::Station::Clocks);
         self.advance_tab_press_if_due(now)?;
         self.advance_strip_animation(now)?;
+        // A screenful of held-back output arriving at once, under its own name
+        // rather than the web page's — see [`hang_watch::Station::SyncUpdate`].
+        hang_watch::at(hang_watch::Station::SyncUpdate);
         self.finish_synchronized_update_if_due(now)?;
         // The watcher's own clock (R31's D), beside the rest of this window's:
         // it asks for a wake-up only while it is holding news, and the
@@ -100155,7 +100836,12 @@ impl Runtime<'_> {
         // above, and the news it produces reaches the pages through the caches
         // those pages own.
         if application_clocks {
+            hang_watch::at(hang_watch::Station::Watches);
             self.advance_git_watch(now)?;
+            // `flush_if_due` stamps [`hang_watch::Station::Autosave`] itself,
+            // and since T-STATION-SPLIT that name covers the file it writes and
+            // nothing else: the clock run below says its own name on the very
+            // next line.
             self.app.session_store.flush_if_due(now);
         }
         // **The one rule, in the one place it can be kept.** Whichever rung holds
@@ -100172,6 +100858,12 @@ impl Runtime<'_> {
         // here, on the identical argument — every way the keyboard can move has
         // already happened by the time this line runs, so nothing has to
         // enumerate them.
+        //
+        // **And the run this line opens says its own name** (T-STATION-SPLIT).
+        // Every clock from here to the pane resize below used to be charged to
+        // `session flush_if_due`, the last station entered above — a lane that
+        // writes one small file and had nothing to do with any of them.
+        hang_watch::at(hang_watch::Station::Clocks);
         self.settle_composition_owner()?;
         self.offer_ime_caret(None);
         self.flush_ime_cursor_area(now);
@@ -100212,6 +100904,12 @@ impl Runtime<'_> {
         // ago.
         self.advance_drag_autoscroll(now)?;
         self.clear_math_hover_if_due(now)?;
+        // And the band that is changing face, **ahead** of the marks: the
+        // journey this pays for moves the block's own rectangle, and the marks
+        // ride that rectangle's right-hand midline (§7.1.5p ⑨ ii, ⑪) — so the
+        // picture they follow should be the one this turn has just asked for
+        // rather than the one before it.
+        self.advance_math_toggle_if_due(now)?;
         // And the band's marks, beside the clock that takes them down: the fade
         // they are climbing, and the second look they owe the picture that lit
         // the band they belong to (owner's report 2026-09-14).
@@ -100285,6 +100983,10 @@ impl Runtime<'_> {
         // Service the PTY gate after every other due task that can mutate session state, then carry
         // the deadline derived from that exact sample into the control-flow decision below.
         let pty_resize_deadline = self.flush_pending_pty_resize(now)?;
+        // **And the round trip's name stops there** (T-STATION-SPLIT): the
+        // deadline arithmetic below is this window reading its own clocks, not
+        // conhost answering.
+        hang_watch::at(hang_watch::Station::Deadlines);
         let startup_deadline =
             startup_poll_delay(self.window.first_text_presented).map(|delay| now + delay);
         // Every leaf, not every tab's focused leaf: an unfocused pane runs its own resize
@@ -100477,6 +101179,11 @@ impl Runtime<'_> {
             // landed: a pointer resting on a formula costs no wake-ups at all
             // (owner's ruling 2026-09-14 ②, and its report that evening).
             self.math_tools_deadline(now),
+            // And the band that is changing face, while its ninety milliseconds
+            // are still running — one entry, because one hand presses one mark,
+            // and none at all once it has landed or under `Motion::Reduced`,
+            // which never starts a journey at all (§7.1.5p ⑪).
+            self.math_toggle_deadline(now),
             // And the copy tick's one wake-up: the instant it is due to turn
             // back into a pair of sheets. One entry because there is one
             // clipboard and one clock.
@@ -102166,6 +102873,223 @@ mod recent_folder_door_tests {
     }
 }
 
+/// **A hold's stations name the work they cover** (T-STATION-SPLIT).
+///
+/// The hang ledger charges the station the thread was *last in*, so a station's
+/// bill is everything between its own line and the next one — and until this
+/// slice `turn` entered six stations across sixty-odd calls. The owner's
+/// recording of 2026-09-15 is what that costs a reader: `held control for
+/// 1261 ms — flush_wheel 1104 ms` on a turn where the hand was typing and the
+/// wheel had not been touched, because `flush_wheel` stamped a station
+/// unconditionally at the top of `window_event` and never gave it back.
+///
+/// What a pin can hold here is not a duration — it is **which line comes before
+/// which**, which is exactly the property that decays when somebody adds a call
+/// in the middle of the run. So this reads the file as text, for
+/// [`mouse_trace_station_tests`]' reason exactly, and asserts that every station
+/// `turn` enters stands where the work it names begins.
+///
+/// Two halves. The first is the order, read off the source. The second is the
+/// one rule that makes the order mean anything: a station that stands inside
+/// somebody else's function hands the caller's back on the way out, which is
+/// `hang_watch::enter`'s own contract — a `flush_wheel` or a `refresh_chrome`
+/// that stamped and walked away is the defect this whole module is about.
+#[cfg(test)]
+mod hold_station_tests {
+    /// This file, read as text.
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The text of one method, from its signature to the next method's —
+    /// [`super::mouse_trace_station_tests`]' own reader.
+    fn body(signature: &str) -> &'static str {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        let end = rest.find("\n    fn ").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// Where `needle` first stands in `text`.
+    ///
+    /// The first and not the only one: two stations are entered more than once a
+    /// turn — the clock run is interrupted by the web page and the autosave, and
+    /// the watches are not contiguous — and the head of each run is what the
+    /// order below is about.
+    fn first_at(text: &str, needle: &str) -> usize {
+        text.find(needle)
+            .unwrap_or_else(|| panic!("`{needle}` is not in this function any more"))
+    }
+
+    /// The text of one free function, from its signature to the line its body
+    /// closes on — [`body`]'s reader, one indentation level out.
+    fn free_body(signature: &str) -> &'static str {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        let end = rest.find("\n}").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// The `WindowEvent` kinds a match answers, read off its arm heads.
+    ///
+    /// The twelve-space indent is the whole of the reading: it is what
+    /// separates an arm from a mention of one in a comment beside it and from
+    /// the guard above the match, both of which stand in this dispatcher and
+    /// neither of which is an arm.
+    fn arms(text: &str) -> Vec<&str> {
+        text.lines()
+            .filter_map(|line| line.strip_prefix("            WindowEvent::"))
+            .map(|kind| {
+                let end = kind
+                    .find(|character: char| !character.is_alphanumeric() && character != '_')
+                    .unwrap_or(kind.len());
+                &kind[..end]
+            })
+            .collect()
+    }
+
+    /// **Each station stands at the head of the run it names.**
+    ///
+    /// The pairs are read in the order a turn runs them: the station's own line,
+    /// and the first call it is claiming. A call that moves above its station, or
+    /// a station that drifts below the work it is for, is a line in the report
+    /// that names the wrong lane — silently, which is the whole problem.
+    #[test]
+    fn a_turn_enters_its_stations_where_the_work_begins() {
+        let turning = body("    fn turn(&mut self, now: Instant, application_clocks: bool)");
+        // (the station, the first call it claims) — in the order `turn` runs them.
+        let run = [
+            ("Station::DpiSettle", "self.settle_deferred_dpi()?;"),
+            ("Station::Pickers", "self.apply_math_context_menu_result();"),
+            ("Station::PaneRows", "self.settle_pane_notices()?;"),
+            ("Station::Clocks", "self.raise_first_run_if_due()?;"),
+            (
+                "Station::SyncUpdate",
+                "self.finish_synchronized_update_if_due(now)?;",
+            ),
+            ("Station::Deadlines", "let startup_deadline ="),
+        ];
+        let mut previous = 0;
+        for (station, first_call) in run {
+            let at = first_at(turning, station);
+            let call = first_at(turning, first_call);
+            assert!(
+                at < call,
+                "{station} stands after the work it names, so `{first_call}` is \
+                 charged to whatever came before it"
+            );
+            assert!(at > previous, "{station} is out of the turn's own order");
+            previous = at;
+        }
+        // The drain names itself from inside, and still sits between the pickers
+        // above it and the rows below.
+        let drain = first_at(turning, "self.drain_pty()?;");
+        assert!(
+            drain > first_at(turning, "Station::Pickers")
+                && drain < first_at(turning, "Station::PaneRows"),
+            "the drain has moved out of the run the two stations beside it bracket"
+        );
+        // Neither of the two interrupted runs has lost a piece: the watches are
+        // three separate polls and the clock run is broken twice, by the page and
+        // by the autosave, each of which names itself. Counted with the closing
+        // bracket of the call, so a doc link in a comment beside one is not
+        // mistaken for a station being entered.
+        assert_eq!(
+            turning.matches("hang_watch::Station::Watches)").count(),
+            3,
+            "a poll of the world outside this process is standing under somebody else's name"
+        );
+        assert_eq!(
+            turning.matches("hang_watch::Station::Clocks)").count(),
+            3,
+            "a clock is standing under the name of the call that interrupted the run"
+        );
+    }
+
+    /// **A station inside somebody else's function gives the name back.**
+    ///
+    /// `enter` answers the station being left precisely so the caller can put it
+    /// back; a door that calls `enter` and never calls `at` keeps the rest of its
+    /// caller's function under its own name, which is the defect this slice
+    /// exists to remove — `flush_wheel` did exactly that at the top of
+    /// `window_event`, and every keystroke paid for it.
+    #[test]
+    fn a_scoped_station_hands_the_callers_back() {
+        for signature in [
+            "    fn flush_wheel(&mut self) -> Result<()> {",
+            "    fn refresh_chrome(&mut self) -> bool {",
+            "    fn refresh_search(&mut self, forced: bool) -> Result<()> {",
+        ] {
+            let text = body(signature);
+            let entered = text.matches("hang_watch::enter(").count();
+            assert!(entered > 0, "{signature} no longer names its own work");
+            assert_eq!(
+                text.matches("hang_watch::at(").count(),
+                entered,
+                "{signature} enters a station it does not hand back:\n{text}"
+            );
+        }
+        // And the one door that must *not* be scoped: `window_event`'s own
+        // station is the event, and the handler under it is what it names.
+        //
+        // Spelled in two pieces because this pin stands *above* the door it
+        // reads, and a whole signature written here would be the first match in
+        // the file — the reader takes the first, so it would read this line.
+        let event = body(&["    fn window", "_event("].concat());
+        assert!(
+            event.contains("hang_watch::at(hang_watch::Station::Event);"),
+            "the event's own name has left the door it is about"
+        );
+        // And the handler underneath it, which *is* scoped: opened over the
+        // match alone and handed back before the application doors below it.
+        let opened = "hang_watch::enter(window_event_station(&event))";
+        assert_eq!(
+            event.matches(opened).count(),
+            1,
+            "the handler an event is given to is not named, so a stall inside \
+             one of them is charged to the event"
+        );
+        assert_eq!(
+            event.matches("hang_watch::at(leaving_station);").count(),
+            1,
+            "the handler's name is never handed back, so the dispatch below the \
+             match runs under it"
+        );
+    }
+
+    /// **Every kind the dispatcher answers names its own handler**
+    /// (T-WINDOW-EVENT-STATIONS).
+    ///
+    /// `window_event` ran every one of them under one word, so four seconds
+    /// inside a keystroke, a redraw and a resize all read `window_event 3960
+    /// ms` — which is the line the owner's traced run of 2026-09-15 actually
+    /// produced. A kind added to the match without a line in
+    /// [`super::window_event_station`] puts that back one arm at a time, and
+    /// puts it back *silently*, because `_ => Station::EventOther` answers
+    /// everything. That is the decay this pin is here to catch.
+    #[test]
+    fn every_event_kind_the_dispatcher_answers_names_its_own_handler() {
+        let dispatch = body(&["    fn window", "_event("].concat());
+        let naming = free_body(&["fn window_event", "_station("].concat());
+        let mut kinds = arms(dispatch);
+        assert!(
+            kinds.len() > 10,
+            "the dispatcher has stopped matching on kinds, so this pin reads nothing"
+        );
+        kinds.sort_unstable();
+        kinds.dedup();
+        for kind in kinds {
+            assert!(
+                naming.contains(&format!("WindowEvent::{kind}")),
+                "`{kind}` is answered by a handler no station names, so a stall \
+                 inside it is charged to the event itself"
+            );
+        }
+    }
+}
+
 /// **Re-rooting a files column is one door, and every road to it goes through
 /// the range question first** (user ruling 2026-08-25).
 ///
@@ -103695,6 +104619,168 @@ mod formula_tool_seat_tests {
             placed.matches("pane_body_viewport(").count(),
             1,
             "the pane is resolved once:\n{placed}"
+        );
+    }
+
+    /// RED GATE — **a change of face is landed by whatever interrupts it, and never carried
+    /// half-drawn into a view that has moved** (owner's ruling 2026-09-15, T-MATH-TOGGLE-MOTION;
+    /// §7.1.5p ⑪).
+    ///
+    /// The arithmetic of the journey is pinned without a window in
+    /// [`formula_tools::FormulaToggleMotion`]'s own tests; what can only be pinned here is *who
+    /// calls the door*. There is one door — `settle_math_toggle` — and it does the same two things
+    /// for every caller: the far face on the glass, and the document told if the telling was still
+    /// owed.
+    ///
+    /// MUTATIONS: drop the call from `leave_hovered_math` and a tab switch leaves a block
+    /// presented at a height for a document nobody can see, with the press it was carrying never
+    /// reaching the transcript. Drop it from a scroll door and the band goes on growing while the
+    /// rows it stands on move under it. Drop `advance_math_toggle_if_due` from `turn` and the
+    /// change never lands at all — the block is frozen at whatever fraction of the way the press's
+    /// own frame caught it.
+    #[test]
+    fn an_interrupted_change_of_face_lands_before_the_thing_that_interrupted_it() {
+        for (door, why) in [
+            (
+                body(&["    fn leave_hovered", "_math(&mut self, now: Instant)"].concat()),
+                "a tab switch, a pane close and a focus change",
+            ),
+            (
+                body(&["    fn scroll", "_view(&mut self, rows: i32)"].concat()),
+                "a keyboard page",
+            ),
+            (
+                body(&["    fn scroll_view", "_exact_in("].concat()),
+                "a wheel notch",
+            ),
+            (
+                body(&["    fn scroll_seat", "_to_subpixels("].concat()),
+                "a drag of the scroll bar",
+            ),
+        ] {
+            assert!(
+                door.contains("self.settle_math_toggle()"),
+                "{why} lands a band that is still changing face:\n{door}"
+            );
+        }
+
+        // The turn pays the journey's frames, ahead of the marks that ride the rectangle it moves.
+        let turning = body("    fn turn(&mut self, now: Instant, application_clocks: bool)");
+        let toggle = turning
+            .find("self.advance_math_toggle_if_due(now)?;")
+            .expect("a change of face takes a turn like every other motion in this window");
+        let marks = turning
+            .find("self.advance_math_tools_if_due(now)?;")
+            .expect("and so do the marks beside it");
+        assert!(
+            toggle < marks,
+            "the block moves before the marks that ride it:\n{turning}"
+        );
+
+        // And the advancer re-reads the far end rather than trusting the one it set out for.
+        let advancer = body(
+            &[
+                "    fn advance_math_toggle",
+                "_if_due(&mut self, now: Instant)",
+            ]
+            .concat(),
+        );
+        assert!(
+            advancer.contains("still_measures(heights)"),
+            "a pane that re-wrapped mid-flight moves the height the journey lands on:\n{advancer}"
+        );
+        // **And it re-reads them without laying the other face out** (T-MATH-MARKS-IN-SOURCE-FACE).
+        // A turn is not a frame; `math_toggle_faces` builds a `String` per row of the block to have
+        // one integer pair read off it, and this door runs on every pass of the loop while a change
+        // is in flight. MUTATION: put `math_toggle_faces` back here and the tween pays a full
+        // `layout_frozen_line` of every line of the block per wake-up.
+        assert!(
+            advancer.contains("self.math_toggle_heights(&anchor)")
+                && !advancer.contains("math_toggle_faces"),
+            "the advancer re-measures the other face's rows on every turn:\n{advancer}"
+        );
+
+        // Stillness and the live plane take the one-frame switch, in the press's own door.
+        let press = body(&["    fn press_math", "_toggle(&mut self, anchor"].concat());
+        assert!(
+            press.contains("Motion::Reduced") && press.contains("self.switch_math_source_now("),
+            "a reader who asked for no motion gets the change on the frame it is asked for:\n\
+             {press}"
+        );
+    }
+
+    /// RED GATE — **the other face is never struck over a picture that is already drawing it**
+    /// (§7.1.5p ⑪ iii).
+    ///
+    /// A block returning to its typeset face is told at the near end, and a pane keeps the last
+    /// frame it presented — so between the telling and the next present, the terminal is still
+    /// painting the `$$…$$` rows itself.
+    ///
+    /// MUTATION: draw the overlay whatever face the picture in hand is wearing, and for that one
+    /// frame every line of the source is struck twice in the same place, which reads as the text
+    /// thickening the instant the mark is pressed.
+    #[test]
+    fn the_source_face_is_not_struck_over_a_picture_already_drawing_it() {
+        let lane = body(&["    fn formula_toggle", "_layers(&self, now: Instant)"].concat());
+        assert!(
+            lane.contains("face.display == bt_viewport::MathBlockDisplay::Source"),
+            "the lane asks which face the picture in hand is wearing:\n{lane}"
+        );
+        assert!(
+            lane.contains("leaf.last_presented_frame.as_ref()"),
+            "and it is the picture the pane has actually shown, as every band reader here is"
+        );
+    }
+
+    /// RED GATE — **the other face's rows are measured once per change, not once per frame**
+    /// (owner's report 2026-09-15, T-MATH-MARKS-IN-SOURCE-FACE; §7.1.5p ⑪ ii and iii).
+    ///
+    /// ⑪ ii settles the whole clause on one answer, `ViewportProjection::math_source_face`, and
+    /// ⑪ iii draws the overlay from it. What the report is about is *how often it is asked*. This
+    /// lane runs on every rebuild of the window's chrome for the whole of the ninety
+    /// milliseconds, and the only honest place for a `layout_frozen_line` of the block's every
+    /// line is the press — so the rows it draws must come off the flight, which was handed them
+    /// when the change began (`FormulaToggleMotion::begin`) or turned round
+    /// (`FormulaToggleMotion::reverse`), and never off the projection again.
+    ///
+    /// The other half is the fade: it is the **layer's** and not a label's, so a frame of the
+    /// change moves an opacity rather than restriking anything (⑪ iii, ② and ⑦ iii's own
+    /// arrangement) — and the rows the band has not grown far enough to show are dropped before
+    /// they are shaped, so what the chrome text path is handed grows with the band rather than
+    /// being the whole block from the first frame.
+    ///
+    /// MUTATIONS: ask the session for the source face here — `math_source_face`, or
+    /// `math_toggle_faces` around it — and every frame of the change lays the block's rows out
+    /// again for a `Vec<String>` it already has. Put the fade on the labels and the layer's one
+    /// number becomes one per row.
+    #[test]
+    fn the_other_faces_rows_are_measured_once_per_change_and_not_once_per_frame() {
+        let lane = body(&["    fn formula_toggle", "_layers(&self, now: Instant)"].concat());
+        assert!(
+            lane.contains("flight.source_rows()"),
+            "the overlay draws the rows the flight was handed when it began:\n{lane}"
+        );
+        assert!(
+            !lane.contains("math_source_face") && !lane.contains("math_toggle_faces"),
+            "a frame of the change re-measures the other face:\n{lane}"
+        );
+        assert_eq!(
+            lane.matches("source_opacity(").count(),
+            1,
+            "the fade is read once for the whole layer:\n{lane}"
+        );
+        assert!(
+            lane.contains("            opacity,"),
+            "and it is the layer's own number, not a label's:\n{lane}"
+        );
+
+        // And the rows are laid out in exactly the two places a change acquires them: setting out,
+        // and turning round.
+        let press = body(&["    fn press_math", "_toggle(&mut self, anchor"].concat());
+        assert_eq!(
+            press.matches("faces.source.rows").count(),
+            2,
+            "the press is the one place the block's rows are laid out:\n{press}"
         );
     }
 }
@@ -105914,10 +107000,19 @@ mod quit_transaction_tests {
 /// bounds one is what keeps the other alive. Nothing here can be asked of a
 /// `LeafSession` in a unit test — the drain needs a live ConPTY with a child
 /// printing into it, which is what the acceptance in `HANDOFF`/`DESIGN` is for —
-/// so what is pinned is the *shape*: that the read is taken once and not in a
-/// loop, that the leftover is reported, and that the report becomes a wake.
+/// so what is pinned is mostly the *shape*: that the read is taken once and not
+/// in a loop, that the leftover is reported, and that the report becomes a wake.
+///
+/// **The budget itself is not shape and is not pinned as shape**
+/// (T-DRAIN-BURST). `drain_may_take_another_slice` is the whole of the decision
+/// and it is a free function over two plain values, so it is put to an ordinary
+/// test with synthetic durations — no window, no clock, no sleeping. What a
+/// burst does to a real ring is tested where the ring lives
+/// (`bt_pty::tests::a_two_mib_burst_leaves_a_pane_a_turn_at_a_time_in_order`).
 #[cfg(test)]
 mod pty_drain_budget_tests {
+    use std::time::Duration;
+
     /// This file as text, for [`application_change_tests::SOURCE`]'s reason.
     const SOURCE: &str = include_str!("main.rs");
 
@@ -105972,16 +107067,23 @@ mod pty_drain_budget_tests {
     /// just ahead of the terminal at rest falls behind while the frame is being
     /// dragged.
     ///
+    /// **T-DRAIN-BURST narrowed the ask and left the shape alone.** The read is
+    /// a [`bt_pty::TERM_READ_SLICE`] rather than a whole quantum, because the
+    /// caller wants the clock between reads and cannot interrupt a call it is
+    /// already inside; that the read happens *once per call*, outside any loop,
+    /// is what puts the repetition — and therefore the deadline — up in
+    /// `drain_pty` where it can be enforced.
+    ///
     /// Mutation: put the read back in a `loop`, or drop the `pending` report,
     /// or stop raising the wake for it.
     #[test]
     fn one_turn_takes_one_quantum_from_a_pane_and_says_what_is_left() {
         let drain = free_fn_body("drain_leaf_pty");
         let read = drain
-            .find("read_output()")
+            .find("read_output_slice()")
             .expect("`drain_leaf_pty` reads its pane's ring");
         assert_eq!(
-            drain.matches("read_output()").count(),
+            drain.matches("read_output_slice()").count(),
             1,
             "one turn asks a pane for its output exactly once; a second ask is \
              the unbounded loop coming back"
@@ -106049,6 +107151,120 @@ mod pty_drain_budget_tests {
         assert!(
             all.pending,
             "and a quiet pane drained after it does not cancel it"
+        );
+    }
+
+    /// RED (T-DRAIN-BURST, owner's `diagnostics.log` 2026-09-15) — **a turn is
+    /// bounded by a clock as well as by a byte count, and the clock is the one
+    /// that ends a burst.**
+    ///
+    /// The defect this stands on: `drain_pty` was bounded in bytes alone — one
+    /// `bt_pty::TERM_READ_QUANTUM` per pane — and a quarter megabyte of a build
+    /// log is *seconds* of VT parsing, transcript freezing and arming, not
+    /// milliseconds of byte shuffling. The log carries `held control for
+    /// 4386 ms — drain_pty 4386 ms`, `2791 ms — drain_pty 2787`, `1862 —
+    /// drain_pty 1858`, many between 600 and 1000, with 0.4.1's page-fault
+    /// column near zero beside them: the thread was working, not paging.
+    ///
+    /// Both bounds have to be here and each one has a case the other misses. Cut
+    /// the clock and the pathological content is unbounded again; cut the count
+    /// and cheap content — megabytes of blank lines — is carried whole in one
+    /// turn, which is the same defect arrived at from the fast side.
+    ///
+    /// Mutation: make either bound `<=`, drop either conjunct, or let
+    /// `DRAIN_SLICES_PER_TURN` become a number of its own instead of the
+    /// quantum-over-slice quotient.
+    #[test]
+    fn a_turn_stops_at_the_clock_or_at_the_quantum_whichever_comes_first() {
+        let budget = super::DRAIN_TURN_BUDGET;
+        let last = super::DRAIN_SLICES_PER_TURN - 1;
+
+        assert!(
+            super::drain_may_take_another_slice(0, Duration::ZERO),
+            "a turn that has done nothing may do something"
+        );
+        assert!(
+            super::drain_may_take_another_slice(last, budget - Duration::from_micros(1)),
+            "and may go round once more with a microsecond of its budget left"
+        );
+        assert!(
+            !super::drain_may_take_another_slice(super::DRAIN_SLICES_PER_TURN, Duration::ZERO),
+            "a quantum is spent however fast it went"
+        );
+        assert!(
+            !super::drain_may_take_another_slice(0, budget),
+            "and the budget is spent however little was carried — this is the \
+             arm the 4386 ms hold needed"
+        );
+        assert!(
+            !super::drain_may_take_another_slice(0, Duration::from_secs(4)),
+            "a pass that overran by itself does not buy a second one"
+        );
+
+        // The two figures this quotient stands between are the ones with
+        // meanings; a third independent number here is how they start to drift.
+        assert_eq!(
+            super::DRAIN_SLICES_PER_TURN,
+            bt_pty::TERM_READ_QUANTUM.get() / bt_pty::TERM_READ_SLICE.get()
+        );
+        assert_eq!(
+            super::DRAIN_SLICES_PER_TURN * bt_pty::TERM_READ_SLICE.get(),
+            bt_pty::TERM_READ_QUANTUM.get(),
+            "the slices must spend the quantum exactly, or a turn quietly \
+             carries less than DESIGN.md §1.3 allows it"
+        );
+
+        // Half a 60 Hz frame, with the other half for the frame this same turn
+        // publishes and the platform round trip after it. The claim the ticket
+        // is answering is "a keystroke is answered within a frame or two", and
+        // it is this inequality that makes the first half of it true.
+        let frame = Duration::from_nanos(16_666_667);
+        assert!(
+            budget * 2 <= frame,
+            "the drain's budget ({budget:?}) has to leave a frame room for the \
+             frame it ends with"
+        );
+    }
+
+    /// PIN (T-DRAIN-BURST) — **the repetition lives where the deadline does, and
+    /// the bookkeeping that follows it runs once.**
+    ///
+    /// `drain_leaf_pty` takes one slice per call, so something has to call it
+    /// again; that something is the pass loop in `drain_pty`, and the only exit
+    /// it has is `drain_may_take_another_slice`. A loop with any other exit —
+    /// "until the ring is empty" above all — is the 2026-08-24 hang rebuilt one
+    /// level up, where the reader thread refills faster than the window drains.
+    ///
+    /// The second half is the ticket's other clause: what a tab said is gathered
+    /// across the passes and acted on once per turn. `deliver_osc_attention`
+    /// stamps a pane with the turn's single `now`, and `active_changed` is an
+    /// assignment rather than an `|=` — both are sentences about a turn, and a
+    /// pass is not a turn.
+    ///
+    /// Mutation: exit the pass loop on the ring instead of the budget, or move
+    /// `deliver_osc_attention` back inside it.
+    #[test]
+    fn the_drain_repeats_under_the_budget_and_settles_up_once() {
+        let body = method_body("drain_pty");
+        let gate = body
+            .find("drain_may_take_another_slice(")
+            .expect("`drain_pty` asks the budget whether it may go round again");
+        assert_eq!(
+            body.matches("drain_tab_pty(").count(),
+            1,
+            "one call site, inside the budgeted loop; a second is a road round it"
+        );
+        let settle = body
+            .find("deliver_osc_attention(")
+            .expect("`drain_pty` delivers what the panes said");
+        assert!(
+            gate < settle,
+            "the passes finish before anything is done about what they heard"
+        );
+        assert!(
+            body[..gate].contains("slice_pending |= outcome.pending;"),
+            "and what decides another pass is the leftover this pass found, not \
+             the leftover the turn has accumulated"
         );
     }
 
@@ -106633,6 +107849,24 @@ fn ask_again_after(outcome: &PresentOutcome, textless_run: &mut u32) -> bool {
         // turn and the next is the swapchain, not this window, so the ask is
         // unconditional — it always was.
         PresentOutcome::Skipped | PresentOutcome::Reconfigure => true,
+        // **Except when what the swapchain said was "this window is not on
+        // screen"** (GitHub issue #5). Then nothing changes between this turn
+        // and the next: on macOS the acquire reads the window's occlusion state
+        // and refuses for as long as it is covered, hidden or miniaturised, so
+        // an unconditional ask is a closed loop with no wait in it — winit's
+        // macOS `request_redraw` wakes the run loop rather than going through a
+        // display cycle, so it spins at CPU speed against a window nobody can
+        // see, and it was still doing that seven minutes later.
+        //
+        // The frame is still owed and is still re-filed by both present sites;
+        // what is dropped is only the ask. What pays the debt is the next real
+        // invalidation — `WindowEvent::Occluded(false)`, which winit raises off
+        // the very same `Visible` bit the acquire tested, and equally a
+        // keystroke, PTY output, a focus change or an animation tick. A window
+        // that becomes visible with none of those to show for it is a window
+        // whose picture has not changed since the last one that reached the
+        // glass.
+        PresentOutcome::SkippedNotVisible => false,
         PresentOutcome::PresentedWithoutText(_) => {
             *textless_run = textless_run.saturating_add(1);
             *textless_run <= TEXTLESS_RETRY_BUDGET
@@ -106640,8 +107874,12 @@ fn ask_again_after(outcome: &PresentOutcome, textless_run: &mut u32) -> bool {
     }
 }
 
-/// What a window does with a frame that reached the glass without its
-/// characters — `bt-render`'s [`PresentOutcome::PresentedWithoutText`].
+/// What a window does with a frame that did not reach the glass whole — one
+/// that arrived without its characters
+/// (`bt-render`'s [`PresentOutcome::PresentedWithoutText`]) and one that never
+/// arrived at all because nobody could see the window
+/// ([`PresentOutcome::SkippedNotVisible`]). Both are frames the window still
+/// owes; they differ in whether asking again is worth a turn.
 #[cfg(test)]
 mod textless_present_tests {
     use super::{PresentOutcome, TEXTLESS_RETRY_BUDGET, ask_again_after};
@@ -106784,6 +108022,86 @@ mod textless_present_tests {
                 "`{method}` asks for the retry outside the textless arm"
             );
         }
+    }
+
+    /// PIN (GitHub issue #5) — **a window nobody can see is not asked to draw
+    /// itself again, and is drawn once as soon as it can be seen.**
+    ///
+    /// On macOS every acquire against a window whose `NSWindowOcclusionState`
+    /// lacks `Visible` is refused, for as long as it is covered, hidden or
+    /// miniaturised — so the unconditional re-ask that is right for the other
+    /// two swapchain refusals is, for this one, a closed loop with no wait in
+    /// it. winit's macOS `request_redraw` wakes the run loop rather than going
+    /// through an AppKit display cycle, so there is no 60 Hz to slow it: the
+    /// reporter's window spun a core for seven minutes, and every turn of the
+    /// spin staged another frame's worth of GPU uploads that no submit retired,
+    /// until the Metal device refused an allocation.
+    ///
+    /// Three properties, and the defect needs all three to be gone:
+    ///
+    /// 1. the occluded skip asks for no turn, however many times it happens;
+    /// 2. it is still *re-filed* by both present sites — the picture is owed,
+    ///    not abandoned, or a window would come back from the Dock blank;
+    /// 3. and the window that became visible again asks for exactly one frame.
+    ///
+    /// Mutation: group `SkippedNotVisible` with `Skipped` in `ask_again_after`
+    /// and ① fails; drop it from either present site's arm and ② fails; take
+    /// `publish_frame` out of the `Occluded(false)` arm and ③ fails.
+    #[test]
+    fn a_window_that_is_not_on_screen_stops_asking_and_is_woken_once() {
+        // ① It does not ask, and it does not spend the textless run either.
+        let mut run = 0_u32;
+        for turn in 0..1_000 {
+            assert!(
+                !ask_again_after(&PresentOutcome::SkippedNotVisible, &mut run),
+                "turn {turn}: a window that is off screen asked for another \
+                 turn, and that ask is the spin"
+            );
+        }
+        assert_eq!(run, 0, "no image is not a textless image");
+        // The swapchain's other two refusals are untouched: what changes
+        // between *their* turns really is the swapchain.
+        assert!(ask_again_after(&PresentOutcome::Skipped, &mut run));
+        assert!(ask_again_after(&PresentOutcome::Reconfigure, &mut run));
+        assert_eq!(run, 0);
+
+        // ② Both present sites still owe the picture.
+        for method in ["redraw", "present_retained_picture"] {
+            let body = fn_body(method);
+            let owed = body
+                .find("PresentOutcome::SkippedNotVisible")
+                .unwrap_or_else(|| {
+                    panic!("`{method}` must re-file the frame of a window that is off screen")
+                });
+            let paid = body
+                .find("PresentOutcome::Presented(_)")
+                .or_else(|| body.find("PresentOutcome::Presented(receipt)"))
+                .unwrap_or_else(|| panic!("`{method}` must name the presented outcome"));
+            assert!(
+                owed > paid,
+                "`{method}` recorded an invisible window's skip as a delivery"
+            );
+        }
+
+        // ③ And the turn that pays the debt exists, on the event winit raises
+        // from the very same `Visible` bit the acquire tested.
+        //
+        // The needle is spelled in two pieces so that this test cannot find
+        // itself: the event-loop arm it is looking for stands *later* in this
+        // file than the test does.
+        let woken = SOURCE
+            .find(concat!(
+                "WindowEvent::Occluded(false) => runtime.",
+                "publish_frame(FrameTrigger {"
+            ))
+            .expect("the event loop answers the window that came back on screen");
+        let arm = &SOURCE[woken..];
+        let end = arm.find("\n            _ => Ok(())").unwrap_or(arm.len());
+        assert_eq!(
+            arm[..end].matches("publish_frame").count(),
+            1,
+            "a window that came back composes and asks for exactly one frame"
+        );
     }
 }
 
@@ -109978,6 +111296,13 @@ impl FolioApp {
         if self.app.is_none() {
             return;
         }
+        // **What one turn owes the application, under its own name**
+        // (T-STATION-SPLIT). A hold opens at the wake with the station stamped
+        // `woken`, and until this line nothing between there and the first
+        // window's own turn ever said anything else — so opening a window,
+        // reaping one, or rebuilding the menu bar was reported as a wake that
+        // named no lane. See [`hang_watch::Station::AppTurn`].
+        hang_watch::at(hang_watch::Station::AppTurn);
         // **Whether a second launch may still be promised anything** (§7.59, review C-2
         // 2026-09-11), mirrored into the listener thread's own flag once a turn and **above the
         // retirement arm's early return**, which is the whole reason it is here: that arm is the
@@ -110837,6 +112162,13 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         // inside the close — past that line the window is gone, and a question
         // asked after the answer is worthless.
         let mut shutting = false;
+        // **The handler this event is about to be given to, named before it is
+        // given** — see [`window_event_station`]. Opened here and not at the
+        // door above, so the lookup, the three gates and the wheel burst stay
+        // the event's own; handed back at the foot of the match, on
+        // [`hang_watch::enter`]'s rule, so the four application doors under it
+        // belong to the dispatch and not to the handler.
+        let leaving_station = hang_watch::enter(window_event_station(&event));
         let result = match event {
             // **The summoned terminal's `×` means hide, and it means it by
             // setting the chord's own bit** (§7.54e ②, user ruling 2026-09-05:
@@ -111060,12 +112392,28 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     })
                 })
             }
+            // **The window is on screen again, and this is the one turn that
+            // owes it a picture** (GitHub issue #5).
+            //
+            // It always composed and published one frame here — `publish_frame`
+            // requests exactly one redraw — and since a skip caused by occlusion
+            // stopped asking for turns of its own ([`ask_again_after`]), this is
+            // the event that pays whatever the window went dark owing. winit
+            // raises it from `windowDidChangeOcclusionState:`, off the same
+            // `NSWindowOcclusionState::Visible` bit that `wgpu-hal`'s Metal
+            // surface tests before it refuses an acquire, so the moment it
+            // arrives is exactly the moment the acquire starts succeeding.
+            //
+            // `Occluded(true)` is deliberately not handled: a window does not
+            // need to be told it has gone dark. The frame path finds out by
+            // being refused, which is the only reading that cannot be stale.
             WindowEvent::Occluded(false) => runtime.publish_frame(FrameTrigger {
                 occurred_at: Instant::now(),
                 source: FrameSource::Expose,
             }),
             _ => Ok(()),
         };
+        hang_watch::at(leaving_station);
         // The gate's own `Discard`, spent here rather than inside the answer: the
         // shut belongs to the event loop, and re-requesting it means closing goes
         // through the one door it always went through instead of a second one
@@ -111156,6 +112504,47 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         if let Some(app) = self.app.as_mut() {
             app.finish();
         }
+    }
+}
+
+/// **Which handler a `WindowEvent` is about to be given to**
+/// (T-WINDOW-EVENT-STATIONS).
+///
+/// [`AppEvent::station`]'s twin, one door over and born of the same finding.
+/// The whole of `window_event` ran under [`hang_watch::Station::Event`], so the
+/// owner's traced run of 2026-09-15 — `held control for 3971 ms on turn 15341 —
+/// window_event 3960 ms` — could say only that four seconds had gone into *an
+/// event*: a keystroke, a wheel notch, a redraw and a resize wear one word, and
+/// which of them it was is the one thing a reader needs before they can look
+/// anywhere.
+///
+/// A free function rather than a method because `WindowEvent` is winit's, and
+/// it takes the event by reference so the naming happens before the match moves
+/// it.
+///
+/// **The kinds that answer [`hang_watch::Station::EventOther`] are the ones
+/// this window does nothing for.** The match ends in `_ => Ok(())`, and an
+/// event that falls through it has cost this process a lookup and a comparison;
+/// a station apiece for the rest of winit's list would be a dozen names that
+/// can never be the answer, standing in front of the twelve that can.
+fn window_event_station(event: &WindowEvent) -> hang_watch::Station {
+    use hang_watch::Station;
+    match event {
+        WindowEvent::CloseRequested => Station::EventClose,
+        WindowEvent::KeyboardInput { .. } => Station::EventKey,
+        WindowEvent::Ime(_) => Station::EventIme,
+        WindowEvent::ModifiersChanged(_) => Station::EventModifiers,
+        WindowEvent::CursorMoved { .. } | WindowEvent::CursorLeft { .. } => Station::EventPointer,
+        WindowEvent::MouseInput { .. } => Station::EventMouse,
+        WindowEvent::MouseWheel { .. } => Station::EventWheel,
+        WindowEvent::Resized(_) => Station::EventResize,
+        WindowEvent::ScaleFactorChanged { .. } => Station::EventScale,
+        WindowEvent::Moved(_) | WindowEvent::ThemeChanged(_) | WindowEvent::Occluded(_) => {
+            Station::EventWindow
+        }
+        WindowEvent::RedrawRequested => Station::EventRedraw,
+        WindowEvent::Focused(_) => Station::EventFocus,
+        _ => Station::EventOther,
     }
 }
 
@@ -111317,22 +112706,54 @@ fn recoverable_clipboard_write(result: Result<()>, action: &str) -> bool {
     }
 }
 
-fn paste_from_clipboard(
-    session: &mut DualPlaneSession,
-    projection: &mut ViewportProjection,
-    read: impl FnOnce() -> Result<String>,
-    write: impl FnOnce(&[u8]) -> Result<()>,
-) -> Result<bool> {
-    let Some(text) = recoverable_clipboard_read(read()) else {
-        return Ok(false);
-    };
-    paste_text(session, projection, &text, write)?;
-    Ok(true)
+/// The payload and later path refusals are separate causes, both delivered to the app's toast host.
+struct PreparedClipboardPaste {
+    text: Option<String>,
+    notice: Option<String>,
+}
+
+fn prepare_clipboard_paste(
+    payload: std::result::Result<bt_platform::ClipboardPayload, String>,
+    recipient: &shell_literal::Recipient,
+    leading_space: bool,
+) -> PreparedClipboardPaste {
+    use bt_platform::ClipboardPayload;
+    match payload {
+        Ok(ClipboardPayload::Files(paths)) => {
+            let insertion = shell_literal::paths_text(&paths, recipient, leading_space);
+            PreparedClipboardPaste {
+                text: (!insertion.text.is_empty()).then_some(insertion.text),
+                notice: shell_literal::refusal_notice(&insertion.refused),
+            }
+        }
+        Ok(ClipboardPayload::Text(text)) => PreparedClipboardPaste {
+            text: Some(text),
+            notice: None,
+        },
+        Ok(ClipboardPayload::Nothing | ClipboardPayload::Picture(_)) => PreparedClipboardPaste {
+            text: None,
+            notice: None,
+        },
+        Ok(ClipboardPayload::Refused(bt_platform::UnsupportedKind::Promise)) => {
+            PreparedClipboardPaste {
+                text: None,
+                notice: Some(i18n::Text::PasteClipboardPromise.text().to_owned()),
+            }
+        }
+        Err(_) => {
+            // Native error strings never need to carry the source's names or text into diagnostics.
+            eprintln!("clipboard acquisition failed; paste ignored");
+            PreparedClipboardPaste {
+                text: None,
+                notice: Some(i18n::Text::PasteClipboardRead.text().to_owned()),
+            }
+        }
+    }
 }
 
 /// Deliver one string to a shell the way a paste is delivered.
 ///
-/// Split out of [`paste_from_clipboard`] rather than copied because the files
+/// Shared by terminal clipboard routing and K144 rather than copied because the files
 /// tree's `Insert path into terminal` (K144) is a paste in every respect that
 /// matters to the shell and to the view — the selection goes, the view returns
 /// to the bottom, the bytes are bracketed if the shell asked for bracketing, and
@@ -111359,16 +112780,6 @@ fn paste_text(
     projection.set_selection(None);
     projection.scroll_to_bottom();
     write(&bytes)
-}
-
-fn recoverable_clipboard_read(result: Result<String>) -> Option<String> {
-    match result {
-        Ok(text) => Some(text),
-        Err(error) => {
-            eprintln!("clipboard does not contain readable text; paste ignored: {error:#}");
-            None
-        }
-    }
 }
 
 /// **Which shape a recalled command's arrival takes** (DESIGN.md §7.55 ⑨).
@@ -116808,7 +118219,15 @@ fn main() -> Result<()> {
     // this thread's id, and it needs `%APPDATA%` resolved by the thread that is
     // allowed to pay for the one-time relocation `storage_dir` performs. A
     // healthy run never writes a byte — see `hang_watch` for the whole bill.
-    hang_watch::start(storage.join(hang_watch::REPORTS_DIRECTORY));
+    //
+    // **The same question `Runtime::trace_perf` asks, asked here** because the
+    // watchdog starts before there is an `App` to hold the answer — the reading
+    // `MathWorker::spawn` takes for the same reason one lane over. What it
+    // decides is the silence a report is written for: a run somebody started in
+    // order to measure it is worth suspending at two seconds, and a run nobody
+    // asked anything of is not. See `hang_watch::TRACED_HANG_THRESHOLD`.
+    let trace_perf = diagnostics::switched_on(std::env::var_os("BT_PERF_TRACE"));
+    hang_watch::start(storage.join(hang_watch::REPORTS_DIRECTORY), trace_perf);
     // The one-time media-session warm-up (§7.23) is paid here, off the first
     // hover: the process-resident session costs ~210ms cold and ~10ms warm.
     bt_platform::video::prewarm();
@@ -128681,10 +130100,23 @@ mod tests {
         /// `publish_frame_inner` for a source that is not PTY output: composes
         /// unconditionally, with no unchanged-frame gate to fall back on.
         fn publish_expose_frame(&mut self) -> bool {
+            self.publish_expose_frame_inner(false)
+        }
+
+        fn publish_expose_frame_inner(&mut self, skip_unchanged: bool) -> bool {
             self.session.refresh_projection(&mut self.projection);
             self.viewport_frames += 1;
             let frame = self.session.viewport_frame(&mut self.projection).unwrap();
             if self.projection.presentation_hold() && self.last_presented.is_some() {
+                return false;
+            }
+            if skip_unchanged
+                && pty_frame_is_unchanged(
+                    self.pending.pending_frame(),
+                    self.last_presented.as_ref(),
+                    &frame,
+                )
+            {
                 return false;
             }
             self.content_revision += 1;
@@ -131131,34 +132563,39 @@ mod tests {
         projection.set_selection(Some(selection));
         let mut pty_writes = Vec::new();
 
-        assert!(
-            !paste_from_clipboard(
-                &mut session,
-                &mut projection,
-                || Err(anyhow!("injected clipboard owner contention")),
-                |chunk| {
-                    pty_writes.extend_from_slice(chunk);
-                    Ok(())
-                },
-            )
-            .unwrap()
-        );
+        let recipient = shell_literal::Recipient {
+            encoder: shell_literal::Encoder {
+                grammar: shell_literal::ShellGrammar::Posix,
+                named_cmd: false,
+                delayed_expansion: false,
+                powershell_doubled_quotes: &[],
+            },
+            namespace: bt_transcript::paths::PrintedPathNamespace::Windows,
+            spelling: None,
+            wsl_distribution: None,
+        };
+        let unavailable =
+            prepare_clipboard_paste(Err("injected contention".into()), &recipient, false);
+        assert!(unavailable.text.is_none());
+        assert!(unavailable.notice.is_some());
         assert!(pty_writes.is_empty());
         assert!(session.view_selection().is_some());
         assert!(projection.selection().is_some());
-
-        assert!(
-            paste_from_clipboard(
-                &mut session,
-                &mut projection,
-                || Ok("paste me".to_owned()),
-                |chunk| {
-                    pty_writes.extend_from_slice(chunk);
-                    Ok(())
-                },
-            )
-            .unwrap()
+        let retry = prepare_clipboard_paste(
+            Ok(bt_platform::ClipboardPayload::Text("paste me".into())),
+            &recipient,
+            false,
         );
+        paste_text(
+            &mut session,
+            &mut projection,
+            retry.text.as_deref().unwrap(),
+            |bytes| {
+                pty_writes.extend_from_slice(bytes);
+                Ok(())
+            },
+        )
+        .unwrap();
         assert_eq!(pty_writes, b"paste me");
         assert!(session.view_selection().is_none());
         assert!(projection.selection().is_none());
@@ -131244,6 +132681,96 @@ mod tests {
             .plus(MouseScrollDelta::LineDelta(0.0, -1.0)),
             None
         );
+    }
+
+    // Runtime needs a window and a GPU. Exercise real terminal bytes,
+    // projection, equivalence and frame slots here; the wiring test below
+    // checks the Runtime doors that the headless harness cannot call.
+    fn wheel_pane_at_top() -> PtyPresentationHarness {
+        let mut pane = PtyPresentationHarness::new(20, 3);
+        pane.feed_drain(b"zero\r\none\r\ntwo\r\nthree\r\nfour\r\nfive");
+        pane.projection.scroll_to_top();
+        pane.publish_expose_frame();
+        pane.present_pending();
+        assert!(pane.projection.scroll_offset_subpixels() > 0);
+        pane.publications = 0;
+        pane
+    }
+
+    fn flush_test_wheel(pane: &mut PtyPresentationHarness, notches: f32) -> bool {
+        let burst = WheelBurst::of(MouseScrollDelta::LineDelta(0.0, notches / 2.0))
+            .plus(MouseScrollDelta::LineDelta(0.0, notches / 2.0))
+            .unwrap();
+        let MouseScrollDelta::LineDelta(_, lines) = burst.delta() else {
+            panic!("line reports stay in their own currency");
+        };
+        let before = pane.projection.scroll_offset_subpixels();
+        let mut remainder = f64::from(lines) * pane.projection.cell_height_subpixels().get() as f64;
+        pane.projection
+            .scroll_by_subpixels(drain_whole_units(&mut remainder, 1.0));
+        let moved = pane.projection.scroll_offset_subpixels() != before;
+        pane.publish_expose_frame_inner(true);
+        moved
+    }
+
+    #[test]
+    fn wheel_flush_at_the_top_clamp_publishes_no_frame() {
+        let mut pane = wheel_pane_at_top();
+        let revision = pane.content_revision;
+        assert!(!flush_test_wheel(&mut pane, 1.0));
+        assert_eq!(pane.publications, 0);
+        assert_eq!(pane.content_revision, revision);
+        assert!(!pane.present_pending());
+        // The former unconditional wheel publish fails the zero-frame rule.
+        assert!(pane.publish_expose_frame());
+        assert_eq!(pane.publications, 1);
+    }
+
+    #[test]
+    fn wheel_flush_that_moves_the_view_publishes_exactly_one_frame() {
+        let mut pane = wheel_pane_at_top();
+        let before = pane.last_presented.clone().unwrap();
+        assert!(flush_test_wheel(&mut pane, -1.0));
+        assert_eq!(pane.publications, 1);
+        let after = pane.pending.pending_frame().unwrap();
+        assert_ne!(before.viewport_origin, after.viewport_origin);
+        assert!(pane.present_pending());
+        assert!(!pane.present_pending());
+    }
+
+    #[test]
+    fn wheel_flush_at_a_clamp_still_publishes_changed_content() {
+        let mut pane = wheel_pane_at_top();
+        // New live cells still belong to the frame at the bottom clamp.
+        pane.session.feed(b"\x1b[3J\x1b[2J\x1b[Hnew").unwrap();
+        pane.publish_expose_frame();
+        pane.present_pending();
+        pane.publications = 0;
+        pane.session.feed(b" content").unwrap();
+        assert!(!flush_test_wheel(&mut pane, -1.0));
+        assert_eq!(pane.publications, 1);
+    }
+
+    #[test]
+    fn wheel_flush_runtime_skips_unchanged_panes_but_keeps_thumb_frames() {
+        let repaint = method_text("    fn repaint_pane_change_inner(");
+        assert!(repaint.contains("self.publish_frame_inner(trigger,wheel_view_moved.is_some())?"));
+        assert!(repaint.contains("||seat==self.focused_leaf||wheel_view_moved==Some(false)"));
+        assert!(repaint.contains("self.represent_on_screen_frame(trigger)"));
+        let scroll = method_text("    fn scroll_view_exact_in(");
+        assert!(scroll.contains("letbefore=leaf.projection.scroll_offset_subpixels();"));
+        assert!(scroll.contains("letmoved=leaf.projection.scroll_offset_subpixels()!=before;"));
+        let publish = scroll
+            .find("self.repaint_pane_change_inner(seat,Some(moved))?")
+            .unwrap();
+        let thumb = scroll.find("self.woke_terminal_thumb(seat)?").unwrap();
+        assert!(
+            publish < thumb,
+            "the thumb shares a moved view's queued frame"
+        );
+        let wake =
+            method_text("    fn woke_terminal_thumb(&mut self, seat: SeatId) -> Result<()> {");
+        assert!(wake.contains("ifself.refresh_overlay(){self.present_chrome_change()?;"));
     }
 
     #[test]
@@ -150310,6 +151837,102 @@ mod tests {
         }
     }
 
+    /// PIN (T-REMOTE-INPUT-PACKET, owner evidence 2026-09-15) — **a commit that
+    /// arrived with no composition in front of it is still what the reader
+    /// typed**, and it is typed once.
+    ///
+    /// # The second shape of injected text
+    ///
+    /// A program that types for you reaches this window in one of two shapes,
+    /// and only one of them is a key. The phone keyboard's is
+    /// ([`input::injected_logical_key`] carries that half). Windows' own **Win+H
+    /// voice typing**, in a window with no text store — which is every window
+    /// this program has — uses the *other* one: it opens an IMM composition and
+    /// goes straight to its result, with no pre-edit anywhere in it. Measured in
+    /// a bare Win32 window on 2026-09-15:
+    ///
+    /// ```text
+    /// WM_IME_STARTCOMPOSITION
+    /// WM_IME_COMPOSITION lParam=0x0800 (GCS_RESULTSTR) "你可以听到我说话吗"
+    /// WM_IME_ENDCOMPOSITION
+    /// ```
+    ///
+    /// winit reads `GCS_RESULTSTR` the same way whatever else is in `lParam`
+    /// (`event_loop.rs`'s `WM_IME_COMPOSITION` arm), so what this window is
+    /// handed is `Ime::Preedit("")` followed by `Ime::Commit(sentence)` — the
+    /// identical pair Microsoft Pinyin ends a word with, which is why that half
+    /// needs no new road: **a commit is already unconditional here.** This test
+    /// is what keeps it that way. The tempting guard — "only commit while
+    /// something is being composed" — is one this file has the vocabulary to
+    /// write (the window's own `preedit` and `composing` are both in reach)
+    /// and it would silently delete every dictated sentence, because a
+    /// dictation never composes anything.
+    ///
+    /// **And once.** winit answers `WM_IME_COMPOSITION` with `Value(0)` rather
+    /// than `DefWindowProc`, so the `WM_IME_CHAR`/`WM_CHAR` tail the probe saw
+    /// is never generated under it; and a `WM_CHAR` with no key press under it
+    /// is dropped by winit's own builder ("Received a CHAR message but no
+    /// `event_info` was available"). So the commit door and the key door cannot
+    /// both fire for one sentence — which is also why the injected-text rewrite
+    /// belongs at the top of the *key* ladder and nowhere near this one.
+    ///
+    /// MUTATIONS: put any `if` or any early `return` between the commit arm and
+    /// its write — Win+H goes silent again while every Chinese IME keeps
+    /// working, which is exactly the shape of bug that survives a release; move
+    /// the injected-key rewrite out of `keyboard_input` and the last assertion
+    /// goes red.
+    #[test]
+    fn a_commit_with_no_composition_in_front_of_it_still_reaches_the_child() {
+        const SOURCE: &str = include_str!("main.rs");
+        fn body(signature: &str) -> &'static str {
+            let start = SOURCE
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+            let rest = &SOURCE[start + signature.len()..];
+            &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+        }
+
+        let door = body("fn ime_input(&mut self, event: Ime) -> Result<()> {");
+        let commit = door
+            .find("Ime::Commit(text) => {")
+            .expect("the composition door has a commit arm");
+        let write = door[commit..]
+            .find("write_pty_input(")
+            .expect("and that arm ends in the write into the child");
+        let statements = door[commit..commit + write]
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with("//"))
+            .collect::<Vec<_>>();
+        assert!(
+            !statements.iter().any(|line| line.starts_with("if ")),
+            "a condition stands between a commit and the child, and a dictated \
+             sentence composes nothing for it to be true of:\n{statements:#?}"
+        );
+        // A `return` *statement*, which is the only way out of this arm short of
+        // the write — `return_to_live_for_input` is a call and spells the same
+        // six letters, which is why this is asked of the start of the line.
+        assert!(
+            !statements.iter().any(|line| line.starts_with("return")),
+            "the commit arm can now decline to type what it was given:\n{statements:#?}"
+        );
+
+        // The other shape's road, and the assertion that the two stay apart: the
+        // key that carries text is rewritten in the *key* ladder, so no sentence
+        // can arrive through both doors.
+        let ladder = body(
+            "fn keyboard_input(&mut self, event: &KeyEvent, is_synthetic: bool) -> Result<()> {",
+        );
+        assert!(
+            ladder.contains("input::injected_logical_key("),
+            "a press that carries text and names no key has no rung again"
+        );
+        assert!(
+            !door.contains("injected_logical_key"),
+            "the composition door does not also rewrite keys"
+        );
+    }
+
     /// PIN (user report, 2026-08-17) — **every rung says where its caret comes
     /// from, and the sweep proves the ladder can produce no other rung.**
     ///
@@ -153229,29 +154852,31 @@ mod tests {
     /// command; and the trailing one is what lets the next argument be typed
     /// without reaching for the space bar first.
     #[test]
-    fn an_inserted_path_is_quoted_when_it_has_to_be_and_spaced_on_both_sides() {
-        let plain = Path::new(r"C:\work\notes.md");
-        assert_eq!(inserted_path_text(plain, false), r"C:\work\notes.md ");
-        assert_eq!(inserted_path_text(plain, true), r" C:\work\notes.md ");
-
-        let spaced = Path::new(r"C:\Program Files\thing.exe");
-        assert_eq!(
-            inserted_path_text(spaced, false),
-            "\"C:\\Program Files\\thing.exe\" ",
-            "a space in a path is where a shell would end the word"
-        );
-        assert_eq!(
-            inserted_path_text(spaced, true),
-            " \"C:\\Program Files\\thing.exe\" "
-        );
-        assert!(
-            inserted_path_text(plain, false).ends_with(' '),
-            "always a space after, so the next argument can just be typed"
-        );
-        assert!(
-            !inserted_path_text(plain, false).starts_with(' '),
-            "and never one in front when the input line already ends in one"
-        );
+    fn an_inserted_path_is_always_quoted_and_spaced_on_both_sides() {
+        let recipient = shell_literal::Recipient {
+            encoder: shell_literal::Encoder {
+                grammar: shell_literal::ShellGrammar::PowerShell,
+                named_cmd: false,
+                delayed_expansion: false,
+                powershell_doubled_quotes: &[],
+            },
+            namespace: bt_transcript::paths::PrintedPathNamespace::Windows,
+            spelling: None,
+            wsl_distribution: None,
+        };
+        for path in [
+            r"C:\work\notes.md",
+            r"C:\Program Files\thing.exe",
+            r"C:\$RECYCLE.BIN",
+        ] {
+            for leading in [false, true] {
+                let insertion = shell_literal::paths_text(&[path.into()], &recipient, leading);
+                assert_eq!(
+                    insertion.text,
+                    format!("{}'{path}' ", if leading { " " } else { "" })
+                );
+            }
+        }
     }
 
     /// PIN — K144's leading space, read off the screen the shell drew.
@@ -156245,6 +157870,10 @@ mod tests {
             // panes exist to carry scrollback, and the default profile is what
             // the pane they stand in for would have been started as.
             profile: profiles::fallback_profile(),
+            paste_recipient: profiles::paste_recipient(
+                profiles::fallback_profile(),
+                &bt_pty::SystemShellEnvironment,
+            ),
             // And the door that profile is served through, which is the one the
             // spawn would have read for it.
             integration: profiles::row(profiles::fallback_profile())
@@ -163701,7 +165330,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 11] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 13] = [
         // The hook this build writes into somebody else's settings file names a
         // program, and a program is named differently on each platform.
         "attention_copilot.rs",
@@ -163721,10 +165350,16 @@ mod platform_gate_tests {
         "main.rs",
         // Which rows the palette offers on this machine.
         "palette_index.rs",
+        // Test fixtures compose Windows-only namespace translation with profile
+        // overrides; production profile policy uses the portable platform interface.
+        "profiles.rs",
         // A PowerShell module, which is a Windows fact end to end.
         "psreadline.rs",
         // Which shells can be integrated with here.
         "shell_integration.rs",
+        // Native invalid-name, Windows spelling and direct CRT test fixtures only;
+        // the pure encoders stay here as paste-paths design section 5 specifies.
+        "shell_literal.rs",
         // WSL.
         "wsl.rs",
     ];
@@ -163780,7 +165415,7 @@ mod platform_gate_tests {
         opens && PLATFORM_WORDS.iter().any(|word| line.contains(word))
     }
 
-    /// RED — **no twelfth file, and no name on the list that has stopped
+    /// RED — **no unlisted file, and no name on the list that has stopped
     /// asking.**
     ///
     /// Two directions, because a one-way list rots: a file that starts naming a
@@ -166602,5 +168237,181 @@ mod field_command_tests {
         // enter this program is through `bt-platform`. That is where M3-2's menu
         // bar is hung, and where the rule is kept:
         // `macos_menu::tests::the_menu_bar_does_not_end_the_process_where_it_stands`.
+    }
+}
+
+#[cfg(test)]
+mod clipboard_path_tests {
+    use super::*;
+    use bt_platform::clipboard::{Candidate, ClipboardPort, ClipboardTypes};
+
+    struct MemoryClipboard {
+        files: Vec<PathBuf>,
+        text: String,
+        fetched: Vec<&'static str>,
+    }
+    impl ClipboardPort for MemoryClipboard {
+        fn begin(&mut self) -> std::result::Result<(), String> {
+            Ok(())
+        }
+        fn survey(&mut self) -> std::result::Result<ClipboardTypes, String> {
+            Ok(ClipboardTypes {
+                files: true,
+                text: true,
+                picture: true,
+                promise: false,
+            })
+        }
+        fn files(&mut self) -> Candidate<Vec<PathBuf>> {
+            self.fetched.push("files");
+            Candidate::Present(self.files.clone())
+        }
+        fn text(&mut self) -> Candidate<String> {
+            self.fetched.push("text");
+            Candidate::Present(self.text.clone())
+        }
+        fn finish(&mut self) -> std::result::Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn recipient() -> shell_literal::Recipient {
+        shell_literal::Recipient {
+            encoder: shell_literal::Encoder {
+                grammar: shell_literal::ShellGrammar::Posix,
+                named_cmd: false,
+                delayed_expansion: false,
+                powershell_doubled_quotes: &[],
+            },
+            namespace: bt_transcript::paths::PrintedPathNamespace::Windows,
+            spelling: None,
+            wsl_distribution: None,
+        }
+    }
+
+    #[test]
+    fn fake_clipboard_reaches_one_paste_write_and_inherits_the_terminal_bracketing() {
+        for bracketed in [false, true] {
+            let mut clipboard = MemoryClipboard {
+                files: vec![
+                    "/first".into(),
+                    "/bad\nname".into(),
+                    "/second space".into(),
+                    "/third".into(),
+                ],
+                text: "Finder leaf name".into(),
+                fetched: Vec::new(),
+            };
+            let mut session =
+                DualPlaneSession::new(NonZeroU32::new(40).unwrap(), NonZeroU32::new(4).unwrap());
+            session.feed(b"cat").unwrap();
+            if bracketed {
+                session.feed(b"\x1b[?2004h").unwrap();
+            }
+            let prepared = prepare_clipboard_paste(
+                bt_platform::clipboard::read_payload(&mut clipboard),
+                &recipient(),
+                input_line_needs_a_space_first(&session),
+            );
+            assert_eq!(clipboard.fetched, ["files"]);
+            assert!(prepared.notice.unwrap().contains("bad\\nname"));
+            let text = prepared.text.unwrap();
+            assert_eq!(text, " '/first' '/second space' '/third' ");
+            let mut projection = session.new_projection(session.layout_key());
+            let mut writes = Vec::new();
+            paste_text(&mut session, &mut projection, &text, |bytes| {
+                writes.push(bytes.to_vec());
+                Ok(())
+            })
+            .unwrap();
+            let expected = if bracketed {
+                format!("\x1b[200~{text}\x1b[201~").into_bytes()
+            } else {
+                text.into_bytes()
+            };
+            assert_eq!(writes, [expected]);
+            assert!(!writes[0].contains(&b'\r'));
+        }
+    }
+
+    #[test]
+    fn text_is_unchanged_and_empty_text_does_not_fall_through() {
+        for text in [
+            "",
+            "\"D:\\Copy as path\\a.txt\"",
+            "ordinary\ntext\twith controls",
+        ] {
+            let mut clipboard = MemoryClipboard {
+                files: Vec::new(),
+                text: text.into(),
+                fetched: Vec::new(),
+            };
+            let prepared = prepare_clipboard_paste(
+                bt_platform::clipboard::read_payload(&mut clipboard),
+                &recipient(),
+                true,
+            );
+            assert_eq!(prepared.text.as_deref(), Some(text));
+            assert!(prepared.notice.is_none());
+            assert_eq!(clipboard.fetched, ["files", "text"]);
+        }
+    }
+
+    #[test]
+    fn nothing_is_silent_and_payload_refusal_acquisition_error_and_path_error_each_report() {
+        use bt_platform::{ClipboardPayload, UnsupportedKind};
+        for payload in [
+            ClipboardPayload::Nothing,
+            ClipboardPayload::Picture(Vec::new()),
+        ] {
+            let prepared = prepare_clipboard_paste(Ok(payload), &recipient(), false);
+            assert!(prepared.text.is_none());
+            assert!(prepared.notice.is_none());
+        }
+        for result in [
+            Ok(ClipboardPayload::Refused(UnsupportedKind::Promise)),
+            Err("injected read failure".into()),
+            Ok(ClipboardPayload::Files(vec!["/bad\tname".into()])),
+        ] {
+            let prepared = prepare_clipboard_paste(result, &recipient(), true);
+            assert!(prepared.text.is_none());
+            assert!(prepared.notice.is_some());
+        }
+    }
+
+    #[test]
+    fn terminal_is_the_only_new_clipboard_caller_and_k144_keeps_focus() {
+        let source = include_str!("main.rs");
+        let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
+        assert_eq!(
+            before_this_fixture
+                .matches("bt_platform::clipboard_payload()")
+                .count(),
+            1
+        );
+        let paste = source
+            .split_once("    fn paste_from_clipboard_into(")
+            .unwrap()
+            .1
+            .split_once("    /// A composition event")
+            .unwrap()
+            .0;
+        assert!(paste.contains("bt_platform::clipboard_payload()"));
+        assert!(paste.contains("hang_watch::Station::ClipboardRead"));
+        assert!(paste.contains("leaf.paste_recipient.clone()"));
+        assert!(!paste.contains("set_focus("));
+        assert!(!paste.contains("set_files_keyboard("));
+        let k144 = source
+            .split_once("    fn insert_path_into_terminal(")
+            .unwrap()
+            .1
+            .split_once("    // ── the floating window")
+            .unwrap()
+            .0;
+        assert!(k144.contains("shell_literal::paths_text("));
+        assert!(k144.contains("set_files_keyboard(None"));
+        assert!(k144.contains("self.seats.set_focus(seat)"));
+        assert!(k144.contains("paste_text("));
+        assert!(!k144.contains("to_string_lossy"));
     }
 }
