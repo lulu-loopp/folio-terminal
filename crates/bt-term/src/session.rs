@@ -3722,10 +3722,10 @@ impl DualPlaneSession {
         }
         self.live_detection_count = self.live_detection_count.saturating_add(scheduled as u64);
         if scheduled != 0 && switched_on("BT_PERF_TRACE") {
-            eprintln!(
+            bt_viewport::trace::line(format!(
                 "BT_PERF_TRACE live_math_detect={} live_math_invalidations={}",
                 self.live_detection_count, self.live_invalidation_count
-            );
+            ));
         }
         scheduled.saturating_add(
             self.local_image_path_tasks
@@ -6777,10 +6777,10 @@ impl DualPlaneSession {
         }
         self.live_invalidation_count = self.live_invalidation_count.saturating_add(invalidated);
         if invalidated != 0 && switched_on("BT_PERF_TRACE") {
-            eprintln!(
+            bt_viewport::trace::line(format!(
                 "BT_PERF_TRACE live_math_event=invalidate live_math_detect={} live_math_invalidations={}",
                 self.live_detection_count, self.live_invalidation_count
-            );
+            ));
         }
     }
 
@@ -6800,10 +6800,10 @@ impl DualPlaneSession {
             self.offscreen_decorations.clear();
         }
         if removed != 0 && switched_on("BT_PERF_TRACE") {
-            eprintln!(
+            bt_viewport::trace::line(format!(
                 "BT_PERF_TRACE live_math_event=invalidate-all live_math_detect={} live_math_invalidations={}",
                 self.live_detection_count, self.live_invalidation_count
-            );
+            ));
         }
     }
 
@@ -7080,17 +7080,17 @@ impl DualPlaneSession {
             self.account_stranded_pending(task.candidate_id, task.versions);
         } else if switched_on("BT_PERF_TRACE") {
             if let Some(elapsed) = render_time {
-                eprintln!(
+                bt_viewport::trace::line(format!(
                     "BT_PERF_TRACE math_render_us={} source={} resident_bytes={}",
                     elapsed.as_micros(),
                     task.transcript_id.0,
                     self.math_resident_bytes(),
-                );
+                ));
             } else if let Some(error) = render_error.as_ref() {
-                eprintln!(
+                bt_viewport::trace::line(format!(
                     "BT_PERF_TRACE math_render_failed source={} error={error:?}",
                     task.transcript_id.0,
-                );
+                ));
             }
         }
         if accepted && let Some(error) = render_error.as_ref() {
@@ -7124,12 +7124,12 @@ impl DualPlaneSession {
         } else if switched_on("BT_PERF_TRACE")
             && let Some(elapsed) = render_time
         {
-            eprintln!(
+            bt_viewport::trace::line(format!(
                 "BT_PERF_TRACE live_math_render_us={} row={} resident_bytes={}",
                 elapsed.as_micros(),
                 task.start.row,
                 self.math_resident_bytes(),
-            );
+            ));
         }
         if accepted && let Some(error) = render_error.as_ref() {
             self.record_math_failure(error);
@@ -7152,12 +7152,12 @@ impl DualPlaneSession {
             None => return,
         }
         if switched_on("BT_PERF_TRACE") {
-            eprintln!(
+            bt_viewport::trace::line(format!(
                 "BT_PERF_TRACE math_failures_validate={} math_failures_convert={} math_failures_compile={}",
                 self.math_failure_validate_count,
                 self.math_failure_convert_count,
                 self.math_failure_compile_count,
-            );
+            ));
         }
     }
 

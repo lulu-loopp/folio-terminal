@@ -6,6 +6,18 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Fixed
+
+- **A traced run no longer pauses when whatever is reading the trace falls
+  behind.** This only concerns runs started with one of the `BT_…_TRACE`
+  variables set — a diagnostic recording, not an ordinary launch. Those runs
+  used to stop dead for seconds at a time, mid-keystroke, whenever the shell
+  collecting the trace stopped reading it: the window was waiting for the
+  recording to be taken, so the very thing being measured was what made it slow.
+  The lines now go to a thread of their own, and a run that produces them faster
+  than they can be written drops some and says how many rather than holding the
+  window.
+
 ## 0.4.1-preview — 2026-09-16
 
 ### Added
