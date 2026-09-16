@@ -129,6 +129,7 @@ mod text_field;
 mod toast;
 mod tooltip;
 mod trace;
+mod trace_sink;
 mod update;
 mod version;
 mod video_seat;
@@ -1408,10 +1409,10 @@ impl MathWorker {
                     };
                     let (leaf, completion) = request.completion();
                     if let Some(started) = started {
-                        eprintln!(
+                        trace_sink::stderr_line(format!(
                             "BT_PERF_TRACE image_scale purpose={purpose:?} size={width}x{height} lanczos_us={}",
                             started.elapsed().as_micros(),
-                        );
+                        ));
                     }
                     if scale_result_tx
                         .send(MathWorkerResult { leaf, completion })
@@ -12381,6 +12382,16 @@ struct WindowRuntime {
     /// a frame is what a profiler measures; the gap between frames is what a
     /// hand feels, and under CPU starvation the two stop being the same number.
     last_present_at: Option<Instant>,
+    /// **What the previous present line cost to write**, reported on the next
+    /// one as `trace_us` (T-TRACE-OFF-THREAD).
+    ///
+    /// The renderer's own `perf_trace_us` seen from this side, and carried
+    /// forward for its reason: a line cannot carry the cost of writing itself,
+    /// so present *n* reports what present *n-1* spent formatting its line and
+    /// handing it to `trace_sink`. Under a queue that is microseconds; under the
+    /// synchronous `eprintln!` this replaced it was, four times in one hour,
+    /// seconds.
+    perf_trace_us: u128,
     /// When [`Self::advance_strip_animation`] last ran, so
     /// [`STRIP_ANIMATION_FRAME`] can be the rate it claims to be rather than a
     /// floor nothing stands on. `None` until the first tick.
@@ -28307,42 +28318,35 @@ fn dump_focus_thumb_frame(
     stats: focus_thumb::ThumbStats,
     pages: web_thumb::WebThumbStats,
 ) {
-    let Some(path) = diagnostics::named_file(std::env::var_os("BT_FOCUS_THUMB_DUMP")) else {
-        return;
-    };
     // **The page lane on the same line and not on a second switch** (W2 slice
     // ⑥). It is the same budget seen from the one seat whose content this
     // window cannot compute, and a reader watching a card fill in wants the
     // projection counters and the capture counters against one another: a
     // `captures` that never moves beside a `hidden` that climbs is the whole
     // story of a column full of background tabs, and two files could not say it.
-    let line = format!(
-        "focus-thumb visible={visible} projections={} unchanged={} throttled={} dropped={} \
-         captures={} pictures={} page-frames={} page-hidden={} page-closing={} page-blank={} \
-         page-inflight={} page-throttled={} page-unchanged={} page-stale={}\n",
-        stats.projections,
-        stats.skipped_unchanged,
-        stats.skipped_throttled,
-        stats.dropped_offscreen,
-        pages.captures,
-        pages.pictures,
-        pages.frames,
-        pages.skipped_hidden,
-        pages.skipped_closing,
-        pages.skipped_blank,
-        pages.skipped_in_flight,
-        pages.skipped_throttled,
-        pages.skipped_unchanged,
-        pages.dropped_stale,
-    );
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        use std::io::Write as _;
-        let _ = file.write_all(line.as_bytes());
-    }
+    static FOCUS_THUMB_DUMP: trace::Dump = trace::Dump::new("BT_FOCUS_THUMB_DUMP");
+    FOCUS_THUMB_DUMP.line(|| {
+        format!(
+            "focus-thumb visible={visible} projections={} unchanged={} throttled={} dropped={} \
+             captures={} pictures={} page-frames={} page-hidden={} page-closing={} \
+             page-blank={} page-inflight={} page-throttled={} page-unchanged={} \
+             page-stale={}",
+            stats.projections,
+            stats.skipped_unchanged,
+            stats.skipped_throttled,
+            stats.dropped_offscreen,
+            pages.captures,
+            pages.pictures,
+            pages.frames,
+            pages.skipped_hidden,
+            pages.skipped_closing,
+            pages.skipped_blank,
+            pages.skipped_in_flight,
+            pages.skipped_throttled,
+            pages.skipped_unchanged,
+            pages.dropped_stale,
+        )
+    });
 }
 
 /// The same probe, for the overlay stack — see [`dump_chrome_frame`].
@@ -35537,6 +35541,23 @@ fn drain_may_take_another_slice(slices_taken: usize, elapsed: Duration) -> bool 
     slices_taken < DRAIN_SLICES_PER_TURN && elapsed < DRAIN_TURN_BUDGET
 }
 
+/// Bracket the complete slice loop, including its error return, once for every tab.
+fn in_drain_feed_turn<T, R>(
+    tabs: &mut [T],
+    begin: impl Fn(&mut T),
+    end: impl Fn(&mut T),
+    drain: impl FnOnce(&mut [T]) -> R,
+) -> R {
+    for tab in &mut *tabs {
+        begin(tab);
+    }
+    let result = drain(tabs);
+    for tab in tabs {
+        end(tab);
+    }
+    result
+}
+
 /// What one drain turned up, beyond the bytes.
 ///
 /// Separate answers rather than a `bool` tuple because they drive different
@@ -35724,30 +35745,8 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
         .read_output_slice();
     if !bytes.is_empty() {
         debug_assert!(bytes.len() <= bt_pty::TERM_READ_SLICE.get());
-        // **One thing a smaller read touches that is not in this crate, written
-        // down here because silence is how it gets lost.**
-        // `DualPlaneSession::feed_at` opens a repaint-preservation window when
-        // the bytes it is given carry a clear+home, an erase storm or a DEC 2026
-        // BSU, and closes it at the end of the same call unless a synchronized
-        // update is still open. That window is therefore scoped to *one read*,
-        // and always was: a reprint longer than the read splits across two, and
-        // the second half repaints with no window standing. A smaller read makes
-        // that split likelier — 8 KiB rather than 256 KiB of head room — so what
-        // used to be a quantum-boundary rarity is now an 8 KiB-boundary one.
-        //
-        // What it does **not** do is put a half-repainted picture on the glass:
-        // no frame is published between the slices of a turn
-        // ([`Runtime::drain_pty`] publishes once, at its tail), and records the
-        // reprojection cannot place are held off-band and re-anchored by exact
-        // source equality on the next slice. What is left is a record whose rows
-        // are rewritten in the slice *after* the window closed: it goes to source
-        // until re-detection.
-        //
-        // The repair is to scope that window to the turn rather than to the read
-        // — `feed_at` deferring its two `finish_*_repaint` calls to an explicit
-        // end-of-turn settle — and it belongs in `bt-term` beside
-        // `repaint_flash_oracle`, which is the gate that can prove it. T-DRAIN-BURST
-        // deliberately does not reach into that contract.
+        // The drain brackets all of its slices with begin/end_feed_turn, so a
+        // repaint's proven records stay protected until the whole turn settles.
         leaf.session
             .feed_at(&bytes, Instant::now())
             .context("apply PTY output")?;
@@ -36317,6 +36316,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         wheel_routings: 0,
         wheel_burst: None,
         last_present_at: None,
+        perf_trace_us: 0,
         strip_animation_ticked_at: None,
         cards: focus_thumb::CardClock::default(),
         preedit: None,
@@ -37145,9 +37145,9 @@ impl Runtime<'_> {
             // The spike printed exactly these two lines, and they are what a
             // machine that goes wrong here will be asked for: the chosen mode
             // alone leaves "why not the other one" unanswerable.
-            eprintln!("BT_STARTUP alpha target={:?}", alpha.target);
-            eprintln!("BT_STARTUP alpha offered={:?}", alpha.offered);
-            eprintln!("BT_STARTUP alpha chosen={:?}", alpha.chosen);
+            trace_sink::stderr_line(format!("BT_STARTUP alpha target={:?}", alpha.target));
+            trace_sink::stderr_line(format!("BT_STARTUP alpha offered={:?}", alpha.offered));
+            trace_sink::stderr_line(format!("BT_STARTUP alpha chosen={:?}", alpha.chosen));
         }
         // What the Background opacity row is allowed to offer, taken from the
         // surface that was actually configured rather than assumed (§7.1.6c-4b).
@@ -37355,7 +37355,7 @@ impl Runtime<'_> {
         );
         renderer.set_seat_viewport(terminal_seat);
         if trace_startup || trace_resize {
-            eprintln!("BT_CONPTY_SOURCE sources={conpty_sources:?}");
+            trace_sink::stderr_line(format!("BT_CONPTY_SOURCE sources={conpty_sources:?}"));
         }
         let pty_time = phase_started.elapsed();
         let math_worker = MathWorker::spawn(proxy.clone())?;
@@ -37554,7 +37554,7 @@ impl Runtime<'_> {
         runtime.dress_new_window(native)?;
         if trace_startup {
             let renderer_phases = runtime.window.renderer.init_timings(&runtime.app.gpu);
-            eprintln!(
+            trace_sink::stderr_line(format!(
                 "BT_STARTUP window={}ms adapter={}ms device={}ms surface={}ms fonts={}ms metrics={}ms render_resources={}ms renderer_total={}ms pty_spawn={}ms probe_input={} conpty_sources={conpty_sources:?} runtime_ready={}ms",
                 window_time.as_millis(),
                 renderer_phases.adapter.as_millis(),
@@ -37567,7 +37567,7 @@ impl Runtime<'_> {
                 pty_time.as_millis(),
                 probe_input.as_ref().map_or(0, Vec::len),
                 startup_started.elapsed().as_millis(),
-            );
+            ));
         }
         runtime.show_new_window(restored.is_some_and(|placement| placement.maximized))?;
         // **Every page the file said this window's panes were on**, and here for
@@ -37601,10 +37601,10 @@ impl Runtime<'_> {
         let background_visible = startup_started.elapsed();
         runtime.window.background_visible = Some(background_visible);
         if trace_startup {
-            eprintln!(
+            trace_sink::stderr_line(format!(
                 "BT_STARTUP background_visible={}ms",
                 background_visible.as_millis()
-            );
+            ));
         }
         // The facade's two borrows end here, at their last use: what a launch
         // hands back is the layers themselves.
@@ -42462,14 +42462,14 @@ impl Runtime<'_> {
         // every other one. A recording where it tracks `frozen_lines` while a shell prints is the
         // incremental step having been lost.
         if self.app.trace_perf {
-            eprintln!(
+            trace_sink::stderr_line(format!(
                 "BT_PERF_TRACE search_scan lines_scanned={} frozen_lines={} history_us={history_us} history_hits={} live_rows={} volatile_hits={}",
                 history.lines_scanned,
                 history.scan.window().len,
                 history.scan.hits().len(),
                 live.len(),
                 volatile_hits.len(),
-            );
+            ));
         }
         // Nothing happened when the question, the plane's window and the volatile hits are all the
         // ones the last scan saw. The window stands in for the history hits because it is what they
@@ -63502,13 +63502,13 @@ impl Runtime<'_> {
                 .map_or(f32::NAN, |(body, image_px)| {
                     image_zoom_scale(body, image_px, zoom)
                 });
-            eprintln!(
+            trace_sink::stderr_line(format!(
                 "BT_PERF_TRACE image_zoom scale={scale:.4} layout_us={} chrome_us={} present_us={} total_us={}",
                 (laid_out - started).as_micros(),
                 (chromed - laid_out).as_micros(),
                 chromed.elapsed().as_micros(),
                 started.elapsed().as_micros(),
-            );
+            ));
         }
         Ok(true)
     }
@@ -64645,10 +64645,10 @@ impl Runtime<'_> {
                     || "none".to_owned(),
                     |raster| format!("{}x{}", raster.width_px, raster.height_px),
                 );
-            eprintln!(
+            trace_sink::stderr_line(format!(
                 "BT_PERF_TRACE image_resample want={}x{} held={held_at} display={display_width}x{display_height}",
                 raster_width, raster_height,
-            );
+            ));
         }
         let task = peek_scale_task(&target, rgba, native_width, native_height);
         if self
@@ -64773,7 +64773,7 @@ impl Runtime<'_> {
             published_at,
             next_grid,
         ) {
-            eprintln!(
+            trace_sink::stderr_line(format!(
                 "BT_PERF_TRACE resize_frame solve_us={} actor_us={} publish_us={} redraw_us={} total_us={} queued={} columns={} rows={}",
                 solved.saturating_duration_since(started).as_micros(),
                 resized.saturating_duration_since(solved).as_micros(),
@@ -64785,7 +64785,7 @@ impl Runtime<'_> {
                 u8::from(!synchronous_present),
                 next_grid.columns,
                 next_grid.rows,
-            );
+            ));
         }
         Ok(())
     }
@@ -64955,7 +64955,7 @@ impl Runtime<'_> {
             let projection_started_at = trace_perf.then(Instant::now);
             leaf.session.refresh_projection(&mut leaf.projection);
             if let Some(started_at) = projection_started_at {
-                eprintln!(
+                trace_sink::stderr_line(format!(
                     "BT_PERF_TRACE projection source={:?} refresh_us={} lines_measured={} projected_lines={} rebuilt={} band_moved={}",
                     trigger.source,
                     started_at.elapsed().as_micros(),
@@ -64967,7 +64967,7 @@ impl Runtime<'_> {
                     leaf.projection
                         .bands_moved()
                         .saturating_sub(bands_moved_before),
-                );
+                ));
             }
             let frame = leaf
                 .session
@@ -64991,12 +64991,12 @@ impl Runtime<'_> {
         if self.shell().projection.presentation_hold() && self.window.last_presented_frame.is_some()
         {
             if self.app.trace_perf {
-                eprintln!(
+                trace_sink::stderr_line(format!(
                     "BT_PERF_TRACE hold=presentation source={:?} review={} exact_source={}",
                     trigger.source,
                     u8::from(self.shell().projection.review_hold()),
                     u8::from(self.shell().projection.exact_source_reprint_hold()),
-                );
+                ));
             }
             return Ok(false);
         }
@@ -65109,7 +65109,7 @@ impl Runtime<'_> {
                 let digest = frame_content_digest(&composed.frame);
                 let alternate_screen = frame_is_alternate_screen(&composed.frame);
                 let digest_elapsed = digest_started.elapsed();
-                eprintln!(
+                trace_sink::stderr_line(format!(
                     "BT_PERF_TRACE skip=unchanged source={:?} content_fnv={:016x} alt={} digest_us={} present_unchanged={} slot_overwrites={}",
                     trigger.source,
                     digest.content_fnv,
@@ -65117,7 +65117,7 @@ impl Runtime<'_> {
                     digest_elapsed.as_micros(),
                     self.window.present_gate.unchanged,
                     self.window.pending_frames.overwrites(),
-                );
+                ));
             }
             return Ok(false);
         }
@@ -82060,7 +82060,7 @@ impl Runtime<'_> {
         if published || !sync_open {
             self.pending_keyboard_at = None;
         } else if self.app.trace_perf {
-            eprintln!("BT_PERF_TRACE defer=synchronized-update");
+            trace_sink::stderr_line("BT_PERF_TRACE defer=synchronized-update".to_owned());
         }
         Ok(())
     }
@@ -82085,7 +82085,9 @@ impl Runtime<'_> {
             .map(|pty| pty.conpty_source().to_string())
             .unwrap_or_else(|| "direct-input".to_string());
         for event in &trace[self.window.resize_trace_logged_events.min(trace.len())..] {
-            eprintln!("BT_RESIZE_TRACE conpty_source={conpty_source:?} {event:?}");
+            trace_sink::stderr_line(format!(
+                "BT_RESIZE_TRACE conpty_source={conpty_source:?} {event:?}"
+            ));
         }
         self.window.resize_trace_logged_events = trace.len();
     }
@@ -82469,19 +82471,41 @@ impl Runtime<'_> {
         // a leftover two passes ago and has since gone quiet owes this window
         // nothing, and a wake raised for it would be a turn that drains nothing
         // and publishes a frame nobody asked for.
-        let pending = loop {
-            let mut slice_pending = false;
-            for (index, tab) in self.window.tabs.iter_mut().enumerate() {
-                let outcome =
-                    drain_tab_pty(tab, window_focused, index == active_tab, owner_is_a_shell)?;
-                slice_pending |= outcome.pending;
-                outcomes[index].merge(outcome);
-            }
-            slices_taken += 1;
-            if !slice_pending || !drain_may_take_another_slice(slices_taken, now.elapsed()) {
-                break slice_pending;
-            }
-        };
+        let drain_result = in_drain_feed_turn(
+            &mut self.window.tabs,
+            |tab| {
+                for (_, leaf) in tab.leaves_mut() {
+                    leaf.session.begin_feed_turn();
+                }
+            },
+            |tab| {
+                for (_, leaf) in tab.leaves_mut() {
+                    leaf.session.end_feed_turn();
+                }
+            },
+            |tabs| -> Result<bool> {
+                let pending = loop {
+                    let mut slice_pending = false;
+                    for (index, tab) in tabs.iter_mut().enumerate() {
+                        let outcome = drain_tab_pty(
+                            tab,
+                            window_focused,
+                            index == active_tab,
+                            owner_is_a_shell,
+                        )?;
+                        slice_pending |= outcome.pending;
+                        outcomes[index].merge(outcome);
+                    }
+                    slices_taken += 1;
+                    if !slice_pending || !drain_may_take_another_slice(slices_taken, now.elapsed())
+                    {
+                        break slice_pending;
+                    }
+                };
+                Ok(pending)
+            },
+        );
+        let pending = drain_result?;
         for (index, tab) in self.window.tabs.iter_mut().enumerate() {
             let outcome = &mut outcomes[index];
             // **The OSC lane's turn, on the turn the bytes arrived.** A standing request a program
@@ -83996,12 +84020,12 @@ impl Runtime<'_> {
                     .line()
                 });
                 if trace {
-                    eprintln!(
+                    trace_sink::stderr_line(format!(
                         "BT_RESIZE_TRACE conpty tab={index} seat={} cols={} rows={}",
                         seat.0,
                         leaf.conpty_grid.columns.get(),
                         leaf.conpty_grid.rows.get()
-                    );
+                    ));
                 }
                 committed_any = true;
                 reflowed_any |= commit.reflowed;
@@ -86102,11 +86126,25 @@ impl Runtime<'_> {
     /// that pane's own projection. Nothing is invented for the held pane; the
     /// panes that have something new to show simply stop being hostage to it.
     fn repaint_pane_change(&mut self, seat: SeatId) -> Result<()> {
+        self.repaint_pane_change_inner(seat, None)
+    }
+
+    /// A wheel can leave the view at its clamp; other pane changes still owe
+    /// their unconditional frame. The focused frame's digest cannot tell us
+    /// whether an unfocused view moved, so carry that answer from the scroll.
+    fn repaint_pane_change_inner(
+        &mut self,
+        seat: SeatId,
+        wheel_view_moved: Option<bool>,
+    ) -> Result<()> {
         let trigger = FrameTrigger {
             occurred_at: Instant::now(),
             source: FrameSource::Expose,
         };
-        if self.publish_frame_inner(trigger, false)? || seat == self.focused_leaf {
+        if self.publish_frame_inner(trigger, wheel_view_moved.is_some())?
+            || seat == self.focused_leaf
+            || wheel_view_moved == Some(false)
+        {
             return Ok(());
         }
         self.represent_on_screen_frame(trigger)
@@ -95983,7 +96021,9 @@ impl Runtime<'_> {
             }
             WheelRoute::Local => match self.wheel_columns(target_seat, delta) {
                 Some(columns) => self.scroll_seat_by_columns(target_seat, columns),
-                None => self.scroll_view_exact_in(target_seat, event_subpixels),
+                None => self
+                    .scroll_view_exact_in(target_seat, event_subpixels)
+                    .map(|_| ()),
             },
             WheelRoute::Nothing => Ok(()),
         }
@@ -96113,29 +96153,34 @@ impl Runtime<'_> {
     /// The remainder accumulator stays window-wide: it holds the fraction of a
     /// subpixel one physical notch left over, and a notch is a property of the
     /// mouse, not of the pane it landed on.
+    /// Returns whether the clamped view moved, independently of thumb changes.
     fn scroll_view_exact_in(
         &mut self,
         seat: bt_layout::SeatId,
         event_subpixels: f64,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         self.window.local_wheel_subpixel_remainder += event_subpixels;
         let take = drain_whole_units(&mut self.window.local_wheel_subpixel_remainder, 1.0);
         if take == 0 {
-            return Ok(());
+            return Ok(false);
         }
         // A notch lands a band that is still changing face, for `scroll_view`'s reason.
         self.settle_math_toggle()?;
         let active = self.window.active_tab;
         let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) else {
-            return Ok(());
+            return Ok(false);
         };
+        let before = leaf.projection.scroll_offset_subpixels();
         leaf.projection.scroll_by_subpixels(take);
+        let moved = leaf.projection.scroll_offset_subpixels() != before;
+        self.repaint_pane_change_inner(seat, Some(moved))?;
         // A notch is a reason for the bar to be up, and a moved view is a moved
         // thumb: the overlay is built on demand, so a wheel that only
         // republished the pane would slide the text under a mark that stayed
-        // where it was (P2-9 slice 1).
+        // where it was (P2-9 slice 1). Publish the view first so the thumb can
+        // share that frame; at a clamp a changed fade still owes its own frame.
         self.woke_terminal_thumb(seat)?;
-        self.repaint_pane_change(seat)
+        Ok(moved)
     }
 
     /// **Every key this window is told about, and the one gate above the
@@ -97245,16 +97290,8 @@ impl Runtime<'_> {
         // grepped, and the question "did the IME say that, or did we" has to
         // be answered from what the IME actually said. Written before any
         // routing so a swallowed event is still on the record.
-        if let Some(path) = diagnostics::named_file(std::env::var_os("BT_IME_TRACE")) {
-            use std::io::Write as _;
-            if let Ok(mut file) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-            {
-                let _ = writeln!(file, "{:?} {:?}", Instant::now(), event);
-            }
-        }
+        static IME_TRACE: trace::Dump = trace::Dump::new("BT_IME_TRACE");
+        IME_TRACE.line(|| format!("{:?} {:?}", Instant::now(), event));
         let composing = matches!(event, Ime::Preedit(..) | Ime::Commit(_));
         // **Which rung this composition was started in**, written above every
         // one of them so that the answer is the same one that routes the letters
@@ -100329,8 +100366,13 @@ impl Runtime<'_> {
         let Ok(latency) = receipt.latency() else {
             return;
         };
-        eprintln!(
-            "BT_PERF_TRACE present source={source:?} retained={} event_to_present_us={} event_to_submit_us={} since_previous_us={} composed={} slot_overwrites={} wheel_events={} wheel_routings={}",
+        // **The clock the line itself is measured on** — see
+        // [`WindowRuntime::perf_trace_us`]. It starts before the `format!`,
+        // because building the fields is part of what a trace costs a frame,
+        // and stops once the sink has the line.
+        let trace_started = Instant::now();
+        trace_sink::stderr_line(format!(
+            "BT_PERF_TRACE present source={source:?} retained={} event_to_present_us={} event_to_submit_us={} since_previous_us={} composed={} slot_overwrites={} wheel_events={} wheel_routings={} trace_us={}",
             u8::from(retained),
             latency.event_to_present_call.as_micros(),
             latency.event_to_submit.as_micros(),
@@ -100339,7 +100381,9 @@ impl Runtime<'_> {
             self.window.pending_frames.overwrites(),
             self.window.wheel_events,
             self.window.wheel_routings,
-        );
+            self.window.perf_trace_us,
+        ));
+        self.window.perf_trace_us = trace_started.elapsed().as_micros();
     }
 
     fn present_conditions(&self, source: FrameSource) -> present_gate::PresentConditions {
@@ -100793,22 +100837,22 @@ impl Runtime<'_> {
                     && matches!(trigger.source, FrameSource::Resize)
                     && let Some(Ok(latency)) = latency
                 {
-                    eprintln!(
+                    trace_sink::stderr_line(format!(
                         "BT_RESIZE present={}us columns={} rows={}",
                         latency.event_to_present_call.as_micros(),
                         frame.columns,
                         frame.grid_rows
-                    );
+                    ));
                 }
                 if has_text && !self.window.first_text_presented {
                     self.window.first_text_presented = true;
                     if self.app.trace_startup {
                         let text_visible = self.app.startup_started.elapsed();
                         self.window.first_text_visible = Some(text_visible);
-                        eprintln!(
+                        trace_sink::stderr_line(format!(
                             "BT_STARTUP first_text_present={}ms",
                             text_visible.as_millis()
-                        );
+                        ));
                     }
                 }
                 // Each pane keeps the frame it just drew, so a pointer question
@@ -103081,6 +103125,35 @@ mod hold_station_tests {
             .unwrap_or_else(|| panic!("`{needle}` is not in this function any more"))
     }
 
+    /// The text of one free function, from its signature to the line its body
+    /// closes on — [`body`]'s reader, one indentation level out.
+    fn free_body(signature: &str) -> &'static str {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        let end = rest.find("\n}").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// The `WindowEvent` kinds a match answers, read off its arm heads.
+    ///
+    /// The twelve-space indent is the whole of the reading: it is what
+    /// separates an arm from a mention of one in a comment beside it and from
+    /// the guard above the match, both of which stand in this dispatcher and
+    /// neither of which is an arm.
+    fn arms(text: &str) -> Vec<&str> {
+        text.lines()
+            .filter_map(|line| line.strip_prefix("            WindowEvent::"))
+            .map(|kind| {
+                let end = kind
+                    .find(|character: char| !character.is_alphanumeric() && character != '_')
+                    .unwrap_or(kind.len());
+                &kind[..end]
+            })
+            .collect()
+    }
+
     /// **Each station stands at the head of the run it names.**
     ///
     /// The pairs are read in the order a turn runs them: the station's own line,
@@ -103173,6 +103246,51 @@ mod hold_station_tests {
             event.contains("hang_watch::at(hang_watch::Station::Event);"),
             "the event's own name has left the door it is about"
         );
+        // And the handler underneath it, which *is* scoped: opened over the
+        // match alone and handed back before the application doors below it.
+        let opened = "hang_watch::enter(window_event_station(&event))";
+        assert_eq!(
+            event.matches(opened).count(),
+            1,
+            "the handler an event is given to is not named, so a stall inside \
+             one of them is charged to the event"
+        );
+        assert_eq!(
+            event.matches("hang_watch::at(leaving_station);").count(),
+            1,
+            "the handler's name is never handed back, so the dispatch below the \
+             match runs under it"
+        );
+    }
+
+    /// **Every kind the dispatcher answers names its own handler**
+    /// (T-WINDOW-EVENT-STATIONS).
+    ///
+    /// `window_event` ran every one of them under one word, so four seconds
+    /// inside a keystroke, a redraw and a resize all read `window_event 3960
+    /// ms` — which is the line the owner's traced run of 2026-09-15 actually
+    /// produced. A kind added to the match without a line in
+    /// [`super::window_event_station`] puts that back one arm at a time, and
+    /// puts it back *silently*, because `_ => Station::EventOther` answers
+    /// everything. That is the decay this pin is here to catch.
+    #[test]
+    fn every_event_kind_the_dispatcher_answers_names_its_own_handler() {
+        let dispatch = body(&["    fn window", "_event("].concat());
+        let naming = free_body(&["fn window_event", "_station("].concat());
+        let mut kinds = arms(dispatch);
+        assert!(
+            kinds.len() > 10,
+            "the dispatcher has stopped matching on kinds, so this pin reads nothing"
+        );
+        kinds.sort_unstable();
+        kinds.dedup();
+        for kind in kinds {
+            assert!(
+                naming.contains(&format!("WindowEvent::{kind}")),
+                "`{kind}` is answered by a handler no station names, so a stall \
+                 inside it is charged to the event itself"
+            );
+        }
     }
 }
 
@@ -107310,6 +107428,47 @@ mod pty_drain_budget_tests {
             "the drain's budget ({budget:?}) has to leave a frame room for the \
              frame it ends with"
         );
+    }
+
+    #[test]
+    fn the_drain_marks_each_sessions_turn_once_for_any_slice_count() {
+        for slices in [1, 2, super::DRAIN_SLICES_PER_TURN] {
+            for fail in [false, true] {
+                let mut tabs = [Vec::new(), Vec::new()];
+                let result = super::in_drain_feed_turn(
+                    &mut tabs,
+                    |events| events.push("begin"),
+                    |events| events.push("end"),
+                    |tabs| {
+                        for _ in 0..slices {
+                            for events in &mut *tabs {
+                                events.push("slice");
+                            }
+                        }
+                        if fail { Err("feed failed") } else { Ok(()) }
+                    },
+                );
+                assert_eq!(result.is_err(), fail);
+                for events in tabs {
+                    assert_eq!(events.first(), Some(&"begin"));
+                    assert_eq!(events.last(), Some(&"end"));
+                    assert_eq!(events.iter().filter(|event| **event == "begin").count(), 1);
+                    assert_eq!(events.iter().filter(|event| **event == "end").count(), 1);
+                    assert_eq!(
+                        events.iter().filter(|event| **event == "slice").count(),
+                        slices
+                    );
+                }
+            }
+        }
+        // Pin the production loop to the same scope exercised above.
+        let body = method_body("drain_pty");
+        let scope = body.find("in_drain_feed_turn(").unwrap();
+        let slices = body.find("let pending = loop {").unwrap();
+        assert!(scope < slices);
+        assert_eq!(body.matches("leaf.session.begin_feed_turn();").count(), 1);
+        assert_eq!(body.matches("leaf.session.end_feed_turn();").count(), 1);
+        assert!(body[slices..].contains("let pending = drain_result?;"));
     }
 
     /// PIN (T-DRAIN-BURST) — **the repetition lives where the deadline does, and
@@ -112248,6 +112407,13 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         // inside the close — past that line the window is gone, and a question
         // asked after the answer is worthless.
         let mut shutting = false;
+        // **The handler this event is about to be given to, named before it is
+        // given** — see [`window_event_station`]. Opened here and not at the
+        // door above, so the lookup, the three gates and the wheel burst stay
+        // the event's own; handed back at the foot of the match, on
+        // [`hang_watch::enter`]'s rule, so the four application doors under it
+        // belong to the dispatch and not to the handler.
+        let leaving_station = hang_watch::enter(window_event_station(&event));
         let result = match event {
             // **The summoned terminal's `×` means hide, and it means it by
             // setting the chord's own bit** (§7.54e ②, user ruling 2026-09-05:
@@ -112492,6 +112658,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             }),
             _ => Ok(()),
         };
+        hang_watch::at(leaving_station);
         // The gate's own `Discard`, spent here rather than inside the answer: the
         // shut belongs to the event loop, and re-requesting it means closing goes
         // through the one door it always went through instead of a second one
@@ -112582,6 +112749,47 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         if let Some(app) = self.app.as_mut() {
             app.finish();
         }
+    }
+}
+
+/// **Which handler a `WindowEvent` is about to be given to**
+/// (T-WINDOW-EVENT-STATIONS).
+///
+/// [`AppEvent::station`]'s twin, one door over and born of the same finding.
+/// The whole of `window_event` ran under [`hang_watch::Station::Event`], so the
+/// owner's traced run of 2026-09-15 — `held control for 3971 ms on turn 15341 —
+/// window_event 3960 ms` — could say only that four seconds had gone into *an
+/// event*: a keystroke, a wheel notch, a redraw and a resize wear one word, and
+/// which of them it was is the one thing a reader needs before they can look
+/// anywhere.
+///
+/// A free function rather than a method because `WindowEvent` is winit's, and
+/// it takes the event by reference so the naming happens before the match moves
+/// it.
+///
+/// **The kinds that answer [`hang_watch::Station::EventOther`] are the ones
+/// this window does nothing for.** The match ends in `_ => Ok(())`, and an
+/// event that falls through it has cost this process a lookup and a comparison;
+/// a station apiece for the rest of winit's list would be a dozen names that
+/// can never be the answer, standing in front of the twelve that can.
+fn window_event_station(event: &WindowEvent) -> hang_watch::Station {
+    use hang_watch::Station;
+    match event {
+        WindowEvent::CloseRequested => Station::EventClose,
+        WindowEvent::KeyboardInput { .. } => Station::EventKey,
+        WindowEvent::Ime(_) => Station::EventIme,
+        WindowEvent::ModifiersChanged(_) => Station::EventModifiers,
+        WindowEvent::CursorMoved { .. } | WindowEvent::CursorLeft { .. } => Station::EventPointer,
+        WindowEvent::MouseInput { .. } => Station::EventMouse,
+        WindowEvent::MouseWheel { .. } => Station::EventWheel,
+        WindowEvent::Resized(_) => Station::EventResize,
+        WindowEvent::ScaleFactorChanged { .. } => Station::EventScale,
+        WindowEvent::Moved(_) | WindowEvent::ThemeChanged(_) | WindowEvent::Occluded(_) => {
+            Station::EventWindow
+        }
+        WindowEvent::RedrawRequested => Station::EventRedraw,
+        WindowEvent::Focused(_) => Station::EventFocus,
+        _ => Station::EventOther,
     }
 }
 
@@ -114414,14 +114622,14 @@ fn trace_surface_size_clamp(
     {
         return;
     }
-    eprintln!(
+    trace_sink::stderr_line(format!(
         "{prefix} surface_size_clamped requested={}x{} configured={}x{} max_texture_dimension_2d={}",
         requested.width,
         requested.height,
         presentation.swapchain_size.0,
         presentation.swapchain_size.1,
         presentation.max_texture_dimension_2d,
-    );
+    ));
 }
 
 /// Put the stored pair of schemes in force, resolving each name against this
@@ -118270,18 +118478,38 @@ fn main() -> Result<()> {
     // Before `hang_watch::start`, so the watchdog's own line lands in the log
     // and never in somebody's shell — which is the report that opened this.
     let channel = diagnostics::enter_resident_run(&storage);
+    // **And from here no trace line is written by the thread that made it**
+    // (T-TRACE-OFF-THREAD). `trace_sink` starts one writer thread — and only
+    // for a run that asked for a trace — behind a bounded queue that drops and
+    // counts rather than waiting. After `enter_resident_run` has decided where
+    // `stderr` points, and before frame traces: the renderer's receipt is the line
+    // that spent 5.9 seconds inside `ZwWriteFile` on the window thread.
+    //
+    // The door is `bt_viewport`'s because `bt-app` depends on the three crates
+    // that write these lines and none of them can name this module; see
+    // `bt_viewport::trace`.
+    let _trace_shutdown = trace_sink::start();
+    bt_render::set_trace_writer(trace_sink::stderr_line);
     if diagnostics::switched_on(std::env::var_os("BT_STARTUP_TRACE")) {
-        eprintln!(
+        trace_sink::stderr_line(format!(
             "BT_STARTUP_TRACE: from here Folio talks to {}",
             channel.label()
-        );
+        ));
     }
     // **And the witness to the day this thread stops answering** (§1.5).
     // Started from here, on the window thread, before the loop exists: it needs
     // this thread's id, and it needs `%APPDATA%` resolved by the thread that is
     // allowed to pay for the one-time relocation `storage_dir` performs. A
     // healthy run never writes a byte — see `hang_watch` for the whole bill.
-    hang_watch::start(storage.join(hang_watch::REPORTS_DIRECTORY));
+    //
+    // **The same question `Runtime::trace_perf` asks, asked here** because the
+    // watchdog starts before there is an `App` to hold the answer — the reading
+    // `MathWorker::spawn` takes for the same reason one lane over. What it
+    // decides is the silence a report is written for: a run somebody started in
+    // order to measure it is worth suspending at two seconds, and a run nobody
+    // asked anything of is not. See `hang_watch::TRACED_HANG_THRESHOLD`.
+    let trace_perf = diagnostics::switched_on(std::env::var_os("BT_PERF_TRACE"));
+    hang_watch::start(storage.join(hang_watch::REPORTS_DIRECTORY), trace_perf);
     // The one-time media-session warm-up (§7.23) is paid here, off the first
     // hover: the process-resident session costs ~210ms cold and ~10ms warm.
     bt_platform::video::prewarm();
@@ -118435,17 +118663,19 @@ fn main() -> Result<()> {
     let code = match &outcome {
         Ok(()) => 0,
         Err(error) => {
-            eprintln!("{APP_NAME} stopped: {error:#}");
+            trace_sink::stderr_line(format!("{APP_NAME} stopped: {error:#}"));
             1
         }
     };
-    eprintln!(
-        "{}",
-        diagnostics::run_footer(
-            &hang_watch::utc_timestamp(std::time::SystemTime::now()),
-            code
-        )
-    );
+    trace_sink::stderr_line(diagnostics::run_footer(
+        &hang_watch::utc_timestamp(std::time::SystemTime::now()),
+        code,
+    ));
+    // **And what the trace still has queued, before the process goes**
+    // (T-TRACE-OFF-THREAD). Under a bound — see `trace_sink::FLUSH_TIMEOUT`:
+    // the failure that queue exists for is a writer stuck in a kernel write,
+    // and waiting on it forever here would move the hang to the end of the run.
+    trace_sink::flush();
     bt_platform::leave_process(code)
 }
 
@@ -125319,7 +125549,7 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_file(&path);
-        let trace = crate::trace::Trace::create(&path, "# pin").expect("open a scratch trace");
+        let trace = crate::trace::Trace::create(&path, "# pin");
         let read = |from: usize| -> Vec<String> {
             std::fs::read_to_string(&path)
                 .expect("the trace file was created")
@@ -126417,7 +126647,7 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_file(&path);
-        let trace = trace::Trace::create(&path, HEADER).expect("open a trace at a temporary path");
+        let trace = trace::Trace::create(&path, HEADER);
         let write = |message: String| mouse_trace::emit(Some(&trace), || message);
 
         // A driver that speaks half a detent at a time — the shape a
@@ -130154,10 +130384,23 @@ mod tests {
         /// `publish_frame_inner` for a source that is not PTY output: composes
         /// unconditionally, with no unchanged-frame gate to fall back on.
         fn publish_expose_frame(&mut self) -> bool {
+            self.publish_expose_frame_inner(false)
+        }
+
+        fn publish_expose_frame_inner(&mut self, skip_unchanged: bool) -> bool {
             self.session.refresh_projection(&mut self.projection);
             self.viewport_frames += 1;
             let frame = self.session.viewport_frame(&mut self.projection).unwrap();
             if self.projection.presentation_hold() && self.last_presented.is_some() {
+                return false;
+            }
+            if skip_unchanged
+                && pty_frame_is_unchanged(
+                    self.pending.pending_frame(),
+                    self.last_presented.as_ref(),
+                    &frame,
+                )
+            {
                 return false;
             }
             self.content_revision += 1;
@@ -132722,6 +132965,96 @@ mod tests {
             .plus(MouseScrollDelta::LineDelta(0.0, -1.0)),
             None
         );
+    }
+
+    // Runtime needs a window and a GPU. Exercise real terminal bytes,
+    // projection, equivalence and frame slots here; the wiring test below
+    // checks the Runtime doors that the headless harness cannot call.
+    fn wheel_pane_at_top() -> PtyPresentationHarness {
+        let mut pane = PtyPresentationHarness::new(20, 3);
+        pane.feed_drain(b"zero\r\none\r\ntwo\r\nthree\r\nfour\r\nfive");
+        pane.projection.scroll_to_top();
+        pane.publish_expose_frame();
+        pane.present_pending();
+        assert!(pane.projection.scroll_offset_subpixels() > 0);
+        pane.publications = 0;
+        pane
+    }
+
+    fn flush_test_wheel(pane: &mut PtyPresentationHarness, notches: f32) -> bool {
+        let burst = WheelBurst::of(MouseScrollDelta::LineDelta(0.0, notches / 2.0))
+            .plus(MouseScrollDelta::LineDelta(0.0, notches / 2.0))
+            .unwrap();
+        let MouseScrollDelta::LineDelta(_, lines) = burst.delta() else {
+            panic!("line reports stay in their own currency");
+        };
+        let before = pane.projection.scroll_offset_subpixels();
+        let mut remainder = f64::from(lines) * pane.projection.cell_height_subpixels().get() as f64;
+        pane.projection
+            .scroll_by_subpixels(drain_whole_units(&mut remainder, 1.0));
+        let moved = pane.projection.scroll_offset_subpixels() != before;
+        pane.publish_expose_frame_inner(true);
+        moved
+    }
+
+    #[test]
+    fn wheel_flush_at_the_top_clamp_publishes_no_frame() {
+        let mut pane = wheel_pane_at_top();
+        let revision = pane.content_revision;
+        assert!(!flush_test_wheel(&mut pane, 1.0));
+        assert_eq!(pane.publications, 0);
+        assert_eq!(pane.content_revision, revision);
+        assert!(!pane.present_pending());
+        // The former unconditional wheel publish fails the zero-frame rule.
+        assert!(pane.publish_expose_frame());
+        assert_eq!(pane.publications, 1);
+    }
+
+    #[test]
+    fn wheel_flush_that_moves_the_view_publishes_exactly_one_frame() {
+        let mut pane = wheel_pane_at_top();
+        let before = pane.last_presented.clone().unwrap();
+        assert!(flush_test_wheel(&mut pane, -1.0));
+        assert_eq!(pane.publications, 1);
+        let after = pane.pending.pending_frame().unwrap();
+        assert_ne!(before.viewport_origin, after.viewport_origin);
+        assert!(pane.present_pending());
+        assert!(!pane.present_pending());
+    }
+
+    #[test]
+    fn wheel_flush_at_a_clamp_still_publishes_changed_content() {
+        let mut pane = wheel_pane_at_top();
+        // New live cells still belong to the frame at the bottom clamp.
+        pane.session.feed(b"\x1b[3J\x1b[2J\x1b[Hnew").unwrap();
+        pane.publish_expose_frame();
+        pane.present_pending();
+        pane.publications = 0;
+        pane.session.feed(b" content").unwrap();
+        assert!(!flush_test_wheel(&mut pane, -1.0));
+        assert_eq!(pane.publications, 1);
+    }
+
+    #[test]
+    fn wheel_flush_runtime_skips_unchanged_panes_but_keeps_thumb_frames() {
+        let repaint = method_text("    fn repaint_pane_change_inner(");
+        assert!(repaint.contains("self.publish_frame_inner(trigger,wheel_view_moved.is_some())?"));
+        assert!(repaint.contains("||seat==self.focused_leaf||wheel_view_moved==Some(false)"));
+        assert!(repaint.contains("self.represent_on_screen_frame(trigger)"));
+        let scroll = method_text("    fn scroll_view_exact_in(");
+        assert!(scroll.contains("letbefore=leaf.projection.scroll_offset_subpixels();"));
+        assert!(scroll.contains("letmoved=leaf.projection.scroll_offset_subpixels()!=before;"));
+        let publish = scroll
+            .find("self.repaint_pane_change_inner(seat,Some(moved))?")
+            .unwrap();
+        let thumb = scroll.find("self.woke_terminal_thumb(seat)?").unwrap();
+        assert!(
+            publish < thumb,
+            "the thumb shares a moved view's queued frame"
+        );
+        let wake =
+            method_text("    fn woke_terminal_thumb(&mut self, seat: SeatId) -> Result<()> {");
+        assert!(wake.contains("ifself.refresh_overlay(){self.present_chrome_change()?;"));
     }
 
     #[test]

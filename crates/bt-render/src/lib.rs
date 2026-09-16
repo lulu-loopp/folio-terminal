@@ -44,6 +44,12 @@ use thiserror::Error;
 use unicode_properties::emoji::{EmojiStatus, UnicodeEmoji};
 use wgpu::util::DeviceExt;
 
+/// Install the process-wide trace destination before constructing a renderer.
+/// A standalone renderer keeps the stderr fallback when no writer is installed.
+pub fn set_trace_writer(writer: impl Fn(String) + Send + Sync + 'static) {
+    bt_viewport::trace::set_writer(writer);
+}
+
 pub use glyph_census::{GlyphCensus, LaneGlyphDemand};
 
 pub use contrast::{
@@ -255,8 +261,11 @@ fn math_tool_cluster_width_px(scale: f32) -> f32 {
 /// **The ground a display block keeps around its ink** — its left and right
 /// edges, in the pane body's own pixels.
 ///
-/// `ink` is `[the raster's visible left, its visible right]` and `pane` is `[the
-/// pane's left edge, its right edge]`.
+/// `ink` is `[the block's substance's visible left, its visible right]` and
+/// `pane` is `[the pane's left edge, its right edge]`. The substance is the
+/// raster for a picture and the longest row the pane laid the `$$…$$` source out
+/// on for a source face (owner's ruling 2026-09-16) — one rule, asked of
+/// whichever face the block is wearing.
 ///
 /// One whole cell column on the left; on the right that column *plus* the cells
 /// the two marks need, because since the owner's ruling of 2026-09-15 ② the
@@ -282,7 +291,8 @@ fn math_block_ground_bounds(metrics: CellMetrics, ink: [f32; 2], pane: [f32; 2])
 /// in that order, in the pane body's own pixels.
 ///
 /// `block` is the block's own rectangle — its ground, not its ink — and
-/// `ink_right` is where the formula's pixels stop.
+/// `ink_right` is where the block's substance stops: the formula's pixels on a
+/// picture, the longest source row's last cell on a source face.
 ///
 /// **Inside the block, at its right edge, centred on its midline** (owner's
 /// ruling 2026-09-15 ②). Until that ruling they stood *beside* the band, which
@@ -510,13 +520,15 @@ struct MathBlockGeometry {
     /// composite keeps no region of its own: it stands in a line of prose, and
     /// its block *is* its ink.
     ///
-    /// **A band wearing its source face keeps no ground either, for the opposite
-    /// reason: it has no picture to keep it around.** Its region is the band its
-    /// rows stand on — column zero to the pane's right edge, top to bottom of
-    /// the rows the projection gave it — which is the same band
-    /// [`MathBandFace`] answers with and the same rows the terminal itself is
-    /// drawing (§7.1.5p ⑪ iii; owner's report 2026-09-15,
-    /// T-MATH-MARKS-IN-SOURCE-FACE).
+    /// **A band wearing its source face keeps the same ground round a different
+    /// substance**: the rows themselves, the longest of them
+    /// ([`bt_viewport::MathBlockPlacement::source_width_cells`]) standing in for
+    /// the picture's ink. So the band hugs the text on it and the two faces read
+    /// as one block, which is the whole of the owner's ruling of 2026-09-16
+    /// (T-MATH-SOURCE-BAND-HUGS-TEXT; §7.1.5p ⑪ iii). The *rows* are still
+    /// ordinary rows of this terminal running to the pane's right edge
+    /// ([`MathBandFace::rows_right`]) — what stops at the text is the floor
+    /// under them.
     block: [f32; 4],
     /// **The formula's own pixels** — where the raster begins and ends.
     ///
@@ -563,23 +575,18 @@ fn math_block_geometry_px(
     };
     let clip_height = placement.clip_height_subpixels.max(1) as f32 / SUBPIXELS_PER_PX as f32;
     let scaled_width = if placement.display == MathBlockDisplay::Source {
-        // The longest source line, and nothing added to it. It carried `+ 4` from M1.9b, which was
-        // room for the two verbs drawn inside the box in that milestone; the room they need is
-        // stated once now, in `math_block_ground_bounds`' right inset, and adding it here as well
-        // would be a block reserving the same cells twice.
+        // **The longest row this pane laid the source out on**, and nothing added to it. It carried
+        // `+ 4` from M1.9b, which was room for the two verbs drawn inside the box in that
+        // milestone; the room they need is stated once now, in `math_block_ground_bounds`' right
+        // inset, and adding it here as well would be a block reserving the same cells twice.
         //
-        // **This is the ink and no longer the region** (T-MATH-MARKS-IN-SOURCE-FACE): a source
-        // face's region is the band its rows stand on, which is the pane, and only `ink` — the
-        // one field that means *the substance* rather than *the room round it* — is measured
-        // from this text. Nothing seats a mark or draws a floor from it any more.
-        placement
-            .source
-            .lines()
-            .map(|line| line.chars().count())
-            .max()
-            .unwrap_or(0)
-            .max(1) as f32
-            * metrics.cell_width_px
+        // **The rows and not `placement.source`** (owner's ruling 2026-09-16,
+        // T-MATH-SOURCE-BAND-HUGS-TEXT). That field is the block's pre-wrap original grid text,
+        // `$$` delimiters and all — neither the rows the pane cut nor anything drawn — so a block
+        // whose source wrapped was measured long and a block whose `$$` line was its longest was
+        // measured by a delimiter. `MathBlockPlacement::source_width_cells` is the rows themselves,
+        // counted in columns, which is what the ink of a source face actually is.
+        placement.source_width_cells.max(1) as f32 * metrics.cell_width_px
     } else {
         placement.artifact.width_px as f32 * placement.artifact.render_scale_milli as f32 / 1000.0
     };
@@ -627,45 +634,41 @@ fn math_block_geometry_px(
     // breathing above and below it. An inline composite's region is its ink, so the two agree and
     // nothing about a line of prose changes.
     //
-    // **A source face's region is the band its rows stand on, and that band is the pane**
-    // (owner's report 2026-09-15, T-MATH-MARKS-IN-SOURCE-FACE; §7.1.5p ⑨ i read against ⑪ iii).
-    // ⑨ i's ground is room a *picture* keeps around itself, and it is measured from the picture's
-    // ink. A block wearing its `$$…$$` face has no picture: what stands on those rows is ordinary
-    // terminal text, and ⑪ iii already says so in the one other place this crate answers for a
-    // source face — [`MathBandFace::rows_left`] is column zero and `rows_right` is the pane's own
-    // right edge, "because a source row is an ordinary row of this terminal and is not confined to
-    // the ground the picture kept around itself". The two answers have to be one answer, and the
-    // one that matches the rows is the band's.
+    // **A source face's band hugs its rows, by the same arithmetic** (owner's ruling 2026-09-16,
+    // T-MATH-SOURCE-BAND-HUGS-TEXT; §7.1.5p ⑨ i read against ⑪ iii). ⑨ i's ground is room a block
+    // keeps around its substance, measured from that substance; the only question a source face
+    // ever raised is *what its substance is*, and the answer is the rows — so there is one branch
+    // here for both faces and the two look like the same block, which is the whole of the ruling.
     //
-    // Measuring it the other way is what the report is a picture of: the region was
-    // `math_block_ground_bounds` around `visible_right`, and `visible_right` for a source face is
-    // the longest line of `placement.source` — the block's **pre-wrap original grid text**, `$$`
-    // delimiters and all, which is neither the rows the pane lays out nor anything drawn. So the
-    // marks were seated against a width nobody draws while the floor under them was the band, and
-    // they stood short of the block's right edge by whatever the difference happened to be.
-    let source_face = placement.display == MathBlockDisplay::Source;
-    let block = if !math_block_is_a_band(placement) {
-        ink
-    } else if source_face {
-        [pane_left, clip_top, pane_right, clip_bottom]
-    } else {
+    // Two wrong answers preceded it, and each was a picture the owner sent in. The first measured
+    // the substance as the longest line of `placement.source`, the block's pre-wrap original grid
+    // text, and seated the marks against a width nobody draws. The second (T-MATH-MARKS-IN-SOURCE-
+    // FACE) gave the source face the whole pane, on the grounds that a source row is an ordinary
+    // row of this terminal and runs to the pane's edge — which is true of the *rows*, and
+    // [`MathBandFace::rows_right`] still says so, but not of the floor under them: a band running
+    // the width of the pane behind four short rows of LaTeX is the "why is this block so wide" the
+    // owner asked. The rows are as wide as the rows are, and the band is what ⑨ i keeps around
+    // them.
+    //
+    // The left edge is the one place the two faces genuinely differ, and it is `ground_bounds`' own
+    // clamp rather than a rule of its own: a picture is indented off the pane edge and keeps a
+    // whole column left of its ink, while a source row *begins* at column zero and there is no
+    // column there to keep.
+    let block = if math_block_is_a_band(placement) {
         let (ground_left, ground_right) = math_block_ground_bounds(
             metrics,
             [visible_left, visible_right],
             [pane_left, pane_right],
         );
         [ground_left, clip_top, ground_right, clip_bottom]
+    } else {
+        ink
     };
     let (eye, copy) = if placement.toolbar_visible {
-        // **What the marks must not stand on.** For a picture that is the raster's right edge, and
-        // the whole of ⑨ ii's "centred in the reserve" is the room between it and the block's own
-        // edge. For a source face there is no reserve to centre in — the rows run to the pane's
-        // edge — so the band's own right edge is handed in and ⑨ ii's first degradation applies:
-        // the pair is pushed flush against the block's right edge, on its midline. That is one
-        // rule spoken about two faces, not a second placement.
-        let marks_ink_right = if source_face { block[2] } else { visible_right };
-        let (source, copy) =
-            math_tool_boxes_px(block, marks_ink_right, metrics.scale_factor as f32);
+        // **What the marks must not stand on** — the block's substance, which is the raster's right
+        // edge for a picture and the longest row's for a source face. ⑨ ii's "centred in the
+        // reserve" is then the room between that edge and the block's own, on either face.
+        let (source, copy) = math_tool_boxes_px(block, visible_right, metrics.scale_factor as f32);
         (Some(source), Some(copy))
     } else {
         (None, None)
@@ -4863,6 +4866,21 @@ pub struct WindowRenderer {
     preview_text_renderer: TextRenderer,
     trace_perf: bool,
     perf_frame: u64,
+    /// **What the previous frame's own trace line cost**, reported on the next
+    /// one as `trace_us` (T-TRACE-OFF-THREAD).
+    ///
+    /// Carried forward rather than measured in place, because the thing being
+    /// measured is the statement that prints the measurement: a line cannot
+    /// carry the cost of writing itself. So frame *n* reports what frame *n-1*
+    /// spent formatting its line and handing it to the sink, and a `trace_us`
+    /// of four million on the line after a stall is the whole answer to "was the
+    /// instrument the stall".
+    ///
+    /// It is `total_us`'s missing half. `total_us` is sampled *before* the line
+    /// is built (that is deliberate — it is the cost of the frame, not of
+    /// reporting it), which is exactly why a blocked write used to be invisible
+    /// in every number the renderer printed.
+    perf_trace_us: u128,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -7413,6 +7431,7 @@ impl WindowRenderer {
             preview_text_renderer,
             trace_perf,
             perf_frame: 0,
+            perf_trace_us: 0,
         })
     }
 
@@ -9905,8 +9924,14 @@ impl WindowRenderer {
             let alternate_screen = frame_is_alternate_screen(frame);
             let digest_elapsed = digest_started.elapsed();
             self.perf_frame = self.perf_frame.saturating_add(1);
-            eprintln!(
-                "BT_PERF_TRACE frame={} seats={} source={:?} cells={} nonblank_cells={} first_text_row={} last_text_row={} content_fnv={:016x} alt={} digest_us={} validate_us={} viewport_us={} row_compose_us={} rows_reshaped={} row_cache_hits={} row_cache_misses={} row_cache_evictions={} row_cache_resident_bytes={} shape_miss_us={} narrow_hits={} narrow_misses={} narrow_evictions={} narrow_resident_bytes={} wide_hits={} wide_misses={} wide_evictions={} wide_resident_bytes={} atlas_prepare_upload_us={} atlas_hits=unmeasurable_glyphon_0_12 atlas_misses=unmeasurable_glyphon_0_12 atlas_grows=unmeasurable_glyphon_0_12 atlas_evictions=unmeasurable_glyphon_0_12 atlas_upload_bytes=unmeasurable_glyphon_0_12 rectangles_us={} math_prepare_upload_us={} math_blocks={} math_texture_evictions={} math_texture_refusals={} textureless_math_blocks={} math_texture_resident_bytes={} acquire_us={} encode_us={} submit_present_us={} total_us={}",
+            // **The clock the line itself is measured on** — see
+            // [`WindowRenderer::perf_trace_us`]. It starts before the `format!`
+            // because formatting a kilobyte of fields is part of what a trace
+            // costs a frame, and it stops after the sink has the line, which in
+            // a run with a sink is a `try_send` and nothing else.
+            let trace_started = Instant::now();
+            bt_viewport::trace::line(format!(
+                "BT_PERF_TRACE frame={} seats={} source={:?} cells={} nonblank_cells={} first_text_row={} last_text_row={} content_fnv={:016x} alt={} digest_us={} validate_us={} viewport_us={} row_compose_us={} rows_reshaped={} row_cache_hits={} row_cache_misses={} row_cache_evictions={} row_cache_resident_bytes={} shape_miss_us={} narrow_hits={} narrow_misses={} narrow_evictions={} narrow_resident_bytes={} wide_hits={} wide_misses={} wide_evictions={} wide_resident_bytes={} atlas_prepare_upload_us={} atlas_hits=unmeasurable_glyphon_0_12 atlas_misses=unmeasurable_glyphon_0_12 atlas_grows=unmeasurable_glyphon_0_12 atlas_evictions=unmeasurable_glyphon_0_12 atlas_upload_bytes=unmeasurable_glyphon_0_12 rectangles_us={} math_prepare_upload_us={} math_blocks={} math_texture_evictions={} math_texture_refusals={} textureless_math_blocks={} math_texture_resident_bytes={} acquire_us={} encode_us={} submit_us={} present_us={} total_us={} trace_us={}",
                 self.perf_frame,
                 seats.len(),
                 trigger.source,
@@ -9944,9 +9969,12 @@ impl WindowRenderer {
                 gpu.math_textures.resident_bytes(),
                 (surface_acquired_at - rectangles_prepared_at).as_micros(),
                 (encoded_at - surface_acquired_at).as_micros(),
-                (present_called_at - encoded_at).as_micros(),
+                (submitted_at - encoded_at).as_micros(),
+                (present_called_at - submitted_at).as_micros(),
                 total_elapsed.as_micros(),
-            );
+                self.perf_trace_us,
+            ));
+            self.perf_trace_us = trace_started.elapsed().as_micros();
         }
         Ok(present_outcome(text_complete, receipt))
     }
@@ -10103,9 +10131,9 @@ impl WindowRenderer {
     fn note_math_texture_refusal(&mut self, key: &str, resident_bytes: usize) {
         self.math_texture_refusals = self.math_texture_refusals.saturating_add(1);
         if self.trace_perf {
-            eprintln!(
+            bt_viewport::trace::line(format!(
                 "BT_PERF_TRACE math_texture_refused key={key} bytes={resident_bytes} budget={MATH_TEXTURE_CACHE_BUDGET_BYTES}"
-            );
+            ));
         }
     }
 
@@ -10114,10 +10142,10 @@ impl WindowRenderer {
     fn note_textureless_block(&mut self, gpu: &GpuContext, key: &str, resident_bytes: usize) {
         self.textureless_math_blocks = self.textureless_math_blocks.saturating_add(1);
         if self.trace_perf {
-            eprintln!(
+            bt_viewport::trace::line(format!(
                 "BT_PERF_TRACE math_block_without_texture key={key} bytes={resident_bytes} resident={}",
                 gpu.math_textures.resident_bytes(),
-            );
+            ));
         }
     }
 
@@ -16772,6 +16800,7 @@ mod tests {
             content_offset_subpixels: 0,
             clip_height_subpixels,
             display: MathBlockDisplay::Rendered,
+            source_width_cells: 0,
             horizontal_overflow: bt_viewport::BlockOverflowOwner::Block,
             horizontal_scroll_px: 0,
             vertical_scroll_px: 0,
@@ -19111,38 +19140,46 @@ mod tests {
     /// The same band after a press on `‹›`: three rows of `$$…$$` where the
     /// picture stood, lit.
     ///
-    /// Its `source` is the untouched grid text the detector kept, and it is
-    /// deliberately far narrower than the pane — that is the width the region
-    /// used to be measured from, so it is the number the pin below must be able
-    /// to prove nothing is seated against.
+    /// Its `source` is the untouched grid text the detector kept and its
+    /// `source_width_cells` is what this pane laid that text out on, and the two
+    /// are deliberately different numbers: `\text{中文混排}` is **eleven
+    /// clusters and fifteen columns**, so a band measured off the string stops
+    /// four cells short of the text standing on it. Both are far narrower than
+    /// the pane's thirty, which is the third number the pin below has to keep
+    /// apart from the other two.
     fn seat_test_source_face(first_row: u32, rows: u32) -> MathBlockPlacement {
         let mut placement = seat_test_band(first_row, rows, true);
         placement.display = MathBlockDisplay::Source;
-        placement.source = "$$\n\\frac{1}{2}\n$$".to_owned();
+        placement.source = "$$\n\\text{中文混排}\n$$".to_owned();
+        placement.source_width_cells = 15;
         placement
     }
 
-    /// PIN (owner's report 2026-09-15, T-MATH-MARKS-IN-SOURCE-FACE; §7.1.5p ⑨
-    /// ii read against ⑪ iii): **a block wearing its source face is the band its
-    /// rows stand on, and its two marks stand inside that band at its right
+    /// PIN (owner's ruling 2026-09-16, T-MATH-SOURCE-BAND-HUGS-TEXT, revising
+    /// the owner's report of 2026-09-15, T-MATH-MARKS-IN-SOURCE-FACE; §7.1.5p ⑨
+    /// ii read against ⑪ iii): **a block wearing its source face is a band
+    /// hugging its rows, and its two marks stand inside that band at its right
     /// edge, on its midline.**
     ///
-    /// The report is a picture of the two disagreeing: the floor under the three
-    /// `$$…$$` rows ran the width of the pane, and the marks stood well short of
-    /// its right edge and low of its middle — seated, as the owner read it,
-    /// against the picture's own extents rather than against the rows. The cause
-    /// is one number: the region was `math_block_ground_bounds` around
-    /// `visible_right`, and `visible_right` for a source face is the longest
-    /// line of `placement.source` — the block's **pre-wrap original grid text**,
+    /// Three answers have been given to *how wide is a source face*, and the
+    /// owner sent in a picture of each of the first two. It was the longest line
+    /// of `placement.source` — the block's **pre-wrap original grid text**,
     /// delimiters and all, which is neither a picture nor the rows the pane lays
-    /// out. This crate's other answer about a source face
-    /// ([`MathBandFace::rows_left`] / `rows_right`) had said the band was the
-    /// pane all along, and the two were never reconciled.
+    /// out — and the marks stood short of the block by whatever the difference
+    /// happened to be. Then it was the whole pane, on ⑪ iii's true statement
+    /// that a source *row* runs to the pane's own right edge: the marks were
+    /// seated right at last, and the floor under three short rows of LaTeX ran
+    /// the width of the window, which is the *why is this block so wide* this
+    /// ruling answers. It is now the rows themselves — `source_width_cells`, the
+    /// longest of them as this pane cut them — with ⑨ i's own ground round it,
+    /// so a block's two faces are one region measured one way.
     ///
-    /// MUTATIONS: hand `math_tool_boxes_px` `visible_right` again and ② and ③
-    /// fall — the marks come back to the end of a string nobody draws. Give a
-    /// source face the picture's ground and ① falls. Hang the pair from the
-    /// band's top and ④ falls.
+    /// MUTATIONS: measure the substance from `placement.source` again and ① and
+    /// ② fall by four cells, which is what the wide characters in the fixture
+    /// are for. Give a source face the pane and ① and ② fall. Hand
+    /// `math_tool_boxes_px` the band's own right edge instead of the rows' and
+    /// ③ falls — the pair is jammed into the corner with the air all on one
+    /// side. Hang it from the band's top and ④ falls.
     #[test]
     fn a_source_faces_marks_stand_in_the_rows_own_band_at_its_right_edge() {
         let metrics = fade_metrics();
@@ -19155,36 +19192,50 @@ mod tests {
             .expect("a source face on screen has a box");
         let boxes = seat_test_boxes(&frame, &anchor).expect("a lit source face has its marks");
 
-        // ① The region is the rows' own band: column zero to the pane's right
-        //    edge, and the whole of the rows the projection gave it. The same
-        //    band `math_band_face` answers with, and the same rectangle the
-        //    ground is drawn under.
-        let pane_right = metrics.padding_px + 30.0 * metrics.cell_width_px;
-        assert_eq!(geometry.block, [metrics.padding_px, 28.0, pane_right, 88.0]);
+        // ① The substance is the fifteen columns the rows really take, and the
+        //    region is ⑨ i's ground round it: one whole cell column on the left,
+        //    which the pane edge takes straight back because a source row begins
+        //    at column zero, and on the right that column plus the four the two
+        //    marks need. The same rectangle the ground is drawn under and the
+        //    same one `math_band_face` answers with.
+        let ink_right = metrics.padding_px + 15.0 * metrics.cell_width_px;
+        assert_eq!(geometry.ink, [metrics.padding_px, 28.0, ink_right, 88.0]);
+        assert_eq!(geometry.block[0], metrics.padding_px);
+        assert_eq!(geometry.block[2], ink_right + 5.0 * metrics.cell_width_px);
+        assert_eq!([geometry.block[1], geometry.block[3]], [28.0, 88.0]);
         assert_eq!(boxes.block, geometry.block);
         assert!(
             math_block_ground_is_drawn(&frame.math_blocks[0], false),
             "a source face draws its floor under exactly that band"
         );
 
-        // ② And it is *not* the source string's own width: the marks stand well
-        //    right of where that text stops, which is where they used to stand.
+        // ② And it is neither of the two answers it replaces: not the pane, and
+        //    not the string, whose longest line is eleven clusters where the row
+        //    it is drawn on is fifteen columns.
+        let pane_right = metrics.padding_px + 30.0 * metrics.cell_width_px;
         assert!(
-            geometry.ink[2] < geometry.block[2],
-            "the fixture must make the two answers different: ink={:?} block={:?}",
-            geometry.ink,
+            geometry.block[2] < pane_right,
+            "the band still runs the width of the pane: {:?}",
             geometry.block
         );
         assert!(
-            boxes.source[0] > geometry.ink[2],
-            "{:?} is seated against the source text rather than against the band",
-            boxes.source
+            geometry.ink[2] > metrics.padding_px + 11.0 * metrics.cell_width_px,
+            "{:?} is measured off the source string's clusters, not off its rows",
+            geometry.ink
         );
 
-        // ③ Flush with the band's right edge — ⑨ ii's first degradation, which
-        //    is the whole of the answer here: rows that run to the pane's edge
-        //    leave no reserve to be centred in.
-        assert_eq!(boxes.copy[2], geometry.block[2]);
+        // ③ Centred in the reserve at the band's right edge — ⑨ ii's own seat,
+        //    the one the typeset face's marks take, with the same air either side
+        //    of the pair and none of it over the text.
+        assert!(
+            boxes.source[0] > geometry.ink[2],
+            "{:?} is drawn over the source text rather than beside it",
+            boxes.source
+        );
+        assert_eq!(
+            boxes.source[0] - geometry.ink[2],
+            geometry.block[2] - boxes.copy[2]
+        );
         assert_eq!(boxes.copy[0] - boxes.source[2], MATH_TOOL_GAP_LOGICAL_PX);
 
         // ④ On the band's midline, and inside it top and bottom.

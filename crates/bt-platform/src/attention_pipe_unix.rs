@@ -59,8 +59,10 @@
 //! called equivalent (`docs/plans/port/macos-plan-2026-09-12.md` §R6).
 //!
 //! **What the runtime directory does and does not buy.** It is `0700` and it is
-//! per-uid, and on macOS `$TMPDIR` is itself `/var/folders/<xx>/<digest>/T/` —
-//! which is **per user and per boot, not per session**. Every login session of
+//! per-uid, and on macOS it sits inside the per-user temporary directory the
+//! system names — `/var/folders/<xx>/<digest>/T/`, which since review RA-1 is
+//! asked of `confstr` rather than read out of `$TMPDIR` and is
+//! **per user and per boot, not per session**. Every login session of
 //! one user is handed the same one, so it adds nothing at all to the session
 //! question, and saying that it did would be the substitution this module is
 //! refusing. What it does buy is against a *different* user: the directory

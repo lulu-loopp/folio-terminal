@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     error::Error,
     fmt::{self, Write as _},
     fs::OpenOptions,
@@ -15,11 +15,11 @@ use std::{
 
 use bt_detect::{
     DecorationRecord, DelimiterKind, DetectionContext, DetectionInput, DetectionOptions,
-    DetectionTask, InlineMathRun, InlineMathSite, LiveDetectionInput, LiveDetectionSource,
-    LiveDetectionTask, MAX_MATH_SOURCE_BYTES, MathCellSegment, MathSourceLine, MathSpan,
-    PlaceholderArtifact, StaleArtifact, advance_detection_context, detect_math_blocks_with_sites,
-    frozen_resync_scan_with_options, resolve_detection_task, resolve_live_detection_task,
-    resolve_live_detection_tasks,
+    DetectionTask, InlineJoinedFragment, InlineMathRun, InlineMathSite, LiveDetectionInput,
+    LiveDetectionSource, LiveDetectionTask, MAX_MATH_SOURCE_BYTES, MathCellSegment, MathSourceLine,
+    MathSpan, PlaceholderArtifact, StaleArtifact, advance_detection_context,
+    detect_math_blocks_with_sites, frozen_resync_scan_with_options, resolve_detection_task,
+    resolve_live_detection_task, resolve_live_detection_tasks,
 };
 use bt_doc::{
     AnchorError, AnchorId, Bias, BlockKind, ContentAnchor, DecorationIntent, DecorationLifecycle,
@@ -187,21 +187,6 @@ impl Default for MathLayoutOptions {
             restore_stripped_environment_newlines: true,
             reject_claude_code_jump_chip_overlay: true,
             detect_image_paths: false,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct MathSourcePreferenceKey {
-    original_source: String,
-    mode: MathMode,
-}
-
-impl MathSourcePreferenceKey {
-    fn from_span(span: &MathSpan) -> Self {
-        Self {
-            original_source: span.original_source.clone(),
-            mode: span.mode,
         }
     }
 }
@@ -842,6 +827,10 @@ struct PendingLiveArtifactHandoff {
     candidate_staging: StagingId,
     candidate_start: Option<TranscriptId>,
     expected_frozen_lines: u64,
+    /// The face the live occurrence is wearing, re-read at every capture — the last capture is
+    /// the one that freezes its final row, so there is no frame on which the reader could turn the
+    /// block over after this was last refreshed.
+    show_source: bool,
     /// Proven source rows captured from the top of this still-live occurrence, in source order.
     /// These staging ids are populated before the terminal grid shifts; as they finalize, their
     /// transcript ids become the live record's frozen prefix so projection can bridge and suppress
@@ -1178,6 +1167,14 @@ pub struct MathTogglePresentation {
     pub picture_opacity_milli: u16,
 }
 
+/// Facts accumulated while slices share one drain turn. No bytes are buffered here.
+#[derive(Default)]
+struct FeedTurn {
+    fed: bool,
+    primary_reprint_boundary: bool,
+    cursor_memory_reprint_boundary: bool,
+}
+
 /// Per-session actor core. It is the serialized owner required by DESIGN.md §1.3 and composes
 /// terminal facts with lifecycle, transcript, detection, scheduling, and viewport policy.
 pub struct DualPlaneSession {
@@ -1411,6 +1408,7 @@ pub struct DualPlaneSession {
     live_decorations: BTreeMap<u32, LiveDecorationRecord>,
     next_live_occurrence_id: u64,
     offscreen_decorations: VecDeque<LiveDecorationRecord>,
+    feed_turn: Option<FeedTurn>,
     alternate_repaint_snapshot: Option<AlternateRepaintSnapshot>,
     alternate_repaint_in_progress: bool,
     /// True while a primary-screen in-stream transcript reprint is in flight (a clear+home /
@@ -1442,10 +1440,6 @@ pub struct DualPlaneSession {
     /// prevents an older equal-source formula elsewhere in history from spuriously releasing hold.
     primary_reprint_history_floor: Option<PrimaryReprintHistoryFloor>,
     alternate_content_end_row: Option<u32>,
-    /// User presentation choices are content state, not decoration-instance state. Entries are
-    /// created only by an explicit toggle and live for the session, so alternate-screen repaint,
-    /// redetection, grid-generation changes, and layout changes cannot reset the choice.
-    math_source_preferences: HashMap<MathSourcePreferenceKey, bool>,
     pending_live_handoffs: Vec<PendingLiveArtifactHandoff>,
     frozen_detection_context: DetectionContext,
     frozen_detection_contexts: BTreeMap<TranscriptId, DetectionContext>,
@@ -1766,6 +1760,7 @@ impl DualPlaneSession {
             live_decorations: BTreeMap::new(),
             next_live_occurrence_id: 1,
             offscreen_decorations: VecDeque::new(),
+            feed_turn: None,
             alternate_repaint_snapshot: None,
             alternate_repaint_in_progress: false,
             primary_repaint_in_progress: false,
@@ -1774,7 +1769,6 @@ impl DualPlaneSession {
             primary_reprint_hold_occurrences: BTreeMap::new(),
             primary_reprint_history_floor: None,
             alternate_content_end_row: None,
-            math_source_preferences: HashMap::new(),
             pending_live_handoffs: Vec::new(),
             frozen_detection_context: DetectionContext::default(),
             frozen_detection_contexts: BTreeMap::new(),
@@ -2886,6 +2880,24 @@ impl DualPlaneSession {
         self.feed_at(bytes, Instant::now())
     }
 
+    /// Group successive feeds into one drain turn. Call `end_feed_turn` even on an error,
+    /// before publishing or running other session work. Standalone feeds need no markers.
+    /// Parsing still happens per slice; only repaint settlement waits for the turn's end.
+    pub fn begin_feed_turn(&mut self) {
+        assert!(self.feed_turn.is_none(), "feed turns must not nest");
+        self.feed_turn = Some(FeedTurn::default());
+    }
+
+    /// Settle a sliced read once. DEC 2026 retains its own buffer and deadline across turns;
+    /// ending a turn never forces a synchronized update to commit.
+    pub fn end_feed_turn(&mut self) {
+        if let Some(turn) = self.feed_turn.take()
+            && turn.fed
+        {
+            self.settle_feed_turn(turn);
+        }
+    }
+
     /// Deterministic replay entry point. Production callers normally use `feed`; integration tests
     /// can supply a monotonic timestamp without sleeping through the resize silence window.
     pub fn feed_at(&mut self, bytes: &[u8], observed_at: Instant) -> Result<(), SessionError> {
@@ -2988,7 +3000,31 @@ impl DualPlaneSession {
             self.primary_repaint_dirty = false;
             self.primary_reprint_history_floor = None;
             self.invalidate_all_live_decorations();
-        } else if self.synchronized_update_deadline().is_none() {
+            if let Some(turn) = &mut self.feed_turn {
+                *turn = FeedTurn::default();
+            }
+            if self.resize_epoch.is_active() {
+                self.stage_resize_history();
+            }
+        } else {
+            let facts = FeedTurn {
+                fed: true,
+                primary_reprint_boundary,
+                cursor_memory_reprint_boundary,
+            };
+            if let Some(turn) = &mut self.feed_turn {
+                turn.fed = true;
+                turn.primary_reprint_boundary |= facts.primary_reprint_boundary;
+                turn.cursor_memory_reprint_boundary |= facts.cursor_memory_reprint_boundary;
+            } else {
+                self.settle_feed_turn(facts);
+            }
+        }
+        result
+    }
+
+    fn settle_feed_turn(&mut self, turn: FeedTurn) {
+        if self.synchronized_update_deadline().is_none() {
             if let Some(snapshot) = self.alternate_repaint_snapshot.take() {
                 self.finish_alternate_repaint(snapshot);
             }
@@ -2997,29 +3033,21 @@ impl DualPlaneSession {
             }
         }
         self.alternate_repaint_in_progress = self.alternate_repaint_snapshot.is_some();
-        if result.is_ok() {
-            // Re-seat already-known path occurrences immediately after an atomic repaint. New
-            // candidates and retirement still wait for the ordinary stability gate below.
-            self.reconcile_live_image_paths(false, &vec![false; self.live_rows.len()]);
-            self.restore_offscreen_decorations();
-            self.reconcile_primary_reprint_presentation_hold(primary_reprint_boundary);
-            // The reprint has landed and its records are re-anchored: end preservation unless a
-            // synchronized update is still buffering the repaint (its damage arrives at the commit).
-            if self.synchronized_update_deadline().is_none() {
-                self.primary_repaint_in_progress = false;
-                self.primary_reprint_history_floor = None;
-            }
-            // An open synchronized repaint still publishes the pre-transaction grid. Its boundary
-            // invalidated the old cursor line above, so do not immediately memorize that stale
-            // cursor again; ESU or the parser timeout records the committed cursor instead.
-            if !(cursor_memory_reprint_boundary && self.synchronized_update_deadline().is_some()) {
-                self.remember_visible_cursor_logical_line();
-            }
+        // Re-seat already-known paths and records only after the whole repaint has landed.
+        self.reconcile_live_image_paths(false, &vec![false; self.live_rows.len()]);
+        self.restore_offscreen_decorations();
+        self.reconcile_primary_reprint_presentation_hold(turn.primary_reprint_boundary);
+        if self.synchronized_update_deadline().is_none() {
+            self.primary_repaint_in_progress = false;
+            self.primary_reprint_history_floor = None;
+        }
+        // A buffering synchronized update still exposes the pre-transaction cursor.
+        if !(turn.cursor_memory_reprint_boundary && self.synchronized_update_deadline().is_some()) {
+            self.remember_visible_cursor_logical_line();
         }
         if self.resize_epoch.is_active() {
             self.stage_resize_history();
         }
-        result
     }
 
     /// `Clear screen` (§7.1.6, §7.1.6l): **the rows above the cursor go, the row the cursor is on
@@ -3695,6 +3723,7 @@ impl DualPlaneSession {
                     kind: BlockKind::Math,
                     cell_segments: Vec::new(),
                     inline_runs: Vec::new(),
+                    inline_joined_head: None,
                 },
                 detection_complete: false,
                 resolved: false,
@@ -3722,10 +3751,10 @@ impl DualPlaneSession {
         }
         self.live_detection_count = self.live_detection_count.saturating_add(scheduled as u64);
         if scheduled != 0 && switched_on("BT_PERF_TRACE") {
-            eprintln!(
+            bt_viewport::trace::line(format!(
                 "BT_PERF_TRACE live_math_detect={} live_math_invalidations={}",
                 self.live_detection_count, self.live_invalidation_count
-            );
+            ));
         }
         scheduled.saturating_add(
             self.local_image_path_tasks
@@ -6777,10 +6806,10 @@ impl DualPlaneSession {
         }
         self.live_invalidation_count = self.live_invalidation_count.saturating_add(invalidated);
         if invalidated != 0 && switched_on("BT_PERF_TRACE") {
-            eprintln!(
+            bt_viewport::trace::line(format!(
                 "BT_PERF_TRACE live_math_event=invalidate live_math_detect={} live_math_invalidations={}",
                 self.live_detection_count, self.live_invalidation_count
-            );
+            ));
         }
     }
 
@@ -6800,10 +6829,10 @@ impl DualPlaneSession {
             self.offscreen_decorations.clear();
         }
         if removed != 0 && switched_on("BT_PERF_TRACE") {
-            eprintln!(
+            bt_viewport::trace::line(format!(
                 "BT_PERF_TRACE live_math_event=invalidate-all live_math_detect={} live_math_invalidations={}",
                 self.live_detection_count, self.live_invalidation_count
-            );
+            ));
         }
     }
 
@@ -7080,17 +7109,17 @@ impl DualPlaneSession {
             self.account_stranded_pending(task.candidate_id, task.versions);
         } else if switched_on("BT_PERF_TRACE") {
             if let Some(elapsed) = render_time {
-                eprintln!(
+                bt_viewport::trace::line(format!(
                     "BT_PERF_TRACE math_render_us={} source={} resident_bytes={}",
                     elapsed.as_micros(),
                     task.transcript_id.0,
                     self.math_resident_bytes(),
-                );
+                ));
             } else if let Some(error) = render_error.as_ref() {
-                eprintln!(
+                bt_viewport::trace::line(format!(
                     "BT_PERF_TRACE math_render_failed source={} error={error:?}",
                     task.transcript_id.0,
-                );
+                ));
             }
         }
         if accepted && let Some(error) = render_error.as_ref() {
@@ -7124,12 +7153,12 @@ impl DualPlaneSession {
         } else if switched_on("BT_PERF_TRACE")
             && let Some(elapsed) = render_time
         {
-            eprintln!(
+            bt_viewport::trace::line(format!(
                 "BT_PERF_TRACE live_math_render_us={} row={} resident_bytes={}",
                 elapsed.as_micros(),
                 task.start.row,
                 self.math_resident_bytes(),
-            );
+            ));
         }
         if accepted && let Some(error) = render_error.as_ref() {
             self.record_math_failure(error);
@@ -7152,12 +7181,12 @@ impl DualPlaneSession {
             None => return,
         }
         if switched_on("BT_PERF_TRACE") {
-            eprintln!(
+            bt_viewport::trace::line(format!(
                 "BT_PERF_TRACE math_failures_validate={} math_failures_convert={} math_failures_compile={}",
                 self.math_failure_validate_count,
                 self.math_failure_convert_count,
                 self.math_failure_compile_count,
-            );
+            ));
         }
     }
 
@@ -7210,18 +7239,21 @@ impl DualPlaneSession {
             }
             return true;
         }
-        let preference_key = MathSourcePreferenceKey::from_span(&task.span);
-        let show_source = self
-            .math_source_preferences
-            .get(&preference_key)
-            .copied()
-            .unwrap_or(false);
+        // Instance state, carried across a re-detection of the block that is already standing on
+        // this row: the same rows, the same source, the same mode is the same occurrence, and the
+        // face it is wearing belongs to it exactly as its hover and its scroll offsets do. A block
+        // that does not find itself here is a new occurrence and starts typeset — looking at a
+        // formula's source is an action on one block, not a setting that follows the text.
         let remembered = self
             .live_decorations
             .get(&task.start.row)
-            .filter(|record| MathSourcePreferenceKey::from_span(&record.span) == preference_key)
+            .filter(|record| {
+                record.span.original_source == task.span.original_source
+                    && record.span.mode == task.span.mode
+            })
             .map(|record| {
                 (
+                    record.show_source,
                     record.hovered,
                     record.horizontal_scroll_px,
                     record.vertical_scroll_px,
@@ -7229,8 +7261,8 @@ impl DualPlaneSession {
             });
         self.live_decorations
             .retain(|_, record| record.end.row < task.start.row || record.start.row > task.end.row);
-        let (hovered, horizontal_scroll_px, vertical_scroll_px) =
-            remembered.unwrap_or((false, 0, 0));
+        let (show_source, hovered, horizontal_scroll_px, vertical_scroll_px) =
+            remembered.unwrap_or((false, false, 0, 0));
         let occurrence_id = LiveMathOccurrenceId(self.next_live_occurrence_id);
         let Some(identity) = proven_live_occurrence(&task, occurrence_id) else {
             return false;
@@ -7360,12 +7392,6 @@ impl DualPlaneSession {
             candidate.decoration = DecorationLifecycle::None;
             candidate.artifact = None;
         }
-        let preference_key = MathSourcePreferenceKey::from_span(&task.span);
-        let show_source = self
-            .math_source_preferences
-            .get(&preference_key)
-            .copied()
-            .unwrap_or(false);
         let Some(record) = self.decorations.get_mut(&task.transcript_id) else {
             return false;
         };
@@ -7403,9 +7429,6 @@ impl DualPlaneSession {
                 record.fail(&resolved_task, failure_reason)
             }
         };
-        if applied {
-            record.show_source = show_source;
-        }
         // A resolved multi-line block owns its interior rows as body. A structural delimiter inside
         // it (e.g. the `\begin{aligned}` of a `$$…\begin{aligned}…\end{aligned}…$$` block) is never a
         // sub-block; suppress any stale standalone render left on one — which the certified-frontier
@@ -8051,8 +8074,11 @@ impl DualPlaneSession {
         self.math_toggle.as_ref()
     }
 
+    /// **Turn one block over, and only that one** (owner's ruling 2026-09-16). Looking at a
+    /// formula's source is an action on the occurrence under the mark, not a setting the formula's
+    /// text carries: the same `$$…$$` printed again is a new block and arrives typeset.
     pub fn toggle_math_source(&mut self, anchor: &MathBlockAnchor) -> bool {
-        let preference = match anchor {
+        match anchor {
             MathBlockAnchor::History { start, end, .. } => {
                 let Some(record) = self
                     .decorations
@@ -8061,13 +8087,10 @@ impl DualPlaneSession {
                 else {
                     return false;
                 };
-                let Some(key) = record.span.as_ref().map(MathSourcePreferenceKey::from_span) else {
-                    return false;
-                };
-                if !record.toggle_source() {
+                if record.span.is_none() {
                     return false;
                 }
-                (key, record.show_source)
+                record.toggle_source()
             }
             MathBlockAnchor::Live {
                 screen,
@@ -8087,15 +8110,9 @@ impl DualPlaneSession {
                 record.show_source = !record.show_source;
                 record.horizontal_scroll_px = 0;
                 record.vertical_scroll_px = 0;
-                (
-                    MathSourcePreferenceKey::from_span(&record.span),
-                    record.show_source,
-                )
+                true
             }
-        };
-        self.math_source_preferences
-            .insert(preference.0, preference.1);
-        true
+        }
     }
 
     pub fn set_math_hover(&mut self, anchor: Option<&MathBlockAnchor>) -> bool {
@@ -8802,6 +8819,9 @@ impl DualPlaneSession {
                 .take_while(|row| frame_row_history_id(frame, *row).is_some_and(|id| id <= end))
                 .last()
                 .unwrap_or(first_row);
+            // Taken before the placement is built, where the frame is still only read: this is the
+            // block's own rows, and they are on the frame already.
+            let source_width_cells = frame_rows_width_cells(frame, first_row, last_row);
             let Some(first_mapped) = frame.row_map.get(first_row as usize) else {
                 continue;
             };
@@ -8828,6 +8848,7 @@ impl DualPlaneSession {
                     .saturating_add(last_mapped.height_subpixels)
                     .saturating_sub(first_mapped.top_subpixels),
                 display: MathBlockDisplay::Source,
+                source_width_cells,
                 horizontal_overflow: overflow,
                 horizontal_scroll_px: 0,
                 vertical_scroll_px: 0,
@@ -8872,14 +8893,25 @@ impl DualPlaneSession {
             ) else {
                 continue;
             };
-            let Some(first_mapped) = frame.row_map.get(visible_row as usize) else {
-                continue;
-            };
-            let Some(last_mapped) = frame.row_map.iter().rfind(|row| {
+            let Some(last_row) = frame.row_map.iter().rposition(|row| {
                 row.live_grid_row.is_some_and(|live| {
                     (record.band_start_row..=record.band_end_row).contains(&live)
                 })
             }) else {
+                continue;
+            };
+            // The band's last row by index rather than by value, because the width below is a walk
+            // of the rows between the two ends and a row nobody can name is a row nobody can
+            // measure.
+            let source_width_cells = frame_rows_width_cells(
+                frame,
+                visible_row,
+                u32::try_from(last_row).unwrap_or(u32::MAX),
+            );
+            let Some(first_mapped) = frame.row_map.get(visible_row as usize) else {
+                continue;
+            };
+            let Some(last_mapped) = frame.row_map.get(last_row) else {
                 continue;
             };
             let band_height = last_mapped
@@ -8904,6 +8936,7 @@ impl DualPlaneSession {
                 content_offset_subpixels: 0,
                 clip_height_subpixels: band_height,
                 display: MathBlockDisplay::Source,
+                source_width_cells,
                 horizontal_overflow: overflow,
                 horizontal_scroll_px: if self.math_layout_options.block_line_wrapping {
                     record.horizontal_scroll_px
@@ -8956,6 +8989,26 @@ impl DualPlaneSession {
                 |run| frozen_inline_run_cells(frame, *start, &entry.line, run),
                 artifact.width_px,
             );
+            // A formula the producer's own wrap split across two rows is drawn whole on the row
+            // that closes it (run 0). The opening fragment above is the same formula's other half,
+            // so once that picture is standing the fragment is redundant text and comes down with
+            // the cells under the picture. Only then: a run that fell back to source leaves both
+            // halves exactly as the producer wrote them.
+            let joined_head_cells = span
+                .inline_joined_head
+                .as_ref()
+                .filter(|_| {
+                    placements
+                        .iter()
+                        .any(|placement| placement.runs.iter().any(|run| run.run == 0))
+                })
+                .and_then(|head| frozen_joined_head_cells(frame, &self.document, *start, head));
+            for index in joined_head_cells.into_iter().flatten() {
+                if let Some(cell) = frame.cells.get_mut(index) {
+                    cell.text.clear();
+                    cell.wide_spacer = false;
+                }
+            }
             for placement in placements {
                 let Some((top_subpixels, row_height_subpixels)) = frame
                     .row_map
@@ -8985,6 +9038,7 @@ impl DualPlaneSession {
                     content_offset_subpixels: 0,
                     clip_height_subpixels: row_height_subpixels,
                     display: MathBlockDisplay::Rendered,
+                    source_width_cells: 0,
                     horizontal_overflow: BlockOverflowOwner::Pane,
                     horizontal_scroll_px: 0,
                     vertical_scroll_px: 0,
@@ -9027,6 +9081,26 @@ impl DualPlaneSession {
                 |run| live_inline_run_cells(frame, &record.inputs, record.start.row, run),
                 artifact.width_px,
             );
+            // The joined opening fragment on the row above, cleared under the same rule the frozen
+            // plane applies: only once the picture that replaces it is actually standing.
+            let joined_head_cells = record
+                .span
+                .inline_joined_head
+                .as_ref()
+                .filter(|_| {
+                    placements
+                        .iter()
+                        .any(|placement| placement.runs.iter().any(|run| run.run == 0))
+                })
+                .and_then(|head| {
+                    live_joined_head_cells(frame, &record.inputs, record.start.row, head)
+                });
+            for index in joined_head_cells.into_iter().flatten() {
+                if let Some(cell) = frame.cells.get_mut(index) {
+                    cell.text.clear();
+                    cell.wide_spacer = false;
+                }
+            }
             for placement in placements {
                 let Some(mapped) = frame.row_map.get(placement.row as usize) else {
                     continue;
@@ -9064,6 +9138,7 @@ impl DualPlaneSession {
                     content_offset_subpixels: 0,
                     clip_height_subpixels: row_height_subpixels,
                     display: MathBlockDisplay::Rendered,
+                    source_width_cells: 0,
                     horizontal_overflow: BlockOverflowOwner::Pane,
                     horizontal_scroll_px: 0,
                     vertical_scroll_px: 0,
@@ -10444,6 +10519,7 @@ impl DualPlaneSession {
                 .iter_mut()
                 .find(|pending| pending.occurrence_id == record.identity.occurrence_id)
             {
+                pending.show_source = record.show_source;
                 let next = pending.prefix_staging.len();
                 if first_index != next
                     || captured_source
@@ -10485,6 +10561,7 @@ impl DualPlaneSession {
                 candidate_start: None,
                 expected_frozen_lines: u64::try_from(record.identity.source_rows.len())
                     .unwrap_or(u64::MAX),
+                show_source: record.show_source,
                 prefix_staging: captured_source
                     .iter()
                     .map(|(_, staging)| *staging)
@@ -10656,6 +10733,11 @@ impl DualPlaneSession {
         record.stale_artifact = None;
         record.block_end = Some(block.end);
         record.span = Some(block.span.clone());
+        // A freeze is not a new block: these are the very rows the reader was looking at a moment
+        // ago, so the face the occurrence was wearing while it was live crosses with its raster.
+        // Nothing else carries it — a history record is born typeset — and the face is the
+        // occurrence's own, so it travels with the occurrence rather than with its text.
+        record.show_source = pending.show_source;
         self.document.set_decoration(
             block.start,
             DecorationIntent::Math {
@@ -11115,6 +11197,25 @@ impl DualPlaneSession {
         (start != candidate).then_some(start)
     }
 
+    /// The one line above `candidate` an inline row-split join has to be read with.
+    ///
+    /// The certified frontier usually reaches further back than this and makes it moot. Usually is
+    /// not always: with the frontier immediately above the candidate — or with the fallback window,
+    /// whose `required_start` for a line outside any display block is that line itself — the scan
+    /// would see the closing fragment alone and could not join anything, and whether a formula
+    /// renders would depend on where the last `$$` happened to be. One line, and only for a
+    /// candidate whose own text says it could be a closing fragment at all.
+    fn frozen_inline_join_window_start(&self, candidate: TranscriptId) -> Option<TranscriptId> {
+        if !self.inline_math_bands {
+            return None;
+        }
+        let entries = self.document.entries();
+        if !bt_detect::may_close_row_split_inline_math(&entries.get(&candidate)?.line.text) {
+            return None;
+        }
+        entries.range(..candidate).next_back().map(|(id, _)| *id)
+    }
+
     /// The resident lines past `candidate` a table ending there has to be read with.
     ///
     /// The same sentence as [`Self::frozen_table_window_start`], pointing the other way. Rule 2 of
@@ -11211,6 +11312,13 @@ impl DualPlaneSession {
             (Some(certified), Some(table)) => Some(certified.min(table)),
             (certified, table) => certified.or(table),
         };
+        // And the line above, when this candidate could be closing an inline formula the producer's
+        // own wrapping left open on it.
+        let join_start = self.frozen_inline_join_window_start(candidate_id);
+        let anchor = match (anchor, join_start) {
+            (Some(anchor), Some(join)) => Some(anchor.min(join)),
+            (anchor, join) => anchor.or(join),
+        };
         // And one line past the candidate when the candidate is a table row, because that line is
         // half of rule 2's question (see `frozen_table_window_end`).
         let window_end = self
@@ -11239,7 +11347,9 @@ impl DualPlaneSession {
             self.enqueue_task(task);
             return;
         }
-        let required_start = candidate_context.required_start(candidate_id);
+        let required_start = candidate_context
+            .required_start(candidate_id)
+            .map(|start| join_start.map_or(start, |join| start.min(join)));
         let mut initial_context = candidate_context.clone();
         let mut inputs = Vec::new();
         if let Some(start) = required_start {
@@ -12475,12 +12585,17 @@ fn may_contain_display_math(text: &str) -> bool {
 
 /// Could this line carry an inline `$…$` run? The cheapest structurally honest question.
 ///
-/// A run needs a *pair* of delimiters, so one `$` can never make one and a single-dollar line is
-/// not armed — `echo $PATH` and `Cost: $5` cost a two-byte scan and nothing else. Two is where the
-/// pre-filter has to stop being clever: `$5 和 $10` also has two, and deciding that it is currency
-/// rather than mathematics is the disambiguator's job, not a prefilter's.
+/// A run needs a *pair* of delimiters — or a lone `$` that closes one the line above left open,
+/// which is the row-split case. Both readings come out of **one pass over this line's dollars**,
+/// because this runs once per line for every line a frame can see; `bt_detect`'s
+/// [`bt_detect::may_carry_inline_math`] states the budget and holds it. A single-dollar line that
+/// is a sigil — `echo $PATH`, `Cost: $5` — still costs that one scan and nothing else.
+///
+/// Two dollars is where the pre-filter has to stop being clever: `$5 和 $10` also has two, and
+/// deciding that it is currency rather than mathematics is the disambiguator's job, not a
+/// prefilter's.
 fn may_contain_inline_math(text: &str) -> bool {
-    text.bytes().filter(|byte| *byte == b'$').take(2).count() == 2
+    bt_detect::may_carry_inline_math(text)
 }
 
 /// Could this line take part in a math detection at *some* site? The membership test for the live
@@ -12731,6 +12846,7 @@ fn empty_live_math_span() -> MathSpan {
         kind: BlockKind::Math,
         cell_segments: Vec::new(),
         inline_runs: Vec::new(),
+        inline_joined_head: None,
     }
 }
 
@@ -13447,6 +13563,7 @@ fn live_task_is_current(
         kind: BlockKind::Math,
         cell_segments: Vec::new(),
         inline_runs: Vec::new(),
+        inline_joined_head: None,
     };
     current_task.detection_complete = false;
     current_task.resolved = false;
@@ -13789,6 +13906,33 @@ fn drawable_frame_row_count(frame: &ViewportFrame) -> u32 {
     u32::try_from(frame.drawable_rows()).unwrap_or(u32::MAX)
 }
 
+/// **How wide the widest of `first ..= last` is, in cells** — the number the band behind a block
+/// wearing its source face hugs (owner's ruling 2026-09-16, T-MATH-SOURCE-BAND-HUGS-TEXT;
+/// `docs/DESIGN.md` §7.1.5p ⑪ iii).
+///
+/// Read off the frame's own cells, which for such a block **are** the rows the terminal is drawing:
+/// a record that says `show_source` is a record whose lines the projection stopped swallowing, so
+/// they were laid out by the ordinary path like every other line of the pane and there is nothing
+/// here to lay out a second time. That matters twice over — it is the same answer on the live plane
+/// as on history, where `ViewportProjection::math_source_face` can only speak for transcript lines,
+/// and it is one row walk of one block per frame rather than a `Vec<String>` of the block rebuilt
+/// to read one integer off it (the per-turn cost T-MATH-MARKS-IN-SOURCE-FACE removed from the
+/// other face).
+///
+/// The width of a row is `bt_viewport::row_width_cells` and is that in both places, so the band the
+/// renderer draws and the band the projection measures for the *other* face cannot drift apart.
+fn frame_rows_width_cells(frame: &ViewportFrame, first: u32, last: u32) -> u32 {
+    let columns = frame.columns.get() as usize;
+    (first..=last)
+        .filter_map(|row| {
+            let start = (row as usize).checked_mul(columns)?;
+            frame.cells.get(start..start.checked_add(columns)?)
+        })
+        .map(bt_viewport::row_width_cells)
+        .max()
+        .unwrap_or(0)
+}
+
 fn frame_row_for_history(frame: &ViewportFrame, id: TranscriptId) -> Option<u32> {
     (0..drawable_frame_row_count(frame)).find(|row| frame_row_history_id(frame, *row) == Some(id))
 }
@@ -13817,14 +13961,24 @@ fn frozen_inline_run_cells(
     line: &FrozenLine,
     run: &InlineMathRun,
 ) -> Option<(u32, u32, Vec<usize>)> {
+    frozen_fragment_cells(frame, id, line, run.byte_start, run.byte_end)
+}
+
+/// Frame cells one byte range of one frozen logical line occupies, as `(row, left column, cell
+/// indices)`.
+///
+/// The run lookup above and the joined-head lookup below ask the identical question of different
+/// ranges — where was *this* slice of *this* line drawn — so they ask it in one place.
+fn frozen_fragment_cells(
+    frame: &ViewportFrame,
+    id: TranscriptId,
+    line: &FrozenLine,
+    byte_start: u32,
+    byte_end: u32,
+) -> Option<(u32, u32, Vec<usize>)> {
     let columns = frame.columns.get() as usize;
-    let start = u32::try_from(
-        line.grapheme_boundaries
-            .binary_search(&run.byte_start)
-            .ok()?,
-    )
-    .ok()?;
-    let end = u32::try_from(line.grapheme_boundaries.binary_search(&run.byte_end).ok()?).ok()?;
+    let start = u32::try_from(line.grapheme_boundaries.binary_search(&byte_start).ok()?).ok()?;
+    let end = u32::try_from(line.grapheme_boundaries.binary_search(&byte_end).ok()?).ok()?;
     let mut origin = None;
     let mut cells = Vec::new();
     for (index, anchors) in frame
@@ -13919,9 +14073,26 @@ fn live_inline_run_cells(
     live_row: u32,
     run: &InlineMathRun,
 ) -> Option<(u32, u32, Vec<usize>)> {
+    live_fragment_cells(
+        frame,
+        inputs,
+        live_row,
+        usize::try_from(run.byte_start).ok()?,
+        usize::try_from(run.byte_end).ok()?,
+    )
+}
+
+/// Frame cells one byte range of one live logical line occupies, as `(row, left column, cell
+/// indices)`. The byte offsets are offsets into the **logical** line, whichever of its physical
+/// rows they land on.
+fn live_fragment_cells(
+    frame: &ViewportFrame,
+    inputs: &[LiveDetectionInput],
+    live_row: u32,
+    run_start: usize,
+    run_end: usize,
+) -> Option<(u32, u32, Vec<usize>)> {
     let columns = frame.columns.get() as usize;
-    let run_start = usize::try_from(run.byte_start).ok()?;
-    let run_end = usize::try_from(run.byte_end).ok()?;
     if run_start >= run_end {
         return None;
     }
@@ -13957,6 +14128,55 @@ fn live_inline_run_cells(
     }
     let (row, left) = origin?;
     Some((row, left, cells))
+}
+
+/// Frame cells the opening fragment of a row-split inline formula still occupies on the frozen
+/// line above the one its picture stands on.
+///
+/// **Two proofs before a single cell is cleared.** The line above is the transcript's own
+/// predecessor of the occurrence's line — not an index arithmetic guess — and the bytes it holds at
+/// the recorded range must still be exactly the fragment the join was proved on. If either fails,
+/// nothing is cleared and the fragment stays visible beside the picture: a redundant `$x` is a
+/// blemish, and erasing a line the producer has since rewritten is data loss.
+fn frozen_joined_head_cells(
+    frame: &ViewportFrame,
+    document: &HistoryDocument,
+    start: TranscriptId,
+    head: &InlineJoinedFragment,
+) -> Option<Vec<usize>> {
+    let (head_id, entry) = document.entries().range(..start).next_back()?;
+    let begin = usize::try_from(head.byte_start).ok()?;
+    let end = usize::try_from(head.byte_end).ok()?;
+    if entry.line.text.get(begin..end) != Some(head.text.as_str()) {
+        return None;
+    }
+    let (_, _, cells) =
+        frozen_fragment_cells(frame, *head_id, &entry.line, head.byte_start, head.byte_end)?;
+    Some(cells)
+}
+
+/// The live-grid mirror of [`frozen_joined_head_cells`].
+///
+/// The line above is the logical line ending on the row before this occurrence's first row, and the
+/// same text proof stands guard: an alternate-screen application repaints constantly, and between
+/// the moment the join was proved and the moment this frame is painted the row above may have
+/// become something else entirely.
+fn live_joined_head_cells(
+    frame: &ViewportFrame,
+    inputs: &[LiveDetectionInput],
+    live_row: u32,
+    head: &InlineJoinedFragment,
+) -> Option<Vec<usize>> {
+    let (first_row, _) = *live_logical_line_rows(inputs, live_row).first()?;
+    let head_row = first_row.checked_sub(1)?;
+    let head_text = live_snapshot_logical_line_text(inputs, head_row);
+    let begin = usize::try_from(head.byte_start).ok()?;
+    let end = usize::try_from(head.byte_end).ok()?;
+    if head_text.get(begin..end) != Some(head.text.as_str()) {
+        return None;
+    }
+    let (_, _, cells) = live_fragment_cells(frame, inputs, head_row, begin, end)?;
+    Some(cells)
 }
 
 /// One physical row's share of an inline occurrence: where its picture stands, which cells it
@@ -18937,6 +19157,152 @@ mod tests {
     }
 
     #[test]
+    fn a_single_slice_feed_turn_matches_a_standalone_feed() {
+        let start = Instant::now();
+        for alternate in [false, true] {
+            for repaint in [
+                b"\x1b[2J\x1b[Htop\r\n$$x$$\r\nbarrier".as_slice(),
+                b"\x1b[H\x1b[Ktop\r\n\x1b[K$$x$$\r\n\x1b[Kbarrier".as_slice(),
+                b"\x1b[?2026h\x1b[2J\x1b[Htop\r\n$$x$$\r\nbarrier\x1b[?2026l".as_slice(),
+                b"\x1b[2J\x1b[Hno formula\r\nbarrier".as_slice(),
+            ] {
+                let mut sessions = [
+                    DualPlaneSession::new(nz(40), nz(12)),
+                    DualPlaneSession::new(nz(40), nz(12)),
+                ];
+                for session in &mut sessions {
+                    if alternate {
+                        session.feed_at(b"\x1b[?1049h", start).unwrap();
+                    }
+                    session.feed_at(b"$$x$$\r\nbarrier", start).unwrap();
+                    session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+                    assert_eq!(
+                        complete_detected_live_tasks(session, synthetic_raster(40, 18)),
+                        1
+                    );
+                }
+                sessions[0]
+                    .feed_at(repaint, start + Duration::from_millis(250))
+                    .unwrap();
+                sessions[1].begin_feed_turn();
+                sessions[1]
+                    .feed_at(repaint, start + Duration::from_millis(250))
+                    .unwrap();
+                sessions[1].end_feed_turn();
+                let [plain, marked] = &mut sessions;
+                assert_eq!(
+                    plain.terminal.visible_text(),
+                    marked.terminal.visible_text()
+                );
+                assert_eq!(
+                    plain.live_invalidation_count,
+                    marked.live_invalidation_count
+                );
+                assert_eq!(plain.live_detection_count(), marked.live_detection_count());
+                assert_eq!(plain.screen_revision(), marked.screen_revision());
+                let mut plain_projection = plain.new_projection(plain.layout_key());
+                let mut marked_projection = marked.new_projection(marked.layout_key());
+                assert_eq!(
+                    plain.viewport_frame(&mut plain_projection).unwrap(),
+                    marked.viewport_frame(&mut marked_projection).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_feed_turn_does_not_commit_a_split_synchronized_update() {
+        let mut session = DualPlaneSession::new(nz(40), nz(12));
+        session.feed(b"before").unwrap();
+        session.begin_feed_turn();
+        session.feed(b"\x1b[?2026h\x1b[2J\x1b[Hafter").unwrap();
+        let deadline = session.synchronized_update_deadline().unwrap();
+        session.feed(b" the redraw\x1b[?202").unwrap();
+        session.end_feed_turn();
+        assert_eq!(session.terminal.visible_text()[0], "before");
+        assert_eq!(session.synchronized_update_deadline(), Some(deadline));
+        assert!(session.primary_repaint_in_progress);
+        session.begin_feed_turn();
+        session.feed(b"6l").unwrap();
+        session.end_feed_turn();
+        assert_eq!(session.terminal.visible_text()[0], "after the redraw");
+        assert!(session.synchronized_update_deadline().is_none());
+        assert!(!session.primary_repaint_in_progress);
+
+        // An unterminated update still uses the parser's existing 150 ms deadline.
+        session.begin_feed_turn();
+        session.feed(b"\x1b[?2026h\rtimeout\x1b[K").unwrap();
+        let deadline = session.synchronized_update_deadline().unwrap();
+        session.end_feed_turn();
+        assert_eq!(session.terminal.visible_text()[0], "after the redraw");
+        assert!(session.finish_synchronized_update(deadline).unwrap());
+        assert_eq!(session.terminal.visible_text()[0], "timeout");
+        assert!(session.synchronized_update_deadline().is_none());
+    }
+
+    #[test]
+    fn sliced_repaint_turn_keeps_both_formula_records_and_rasters() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(16));
+        let source = b"$$x$$\r\nbarrier\r\n\r\n$$y$$\r\ntail";
+        session.feed_at(source, start).unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 18)),
+            2
+        );
+        let records: Vec<_> = session
+            .live_decorations
+            .values()
+            .map(|record| {
+                (
+                    record.identity.occurrence_id,
+                    record.artifact.clone().unwrap(),
+                )
+            })
+            .collect();
+        let invalidations = session.live_invalidation_count;
+        // A cursor-addressed redraw first restores its body, then inserts the header and
+        // repositions that body. NUL padding makes the boundary exactly the drain's 8 KiB.
+        let mut repaint = b"\x1b[2J\x1b[H".to_vec();
+        repaint.extend_from_slice(source);
+        repaint.resize(8 * 1024, 0);
+        repaint.extend_from_slice(b"\x1b[Htop\x1b[0K\r\n$$x$$\x1b[0K\r\nbarrier\x1b[0K\r\n\x1b[0K\r\n$$y$$\x1b[0K\r\ntail");
+        session.begin_feed_turn();
+        for slice in repaint.chunks(8 * 1024) {
+            session
+                .feed_at(slice, start + Duration::from_millis(50))
+                .unwrap();
+        }
+        session.end_feed_turn();
+        assert!(session.primary_repaint_snapshot.is_none());
+        assert!(!session.primary_repaint_in_progress);
+        assert_eq!(session.live_decorations.len(), 2);
+        assert_eq!(session.live_invalidation_count, invalidations);
+        for (occurrence, artifact) in records {
+            let record = session
+                .live_decorations
+                .values()
+                .find(|record| record.identity.occurrence_id == occurrence)
+                .expect("the same occurrence survives the sliced repaint");
+            assert!(Arc::ptr_eq(
+                &artifact.rgba,
+                &record.artifact.as_ref().unwrap().rgba
+            ));
+        }
+        assert!(session.take_worker_task().is_none());
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(frame.math_blocks.len(), 2);
+        assert!(
+            frame
+                .math_blocks
+                .iter()
+                .all(|block| block.display == MathBlockDisplay::Rendered)
+        );
+    }
+
+    #[test]
     fn primary_in_stream_reprint_reanchors_proven_formula_instead_of_flashing() {
         // Regression for the primary in-stream reprint flash. Codex reflows and reprints its whole
         // transcript mid-stream (a clear+home boundary). A proven live formula whose row is rewritten
@@ -19649,56 +20015,105 @@ mod tests {
         );
     }
 
+    /// **A face belongs to the occurrence, not to the text** (owner's ruling 2026-09-16). Turning
+    /// one block over is an action on the block under the mark; the next time the same `$$…$$` is
+    /// printed it is a different block, and it arrives typeset like any other.
     #[test]
-    fn alternate_show_source_preference_survives_redetection_in_both_directions() {
+    fn a_second_printing_of_the_same_formula_arrives_typeset() {
         let start = Instant::now();
         let mut session = DualPlaneSession::new(nz(40), nz(12));
-        session
-            .feed_at(b"\x1b[?1049h$$x^2$$\r\ninput", start)
-            .unwrap();
+        session.feed_at(b"$$x^2$$\r\nbarrier", start).unwrap();
+        hide_cursor(&mut session, start);
         session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
         assert_eq!(
-            complete_detected_live_tasks(&mut session, synthetic_raster(40, 20)),
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 18)),
             1
         );
         let mut projection = session.new_projection(session.layout_key());
         let rendered = session.viewport_frame(&mut projection).unwrap();
+        let first = rendered.math_blocks[0].anchor.clone();
+        assert!(session.toggle_math_source(&first));
+
+        let again = start + Duration::from_millis(210);
+        session.feed_at(b"\r\n$$x^2$$\r\ntail", again).unwrap();
+        hide_cursor(&mut session, again);
+        session.advance_live_stability(again + LIVE_MATH_STABLE_INTERVAL);
+        complete_detected_live_tasks(&mut session, synthetic_raster(40, 18));
+        let both = session.viewport_frame(&mut projection).unwrap();
+        let face_at = |row: u32| {
+            both.math_blocks
+                .iter()
+                .find(|block| match &block.anchor {
+                    MathBlockAnchor::Live { start, .. } => start.row == row,
+                    MathBlockAnchor::History { .. } => false,
+                })
+                .map(|block| block.display)
+        };
+        assert_eq!(
+            face_at(0),
+            Some(MathBlockDisplay::Source),
+            "the block the reader turned over keeps its source face"
+        );
+        assert_eq!(
+            face_at(2),
+            Some(MathBlockDisplay::Rendered),
+            "the same formula printed again is another block and arrives typeset"
+        );
+        // Mutation: keying the face on the formula's own text turns the second block over too.
+    }
+
+    /// **The freeze is not a new block.** The rows a live occurrence was turned over on are the
+    /// very rows that land in history, so its face crosses with its raster.
+    #[test]
+    fn a_live_block_turned_over_keeps_its_source_face_across_the_freeze() {
+        let start = Instant::now();
+        // Leave room above the eight-row visible-text floor for a block the reader can turn over.
+        let mut session = DualPlaneSession::new(nz(40), nz(12));
+        session.feed_at(b"$$x^2$$\r\nbarrier", start).unwrap();
+        hide_cursor(&mut session, start);
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 18)),
+            1
+        );
+        let live_raster = session
+            .live_decorations
+            .values()
+            .find_map(|record| record.artifact.as_ref())
+            .map(|artifact| Arc::clone(&artifact.rgba))
+            .expect("the live block renders before it is turned over");
+        let mut projection = session.new_projection(session.layout_key());
+        let rendered = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(rendered.math_blocks.len(), 1, "the live block is visible");
+        assert_eq!(rendered.math_blocks[0].display, MathBlockDisplay::Rendered);
         let anchor = rendered.math_blocks[0].anchor.clone();
         assert!(session.toggle_math_source(&anchor));
 
-        session.redetect(DetectionRevision(2));
-        assert_eq!(
-            session.advance_live_stability(start + Duration::from_millis(400)),
-            1
+        // Twelve lines scroll the formula's source row out of the grid, so the occurrence hands
+        // its raster to the history record it becomes.
+        for index in 0..12 {
+            session
+                .feed_at(
+                    format!("\r\nscroll-{index}").as_bytes(),
+                    start + Duration::from_millis(210 + index * 10),
+                )
+                .unwrap();
+        }
+        let frozen = session
+            .decorations
+            .values()
+            .find(|record| {
+                record
+                    .artifact
+                    .as_ref()
+                    .is_some_and(|artifact| Arc::ptr_eq(&artifact.rgba, &live_raster))
+            })
+            .expect("the history record receives the handed-off raster");
+        assert!(
+            frozen.show_source,
+            "the occurrence keeps the face the reader gave it across the freeze"
         );
-        assert_eq!(
-            complete_detected_live_tasks(&mut session, synthetic_raster(40, 20)),
-            1
-        );
-        let source = session.viewport_frame(&mut projection).unwrap();
-        let source_block = source
-            .math_blocks
-            .iter()
-            .find(|block| block.display == MathBlockDisplay::Source)
-            .expect("content preference restores source after redetection");
-        assert!(session.toggle_math_source(&source_block.anchor));
-
-        session.redetect(DetectionRevision(3));
-        assert_eq!(
-            session.advance_live_stability(start + Duration::from_millis(600)),
-            1
-        );
-        assert_eq!(
-            complete_detected_live_tasks(&mut session, synthetic_raster(40, 20)),
-            1
-        );
-        let rendered_again = session.viewport_frame(&mut projection).unwrap();
-        assert_eq!(rendered_again.math_blocks.len(), 1);
-        assert_eq!(
-            rendered_again.math_blocks[0].display,
-            MathBlockDisplay::Rendered
-        );
-        // Mutation: removing the content-preference lookup restores Rendered after revision 2.
+        // Mutation: dropping the face from the handoff shows the picture again as the rows freeze.
     }
 
     #[test]
@@ -19789,6 +20204,53 @@ mod tests {
         assert_eq!(
             session.viewport_frame(&mut projection).unwrap().math_blocks[0].horizontal_overflow,
             BlockOverflowOwner::Pane
+        );
+    }
+
+    /// RED GATE (owner's ruling 2026-09-16, T-MATH-SOURCE-BAND-HUGS-TEXT; `docs/DESIGN.md`
+    /// §7.1.5p ⑪ iii): **a block wearing its source face tells the renderer how wide its rows are,
+    /// so the band behind them can hug the text instead of running the width of the pane.**
+    ///
+    /// The owner's screenshot was a tinted floor spanning a whole pane behind a few short rows of
+    /// LaTeX, with the two marks out at the far edge of it. `bt_render` measures that floor from
+    /// the block's substance, and a source face's substance is its rows — which only this layer can
+    /// see, because by the time anybody asks they are the frame's own cells. The two numbers pulled
+    /// apart here are the seven columns `$$x^2$$` takes and the sixteen the pane has.
+    ///
+    /// MUTATIONS: carry `placement.source`'s own longest line instead and a block whose source
+    /// wrapped — or whose row holds a wide character — is measured by something nobody draws. Carry
+    /// the pane's width and the report is back exactly. Fill the field on a picture and the first
+    /// assertion falls, which is what keeps this one number about one face.
+    #[test]
+    fn a_source_faces_placement_carries_the_width_of_the_rows_it_stands_on() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(16), nz(12));
+        session.feed_at(b"$$x^2$$", start).unwrap();
+        hide_cursor(&mut session, start);
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(400, 18)),
+            1
+        );
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let anchor = frame.math_blocks[0].anchor.clone();
+        assert_eq!(
+            frame.math_blocks[0].source_width_cells, 0,
+            "a picture's width is its raster's, and this field is not about it"
+        );
+
+        assert!(session.toggle_math_source(&anchor));
+        let source = session.viewport_frame(&mut projection).unwrap();
+        let placement = &source.math_blocks[0];
+        assert_eq!(placement.display, MathBlockDisplay::Source);
+        assert_eq!(
+            placement.source_width_cells, 7,
+            "the band hugs the seven columns `$$x^2$$` is drawn on"
+        );
+        assert!(
+            placement.source_width_cells < source.columns.get(),
+            "a band as wide as its pane is the report itself"
         );
     }
 
@@ -27908,6 +28370,74 @@ mod tests {
         );
     }
 
+    /// T-MATH-INLINE-WRAP: a formula the producer's own wrapping split across two printed rows.
+    ///
+    /// Claude Code wraps its answers itself, with hard newlines at the pane width, so a formula
+    /// that does not fit the rest of a row arrives as two rows and neither half is a formula. The
+    /// user saw the identities that happened to land whole typeset and the one that did not left as
+    /// raw text between them (2026-09-15).
+    ///
+    /// Driven end to end — real VT bytes, real OSC 133 markers, the real rasterizer — because the
+    /// join has to be true in three places at once and any one of them alone reads green: the
+    /// arming prefilter has to ask about a row carrying one `$`, the scan window has to reach the
+    /// row above, and the placer has to take down the fragment it left there.
+    #[test]
+    fn a_formula_split_across_two_printed_rows_is_joined_and_typeset() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut session);
+        let stream = concat!(
+            "\x1b]133;A\x07PS> \x1b]133;B\x07show\x1b]133;C\x07\r\n",
+            r"Euler wrote $e^{i\theta}",
+            "\r\n",
+            r"= \cos\theta + i\sin\theta$ and it holds",
+            "\r\n",
+        );
+        session.feed_at(stream.as_bytes(), started).unwrap();
+        assert_eq!(
+            grid_site_of(&session, "Euler"),
+            InlineMathSite::CommandOutput,
+            "both halves must really be one command's output"
+        );
+
+        assert_eq!(
+            session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL),
+            1,
+            "the closing row carries one `$` and must still be armed; the opening row's `$` is \
+             glued to an identifier and must not be"
+        );
+        assert_eq!(
+            complete_live_math_for_real(&mut session),
+            1,
+            "the armed row must resolve, which it can only do by reading the row above it"
+        );
+
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let blocks = rendered_inline_blocks(&frame);
+        assert_eq!(
+            blocks.len(),
+            1,
+            "one picture for one formula: {:?}",
+            frame
+                .math_blocks
+                .iter()
+                .map(|block| (block.artifact.mode, block.display))
+                .collect::<Vec<_>>()
+        );
+        let closing = frame_row_text(&frame, 2);
+        assert!(
+            !closing.contains('$') && closing.contains("and it holds"),
+            "the picture stands on the closing row, over its own fragment only: {closing:?}"
+        );
+        let opening = frame_row_text(&frame, 1);
+        assert_eq!(
+            opening.trim_end(),
+            "Euler wrote",
+            "and the fragment it left above comes down with it, delimiter and all: {opening:?}"
+        );
+    }
+
     /// PIN (blocker 3): the same run keeps its verdict once the line is frozen scrollback.
     ///
     /// The frozen worker scans text with no idea where a line sat in the command lifecycle, so
@@ -27957,6 +28487,135 @@ mod tests {
             inline, 1,
             "the frozen scan must carry the captured OSC 133 site, not default to Ineligible"
         );
+    }
+
+    /// T-INLINE-MATH-SURVIVES-RESIZE: real command output, frozen before the window rewraps it.
+    #[test]
+    fn frozen_inline_math_survives_window_resize() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(100), nz(24));
+        seat_inline_metrics(&mut session);
+        session.set_layout_key(LayoutKey {
+            line_wrapping: true,
+            ..session.layout_key()
+        });
+        let document = concat!(
+            "\x1b]133;A\x07PS> \x1b]133;B\x07type math-test.md\x1b]133;C\x07\r\n",
+            r"The integral $\int_{-\infty}^{\infty} e^{-x^2}\,dx = \sqrt{\pi}$ shows up everywhere.",
+            "\r\n$$\r\n",
+            r"\int_{-\infty}^{\infty} e^{-x^2}\,dx = \sqrt{\pi}",
+            "\r\n$$\r\n",
+            r"Euler: $e^{i\pi} + 1 = 0$. Matrix:",
+            "\r\n$$\r\n",
+            r"\begin{pmatrix}1 & 2 \\ 3 & 4\end{pmatrix}",
+            "\r\n$$\r\n",
+            r"The series $\sum_{n=1}^{\infty} \frac{1}{n^2} = \frac{\pi^2}{6}$ converges.",
+            "\r\n\x1b]133;D;0\x07\x1b]133;A\x07PS> \x1b]133;B\x07",
+        );
+        session.feed_at(document.as_bytes(), started).unwrap();
+        session
+            .feed_at("\r\npad".repeat(28).as_bytes(), started)
+            .unwrap();
+        assert!(complete_frozen_math_for_real(&mut session) >= 5);
+        let occurrences = session
+            .decorations
+            .iter()
+            .filter_map(|(id, record)| {
+                let span = record.span.as_ref()?;
+                frozen_artifact_and_scale(record)?;
+                Some((*id, span.clone()))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            occurrences
+                .iter()
+                .filter(|(_, span)| span.mode == MathMode::Inline)
+                .count(),
+            3
+        );
+        assert_eq!(
+            occurrences
+                .iter()
+                .filter(|(_, span)| span.mode == MathMode::Display)
+                .count(),
+            2
+        );
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_to_top();
+        let before = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(rendered_inline_blocks(&before).len(), 3);
+
+        let assert_pictures = |session: &DualPlaneSession, frame: &ViewportFrame| {
+            for (id, span) in &occurrences {
+                let record = session
+                    .decoration(*id)
+                    .expect("rewrap retains the transcript occurrence");
+                assert_eq!(record.span.as_ref(), Some(span));
+                assert!(frozen_artifact_and_scale(record).is_some());
+                assert!(
+                    frame.math_blocks.iter().any(|block| {
+                        block.start == *id && block.display == MathBlockDisplay::Rendered
+                    }),
+                    "the same occurrence must still have a picture"
+                );
+            }
+            assert_eq!(rendered_inline_blocks(frame).len(), 3);
+            assert_eq!(
+                frame
+                    .math_blocks
+                    .iter()
+                    .filter(|block| block.artifact.mode == MathMode::Display)
+                    .count(),
+                2
+            );
+            assert!(
+                !frame.cells.iter().any(|cell| cell.text.contains('$')),
+                "no formula's delimiters return as source"
+            );
+        };
+        assert_pictures(&session, &before);
+        for (step, columns) in [60, 100, 60].into_iter().enumerate() {
+            let resized_at = started + Duration::from_secs(1 + step as u64 * 4);
+            session.resize_at(nz(columns), nz(24), resized_at).unwrap();
+            session.refresh_projection(&mut projection);
+            // Measure the new live/staging extent before positioning the review viewport.
+            session.viewport_frame(&mut projection).unwrap();
+            projection.scroll_to_top();
+            let after = session.viewport_frame(&mut projection).unwrap();
+            assert_eq!(
+                after.columns.get(),
+                columns,
+                "frame must use the resized width"
+            );
+            assert_pictures(&session, &after);
+            let integral_rows = after.cell_anchors.chunks(columns as usize).filter(|row| {
+                row.iter().any(|cell| matches!(cell.start, ContentAnchor::History { id, .. } if id == occurrences[0].0))
+            }).count();
+            assert_eq!(
+                integral_rows,
+                if columns == 60 { 2 } else { 1 },
+                "the frozen integral sentence must really rewrap: first={:?}, layout={:?}, rows={:?}",
+                occurrences[0],
+                session.layout_key(),
+                after
+                    .cell_anchors
+                    .chunks(columns as usize)
+                    .map(|row| &row[0].start)
+                    .collect::<Vec<_>>()
+            );
+            session.mark_pty_resize_requested_at(nz(columns), nz(24), resized_at);
+            assert!(
+                session
+                    .finish_resize_if_quiescent(resized_at + Duration::from_secs(2))
+                    .unwrap()
+            );
+            session.schedule_visible_artifacts(&after);
+            complete_frozen_math_for_real(&mut session);
+            session.refresh_projection(&mut projection);
+            let settled = session.viewport_frame(&mut projection).unwrap();
+            assert_pictures(&session, &settled);
+        }
     }
 
     /// PIN (slice 3): one over-wide run falls back to source alone; its neighbour still renders.
@@ -28481,9 +29140,11 @@ mod tests {
     /// * **The question that replaced them is asked once per line.** Not once per `$` — a screen
     ///   whose lines carry six times as many dollars in the same forty rows produces a ledger
     ///   identical to the byte, which is the whole difference between a prefilter and the scan it
-    ///   is standing in front of. And not at all where the two-byte dollar scan has already
-    ///   answered: a screen of lines carrying one `$` each never reaches the site question, which
-    ///   is what makes `echo $PATH` cost two bytes and nothing else.
+    ///   is standing in front of. And not at all where the row alone has already answered: a
+    ///   screen whose one `$` per line is a sigil — `$HOME`, `$PATH`, `$1` — never reaches the site
+    ///   question, which is what makes `echo $PATH` cost a byte scan and nothing else. (A lone `$`
+    ///   is no longer *automatically* an answer, since one can close a formula the row above left
+    ///   open; a lone `$` glued to an identifier still is, and that is every sigil there is.)
     #[test]
     fn a_pathological_dollar_screen_arms_nothing_where_the_site_can_never_answer_yes() {
         const ROWS: u32 = 40;
@@ -28614,8 +29275,8 @@ mod tests {
         );
         assert_eq!(
             lone.ledger.site_questions, 0,
-            "a single `$` cannot make a run, so the two-byte scan answers and the site is never \
-             asked"
+            "a single `$` glued to an identifier is a sigil and can neither open a run nor close \
+             one left open above, so the byte scan answers and the site is never asked"
         );
         assert!(
             alt.armed > 0,

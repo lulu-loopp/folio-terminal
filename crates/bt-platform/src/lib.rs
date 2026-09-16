@@ -11652,7 +11652,44 @@ mod native_window_door_tests {
         declarations
     }
 
+    /// **Whether a declaration names `shape`, rather than merely containing its
+    /// letters.**
+    ///
+    /// [`public_declarations`] is generous on purpose about *how a declaration
+    /// is written* — wrapped over four lines, a function or a field or an alias
+    /// — because a gate that missed a leak because of how it was wrapped is a
+    /// gate the next leak walks through. It is **not** generous about what a
+    /// name is, and this is where that is said: the four spellings are names,
+    /// and a name that is part of a longer name is a different name.
+    ///
+    /// `EVENT_NOT_HANDLED_ERR` is the case that taught it. That is Carbon's
+    /// `eventNotHandledErr`, it names no handle of any kind, and a plain
+    /// substring search reported it because `HANDLED` contains `HANDLE` —
+    /// a false red on both platforms, and one that would have been answered by
+    /// hiding a constant that has every right to be public.
+    ///
+    /// So a match has to stand at a name's edge. On the left, always: nothing
+    /// may run into it, which is what keeps `my_windows::` out. On the right,
+    /// only when the spelling itself **ends** in a name character — `HANDLE`,
+    /// `HWND` and `NonZeroIsize` do, so `HANDLED` and `HWNDX` are not them,
+    /// while `windows::` ends in punctuation and is a path prefix whose whole
+    /// job is to be followed by more name.
+    fn names(declaration: &str, shape: &str) -> bool {
+        let is_name_byte = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+        let open_ended = !shape.as_bytes().last().copied().is_some_and(is_name_byte);
+        let text = declaration.as_bytes();
+        declaration.match_indices(shape).any(|(at, _)| {
+            let left = at == 0 || !is_name_byte(text[at - 1]);
+            let end = at + shape.len();
+            let right = open_ended || end == text.len() || !is_name_byte(text[end]);
+            left && right
+        })
+    }
+
     /// RED — **no public item of this crate names a Windows handle.**
+    ///
+    /// A *name* and not a run of letters — see [`names`], which is the whole of
+    /// the difference and carries the case that made it necessary.
     #[test]
     fn the_native_window_door_has_no_windows_type_in_its_signature() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -11669,7 +11706,7 @@ mod native_window_door_tests {
                     continue;
                 }
                 for shape in WINDOWS_SHAPES {
-                    if declaration.contains(shape) {
+                    if names(&declaration, shape) {
                         leaks.push(format!(
                             "{}: {declaration}",
                             file.strip_prefix(root).unwrap_or(&file).display()
@@ -12474,12 +12511,23 @@ mod macos_window_backend_tests {
     /// door still does the four things the take-over *is*, and the reading is
     /// still off the buttons AppKit drew rather than off a constant.
     ///
+    /// **The fifth call is `setMovable(false)`** (T-MAC-TAB-DRAG, owner report
+    /// 2026-09-16), and it is on this list for the same reason the background
+    /// flag is: it is a sentence of the ruling that this window's header is
+    /// Folio's to route. The background flag alone leaves AppKit's own
+    /// title-bar drag standing, and on a `FullSizeContentView` window AppKit
+    /// decides that one by asking the view under the press whether it may move
+    /// the window — a view of winit's, which answers `YES`. Every drag begun in
+    /// the header was AppKit's, so a tab could be neither reordered nor torn
+    /// out: the press armed the tab and the motion moved the window.
+    ///
     /// MUTATION: drop `FullSizeContentView` and Folio's first row of tabs is
     /// pushed below a title bar that is still reserving its own height; drop
     /// `titleVisibility` and the window shows two titles; turn
     /// `MovableByWindowBackground` on and every drag anywhere in the window
-    /// moves it; answer a constant instead of `standardWindowButton` and this
-    /// names it.
+    /// moves it; drop `setMovable(false)` and every drag in the header moves it,
+    /// the ones that began on a tab included; answer a constant instead of
+    /// `standardWindowButton` and this names it.
     #[test]
     fn the_macos_title_bar_is_kept_and_emptied_rather_than_taken_away() {
         let body_of = |needle: &str| {
@@ -12496,6 +12544,7 @@ mod macos_window_backend_tests {
             "setTitlebarAppearsTransparent(true)",
             "setTitleVisibility(NSWindowTitleVisibility::Hidden)",
             "setMovableByWindowBackground(false)",
+            "setMovable(false)",
             "measure_window_chrome(",
         ] {
             assert!(
@@ -17836,6 +17885,49 @@ mod macos_player_signature_tests {
                 "`{class}` is allocated somewhere other than the one door that carries the reason"
             );
         }
+    }
+
+    /// RED (RA-5) — **the engine thread has an autorelease pool, and the pump
+    /// drains one every turn.**
+    ///
+    /// Apple's contract for a secondary thread that touches Cocoa: a pool
+    /// before the first message, and a pool drained inside any long-lived loop.
+    /// The pump calls into AVFoundation every `FRAME_POLL_INTERVAL` for as long
+    /// as a preview is open, so a pool that drains only when the preview closes
+    /// is the case this is about rather than the fix for it.
+    ///
+    /// A source pin for `the_player_is_allocated_without_claiming_the_window_thread`'s
+    /// reason — the arm compiles on one machine, and what is being asserted is
+    /// a structural property rather than a measurable one: there is no number
+    /// AVFoundation publishes for "objects waiting for a pool".
+    ///
+    /// MUTATION: put the pool around `pump` instead of inside it — one pool for
+    /// the whole lifetime, which is the shape this finding rejects — and the
+    /// second half of this names it.
+    #[test]
+    fn the_engine_thread_holds_a_pool_and_drains_one_every_turn() {
+        let run = MACOS_ARM
+            .split("\nfn run(")
+            .nth(1)
+            .expect("the macOS engine thread has a body");
+        let run = run.split("\n}\n").next().unwrap_or_default();
+        assert!(
+            run.contains("autoreleasepool(") && run.contains("Machinery::build("),
+            "the engine thread sends its first Objective-C message with no autorelease \
+             pool on it; Apple's contract for a thread this file started is that it \
+             makes one before it does: {run}"
+        );
+        let pump = MACOS_ARM
+            .split("fn pump(&mut self, shared: &Arc<Shared>, inbox: &mpsc::Receiver<Command>) {")
+            .nth(1)
+            .expect("the macOS engine has a pump");
+        let pump = pump.split("\n    }\n").next().unwrap_or_default();
+        assert!(
+            pump.contains("while autoreleasepool(") && pump.contains("self.one_turn("),
+            "the pump's work is no longer inside a pool that is drained on every \
+             iteration, so a preview left open accumulates everything AVFoundation \
+             autoreleased on this thread: {pump}"
+        );
     }
 }
 

@@ -15,8 +15,10 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
+
+use crate::trace_sink;
 
 /// **The process's own zero, shared by every named trace.**
 ///
@@ -39,19 +41,80 @@ fn origin() -> Instant {
     *ORIGIN.get_or_init(Instant::now)
 }
 
-/// One opened trace file, and the clock its timestamps are measured from.
+/// A destination resolved by the producer, opened and written only by the sink.
+/// The header is written with the first accepted line, so dropping a queued
+/// line can never leave the file without its header.
+pub struct TraceFile {
+    path: PathBuf,
+    header: Option<String>,
+    file: OnceLock<Option<Mutex<File>>>,
+}
+
+impl TraceFile {
+    pub fn new(path: &Path, header: Option<&str>) -> Self {
+        Self {
+            path: path.to_owned(),
+            header: header.map(str::to_owned),
+            file: OnceLock::new(),
+        }
+    }
+
+    /// Only the writer calls this in a resident run. Tests without a sink keep
+    /// their synchronous behavior. Failed opens are remembered, not retried on
+    /// every frame, and their diagnostic is emitted on this same writer thread.
+    fn open(&self) -> Option<&Mutex<File>> {
+        self.file
+            .get_or_init(|| {
+                let opened = (|| -> std::io::Result<File> {
+                    let mut file = OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&self.path)?;
+                    if let Some(header) = &self.header {
+                        writeln!(file, "{header}")?;
+                    }
+                    Ok(file)
+                })();
+                match opened {
+                    Ok(file) => Some(Mutex::new(file)),
+                    Err(error) => {
+                        // Ignore stderr failures too: a trace must not panic.
+                        let _ = writeln!(
+                            std::io::stderr(),
+                            "{} could not be opened for the trace: {error}",
+                            self.path.display()
+                        );
+                        None
+                    }
+                }
+            })
+            .as_ref()
+    }
+
+    pub fn append(&self, line: &str) {
+        if let Some(file) = self.open() {
+            let mut file = file
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _ = writeln!(file, "{line}");
+            let _ = file.flush();
+        }
+    }
+}
+
+/// One trace destination, and the clock its timestamps are measured from.
 ///
 /// The clock is [`Instant`] rather than a wall time: what a reader of this file
 /// needs is the *distance* between two stations of one gesture, and a monotonic
 /// millisecond is the only number that means the same thing on both sides of a
 /// clock adjustment.
 pub struct Trace {
-    file: Mutex<File>,
+    file: Arc<TraceFile>,
     started: Instant,
 }
 
 impl Trace {
-    /// Open (or re-open) a trace at `path`, **appending**, and write `header`.
+    /// Prepare an append-only trace; the writer opens it with the first line.
     ///
     /// Appending rather than truncating because a reproduction is several runs —
     /// "main monitor, second monitor, back to main" is one story the user tells
@@ -59,58 +122,35 @@ impl Trace {
     /// the first would take the comparison away. The header line is what keeps
     /// the runs separable, and naming the format in it is what keeps a file
     /// from two different traces readable by whoever opens it.
-    pub fn create(path: &Path, header: &str) -> std::io::Result<Self> {
-        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-        writeln!(file, "{header}")?;
-        file.flush()?;
-        Ok(Self {
-            file: Mutex::new(file),
+    pub fn create(path: &Path, header: &str) -> Self {
+        let file = Arc::new(TraceFile::new(path, Some(header)));
+        // Standalone users keep the immediate header, even when no events
+        // follow. In a resident run, all file I/O belongs to the sink instead.
+        if !trace_sink::started() {
+            let _ = file.open();
+        }
+        Self {
+            file,
             started: origin(),
-        })
-    }
-
-    /// The trace `env` names, or `None` when it names nothing.
-    ///
-    /// Set-but-empty is off, for the reason `BT_PERF_TRACE` reads the same way:
-    /// `BT_MOUSE_TRACE=` is a shell saying "not this run", and a run that
-    /// answered it with a file named the empty string would fail in a way that
-    /// looks like the feature is broken.
-    fn from_environment(env: &str, header: &str) -> Option<Self> {
-        let path = std::env::var_os(env).filter(|value| !value.is_empty())?;
-        let path = PathBuf::from(path);
-        match Self::create(&path, header) {
-            Ok(trace) => Some(trace),
-            // Said out loud and then dropped. A trace file that could not be
-            // opened is a diagnostic that will not run, which is a thing the
-            // person who asked for it has to be told; it is not a reason for the
-            // terminal to refuse to start.
-            Err(error) => {
-                eprintln!(
-                    "{env} names {} but it could not be opened for the trace: {error}",
-                    path.display()
-                );
-                None
-            }
         }
     }
 
-    /// One line, timestamped and flushed.
+    /// Resolve the path without opening it on the calling thread.
+    fn from_environment(env: &str, header: &str) -> Option<Self> {
+        let path = std::env::var_os(env).filter(|value| !value.is_empty())?;
+        Some(Self::create(&PathBuf::from(path), header))
+    }
+
+    /// One line, timestamped here and written by [`trace_sink`]'s thread.
     ///
-    /// Flushed per line on purpose: the failure this apparatus exists for may end
-    /// in a crash, and a buffered last line is the one line that would have said
-    /// which station it crashed at.
+    /// **The stamp is taken on this thread and not on the writer's**, which is
+    /// the whole reason the queue carries text rather than fields: the first
+    /// column of these files is what a reader merges two of them on, and a
+    /// number taken after a queue would be the time the line was *written* —
+    /// a fact about a different thread at a different moment.
     fn write(&self, message: &str) {
         let elapsed = self.started.elapsed().as_secs_f64() * 1000.0;
-        // A poisoned lock means some other thread panicked mid-line. The bytes
-        // are still a file and this line is still worth having, so the guard is
-        // taken back rather than propagated: a diagnostic must not be the thing
-        // that turns one panic into two.
-        let mut file = self
-            .file
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let _ = writeln!(file, "{elapsed:9.3} {message}");
-        let _ = file.flush();
+        trace_sink::file_line(Arc::clone(&self.file), format!("{elapsed:9.3} {message}"));
     }
 }
 
@@ -135,12 +175,57 @@ impl Gate {
         }
     }
 
-    /// This process's trace for this variable, opening it on first ask.
+    /// This process's trace for this variable, resolving its path on first ask.
     pub fn get(&'static self) -> Option<&'static Trace> {
         self.trace
             .get_or_init(|| Trace::from_environment(self.env, self.header))
             .as_ref()
     }
+}
+
+/// **A file a diagnostic appends to in its own words** — no header of ours, no
+/// timestamp of ours, one line per call.
+///
+/// [`Gate`]'s sibling, for the two writers that were opening a file per line on
+/// the window thread and whose *format* is not this module's to change:
+/// `BT_IME_TRACE`, which was doing a whole `CreateFile`/`WriteFile`/`CloseHandle`
+/// on the first statement of `ime_input` (1370 of them in the `next68` run), and
+/// `BT_FOCUS_THUMB_DUMP`, which was doing the same once per card frame. What
+/// they get from this is what [`Gate`] already had — the handle opened once —
+/// and what [`trace_sink`] adds to both: the write happens on the sink's thread.
+///
+/// The bytes are unchanged. Whatever the caller formats is the whole of the
+/// line, so a reader's existing tooling reads exactly what it read before.
+pub struct Dump {
+    env: &'static str,
+    file: OnceLock<Option<Arc<TraceFile>>>,
+}
+
+impl Dump {
+    pub const fn new(env: &'static str) -> Self {
+        Self {
+            env,
+            file: OnceLock::new(),
+        }
+    }
+
+    /// One line, formatting nothing at all when the variable names no file.
+    pub fn line(&self, message: impl FnOnce() -> String) {
+        let Some(file) = self.file.get_or_init(|| open_dump(self.env)).as_ref() else {
+            return;
+        };
+        trace_sink::file_line(Arc::clone(file), message());
+    }
+}
+
+/// The file `env` names, or `None` when it names nothing.
+///
+/// Set-but-empty is off, on [`Trace::from_environment`]'s rule and for its
+/// reason.
+fn open_dump(env: &'static str) -> Option<Arc<TraceFile>> {
+    let path = std::env::var_os(env).filter(|value| !value.is_empty())?;
+    let path = PathBuf::from(path);
+    Some(Arc::new(TraceFile::new(&path, None)))
 }
 
 /// Write one line to a named trace, formatting nothing when there is none.
@@ -172,6 +257,30 @@ mod tests {
         std::fs::read_to_string(path).expect("the trace file was created")
     }
 
+    /// **A [`Dump`]'s bytes are the caller's bytes** — no header, no timestamp,
+    /// one newline.
+    ///
+    /// The property that let `BT_IME_TRACE` and `BT_FOCUS_THUMB_DUMP` move onto
+    /// this machinery without anybody's tooling changing: what those two writers
+    /// gained was a handle opened once and a write that happens on
+    /// [`trace_sink`]'s thread, and what they were not allowed to lose was the
+    /// shape of the line they had been writing since the day they were added.
+    ///
+    /// MUTATION: give [`TraceFile::append`] a timestamp of its own and both
+    /// comparisons go red.
+    #[test]
+    fn a_trace_file_writes_the_line_it_was_given_and_one_newline() {
+        let path = scratch("verbatim");
+        let file = TraceFile::new(&path, None);
+        file.append("Instant { t: 1 } Preedit(\"ni\")");
+        file.append("focus-thumb visible=3 projections=1");
+        assert_eq!(
+            body(&path),
+            "Instant { t: 1 } Preedit(\"ni\")\nfocus-thumb visible=3 projections=1\n"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// **The whole of what "zero overhead when off" means**: not that the string
     /// is thrown away, that it is never built.
     #[test]
@@ -191,7 +300,7 @@ mod tests {
     #[test]
     fn an_open_gate_writes_one_line_per_call() {
         let path = scratch("one-line");
-        let trace = Trace::create(&path, HEADER).expect("open a trace in the scratch directory");
+        let trace = Trace::create(&path, HEADER);
         emit(Some(&trace), || String::from("mouse_input state=Pressed"));
         emit(Some(&trace), || {
             String::from("finish_local_selection single_click=1")
@@ -230,11 +339,11 @@ mod tests {
     fn a_second_run_appends_rather_than_erasing_the_first() {
         let path = scratch("append");
         {
-            let first = Trace::create(&path, HEADER).expect("open a trace");
+            let first = Trace::create(&path, HEADER);
             emit(Some(&first), || String::from("run=1"));
         }
         {
-            let second = Trace::create(&path, HEADER).expect("re-open the same trace");
+            let second = Trace::create(&path, HEADER);
             emit(Some(&second), || String::from("run=2"));
         }
         let written = body(&path);
@@ -262,7 +371,7 @@ mod tests {
     fn two_gates_share_one_clock_so_their_files_merge() {
         let first = scratch("clock-first");
         let second = scratch("clock-second");
-        let early = Trace::create(&first, HEADER).expect("open the first trace");
+        let early = Trace::create(&first, HEADER);
         emit(Some(&early), || String::from("first"));
         let stamp_of = |line: &str| -> f64 {
             line.split_whitespace()
@@ -272,7 +381,7 @@ mod tests {
                 .expect("and it is a number of milliseconds")
         };
         let opened_at = stamp_of(body(&first).lines().nth(1).expect("the first line"));
-        let late = Trace::create(&second, HEADER).expect("open the second trace");
+        let late = Trace::create(&second, HEADER);
         emit(Some(&late), || String::from("second"));
         let later = stamp_of(
             body(&second)
@@ -294,8 +403,8 @@ mod tests {
     fn two_gates_write_to_two_files() {
         let mouse = scratch("two-mouse");
         let attention = scratch("two-attention");
-        let first = Trace::create(&mouse, HEADER).expect("open the first trace");
-        let second = Trace::create(&attention, HEADER).expect("open the second trace");
+        let first = Trace::create(&mouse, HEADER);
+        let second = Trace::create(&attention, HEADER);
         emit(Some(&first), || String::from("pane_press"));
         emit(Some(&second), || String::from("bell"));
         assert!(body(&mouse).contains("pane_press"));

@@ -144,13 +144,35 @@
 //! `super::engine::engines_started` and `engines_shut_down` count the two halves
 //! here for the reason they count them there: so that "no engine outlives the
 //! process" is a claim a test can read rather than a promise in a comment.
+//!
+//! # A pool per turn, because this is a thread of our own (RA-5)
+//!
+//! Apple's contract for a secondary thread that touches Cocoa is that the
+//! thread makes an autorelease pool before it sends its first message and
+//! drains one periodically if it is long-lived; a thread that AppKit did not
+//! start has no pool of its own, and what is autoreleased on it is held until
+//! there is one. This file's own calls are nearly all scalars and `CMTime`s and
+//! everything it *owns* is a `Retained` — so what has nowhere to go is not
+//! this module's objects but whatever AVFoundation autoreleases internally on
+//! the way through, and [`Machinery::pump`] goes through it every
+//! [`FRAME_POLL_INTERVAL`] for as long as the preview is open.
+//!
+//! So there are two pools and the inner one is the point. [`run`] holds one
+//! around the whole of the thread's life, which is what covers building the
+//! machinery and tearing it down; `pump` opens and drains a nested one **every
+//! turn**, which is what keeps a five-minute video from accumulating five
+//! minutes of autoreleased objects. A single pool around the whole lifetime is
+//! not this fix — it drains once, at the end, which is the case the finding is
+//! about. Anything that has to outlive a turn is held as a `Retained`, which is
+//! `+1` and owes a pool nothing; `Machinery` is made of exactly those, which is
+//! why it can be built inside one pool and used inside the next.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use objc2::rc::{Allocated, Retained};
+use objc2::rc::{Allocated, Retained, autoreleasepool};
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
 use objc2::{AnyThread, ClassType, DefinedClass, define_class, msg_send, sel};
 use objc2_av_foundation::{
@@ -492,13 +514,21 @@ enum Command {
 /// one: a failure at any point is written into the shared [`EngineState`] as its
 /// `error`, which is the same slot a codec refusing a file a minute in writes to
 /// and the same slot every surface already reads.
+///
+/// **The outer autorelease pool is here** (RA-5, and the module note's last
+/// section). This is a thread this file started, so nothing has made a pool on
+/// it; one is made before the first message is sent and drained after the last
+/// one, which covers everything [`Machinery::build`] and [`Machinery::stop`]
+/// send. It is not what covers the pump — that has a pool of its own, per turn,
+/// because a pool that drains when playback ends is a pool that holds
+/// everything playback made.
 fn run(
     path: &Path,
     shared: &Arc<Shared>,
     commands: &mpsc::Sender<Command>,
     inbox: &mpsc::Receiver<Command>,
 ) {
-    match Machinery::build(path, commands) {
+    autoreleasepool(|_pool| match Machinery::build(path, commands) {
         Ok(mut machinery) => {
             // Before the pump and after the player: this is what stops
             // `Engine::state` charging a working engine with having missed
@@ -509,7 +539,7 @@ fn run(
             note_engine_shut_down();
         }
         Err(error) => publish_failure(shared, error),
-    }
+    });
 }
 
 /// An engine that never came into being, said in the one place a caller looks.
@@ -647,37 +677,55 @@ impl Machinery {
 
     /// The loop: answer commands, publish state, and take a picture when there
     /// is one. The Windows arm's `pump`, line for line.
+    ///
+    /// **One autorelease pool per turn** (RA-5). The loop is here and the work
+    /// is in [`Self::one_turn`] for exactly that: the pool has to be opened and
+    /// drained inside the loop, because a pool opened outside it drains when
+    /// the video is closed and holds every object the frameworks autoreleased
+    /// in between — which for a preview left open is the whole preview. The
+    /// only thing carried from one turn to the next is `self`, and everything
+    /// of AVFoundation's in it is a `Retained`.
     fn pump(&mut self, shared: &Arc<Shared>, inbox: &mpsc::Receiver<Command>) {
-        loop {
-            let state = self.publish_state(shared);
-            // A picture is due while the clock is running, and once more after
-            // anything else — a seek while paused draws a new frame, and so does
-            // the load that first produces one.
-            let wait = if state.playing {
-                FRAME_POLL_INTERVAL
-            } else {
-                IDLE_POLL_INTERVAL
-            };
-            match inbox.recv_timeout(wait) {
-                Ok(Command::Shutdown) => return,
-                Ok(command) => {
-                    self.apply(command);
-                    // Drain whatever else is already waiting before spending a
-                    // poll on it.
-                    while let Ok(next) = inbox.try_recv() {
-                        if matches!(next, Command::Shutdown) {
-                            return;
-                        }
-                        self.apply(next);
-                    }
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                // Every handle has gone without saying so — a panic between the
-                // `Engine` being made and being dropped. Same ending.
-                Err(mpsc::RecvTimeoutError::Disconnected) => return,
-            }
-            self.take_frame(shared);
+        while autoreleasepool(|_pool| self.one_turn(shared, inbox)) {
+            // The turn's pool is drained on the way back out of that call, and
+            // this is the line that says so: the loop body is deliberately
+            // empty, because everything a turn does has to happen inside the
+            // pool rather than beside it.
         }
+    }
+
+    /// One turn of [`Self::pump`] — `false` when the engine has been told to
+    /// stop, or when every handle to it has gone.
+    fn one_turn(&mut self, shared: &Arc<Shared>, inbox: &mpsc::Receiver<Command>) -> bool {
+        let state = self.publish_state(shared);
+        // A picture is due while the clock is running, and once more after
+        // anything else — a seek while paused draws a new frame, and so does
+        // the load that first produces one.
+        let wait = if state.playing {
+            FRAME_POLL_INTERVAL
+        } else {
+            IDLE_POLL_INTERVAL
+        };
+        match inbox.recv_timeout(wait) {
+            Ok(Command::Shutdown) => return false,
+            Ok(command) => {
+                self.apply(command);
+                // Drain whatever else is already waiting before spending a
+                // poll on it.
+                while let Ok(next) = inbox.try_recv() {
+                    if matches!(next, Command::Shutdown) {
+                        return false;
+                    }
+                    self.apply(next);
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            // Every handle has gone without saying so — a panic between the
+            // `Engine` being made and being dropped. Same ending.
+            Err(mpsc::RecvTimeoutError::Disconnected) => return false,
+        }
+        self.take_frame(shared);
+        true
     }
 
     fn apply(&mut self, command: Command) {

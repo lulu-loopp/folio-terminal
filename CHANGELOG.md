@@ -6,12 +6,129 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Changed
+
+- **When Folio's window stops answering, its own log now says which kind of
+  event it was answering.** The line Folio writes about a window that held on
+  too long used to end at `window_event`, which is every key, every pointer
+  move, every redraw and every resize under one word; it now names the handler
+  the event went to — `keyboard_input`, `redraw`, `resized` and ten others — so
+  a report about a window that froze for a few seconds says where inside it the
+  time went. And a run started with `BT_PERF_TRACE` set now writes a full hang
+  report after two seconds of silence instead of five, which is where the stalls
+  people actually notice live; a run started without it is unchanged.
+
 ### Fixed
 
 - **A picture that has not changed no longer asks the GPU to draw it again.**
   Repeated redraws compare each pane and the window furniture around it with the last
   complete picture. Caret blinks, hover marks and moving panes still redraw;
   resizing and replacing a surface always get their own frame.
+
+- **On a Mac, a second Folio started from a terminal now hands over instead of
+  becoming a second writer.** Which Folio is allowed to write your settings and
+  your saved session was decided in a directory whose location came from
+  `TMPDIR` — so a Folio started from the Dock and one started from an `ssh`
+  session, a script or a login shell that clears the environment were each
+  certain they were the only one. Both wrote, the later write erased the
+  earlier, and the second window never found the first to pass your command line
+  to. The location is now asked of macOS itself, which gives every process you
+  run the same answer however it was started.
+- **On a Mac, Folio no longer tells the system it has dealt with a keyboard
+  shortcut that is not its own.** The summon key's handler answered "handled" to
+  every hot key event offered to Folio, including ones registered by something
+  else inside the same application and ones it could not read at all. It now
+  says so only for the press it actually acted on, and leaves the rest to carry
+  on to whoever was waiting for them.
+- **On a Mac, a video left playing no longer builds up memory for as long as it
+  is open.** The thread that plays a video ran without an autorelease pool, so
+  everything the system's media framework handed it in passing was held until
+  the preview was closed rather than released as it went. It now opens and
+  drains one on every pass, so a video that plays for an hour costs what a video
+  that plays for a minute does.
+
+- **A Markdown file too big to edit now keeps up with the file.** Above 8 MB
+  Folio shows the first screen of a document and will not let you type in it.
+  That first screen used to be the one it was opened with, for as long as the
+  pane stayed open: writing to the file from anywhere else changed nothing on
+  screen, and `Reload from disk` changed nothing either. It now shows the file's
+  current first screen whenever the file is written. Unsaved edits of your own
+  are still never replaced — the notice about the file having changed stays up,
+  with the same two answers on it.
+
+- **A formula broken across two lines is now typeset.** When a program wraps its
+  own text — Claude Code does, at the width of the pane — a formula that does not
+  fit the rest of a line is split in two, with `$x` left at the end of one line
+  and the rest of it starting the next. Folio read each line by itself, so the
+  formula between them stayed as you typed it while the ones that happened to fit
+  on a line were typeset around it. The two halves are now read together: the
+  formula is set on the line that finishes it, and the piece left hanging above is
+  taken down with it. A line only joins the one below it when the reading is
+  unambiguous — one unclosed `$`, the matching one near the start of the next
+  line, and nothing in between that starts a new paragraph, bullet or heading — so
+  a price at the end of a sentence is still a price.
+- **Copying a formula no longer leaves the window busy.** The tick that confirms
+  the copy has always come down after a moment on screen, but the window went on
+  asking to be woken for it for as long as it stayed open — one processor core,
+  spent on a window doing nothing. The confirmation is now finished with when it
+  leaves the screen.
+- **A formula's two marks stay with the formula.** Switching tabs or closing a
+  pane used to leave the marks from the block you had been pointing at standing
+  over whatever came next, until you moved the mouse. And in a window split into
+  panes of different sizes, the marks in an unfocused pane were placed — and
+  could be pressed — as though that pane were the size of the focused one.
+
+- **A typeset formula no longer flashes back to its source while a program
+  repaints the screen.** A redraw arriving in several pieces now keeps the
+  formula's picture until the whole turn has finished, without waiting for it
+  to be typeset again.
+
+- **Maximising or resizing a window no longer pauses when a pane has a long
+  history behind it.** Every pane on screen was copying its whole terminal
+  twice at the start of a resize — everything that had scrolled past included,
+  on the window thread, before a single frame at the new size was drawn — and
+  the second of those two copies was thrown away without ever being read. It is
+  gone.
+
+- **The tinted block behind a formula's source now stops where the text does.**
+  Pressing the show-source mark on a display formula used to lay a shaded band
+  across the whole width of the pane, however short the `$$…$$` lines standing on
+  it were, with the two marks out at the far right edge of the window. The band
+  now fits the longest of those lines, with the same clear column around it that
+  the typeset formula's block has, and the show-source and copy marks sit at that
+  edge — so both forms of a formula read as the same block.
+
+- **On a Mac, a tab can be dragged to reorder it or out into its own window
+  again; the window moves only when the empty part of the header is dragged.**
+
+- **A Markdown line beginning with an angle bracket and carrying non-ASCII
+  text no longer crashes the preview.** Such a line now stays readable, and
+  the other tabs in the window stay open.
+
+- **Showing a formula's source now applies to that one formula on the screen.**
+  Turning a block over with the `‹›` mark used to be remembered against the
+  formula's own text for the rest of the session, so printing the same `$$…$$`
+  again showed that one as source too, and a formula you had once looked behind
+  never went back to its typeset form on its own. Looking at the source is an
+  action on the block in front of you: the next block arrives typeset, and the
+  block you turned over keeps its face, including while it scrolls off the
+  screen into the history above.
+
+- **A wheel notch at the end of a pane no longer asks for the same frame.**
+  When the view and its contents stay put, the wheel skips the terminal frame
+  and leaves the next keystroke or pointer move less work to wait behind.
+  A scroll that moves the view still draws it, and the scrollbar still gets
+  its own frame when its thumb or fade changes.
+
+- **A traced run no longer pauses when whatever is reading the trace falls
+  behind.** This only concerns runs started with one of the `BT_…_TRACE`
+  variables set — a diagnostic recording, not an ordinary launch. Those runs
+  used to stop dead for seconds at a time, mid-keystroke, whenever the shell
+  collecting the trace stopped reading it: the window was waiting for the
+  recording to be taken, so the very thing being measured was what made it slow.
+  The lines now go to a thread of their own, and a run that produces them faster
+  than they can be written drops some and says how many rather than holding the
+  window.
 
 ## 0.4.1-preview — 2026-09-16
 

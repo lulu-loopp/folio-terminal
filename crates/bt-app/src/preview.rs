@@ -2935,8 +2935,9 @@ fn html_image_block(lines: &[&str], start: usize) -> Option<(MarkdownImage, usiz
 fn opens_html_tag(text: &str, name: &str) -> bool {
     let Some(rest) = text
         .strip_prefix('<')
-        .filter(|rest| rest.len() >= name.len() && rest[..name.len()].eq_ignore_ascii_case(name))
-        .map(|rest| &rest[name.len()..])
+        .and_then(|rest| rest.split_at_checked(name.len()))
+        .filter(|(prefix, _)| prefix.eq_ignore_ascii_case(name))
+        .map(|(_, rest)| rest)
     else {
         return false;
     };
@@ -4925,8 +4926,10 @@ pub struct PreviewBuffer {
     /// an explicit edit upgrade for other text. Standalone glances stay heads.
     /// Watcher reloads must never downgrade an editor to a head reader.
     reads_whole: bool,
-    /// The last whole read exceeded the input ceiling. Initial arrival installs
-    /// its mandatory fallback head; later arrivals retain existing bytes/history.
+    /// The last whole read exceeded the input ceiling. The answer's bounded head
+    /// is installed when there is nothing to lose by it — no body yet, or a body
+    /// that is the disk's own reading of a file that has since moved — and the
+    /// reader's unsaved bytes are kept where it is theirs (see [`Self::accept`]).
     /// Complete and refused replacements clear this fact, so shrinking files can
     /// become editable again. This bit refuses editing as well as ending waits.
     too_large_to_edit: bool,
@@ -5996,7 +5999,12 @@ impl PreviewBuffer {
         self.head_asked = false;
         // And so is the watcher's: this answer is what the disk had to say, and
         // a buffer left behind its file would ask again on the next frame and
-        // for ever.
+        // for ever. **An arm that installs nothing closes it too** (ticket
+        // T-AUDIT3-PREVIEW-OVERSIZE): the read was spent, and re-arming the bit
+        // here would spend the next one on the next frame. A buffer that is
+        // still behind its file is reached again by the next thing the watcher
+        // says — [`Self::mark_stale`] is not gated on this arm's outcome — so
+        // nothing has opted out of being told.
         self.stale = false;
         match outcome {
             HeadOutcome::Read {
@@ -6090,10 +6098,53 @@ impl PreviewBuffer {
                 self.load = PreviewLoad::Refused(refusal);
             }
             HeadOutcome::TooLargeToEdit { head, file_bytes } => {
-                // Initial loading has no prior body to retain. Install the
-                // bounded head through the normal replacement/reset door once.
-                // A later over-limit result preserves existing bytes/history.
-                if self.content.is_none() {
+                // **An over-cap answer is a reading of the file like any other,
+                // and the one thing it must never do is throw away a reading the
+                // *reader* made** (ticket T-EDIT-DISK, finding A10; ticket
+                // T-AUDIT3-PREVIEW-OVERSIZE, finding RB-2).
+                //
+                // The question "is there a body here" used to stand for both of
+                // those at once, and that was the defect: a buffer that already
+                // had a body kept it whatever had happened to the file, so a
+                // document past the cap showed the head it was opened with for
+                // the rest of the session. Every Markdown pane reads whole
+                // (see [`Self::reads_whole`]), so every watcher notification
+                // about such a file spent a read, changed nothing, and cleared
+                // the staleness that would have made anything ask again.
+                //
+                // Two facts decide it instead, and the arm already holds both:
+                //
+                // * **Has the file moved since this body was read?** The
+                //   identity is [`Self::disk_mtime`], which is this buffer's one
+                //   notion of "the file I am holding" — [`Self::note_disk_moved`]
+                //   and [`Self::save`] ask the same question of the same stamp,
+                //   and a second notion would be one they could disagree with. A
+                //   stamp the disk would not give (`None`) is not evidence that
+                //   anything moved, so it leaves the body alone: the reader
+                //   would lose the head they are reading for one nobody can say
+                //   is newer. A file standing still is also the whole of the
+                //   *upgrade* refusal — a reader pressing into a truncated head
+                //   of a file past the cap gets the same bytes back, and their
+                //   place in the document is not something a refused gesture is
+                //   allowed to move.
+                // * **Are the bytes on the glass the reader's own?**
+                //   [`Self::dirty`] is this file's standing answer to that, and
+                //   it is the answer [`Self::mark_stale`] refuses a re-read on
+                //   and [`Self::take_the_disks_copy`] puts down when the reader
+                //   authorises the replacement themselves. Unsaved work is kept
+                //   with its undo log, its caret and its selection, and the
+                //   strip stays up: the file and this body really have parted,
+                //   and the two verbs on that strip are the answers to it.
+                //
+                // A buffer with no body at all has nothing of either kind to
+                // protect, and the bounded head is the only reading of that file
+                // this window is ever going to have.
+                let file_moved = head.mtime.is_some() && head.mtime != self.disk_mtime;
+                if self.content.is_none() || (file_moved && !self.dirty) {
+                    // Through the same door a complete body lands through, so
+                    // the line index, the widest line, the revision, the mtime
+                    // and the strip are settled by the one place that settles
+                    // them.
                     self.accept(HeadOutcome::Read {
                         text: head.text,
                         truncated: true,
@@ -6115,9 +6166,12 @@ impl PreviewBuffer {
     /// **A body arriving from a disk is a different body** — everything the
     /// replacement ends (ticket T3; gathered here by T-EDIT-DISK).
     ///
-    /// The two arms of [`Self::accept`] that put a body where the old one was
-    /// call it, and the arm that replaces nothing does not. Five facts, and
-    /// every one of them is about the body and not about the question:
+    /// Every arm of [`Self::accept`] that puts a body where the old one was
+    /// calls it, and an arm that replaces nothing does not — which is why the
+    /// over-cap arm calls it only down the path where it installs its head, and
+    /// calls it there through the `Read` arm rather than by repeating this list.
+    /// Five facts, and every one of them is about the body and not about the
+    /// question:
     ///
     /// * the revision moves, because every cache in this window is keyed on it;
     /// * the mark goes — what a reader had selected is a claim about text that
@@ -11895,6 +11949,297 @@ mod tests {
         assert_eq!(buffer.read_only_notice(), None);
     }
 
+    // ── T-AUDIT3-PREVIEW-OVERSIZE: a body past the cap still follows its file ─
+
+    /// An over-cap answer stamped with the disk state its head was read at —
+    /// [`over_limit_answer`]'s sibling, and the stamp is the whole difference:
+    /// the fixtures above are about the badge and the read-only bit, which no
+    /// disk state changes, while these are about *which* reading of the file is
+    /// on the glass.
+    fn over_cap(text: &str, mtime: SystemTime, file_bytes: u64) -> HeadOutcome {
+        HeadOutcome::TooLargeToEdit {
+            head: FallbackHead {
+                text: text.to_owned(),
+                mtime: Some(mtime),
+                content_says_text: true,
+                encoding: HeadEncoding::Utf8,
+                lossy: false,
+            },
+            file_bytes,
+        }
+    }
+
+    /// A stamp the filesystem could have written, `seconds` apart from the one
+    /// before it. Fixed rather than read off a clock: what these tests are about
+    /// is two stamps being *different*, and NTFS's coarse tick makes "now" and
+    /// "now again" the same number often enough to hide it.
+    fn stamp(seconds: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds)
+    }
+
+    /// PIN (ticket T-AUDIT3-PREVIEW-OVERSIZE) — **the first head of a file past
+    /// the cap carries the disk state it was read at.**
+    ///
+    /// The first open has always installed its head; what this holds is the
+    /// stamp that came with it, because every later answer about this file is
+    /// decided against it. A first install that dropped the mtime would leave
+    /// the buffer unable to tell a file that had moved from one that had not.
+    ///
+    /// Mutation: drop `mtime` from the head this arm hands to the `Read` arm and
+    /// the last assertion fails.
+    #[test]
+    fn the_first_head_past_the_cap_records_the_disk_state_it_was_read_at() {
+        let opened_at = stamp(1_000);
+        let mut buffer =
+            PreviewBuffer::new(PreviewSource::file(r"C:\w\book.md"), "book.md".to_owned());
+        assert_eq!(buffer.load, PreviewLoad::Pending);
+
+        buffer.accept(over_cap("# chapter one\n", opened_at, 9 * 1024 * 1024));
+
+        assert_eq!(buffer.content.as_deref(), Some("# chapter one\n"));
+        assert_eq!(buffer.load, PreviewLoad::Ready);
+        assert!(buffer.truncated && buffer.too_large_to_edit);
+        assert!(
+            !buffer.is_editable(false),
+            "a bounded head of a file this window cannot hold is not a body to type into"
+        );
+        assert_eq!(buffer.revision, 1);
+        assert_eq!(
+            buffer.disk_mtime,
+            Some(opened_at),
+            "and this is the stamp every later answer about this file is decided against"
+        );
+    }
+
+    /// RED (ticket T-AUDIT3-PREVIEW-OVERSIZE, finding RB-2) — **a file that
+    /// grows past the cap refreshes the head on the glass.**
+    ///
+    /// Every Markdown pane reads whole ([`PreviewBuffer::reads_whole`]), so a
+    /// `.md` file past [`PREVIEW_EDIT_BYTES`] is answered with a fresh bounded
+    /// head every time the watcher says it moved. The arm threw every one of
+    /// them away — it installed a head only when there was no body yet — while
+    /// the preamble cleared the staleness that would have made anything ask
+    /// again. A reader watching an 8MB log being appended to saw the screen it
+    /// opened, for the life of the session, with no gesture in the window able
+    /// to change it: `Reload from disk` spent a read and changed nothing.
+    ///
+    /// RED GATE: restore `if self.content.is_none()` as the arm's whole
+    /// condition and the body assertion fails with the head this buffer was
+    /// opened with.
+    #[test]
+    fn a_file_that_grew_past_the_cap_refreshes_the_head_on_the_glass() {
+        let opened_at = stamp(1_000);
+        let grown_at = stamp(1_060);
+        let mut buffer =
+            PreviewBuffer::new(PreviewSource::file(r"C:\w\book.md"), "book.md".to_owned());
+        buffer.accept(over_cap("# chapter one\n", opened_at, 9 * 1024 * 1024));
+        let first_head = buffer.revision;
+
+        // Somebody writes a new first line into it, and the watcher says so.
+        assert_eq!(
+            buffer.note_disk_moved(true, Some(grown_at)),
+            DiskVerdict::ReadAgain,
+            "a body past the cap is still a body behind its file"
+        );
+        let Some(PreviewWant::Whole(base)) = buffer.claim_head_read() else {
+            panic!("a Markdown pane is owed the whole file");
+        };
+        // The rename that rewrote it takes the file away for an instant, so
+        // there is a sentence standing for the answer to take back down.
+        assert_eq!(buffer.note_disk_moved(false, None), DiskVerdict::Say);
+        assert_eq!(buffer.disk, DiskNews::Deleted);
+
+        assert_eq!(
+            buffer.land_read(
+                over_cap(
+                    "# chapter zero\n# chapter one\n",
+                    grown_at,
+                    10 * 1024 * 1024
+                ),
+                base
+            ),
+            ReadLanded::Took
+        );
+
+        assert_eq!(
+            buffer.content.as_deref(),
+            Some("# chapter zero\n# chapter one\n"),
+            "what is on the glass is the file's first screen, not the one it was opened with"
+        );
+        assert_eq!(
+            buffer.disk_mtime,
+            Some(grown_at),
+            "and this body is a reading of the file as it stands now"
+        );
+        assert!(
+            buffer.revision > first_head,
+            "so every cache in this window keyed on the revision is owed the new body"
+        );
+        assert_eq!(
+            buffer.max_columns, 14,
+            "and the widest line is the new body's, not the old body's 13"
+        );
+        assert_eq!(
+            buffer.disk,
+            DiskNews::Level,
+            "the shown bytes are the file's, so nothing is left claiming the two have parted"
+        );
+        assert!(buffer.truncated && buffer.too_large_to_edit);
+        assert!(
+            !buffer.is_editable(false),
+            "a refreshed head is still a head of a file past the cap"
+        );
+        assert_eq!(
+            buffer.read_only_notice(),
+            Some(preview_too_large_notice(10 * 1024 * 1024, crate::i18n::Lang::English).as_str()),
+            "and the size it names is the size the file is now"
+        );
+        assert!(!buffer.awaiting_head_read() && !buffer.is_behind_the_disk());
+    }
+
+    /// PIN (ticket T-EDIT-DISK, finding A10; held through ticket
+    /// T-AUDIT3-PREVIEW-OVERSIZE) — **an over-cap answer never takes the
+    /// reader's unsaved bytes.**
+    ///
+    /// The screw the refresh above must not undo. The body here was typed in
+    /// this window and has not been written anywhere, so it is the newest
+    /// reading of this document there is and an older one off the disk may not
+    /// stand on top of it — however much the file has grown since. What the
+    /// reader gets instead is the sentence, and the two verbs on it are the two
+    /// answers a person can give to it.
+    ///
+    /// RED GATE: drop `!self.dirty` from the arm's condition and the body, the
+    /// dirty bit, the undo log and the strip all go at once.
+    #[test]
+    fn an_over_cap_answer_does_not_take_the_readers_unsaved_bytes() {
+        let read_at = stamp(1_000);
+        let grown_at = stamp(1_060);
+        let mut caret = crate::preview_edit::EditCaret::default();
+        let mut buffer =
+            PreviewBuffer::new(PreviewSource::file(r"C:\w\notes.md"), "notes.md".to_owned());
+        buffer.accept(HeadOutcome::Read {
+            text: "the file, complete\n".to_owned(),
+            truncated: false,
+            mtime: Some(read_at),
+            content_says_text: true,
+            encoding: HeadEncoding::Utf8,
+            lossy: false,
+        });
+        assert!(buffer.is_editable(false));
+        type_into(&mut buffer, &mut caret, 18);
+        assert!(buffer.dirty, "there is unsaved work here");
+        let typed = buffer.content.clone().expect("a body");
+
+        // The file grows past the cap under the unsaved edit. Nothing is read —
+        // `mark_stale` refuses a dirty buffer — and the reader is told instead.
+        assert_eq!(
+            buffer.note_disk_moved(true, Some(grown_at)),
+            DiskVerdict::Say
+        );
+        assert_eq!(buffer.disk, DiskNews::Changed);
+        assert!(!buffer.is_behind_the_disk());
+
+        buffer.accept(over_cap(
+            "a head of the file as it stands now, past the cap\n",
+            grown_at,
+            12 * 1024 * 1024,
+        ));
+
+        assert_eq!(
+            buffer.content,
+            Some(typed),
+            "the newest reading of this document is the one in the reader's hands"
+        );
+        assert_eq!(
+            buffer.disk_mtime,
+            Some(read_at),
+            "and it is still a reading of the file it was read from"
+        );
+        assert!(buffer.dirty, "with the unsaved work it had");
+        assert_eq!(
+            buffer.disk,
+            DiskNews::Changed,
+            "and the strip carrying the two answers to that still standing"
+        );
+        assert!(
+            !buffer.is_editable(false),
+            "though the file has grown out of this window's reach"
+        );
+        assert!(
+            buffer.undo_edit().is_some(),
+            "and the road back to the bytes the file gave is still here"
+        );
+    }
+
+    /// PIN (ticket T-AUDIT3-PREVIEW-OVERSIZE) — **a refused upgrade leaves the
+    /// reader looking at what they were looking at, and the buffer still
+    /// watched.**
+    ///
+    /// The other side of the refresh. A reader pressing into a truncated head of
+    /// a file past the cap gets an answer about the very disk state they are
+    /// already holding, and a gesture that failed is not allowed to move their
+    /// place in the document. Nothing is installed — and the second half is that
+    /// a buffer which installed nothing has not quietly stopped listening: the
+    /// answer closed the question, and the next thing the watcher says re-opens
+    /// it, which is the behaviour that makes the refresh above reachable at all.
+    ///
+    /// RED GATE: drop the `head.mtime != self.disk_mtime` half of the arm's
+    /// condition and the revision assertion fails — the body is re-installed for
+    /// a file that never moved. Gate the second half on the arm's outcome
+    /// instead (leave `stale` standing, or refuse to re-arm it) and the last
+    /// block fails.
+    #[test]
+    fn a_refused_upgrade_keeps_the_head_and_the_buffer_stays_watched() {
+        let read_at = stamp(1_000);
+        let later = stamp(1_060);
+        let mut buffer =
+            PreviewBuffer::new(PreviewSource::file(r"C:\w\log.txt"), "log.txt".to_owned());
+        buffer.accept(HeadOutcome::Read {
+            text: "the first screen of a long log\n".to_owned(),
+            truncated: true,
+            mtime: Some(read_at),
+            content_says_text: true,
+            encoding: HeadEncoding::Utf8,
+            lossy: false,
+        });
+        let head = buffer.revision;
+
+        // The reader presses into the body, so this window asks for the rest.
+        assert!(buffer.ask_for_the_whole_file(false));
+        let Some(PreviewWant::Whole(base)) = buffer.claim_head_read() else {
+            panic!("the upgrade read is owed");
+        };
+        assert_eq!(
+            buffer.land_read(
+                over_cap("the first screen of a long log\n", read_at, 9 * 1024 * 1024),
+                base
+            ),
+            ReadLanded::Took
+        );
+
+        assert_eq!(
+            buffer.content.as_deref(),
+            Some("the first screen of a long log\n"),
+            "the file never moved, so there is nothing here a refusal could refresh"
+        );
+        assert_eq!(
+            buffer.revision, head,
+            "and nothing was replaced, so nothing in this window is owed a rebuild"
+        );
+        assert!(buffer.too_large_to_edit && !buffer.is_editable(false));
+
+        // And the buffer has not opted out of being told about its file.
+        assert_eq!(
+            buffer.note_disk_moved(true, Some(later)),
+            DiskVerdict::ReadAgain
+        );
+        assert!(buffer.is_behind_the_disk());
+        assert!(matches!(
+            buffer.claim_head_read(),
+            Some(PreviewWant::Whole(_))
+        ));
+    }
+
     /// NTFS records the last-write time on a coarse tick, so two writes inside
     /// one tick carry the same mtime and a rule about identity never fires. The
     /// disk is moved forward by hand so the tests above read the rule and not
@@ -13198,6 +13543,43 @@ mod tests {
                     .any(|block| matches!(block, MarkdownBlock::Image(_))),
                 "{source:?} is not a picture this window reads: {blocks:#?}"
             );
+        }
+    }
+
+    #[test]
+    fn unicode_angle_bracket_lines_remain_prose() {
+        for source in [
+            "<\u{4e2d}\u{6587}\u{6807}\u{9898}>",
+            "<b>\u{4e2d}\u{6587}</b>",
+            "<a\u{4e2d}",
+            "<\u{1f642}abc>",
+            "<im\u{00e9}>",
+        ] {
+            assert_eq!(
+                parse_markdown(source),
+                vec![MarkdownBlock::Paragraph(vec![Span::plain(source)])],
+                "{source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn html_tag_prefixes_split_only_at_utf8_boundaries() {
+        for name in ["img", "picture", "\u{4e2d}", "\u{1f642}"] {
+            for ending in ["", ">", "/>", " src='a.png'", "\u{2003}src='a.png'"] {
+                assert!(opens_html_tag(&format!("<{name}{ending}"), name));
+            }
+            assert!(!opens_html_tag(&format!("<{name}x>"), name));
+            assert!(!opens_html_tag("<", name));
+        }
+        assert!(opens_html_tag("<IMG src='a.png'>", "img"));
+        assert!(opens_html_tag("<PICTURE>", "picture"));
+        for character in ['\u{00e9}', '\u{4e2d}', '\u{1f642}'] {
+            for prefix in 0..8 {
+                let source = format!("<{}{character}abcdef>", "a".repeat(prefix));
+                assert!(!opens_html_tag(&source, "img"));
+                assert!(!opens_html_tag(&source, "picture"));
+            }
         }
     }
 

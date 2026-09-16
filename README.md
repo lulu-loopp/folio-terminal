@@ -80,7 +80,7 @@ the first run asks, and what to do if the system puts a panel in front of you.
 - [A terminal on a hotkey](docs/features.md#a-terminal-on-a-hotkey) — ``Win+` ``, or ``⌃` `` on a Mac, brings one down over whatever is on the screen.
 - [Search everything](docs/features.md#search-everything) — actions, panes, commands, files and settings in one box.
 - [System integration](docs/features.md#windows-integration) — the Explorer and Finder right-click menus, and VS Code's external terminal.
-- [English and Chinese](docs/features.md#english-and-chinese) — every string in both, switched from one row in Settings.
+- [English and Chinese](docs/features.md#english-and-chinese) — every string in Folio's own interface in both, switched from one row in Settings.
 
 Every feature is described in full, with the rules it follows, in [docs/features.md](docs/features.md).
 

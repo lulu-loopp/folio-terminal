@@ -158,6 +158,28 @@
 //! window thread; the window thread's whole part is a `try_lock` it never waits
 //! on and a `push`.
 //!
+//! # A run that asked to be measured is judged sooner
+//!
+//! The two instruments above cover each other exactly only while a stall is
+//! either shorter than [`SLOW_HOLD_THRESHOLD`] or longer than
+//! [`HANG_THRESHOLD`]. The owner's traced run of 2026-09-15 landed between
+//! them — `held control for 3971 ms on turn 15341 — window_event 3960 ms` —
+//! and that line is the whole of what this facility could say about it: four
+//! seconds went into an event. Four seconds is a dead window by any reader's
+//! account, and the question the line leaves is *where inside the event*, which
+//! nothing but a stack answers.
+//!
+//! So a run started with `BT_PERF_TRACE` set is judged against
+//! [`TRACED_HANG_THRESHOLD`] — two seconds — and every other run against
+//! [`HANG_THRESHOLD`]. It is the only thing that variable changes in here, and
+//! it is opt-in for the reason the rest of this facility is resident: a report
+//! suspends the window thread for two kernel calls and leaves somebody a file,
+//! and a machine that stalls for two seconds under a compile asked for neither.
+//! A machine whose owner set the variable did. The variable is read once, on
+//! the window thread, beside every other reader of it, and handed to [`start`];
+//! the watchdog thread asks the environment nothing, and a report prints the
+//! threshold it actually crossed.
+//!
 //! # Whose seconds they were
 //!
 //! A line reading `flush_wheel 1928 ms` names where the time went and cannot
@@ -219,7 +241,33 @@ const ANSWER_WITHIN: Duration = Duration::from_secs(1);
 /// a 1.25 s frame under 24-way `cargo` — and it is also the neighbourhood where
 /// Windows itself starts drawing the ghost window and saying `Not Responding`,
 /// which is the symptom the user reports.
+///
+/// **The threshold an ordinary run is judged against.** A run that was started
+/// in order to be measured is judged against [`TRACED_HANG_THRESHOLD`] instead,
+/// and which of the two applies is settled once, in [`start`].
 const HANG_THRESHOLD: Duration = Duration::from_secs(5);
+
+/// How long the pump may be silent before it is a hang, **on a run that asked
+/// to be measured** (`BT_PERF_TRACE`).
+///
+/// Two seconds. The two instruments this module carries cover each other
+/// exactly only while a stall is either shorter than [`SLOW_HOLD_THRESHOLD`] or
+/// longer than [`HANG_THRESHOLD`], and the owner's traced run of 2026-09-15
+/// landed between them: `the window thread held control for 3971 ms on turn
+/// 15341 — window_event 3960 ms`. The ledger named the lane, and the watchdog —
+/// never past its own threshold — took no stack, so the one question that line
+/// leaves had no answer in the run that produced it.
+///
+/// Not a threshold an ordinary run could carry. A report suspends the window
+/// thread for two kernel calls and writes a file, and a person whose machine
+/// stalls for two seconds under a compile asked for neither; a person who set
+/// `BT_PERF_TRACE` asked for exactly that, and this is the only thing the
+/// variable changes in this module.
+///
+/// Two and not one, because the watchdog wakes every [`WATCH_INTERVAL`]: a
+/// threshold shorter than the poll would be crossed and gone before anything
+/// looked at it, and two seconds is crossed within four.
+const TRACED_HANG_THRESHOLD: Duration = Duration::from_secs(2);
 
 /// How long the loop may take to reach its **first** turn before that, too, is a
 /// hang.
@@ -268,7 +316,7 @@ fn slow_hold_threshold_ms() -> u64 {
 /// Held against [`Station`] by `every_station_has_a_slot_in_the_ledger`: a
 /// further variant added without widening this would have its milliseconds
 /// charged to nobody, and the line would silently stop adding up.
-const STATION_COUNT: usize = 35;
+const STATION_COUNT: usize = 48;
 
 /// How many reports are kept. The oldest beyond this are deleted.
 ///
@@ -304,7 +352,18 @@ pub enum Station {
     Starting = 0,
     /// The top of `about_to_wait`: the loop is going round.
     Wait = 1,
-    /// Inside `window_event`: the platform handed us something.
+    /// Inside `window_event`, and **outside the handler the event went to**:
+    /// the id lookup, the three gates a retiring or leaving window is refused
+    /// at, the wheel burst spent before anything that is not a notch, and the
+    /// four application doors the dispatch closes with.
+    ///
+    /// **It used to be the whole of it** (T-WINDOW-EVENT-STATIONS). Every kind
+    /// winit delivers wore this one word, so the owner's traced run of
+    /// 2026-09-15 — `held control for 3971 ms on turn 15341 — window_event
+    /// 3960 ms` — said that four seconds had gone into *an event* and could not
+    /// say which: a keystroke, a wheel notch, a redraw and a resize are four
+    /// lanes, repaired four different ways. The thirteen stations at the foot
+    /// of this enum are those lanes.
     Event = 2,
     /// `Runtime::drain_pty` — every shell's output, a slice at a time until the
     /// turn's quantum or its millisecond budget runs out (T-DRAIN-BURST). It is
@@ -547,6 +606,97 @@ pub enum Station {
     /// `refresh_search`, which leaves through eight doors: a station that is put
     /// back on only one of them would be a worse lie than the one this replaces.
     SearchScan = 34,
+    /// `WindowEvent::CloseRequested` — the dirty gate, which asks the reader
+    /// about preview buffers that would not survive the shut, and the summoned
+    /// terminal's `×`, which sets a bit and returns.
+    ///
+    /// **The head of the window-event family, whose one rule is stated here.**
+    /// Each of the thirteen is opened by `window_event` over the length of its
+    /// match and handed back at the foot of it ([`enter`]), so a handler's
+    /// milliseconds are the handler's and the dispatch around them stays
+    /// [`Self::Event`]'s. Which one an event opens is
+    /// [`crate::window_event_station`] — [`crate::AppEvent::station`]'s twin,
+    /// one door over and born of the same finding.
+    EventClose = 35,
+    /// `Runtime::keyboard_input` — the ladder every press and release of a key
+    /// in this window walks.
+    ///
+    /// The heaviest thing a key can do without leaving this process, and almost
+    /// none of it is charged here: the search box's live scan
+    /// ([`Self::SearchScan`]), the chrome rebuild ([`Self::Chrome`]) and the
+    /// frame ([`Self::Present`]) all name themselves, so what is left against
+    /// this label is the ladder that reached them.
+    EventKey = 36,
+    /// `Runtime::ime_input` — one composition event from the input method,
+    /// which on Windows arrives on IMM32's own synchronous call.
+    EventIme = 37,
+    /// `WindowEvent::ModifiersChanged` — **the one door every modifier state in
+    /// this process comes through** (M1-7, §8 Q9).
+    ///
+    /// Three statements long and not therefore cheap: the pointer's shape is
+    /// re-decided from it and the key hint is told about it, and either can end
+    /// in the chrome being rebuilt.
+    EventModifiers = 38,
+    /// `Runtime::pointer_moved` and `Runtime::pointer_left` — the hover road,
+    /// walked once per pointer sample the platform delivers.
+    ///
+    /// **One station for two arms**, because they are the same lane read at its
+    /// two ends and because the same thing makes either slow: a hit test over
+    /// every seat in the window, and the rebuild a hover that changed something
+    /// asks for.
+    EventPointer = 39,
+    /// `Runtime::mouse_input` — a button going down or coming up, and every
+    /// verb a press can reach from a tab strip, a pane head, a files row, a
+    /// card or a rendered page.
+    EventMouse = 40,
+    /// `Runtime::queue_wheel` — one notch being added to the burst.
+    ///
+    /// Its own station rather than [`Self::Wheel`]'s, which is `flush_wheel`
+    /// and is where the burst is actually spent: one is an addition and the
+    /// other is a scroll, so a hold that lands here has named a very short
+    /// piece of code — which is worth being able to read rather than assume.
+    EventWheel = 41,
+    /// `Runtime::resized` — a rectangle from the platform, with the solve, the
+    /// re-measure and the shell resizes that follow it.
+    EventResize = 42,
+    /// `Runtime::scale_factor_changed` — this window arriving on a display with
+    /// a different scale, which re-measures the font and re-solves every pane.
+    EventScale = 43,
+    /// `Runtime::window_moved`, `Runtime::os_theme_changed`, and the frame a
+    /// window that has been uncovered owes (GitHub issue #5).
+    ///
+    /// **One station for three arms**, on [`Self::Chrome`]'s reasoning: each is
+    /// the platform telling this window something about *itself* rather than
+    /// about a hand, and a reader who sees time here has the fact they need.
+    /// The move is the suspicious one of the three — it is a synchronous call
+    /// into WebView2, and therefore into another process, on every drag of a
+    /// window that has a page in it.
+    EventWindow = 44,
+    /// `Runtime::redraw` — the whole of a frame this window was asked for.
+    ///
+    /// Its own station rather than [`Self::Present`]'s, which is
+    /// `publish_frame_inner` and is entered inside it: the difference between
+    /// the two is everything a redraw does before it composes, and the two are
+    /// repaired differently.
+    EventRedraw = 45,
+    /// `WindowEvent::Focused` — the keyboard arriving at this window or leaving
+    /// it.
+    ///
+    /// One station for both arms, because they are the same list of things
+    /// being put down and picked up again. The arm that can be slow is the
+    /// arriving one: a window that has been away re-reads its git surfaces and
+    /// the preview files no kernel would speak for, which is the only thing
+    /// either arm asks a disk.
+    EventFocus = 46,
+    /// Every kind `window_event`'s match ends in `_ => Ok(())` for.
+    ///
+    /// **The label says `other` rather than naming them**, because the set is
+    /// winit's and grows with it: an event this window does nothing for has
+    /// cost a lookup and a comparison, and thirty stations that can never be
+    /// the answer would bury the twelve that can. Time against this label is
+    /// the dispatch itself — and, since that is very nearly impossible, a kind
+    /// this window has started answering without being given a name.
+    EventOther = 47,
 }
 
 impl Station {
@@ -589,6 +739,19 @@ impl Station {
             Self::Deadlines => "wake deadlines",
             Self::AppTurn => "application turn",
             Self::SearchScan => "search scan",
+            Self::EventClose => "close_requested",
+            Self::EventKey => "keyboard_input",
+            Self::EventIme => "ime_input",
+            Self::EventModifiers => "modifiers_changed",
+            Self::EventPointer => "pointer_moved",
+            Self::EventMouse => "mouse_input",
+            Self::EventWheel => "queue_wheel",
+            Self::EventResize => "resized",
+            Self::EventScale => "scale_factor_changed",
+            Self::EventWindow => "window state",
+            Self::EventRedraw => "redraw",
+            Self::EventFocus => "focused",
+            Self::EventOther => "window_event other",
         }
     }
 
@@ -644,6 +807,19 @@ impl Station {
             32 => Self::Deadlines,
             33 => Self::AppTurn,
             34 => Self::SearchScan,
+            35 => Self::EventClose,
+            36 => Self::EventKey,
+            37 => Self::EventIme,
+            38 => Self::EventModifiers,
+            39 => Self::EventPointer,
+            40 => Self::EventMouse,
+            41 => Self::EventWheel,
+            42 => Self::EventResize,
+            43 => Self::EventScale,
+            44 => Self::EventWindow,
+            45 => Self::EventRedraw,
+            46 => Self::EventFocus,
+            47 => Self::EventOther,
             _ => Self::Starting,
         }
     }
@@ -1596,6 +1772,12 @@ pub fn render_report(facts: &ReportFacts<'_>) -> String {
         }
     );
     let _ = writeln!(out, "when asked     : {}", facts.answer.phrase());
+    // **And which `WindowEvent` it was, which this same line answers.** A thread
+    // wedged inside a handler is stamped at that handler's own station — see
+    // [`Station::Event`] and the family under it — so `last station :
+    // keyboard_input` names the kind as well as the call, and a separate
+    // `last event` line would be one fact written twice and able to disagree
+    // with itself.
     let _ = writeln!(
         out,
         "last station   : {} (the last one entered, not necessarily the one it is in)",
@@ -1730,19 +1912,31 @@ pub fn prune_reports(directory: &Path, keep: usize) -> std::io::Result<usize> {
 /// moment of the program's choosing, and so that a test can point it somewhere
 /// private.
 ///
+/// `trace_perf` is whether this run was started with `BT_PERF_TRACE` set, and
+/// it is the caller's answer for the same reason `reports` is: the variable is
+/// read once per run, on the window thread, beside every other reader of it.
+/// What it decides is the threshold — see [`TRACED_HANG_THRESHOLD`] — and it is
+/// decided here rather than on the watchdog, which asks the environment
+/// nothing.
+///
 /// Failing to spawn is said out loud and dropped: a terminal that refused to
 /// start because it could not arrange to diagnose itself would be a worse
 /// program than one that starts without the diagnosis.
-pub fn start(reports: PathBuf) {
+pub fn start(reports: PathBuf, trace_perf: bool) {
     let ui_thread_id = bt_platform::hang::current_thread_id();
     // Touch the heartbeat here so its origin is the start of the run rather
     // than the first station, which makes `uptime` in a report mean what it
     // says.
     let _ = heartbeat().now_ms();
+    let threshold = if trace_perf {
+        TRACED_HANG_THRESHOLD
+    } else {
+        HANG_THRESHOLD
+    };
     if let Err(error) = bt_platform::spawn_at_priority(
         "bt-hang-watch",
         bt_platform::ThreadPriority::BelowNormal,
-        move || watch_forever(reports, ui_thread_id),
+        move || watch_forever(reports, ui_thread_id, threshold),
     ) {
         eprintln!("Folio could not start its hang watchdog: {error}");
     }
@@ -1800,8 +1994,12 @@ pub fn can_come_round(now_ms: u64, pulse: Pulse, allowance_ms: u64) -> bool {
 }
 
 /// The watchdog thread's whole life.
-fn watch_forever(reports: PathBuf, ui_thread_id: u32) {
-    let mut watch = HangWatch::new(HANG_THRESHOLD, STARTUP_THRESHOLD);
+///
+/// `threshold` is [`start`]'s answer and not this thread's: see
+/// [`TRACED_HANG_THRESHOLD`] for which run gets which, and for why the reading
+/// is not taken here.
+fn watch_forever(reports: PathBuf, ui_thread_id: u32, threshold: Duration) {
+    let mut watch = HangWatch::new(threshold, STARTUP_THRESHOLD);
     // The file the stall in progress was reported to, so its healing line lands
     // in the same file rather than in a second one nobody would connect to it.
     let mut open_report: Option<PathBuf> = None;
