@@ -2486,7 +2486,7 @@ A frozen line's inline site is recorded on its transcript entry when the line fr
 
 - **外部删掉一行 = 行消失,而它若是 default 就落到内置底板,并且没有新规则**:`default_profile` 从这个设置存在的第一天起就把「存着的 id 没有任何行认领」答成 `fallback_profile()`,而一次在编辑器里的删除,正是「文件不再点名它」。**存下来的 id 不改写**(把条目贴回去,默认就回来),**不发 Undo**:Undo 是**本窗**执行的删除的动词、它存在是为了把自己拿走的退路还回去;别人在编辑器里的删除是一个事实,而它的退路是那个文件。
 
-- **正在跑的会话不受影响,但下标要跟着 id 走**。档案是出生证不是合同:已经起来的 shell 的 program 与 env 在一个本窗无法再争论的进程里。可它**会**丢掉自己对自己的称呼——pane 手里攥的是**下标**,而下标是某人可能正在编辑器里拖动的那张表里的一个位置。于是重扫前按 id 记下每个座位站在谁身上、重扫后用 `index_of_id` 找回去:这是那个函数的既有规矩(找不到就落到 fallback,「丢的是这个 tab 的 shell 选择,永不是这个 tab」)而不是第二条。**红测钉的是危险本身**:重排之后,老下标上坐的确实是别人。
+- **正在跑的会话不受影响,但下标要跟着 id 走**。档案是出生证不是合同:已经起来的 shell 的 program 与 env 在一个本窗无法再争论的进程里。可它**会**丢掉自己对自己的称呼——pane 手里攥的是**下标**,而下标是某人可能正在编辑器里拖动的那张表里的一个位置。于是重扫前按 id 记下每个座位站在谁身上、重扫后用 `index_of_id` 找回去:这是那个函数的既有规矩(找不到就落到 fallback,「丢的是这个 tab 的 shell 选择,永不是这个 tab」)而不是第二条。**红测钉的是危险本身**:重排之后,老下标上坐的确实是别人。 **T-PROFILE-TABLE-MOVE supersedes the re-pointing half of this:** a seat and every seed it mints now hold the profile's stable id rather than a row index, and `ProfilePrograms` is keyed by id too, so the four in-window verbs (`Move up`, `Move down`, `Duplicate`, `Delete`) have nothing left to move — a row that is really gone is resolved once at the spawn, where it degrades to the fallback profile with a banner instead of indexing past the end of the table and panicking the window thread.
 
 - **编辑页留着草稿,并跟着自己的档案走**。同型冲突在配色那边的判词是「跟着文件走」,这里对应的是**跟着 id 走**:下标重新指向同一个 id、三个文本框一个字节都不动、id 没了就退回列表(与在对话框里删掉这一行时一模一样)。**保存以按键者为准**——下一次击键把整张表写回文件,正在打字的那只手赢下它正在打的那一格,这就是「后写者胜」在其中一个写者是一只手时的读法。行菜单(`⋯`)按下标关掉:它没有 id 可跟,因为它不是一个地方,是一个**手势**,而手势冲着的那张列表已经不在了。焦点走 `keep_focus_reachable`,与这个对话框里每一个挪动列表的动词同一条路。
 

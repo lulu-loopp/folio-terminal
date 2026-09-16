@@ -65,6 +65,19 @@ All notable changes to Folio are recorded here. The format follows
   complete picture. Caret blinks, hover marks and moving panes still redraw;
   resizing and replacing a surface always get their own frame.
 
+- **Reordering your profiles no longer closes the window when a pane is
+  opened.** Moving a row in Settings ▸ Profiles, or deleting one, changed which
+  profile every already-open pane thought it was running: a pane held the row's
+  place in the list rather than the profile itself, and the list had just moved
+  under it. Splitting or restarting such a pane started whichever profile had
+  slid into that place, without saying so, and that wrong profile was written
+  into your saved session, so it came back the same way the next morning. When
+  the list had grown shorter than the place a pane was holding, opening a pane
+  closed Folio outright, taking every tab in every window with it. A pane now
+  names its profile by the profile, so a list that moves cannot move it; a row
+  you really did delete costs that pane its shell choice and nothing else, and
+  the pane says so in its first line.
+
 - **On a Mac, a second Folio started from a terminal now hands over instead of
   becoming a second writer.** Which Folio is allowed to write your settings and
   your saved session was decided in a directory whose location came from
