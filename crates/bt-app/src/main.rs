@@ -102900,6 +102900,35 @@ mod hold_station_tests {
             .unwrap_or_else(|| panic!("`{needle}` is not in this function any more"))
     }
 
+    /// The text of one free function, from its signature to the line its body
+    /// closes on — [`body`]'s reader, one indentation level out.
+    fn free_body(signature: &str) -> &'static str {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        let end = rest.find("\n}").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// The `WindowEvent` kinds a match answers, read off its arm heads.
+    ///
+    /// The twelve-space indent is the whole of the reading: it is what
+    /// separates an arm from a mention of one in a comment beside it and from
+    /// the guard above the match, both of which stand in this dispatcher and
+    /// neither of which is an arm.
+    fn arms(text: &str) -> Vec<&str> {
+        text.lines()
+            .filter_map(|line| line.strip_prefix("            WindowEvent::"))
+            .map(|kind| {
+                let end = kind
+                    .find(|character: char| !character.is_alphanumeric() && character != '_')
+                    .unwrap_or(kind.len());
+                &kind[..end]
+            })
+            .collect()
+    }
+
     /// **Each station stands at the head of the run it names.**
     ///
     /// The pairs are read in the order a turn runs them: the station's own line,
@@ -102992,6 +103021,51 @@ mod hold_station_tests {
             event.contains("hang_watch::at(hang_watch::Station::Event);"),
             "the event's own name has left the door it is about"
         );
+        // And the handler underneath it, which *is* scoped: opened over the
+        // match alone and handed back before the application doors below it.
+        let opened = "hang_watch::enter(window_event_station(&event))";
+        assert_eq!(
+            event.matches(opened).count(),
+            1,
+            "the handler an event is given to is not named, so a stall inside \
+             one of them is charged to the event"
+        );
+        assert_eq!(
+            event.matches("hang_watch::at(leaving_station);").count(),
+            1,
+            "the handler's name is never handed back, so the dispatch below the \
+             match runs under it"
+        );
+    }
+
+    /// **Every kind the dispatcher answers names its own handler**
+    /// (T-WINDOW-EVENT-STATIONS).
+    ///
+    /// `window_event` ran every one of them under one word, so four seconds
+    /// inside a keystroke, a redraw and a resize all read `window_event 3960
+    /// ms` — which is the line the owner's traced run of 2026-09-15 actually
+    /// produced. A kind added to the match without a line in
+    /// [`super::window_event_station`] puts that back one arm at a time, and
+    /// puts it back *silently*, because `_ => Station::EventOther` answers
+    /// everything. That is the decay this pin is here to catch.
+    #[test]
+    fn every_event_kind_the_dispatcher_answers_names_its_own_handler() {
+        let dispatch = body(&["    fn window", "_event("].concat());
+        let naming = free_body(&["fn window_event", "_station("].concat());
+        let mut kinds = arms(dispatch);
+        assert!(
+            kinds.len() > 10,
+            "the dispatcher has stopped matching on kinds, so this pin reads nothing"
+        );
+        kinds.sort_unstable();
+        kinds.dedup();
+        for kind in kinds {
+            assert!(
+                naming.contains(&format!("WindowEvent::{kind}")),
+                "`{kind}` is answered by a handler no station names, so a stall \
+                 inside it is charged to the event itself"
+            );
+        }
     }
 }
 
@@ -112067,6 +112141,13 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         // inside the close — past that line the window is gone, and a question
         // asked after the answer is worthless.
         let mut shutting = false;
+        // **The handler this event is about to be given to, named before it is
+        // given** — see [`window_event_station`]. Opened here and not at the
+        // door above, so the lookup, the three gates and the wheel burst stay
+        // the event's own; handed back at the foot of the match, on
+        // [`hang_watch::enter`]'s rule, so the four application doors under it
+        // belong to the dispatch and not to the handler.
+        let leaving_station = hang_watch::enter(window_event_station(&event));
         let result = match event {
             // **The summoned terminal's `×` means hide, and it means it by
             // setting the chord's own bit** (§7.54e ②, user ruling 2026-09-05:
@@ -112311,6 +112392,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             }),
             _ => Ok(()),
         };
+        hang_watch::at(leaving_station);
         // The gate's own `Discard`, spent here rather than inside the answer: the
         // shut belongs to the event loop, and re-requesting it means closing goes
         // through the one door it always went through instead of a second one
@@ -112401,6 +112483,47 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         if let Some(app) = self.app.as_mut() {
             app.finish();
         }
+    }
+}
+
+/// **Which handler a `WindowEvent` is about to be given to**
+/// (T-WINDOW-EVENT-STATIONS).
+///
+/// [`AppEvent::station`]'s twin, one door over and born of the same finding.
+/// The whole of `window_event` ran under [`hang_watch::Station::Event`], so the
+/// owner's traced run of 2026-09-15 — `held control for 3971 ms on turn 15341 —
+/// window_event 3960 ms` — could say only that four seconds had gone into *an
+/// event*: a keystroke, a wheel notch, a redraw and a resize wear one word, and
+/// which of them it was is the one thing a reader needs before they can look
+/// anywhere.
+///
+/// A free function rather than a method because `WindowEvent` is winit's, and
+/// it takes the event by reference so the naming happens before the match moves
+/// it.
+///
+/// **The kinds that answer [`hang_watch::Station::EventOther`] are the ones
+/// this window does nothing for.** The match ends in `_ => Ok(())`, and an
+/// event that falls through it has cost this process a lookup and a comparison;
+/// a station apiece for the rest of winit's list would be a dozen names that
+/// can never be the answer, standing in front of the twelve that can.
+fn window_event_station(event: &WindowEvent) -> hang_watch::Station {
+    use hang_watch::Station;
+    match event {
+        WindowEvent::CloseRequested => Station::EventClose,
+        WindowEvent::KeyboardInput { .. } => Station::EventKey,
+        WindowEvent::Ime(_) => Station::EventIme,
+        WindowEvent::ModifiersChanged(_) => Station::EventModifiers,
+        WindowEvent::CursorMoved { .. } | WindowEvent::CursorLeft { .. } => Station::EventPointer,
+        WindowEvent::MouseInput { .. } => Station::EventMouse,
+        WindowEvent::MouseWheel { .. } => Station::EventWheel,
+        WindowEvent::Resized(_) => Station::EventResize,
+        WindowEvent::ScaleFactorChanged { .. } => Station::EventScale,
+        WindowEvent::Moved(_) | WindowEvent::ThemeChanged(_) | WindowEvent::Occluded(_) => {
+            Station::EventWindow
+        }
+        WindowEvent::RedrawRequested => Station::EventRedraw,
+        WindowEvent::Focused(_) => Station::EventFocus,
+        _ => Station::EventOther,
     }
 }
 
@@ -118075,7 +118198,15 @@ fn main() -> Result<()> {
     // this thread's id, and it needs `%APPDATA%` resolved by the thread that is
     // allowed to pay for the one-time relocation `storage_dir` performs. A
     // healthy run never writes a byte — see `hang_watch` for the whole bill.
-    hang_watch::start(storage.join(hang_watch::REPORTS_DIRECTORY));
+    //
+    // **The same question `Runtime::trace_perf` asks, asked here** because the
+    // watchdog starts before there is an `App` to hold the answer — the reading
+    // `MathWorker::spawn` takes for the same reason one lane over. What it
+    // decides is the silence a report is written for: a run somebody started in
+    // order to measure it is worth suspending at two seconds, and a run nobody
+    // asked anything of is not. See `hang_watch::TRACED_HANG_THRESHOLD`.
+    let trace_perf = diagnostics::switched_on(std::env::var_os("BT_PERF_TRACE"));
+    hang_watch::start(storage.join(hang_watch::REPORTS_DIRECTORY), trace_perf);
     // The one-time media-session warm-up (§7.23) is paid here, off the first
     // hover: the process-resident session costs ~210ms cold and ~10ms warm.
     bt_platform::video::prewarm();
