@@ -184,6 +184,12 @@ pub struct ProfileEntryV1 {
     /// Which shell-integration script serves it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub integration: Option<String>,
+    /// Insertion grammar: powershell, cmd, posix, fish, nu, or agent. The app refuses unknown values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paste_as: Option<String>,
+    /// Windows-only insertion spelling: windows, windows-slash, wsl, or msys. Does not affect detection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paste_paths_as: Option<String>,
 }
 
 #[expect(
@@ -432,6 +438,8 @@ mod tests {
                         colour: "amber".to_owned(),
                     }),
                     integration: Some("powershell_opt_in".to_owned()),
+                    paste_as: None,
+                    paste_paths_as: None,
                     hidden: false,
                 },
             ],

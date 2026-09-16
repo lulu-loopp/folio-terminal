@@ -10,7 +10,7 @@
 #     cargo test --workspace --locked -- --ignored --list
 #
 # Why any of them are ignored at all — the policy this list exists to state.
-# Twenty-seven of the twenty-nine are **probes**, not regressions:
+# Twenty-eight of the thirty are **probes**, not regressions:
 #
 #   * nineteen in `bt-pty` drive real ConPTY sessions against a real PowerShell
 #     and read what comes back. Their assertions are about host timing and about
@@ -18,7 +18,7 @@
 #     which is a question with a different right answer on every machine.
 #   * two in `bt-transcript` are the reference-resolution probes over a printed
 #     scrollback.
-#   * four in `bt-app`: one writes a picture for a person to look at, two
+#   * five in `bt-app`: one writes a picture for a person to look at, two
 #     are the large-document typing benchmarks (T-MD-TYPING-PATH; the eager one is the reference), which time
 #     the whole input-to-layout path on docs/DESIGN.md and prints a table --
 #     wall-clock on a shared machine, so it is read by a person and never
@@ -27,6 +27,8 @@
 #     The fourth is the loading-worker diagnostic (T-MD-LOADING-STATE): nine timed
 #     samples of an 8 MiB whole read through the real serial worker, read by a
 #     person; the byte budgets it proves are asserted in the normal suite.
+#     The fifth (T-PASTE-1) measures direct MSVC CRT argv parsing against a separately
+#     compiled fixture, with no shell or window; its pure encoder fixtures run normally.
 #   * one in `bt-math` (`minus_probe`, tests/unary_minus.rs) prints, for a handful of
 #     formulas, every run the typesetter set on this machine -- face, glyph ids,
 #     advances -- to be diffed against another machine when a glyph goes missing
@@ -86,3 +88,7 @@ tests::system_conpty_resize_cursor_outcome_matches_the_sidecar_contract
 tests::typed_input_gate_blank_window_probe
 tests::typed_input_resize_deferral_probe
 webview::webview2_runtime_probe::a_local_page_reaches_only_its_own_folder
+
+# T-PASTE-1: defined MSVC wmain argv consumer must be compiled separately; native acceptance
+# runs it directly with CREATE_NO_WINDOW, no clipboard, shell, keys or Folio. Pure literals run normally.
+shell_literal::tests::direct_crt_receives_the_exact_literal_after_the_program_token

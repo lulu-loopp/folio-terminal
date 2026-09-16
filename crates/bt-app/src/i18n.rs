@@ -336,6 +336,18 @@ const fn pick_platform(
 /// have to be renamed with it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Text {
+    // T-PASTE-1 refusal messages; Chinese is assigned to the copy lane.
+    PastePathEncoding,
+    PastePathControl,
+    PastePathPowerShellQuote,
+    PastePathDoubleQuote,
+    PastePathCmdPercent,
+    PastePathCmdExpansion,
+    PastePathNushell,
+    PasteClipboardPromise,
+    PasteClipboardRead,
+    PasteProfileOverride,
+
     // ── window chrome ──────────────────────────────────────────────────────
     /// The gear's tip **and** the dialog's own `h1` — one string, because they
     /// are one word for one thing and two literals is how two surfaces come to
@@ -2720,6 +2732,56 @@ impl Text {
     #[must_use]
     pub fn on(self, lang: Lang, platform: HostPlatform) -> &'static str {
         match self {
+            Self::PastePathEncoding => pick(
+                lang,
+                "This path cannot be sent as UTF-8.",
+                "路径无法按 UTF-8 发送。",
+            ),
+            Self::PastePathControl => pick(
+                lang,
+                "This path contains a control character or line break.",
+                "路径包含控制字符或换行。",
+            ),
+            Self::PastePathPowerShellQuote => pick(
+                lang,
+                "This quote character has not been verified for path paste in this shell.",
+                "路径中的引号在当前 shell 中尚未验证。",
+            ),
+            Self::PastePathDoubleQuote => pick(
+                lang,
+                "This path contains a double quote that this grammar cannot quote.",
+                "路径包含双引号，当前语法无法转义。",
+            ),
+            Self::PastePathCmdPercent => pick(
+                lang,
+                "Command Prompt expands percent signs in paths.",
+                "命令提示符会展开路径中的百分号。",
+            ),
+            Self::PastePathCmdExpansion => pick(
+                lang,
+                "Command Prompt delayed expansion changes exclamation marks in paths.",
+                "命令提示符的延迟展开会改变路径中的感叹号。",
+            ),
+            Self::PastePathNushell => pick(
+                lang,
+                "Nushell path paste has not been measured yet.",
+                "Nushell 的路径粘贴尚未验证。",
+            ),
+            Self::PasteClipboardPromise => pick(
+                lang,
+                "The clipboard offers a file promise. Copy a saved file instead.",
+                "剪贴板提供的是文件承诺。改为复制已保存的文件。",
+            ),
+            Self::PasteClipboardRead => pick(
+                lang,
+                "The clipboard could not be read. Copy again and retry.",
+                "剪贴板无法读取。重新复制后再试。",
+            ),
+            Self::PasteProfileOverride => pick(
+                lang,
+                "profiles.json: {id}: {key} is unsupported; the default was kept.",
+                "profiles.json：{id}：{key} 不受支持，已保留默认值。",
+            ),
             // ── window chrome ──────────────────────────────────────────────
             Self::Settings => pick(lang, "Settings", "设置"),
             // Mock-up 2270's own text, which names the verb in both directions.
@@ -4907,7 +4969,17 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 673] = [
+    pub const ALL: [Self; 683] = [
+        Self::PastePathEncoding,
+        Self::PastePathControl,
+        Self::PastePathPowerShellQuote,
+        Self::PastePathDoubleQuote,
+        Self::PastePathCmdPercent,
+        Self::PastePathCmdExpansion,
+        Self::PastePathNushell,
+        Self::PasteClipboardPromise,
+        Self::PasteClipboardRead,
+        Self::PasteProfileOverride,
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -6448,6 +6520,10 @@ pub fn colour_name(colour: crate::marks::MarkColour) -> Text {
 #[must_use]
 pub fn profile_entry_fault(fault: &crate::profiles::ProfileFault) -> String {
     match (current(), fault) {
+        (_, crate::profiles::ProfileFault::PasteOverride { id, key }) => Text::PasteProfileOverride
+            .text()
+            .replace("{key}", key)
+            .replace("{id}", id),
         (Lang::English, crate::profiles::ProfileFault::Unusable { id }) => {
             format!("profiles.json: {id} names no program and was skipped")
         }
@@ -8163,6 +8239,50 @@ mod tests {
             }
         }
         assert_eq!(seen.len(), Text::ALL.len());
+    }
+
+    #[test]
+    fn paste_refusal_copy_fits_two_lines_and_tracks_its_pending_columns() {
+        use crate::toast;
+        let entries = [
+            Text::PastePathEncoding,
+            Text::PastePathControl,
+            Text::PastePathPowerShellQuote,
+            Text::PastePathDoubleQuote,
+            Text::PastePathCmdPercent,
+            Text::PastePathCmdExpansion,
+            Text::PastePathNushell,
+            Text::PasteClipboardPromise,
+            Text::PasteClipboardRead,
+            Text::PasteProfileOverride,
+        ];
+        let width = toast::TOAST_WINDOW_WIDTH_LOGICAL_PX
+            - 2.0
+                * (toast::TOAST_BORDER_LOGICAL_PX
+                    + toast::TOAST_PADDING_X_LOGICAL_PX
+                    + toast::TOAST_MARK_GAP_LOGICAL_PX)
+            - toast::TOAST_MARK_LOGICAL_PX
+            - toast::TOAST_CLOSE_LOGICAL_PX;
+        for entry in entries {
+            assert!(Text::ALL.contains(&entry));
+            for platform in Text::PLATFORM_COLUMNS {
+                assert_eq!(
+                    Text::CHINESE_PENDING.contains(&(entry, platform)),
+                    entry.on(Lang::English, platform) == entry.on(Lang::Chinese, platform)
+                );
+                // The deterministic half-em/CJK-em copy measure used by the settings budget.
+                // This budgets the reason, not the unbounded native filename displayed beside it.
+                for lang in [Lang::English, Lang::Chinese] {
+                    let lines = crate::tooltip::wrap(entry.on(lang, platform), width, |run| {
+                        run.chars()
+                            .map(|c| if c.is_ascii() { 0.5 } else { 1.0 })
+                            .sum::<f32>()
+                            * toast::TOAST_BODY_FONT_LOGICAL_PX
+                    });
+                    assert!(lines.len() <= 2, "{entry:?}/{lang:?}: {lines:?}");
+                }
+            }
+        }
     }
 
     /// PIN (§7.1.6b′, user rulings 2026-08-19 and 2026-08-20) — **the focus-mode

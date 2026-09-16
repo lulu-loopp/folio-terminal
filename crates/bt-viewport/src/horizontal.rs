@@ -278,15 +278,20 @@ pub fn seek_from_start(text: &str, target: ContentColumn) -> ColumnSeek {
 /// starts a cell. Every checkpoint this module produces is such a position, which is what makes
 /// the index a pure accelerator: resuming from a checkpoint and resuming from the origin run the
 /// same loop over the same clusters and cannot disagree.
+/// An out-of-range byte or a byte inside a UTF-8 character discards the checkpoint
+/// and seeks from the start of this text instead.
 #[must_use]
 pub fn resume_seek(text: &str, from: ColumnSeek, target: ContentColumn) -> ColumnSeek {
+    let Some(tail) = text.get(from.byte as usize..) else {
+        return seek_from_start(text, target);
+    };
     let mut column = from.column.0;
     let mut byte = from.byte;
     let mut grapheme = from.grapheme;
     if column >= target.0 {
         return from;
     }
-    for cluster in graphemes(&text[from.byte as usize..]) {
+    for cluster in graphemes(tail) {
         let width = cluster_width(cluster) as u32;
         if width == 0 {
             // A zero-width cluster joins the cell in front of it and advances no column, so it
@@ -933,12 +938,21 @@ pub struct FlattenedWindow {
 /// hyperlink and anchor, exactly as the spacer beside a fully visible glyph does. Drawing half a
 /// glyph would be drawing a different glyph, and a blank that still points at the whole cluster
 /// keeps selection and hit-testing naming the thing the reader is looking at.
+/// An out-of-range byte or a byte inside a UTF-8 character discards the checkpoint
+/// and seeks to the window's start in this line instead.
 pub fn window_flattened_line(
     line: &FrozenLine,
     links: &[InferredLink],
     projection: &HorizontalProjection,
     from: ColumnSeek,
 ) -> FlattenedWindow {
+    let (from, tail) = match line.text.get(from.byte as usize..) {
+        Some(tail) => (from, tail),
+        None => {
+            let from = seek_from_start(&line.text, projection.x_origin());
+            (from, &line.text[from.byte as usize..])
+        }
+    };
     let viewport_columns = projection.viewport_columns() as usize;
     let window_start = projection.x_origin().0;
     let window_end = projection.window_end().0;
@@ -956,7 +970,7 @@ pub fn window_flattened_line(
     // cluster nobody drew must not land on whatever cell happens to be last.
     let mut carrier_is_drawn = false;
 
-    for cluster in graphemes(&line.text[from.byte as usize..]) {
+    for cluster in graphemes(tail) {
         let width = cluster_width(cluster) as u32;
         if width == 0 {
             if carrier_is_drawn && let Some(cell) = window.cells.last_mut() {
@@ -1082,6 +1096,39 @@ mod tests {
             styles: Vec::new(),
             shell_marks: Vec::new(),
             wrap_split: false,
+        }
+    }
+
+    #[test]
+    fn invalid_byte_checkpoints_restart_from_the_current_line() {
+        for text in ["", "ab", "a\u{4e2d}e\u{301}\u{1f642}z"] {
+            let line = line_of(text);
+            for byte in [2, 3, 6, 9, text.len() as u32 + 1, u32::MAX] {
+                if text.get(byte as usize..).is_some() {
+                    continue;
+                }
+                for target in [0, 1, 2, 4, 20] {
+                    let from = ColumnSeek {
+                        column: ContentColumn(10),
+                        byte,
+                        grapheme: 10,
+                    };
+                    let target = ContentColumn(target);
+                    let expected = seek_from_start(text, target);
+                    assert_eq!(resume_seek(text, from, target), expected);
+                    let projection =
+                        HorizontalProjection::new(presentable_end_column(text), 3, target);
+                    let expected = window_flattened_line(
+                        &line,
+                        &[],
+                        &projection,
+                        seek_from_start(text, projection.x_origin()),
+                    );
+                    let actual = window_flattened_line(&line, &[], &projection, from);
+                    assert_eq!(actual.cells, expected.cells);
+                    assert_eq!(actual.anchors, expected.anchors);
+                }
+            }
         }
     }
 

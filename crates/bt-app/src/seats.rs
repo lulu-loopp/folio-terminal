@@ -28854,6 +28854,108 @@ mod tests {",
             }
         }
     }
+
+    /// RED — **on a Mac a press on a tab is that tab's, and the window moves
+    /// only from the empty part of the header** (T-MAC-TAB-DRAG, owner report
+    /// 2026-09-16).
+    ///
+    /// The test above walks the whole band and holds the two platforms to one
+    /// rule. This one asks the narrower question the report is about, and asks
+    /// it in the order the press router asks it (`Runtime::chrome_mouse_input`):
+    /// the chrome is asked first, and the window's own handle is what is left
+    /// when nothing of Folio's answered. A press on a tab that resolved to the
+    /// handle is a tab that can be neither reordered nor torn out, because the
+    /// gesture that would have carried it moves the window instead — which is
+    /// what the reader saw.
+    ///
+    /// It is stated at the macOS header and nowhere else, because that is the
+    /// header the defect was reported on: pills centred on the 40-point band,
+    /// the strip beginning after the traffic lights, air above and below every
+    /// tab that a window drawing its own whole bar does not have.
+    ///
+    /// MUTATION: resolve the handle before the chrome and every tab answers
+    /// `MoveTheWindow`; take the reserve out of the strip and the empty header
+    /// has nothing left to answer with; centre the pill on a band the hit test
+    /// does not read and the air above it stops being the window's.
+    #[test]
+    fn a_press_on_a_mac_tab_is_the_tabs_and_the_empty_header_moves_the_window() {
+        /// What one press in the header comes to.
+        #[derive(Debug, PartialEq)]
+        enum Press {
+            Tab(usize),
+            Chrome(ChromeTarget),
+            MoveTheWindow,
+            Nothing,
+        }
+        let resolve = |width: f32,
+                       scale: f32,
+                       chrome: PlatformChrome,
+                       trailers: &[TabTrailer],
+                       x: f32,
+                       y: f32| {
+            let rail = RailState::default();
+            let (x, y) = (f64::from(x), f64::from(y));
+            let named = hit_tab_chrome(width, scale, chrome, trailers, 0, 0.0, x, y)
+                .or_else(|| hit_window_chrome(width, scale, chrome, rail, false, x, y));
+            let moves =
+                title_bar_drag_point(width, scale, chrome, trailers.len(), 0.0, rail, false, x, y);
+            match named {
+                Some(ChromeTarget::Tab(index)) => Press::Tab(index),
+                Some(target) => Press::Chrome(target),
+                None if moves => Press::MoveTheWindow,
+                None => Press::Nothing,
+            }
+        };
+        for scale in [1.0_f32, 2.0] {
+            let width = 960.0 * scale;
+            let chrome = mac_bar(scale);
+            for tabs in [1_usize, 3, 12] {
+                let trailers = resting(tabs);
+                let strip = tab_strip_geometry(width, scale, chrome, &trailers, 0, 0.0);
+                for (index, tab) in strip.tabs.iter().enumerate() {
+                    // A quarter of the way into the pill: the trailer run stands
+                    // at its trailing end, and a squeezed tab centres what is
+                    // left of it, so this is the tab's own surface at every
+                    // width tier rather than a control standing on it.
+                    let x = tab.body[0] + (tab.body[2] - tab.body[0]) / 4.0;
+                    let y = (tab.body[1] + tab.body[3]) / 2.0;
+                    assert_eq!(
+                        resolve(width, scale, chrome, &trailers, x, y),
+                        Press::Tab(index),
+                        "scale {scale}, {tabs} tabs: the press on tab {index} is not that tab's, \
+                         so the gesture it begins is the window's and the tab cannot be \
+                         reordered or torn out"
+                    );
+                }
+                // The band the reserve keeps clear of the strip, which is header
+                // and nothing else however many tabs are open.
+                let reserve = WINDOW_TITLE_BAR_DRAG_RESERVE_LOGICAL_PX * scale;
+                let handle = strip.viewport[1] + reserve / 2.0;
+                let middle = window_band_px(scale, chrome) / 2.0;
+                assert_eq!(
+                    resolve(width, scale, chrome, &trailers, handle, middle),
+                    Press::MoveTheWindow,
+                    "scale {scale}, {tabs} tabs: the empty part of the header does not move the \
+                     window"
+                );
+                // And the air a pill leaves above itself is header too — the
+                // five points §13.19 names, which only this host's strip has.
+                let first = strip.tabs[0].body;
+                let above = (first[1] / 2.0).floor();
+                assert!(
+                    above < first[1],
+                    "scale {scale}: a pill floats, so there is air above it to press"
+                );
+                let over = (first[0] + first[2]) / 2.0;
+                assert_eq!(
+                    resolve(width, scale, chrome, &trailers, over, above),
+                    Press::MoveTheWindow,
+                    "scale {scale}, {tabs} tabs: the air over a pill is not the window's"
+                );
+            }
+        }
+    }
+
     /// The caption run's boxes and its hit test are one arithmetic, and this is
     /// what says so: every box answers with its own target when asked at its
     /// centre, and the run tiles the corner with no seam between the buttons.
