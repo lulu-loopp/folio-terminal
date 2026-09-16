@@ -2935,8 +2935,9 @@ fn html_image_block(lines: &[&str], start: usize) -> Option<(MarkdownImage, usiz
 fn opens_html_tag(text: &str, name: &str) -> bool {
     let Some(rest) = text
         .strip_prefix('<')
-        .filter(|rest| rest.len() >= name.len() && rest[..name.len()].eq_ignore_ascii_case(name))
-        .map(|rest| &rest[name.len()..])
+        .and_then(|rest| rest.split_at_checked(name.len()))
+        .filter(|(prefix, _)| prefix.eq_ignore_ascii_case(name))
+        .map(|(_, rest)| rest)
     else {
         return false;
     };
@@ -13542,6 +13543,43 @@ mod tests {
                     .any(|block| matches!(block, MarkdownBlock::Image(_))),
                 "{source:?} is not a picture this window reads: {blocks:#?}"
             );
+        }
+    }
+
+    #[test]
+    fn unicode_angle_bracket_lines_remain_prose() {
+        for source in [
+            "<\u{4e2d}\u{6587}\u{6807}\u{9898}>",
+            "<b>\u{4e2d}\u{6587}</b>",
+            "<a\u{4e2d}",
+            "<\u{1f642}abc>",
+            "<im\u{00e9}>",
+        ] {
+            assert_eq!(
+                parse_markdown(source),
+                vec![MarkdownBlock::Paragraph(vec![Span::plain(source)])],
+                "{source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn html_tag_prefixes_split_only_at_utf8_boundaries() {
+        for name in ["img", "picture", "\u{4e2d}", "\u{1f642}"] {
+            for ending in ["", ">", "/>", " src='a.png'", "\u{2003}src='a.png'"] {
+                assert!(opens_html_tag(&format!("<{name}{ending}"), name));
+            }
+            assert!(!opens_html_tag(&format!("<{name}x>"), name));
+            assert!(!opens_html_tag("<", name));
+        }
+        assert!(opens_html_tag("<IMG src='a.png'>", "img"));
+        assert!(opens_html_tag("<PICTURE>", "picture"));
+        for character in ['\u{00e9}', '\u{4e2d}', '\u{1f642}'] {
+            for prefix in 0..8 {
+                let source = format!("<{}{character}abcdef>", "a".repeat(prefix));
+                assert!(!opens_html_tag(&source, "img"));
+                assert!(!opens_html_tag(&source, "picture"));
+            }
         }
     }
 

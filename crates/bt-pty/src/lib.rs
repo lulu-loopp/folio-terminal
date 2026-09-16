@@ -62,7 +62,30 @@ pub const PTY_RING_BYTES: NonZeroUsize = NonZeroUsize::new(1024 * 1024).unwrap()
 /// not bound — a single write is never refused for its size alone.
 pub const PTY_INPUT_RING_BYTES: NonZeroUsize = NonZeroUsize::new(1024 * 1024).unwrap();
 /// Matches the serialized Term actor quantum from DESIGN.md §1.3.
+///
+/// **It is a per-turn ceiling and not a read size** (T-DRAIN-BURST). It says how
+/// much of one pane's output a single turn of the window's loop may carry; the
+/// turn reaches it a [`TERM_READ_SLICE`] at a time, so that it can look at the
+/// clock in between and stop early.
 pub const TERM_READ_QUANTUM: NonZeroUsize = NonZeroUsize::new(256 * 1024).unwrap();
+/// **The most output one pane is asked for in a single read** (T-DRAIN-BURST).
+///
+/// [`TERM_READ_QUANTUM`] bounds a turn in bytes and cannot bound it in time,
+/// because what a quarter megabyte of VT costs depends entirely on what is in
+/// it: a machine's own diagnostics log recorded window-thread holds of 4386,
+/// 3112, 2791 and 1862 ms charged to the drain, with the page-fault column near
+/// zero beside them — a quantum of ordinary build-log output being parsed,
+/// frozen into the transcript and scanned, all of it between one look at the
+/// message queue and the next.
+///
+/// So the quantum is taken in slices and the clock is consulted between them
+/// (`DRAIN_TURN_BUDGET` in `bt-app`). This number is therefore **not** a
+/// throughput knob — the budget decides how many slices a turn takes — it is
+/// the granularity of the overshoot: a turn can run past its deadline by at
+/// most the cost of one slice. Eight KiB is a thirty-second of the quantum, so
+/// even at the ~0.5 MB/s the worst of those holds implies it is about one
+/// 60 Hz frame, and at any healthy parse rate it is a fraction of one.
+pub const TERM_READ_SLICE: NonZeroUsize = NonZeroUsize::new(8 * 1024).unwrap();
 /// VT input translated by ConPTY to the shell integration's Ctrl+Alt+Shift+F12 resize-anchor chord.
 /// On PSReadLine 2.4.x the handler repairs the cached input anchor and render geometry without
 /// repainting; older/unproven versions consume the chord as a no-op.
@@ -1528,6 +1551,20 @@ impl PtySession {
         self.output.try_pop(TERM_READ_QUANTUM)
     }
 
+    /// One [`TERM_READ_SLICE`] of this pane's output, in order, and nothing
+    /// dropped (T-DRAIN-BURST).
+    ///
+    /// The window thread's door. It is a smaller ask than [`Self::read_output`]
+    /// for one reason only: the turn that calls it wants to look at the clock
+    /// between slices, and a call it is already inside is a call it cannot stop.
+    /// [`OutputRing::try_pop`] splits the chunk it cannot fit and pushes the tail
+    /// back on the front, so a slice boundary is a boundary in the byte stream
+    /// and nowhere else — the same contract a quantum-sized pop has always had
+    /// with the chunks the reader thread happened to deliver.
+    pub fn read_output_slice(&self) -> Vec<u8> {
+        self.output.try_pop(TERM_READ_SLICE)
+    }
+
     pub fn output_is_drained(&self) -> bool {
         self.output.is_closed_and_drained()
     }
@@ -2750,6 +2787,169 @@ mod tests {
         producer.join().unwrap();
         assert_eq!(ring.stats().maximum_bytes, 4);
         assert_eq!(ring.stats().blocked_pushes, 1);
+    }
+
+    /// The burst a turn is allowed to carry, in the units the window thread spends it in.
+    fn slices_per_turn() -> usize {
+        TERM_READ_QUANTUM.get() / TERM_READ_SLICE.get()
+    }
+
+    /// A burst whose every byte says where in the burst it came from, so that a
+    /// concatenation comparing equal is order *and* completeness in one assertion.
+    fn identifiable_burst(bytes: usize) -> Vec<u8> {
+        (0..bytes).map(|index| (index % 251) as u8).collect()
+    }
+
+    /// RED (T-DRAIN-BURST) — **a burst leaves a pane a turn at a time, in order, and the turn
+    /// ends while there is still something in the ring.**
+    ///
+    /// The defect: the window thread spent a whole [`TERM_READ_QUANTUM`] inside one call, and a
+    /// quarter megabyte of a build log is seconds of parsing, freezing and scanning — the owner's
+    /// diagnostics log for 2026-09-15 has `drain_pty 4386 ms` with the page-fault column near
+    /// zero. A turn that long is a keystroke nobody answers. So the quantum is taken a
+    /// [`TERM_READ_SLICE`] at a time and the caller looks at its clock in between.
+    ///
+    /// What that must not cost is a byte or its place: [`OutputRing::try_pop`] splits the chunk it
+    /// cannot fit and pushes the tail back on the *front*, so the slicing is a boundary in the
+    /// stream and nowhere else.
+    ///
+    /// Mutation: pop [`TERM_READ_QUANTUM`] in one go and the per-read ceiling goes red on the
+    /// first read — which is the point, because a read that big is a call the window thread cannot
+    /// look at a clock inside. Split without pushing the tail back and the concatenation stops
+    /// matching.
+    #[test]
+    fn a_two_mib_burst_leaves_a_pane_a_turn_at_a_time_in_order() {
+        const BURST_BYTES: usize = 2 * 1024 * 1024;
+        let burst = identifiable_burst(BURST_BYTES);
+        let ring = OutputRing::new(NonZeroUsize::new(BURST_BYTES).unwrap());
+        // As the reader thread delivers it: whatever came back from one read of the pipe, which is
+        // never the same size twice and is never aligned to anything this side cares about.
+        let mut offset = 0;
+        for (step, chunk) in [7_usize, 4096, 65_537, 1, 300_000]
+            .iter()
+            .cycle()
+            .enumerate()
+        {
+            let end = (offset + chunk).min(BURST_BYTES);
+            ring.push(burst[offset..end].to_vec()).unwrap();
+            offset = end;
+            assert!(step < 10_000, "the burst was never fully pushed");
+            if offset == BURST_BYTES {
+                break;
+            }
+        }
+
+        let mut drained: Vec<u8> = Vec::with_capacity(BURST_BYTES);
+        let mut turns = 0_usize;
+        loop {
+            turns += 1;
+            let mut carried = 0_usize;
+            for _ in 0..slices_per_turn() {
+                let slice = ring.try_pop(TERM_READ_SLICE);
+                if slice.is_empty() {
+                    break;
+                }
+                assert!(
+                    slice.len() <= TERM_READ_SLICE.get(),
+                    "a read took {} bytes, more than one slice",
+                    slice.len()
+                );
+                carried += slice.len();
+                drained.extend(slice);
+            }
+            assert!(
+                carried <= TERM_READ_QUANTUM.get(),
+                "one turn carried {carried} bytes, more than DESIGN.md §1.3's quantum"
+            );
+            if ring.stats().current_bytes == 0 {
+                break;
+            }
+            // The whole point: the turn is over and the burst is not. This is the moment the
+            // window thread is back at the message pump with a keypress waiting in it.
+            assert!(
+                turns < 1_000,
+                "the burst never ran out; {} bytes still in the ring",
+                ring.stats().current_bytes
+            );
+        }
+
+        assert_eq!(
+            turns,
+            BURST_BYTES / TERM_READ_QUANTUM.get(),
+            "two MiB is eight quanta and therefore eight turns at full budget"
+        );
+        // Reported as a place rather than as two megabytes of hex: a stream that diverges
+        // diverges somewhere, and the offset is the only part of it anyone can read.
+        assert_eq!(
+            drained.len(),
+            burst.len(),
+            "bytes went missing or were duplicated"
+        );
+        assert_eq!(
+            drained
+                .iter()
+                .zip(&burst)
+                .position(|(got, want)| got != want),
+            None,
+            "the burst came out in a different order than it went in"
+        );
+        assert_eq!(
+            ring.stats().current_bytes,
+            0,
+            "and the last turn emptied it"
+        );
+    }
+
+    /// RED (T-DRAIN-BURST) — **what a child says between two turns queues behind what it said
+    /// before them, and none of it is dropped.**
+    ///
+    /// The bounded turn only works if the leftover is *left*, not skipped: the ring is the order,
+    /// and a pane's echo of a keystroke is simply the next thing in it. This is the guarantee the
+    /// budget is allowed to lean on.
+    ///
+    /// Mutation: drop the leftover instead of leaving it (the tail vanishes), or drain the newest
+    /// chunk first (the marker arrives early).
+    #[test]
+    fn what_arrives_between_turns_queues_behind_the_backlog() {
+        let backlog = identifiable_burst(3 * TERM_READ_QUANTUM.get());
+        let marker = b"\x1b[32mecho\x1b[0m".to_vec();
+        let ring = OutputRing::new(NonZeroUsize::new(4 * TERM_READ_QUANTUM.get()).unwrap());
+        ring.push(backlog.clone()).unwrap();
+
+        let mut drained: Vec<u8> = Vec::new();
+        let one_turn = |ring: &OutputRing, drained: &mut Vec<u8>| {
+            for _ in 0..slices_per_turn() {
+                let slice = ring.try_pop(TERM_READ_SLICE);
+                if slice.is_empty() {
+                    break;
+                }
+                drained.extend(slice);
+            }
+        };
+
+        one_turn(&ring, &mut drained);
+        assert_eq!(drained.len(), TERM_READ_QUANTUM.get());
+        // The child spoke again while the window was away.
+        ring.push(marker.clone()).unwrap();
+        while ring.stats().current_bytes > 0 {
+            one_turn(&ring, &mut drained);
+        }
+
+        let mut expected = backlog;
+        expected.extend(marker);
+        assert_eq!(
+            drained.len(),
+            expected.len(),
+            "the backlog and the new words, all of both"
+        );
+        assert_eq!(
+            drained
+                .iter()
+                .zip(&expected)
+                .position(|(got, want)| got != want),
+            None,
+            "the new words did not queue behind the backlog"
+        );
     }
 
     /// RED — **the window's thread hands input over; it never waits for a child to take it**

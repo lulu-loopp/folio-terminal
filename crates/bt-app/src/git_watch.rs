@@ -96,10 +96,20 @@ impl GitWatch {
     ///
     /// Answers whether the set changed, which is only of interest to a
     /// diagnostics line.
+    ///
+    /// **The proxy is borrowed here and cloned only where a watch is actually
+    /// opened**, which on one of the two platforms is the difference between an
+    /// idle window and a burning processor. A clone of an `EventLoopProxy` is an
+    /// `Arc` bump on Windows and *not* one on macOS: winit builds a fresh run
+    /// loop source, adds it to the main run loop and **wakes the loop**, and
+    /// dropping it invalidates the source again. This is called on every turn,
+    /// so a clone taken at the top of it would schedule the very turn that takes
+    /// the next one — a window nobody is looking at, holding a core at full tilt
+    /// for as long as it stays open. So the clone is taken once per
+    /// subscription, in [`subscribe`], and never per turn.
     pub fn sync(&mut self, wanted: &BTreeSet<PathBuf>, proxy: &EventLoopProxy<AppEvent>) -> bool {
         let news = Arc::clone(&self.news);
-        let proxy = proxy.clone();
-        let changed = self.sync_with(wanted, move |root| subscribe(&news, &proxy, root));
+        let changed = self.sync_with(wanted, |root| subscribe(&news, proxy, root));
         if changed {
             let (held, watching) = self.counts();
             trace(&format!(
@@ -208,6 +218,9 @@ impl GitWatch {
 /// A free function and not a method because it is called from inside a closure
 /// that [`GitWatch::sync_with`] holds while it holds `self` mutably; what it
 /// needs is the mailbox and the proxy, not the registry.
+///
+/// **And it is the only place in this file the proxy is cloned** — once per
+/// watch opened, for the reason [`GitWatch::sync`] states.
 fn subscribe(
     news: &Arc<Mutex<BTreeMap<PathBuf, Instant>>>,
     proxy: &EventLoopProxy<AppEvent>,

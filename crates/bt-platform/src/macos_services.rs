@@ -72,26 +72,13 @@
 use std::sync::OnceLock;
 
 use objc2::rc::Retained;
-use objc2::runtime::{AnyClass, NSObject, NSObjectProtocol};
-use objc2::{AnyThread, ClassType, MainThreadMarker, define_class, msg_send, sel};
+use objc2::runtime::{NSObject, NSObjectProtocol};
+use objc2::{AnyThread, MainThreadMarker, define_class, msg_send, sel};
 use objc2_app_kit::{NSApplication, NSPasteboard, NSUpdateDynamicServices};
-use objc2_foundation::{NSArray, NSString, NSURL};
+use objc2_foundation::NSString;
 
-use crate::app_delegate::{AppDelegateEventKind, AppDelegateOrigin, path_from_file_url};
+use crate::app_delegate::{AppDelegateEventKind, AppDelegateOrigin};
 use crate::macos_impl::off_the_window_thread;
-
-/// **The uniform type the `NSSendTypes` array asks Finder for**, and therefore
-/// the only class this method reads off the pasteboard.
-///
-/// Named here as the class rather than as the type string, because
-/// `-[NSPasteboard readObjectsForClasses:options:]` is asked in classes: it
-/// covers `public.file-url` *and* the legacy `NSFilenamesPboardType` a sender
-/// older than the pasteboard-item API might write, without this file having to
-/// know that the second one exists. The probe read the string off each item by
-/// hand; this is the same read with AppKit doing the conversion.
-fn the_classes_a_selection_arrives_as() -> Retained<NSArray<AnyClass>> {
-    NSArray::from_slice(&[NSURL::class()])
-}
 
 define_class!(
     // SAFETY:
@@ -175,35 +162,29 @@ impl ServicesProvider {
 /// refusals.
 ///
 /// `absoluteString` and not `-[NSURL path]`, for the reason
-/// [`path_from_file_url`] gives at length: a path is not required to be text,
+/// [`crate::path_from_file_url`] gives at length: a path is not required to be text,
 /// the percent escapes in the URL *are* the file system representation's own
 /// bytes, and an `NSString` round trip past them hands back a different file.
 fn paths_on(pasteboard: &NSPasteboard) -> Vec<std::path::PathBuf> {
-    // SAFETY: the class array is an `NSArray` of live class objects, and
-    // `NSURL` conforms to `NSPasteboardReading`; no options are passed, which
-    // is the `nil` the method documents as "every representation".
-    let read = unsafe {
-        pasteboard.readObjectsForClasses_options(&the_classes_a_selection_arrives_as(), None)
+    let urls = match crate::macos_file_urls::urls_on(pasteboard) {
+        Ok(urls) => urls,
+        Err(reason) => {
+            eprintln!("BT_MAC_APP openInFolio: {reason}");
+            return Vec::new();
+        }
     };
-    let Some(read) = read else {
-        return Vec::new();
-    };
+    // Services keep their existing partial-open rule and their own diagnostic channel; a clipboard
+    // candidate instead fails as a whole when one advertised file cannot be acquired.
     let mut paths = Vec::new();
-    for object in read.iter() {
-        let Some(url) = object.downcast_ref::<NSURL>() else {
-            // Asked for by class, so this is unreachable through AppKit; it is
-            // an answer rather than an `expect` because a panic inside an
-            // Objective-C frame unwinds into AppKit, which X-2 measured as a
-            // process that ends before any hook of this program's is consulted.
-            continue;
-        };
-        let Some(spelling) = url.absoluteString() else {
-            eprintln!("BT_MAC_APP a selected item has no absolute URL and was not opened");
-            continue;
-        };
-        match path_from_file_url(&spelling.to_string()) {
-            Ok(path) => paths.push(path),
-            Err(reason) => eprintln!("BT_MAC_APP openInFolio: {reason}"),
+    for url in urls {
+        match crate::clipboard::file_urls([url]) {
+            crate::clipboard::Candidate::Present(mut selected) => paths.append(&mut selected),
+            crate::clipboard::Candidate::Absent => {
+                eprintln!("BT_MAC_APP selected item is not a local file")
+            }
+            crate::clipboard::Candidate::Unreadable(reason) => {
+                eprintln!("BT_MAC_APP openInFolio: {reason}")
+            }
         }
     }
     paths

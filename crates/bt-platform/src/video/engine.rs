@@ -1565,7 +1565,8 @@ mod tests {
         assert_eq!(engines_outstanding(), before);
     }
 
-    /// **Hold the process still while an engine is counted.**
+    /// **Hold the process still while an engine is counted**, and hand the
+    /// holder a ledger nobody else is still moving.
     ///
     /// [`engines_outstanding`] is a fact about a *process*, and the tests in
     /// this module all run in one. Every test here that creates an engine takes
@@ -1574,13 +1575,27 @@ mod tests {
     /// exactly what it did on the first full-workspace run, where three arms
     /// that are each correct in isolation added up to a red.
     ///
+    /// **The lock alone is not enough, because it only stops the next test
+    /// starting an engine — not the last test's engine leaving.** A count is
+    /// taken off by the engine's own thread, and [`Engine::shutdown`] is allowed
+    /// to return before that thread has got there: a thread that has not said it
+    /// stopped within [`SHUTDOWN_BUDGET`] is let go rather than waited on, and
+    /// takes its count off some milliseconds later — under whoever holds this by
+    /// then. So the gate waits for the ledger to come back to quiet before it
+    /// hands over, and quiet is zero: between the tests that make engines, no
+    /// engine of this process is alive. A wait that runs out leaves its caller no
+    /// worse off than it would have been, since it reads its own baseline either
+    /// way.
+    ///
     /// It is not a fix to the invariant and must not be mistaken for one: the
     /// engines are perfectly safe to open concurrently and nothing in the
     /// product serialises them. What cannot be done concurrently is *reading a
     /// global counter and concluding something from the number*.
     fn ledger_gate() -> std::sync::MutexGuard<'static, ()> {
         static GATE: Mutex<()> = Mutex::new(());
-        GATE.lock().unwrap_or_else(|held| held.into_inner())
+        let gate = GATE.lock().unwrap_or_else(|held| held.into_inner());
+        engines_settling_to(0);
+        gate
     }
 
     /// **Wait for the ledger to reach `target`**, and answer where it actually
@@ -1593,7 +1608,15 @@ mod tests {
     /// property being pinned is that the number comes up and goes back down, not
     /// that it does so before the caller's next line.
     ///
-    /// Under the [`ledger_gate`], so nothing else is moving this number.
+    /// **Both edges, for the same reason.** "An engine is gone" also becomes
+    /// true on the engine's own thread, and an [`Engine::shutdown`] that ran out
+    /// of [`SHUTDOWN_BUDGET`] returns with the count still standing — which is
+    /// the truth it is meant to tell, and which cost this module a red on
+    /// GitHub's Windows machine on 2026-09-16.
+    ///
+    /// Under the [`ledger_gate`] — including from the gate itself, which is
+    /// where the previous test's engine is waited out — so nothing else is
+    /// moving this number.
     fn engines_settling_to(target: u64) -> u64 {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -1862,6 +1885,11 @@ mod tests {
     /// [`Engine::shutdown`], a drop at the end of a scope, or an unwind past
     /// one.
     ///
+    /// Both movements are read through [`engines_settling_to`], because the
+    /// engine's own thread is what makes them — the rise lands after the open
+    /// returns and the fall after the shutdown call does. That is the same fact
+    /// told at both ends, not a wait bolted onto a race; see there.
+    ///
     /// The third arm is the one that matters. A `Shutdown` that only ran on the
     /// explicit call would leak a decoder, a work queue and a Direct3D device
     /// for every pane that was closed by anything other than its own button —
@@ -1879,13 +1907,17 @@ mod tests {
         let mut explicit = Engine::open(&path).expect("an engine opens");
         assert_eq!(engines_settling_to(before + 1), before + 1);
         explicit.shutdown();
-        assert_eq!(engines_outstanding(), before, "an explicit shutdown counts");
+        assert_eq!(
+            engines_settling_to(before),
+            before,
+            "an explicit shutdown counts"
+        );
 
         {
             let _dropped = Engine::open(&path).expect("an engine opens");
             assert_eq!(engines_settling_to(before + 1), before + 1);
         }
-        assert_eq!(engines_outstanding(), before, "a drop counts");
+        assert_eq!(engines_settling_to(before), before, "a drop counts");
 
         // The third arm has to be sure an engine was actually standing when the
         // unwind began, or "the count came back" would be true of a panic that
@@ -1906,7 +1938,7 @@ mod tests {
             before + 1,
             "an engine was standing when the unwind started"
         );
-        assert_eq!(engines_outstanding(), before, "an unwind counts");
+        assert_eq!(engines_settling_to(before), before, "an unwind counts");
         assert!(engines_started() >= 3);
     }
 

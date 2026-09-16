@@ -255,8 +255,11 @@ fn math_tool_cluster_width_px(scale: f32) -> f32 {
 /// **The ground a display block keeps around its ink** — its left and right
 /// edges, in the pane body's own pixels.
 ///
-/// `ink` is `[the raster's visible left, its visible right]` and `pane` is `[the
-/// pane's left edge, its right edge]`.
+/// `ink` is `[the block's substance's visible left, its visible right]` and
+/// `pane` is `[the pane's left edge, its right edge]`. The substance is the
+/// raster for a picture and the longest row the pane laid the `$$…$$` source out
+/// on for a source face (owner's ruling 2026-09-16) — one rule, asked of
+/// whichever face the block is wearing.
 ///
 /// One whole cell column on the left; on the right that column *plus* the cells
 /// the two marks need, because since the owner's ruling of 2026-09-15 ② the
@@ -282,7 +285,8 @@ fn math_block_ground_bounds(metrics: CellMetrics, ink: [f32; 2], pane: [f32; 2])
 /// in that order, in the pane body's own pixels.
 ///
 /// `block` is the block's own rectangle — its ground, not its ink — and
-/// `ink_right` is where the formula's pixels stop.
+/// `ink_right` is where the block's substance stops: the formula's pixels on a
+/// picture, the longest source row's last cell on a source face.
 ///
 /// **Inside the block, at its right edge, centred on its midline** (owner's
 /// ruling 2026-09-15 ②). Until that ruling they stood *beside* the band, which
@@ -360,6 +364,75 @@ pub struct MathToolBoxes {
     pub source: [f32; 4],
     /// The copy mark's box, one [`MATH_TOOL_GAP_LOGICAL_PX`] to its right.
     pub copy: [f32; 4],
+}
+
+/// **Where one named band's rows stand**, in the pane body's own pixels — see
+/// [`WindowRenderer::math_band_face`].
+///
+/// A band has two faces and only ever wears one of them; this is what the other
+/// one needs to be drawn over the same region while the two cross-fade
+/// (`docs/DESIGN.md` §7.1.5p ⑪). Geometry and identity only, like
+/// [`MathToolBoxes`] beside it: *what* is written on those rows is the session's
+/// answer and *how solid* is a clock's, and a field for either here would be
+/// this crate holding an opinion about a gesture it never sees.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MathBandFace {
+    /// `[left, top, right, bottom]` of the band itself, ground included — the
+    /// region the other face is clipped to, and the same box the marks ride.
+    pub block: [f32; 4],
+    /// The top of the band's **first row**, before the pane's own clip: row `k`
+    /// stands at `rows_top + k * row_height`, which is exactly where the
+    /// transcript rows themselves land once the block stops swallowing them.
+    /// Above the pane's top edge for a band the reader has scrolled into.
+    pub rows_top: f32,
+    /// Column zero of this pane, which is where a transcript row begins — and
+    /// deliberately not the band's own left edge, which stands a whole cell
+    /// column further out (owner's ruling 2026-09-15 ⑨ i).
+    pub rows_left: f32,
+    /// The pane's own right edge, which is where a transcript row ends. A source row is an
+    /// ordinary row of this terminal and is not confined to the band's ground — the ground is as
+    /// wide as the *picture* needs, and the text that replaces it is as wide as the pane.
+    pub rows_right: f32,
+    /// One row's height.
+    pub row_height: f32,
+    /// The face this band is wearing on this picture.
+    pub display: MathBlockDisplay,
+}
+
+/// [`WindowRenderer::math_band_face`]'s arithmetic, free of the renderer for the
+/// reason [`math_block_geometry_px`] is.
+///
+/// **It does not ask for `toolbar_visible`**, which is the one place this parts
+/// company with [`math_tool_boxes_for`] above, and the difference is the point:
+/// the marks are a hover and belong to the pointer, while a block changing face
+/// is a gesture that has already happened and goes on happening if the hand
+/// moves away from it. Naming the band is still the whole of the lookup, by the
+/// identity `bt_term`'s own hover sweep keys on.
+fn math_band_face_for(
+    metrics: CellMetrics,
+    seat: SeatViewport,
+    frame: &ViewportFrame,
+    named: &MathBlockAnchor,
+) -> Option<MathBandFace> {
+    let placement = frame.math_blocks.iter().find(|placement| {
+        placement.artifact.kind == bt_viewport::RgbaArtifactKind::Math
+            && math_block_is_a_band(placement)
+            && placement.anchor.same_block(named)
+    })?;
+    let geometry = math_block_geometry_px(metrics, seat, frame, placement)?;
+    Some(MathBandFace {
+        block: geometry.block,
+        // The band's own top, taken from the placement rather than from the
+        // geometry: `MathBlockGeometry::block` is already cut to the pane, and a
+        // row list measured from a clipped top would start its first row wherever
+        // the pane's edge happens to be.
+        rows_top: metrics.padding_px + placement.top_subpixels as f32 / SUBPIXELS_PER_PX as f32,
+        rows_left: metrics.padding_px,
+        rows_right: (metrics.padding_px + frame.columns.get() as f32 * metrics.cell_width_px)
+            .min(seat.width as f32),
+        row_height: metrics.cell_height_px,
+        display: placement.display,
+    })
 }
 
 /// **The one placement a hovered anchor names, and its boxes** — see
@@ -440,6 +513,16 @@ struct MathBlockGeometry {
     /// actually become visible (owner's ruling 2026-09-15 ①). An inline
     /// composite keeps no region of its own: it stands in a line of prose, and
     /// its block *is* its ink.
+    ///
+    /// **A band wearing its source face keeps the same ground round a different
+    /// substance**: the rows themselves, the longest of them
+    /// ([`bt_viewport::MathBlockPlacement::source_width_cells`]) standing in for
+    /// the picture's ink. So the band hugs the text on it and the two faces read
+    /// as one block, which is the whole of the owner's ruling of 2026-09-16
+    /// (T-MATH-SOURCE-BAND-HUGS-TEXT; §7.1.5p ⑪ iii). The *rows* are still
+    /// ordinary rows of this terminal running to the pane's right edge
+    /// ([`MathBandFace::rows_right`]) — what stops at the text is the floor
+    /// under them.
     block: [f32; 4],
     /// **The formula's own pixels** — where the raster begins and ends.
     ///
@@ -486,18 +569,18 @@ fn math_block_geometry_px(
     };
     let clip_height = placement.clip_height_subpixels.max(1) as f32 / SUBPIXELS_PER_PX as f32;
     let scaled_width = if placement.display == MathBlockDisplay::Source {
-        // The longest source line, and nothing added to it. It carried `+ 4` from M1.9b, which was
-        // room for the two verbs drawn inside the box in that milestone; the room they need is
-        // stated once now, in `math_block_ground_bounds`' right inset, and adding it here as well
-        // would be a block reserving the same cells twice.
-        placement
-            .source
-            .lines()
-            .map(|line| line.chars().count())
-            .max()
-            .unwrap_or(0)
-            .max(1) as f32
-            * metrics.cell_width_px
+        // **The longest row this pane laid the source out on**, and nothing added to it. It carried
+        // `+ 4` from M1.9b, which was room for the two verbs drawn inside the box in that
+        // milestone; the room they need is stated once now, in `math_block_ground_bounds`' right
+        // inset, and adding it here as well would be a block reserving the same cells twice.
+        //
+        // **The rows and not `placement.source`** (owner's ruling 2026-09-16,
+        // T-MATH-SOURCE-BAND-HUGS-TEXT). That field is the block's pre-wrap original grid text,
+        // `$$` delimiters and all — neither the rows the pane cut nor anything drawn — so a block
+        // whose source wrapped was measured long and a block whose `$$` line was its longest was
+        // measured by a delimiter. `MathBlockPlacement::source_width_cells` is the rows themselves,
+        // counted in columns, which is what the ink of a source face actually is.
+        placement.source_width_cells.max(1) as f32 * metrics.cell_width_px
     } else {
         placement.artifact.width_px as f32 * placement.artifact.render_scale_milli as f32 / 1000.0
     };
@@ -544,6 +627,27 @@ fn math_block_geometry_px(
     // the whole band the projection reserved, which is the ink plus the whole cell rows of
     // breathing above and below it. An inline composite's region is its ink, so the two agree and
     // nothing about a line of prose changes.
+    //
+    // **A source face's band hugs its rows, by the same arithmetic** (owner's ruling 2026-09-16,
+    // T-MATH-SOURCE-BAND-HUGS-TEXT; §7.1.5p ⑨ i read against ⑪ iii). ⑨ i's ground is room a block
+    // keeps around its substance, measured from that substance; the only question a source face
+    // ever raised is *what its substance is*, and the answer is the rows — so there is one branch
+    // here for both faces and the two look like the same block, which is the whole of the ruling.
+    //
+    // Two wrong answers preceded it, and each was a picture the owner sent in. The first measured
+    // the substance as the longest line of `placement.source`, the block's pre-wrap original grid
+    // text, and seated the marks against a width nobody draws. The second (T-MATH-MARKS-IN-SOURCE-
+    // FACE) gave the source face the whole pane, on the grounds that a source row is an ordinary
+    // row of this terminal and runs to the pane's edge — which is true of the *rows*, and
+    // [`MathBandFace::rows_right`] still says so, but not of the floor under them: a band running
+    // the width of the pane behind four short rows of LaTeX is the "why is this block so wide" the
+    // owner asked. The rows are as wide as the rows are, and the band is what ⑨ i keeps around
+    // them.
+    //
+    // The left edge is the one place the two faces genuinely differ, and it is `ground_bounds`' own
+    // clamp rather than a rule of its own: a picture is indented off the pane edge and keeps a
+    // whole column left of its ink, while a source row *begins* at column zero and there is no
+    // column there to keep.
     let block = if math_block_is_a_band(placement) {
         let (ground_left, ground_right) = math_block_ground_bounds(
             metrics,
@@ -555,6 +659,9 @@ fn math_block_geometry_px(
         ink
     };
     let (eye, copy) = if placement.toolbar_visible {
+        // **What the marks must not stand on** — the block's substance, which is the raster's right
+        // edge for a picture and the longest row's for a source face. ⑨ ii's "centred in the
+        // reserve" is then the room between that edge and the block's own, on either face.
         let (source, copy) = math_tool_boxes_px(block, visible_right, metrics.scale_factor as f32);
         (Some(source), Some(copy))
     } else {
@@ -1539,6 +1646,33 @@ pub enum PresentOutcome {
     /// the first refusal; the retry then lands on the frame after it.
     PresentedWithoutText(PresentReceipt),
     Skipped,
+    /// The swapchain refused a back buffer **because the window is not on
+    /// screen** — covered, hidden or miniaturised (GitHub issue #5).
+    ///
+    /// The same skip as [`Self::Skipped`] in everything the renderer does: the
+    /// frame is not drawn, what it staged is flushed, and the picture is still
+    /// owed. It is a *different outcome* only in what the caller may conclude
+    /// from it, and the difference is the whole of the defect it is named for.
+    ///
+    /// `Skipped` means "not this instant, ask again" — the swapchain is what
+    /// changes between the two turns, so the ask is unconditional and right.
+    /// This one means "not until something changes", and nothing about a
+    /// repeated ask changes it: on macOS
+    /// (`wgpu-hal/src/metal/surface.rs`, `acquire_texture`) a window whose
+    /// `NSWindowOcclusionState` lacks `Visible` returns `Occluded` from *every*
+    /// acquire, for as long as it is off screen. Asked again unconditionally,
+    /// that is a closed loop with no wait in it — winit's macOS
+    /// `request_redraw` wakes the run loop rather than going through an AppKit
+    /// display cycle, so it spins at CPU speed and every turn of it stages
+    /// another frame's worth of uploads that no submit ever retires.
+    ///
+    /// What ends the wait is the same predicate that started it, read by the
+    /// other side: winit's `windowDidChangeOcclusionState:` tests the very same
+    /// `Visible` bit and delivers `WindowEvent::Occluded(false)`, which asks for
+    /// one redraw. Any ordinary invalidation — a keystroke, PTY output, a
+    /// timer, a focus change — does the same, so a window that never hears the
+    /// occlusion event is woken by whatever else it was going to be woken by.
+    SkippedNotVisible,
     Reconfigure,
 }
 
@@ -3465,7 +3599,17 @@ enum PrepareFailurePolicy {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SurfaceFailure {
+    /// No back buffer this instant, and the next instant may differ — wgpu's
+    /// `Timeout`, and the window that is between two devices.
     Unavailable,
+    /// No back buffer **because the window is not on screen**, which the next
+    /// instant will not differ about — wgpu's `Occluded`, which only the Metal
+    /// backend ever returns (GitHub issue #5).
+    ///
+    /// Split from [`Self::Unavailable`] because the two are absorbed the same
+    /// way and may be *re-asked* in opposite ways; see
+    /// [`PresentOutcome::SkippedNotVisible`] for the whole argument.
+    NotVisible,
     Outdated,
     Lost,
     Validation,
@@ -3474,6 +3618,9 @@ enum SurfaceFailure {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SurfaceFailurePolicy {
     Skip,
+    /// Skip this frame, and do not ask for another one until the window is
+    /// visible again.
+    SkipUntilVisible,
     Reconfigure,
     FatalValidation,
 }
@@ -3811,6 +3958,7 @@ fn present_outcome(text_complete: bool, receipt: PresentReceipt) -> PresentOutco
 fn surface_failure_policy(failure: SurfaceFailure) -> SurfaceFailurePolicy {
     match failure {
         SurfaceFailure::Unavailable => SurfaceFailurePolicy::Skip,
+        SurfaceFailure::NotVisible => SurfaceFailurePolicy::SkipUntilVisible,
         SurfaceFailure::Outdated | SurfaceFailure::Lost => SurfaceFailurePolicy::Reconfigure,
         SurfaceFailure::Validation => SurfaceFailurePolicy::FatalValidation,
     }
@@ -3833,7 +3981,8 @@ fn surface_failure_policy(failure: SurfaceFailure) -> SurfaceFailurePolicy {
 /// investigation from "the pump stopped and the swapchain has been fine all
 /// day". Relaxed on both sides — these are tallies, not a protocol, and no
 /// reader is deciding anything from the order two of them were written in.
-static SURFACE_FAILURES: [AtomicU64; 4] = [
+static SURFACE_FAILURES: [AtomicU64; 5] = [
+    AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -3845,6 +3994,15 @@ static SURFACE_FAILURES: [AtomicU64; 4] = [
 pub struct SurfaceFailureTally {
     /// No back buffer available this instant; the frame is skipped.
     pub unavailable: u64,
+    /// No back buffer because the window is not on screen; the frame is
+    /// skipped and not asked for again until it is (GitHub issue #5).
+    ///
+    /// Counted apart from [`Self::unavailable`] because the two are the same
+    /// absorption with opposite diagnoses: a run of `unavailable` is a
+    /// swapchain that keeps missing its moment, a run of `not_visible` is a
+    /// window somebody covered up. A report that cannot tell them apart cannot
+    /// tell the two hypotheses apart either.
+    pub not_visible: u64,
     /// The swapchain no longer matches the window; it is reconfigured.
     pub outdated: u64,
     /// The device dropped the surface; it is reconfigured.
@@ -3855,7 +4013,7 @@ pub struct SurfaceFailureTally {
 
 impl SurfaceFailureTally {
     /// Whether anything has failed at all, which is what lets a report say
-    /// "clean" in one word instead of printing four zeroes.
+    /// "clean" in one word instead of printing five zeroes.
     #[must_use]
     pub fn is_clean(self) -> bool {
         self == Self::default()
@@ -3865,9 +4023,30 @@ impl SurfaceFailureTally {
     #[must_use]
     pub fn total(self) -> u64 {
         self.unavailable
+            .saturating_add(self.not_visible)
             .saturating_add(self.outdated)
             .saturating_add(self.lost)
             .saturating_add(self.validation)
+    }
+}
+
+/// **One wording for this tally, wherever it is read out** — the hang
+/// reporter's run-counter footer and the decade line
+/// [`count_surface_failure`] writes into `diagnostics.log` are the same five
+/// numbers, and two spellings of them would be two things for a future reader
+/// to reconcile.
+impl std::fmt::Display for SurfaceFailureTally {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            out,
+            "unavailable {}, not visible {}, outdated {}, lost {}, validation {} (total {})",
+            self.unavailable,
+            self.not_visible,
+            self.outdated,
+            self.lost,
+            self.validation,
+            self.total()
+        )
     }
 }
 
@@ -3876,20 +4055,66 @@ impl SurfaceFailureTally {
 pub fn surface_failure_tally() -> SurfaceFailureTally {
     SurfaceFailureTally {
         unavailable: SURFACE_FAILURES[0].load(AtomicOrdering::Relaxed),
-        outdated: SURFACE_FAILURES[1].load(AtomicOrdering::Relaxed),
-        lost: SURFACE_FAILURES[2].load(AtomicOrdering::Relaxed),
-        validation: SURFACE_FAILURES[3].load(AtomicOrdering::Relaxed),
+        not_visible: SURFACE_FAILURES[1].load(AtomicOrdering::Relaxed),
+        outdated: SURFACE_FAILURES[2].load(AtomicOrdering::Relaxed),
+        lost: SURFACE_FAILURES[3].load(AtomicOrdering::Relaxed),
+        validation: SURFACE_FAILURES[4].load(AtomicOrdering::Relaxed),
     }
 }
 
+/// Whether `count` is 10, 100, 1000 … — the ladder the skip counters say
+/// themselves out loud on.
+///
+/// Exact equality and not "past the next decade", because the caller reaches
+/// every value exactly once (`fetch_add` returns the one before), so an equality
+/// fires once per decade however many threads are counting, and no state has to
+/// be kept to remember which decades have been said.
+fn a_decade_was_reached(count: u64) -> bool {
+    let mut decade = 10_u64;
+    while decade <= count {
+        if decade == count {
+            return true;
+        }
+        // 10^19 is the last decade a `u64` holds; there is no decade above it
+        // for `count` to be, so the ladder simply ends.
+        let Some(next) = decade.checked_mul(10) else {
+            return false;
+        };
+        decade = next;
+    }
+    false
+}
+
+/// Count one absorbed acquire failure, and — for the two that a window can sit
+/// in for minutes — say so once per decade.
+///
+/// **Per run, not per frame.** A line every time a swapchain refused a back
+/// buffer is the unusable terminal [`SURFACE_FAILURES`] exists to avoid; a line
+/// at the tenth, the hundredth and the thousandth is at most nineteen lines in
+/// the life of a process, and it is the line that would have turned GitHub
+/// issue #5 from a mystery into a reading. The other three failures are left
+/// silent: an ordinary resize walks through `Outdated` a few dozen times, so a
+/// decade of *those* says nothing a reader can act on.
 fn count_surface_failure(failure: SurfaceFailure) {
     let slot = match failure {
         SurfaceFailure::Unavailable => 0,
-        SurfaceFailure::Outdated => 1,
-        SurfaceFailure::Lost => 2,
-        SurfaceFailure::Validation => 3,
+        SurfaceFailure::NotVisible => 1,
+        SurfaceFailure::Outdated => 2,
+        SurfaceFailure::Lost => 3,
+        SurfaceFailure::Validation => 4,
     };
-    SURFACE_FAILURES[slot].fetch_add(1, AtomicOrdering::Relaxed);
+    let reached = SURFACE_FAILURES[slot].fetch_add(1, AtomicOrdering::Relaxed) + 1;
+    let why = match failure {
+        SurfaceFailure::NotVisible => "the window was not on screen",
+        SurfaceFailure::Unavailable => "no back buffer was available",
+        SurfaceFailure::Outdated | SurfaceFailure::Lost | SurfaceFailure::Validation => return,
+    };
+    if a_decade_was_reached(reached) {
+        eprintln!(
+            "Folio skipped {reached} frames because {why} — surface acquires: {}",
+            surface_failure_tally()
+        );
+    }
 }
 
 /// The glyphon state one Terminal seat needs to put text on the glass.
@@ -6514,10 +6739,11 @@ impl GpuContext {
                 // can count, and the count is the whole diagnosis.
                 eprintln!("{}", note_a_repack(&mut self.glyph_atlas_refits));
             }
-            // A refused frame on a packing that is already fresh, and the three
-            // ends that say nothing about text at all (a skipped or reconfigured
-            // swapchain, a frame that never composed): the trim every frame owes,
-            // and nothing else.
+            // A refused frame on a packing that is already fresh, and the four
+            // ends that say nothing about text at all (a swapchain skipped
+            // either way — this instant, or until the window is on screen again
+            // — a reconfigured one, a frame that never composed): the trim every
+            // frame owes, and nothing else.
             _ => self.atlas.trim(),
         }
     }
@@ -7206,6 +7432,22 @@ impl WindowRenderer {
         hovered: &MathBlockAnchor,
     ) -> Option<MathToolBoxes> {
         math_tool_boxes_for(self.metrics, seat, frame, hovered)
+    }
+
+    /// **Where the named band's rows stand on this picture** — see
+    /// [`MathBandFace`], and `math_band_face_for` for the whole of the
+    /// arithmetic.
+    ///
+    /// Cut to the band's own `seat` like everything else about a band (audit
+    /// 2026-09-15, RC-2), and answered for a band whether or not its marks are
+    /// up.
+    pub fn math_band_face(
+        &self,
+        seat: SeatViewport,
+        frame: &ViewportFrame,
+        named: &MathBlockAnchor,
+    ) -> Option<MathBandFace> {
+        math_band_face_for(self.metrics, seat, frame, named)
     }
 
     /// The pointer's half of [`Self::math_tool_boxes`], cut to the same `seat`
@@ -9687,6 +9929,10 @@ impl WindowRenderer {
                 continue;
             };
             drawn.insert(index);
+            // **How solid this picture is drawn**, which is `1` for every block that is not in the
+            // middle of changing face (§7.1.5p ⑪). The pipeline has carried a per-vertex alpha
+            // since the hover peek; what was missing was anybody to say anything but `1.0`.
+            let picture_opacity = f32::from(placement.picture_opacity_milli) / 1000.0;
             let scale = placement.artifact.render_scale_milli as f32 / 1000.0;
             let block_top = if placement.artifact.mode == MathMode::Inline {
                 pane_top
@@ -9749,7 +9995,7 @@ impl WindowRenderer {
                     uv_bottom,
                     self.seat.width,
                     self.seat.height,
-                    1.0,
+                    picture_opacity,
                 ));
                 draws.push(MathDraw {
                     tile,
@@ -10318,6 +10564,67 @@ impl WindowRenderer {
         Some((marker, hit))
     }
 
+    /// The one way a frame ends without a back buffer — and the one place that
+    /// pays what such a frame still owes.
+    ///
+    /// # No exit from a frame may leave its uploads staged (GitHub issue #5)
+    ///
+    /// The sibling of the rule `close_the_frame` states for the shared atlas,
+    /// pinned by `no_exit_from_a_frame_may_skip_the_atlas_trim`: **no exit from
+    /// a frame may skip what the frame owes the device.** The atlas debt is the
+    /// trim; this is the other one.
+    ///
+    /// By the time the acquire is asked, the whole frame has already been
+    /// staged — every glyphon prepare, every formula, icon, preview and video
+    /// raster — and each of those is a `Queue::write_buffer` or
+    /// `write_texture`, which in wgpu 30 allocates a real mapped GPU buffer
+    /// (`wgpu-core/src/resource.rs`, `StagingBuffer::new`) and parks it in the
+    /// queue's `PendingWrites::temp_resources` together with a blit recorded
+    /// into one command encoder that is left open
+    /// (`wgpu-core/src/device/queue.rs`, `PendingWrites::consume` and
+    /// `activate`). That pile is drained in exactly one place —
+    /// `PendingWrites::pre_submit` — and `pre_submit` is reached only from a
+    /// submit or a real present. `device.poll()` does not reach it.
+    ///
+    /// So a frame that returned here returned *above* the compose path's only
+    /// `queue.submit`, and everything it staged stayed staged. One skipped
+    /// frame is a few tens of kilobytes plus a page of wired memory per mapped
+    /// buffer; a window that skipped for seven minutes is a Metal device that
+    /// refuses the next allocation, which is the reported
+    /// `Folio lost the GPU device — Unknown: Out of memory`, and a single
+    /// command buffer holding minutes of copies for whoever finally submits it.
+    ///
+    /// `queue.submit` with an empty iterator is the drain, and it is the whole
+    /// drain: `Queue::submit` skips its command-buffer preparation when the
+    /// list is empty and then runs `submit_pending_submission` exactly as a
+    /// full submit does, which calls `pre_submit`, ends the open encoder,
+    /// submits it, and moves `temp_resources` into the submission that frees
+    /// them when the GPU retires it. When nothing was staged, `pre_submit` sees
+    /// `is_recording == false`, clears three empty maps and returns `None`, and
+    /// the cost is a submission index and one empty command buffer — cheap
+    /// enough to owe on every absorbed failure rather than guessing which ones
+    /// staged something.
+    ///
+    /// Unconditional for the same reason the counter above it is: a rule with an
+    /// exception is a rule somebody has to re-derive. The reconfigure path
+    /// staged just as much as the skip path did, and the fatal path is the last
+    /// chance this process has to hand the pile back.
+    ///
+    /// # Why here, and not beside the atlas trim
+    ///
+    /// [`Self::present_frame`] is the one place *outside* every exit a frame
+    /// has, which is what the atlas debt needed. This debt is narrower on
+    /// purpose. The exits that skip the submit are of two kinds: the absorbed
+    /// surface failures, which a window repeats for as long as it is off screen
+    /// and which is the whole defect; and the `?`s, every one of which is a
+    /// `RenderError` the caller answers once — by rebuilding the device or by
+    /// stopping — never in a loop, and the first of them is a device that is
+    /// already gone. Submitting on a device that has been lost is how a return
+    /// this process handles becomes a panic it does not, so the drain is owed
+    /// where the frame is *absorbed* and not where it fails. Everything
+    /// [`WindowRenderer::compose_frame`] reaches here has passed
+    /// `still_has_its_device` and has just staged a whole frame against that
+    /// device.
     fn handle_surface_failure(
         &mut self,
         gpu: &GpuContext,
@@ -10328,8 +10635,13 @@ impl WindowRenderer {
         // footer should say so. See [`SURFACE_FAILURES`] for why a silent
         // absorption still owes a number.
         count_surface_failure(failure);
+        // **Second, and unconditionally** — see this function's own note. The
+        // frame staged its uploads before it asked for a back buffer, and it is
+        // leaving without the submit that retires them.
+        gpu.queue.submit(std::iter::empty());
         match surface_failure_policy(failure) {
             SurfaceFailurePolicy::Skip => Ok(PresentOutcome::Skipped),
+            SurfaceFailurePolicy::SkipUntilVisible => Ok(PresentOutcome::SkippedNotVisible),
             SurfaceFailurePolicy::Reconfigure => {
                 self.configure_surface(gpu)?;
                 Ok(PresentOutcome::Reconfigure)
@@ -10392,8 +10704,19 @@ impl WindowRenderer {
                 wgpu::CurrentSurfaceTexture::Suboptimal(texture) => {
                     SurfaceAcquisition::Suboptimal(texture)
                 }
-                wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                wgpu::CurrentSurfaceTexture::Timeout => {
                     SurfaceAcquisition::Failed(SurfaceFailure::Unavailable)
+                }
+                // Only ever seen on macOS, where it is not a moment that passes
+                // but the steady state of a window somebody covered up:
+                // `wgpu-hal`'s Metal surface reads `NSWindowOcclusionState` and
+                // refuses every acquire while `Visible` is missing from it.
+                // Asking again is what it costs a device (GitHub issue #5) — so
+                // this one is answered with a skip that does not re-ask, and the
+                // window waits for the `Occluded(false)` that is the same bit
+                // read from the other side.
+                wgpu::CurrentSurfaceTexture::Occluded => {
+                    SurfaceAcquisition::Failed(SurfaceFailure::NotVisible)
                 }
                 wgpu::CurrentSurfaceTexture::Outdated => {
                     SurfaceAcquisition::Failed(SurfaceFailure::Outdated)
@@ -16358,6 +16681,7 @@ mod tests {
             content_offset_subpixels: 0,
             clip_height_subpixels,
             display: MathBlockDisplay::Rendered,
+            source_width_cells: 0,
             horizontal_overflow: bt_viewport::BlockOverflowOwner::Block,
             horizontal_scroll_px: 0,
             vertical_scroll_px: 0,
@@ -16368,6 +16692,7 @@ mod tests {
             frozen_prefix_rows: 0,
             clipped_top_rows: 0,
             clipped_bottom_rows: 0,
+            picture_opacity_milli: 1000,
             selection_spans: Vec::new(),
         }
     }
@@ -18693,6 +19018,120 @@ mod tests {
         }
     }
 
+    /// The same band after a press on `‹›`: three rows of `$$…$$` where the
+    /// picture stood, lit.
+    ///
+    /// Its `source` is the untouched grid text the detector kept and its
+    /// `source_width_cells` is what this pane laid that text out on, and the two
+    /// are deliberately different numbers: `\text{中文混排}` is **eleven
+    /// clusters and fifteen columns**, so a band measured off the string stops
+    /// four cells short of the text standing on it. Both are far narrower than
+    /// the pane's thirty, which is the third number the pin below has to keep
+    /// apart from the other two.
+    fn seat_test_source_face(first_row: u32, rows: u32) -> MathBlockPlacement {
+        let mut placement = seat_test_band(first_row, rows, true);
+        placement.display = MathBlockDisplay::Source;
+        placement.source = "$$\n\\text{中文混排}\n$$".to_owned();
+        placement.source_width_cells = 15;
+        placement
+    }
+
+    /// PIN (owner's ruling 2026-09-16, T-MATH-SOURCE-BAND-HUGS-TEXT, revising
+    /// the owner's report of 2026-09-15, T-MATH-MARKS-IN-SOURCE-FACE; §7.1.5p ⑨
+    /// ii read against ⑪ iii): **a block wearing its source face is a band
+    /// hugging its rows, and its two marks stand inside that band at its right
+    /// edge, on its midline.**
+    ///
+    /// Three answers have been given to *how wide is a source face*, and the
+    /// owner sent in a picture of each of the first two. It was the longest line
+    /// of `placement.source` — the block's **pre-wrap original grid text**,
+    /// delimiters and all, which is neither a picture nor the rows the pane lays
+    /// out — and the marks stood short of the block by whatever the difference
+    /// happened to be. Then it was the whole pane, on ⑪ iii's true statement
+    /// that a source *row* runs to the pane's own right edge: the marks were
+    /// seated right at last, and the floor under three short rows of LaTeX ran
+    /// the width of the window, which is the *why is this block so wide* this
+    /// ruling answers. It is now the rows themselves — `source_width_cells`, the
+    /// longest of them as this pane cut them — with ⑨ i's own ground round it,
+    /// so a block's two faces are one region measured one way.
+    ///
+    /// MUTATIONS: measure the substance from `placement.source` again and ① and
+    /// ② fall by four cells, which is what the wide characters in the fixture
+    /// are for. Give a source face the pane and ① and ② fall. Hand
+    /// `math_tool_boxes_px` the band's own right edge instead of the rows' and
+    /// ③ falls — the pair is jammed into the corner with the air all on one
+    /// side. Hang it from the band's top and ④ falls.
+    #[test]
+    fn a_source_faces_marks_stand_in_the_rows_own_band_at_its_right_edge() {
+        let metrics = fade_metrics();
+        let seat = seat_test_seat();
+        let mut frame = wash_frame(30, 8);
+        let placement = seat_test_source_face(1, 3);
+        let anchor = placement.anchor.clone();
+        frame.math_blocks = vec![placement];
+        let geometry = math_block_geometry_px(metrics, seat, &frame, &frame.math_blocks[0])
+            .expect("a source face on screen has a box");
+        let boxes = seat_test_boxes(&frame, &anchor).expect("a lit source face has its marks");
+
+        // ① The substance is the fifteen columns the rows really take, and the
+        //    region is ⑨ i's ground round it: one whole cell column on the left,
+        //    which the pane edge takes straight back because a source row begins
+        //    at column zero, and on the right that column plus the four the two
+        //    marks need. The same rectangle the ground is drawn under and the
+        //    same one `math_band_face` answers with.
+        let ink_right = metrics.padding_px + 15.0 * metrics.cell_width_px;
+        assert_eq!(geometry.ink, [metrics.padding_px, 28.0, ink_right, 88.0]);
+        assert_eq!(geometry.block[0], metrics.padding_px);
+        assert_eq!(geometry.block[2], ink_right + 5.0 * metrics.cell_width_px);
+        assert_eq!([geometry.block[1], geometry.block[3]], [28.0, 88.0]);
+        assert_eq!(boxes.block, geometry.block);
+        assert!(
+            math_block_ground_is_drawn(&frame.math_blocks[0], false),
+            "a source face draws its floor under exactly that band"
+        );
+
+        // ② And it is neither of the two answers it replaces: not the pane, and
+        //    not the string, whose longest line is eleven clusters where the row
+        //    it is drawn on is fifteen columns.
+        let pane_right = metrics.padding_px + 30.0 * metrics.cell_width_px;
+        assert!(
+            geometry.block[2] < pane_right,
+            "the band still runs the width of the pane: {:?}",
+            geometry.block
+        );
+        assert!(
+            geometry.ink[2] > metrics.padding_px + 11.0 * metrics.cell_width_px,
+            "{:?} is measured off the source string's clusters, not off its rows",
+            geometry.ink
+        );
+
+        // ③ Centred in the reserve at the band's right edge — ⑨ ii's own seat,
+        //    the one the typeset face's marks take, with the same air either side
+        //    of the pair and none of it over the text.
+        assert!(
+            boxes.source[0] > geometry.ink[2],
+            "{:?} is drawn over the source text rather than beside it",
+            boxes.source
+        );
+        assert_eq!(
+            boxes.source[0] - geometry.ink[2],
+            geometry.block[2] - boxes.copy[2]
+        );
+        assert_eq!(boxes.copy[0] - boxes.source[2], MATH_TOOL_GAP_LOGICAL_PX);
+
+        // ④ On the band's midline, and inside it top and bottom.
+        let midline = (geometry.block[1] + geometry.block[3]) / 2.0;
+        for mark in [boxes.source, boxes.copy] {
+            assert_eq!(
+                (mark[1] + mark[3]) / 2.0,
+                midline,
+                "{mark:?} left the midline"
+            );
+            assert!(mark[1] >= geometry.block[1] && mark[3] <= geometry.block[3]);
+            assert_eq!(mark[3] - mark[1], MATH_TOOL_BUTTON_LOGICAL_PX);
+        }
+    }
+
     /// PIN (owner's report 2026-09-14, T-MATH-TOOLS-SEAT): **the marks move with
     /// the pointer, and they move to the block it moved to.**
     ///
@@ -18791,6 +19230,7 @@ mod tests {
         let source = include_str!("lib.rs");
         for opening in [
             "pub fn math_tool_boxes(",
+            "pub fn math_band_face(",
             "pub fn math_hit_test(",
             "fn math_failure_geometry(",
         ] {
@@ -21506,6 +21946,74 @@ mod tests {
         assert!(
             !body.contains("return"),
             "present_frame must have no early return above its trim: {body}"
+        );
+    }
+
+    fn handle_surface_failure_source() -> String {
+        let source = production_source();
+        let start = source
+            .find("fnhandle_surface_failure(&mutself,gpu:&GpuContext,")
+            .expect("handle_surface_failure");
+        let end = source[start..]
+            .find("fnconfigure_surface_if_needed(")
+            .expect("configure_surface_if_needed follows handle_surface_failure");
+        source[start..start + end].to_owned()
+    }
+
+    /// PIN (GitHub issue #5) — **no exit from a frame may leave its uploads
+    /// staged.**
+    ///
+    /// The sibling of `no_exit_from_a_frame_may_skip_the_atlas_trim`, and the
+    /// same sentence about a different debt: a frame that gives up owes the
+    /// device what it already handed it.
+    ///
+    /// Everything a frame draws is staged before it asks for a back buffer —
+    /// every glyphon prepare, every formula, icon, preview and video raster —
+    /// and in wgpu 30 each of those parks a real mapped GPU buffer plus a blit
+    /// in the queue's `PendingWrites`, which only a submit or a real present
+    /// drains (`PendingWrites::pre_submit`; `device.poll()` does not reach it).
+    /// `compose_frame` returns into this function *above* its only
+    /// `queue.submit`, so before this drain existed every absorbed acquire left
+    /// its whole frame staged. On macOS an off-screen window is refused an
+    /// acquire on every turn, so the reporter's session piled up seven minutes
+    /// of copies and mapped buffers until the Metal device refused an
+    /// allocation: `Folio lost the GPU device — Unknown: Out of memory`.
+    ///
+    /// The drain has to stand *above* the policy, because two of the four
+    /// policies leave this function immediately and a third can fail on its way
+    /// out.
+    ///
+    /// Mutation: move the submit into one arm of the policy match, or put
+    /// anything that can return above it.
+    #[test]
+    fn no_exit_from_a_frame_may_leave_its_uploads_staged() {
+        let body = handle_surface_failure_source();
+        let drained = body
+            .find("gpu.queue.submit(std::iter::empty());")
+            .unwrap_or_else(|| panic!("a frame that gives up must flush what it staged: {body}"));
+        let counted = body
+            .find("count_surface_failure(failure);")
+            .expect("an absorbed failure still owes a number");
+        assert!(
+            counted < drained,
+            "the number is owed first, so that a drain that panics is still \
+             counted: {body}"
+        );
+        let decided = body
+            .find("matchsurface_failure_policy(failure){")
+            .expect("the policy decides what this failure costs the frame");
+        assert!(
+            drained < decided,
+            "the drain must be paid before any policy can leave: {body}"
+        );
+        let above = &body[..drained];
+        assert!(
+            !above.contains('?'),
+            "no fallible call may stand above the drain: {body}"
+        );
+        assert!(
+            !above.contains("return"),
+            "no early return may stand above the drain: {body}"
         );
     }
 
@@ -25299,8 +25807,87 @@ mod tests {
         );
     }
 
+    /// RED (GitHub issue #5) — **"no back buffer this instant" and "no back
+    /// buffer while nobody can see this window" are two failures, because they
+    /// are re-asked in opposite ways.**
+    ///
+    /// They were one, and the one they were was the unconditional re-ask, which
+    /// is right for a swapchain that keeps missing its moment and is a spin
+    /// against a window somebody covered up: on macOS every acquire reads
+    /// `NSWindowOcclusionState` and refuses for as long as `Visible` is missing
+    /// from it, so the answer to the second ask is the answer to the first,
+    /// forever. Both still skip the frame and both still drain what the frame
+    /// staged; only the outcome the caller reads differs.
+    ///
+    /// Mutation: map `Occluded` back onto `Unavailable` and this says so.
+    #[test]
+    fn a_window_that_is_off_screen_is_skipped_without_being_re_asked() {
+        assert_eq!(
+            surface_failure_policy(SurfaceFailure::Unavailable),
+            SurfaceFailurePolicy::Skip
+        );
+        assert_eq!(
+            surface_failure_policy(SurfaceFailure::NotVisible),
+            SurfaceFailurePolicy::SkipUntilVisible
+        );
+        assert_ne!(
+            surface_failure_policy(SurfaceFailure::NotVisible),
+            surface_failure_policy(SurfaceFailure::Unavailable),
+            "the whole of the fix is that these two are not the same answer"
+        );
+        // And the acquire is what tells them apart: `Occluded` is the only
+        // reading that means the window itself, and only the Metal backend ever
+        // returns it.
+        let source = production_source();
+        assert!(
+            source.contains(concat!(
+                "wgpu::CurrentSurfaceTexture::Occluded=>{SurfaceAcquisition::Failed(",
+                "SurfaceFailure::NotVisible)}"
+            )),
+            "an occluded acquire is the one that must not be re-asked"
+        );
+        assert!(
+            source.contains(concat!(
+                "wgpu::CurrentSurfaceTexture::Timeout=>{SurfaceAcquisition::Failed(",
+                "SurfaceFailure::Unavailable)}"
+            )),
+            "and a timeout keeps the unconditional ask it always had"
+        );
+    }
+
+    /// PIN (GitHub issue #5) — **the ladder a skip counter says itself out loud
+    /// on is the decades, and only the decades.**
+    ///
+    /// A line per skipped frame is the unusable terminal the tally exists to
+    /// avoid; a line at the tenth, the hundredth and the thousandth is at most
+    /// nineteen lines in the life of a process and is the line that turns a
+    /// report of this shape into a reading. Exact equality is what makes it fire
+    /// once per decade without keeping any state: the caller reaches every value
+    /// exactly once.
+    #[test]
+    fn a_skip_counter_speaks_once_per_decade() {
+        assert!(!super::a_decade_was_reached(0));
+        assert!(!super::a_decade_was_reached(1));
+        assert!(!super::a_decade_was_reached(9));
+        assert!(super::a_decade_was_reached(10));
+        assert!(!super::a_decade_was_reached(11));
+        assert!(!super::a_decade_was_reached(99));
+        assert!(super::a_decade_was_reached(100));
+        assert!(super::a_decade_was_reached(1_000));
+        assert!(super::a_decade_was_reached(1_000_000));
+        assert!(super::a_decade_was_reached(10_000_000_000_000_000_000));
+        // Above the last decade a `u64` holds the ladder ends rather than
+        // wrapping into a value it would say the wrong thing about.
+        assert!(!super::a_decade_was_reached(u64::MAX));
+        // Exactly one line over a whole spin, not one per frame.
+        let spoken = (1..=100_000_u64)
+            .filter(|count| super::a_decade_was_reached(*count))
+            .count();
+        assert_eq!(spoken, 5, "10, 100, 1000, 10 000, 100 000 and nothing else");
+    }
+
     /// PIN (hang reporter, 2026-08-25) — **every way of failing to get a back
-    /// buffer leaves a number behind, including the three that are absorbed in
+    /// buffer leaves a number behind, including the four that are absorbed in
     /// silence.**
     ///
     /// The tally is process-global and this test runs beside others, so it is
@@ -25311,6 +25898,7 @@ mod tests {
         let before = super::surface_failure_tally();
         for failure in [
             SurfaceFailure::Unavailable,
+            SurfaceFailure::NotVisible,
             SurfaceFailure::Outdated,
             SurfaceFailure::Outdated,
             SurfaceFailure::Lost,
@@ -25320,6 +25908,12 @@ mod tests {
         }
         let after = super::surface_failure_tally();
         assert_eq!(after.unavailable - before.unavailable, 1);
+        assert_eq!(
+            after.not_visible - before.not_visible,
+            1,
+            "a window that was covered up is its own diagnosis, not a swapchain \
+             that missed its moment"
+        );
         assert_eq!(
             after.outdated - before.outdated,
             2,
@@ -25331,7 +25925,10 @@ mod tests {
             1,
             "the fatal one is counted before the policy decides it is fatal"
         );
-        assert_eq!(after.total() - before.total(), 5);
+        assert_eq!(after.total() - before.total(), 6);
+        // The tally spells itself, once, for the hang report's footer and for
+        // the decade lines alike.
+        assert!(after.to_string().contains("not visible"));
         assert!(
             !after.is_clean(),
             "a run that has absorbed anything is not a clean run"

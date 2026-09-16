@@ -225,13 +225,21 @@ impl PreviewWatch {
     ///
     /// Answers whether the set changed, which is only of interest to a
     /// diagnostics line.
+    ///
+    /// **The proxy is borrowed here and cloned only where a watch is actually
+    /// opened**, on [`crate::git_watch::GitWatch::sync`]'s reason and with its
+    /// weight: a clone of an `EventLoopProxy` is an `Arc` bump on Windows and,
+    /// on macOS, a new run loop source added to the main run loop and a
+    /// **wake-up** of it. This is asked on every turn, so a clone taken at the
+    /// top of it would schedule the next turn and the turn after that, for ever,
+    /// over a window nobody is looking at. The clone belongs in [`subscribe`],
+    /// once per folder a subscription is opened on, and nowhere on this path.
     pub fn sync(&mut self, wanted: &BTreeSet<PathBuf>, proxy: &EventLoopProxy<AppEvent>) -> bool {
         let news = Arc::clone(&self.news);
         let listening_for = Arc::clone(&self.listening_for);
-        let proxy = proxy.clone();
         let changed = self.sync_with(
             wanted,
-            move |directory| subscribe(&news, &listening_for, &proxy, directory),
+            |directory| subscribe(&news, &listening_for, proxy, directory),
             Stamp::of,
         );
         if changed {
@@ -472,6 +480,9 @@ impl PreviewWatch {
 /// A free function and not a method for `git_watch::subscribe`'s reason: it is
 /// called from inside a closure `sync_with` holds while it holds `self` mutably,
 /// and what it needs is the mailbox and the proxy rather than the registry.
+///
+/// **And it is the only place in this file the proxy is cloned** — once per
+/// folder a watch is opened on, for the reason [`PreviewWatch::sync`] states.
 fn subscribe(
     news: &Arc<Mutex<BTreeMap<PathBuf, Instant>>>,
     listening_for: &Arc<Mutex<BTreeMap<PathBuf, BTreeSet<String>>>>,
@@ -1035,5 +1046,50 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(watch.deadline(), None);
+    }
+
+    /// PIN (rule 1, ticket T-PROXY-CLONE-PER-TURN) — **a folder is subscribed
+    /// to once, however many turns go by over the same set of files.**
+    ///
+    /// The half of a macOS defect a test without an event loop can hold. `sync`
+    /// is walked on every turn of the loop, and the proxy the watcher threads
+    /// wake it with is cloned inside `open` — in [`subscribe`] — because on that
+    /// platform a clone is not an `Arc` bump: it is a new run loop source, added
+    /// to the main run loop, and a wake-up of the loop. One taken per turn
+    /// therefore schedules the turn that takes the next one, and an idle window
+    /// holds a processor core at full tilt for as long as it stays open.
+    ///
+    /// So what is asserted here is the rule that keeps the clone where it
+    /// belongs, and it is a rule this module wanted anyway: `open` runs once per
+    /// new directory and not once per asking. The two files share a folder, so
+    /// the first turn opens one subscription and the two after it open none.
+    ///
+    /// MUTATIONS: call `open` for every wanted path rather than every new one
+    /// and the first assertion goes; drop the `contains_key` skip in
+    /// [`PreviewWatch::sync_with`] and the repeated turns each open a folder
+    /// again — which is exactly the shape the defect had.
+    #[test]
+    fn a_folder_is_subscribed_to_once_however_many_turns_go_by() {
+        let mut watch = PreviewWatch::default();
+        let wanted = BTreeSet::from([file("one.md"), file("two.md")]);
+        let mut opened: Vec<PathBuf> = Vec::new();
+
+        for _ in 0..3 {
+            watch.sync_with(
+                &wanted,
+                |directory| {
+                    opened.push(directory.to_path_buf());
+                    None
+                },
+                |_| None,
+            );
+        }
+
+        assert_eq!(
+            opened,
+            vec![PathBuf::from(r"D:\notes")],
+            "one folder holds both files, and the two turns after the first open \
+             nothing at all"
+        );
     }
 }

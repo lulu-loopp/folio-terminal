@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     error::Error,
     fmt::{self, Write as _},
     fs::OpenOptions,
@@ -187,21 +187,6 @@ impl Default for MathLayoutOptions {
             restore_stripped_environment_newlines: true,
             reject_claude_code_jump_chip_overlay: true,
             detect_image_paths: false,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct MathSourcePreferenceKey {
-    original_source: String,
-    mode: MathMode,
-}
-
-impl MathSourcePreferenceKey {
-    fn from_span(span: &MathSpan) -> Self {
-        Self {
-            original_source: span.original_source.clone(),
-            mode: span.mode,
         }
     }
 }
@@ -842,6 +827,10 @@ struct PendingLiveArtifactHandoff {
     candidate_staging: StagingId,
     candidate_start: Option<TranscriptId>,
     expected_frozen_lines: u64,
+    /// The face the live occurrence is wearing, re-read at every capture — the last capture is
+    /// the one that freezes its final row, so there is no frame on which the reader could turn the
+    /// block over after this was last refreshed.
+    show_source: bool,
     /// Proven source rows captured from the top of this still-live occurrence, in source order.
     /// These staging ids are populated before the terminal grid shifts; as they finalize, their
     /// transcript ids become the live record's frozen prefix so projection can bridge and suppress
@@ -1138,6 +1127,46 @@ pub enum HostScreen {
     Untold,
 }
 
+/// **Both ends of one block's change of face** — see [`DualPlaneSession::math_toggle_faces`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MathToggleFaces {
+    /// The band height the typeset face stands at: the picture's own rows plus the breathing the
+    /// pane can afford it (owner's ruling 2026-09-15 ⑨ i).
+    pub rendered_height_subpixels: i64,
+    /// The rows the `$$…$$` source stands on, and what they take together.
+    pub source: bt_viewport::MathSourceFace,
+    /// Which face the block is wearing **right now** — the decoration record's own `show_source`,
+    /// which is the field [`DualPlaneSession::toggle_math_source`] flips and therefore the only
+    /// authority on the question. A caller reads it to know which way a press is going.
+    pub showing_source: bool,
+}
+
+impl MathToggleFaces {
+    /// `[the typeset face's band height, the source rows' height]`, in subpixels — the two ends of
+    /// the journey, in the order every reader of this pair takes them.
+    #[must_use]
+    pub fn heights(&self) -> [i64; 2] {
+        [self.rendered_height_subpixels, self.source.height_subpixels]
+    }
+}
+
+/// **A block presented as neither of its faces, because it is between them** — see
+/// [`DualPlaneSession::set_math_toggle_presentation`] and `docs/DESIGN.md` §7.1.5p ⑪.
+///
+/// Presentation and not document: everything here is spent on the *frame*, and the session's own
+/// answer to "which rows does this block swallow" is untouched for the whole of the span.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MathTogglePresentation {
+    /// The block, by the identity every other reader of a band keys on
+    /// ([`MathBlockAnchor::same_block`]).
+    pub anchor: MathBlockAnchor,
+    /// The height the band is presented at this frame, between the two [`MathToggleFaces`] name.
+    pub height_subpixels: i64,
+    /// How solid the picture is drawn, in thousandths — `1000` at the typeset face and `0` at the
+    /// source, with the source text drawn over the same band at what is left.
+    pub picture_opacity_milli: u16,
+}
+
 /// Per-session actor core. It is the serialized owner required by DESIGN.md §1.3 and composes
 /// terminal facts with lifecycle, transcript, detection, scheduling, and viewport policy.
 pub struct DualPlaneSession {
@@ -1176,6 +1205,9 @@ pub struct DualPlaneSession {
     cell_width_subpixels: NonZeroI64,
     ascii_baseline_subpixels: Option<NonZeroI64>,
     math_layout_options: MathLayoutOptions,
+    /// **One block changing face, while it is changing** — see [`MathTogglePresentation`] and
+    /// `docs/DESIGN.md` §7.1.5p ⑪. `None` at rest, which is every session almost all of the time.
+    math_toggle: Option<MathTogglePresentation>,
     live_screen: ScreenId,
     cursor_logical_line_memory: Option<CursorLogicalLineMemory>,
     shell_phases: BTreeMap<ScreenId, ShellIntegrationPhase>,
@@ -1399,10 +1431,6 @@ pub struct DualPlaneSession {
     /// prevents an older equal-source formula elsewhere in history from spuriously releasing hold.
     primary_reprint_history_floor: Option<PrimaryReprintHistoryFloor>,
     alternate_content_end_row: Option<u32>,
-    /// User presentation choices are content state, not decoration-instance state. Entries are
-    /// created only by an explicit toggle and live for the session, so alternate-screen repaint,
-    /// redetection, grid-generation changes, and layout changes cannot reset the choice.
-    math_source_preferences: HashMap<MathSourcePreferenceKey, bool>,
     pending_live_handoffs: Vec<PendingLiveArtifactHandoff>,
     frozen_detection_context: DetectionContext,
     frozen_detection_contexts: BTreeMap<TranscriptId, DetectionContext>,
@@ -1673,6 +1701,7 @@ impl DualPlaneSession {
             cell_width_subpixels: NonZeroI64::new(9 * SUBPIXELS_PER_PX).unwrap(),
             ascii_baseline_subpixels: None,
             math_layout_options: MathLayoutOptions::default(),
+            math_toggle: None,
             live_screen: ScreenId::Primary,
             cursor_logical_line_memory: None,
             shell_phases: BTreeMap::new(),
@@ -1730,7 +1759,6 @@ impl DualPlaneSession {
             primary_reprint_hold_occurrences: BTreeMap::new(),
             primary_reprint_history_floor: None,
             alternate_content_end_row: None,
-            math_source_preferences: HashMap::new(),
             pending_live_handoffs: Vec::new(),
             frozen_detection_context: DetectionContext::default(),
             frozen_detection_contexts: BTreeMap::new(),
@@ -7166,18 +7194,21 @@ impl DualPlaneSession {
             }
             return true;
         }
-        let preference_key = MathSourcePreferenceKey::from_span(&task.span);
-        let show_source = self
-            .math_source_preferences
-            .get(&preference_key)
-            .copied()
-            .unwrap_or(false);
+        // Instance state, carried across a re-detection of the block that is already standing on
+        // this row: the same rows, the same source, the same mode is the same occurrence, and the
+        // face it is wearing belongs to it exactly as its hover and its scroll offsets do. A block
+        // that does not find itself here is a new occurrence and starts typeset — looking at a
+        // formula's source is an action on one block, not a setting that follows the text.
         let remembered = self
             .live_decorations
             .get(&task.start.row)
-            .filter(|record| MathSourcePreferenceKey::from_span(&record.span) == preference_key)
+            .filter(|record| {
+                record.span.original_source == task.span.original_source
+                    && record.span.mode == task.span.mode
+            })
             .map(|record| {
                 (
+                    record.show_source,
                     record.hovered,
                     record.horizontal_scroll_px,
                     record.vertical_scroll_px,
@@ -7185,8 +7216,8 @@ impl DualPlaneSession {
             });
         self.live_decorations
             .retain(|_, record| record.end.row < task.start.row || record.start.row > task.end.row);
-        let (hovered, horizontal_scroll_px, vertical_scroll_px) =
-            remembered.unwrap_or((false, 0, 0));
+        let (show_source, hovered, horizontal_scroll_px, vertical_scroll_px) =
+            remembered.unwrap_or((false, false, 0, 0));
         let occurrence_id = LiveMathOccurrenceId(self.next_live_occurrence_id);
         let Some(identity) = proven_live_occurrence(&task, occurrence_id) else {
             return false;
@@ -7316,12 +7347,6 @@ impl DualPlaneSession {
             candidate.decoration = DecorationLifecycle::None;
             candidate.artifact = None;
         }
-        let preference_key = MathSourcePreferenceKey::from_span(&task.span);
-        let show_source = self
-            .math_source_preferences
-            .get(&preference_key)
-            .copied()
-            .unwrap_or(false);
         let Some(record) = self.decorations.get_mut(&task.transcript_id) else {
             return false;
         };
@@ -7359,9 +7384,6 @@ impl DualPlaneSession {
                 record.fail(&resolved_task, failure_reason)
             }
         };
-        if applied {
-            record.show_source = show_source;
-        }
         // A resolved multi-line block owns its interior rows as body. A structural delimiter inside
         // it (e.g. the `\begin{aligned}` of a `$$…\begin{aligned}…\end{aligned}…$$` block) is never a
         // sub-block; suppress any stale standalone render left on one — which the certified-frontier
@@ -7895,8 +7917,123 @@ impl DualPlaneSession {
         }
     }
 
+    /// **The two heights one display block's faces stand at, and what the other face says**
+    /// (`docs/DESIGN.md` §7.1.5p ⑪).
+    ///
+    /// Both ends of the change, answered together and from the same picture of the session, because
+    /// they are the two ends of one journey: the band's own height as the projection would give it
+    /// for the typeset face, and the rows the `$$…$$` source stands on as this pane would lay them
+    /// out. Answered whichever face the block is wearing at the moment of the question — the change
+    /// runs in both directions and a caller reversing one mid-flight asks again.
+    ///
+    /// **History blocks only, and that is a fact about the other plane rather than a shortcut**
+    /// (§7.1.5p ⑪). A live block is measured against a visible-text floor
+    /// (`live_block_box_limit_subpixels`) which `bt_viewport::sync_live_math_artifacts`
+    /// applies to the *presentation box*: a block presented taller than its own face while it grew
+    /// could be refused by that floor half-way through, and a block that vanishes mid-fade is worse
+    /// than one that changes in a single frame. A history band has no such ceiling, which is why
+    /// this one can travel.
+    #[must_use]
+    pub fn math_toggle_faces(
+        &self,
+        projection: &ViewportProjection,
+        anchor: &MathBlockAnchor,
+    ) -> Option<MathToggleFaces> {
+        let MathBlockAnchor::History { start, end, .. } = anchor else {
+            return None;
+        };
+        let record = self
+            .decorations
+            .get(start)
+            .filter(|record| record.block_end == Some(*end))?;
+        let artifact = projected_frozen_artifact(
+            record,
+            self.math_band(),
+            self.math_vertical_padding_subpixels(),
+            self.cell_height_subpixels.get(),
+        )?;
+        // An inline composite has no second face to travel to: it stands in a line of prose, it
+        // carries no marks, and there is no `‹›` on it to press (§7.1.5p ⑨ iii).
+        if artifact.mode != MathMode::Display {
+            return None;
+        }
+        Some(MathToggleFaces {
+            rendered_height_subpixels: artifact.height_subpixels,
+            source: projection.math_source_face(&self.document, *start, *end),
+            showing_source: record.show_source,
+        })
+    }
+
+    /// **[`Self::math_toggle_faces`]' two heights, without the other face's rows**
+    /// — `[the typeset face's band height, the source rows' height]`, the pair
+    /// [`MathToggleFaces::heights`] answers with.
+    ///
+    /// The same block, the same two ends and the same refusals; what it does not
+    /// do is lay the `$$…$$` rows out. §7.1.5p ⑪ iv re-reads the far end on
+    /// **every turn** of the loop, and a turn is not an animation frame — a
+    /// talkative shell has many of them inside one frame's worth of the ninety
+    /// milliseconds. Building a `Vec<String>` of the block's rows on each of
+    /// them, to read one integer off it, is the per-turn cost the owner's
+    /// stutter report of 2026-09-15 names. The rows are still asked for where
+    /// they are used: once when the change begins, and once more if a second
+    /// press turns it round.
+    #[must_use]
+    pub fn math_toggle_heights(
+        &self,
+        projection: &ViewportProjection,
+        anchor: &MathBlockAnchor,
+    ) -> Option<[i64; 2]> {
+        let MathBlockAnchor::History { start, end, .. } = anchor else {
+            return None;
+        };
+        let record = self
+            .decorations
+            .get(start)
+            .filter(|record| record.block_end == Some(*end))?;
+        let artifact = projected_frozen_artifact(
+            record,
+            self.math_band(),
+            self.math_vertical_padding_subpixels(),
+            self.cell_height_subpixels.get(),
+        )?;
+        if artifact.mode != MathMode::Display {
+            return None;
+        }
+        Some([
+            artifact.height_subpixels,
+            projection.math_source_height_subpixels(&self.document, *start, *end),
+        ])
+    }
+
+    /// **Present one block at a height and a strength that are not its own**, for as long as it is
+    /// changing face (`docs/DESIGN.md` §7.1.5p ⑪).
+    ///
+    /// The document is untouched by this: the block is still the one entry with an artifact height
+    /// it was, and [`Self::toggle_math_source`] is still the only thing that changes which rows
+    /// this session holds. What this moves is the two numbers a frame is built from — the band's
+    /// height, which the projection reads where it reads any artifact's, and how solid the picture
+    /// is drawn, which the placement carries to the renderer — so that the frame on which the
+    /// document really changes is the frame the last presented one already was.
+    ///
+    /// `None` puts both back, which is what the end of the change and every interruption of it do.
+    pub fn set_math_toggle_presentation(&mut self, presentation: Option<MathTogglePresentation>) {
+        self.math_toggle = presentation;
+    }
+
+    /// What this session is presenting a changing block as, if anything — so a caller paying a
+    /// journey's frames can tell a turn that would draw something new from one that would draw
+    /// the frame already on the glass. `Ease::retarget`'s own "`false` when it was already going
+    /// there", asked of the session rather than of the clock.
+    #[must_use]
+    pub fn math_toggle_presentation(&self) -> Option<&MathTogglePresentation> {
+        self.math_toggle.as_ref()
+    }
+
+    /// **Turn one block over, and only that one** (owner's ruling 2026-09-16). Looking at a
+    /// formula's source is an action on the occurrence under the mark, not a setting the formula's
+    /// text carries: the same `$$…$$` printed again is a new block and arrives typeset.
     pub fn toggle_math_source(&mut self, anchor: &MathBlockAnchor) -> bool {
-        let preference = match anchor {
+        match anchor {
             MathBlockAnchor::History { start, end, .. } => {
                 let Some(record) = self
                     .decorations
@@ -7905,13 +8042,10 @@ impl DualPlaneSession {
                 else {
                     return false;
                 };
-                let Some(key) = record.span.as_ref().map(MathSourcePreferenceKey::from_span) else {
-                    return false;
-                };
-                if !record.toggle_source() {
+                if record.span.is_none() {
                     return false;
                 }
-                (key, record.show_source)
+                record.toggle_source()
             }
             MathBlockAnchor::Live {
                 screen,
@@ -7931,15 +8065,9 @@ impl DualPlaneSession {
                 record.show_source = !record.show_source;
                 record.horizontal_scroll_px = 0;
                 record.vertical_scroll_px = 0;
-                (
-                    MathSourcePreferenceKey::from_span(&record.span),
-                    record.show_source,
-                )
+                true
             }
-        };
-        self.math_source_preferences
-            .insert(preference.0, preference.1);
-        true
+        }
     }
 
     pub fn set_math_hover(&mut self, anchor: Option<&MathBlockAnchor>) -> bool {
@@ -8147,6 +8275,26 @@ impl DualPlaneSession {
             self.projected_inline_image(record, artifact, *id)
                 .map(|artifact| (*id, artifact))
         }));
+        // **A block changing face is presented at a height that is neither face's** (§7.1.5p ⑪),
+        // and this is where that is said because this is the one place a band's height enters
+        // projection. Everything the band's geometry is made of comes off this number — the rows
+        // the projected line takes, their individual heights, the placement's top and clip, the
+        // ground drawn under it, the seat the two marks ride — so moving it moves all of them
+        // together, and at the far end of the journey it is the real face's height to the subpixel.
+        // The picture's own offset inside the band is not touched: both faces begin at the band's
+        // top, which is what lets them cross-fade over one rectangle.
+        if let Some(presentation) = self.math_toggle.as_ref()
+            && let MathBlockAnchor::History { start, .. } = &presentation.anchor
+        {
+            for (id, artifact) in &mut frozen_artifacts {
+                // The id alone is not the block: an OSC image anchored to the same transcript line
+                // reaches this list too, and a formula's change of face is not a thing that may
+                // move somebody else's picture.
+                if *id == *start && artifact.kind == bt_viewport::RgbaArtifactKind::Math {
+                    artifact.height_subpixels = presentation.height_subpixels.max(1);
+                }
+            }
+        }
         projection.sync_math_artifacts(frozen_artifacts);
         projection.sync_inline_path_artifacts(self.inline_images.values().filter_map(|record| {
             if !matches!(record.kind, InlineImageRecordKind::LocalPath { .. }) {
@@ -8544,6 +8692,17 @@ impl DualPlaneSession {
             {
                 placement.left_subpixels = self.display_math_left_inset_subpixels();
             }
+            // **How solid this picture is drawn** (§7.1.5p ⑪) — full for every block in every
+            // frame but the handful a change of face runs across, and this is the one writer of
+            // it. Beside the other presentation facts this loop stamps on a placement
+            // (`toolbar_visible`, the interior scroll, the clip), because it is one of them: the
+            // document says the block is a picture, and the gesture says how much of one.
+            let picture_opacity_milli = self
+                .math_toggle
+                .as_ref()
+                .filter(|presentation| presentation.anchor.same_block(&placement.anchor))
+                .map_or(1000, |presentation| presentation.picture_opacity_milli);
+            placement.picture_opacity_milli = picture_opacity_milli;
             match &placement.anchor {
                 MathBlockAnchor::History { start, .. } => {
                     let Some(record) = self.decorations.get(start) else {
@@ -8615,6 +8774,9 @@ impl DualPlaneSession {
                 .take_while(|row| frame_row_history_id(frame, *row).is_some_and(|id| id <= end))
                 .last()
                 .unwrap_or(first_row);
+            // Taken before the placement is built, where the frame is still only read: this is the
+            // block's own rows, and they are on the frame already.
+            let source_width_cells = frame_rows_width_cells(frame, first_row, last_row);
             let Some(first_mapped) = frame.row_map.get(first_row as usize) else {
                 continue;
             };
@@ -8641,6 +8803,7 @@ impl DualPlaneSession {
                     .saturating_add(last_mapped.height_subpixels)
                     .saturating_sub(first_mapped.top_subpixels),
                 display: MathBlockDisplay::Source,
+                source_width_cells,
                 horizontal_overflow: overflow,
                 horizontal_scroll_px: 0,
                 vertical_scroll_px: 0,
@@ -8651,6 +8814,10 @@ impl DualPlaneSession {
                 frozen_prefix_rows: 0,
                 clipped_top_rows: 0,
                 clipped_bottom_rows: 0,
+                // A source face is text, not a picture: there is no raster on this placement to be
+                // drawn at any strength, and the one the change cross-fades is the Rendered
+                // placement it is replacing.
+                picture_opacity_milli: 1000,
                 // Filled in for every placement at once, after the last of them exists.
                 selection_spans: Vec::new(),
             });
@@ -8681,14 +8848,25 @@ impl DualPlaneSession {
             ) else {
                 continue;
             };
-            let Some(first_mapped) = frame.row_map.get(visible_row as usize) else {
-                continue;
-            };
-            let Some(last_mapped) = frame.row_map.iter().rfind(|row| {
+            let Some(last_row) = frame.row_map.iter().rposition(|row| {
                 row.live_grid_row.is_some_and(|live| {
                     (record.band_start_row..=record.band_end_row).contains(&live)
                 })
             }) else {
+                continue;
+            };
+            // The band's last row by index rather than by value, because the width below is a walk
+            // of the rows between the two ends and a row nobody can name is a row nobody can
+            // measure.
+            let source_width_cells = frame_rows_width_cells(
+                frame,
+                visible_row,
+                u32::try_from(last_row).unwrap_or(u32::MAX),
+            );
+            let Some(first_mapped) = frame.row_map.get(visible_row as usize) else {
+                continue;
+            };
+            let Some(last_mapped) = frame.row_map.get(last_row) else {
                 continue;
             };
             let band_height = last_mapped
@@ -8713,6 +8891,7 @@ impl DualPlaneSession {
                 content_offset_subpixels: 0,
                 clip_height_subpixels: band_height,
                 display: MathBlockDisplay::Source,
+                source_width_cells,
                 horizontal_overflow: overflow,
                 horizontal_scroll_px: if self.math_layout_options.block_line_wrapping {
                     record.horizontal_scroll_px
@@ -8727,6 +8906,10 @@ impl DualPlaneSession {
                 frozen_prefix_rows: 0,
                 clipped_top_rows: 0,
                 clipped_bottom_rows: 0,
+                // A source face is text, not a picture: there is no raster on this placement to be
+                // drawn at any strength, and the one the change cross-fades is the Rendered
+                // placement it is replacing.
+                picture_opacity_milli: 1000,
                 // Filled in for every placement at once, after the last of them exists.
                 selection_spans: Vec::new(),
             });
@@ -8790,6 +8973,7 @@ impl DualPlaneSession {
                     content_offset_subpixels: 0,
                     clip_height_subpixels: row_height_subpixels,
                     display: MathBlockDisplay::Rendered,
+                    source_width_cells: 0,
                     horizontal_overflow: BlockOverflowOwner::Pane,
                     horizontal_scroll_px: 0,
                     vertical_scroll_px: 0,
@@ -8800,6 +8984,7 @@ impl DualPlaneSession {
                     frozen_prefix_rows: 0,
                     clipped_top_rows: 0,
                     clipped_bottom_rows: 0,
+                    picture_opacity_milli: 1000,
                     selection_spans: Vec::new(),
                 });
             }
@@ -8868,6 +9053,7 @@ impl DualPlaneSession {
                     content_offset_subpixels: 0,
                     clip_height_subpixels: row_height_subpixels,
                     display: MathBlockDisplay::Rendered,
+                    source_width_cells: 0,
                     horizontal_overflow: BlockOverflowOwner::Pane,
                     horizontal_scroll_px: 0,
                     vertical_scroll_px: 0,
@@ -8878,6 +9064,7 @@ impl DualPlaneSession {
                     frozen_prefix_rows: 0,
                     clipped_top_rows: 0,
                     clipped_bottom_rows: 0,
+                    picture_opacity_milli: 1000,
                     selection_spans: Vec::new(),
                 });
             }
@@ -10247,6 +10434,7 @@ impl DualPlaneSession {
                 .iter_mut()
                 .find(|pending| pending.occurrence_id == record.identity.occurrence_id)
             {
+                pending.show_source = record.show_source;
                 let next = pending.prefix_staging.len();
                 if first_index != next
                     || captured_source
@@ -10288,6 +10476,7 @@ impl DualPlaneSession {
                 candidate_start: None,
                 expected_frozen_lines: u64::try_from(record.identity.source_rows.len())
                     .unwrap_or(u64::MAX),
+                show_source: record.show_source,
                 prefix_staging: captured_source
                     .iter()
                     .map(|(_, staging)| *staging)
@@ -10459,6 +10648,11 @@ impl DualPlaneSession {
         record.stale_artifact = None;
         record.block_end = Some(block.end);
         record.span = Some(block.span.clone());
+        // A freeze is not a new block: these are the very rows the reader was looking at a moment
+        // ago, so the face the occurrence was wearing while it was live crosses with its raster.
+        // Nothing else carries it — a history record is born typeset — and the face is the
+        // occurrence's own, so it travels with the occurrence rather than with its text.
+        record.show_source = pending.show_source;
         self.document.set_decoration(
             block.start,
             DecorationIntent::Math {
@@ -13590,6 +13784,33 @@ fn frame_row_history_id(frame: &ViewportFrame, row: u32) -> Option<TranscriptId>
 
 fn drawable_frame_row_count(frame: &ViewportFrame) -> u32 {
     u32::try_from(frame.drawable_rows()).unwrap_or(u32::MAX)
+}
+
+/// **How wide the widest of `first ..= last` is, in cells** — the number the band behind a block
+/// wearing its source face hugs (owner's ruling 2026-09-16, T-MATH-SOURCE-BAND-HUGS-TEXT;
+/// `docs/DESIGN.md` §7.1.5p ⑪ iii).
+///
+/// Read off the frame's own cells, which for such a block **are** the rows the terminal is drawing:
+/// a record that says `show_source` is a record whose lines the projection stopped swallowing, so
+/// they were laid out by the ordinary path like every other line of the pane and there is nothing
+/// here to lay out a second time. That matters twice over — it is the same answer on the live plane
+/// as on history, where `ViewportProjection::math_source_face` can only speak for transcript lines,
+/// and it is one row walk of one block per frame rather than a `Vec<String>` of the block rebuilt
+/// to read one integer off it (the per-turn cost T-MATH-MARKS-IN-SOURCE-FACE removed from the
+/// other face).
+///
+/// The width of a row is `bt_viewport::row_width_cells` and is that in both places, so the band the
+/// renderer draws and the band the projection measures for the *other* face cannot drift apart.
+fn frame_rows_width_cells(frame: &ViewportFrame, first: u32, last: u32) -> u32 {
+    let columns = frame.columns.get() as usize;
+    (first..=last)
+        .filter_map(|row| {
+            let start = (row as usize).checked_mul(columns)?;
+            frame.cells.get(start..start.checked_add(columns)?)
+        })
+        .map(bt_viewport::row_width_cells)
+        .max()
+        .unwrap_or(0)
 }
 
 fn frame_row_for_history(frame: &ViewportFrame, id: TranscriptId) -> Option<u32> {
@@ -19452,56 +19673,105 @@ mod tests {
         );
     }
 
+    /// **A face belongs to the occurrence, not to the text** (owner's ruling 2026-09-16). Turning
+    /// one block over is an action on the block under the mark; the next time the same `$$…$$` is
+    /// printed it is a different block, and it arrives typeset like any other.
     #[test]
-    fn alternate_show_source_preference_survives_redetection_in_both_directions() {
+    fn a_second_printing_of_the_same_formula_arrives_typeset() {
         let start = Instant::now();
         let mut session = DualPlaneSession::new(nz(40), nz(12));
-        session
-            .feed_at(b"\x1b[?1049h$$x^2$$\r\ninput", start)
-            .unwrap();
+        session.feed_at(b"$$x^2$$\r\nbarrier", start).unwrap();
+        hide_cursor(&mut session, start);
         session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
         assert_eq!(
-            complete_detected_live_tasks(&mut session, synthetic_raster(40, 20)),
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 18)),
             1
         );
         let mut projection = session.new_projection(session.layout_key());
         let rendered = session.viewport_frame(&mut projection).unwrap();
+        let first = rendered.math_blocks[0].anchor.clone();
+        assert!(session.toggle_math_source(&first));
+
+        let again = start + Duration::from_millis(210);
+        session.feed_at(b"\r\n$$x^2$$\r\ntail", again).unwrap();
+        hide_cursor(&mut session, again);
+        session.advance_live_stability(again + LIVE_MATH_STABLE_INTERVAL);
+        complete_detected_live_tasks(&mut session, synthetic_raster(40, 18));
+        let both = session.viewport_frame(&mut projection).unwrap();
+        let face_at = |row: u32| {
+            both.math_blocks
+                .iter()
+                .find(|block| match &block.anchor {
+                    MathBlockAnchor::Live { start, .. } => start.row == row,
+                    MathBlockAnchor::History { .. } => false,
+                })
+                .map(|block| block.display)
+        };
+        assert_eq!(
+            face_at(0),
+            Some(MathBlockDisplay::Source),
+            "the block the reader turned over keeps its source face"
+        );
+        assert_eq!(
+            face_at(2),
+            Some(MathBlockDisplay::Rendered),
+            "the same formula printed again is another block and arrives typeset"
+        );
+        // Mutation: keying the face on the formula's own text turns the second block over too.
+    }
+
+    /// **The freeze is not a new block.** The rows a live occurrence was turned over on are the
+    /// very rows that land in history, so its face crosses with its raster.
+    #[test]
+    fn a_live_block_turned_over_keeps_its_source_face_across_the_freeze() {
+        let start = Instant::now();
+        // Leave room above the eight-row visible-text floor for a block the reader can turn over.
+        let mut session = DualPlaneSession::new(nz(40), nz(12));
+        session.feed_at(b"$$x^2$$\r\nbarrier", start).unwrap();
+        hide_cursor(&mut session, start);
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 18)),
+            1
+        );
+        let live_raster = session
+            .live_decorations
+            .values()
+            .find_map(|record| record.artifact.as_ref())
+            .map(|artifact| Arc::clone(&artifact.rgba))
+            .expect("the live block renders before it is turned over");
+        let mut projection = session.new_projection(session.layout_key());
+        let rendered = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(rendered.math_blocks.len(), 1, "the live block is visible");
+        assert_eq!(rendered.math_blocks[0].display, MathBlockDisplay::Rendered);
         let anchor = rendered.math_blocks[0].anchor.clone();
         assert!(session.toggle_math_source(&anchor));
 
-        session.redetect(DetectionRevision(2));
-        assert_eq!(
-            session.advance_live_stability(start + Duration::from_millis(400)),
-            1
+        // Twelve lines scroll the formula's source row out of the grid, so the occurrence hands
+        // its raster to the history record it becomes.
+        for index in 0..12 {
+            session
+                .feed_at(
+                    format!("\r\nscroll-{index}").as_bytes(),
+                    start + Duration::from_millis(210 + index * 10),
+                )
+                .unwrap();
+        }
+        let frozen = session
+            .decorations
+            .values()
+            .find(|record| {
+                record
+                    .artifact
+                    .as_ref()
+                    .is_some_and(|artifact| Arc::ptr_eq(&artifact.rgba, &live_raster))
+            })
+            .expect("the history record receives the handed-off raster");
+        assert!(
+            frozen.show_source,
+            "the occurrence keeps the face the reader gave it across the freeze"
         );
-        assert_eq!(
-            complete_detected_live_tasks(&mut session, synthetic_raster(40, 20)),
-            1
-        );
-        let source = session.viewport_frame(&mut projection).unwrap();
-        let source_block = source
-            .math_blocks
-            .iter()
-            .find(|block| block.display == MathBlockDisplay::Source)
-            .expect("content preference restores source after redetection");
-        assert!(session.toggle_math_source(&source_block.anchor));
-
-        session.redetect(DetectionRevision(3));
-        assert_eq!(
-            session.advance_live_stability(start + Duration::from_millis(600)),
-            1
-        );
-        assert_eq!(
-            complete_detected_live_tasks(&mut session, synthetic_raster(40, 20)),
-            1
-        );
-        let rendered_again = session.viewport_frame(&mut projection).unwrap();
-        assert_eq!(rendered_again.math_blocks.len(), 1);
-        assert_eq!(
-            rendered_again.math_blocks[0].display,
-            MathBlockDisplay::Rendered
-        );
-        // Mutation: removing the content-preference lookup restores Rendered after revision 2.
+        // Mutation: dropping the face from the handoff shows the picture again as the rows freeze.
     }
 
     #[test]
@@ -19592,6 +19862,53 @@ mod tests {
         assert_eq!(
             session.viewport_frame(&mut projection).unwrap().math_blocks[0].horizontal_overflow,
             BlockOverflowOwner::Pane
+        );
+    }
+
+    /// RED GATE (owner's ruling 2026-09-16, T-MATH-SOURCE-BAND-HUGS-TEXT; `docs/DESIGN.md`
+    /// §7.1.5p ⑪ iii): **a block wearing its source face tells the renderer how wide its rows are,
+    /// so the band behind them can hug the text instead of running the width of the pane.**
+    ///
+    /// The owner's screenshot was a tinted floor spanning a whole pane behind a few short rows of
+    /// LaTeX, with the two marks out at the far edge of it. `bt_render` measures that floor from
+    /// the block's substance, and a source face's substance is its rows — which only this layer can
+    /// see, because by the time anybody asks they are the frame's own cells. The two numbers pulled
+    /// apart here are the seven columns `$$x^2$$` takes and the sixteen the pane has.
+    ///
+    /// MUTATIONS: carry `placement.source`'s own longest line instead and a block whose source
+    /// wrapped — or whose row holds a wide character — is measured by something nobody draws. Carry
+    /// the pane's width and the report is back exactly. Fill the field on a picture and the first
+    /// assertion falls, which is what keeps this one number about one face.
+    #[test]
+    fn a_source_faces_placement_carries_the_width_of_the_rows_it_stands_on() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(16), nz(12));
+        session.feed_at(b"$$x^2$$", start).unwrap();
+        hide_cursor(&mut session, start);
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(400, 18)),
+            1
+        );
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let anchor = frame.math_blocks[0].anchor.clone();
+        assert_eq!(
+            frame.math_blocks[0].source_width_cells, 0,
+            "a picture's width is its raster's, and this field is not about it"
+        );
+
+        assert!(session.toggle_math_source(&anchor));
+        let source = session.viewport_frame(&mut projection).unwrap();
+        let placement = &source.math_blocks[0];
+        assert_eq!(placement.display, MathBlockDisplay::Source);
+        assert_eq!(
+            placement.source_width_cells, 7,
+            "the band hugs the seven columns `$$x^2$$` is drawn on"
+        );
+        assert!(
+            placement.source_width_cells < source.columns.get(),
+            "a band as wide as its pane is the report itself"
         );
     }
 
