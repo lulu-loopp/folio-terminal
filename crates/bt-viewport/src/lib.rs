@@ -611,6 +611,19 @@ pub struct MathBlockPlacement {
     /// clip remains an independent outer bound in the renderer.
     pub clip_height_subpixels: i64,
     pub display: MathBlockDisplay,
+    /// **How wide the widest row this block stands on is, in cells** — the width of the band drawn
+    /// behind a block wearing its [`MathBlockDisplay::Source`] face, and meaningless for any other
+    /// placement (owner's ruling 2026-09-16, T-MATH-SOURCE-BAND-HUGS-TEXT).
+    ///
+    /// A source face has no picture whose extents could say how wide the block is, and until this
+    /// ruling the two candidates were both wrong: [`Self::source`] is the block's **pre-wrap
+    /// original grid text**, `$$` delimiters and all, which is not what the pane laid out, and the
+    /// pane's own width, which is what the band was drawn at and what the owner reported as a floor
+    /// far wider than the text on it. This is the third answer and the only one that is about the
+    /// rows: the longest of them as this pane cut them, by [`row_width_cells`].
+    ///
+    /// Zero on every placement drawing a picture, where the raster's own width is the answer.
+    pub source_width_cells: u32,
     pub horizontal_overflow: BlockOverflowOwner,
     pub horizontal_scroll_px: u32,
     pub vertical_scroll_px: u32,
@@ -674,6 +687,16 @@ pub struct MathBlockPlacement {
 pub struct MathSourceFace {
     /// The rows themselves, top to bottom — row `k` stands `k` cells below the band's own top.
     pub rows: Vec<String>,
+    /// **How wide the widest of those rows is, in cells** — the number the band behind them hugs
+    /// (owner's ruling 2026-09-16, T-MATH-SOURCE-BAND-HUGS-TEXT; `docs/DESIGN.md` §7.1.5p ⑪ iii).
+    ///
+    /// Cells rather than characters, because a band is a region *in the grid*: a row of 中文 is
+    /// twice as wide as it has clusters, and a band measured off the clusters would be cut through
+    /// the right half of its last glyph. [`row_width_cells`] is the rule, applied to the very rows
+    /// [`ViewportProjection::math_source_face`] is about to hand back.
+    ///
+    /// Never wider than the pane, because these rows were laid out to it.
+    pub width_cells: u32,
     /// What those rows take together: `rows.len()` cells.
     pub height_subpixels: i64,
 }
@@ -3005,6 +3028,7 @@ impl ViewportProjection {
                             content_offset_subpixels: artifact.vertical_padding_subpixels,
                             clip_height_subpixels: artifact.height_subpixels,
                             display: MathBlockDisplay::Rendered,
+                            source_width_cells: 0,
                             horizontal_overflow: BlockOverflowOwner::Block,
                             horizontal_scroll_px: 0,
                             vertical_scroll_px: 0,
@@ -3153,6 +3177,7 @@ impl ViewportProjection {
                                 content_offset_subpixels: 0,
                                 clip_height_subpixels: artifact.height_subpixels,
                                 display: MathBlockDisplay::Rendered,
+                                source_width_cells: 0,
                                 horizontal_overflow: BlockOverflowOwner::Block,
                                 horizontal_scroll_px: 0,
                                 vertical_scroll_px: 0,
@@ -3390,6 +3415,7 @@ impl ViewportProjection {
                     // logical rows. It never paints into a neighbour's fixed terminal row.
                     clip_height_subpixels,
                     display: MathBlockDisplay::Rendered,
+                    source_width_cells: 0,
                     horizontal_overflow: BlockOverflowOwner::Block,
                     horizontal_scroll_px: 0,
                     vertical_scroll_px: 0,
@@ -4346,6 +4372,11 @@ impl ViewportProjection {
     /// that have to be kept in step. Answered whether the block is currently swallowing those rows
     /// or showing them, because the change runs in both directions.
     ///
+    /// **And how wide the widest of those rows is**, which is the other thing a band has to be
+    /// given now that it hugs its rows instead of running to the pane's edge (owner's ruling
+    /// 2026-09-16, T-MATH-SOURCE-BAND-HUGS-TEXT). It comes off the same cut, for the same reason
+    /// the height does: a width measured anywhere else is a floor drawn round text it did not see.
+    ///
     /// The row count is `layout_frozen_line`'s, which is `frozen_visual_line_count`'s — the two
     /// have to agree cluster for cluster and already do (`history_row_heights` has always relied on
     /// it) — and a row's height is the cell's, because that is what [`Self::project`] gives a line
@@ -4360,6 +4391,7 @@ impl ViewportProjection {
         end: TranscriptId,
     ) -> MathSourceFace {
         let mut rows = Vec::new();
+        let mut width_cells = 0;
         for (_, entry) in document.entries().range(start..=end) {
             for row in layout_frozen_line(
                 &entry.line,
@@ -4367,6 +4399,9 @@ impl ViewportProjection {
                 &[],
                 self.vertical_reading(),
             ) {
+                // Taken off the cells rather than off the string below, because the string is
+                // clusters and a band is columns (`row_width_cells`).
+                width_cells = width_cells.max(row_width_cells(&row.cells));
                 let mut text = String::new();
                 for cell in &row.cells {
                     text.push_str(cell.text.as_str());
@@ -4385,6 +4420,7 @@ impl ViewportProjection {
             .saturating_mul(self.cell_height_subpixels.get());
         MathSourceFace {
             rows,
+            width_cells,
             height_subpixels,
         }
     }
@@ -5723,6 +5759,31 @@ fn implicit_link_at(links: &[InferredLink], byte: usize) -> Option<&InferredLink
     links
         .iter()
         .find(|link| link.range.byte_start <= byte && byte < link.range.byte_end)
+}
+
+/// **How many cells of one laid-out row are written on** — the row's own width, without the blanks
+/// a short row is padded out to the pane's width with ([`pad_frozen_row`]).
+///
+/// The measurement a band standing behind rows of text hugs (owner's ruling 2026-09-16,
+/// T-MATH-SOURCE-BAND-HUGS-TEXT), and it is one function so that the band and the rows in it cannot
+/// part company: `bt_term` asks it of the frame's own cells and
+/// [`ViewportProjection::math_source_face`] asks it of the rows it has just cut, and those are the
+/// same rows seen from the two sides of a change of face.
+///
+/// Two things it deliberately is not. It is not a count of *characters* — a wide cluster owns two
+/// columns and the spacer beside it is one of them, so a row ending in 中 is two cells wide and the
+/// spacer is named here rather than being mistaken for padding, which is the one blank cell that is
+/// genuinely written on. And it is not a count of *cells*, which is the pane's width for every row
+/// of every frame and is exactly the answer the owner's screenshot was a picture of.
+#[must_use]
+pub fn row_width_cells(cells: &[CapturedCell]) -> u32 {
+    let written = cells
+        .iter()
+        .rposition(|cell| cell.wide_spacer || !cell.text.as_str().trim_matches(' ').is_empty());
+    let Some(last) = written else {
+        return 0;
+    };
+    u32::try_from(last.saturating_add(1)).unwrap_or(u32::MAX)
 }
 
 fn pad_frozen_row(row: &mut VisualRow, line: &FrozenLine, columns: usize, offset: usize) {
@@ -11510,6 +11571,61 @@ mod tests {
             assert_eq!(
                 face.height_subpixels,
                 i64::try_from(face.rows.len()).unwrap() * cell_height().get()
+            );
+        }
+    }
+
+    /// RED GATE (owner's ruling 2026-09-16, T-MATH-SOURCE-BAND-HUGS-TEXT; §7.1.5p ⑪ iii): **the
+    /// source face's width is the longest row it would lay out, in cells.**
+    ///
+    /// The ruling is that the band behind a block's `$$…$$` rows hugs the text on it rather than
+    /// running to the pane's right edge, and a band can only hug what it has been told. This is the
+    /// measurement it is told: the same cut the rows and the height come off, so a band and the
+    /// rows standing in it cannot be measured apart.
+    ///
+    /// MUTATIONS: count the characters of a row rather than its cells and the CJK arm falls by four
+    /// — a row of 中文 is twice as wide as it is long. Take the longest row's *bytes* and it falls
+    /// further. Forget to trim the blanks a short row is padded out with and every arm answers the
+    /// pane's width, which is the defect itself.
+    #[test]
+    fn a_source_faces_width_is_the_longest_row_it_would_lay_out() {
+        let (store, document, ids) = toggle_fixture();
+        let projection = ViewportProjection::new(
+            key(64),
+            DetectionRevision(1),
+            nz32(6),
+            cell_height(),
+            store.source_generation(),
+            GridGeneration(1),
+        );
+
+        // `ids[4]` alone: one row of `line-004 中文混排 and some ordinary text`, which is 36
+        // clusters and 40 columns. The four wide ones are the whole of the difference, and a band
+        // measured at 36 would be cut through the right half of 排.
+        let one_line = projection.math_source_face(&document, ids[4], ids[4]);
+        assert_eq!(one_line.rows.len(), 1);
+        assert_eq!(one_line.rows[0].chars().count(), 36);
+        assert_eq!(one_line.width_cells, 40);
+
+        // The whole block. `ids[5]` is the fixture's long line — two hundred columns of LaTeX — so
+        // at this width it wraps into rows that fill the pane, and the widest row of the face is
+        // one of them.
+        let face = projection.math_source_face(&document, ids[4], ids[7]);
+        assert_eq!(
+            face.width_cells, 64,
+            "a wrapped row fills the pane it wrapped to"
+        );
+        assert!(
+            face.width_cells <= projection.layout_key.width_cells.get(),
+            "a band may never be asked for more than the pane it was laid out in"
+        );
+
+        // And the widest row really is the width: nothing here is wider than what it says, which is
+        // the half of the promise an over-count would break rather than an under-count.
+        for row in &face.rows {
+            assert!(
+                row.chars().count() <= face.width_cells as usize,
+                "{row:?} has more clusters than the face's own width in cells"
             );
         }
     }

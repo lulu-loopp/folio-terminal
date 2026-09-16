@@ -8802,6 +8802,9 @@ impl DualPlaneSession {
                 .take_while(|row| frame_row_history_id(frame, *row).is_some_and(|id| id <= end))
                 .last()
                 .unwrap_or(first_row);
+            // Taken before the placement is built, where the frame is still only read: this is the
+            // block's own rows, and they are on the frame already.
+            let source_width_cells = frame_rows_width_cells(frame, first_row, last_row);
             let Some(first_mapped) = frame.row_map.get(first_row as usize) else {
                 continue;
             };
@@ -8828,6 +8831,7 @@ impl DualPlaneSession {
                     .saturating_add(last_mapped.height_subpixels)
                     .saturating_sub(first_mapped.top_subpixels),
                 display: MathBlockDisplay::Source,
+                source_width_cells,
                 horizontal_overflow: overflow,
                 horizontal_scroll_px: 0,
                 vertical_scroll_px: 0,
@@ -8872,14 +8876,25 @@ impl DualPlaneSession {
             ) else {
                 continue;
             };
-            let Some(first_mapped) = frame.row_map.get(visible_row as usize) else {
-                continue;
-            };
-            let Some(last_mapped) = frame.row_map.iter().rfind(|row| {
+            let Some(last_row) = frame.row_map.iter().rposition(|row| {
                 row.live_grid_row.is_some_and(|live| {
                     (record.band_start_row..=record.band_end_row).contains(&live)
                 })
             }) else {
+                continue;
+            };
+            // The band's last row by index rather than by value, because the width below is a walk
+            // of the rows between the two ends and a row nobody can name is a row nobody can
+            // measure.
+            let source_width_cells = frame_rows_width_cells(
+                frame,
+                visible_row,
+                u32::try_from(last_row).unwrap_or(u32::MAX),
+            );
+            let Some(first_mapped) = frame.row_map.get(visible_row as usize) else {
+                continue;
+            };
+            let Some(last_mapped) = frame.row_map.get(last_row) else {
                 continue;
             };
             let band_height = last_mapped
@@ -8904,6 +8919,7 @@ impl DualPlaneSession {
                 content_offset_subpixels: 0,
                 clip_height_subpixels: band_height,
                 display: MathBlockDisplay::Source,
+                source_width_cells,
                 horizontal_overflow: overflow,
                 horizontal_scroll_px: if self.math_layout_options.block_line_wrapping {
                     record.horizontal_scroll_px
@@ -8985,6 +9001,7 @@ impl DualPlaneSession {
                     content_offset_subpixels: 0,
                     clip_height_subpixels: row_height_subpixels,
                     display: MathBlockDisplay::Rendered,
+                    source_width_cells: 0,
                     horizontal_overflow: BlockOverflowOwner::Pane,
                     horizontal_scroll_px: 0,
                     vertical_scroll_px: 0,
@@ -9064,6 +9081,7 @@ impl DualPlaneSession {
                     content_offset_subpixels: 0,
                     clip_height_subpixels: row_height_subpixels,
                     display: MathBlockDisplay::Rendered,
+                    source_width_cells: 0,
                     horizontal_overflow: BlockOverflowOwner::Pane,
                     horizontal_scroll_px: 0,
                     vertical_scroll_px: 0,
@@ -13787,6 +13805,33 @@ fn frame_row_history_id(frame: &ViewportFrame, row: u32) -> Option<TranscriptId>
 
 fn drawable_frame_row_count(frame: &ViewportFrame) -> u32 {
     u32::try_from(frame.drawable_rows()).unwrap_or(u32::MAX)
+}
+
+/// **How wide the widest of `first ..= last` is, in cells** — the number the band behind a block
+/// wearing its source face hugs (owner's ruling 2026-09-16, T-MATH-SOURCE-BAND-HUGS-TEXT;
+/// `docs/DESIGN.md` §7.1.5p ⑪ iii).
+///
+/// Read off the frame's own cells, which for such a block **are** the rows the terminal is drawing:
+/// a record that says `show_source` is a record whose lines the projection stopped swallowing, so
+/// they were laid out by the ordinary path like every other line of the pane and there is nothing
+/// here to lay out a second time. That matters twice over — it is the same answer on the live plane
+/// as on history, where `ViewportProjection::math_source_face` can only speak for transcript lines,
+/// and it is one row walk of one block per frame rather than a `Vec<String>` of the block rebuilt
+/// to read one integer off it (the per-turn cost T-MATH-MARKS-IN-SOURCE-FACE removed from the
+/// other face).
+///
+/// The width of a row is `bt_viewport::row_width_cells` and is that in both places, so the band the
+/// renderer draws and the band the projection measures for the *other* face cannot drift apart.
+fn frame_rows_width_cells(frame: &ViewportFrame, first: u32, last: u32) -> u32 {
+    let columns = frame.columns.get() as usize;
+    (first..=last)
+        .filter_map(|row| {
+            let start = (row as usize).checked_mul(columns)?;
+            frame.cells.get(start..start.checked_add(columns)?)
+        })
+        .map(bt_viewport::row_width_cells)
+        .max()
+        .unwrap_or(0)
 }
 
 fn frame_row_for_history(frame: &ViewportFrame, id: TranscriptId) -> Option<u32> {
@@ -19789,6 +19834,53 @@ mod tests {
         assert_eq!(
             session.viewport_frame(&mut projection).unwrap().math_blocks[0].horizontal_overflow,
             BlockOverflowOwner::Pane
+        );
+    }
+
+    /// RED GATE (owner's ruling 2026-09-16, T-MATH-SOURCE-BAND-HUGS-TEXT; `docs/DESIGN.md`
+    /// §7.1.5p ⑪ iii): **a block wearing its source face tells the renderer how wide its rows are,
+    /// so the band behind them can hug the text instead of running the width of the pane.**
+    ///
+    /// The owner's screenshot was a tinted floor spanning a whole pane behind a few short rows of
+    /// LaTeX, with the two marks out at the far edge of it. `bt_render` measures that floor from
+    /// the block's substance, and a source face's substance is its rows — which only this layer can
+    /// see, because by the time anybody asks they are the frame's own cells. The two numbers pulled
+    /// apart here are the seven columns `$$x^2$$` takes and the sixteen the pane has.
+    ///
+    /// MUTATIONS: carry `placement.source`'s own longest line instead and a block whose source
+    /// wrapped — or whose row holds a wide character — is measured by something nobody draws. Carry
+    /// the pane's width and the report is back exactly. Fill the field on a picture and the first
+    /// assertion falls, which is what keeps this one number about one face.
+    #[test]
+    fn a_source_faces_placement_carries_the_width_of_the_rows_it_stands_on() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(16), nz(12));
+        session.feed_at(b"$$x^2$$", start).unwrap();
+        hide_cursor(&mut session, start);
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(400, 18)),
+            1
+        );
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let anchor = frame.math_blocks[0].anchor.clone();
+        assert_eq!(
+            frame.math_blocks[0].source_width_cells, 0,
+            "a picture's width is its raster's, and this field is not about it"
+        );
+
+        assert!(session.toggle_math_source(&anchor));
+        let source = session.viewport_frame(&mut projection).unwrap();
+        let placement = &source.math_blocks[0];
+        assert_eq!(placement.display, MathBlockDisplay::Source);
+        assert_eq!(
+            placement.source_width_cells, 7,
+            "the band hugs the seven columns `$$x^2$$` is drawn on"
+        );
+        assert!(
+            placement.source_width_cells < source.columns.get(),
+            "a band as wide as its pane is the report itself"
         );
     }
 
