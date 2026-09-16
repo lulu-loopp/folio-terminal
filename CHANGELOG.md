@@ -41,6 +41,15 @@ All notable changes to Folio are recorded here. The format follows
   the preview was closed rather than released as it went. It now opens and
   drains one on every pass, so a video that plays for an hour costs what a video
   that plays for a minute does.
+
+- **A Markdown file too big to edit now keeps up with the file.** Above 8 MB
+  Folio shows the first screen of a document and will not let you type in it.
+  That first screen used to be the one it was opened with, for as long as the
+  pane stayed open: writing to the file from anywhere else changed nothing on
+  screen, and `Reload from disk` changed nothing either. It now shows the file's
+  current first screen whenever the file is written. Unsaved edits of your own
+  are still never replaced — the notice about the file having changed stays up,
+  with the same two answers on it.
 - **Copying a formula no longer leaves the window busy.** The tick that confirms
   the copy has always come down after a moment on screen, but the window went on
   asking to be woken for it for as long as it stayed open — one processor core,
