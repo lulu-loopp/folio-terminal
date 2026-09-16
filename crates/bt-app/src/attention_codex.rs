@@ -74,6 +74,13 @@ const DEFAULT_DIRECTORY: &str = ".codex";
 /// The key codex spawns a program from at the end of a turn.
 const NOTIFY_KEY: &str = "notify";
 
+/// What this module says about a configuration file it could not read, whichever half could not
+/// read it.
+///
+/// One sentence for the byte that is not UTF-8 and for the document that is not TOML, because to
+/// the reader they are one fact: there is a file there, and this build is not going to guess at it.
+const UNREADABLE: &str = "the codex configuration file is not one this build can read";
+
 /// The event this build asks to be told about, in the wire's `<family>:<event>` spelling.
 ///
 /// The only `type` the survey ever observed in a `notify` payload, quoted from
@@ -161,18 +168,30 @@ pub(crate) fn state() -> State {
     let Some(path) = config_path() else {
         return State::Absent;
     };
-    match std::fs::read_to_string(&path) {
-        Err(_) => State::Absent,
-        Ok(text) => match text.parse::<DocumentMut>() {
-            Ok(document) => {
-                if declares_folio(&document) {
-                    State::Installed
-                } else {
-                    State::Absent
-                }
+    state_at(&path)
+}
+
+/// The same question about a named file, so a test can ask it without a codex installation on the
+/// machine it runs on.
+#[must_use]
+fn state_at(path: &Path) -> State {
+    let text = match crate::attention_hooks::standing(path) {
+        // No file is the same answer to the only question being asked.
+        crate::attention_hooks::Standing::Nothing => return State::Absent,
+        // **Not `Absent`.** There is a file, and a row that said "not installed" about it would
+        // offer to write over one this build never read.
+        crate::attention_hooks::Standing::Unreadable => return State::Unreadable,
+        crate::attention_hooks::Standing::Text(text) => text,
+    };
+    match text.parse::<DocumentMut>() {
+        Ok(document) => {
+            if declares_folio(&document) {
+                State::Installed
+            } else {
+                State::Absent
             }
-            Err(_) => State::Unreadable,
-        },
+        }
+        Err(_) => State::Unreadable,
     }
 }
 
@@ -275,14 +294,26 @@ pub(crate) fn apply(install: bool, exe: &Path) -> Outcome {
     let Some(path) = config_path() else {
         return Outcome::Refused("no codex configuration directory to write into");
     };
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    apply_to(&path, install, exe)
+}
+
+/// The same act on a named file — the seam the tests press, so that what they pin is this function
+/// and not a `config.toml` belonging to whoever runs them.
+fn apply_to(path: &Path, install: bool, exe: &Path) -> Outcome {
+    let existing = match crate::attention_hooks::standing(path) {
+        crate::attention_hooks::Standing::Text(text) => text,
+        // Nothing there yet: the install creates the file, and there is nothing to keep beside it.
+        crate::attention_hooks::Standing::Nothing => String::new(),
+        // **A file that could not be read is never written over.** The empty string this used to
+        // fall back to parses as an empty document, so the refusal below never fired and the write
+        // went ahead over somebody's own configuration — release audit 2026-09-16 (C-3).
+        crate::attention_hooks::Standing::Unreadable => return Outcome::Refused(UNREADABLE),
+    };
     let mut document = match existing.parse::<DocumentMut>() {
         Ok(document) => document,
         // Refused rather than replaced. A configuration file this build cannot read is a file
         // somebody wrote, and overwriting it to add a convenience is not a trade anyone agreed to.
-        Err(_) => {
-            return Outcome::Refused("the codex configuration file is not one this build can read");
-        }
+        Err(_) => return Outcome::Refused(UNREADABLE),
     };
     if install && declares_somebody_else(&document) {
         return Outcome::Refused("codex already runs a notify program of your own");
@@ -298,7 +329,7 @@ pub(crate) fn apply(install: bool, exe: &Path) -> Outcome {
     // The atomic write, the backup that is a precondition and the link that is followed are all
     // `attention_hooks::land`'s, said once for all three installers.
     match crate::attention_hooks::land(
-        &path,
+        path,
         &existing,
         "toml",
         rendered(&document, &existing).as_bytes(),
@@ -582,6 +613,107 @@ mod tests {
         // have made the row offer to write over it.
         let source = include_str!("attention_codex.rs");
         assert!(source.contains("is not one this build can read"));
+    }
+
+    /// RED — **a configuration file that could not be read is left byte for byte.**
+    ///
+    /// Release audit 2026-09-16 (C-3): `read_to_string(&path).unwrap_or_default()` took a file this
+    /// build was not allowed to read — or one holding a single byte that is not UTF-8 — for a file
+    /// that was not there. The empty string it fell back to parses as an empty document, so the
+    /// refusal below it never fired, and `land` was handed nothing to copy: the user's own
+    /// configuration was replaced by one `notify` line with no copy kept anywhere.
+    ///
+    /// RED GATE: put the `unwrap_or_default` back and this file comes back as Folio's own.
+    #[test]
+    fn a_configuration_file_that_could_not_be_read_is_never_written_over() {
+        let dir = scratch("unreadable");
+        let path = dir.join(CONFIG_FILE);
+        // A Latin-1 comment: an ordinary line on an ordinary machine, and not UTF-8.
+        let theirs: &[u8] = b"# caf\xe9\nmodel = \"gpt-5\"\n";
+        std::fs::write(&path, theirs).expect("the user's own file");
+
+        let installing = apply_to(&path, true, &exe());
+        assert_eq!(installing, Outcome::Refused(UNREADABLE));
+        assert_eq!(std::fs::read(&path).expect("still there"), theirs);
+        assert_eq!(
+            names(&dir),
+            vec![CONFIG_FILE.to_owned()],
+            "nothing was written beside it either"
+        );
+        // And the row drawn from it says so, rather than offering to write over it.
+        assert_eq!(state_at(&path), State::Unreadable);
+        // Taking it back out is refused for the same reason: this build cannot tell whose it is.
+        let taking_it_out = apply_to(&path, false, &exe());
+        assert_eq!(taking_it_out, Outcome::Refused(UNREADABLE));
+        assert_eq!(std::fs::read(&path).expect("still there"), theirs);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A file that is not there is the one state in which writing a fresh one loses nothing.**
+    #[test]
+    fn a_configuration_file_that_is_not_there_is_the_one_that_gets_created() {
+        let dir = scratch("absent");
+        let path = dir.join(CONFIG_FILE);
+        assert_eq!(state_at(&path), State::Absent);
+
+        assert_eq!(apply_to(&path, true, &exe()), Outcome::Installed);
+        assert_eq!(state_at(&path), State::Installed);
+        assert_eq!(
+            names(&dir),
+            vec![CONFIG_FILE.to_owned()],
+            "a first install leaves one file: no copy of nothing, no temporary"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A file that is there is copied before it is changed**, and the copy is what was there.
+    #[test]
+    fn a_configuration_file_that_is_there_is_copied_before_it_is_changed() {
+        let dir = scratch("copied");
+        let path = dir.join(CONFIG_FILE);
+        let theirs = "# mine\nmodel = \"gpt-5\"\n";
+        std::fs::write(&path, theirs).expect("the user's own file");
+
+        assert_eq!(apply_to(&path, true, &exe()), Outcome::Installed);
+        let written = std::fs::read_to_string(&path).expect("read back");
+        assert!(written.contains("# mine"), "{written}");
+        assert!(written.contains(NOTIFY_KEY), "{written}");
+        let backup = format!("{CONFIG_FILE}.bak-{}", crate::attention_hooks::today());
+        assert_eq!(names(&dir), vec![CONFIG_FILE.to_owned(), backup.clone()]);
+        assert_eq!(
+            std::fs::read_to_string(dir.join(&backup)).expect("the copy"),
+            theirs,
+            "the copy beside it is the file as it was"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A scratch directory of this test's own. Never anywhere near a real `~/.codex`.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "folio-codex-{name}-{}-{}",
+            std::process::id(),
+            crate::attention_hooks::today()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        dir
+    }
+
+    /// Every name in a directory, sorted — what a reader who opened it would find.
+    fn names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("read the directory")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        names
     }
 
     fn state_of(document: &DocumentMut) -> State {
