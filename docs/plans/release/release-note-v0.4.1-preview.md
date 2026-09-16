@@ -21,7 +21,7 @@
 - A typeset formula now stands in a block with room around it, and turning it
   between the picture and its source grows or shrinks into place instead of
   jumping.
-- On a Mac, Folio quits from an empty desk, a shortcut in the files column opens
+- On a Mac, an idle window no longer burns a core, Folio quits from an empty desk, a shortcut in the files column opens
   what it points at instead of running it, and a previewed page is only called
   guarded when it really is.
 
@@ -58,6 +58,7 @@
   answer scrolling past no longer holds the window for seconds at a time.
 - **With the search box open, typing while a pane is printing no longer pauses**
   while the whole history is searched again.
+- **On a Mac, an idle window no longer keeps a processor core busy.**
 - **On a Mac, a covered or hidden window no longer keeps drawing at full speed**,
   and the pictures it prepared while hidden no longer pile up on the GPU.
 - **Text sent from a phone keyboard, or by a program that types for you, now
