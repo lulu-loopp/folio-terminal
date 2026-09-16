@@ -247,6 +247,35 @@ pub(crate) fn is_writer_of_document(path: &Path) -> bool {
 /// its own disk write.
 const SESSION_DEBOUNCE: Duration = Duration::from_millis(1_500);
 
+/// **How long anything in this process waits for one session write to land**
+/// (T-QUIT-HAS-A-DEADLINE).
+///
+/// An `atomic_write` of `session.json` is a `File::create`, a `write_all`, a `sync_all` and a
+/// `rename` under `%APPDATA%` — a path the reader is free to have redirected onto a network
+/// share or a cloud-sync folder, where the `fsync` is a round trip with no bound this process
+/// can state. Three seconds is far longer than an honest local write and short enough that a
+/// quit does not look wedged; past it the answer is "this did not land", which is a fact the
+/// caller acts on rather than a wait it cannot leave.
+const SESSION_SAVE_BUDGET: Duration = Duration::from_secs(3);
+
+/// How often a bounded join asks whether the writer thread has finished.
+const SESSION_JOIN_POLL: Duration = Duration::from_millis(2);
+
+/// What a save that ran out of budget says, on `stderr` and to the caller.
+///
+/// One sentence for both, because they are the same fact: the document in hand did not reach
+/// the disk, and whatever the last completed save left there is still what the next start
+/// reads.
+fn save_did_not_finish() -> String {
+    let seconds = SESSION_SAVE_BUDGET.as_secs();
+    format!("session save did not finish within {seconds} s; the last completed save stands")
+}
+
+/// Say it once, in the words the log is read in.
+fn report_save_did_not_finish() {
+    eprintln!("Folio: {}", save_did_not_finish());
+}
+
 /// One document on its way to the disk, addressed by the order it was decided in.
 struct SessionWriteRequest {
     generation: u64,
@@ -290,6 +319,13 @@ struct SessionWriter {
     /// The newest request a receipt has come back for. `sent > landed` is "a document is still
     /// in flight", which is the question a quit has to ask even when nothing is dirty.
     landed: u64,
+    /// **A wait on this writer has already run out of budget** (T-QUIT-HAS-A-DEADLINE).
+    ///
+    /// Once one has, the thread is inside a call nobody in this process can bound, and every
+    /// later wait would be the same budget spent again for the same answer — a quit that asks
+    /// three times turns a three-second deadline into a nine-second one. So the first expiry is
+    /// remembered, and from then on this writer answers immediately with the same sentence.
+    stalled: bool,
 }
 
 impl SessionWriter {
@@ -324,6 +360,7 @@ impl SessionWriter {
             thread,
             sent: 0,
             landed: 0,
+            stalled: false,
         }
     }
 
@@ -362,17 +399,37 @@ impl SessionWriter {
     ///
     /// Receipts for older generations are returned alongside, because a synchronous wait must not
     /// swallow the answers the ordinary path was going to read.
-    fn wait_for(&self, generation: u64) -> (Vec<SessionWriteReceipt>, Result<(), String>) {
+    ///
+    /// **And it is a wait with a deadline** (T-QUIT-HAS-A-DEADLINE). The entitlement was to wait
+    /// for an answer, never to wait for ever: the thread it is waiting on is inside an `fsync`
+    /// on a path the reader may have redirected onto storage that has stopped answering, and a
+    /// hidden window over a hung share is a quit that never happens. Running out of budget is
+    /// reported in the shape the thread-gone arm already uses, so every caller's existing
+    /// handling of "it did not land" covers it unchanged.
+    fn wait_for(&mut self, generation: u64) -> (Vec<SessionWriteReceipt>, Result<(), String>) {
         let mut earlier = Vec::new();
+        if self.stalled {
+            return (earlier, Err(save_did_not_finish()));
+        }
+        let deadline = Instant::now() + SESSION_SAVE_BUDGET;
         loop {
-            match self.receipts.recv() {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.receipts.recv_timeout(left) {
                 Ok(receipt) if receipt.generation == generation => {
                     return (earlier, receipt.result);
                 }
                 Ok(receipt) => earlier.push(receipt),
+                // The budget is spent and the thread is still inside the write. It is left to
+                // finish — the write is atomic, so whatever it does next either replaces the file
+                // whole or leaves the last complete document exactly where it was.
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    self.stalled = true;
+                    report_save_did_not_finish();
+                    return (earlier, Err(save_did_not_finish()));
+                }
                 // The thread is gone and the answer is never coming. Say so as a failure rather
                 // than as a wait: a quit that hangs here is worse than a quit that reports.
-                Err(_) => {
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
                     return (
                         earlier,
                         Err(
@@ -396,9 +453,24 @@ impl SessionWriter {
         let (dead, _) = mpsc::channel();
         let live = std::mem::replace(&mut self.requests, dead);
         drop(live);
-        // Bounded by construction: everything queued is already decided, and each item is one
-        // atomic write. Waiting here is the process's last act, and the alternative — walking out
-        // with a write in flight — is the session file half written.
+        // **Bounded, and for the reason the wait above is** (T-QUIT-HAS-A-DEADLINE). Everything
+        // queued is already decided and each item is one atomic write, but "one atomic write" is
+        // exactly the call that has no bound on storage that has stopped answering — an
+        // unbounded join here would simply move the hang one statement later. Past the budget
+        // the thread is let go rather than waited on: it is not holding anything this process
+        // still needs, and the file it may yet replace it replaces whole.
+        if self.stalled {
+            return;
+        }
+        let deadline = Instant::now() + SESSION_SAVE_BUDGET;
+        while !thread.is_finished() {
+            if Instant::now() >= deadline {
+                self.stalled = true;
+                report_save_did_not_finish();
+                return;
+            }
+            std::thread::sleep(SESSION_JOIN_POLL);
+        }
         let _ = thread.join();
     }
 }
@@ -616,14 +688,53 @@ impl SessionStore {
             return;
         }
         // No writer thread — `spawn_at_priority` refused at startup, or it has been closed. The
-        // honest fallback is this thread, because the alternative is a session that is silently
-        // never written at all.
-        let landed = write_session_atomic(&self.session_path, &self.session)
-            .map_err(|error| error.to_string());
+        // honest fallback is a thread of this document's own, because the alternative is a
+        // session that is silently never written at all — and the one thing it may not be is
+        // *this* thread, which is the window's.
+        let landed = self.write_off_thread();
         if landed.is_ok() {
             self.debouncer.mark_flushed();
         }
         self.report_write(landed, now);
+    }
+
+    /// **Write this store's document without an `fsync` on the calling thread, and wait no
+    /// longer than [`SESSION_SAVE_BUDGET`] for it** (T-QUIT-HAS-A-DEADLINE).
+    ///
+    /// The fallback for a store whose writer thread never started (`spawn_at_priority` refused)
+    /// or has already been closed. It used to be this thread's own `write_session_atomic`, which
+    /// under a redirected `%APPDATA%` is exactly the unbounded round trip the writer thread
+    /// exists to keep off the window — the one road to this file that still went through it.
+    /// The document goes to a thread of its own instead and this one waits on a channel with a
+    /// deadline; past it the thread is left to finish, and the caller is told the document did
+    /// not land in the same words the writer's own wait uses.
+    ///
+    /// A thread that cannot be spawned at all is reported rather than written here. A process
+    /// that cannot start one thread is not a process that should answer a stalled disk by
+    /// parking a window on it.
+    fn write_off_thread(&self) -> Result<(), String> {
+        let path = self.session_path.clone();
+        let document = self.session.clone();
+        let (answer, answered) = mpsc::channel();
+        let handed = std::thread::Builder::new()
+            .name("session-writer-once".to_string())
+            .spawn(move || {
+                let landed = write_session_atomic(&path, &document);
+                let _ = answer.send(landed.map_err(|error| error.to_string()));
+            });
+        if handed.is_err() {
+            return Err("the session writer could not be started".to_string());
+        }
+        match answered.recv_timeout(SESSION_SAVE_BUDGET) {
+            Ok(landed) => landed,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                report_save_did_not_finish();
+                Err(save_did_not_finish())
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err("the session writer stopped before this document reached the disk".to_string())
+            }
+        }
     }
 
     /// Read whatever the writer has answered, and let a failure put the document back on the
@@ -731,9 +842,10 @@ impl SessionStore {
             error
         })?;
         let Some(generation) = self.writer.send(&self.session_path, bytes) else {
-            // No writer thread. This one does it, and answers for it.
-            let landed = write_session_atomic(&self.session_path, &self.session)
-                .map_err(|error| error.to_string());
+            // No writer thread. A thread of this document's own does it, under the same deadline
+            // the waiting path keeps, and this one answers for it: a quit that fsyncs here is
+            // the same hang by a different road.
+            let landed = self.write_off_thread();
             if landed.is_ok() {
                 self.debouncer.mark_flushed();
             }
@@ -770,10 +882,16 @@ impl SessionStore {
     /// The order is the whole of it: the sentinel's absence is this run's only claim to have
     /// exited cleanly, so it may not be removed until the document it is vouching for is on the
     /// disk — which is why the writer is closed, and therefore joined, before the sentinel goes.
+    ///
+    /// **And a save that ran out of its budget leaves it standing** (T-QUIT-HAS-A-DEADLINE).
+    /// The deadline buys back the window thread; it does not buy back the claim. A run that
+    /// walked out with a document still inside an `fsync` did not reach a clean exit, and
+    /// removing the sentinel over it would be this run vouching for bytes nobody has heard
+    /// about — the next start is owed the restore prompt instead.
     pub fn close(&mut self) {
         self.flush();
         self.writer.close();
-        if self.armed {
+        if self.armed && !self.writer.stalled {
             let _ = remove_sentinel(&self.sentinel_path);
             self.armed = false;
         }
@@ -1458,6 +1576,98 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// RED — **a quit leaves even when the writer never answers** (T-QUIT-HAS-A-DEADLINE,
+    /// crash review C-4).
+    ///
+    /// The writer thread is stood inside a call that never returns, which is what one parked in
+    /// `sync_all` on a share that has stopped answering looks like from this side: the requests
+    /// channel still takes documents, the receipts channel is still connected, and no receipt
+    /// ever comes back. Both things a quit does with this store then have to end on their own —
+    /// `flush_judged`, which the quit's `Write` step waits on, and `close`, which the process
+    /// exit calls after it.
+    ///
+    /// Red gate: put `recv()` back in `wait_for`, or an unconditional `thread.join()` back in
+    /// `SessionWriter::close`, and this test does not fail — it never returns.
+    #[test]
+    fn a_quit_leaves_a_writer_that_never_answers_behind() {
+        let root = std::env::temp_dir().join(format!(
+            "bt-app-session-stall-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a private directory for this test");
+        let sentinel = root.join("session.lock");
+        std::fs::write(&sentinel, b"").expect("this run's claim to still be running");
+
+        let mut store = SessionStore::at(root.join("session.json"), sentinel.clone());
+        store.armed = true;
+        // The real writer this store opened goes first, and the one that never answers takes its
+        // place.
+        store.writer.close();
+        let (stalled, release) = a_writer_that_never_answers();
+        store.writer = stalled;
+
+        let mut document = SessionV1::default();
+        document
+            .windows
+            .push(bt_persist::SessionWindowV1::default());
+        store.record(document, Instant::now());
+
+        let started = Instant::now();
+        let verdict = store.flush_judged();
+        let waited = started.elapsed();
+        assert!(
+            verdict.is_err(),
+            "a quit is told the document did not land rather than held until it does"
+        );
+        assert!(
+            waited >= SESSION_SAVE_BUDGET && waited < SESSION_SAVE_BUDGET * 3,
+            "it waited its budget and then went on, not {waited:?}"
+        );
+
+        // And the exit that follows does not spend the same budget again, because this writer
+        // has already said it is not answering.
+        let started = Instant::now();
+        store.close();
+        assert!(
+            started.elapsed() < SESSION_SAVE_BUDGET,
+            "a writer already known to be stalled is not waited on a second time"
+        );
+        assert!(
+            sentinel.is_file(),
+            "and this run claims no clean exit over a document nobody heard about"
+        );
+
+        drop(release);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A writer thread that takes documents, stays connected, and answers nothing — the shape of
+    /// one inside an `fsync` that has not come back. It ends when the returned sender is
+    /// dropped, so nothing of this test outlives the test.
+    fn a_writer_that_never_answers() -> (SessionWriter, mpsc::Sender<()>) {
+        let (requests, incoming) = mpsc::channel::<SessionWriteRequest>();
+        let (outgoing, receipts) = mpsc::channel::<SessionWriteReceipt>();
+        let (release, released) = mpsc::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            // Both ends are held for as long as this thread stands, which is what makes the
+            // wait on it a timeout rather than a disconnect.
+            let _requests = incoming;
+            let _receipts = outgoing;
+            let _ = released.recv();
+        });
+        let writer = SessionWriter {
+            requests,
+            receipts,
+            thread: Some(thread),
+            sent: 0,
+            landed: 0,
+            stalled: false,
+        };
+        (writer, release)
+    }
+
     /// PIN — **a receipt for a document that has already been replaced answers for nothing.**
     ///
     /// One writer thread means the writes land in the order they were decided, so the *last*
@@ -1544,14 +1754,25 @@ mod tests {
                 .is_some_and(|at| SOURCE[..at].contains("ThreadPriority::BelowNormal")),
             "and that one is downstream of the spawn that puts it on its own thread"
         );
-        // The two window-thread fallbacks are the ones with no thread to hand to, plus the
-        // `SettingsStore` and friends, which are a human's click rather than a per-turn autosave.
+        // And the fallback for a store with no writer thread is a thread too
+        // (T-QUIT-HAS-A-DEADLINE): the branch that used to `fsync` on the window thread now
+        // hands the document over and waits on it with a deadline, so no road to `session.json`
+        // leaves an unbounded call on the thread a window is drawn from. `SettingsStore` and
+        // friends still write where they are called, and that is a human's click rather than a
+        // per-turn autosave.
         assert_eq!(
             body("\n    fn hand_over(&mut self, now: Instant) {")
                 .matches("write_session_atomic(")
                 .count(),
+            0,
+            "`hand_over` has no road to the disk of its own, with a writer thread or without"
+        );
+        assert_eq!(
+            body("\n    fn write_off_thread(&self) -> Result<(), String> {")
+                .matches("write_session_atomic(")
+                .count(),
             1,
-            "`hand_over` writes here only when there is no writer thread to write for it"
+            "the one fallback write is inside the thread this hands the document to"
         );
     }
 
