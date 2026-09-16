@@ -4904,6 +4904,10 @@ impl DualPlaneSession {
     ///
     /// A transcript line already is the WRAPLINE merge, so there is nothing to widen — the extent
     /// is the line, from its first grapheme to one past its last.
+    ///
+    /// Asked once per line, in [`Self::schedule_detection`], while the region that answers it is
+    /// still standing. Every reader afterwards takes the recorded answer from the line itself —
+    /// see [`Self::history_inline_site`].
     fn command_output_covers_history(&self, id: TranscriptId) -> bool {
         if !self.shell_integration_is_authoritative(ScreenId::Primary) {
             return false;
@@ -4923,7 +4927,17 @@ impl DualPlaneSession {
         self.command_output_covers(&anchor(GraphemeOffset(0)), &anchor(end))
     }
 
-    /// The inline site of a frozen line.
+    /// The inline site of a frozen line, as it was recorded when the line froze.
+    ///
+    /// This reads [`bt_doc::HistoryEntry::inline_site`]; it does not ask the OSC 133 bookkeeping again.
+    /// The bookkeeping is live state and the line is not: a region is retired when the prompt line
+    /// it starts on is evicted, when a reflow declines to re-seat one of its anchors, or when the
+    /// marks behind it go stale, and every one of those leaves the output lines below it resident,
+    /// unchanged, and still carrying formulas. Re-deriving the site would answer `Ineligible` for
+    /// all of them, so an inline formula would revert to `$…$` the first time a width change tore
+    /// its raster down and asked for it to be armed again — which is precisely the bug this
+    /// records its way out of. Whether the site was provable is settled once, in
+    /// [`Self::schedule_detection`].
     ///
     /// Always [`ScreenId::Primary`]: the transcript is the primary screen's scrollback and nothing
     /// else ever enters it — an alternate screen keeps no history, which is why
@@ -4931,7 +4945,10 @@ impl DualPlaneSession {
     /// alternate-screen site cannot arise here, and a frozen line is eligible on OSC 133 evidence
     /// or not at all.
     fn history_inline_site(&self, id: TranscriptId) -> InlineMathSite {
-        inline_math_site(ScreenId::Primary, self.command_output_covers_history(id))
+        self.document
+            .entries()
+            .get(&id)
+            .map_or(InlineMathSite::Ineligible, |entry| entry.inline_site)
     }
 
     fn command_output_covers(&self, start: &ContentAnchor, end: &ContentAnchor) -> bool {
@@ -10725,14 +10742,20 @@ impl DualPlaneSession {
     }
 
     fn schedule_detection(&mut self, id: TranscriptId) {
+        // Where the line stood in the command lifecycle is decided here, once, and written onto
+        // the line: this is the moment it enters history, so the region that proves it is alive
+        // and its anchors still resolve. Every later reader — the re-arm after a resize, the
+        // frozen worker's inputs, a re-seat that was declined — takes the record instead of asking
+        // the bookkeeping again. See [`bt_doc::HistoryEntry::inline_site`].
+        let site = inline_math_site(ScreenId::Primary, self.command_output_covers_history(id));
+        self.document.set_inline_site(id, site);
         let Some(entry) = self.document.entries().get(&id) else {
             return;
         };
-        let armed_for_math = may_arm_math(&entry.line.text, self.inline_math_bands, || {
-            inline_math_site(ScreenId::Primary, self.command_output_covers_history(id))
-        }) || may_arm_table(&entry.line.text, || {
-            self.history_line_above_continues_paragraph(id)
-        });
+        let armed_for_math = may_arm_math(&entry.line.text, self.inline_math_bands, || site)
+            || may_arm_table(&entry.line.text, || {
+                self.history_line_above_continues_paragraph(id)
+            });
         let versions = VersionStamp {
             source: entry.line.source_generation,
             detection: self.detection_revision,
@@ -28297,6 +28320,217 @@ mod tests {
             inline, 1,
             "the frozen scan must carry the captured OSC 133 site, not default to Ineligible"
         );
+    }
+
+    /// T-INLINE-SITE-IS-REMEMBERED: the site is a fact the line keeps, not a question re-asked.
+    ///
+    /// Any width change tears every frozen raster down (`DecorationRecord::layout_changed`) and the
+    /// re-arm then asks each line whether it may carry math again. Display math answers with its
+    /// own delimiters; inline math has nothing but its site. Re-derived, that site reads
+    /// `Ineligible` the moment the OSC 133 region behind the line has been retired — the prompt
+    /// line it started on was evicted, an anchor went stale, a reflow declined to re-seat one — and
+    /// the formula falls back to `$…$` for the rest of the session while the `$$` block beside it
+    /// stays typeset. Clearing the regions stands in for all of those, because every one of them
+    /// reaches this same state. The assertion has to be `Ready` with the record's own artifact: a
+    /// torn-down record keeps its span, so counting spans would step straight over the bug.
+    #[test]
+    fn a_frozen_inline_run_keeps_its_site_across_a_resize() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(6));
+        seat_inline_metrics(&mut session);
+        session
+            .feed_at(
+                b"\x1b]133;A\x07PS> \x1b]133;B\x07show\x1b]133;C\x07\r\n\
+                  energy $E = mc^2$ here\r\n$$a+b$$\r\n\
+                  \x1b]133;D;0\x07\x1b]133;A\x07PS> \x1b]133;B\x07",
+                started,
+            )
+            .unwrap();
+        session
+            .feed_at(
+                b"\r\npad\r\npad\r\npad\r\npad\r\npad\r\npad\r\npad\r\n",
+                started,
+            )
+            .unwrap();
+        assert!(complete_frozen_math_for_real(&mut session) >= 2);
+        let presentable = |session: &DualPlaneSession, mode: MathMode| {
+            session
+                .decorations
+                .values()
+                .filter(|record| {
+                    record.decoration == DecorationLifecycle::Ready
+                        && record.artifact.is_some()
+                        && record.span.as_ref().is_some_and(|span| span.mode == mode)
+                })
+                .count()
+        };
+        assert_eq!(
+            (
+                presentable(&session, MathMode::Inline),
+                presentable(&session, MathMode::Display),
+            ),
+            (1, 1),
+            "the fixture must typeset both formulas before the window moves"
+        );
+
+        // The text, the rasters and the transcript are untouched; only the bookkeeping a re-derived
+        // site would have been read from is gone.
+        session.semantic_output_regions.clear();
+
+        for (step, columns) in [50u32, 60].into_iter().enumerate() {
+            let resized_at = started + Duration::from_secs(1 + step as u64 * 4);
+            session.resize_at(nz(columns), nz(6), resized_at).unwrap();
+            session.set_layout_key(LayoutKey {
+                width_cells: nz(columns),
+                ..session.layout_key()
+            });
+            session.mark_pty_resize_requested_at(nz(columns), nz(6), resized_at);
+            assert!(
+                session
+                    .finish_resize_if_quiescent(resized_at + Duration::from_secs(2))
+                    .unwrap()
+            );
+            complete_frozen_math_for_real(&mut session);
+        }
+
+        assert_eq!(
+            (
+                presentable(&session, MathMode::Inline),
+                presentable(&session, MathMode::Display),
+            ),
+            (1, 1),
+            "the width went 60 → 50 → 60 and nothing else happened: the inline formula comes back \
+             typeset on the site its line was printed at"
+        );
+    }
+
+    /// T-INLINE-MATH-SURVIVES-RESIZE: real command output, frozen before the window rewraps it.
+    #[test]
+    fn frozen_inline_math_survives_window_resize() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(100), nz(24));
+        seat_inline_metrics(&mut session);
+        session.set_layout_key(LayoutKey {
+            line_wrapping: true,
+            ..session.layout_key()
+        });
+        let document = concat!(
+            "\x1b]133;A\x07PS> \x1b]133;B\x07type math-test.md\x1b]133;C\x07\r\n",
+            r"The integral $\int_{-\infty}^{\infty} e^{-x^2}\,dx = \sqrt{\pi}$ shows up everywhere.",
+            "\r\n$$\r\n",
+            r"\int_{-\infty}^{\infty} e^{-x^2}\,dx = \sqrt{\pi}",
+            "\r\n$$\r\n",
+            r"Euler: $e^{i\pi} + 1 = 0$. Matrix:",
+            "\r\n$$\r\n",
+            r"\begin{pmatrix}1 & 2 \\ 3 & 4\end{pmatrix}",
+            "\r\n$$\r\n",
+            r"The series $\sum_{n=1}^{\infty} \frac{1}{n^2} = \frac{\pi^2}{6}$ converges.",
+            "\r\n\x1b]133;D;0\x07\x1b]133;A\x07PS> \x1b]133;B\x07",
+        );
+        session.feed_at(document.as_bytes(), started).unwrap();
+        session
+            .feed_at("\r\npad".repeat(28).as_bytes(), started)
+            .unwrap();
+        assert!(complete_frozen_math_for_real(&mut session) >= 5);
+        let occurrences = session
+            .decorations
+            .iter()
+            .filter_map(|(id, record)| {
+                let span = record.span.as_ref()?;
+                frozen_artifact_and_scale(record)?;
+                Some((*id, span.clone()))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            occurrences
+                .iter()
+                .filter(|(_, span)| span.mode == MathMode::Inline)
+                .count(),
+            3
+        );
+        assert_eq!(
+            occurrences
+                .iter()
+                .filter(|(_, span)| span.mode == MathMode::Display)
+                .count(),
+            2
+        );
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_to_top();
+        let before = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(rendered_inline_blocks(&before).len(), 3);
+
+        let assert_pictures = |session: &DualPlaneSession, frame: &ViewportFrame| {
+            for (id, span) in &occurrences {
+                let record = session
+                    .decoration(*id)
+                    .expect("rewrap retains the transcript occurrence");
+                assert_eq!(record.span.as_ref(), Some(span));
+                assert!(frozen_artifact_and_scale(record).is_some());
+                assert!(
+                    frame.math_blocks.iter().any(|block| {
+                        block.start == *id && block.display == MathBlockDisplay::Rendered
+                    }),
+                    "the same occurrence must still have a picture"
+                );
+            }
+            assert_eq!(rendered_inline_blocks(frame).len(), 3);
+            assert_eq!(
+                frame
+                    .math_blocks
+                    .iter()
+                    .filter(|block| block.artifact.mode == MathMode::Display)
+                    .count(),
+                2
+            );
+            assert!(
+                !frame.cells.iter().any(|cell| cell.text.contains('$')),
+                "no formula's delimiters return as source"
+            );
+        };
+        assert_pictures(&session, &before);
+        for (step, columns) in [60, 100, 60].into_iter().enumerate() {
+            let resized_at = started + Duration::from_secs(1 + step as u64 * 4);
+            session.resize_at(nz(columns), nz(24), resized_at).unwrap();
+            session.refresh_projection(&mut projection);
+            // Measure the new live/staging extent before positioning the review viewport.
+            session.viewport_frame(&mut projection).unwrap();
+            projection.scroll_to_top();
+            let after = session.viewport_frame(&mut projection).unwrap();
+            assert_eq!(
+                after.columns.get(),
+                columns,
+                "frame must use the resized width"
+            );
+            assert_pictures(&session, &after);
+            let integral_rows = after.cell_anchors.chunks(columns as usize).filter(|row| {
+                row.iter().any(|cell| matches!(cell.start, ContentAnchor::History { id, .. } if id == occurrences[0].0))
+            }).count();
+            assert_eq!(
+                integral_rows,
+                if columns == 60 { 2 } else { 1 },
+                "the frozen integral sentence must really rewrap: first={:?}, layout={:?}, rows={:?}",
+                occurrences[0],
+                session.layout_key(),
+                after
+                    .cell_anchors
+                    .chunks(columns as usize)
+                    .map(|row| &row[0].start)
+                    .collect::<Vec<_>>()
+            );
+            session.mark_pty_resize_requested_at(nz(columns), nz(24), resized_at);
+            assert!(
+                session
+                    .finish_resize_if_quiescent(resized_at + Duration::from_secs(2))
+                    .unwrap()
+            );
+            session.schedule_visible_artifacts(&after);
+            complete_frozen_math_for_real(&mut session);
+            session.refresh_projection(&mut projection);
+            let settled = session.viewport_frame(&mut projection).unwrap();
+            assert_pictures(&session, &settled);
+        }
     }
 
     /// PIN (slice 3): one over-wide run falls back to source alone; its neighbour still renders.
