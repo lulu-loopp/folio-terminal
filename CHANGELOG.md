@@ -6,6 +6,23 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- **A picture on the clipboard now pastes as the path of a file Folio writes
+  for it.** A screenshot taken with `Win`+`Shift`+`S`, or with
+  `⌘`+`Ctrl`+`Shift`+`4` on a Mac, is on the clipboard as a picture rather than
+  as a file, so pasting it into a terminal used to type nothing at all — there
+  was nothing there a shell could be handed. Folio now writes it out as a PNG
+  and pastes that file's path, quoted for the shell in the pane exactly as the
+  path of a file copied in Explorer or the Finder already was. What the
+  clipboard holds still decides in one order: a copied file pastes its path,
+  text pastes as text, and only a clipboard holding a picture and nothing else
+  becomes a file — so copying a picture in a browser, which puts the page's own
+  text on the clipboard beside it, goes on pasting the text. The files are
+  written to `%TEMP%\folio\clipboard\` on Windows and to the same folder inside
+  your own temporary directory on a Mac, named for the moment they were taken,
+  and Folio keeps the twenty newest and removes the rest as it writes.
+
 ### Changed
 
 - **When Folio's window stops answering, its own log now says which kind of

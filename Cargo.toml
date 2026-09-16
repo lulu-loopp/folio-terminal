@@ -104,7 +104,19 @@ glyphon = "0.12"
 #   Latin and lose its CJK glyphs. Turn it on the day such a page turns up, and
 #   accept the four packages then rather than on a guess.
 hayro = { version = "=0.7.1", default-features = false, features = ["embed-fonts"] }
-image = { version = "=0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+# **`bmp` is here for one caller and it costs no package**: the Windows clipboard
+# hands a copied picture over as a `CF_DIB`/`CF_DIBV5`, which is a BMP with its
+# file header cut off, and `BmpDecoder::new_without_file_header` — the entry point
+# the format was given for exactly this — is gated on this feature. The codec is
+# inside `image` itself and pulls in nothing, so `Cargo.lock` and
+# `THIRD-PARTY-NOTICES.md` are untouched by it (`bt_app::clipboard_picture`).
+image = { version = "=0.25.10", default-features = false, features = [
+    "bmp",
+    "gif",
+    "jpeg",
+    "png",
+    "webp",
+] }
 # **The GIF container, named directly rather than reached through `image`.** It is
 # already in the lock file — `image`'s own `gif` feature is what put it there, at
 # this exact version — so this adds no package to the tree and nothing to

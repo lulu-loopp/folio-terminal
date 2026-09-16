@@ -49,6 +49,7 @@ mod attention_words;
 mod card_trace;
 mod cardhint;
 mod cli;
+mod clipboard_picture;
 mod cmdrail;
 mod context_menu;
 mod diagnostics;
@@ -564,6 +565,20 @@ enum AppEvent {
     /// here would be a second copy travelling a second way — and `AppEvent` is
     /// `Copy`, which a list of paths is not.
     AppDelegateSpoke,
+    /// **The clipboard's picture has been written to a file** (§7.61).
+    ///
+    /// The thirteenth of the same family and owed a wake for
+    /// [`Self::BackgroundPictureReady`]'s reason with the clock moved: a paste
+    /// is a keystroke, the reader is looking at the line they pressed
+    /// `Ctrl+V` on, and what is between the press and the path appearing is a
+    /// PNG encode of whatever was on the screen when they took the shot. A
+    /// window that produced no frame of its own until somebody typed again would
+    /// show the paste arriving at the wrong moment, or not at all.
+    ///
+    /// Carries nothing, on that variant's own footing: the answer is in this
+    /// window's own picture mailbox by the time this is sent, and this says only
+    /// that there is one.
+    ClipboardPictureReady,
 }
 
 impl AppEvent {
@@ -594,6 +609,9 @@ impl AppEvent {
             Self::GitReady => Station::Git,
             Self::AttentionSpoke => Station::Attention,
             Self::BackgroundPictureReady => Station::Picture,
+            // The station the acquisition opened, charged again for the half of
+            // the same gesture that finishes it.
+            Self::ClipboardPictureReady => Station::ClipboardRead,
             Self::FileIndexReady => Station::FileIndex,
             Self::WebPageSpoke => Station::WebSpoke,
             Self::PsReadLineProbed
@@ -677,6 +695,63 @@ impl BackgroundDecodeMailbox {
     /// move: leaving it there would mean the next `BackgroundPictureReady` —
     /// raised by some *other* decode — finding a stale entry in front of its own.
     fn take_current(&mut self) -> Option<BackgroundDecode> {
+        let landed = self
+            .slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()?;
+        (landed.generation == self.generation).then_some(landed)
+    }
+}
+
+/// One answer from the clipboard picture worker (§7.61).
+///
+/// The **seat travels with the answer** rather than being read back off the
+/// focus when it lands, for [`BackgroundDecode`]'s reason one door over: a paste
+/// belongs to the pane the gesture named, and by the time an encode of a 24
+/// megapixel screenshot comes back the keyboard may be somewhere else entirely.
+#[derive(Debug)]
+struct ClipboardPictureAnswer {
+    generation: u64,
+    seat: SeatId,
+    /// The file, or the sentence saying which half of the job refused. A reason
+    /// and never a picture: a diagnostic that carried what was on the clipboard
+    /// would be this process writing the reader's own screenshot into a log.
+    result: std::result::Result<PathBuf, String>,
+}
+
+/// The clipboard picture worker's one-slot mailbox, on
+/// [`BackgroundDecodeMailbox`]'s shape and for its reasons.
+///
+/// **One slot and not a queue**: a second `Ctrl+V` pressed while the first
+/// screenshot is still encoding supersedes it outright. Two paths arriving on
+/// one command line — in whichever order the two encodes happened to finish — is
+/// not what pressing paste twice asks for, and a queue is the only way to get
+/// it.
+#[derive(Debug, Default)]
+struct ClipboardPictureMailbox {
+    generation: u64,
+    slot: Arc<std::sync::Mutex<Option<ClipboardPictureAnswer>>>,
+}
+
+impl ClipboardPictureMailbox {
+    /// Withdraw whatever the last paste asked for, and hand back the generation
+    /// the next answer must carry to be delivered.
+    fn withdraw(&mut self) -> u64 {
+        self.generation += 1;
+        self.generation
+    }
+
+    /// The slot itself, for the worker to leave its answer in.
+    fn slot(&self) -> Arc<std::sync::Mutex<Option<ClipboardPictureAnswer>>> {
+        Arc::clone(&self.slot)
+    }
+
+    /// Take whatever landed, and answer with it only if it is still an answer to
+    /// the paste being waited for. A superseded answer is taken out and dropped
+    /// in the same move, so the next wake does not find it standing in front of
+    /// its own.
+    fn take_current(&mut self) -> Option<ClipboardPictureAnswer> {
         let landed = self
             .slot
             .lock()
@@ -12043,6 +12118,8 @@ struct WindowRuntime {
     /// [`BackgroundDecodeMailbox`] for the generation that makes a clear win a
     /// race against a decode already running.
     background_decode: BackgroundDecodeMailbox,
+    /// Where the clipboard picture worker leaves its one answer (§7.61).
+    clipboard_picture: ClipboardPictureMailbox,
     /// Which slider the pointer is currently dragging, if any.
     ///
     /// A drag is the press that began it, asked again with a new `x` — see
@@ -36269,6 +36346,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         image_pick_pending: None,
         background_picture: None,
         background_decode: BackgroundDecodeMailbox::default(),
+        clipboard_picture: ClipboardPictureMailbox::default(),
         settings_slider_drag: None,
         settings_menu_bar_drag: None,
         dwm_dark_mode: None,
@@ -97175,9 +97253,26 @@ impl Runtime<'_> {
                 notice,
             )?;
         }
+        if !prepared.picture.is_empty() {
+            return self.save_clipboard_picture(seat, prepared.picture);
+        }
         let Some(text) = prepared.text else {
             return Ok(());
         };
+        self.deliver_paste(seat, &text)
+    }
+
+    /// **The half of a paste that is the same whatever the clipboard held** —
+    /// the bytes onto the child's input, the selection gone, the view back at the
+    /// bottom, and the four pieces of bookkeeping a paste owes the window.
+    ///
+    /// Its own function because a picture's path arrives on a *later turn* than
+    /// the press that asked for it, and a second copy of this for that lane would
+    /// be a second place the attention answer, the typing note and the frame's
+    /// clock are decided — which is the very reason `paste_text` was pulled out
+    /// for K144.
+    fn deliver_paste(&mut self, seat: SeatId, text: &str) -> Result<()> {
+        let active = self.window.active_tab;
         let Some(LeafSession {
             pty,
             session,
@@ -97187,7 +97282,7 @@ impl Runtime<'_> {
         else {
             return Ok(());
         };
-        paste_text(session, projection, &text, |bytes| {
+        paste_text(session, projection, text, |bytes| {
             write_pty_input(pty.as_ref(), bytes, "write clipboard paste to PTY")
         })?;
         // A paste is one gesture landing in one named pane, so it answers whatever that pane was
@@ -97211,6 +97306,114 @@ impl Runtime<'_> {
             occurred_at: self.pending_keyboard_at.unwrap_or_else(Instant::now),
             source: FrameSource::Keyboard,
         })
+    }
+
+    /// **Start the worker that turns a clipboard picture into a file**
+    /// (§7.61, GitHub issue #2).
+    ///
+    /// Nothing is encoded here. A screenshot off a large display is megabytes of
+    /// device-independent bitmap and its PNG encode is tens of milliseconds — on
+    /// this thread that is the window not answering, in the middle of the one
+    /// gesture a reader is watching. What this does is hand the bytes to a
+    /// worker, remember which paste asked, and return; [`Self::adopt_clipboard_picture`]
+    /// is the other half.
+    ///
+    /// **In the workers' band and not below it.** The wallpaper decoder runs at
+    /// `BelowNormal` because nobody is waiting for a wallpaper; somebody is
+    /// waiting for this, with their hand still on the keyboard.
+    fn save_clipboard_picture(
+        &mut self,
+        seat: SeatId,
+        offered: Vec<bt_platform::PictureBytes>,
+    ) -> Result<()> {
+        let generation = self.window.clipboard_picture.withdraw();
+        let slot = self.window.clipboard_picture.slot();
+        let proxy = self.app.event_proxy.clone();
+        let folder = clipboard_picture::directory();
+        let started = bt_platform::spawn_at_priority(
+            "clipboard-picture",
+            bt_platform::ThreadPriority::Normal,
+            move || {
+                let result = clipboard_picture::save(&folder, &offered, SystemTime::now());
+                *slot
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(ClipboardPictureAnswer {
+                        generation,
+                        seat,
+                        result,
+                    });
+                // After the answer is in the slot, never before.
+                let _ = proxy.send_event(AppEvent::ClipboardPictureReady);
+            },
+        );
+        if started.is_err() {
+            // A machine that will not start a thread is a machine that cannot do
+            // this paste, and saying nothing would look like a key that did not
+            // register.
+            eprintln!("clipboard picture worker could not be started; paste ignored");
+            return self.toast(
+                toast::ToastKind::Error,
+                toast::ToastAnchor::Window,
+                None,
+                i18n::Text::PasteClipboardPicture.text().to_owned(),
+            );
+        }
+        Ok(())
+    }
+
+    /// **The file the picture worker wrote, spelled and pasted** (§7.61).
+    ///
+    /// The path goes through `shell_literal::paths_text` — the same call, with
+    /// the same recipient, that a copied *file* goes through — so a picture
+    /// pasted into a `cmd.exe` and one pasted into a `fish` are quoted by the
+    /// grammar each of them actually reads, and a path this recipient cannot
+    /// spell is refused with the same sentence rather than written raw.
+    ///
+    /// **The recipient and the leading space are read now, not when the paste
+    /// was asked for.** They are facts about the line the bytes are about to land
+    /// on, and that line has had the whole of the encode to change.
+    ///
+    /// A seat that is no longer in the tab on top is dropped in silence, on
+    /// [`Self::adopt_background_picture`]'s footing: it answers a gesture that
+    /// has been superseded, and the file it wrote is swept by the cap the next
+    /// paste applies.
+    fn adopt_clipboard_picture(&mut self) -> Result<()> {
+        let Some(landed) = self.window.clipboard_picture.take_current() else {
+            return Ok(());
+        };
+        let path = match landed.result {
+            Ok(path) => path,
+            Err(reason) => {
+                eprintln!("clipboard picture could not be saved; paste ignored: {reason}");
+                return self.toast(
+                    toast::ToastKind::Error,
+                    toast::ToastAnchor::Window,
+                    None,
+                    i18n::Text::PasteClipboardPicture.text().to_owned(),
+                );
+            }
+        };
+        let active = self.window.active_tab;
+        let Some(leaf) = self.window.tabs[active].sessions.get(&landed.seat) else {
+            return Ok(());
+        };
+        let recipient = leaf.paste_recipient.clone();
+        let leading_space = input_line_needs_a_space_first(&leaf.session);
+        let insertion =
+            shell_literal::paths_text(std::slice::from_ref(&path), &recipient, leading_space);
+        if let Some(notice) = shell_literal::refusal_notice(&insertion.refused) {
+            self.toast(
+                toast::ToastKind::Error,
+                toast::ToastAnchor::Window,
+                None,
+                notice,
+            )?;
+        }
+        if insertion.text.is_empty() {
+            return Ok(());
+        }
+        self.deliver_paste(landed.seat, &insertion.text)
     }
 
     /// A composition event, routed by [`ime_owner`].
@@ -112053,6 +112256,13 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             AppEvent::BackgroundPictureReady => {
                 self.for_each_window(|runtime| runtime.adopt_background_picture())
             }
+            // The path is already in the slot; what is owed is the paste around
+            // it. Every window, on this family's standing reason — a worker's
+            // answer carries its own address, and a window with no paste waiting
+            // finds an empty slot and costs a lock.
+            AppEvent::ClipboardPictureReady => {
+                self.for_each_window(|runtime| runtime.adopt_clipboard_picture())
+            }
             // **Ask the system again, and tell every window the answer** (§7.18).
             //
             // The application holds one preference because it is one machine's
@@ -112713,9 +112923,19 @@ fn recoverable_clipboard_write(result: Result<()>, action: &str) -> bool {
 }
 
 /// The payload and later path refusals are separate causes, both delivered to the app's toast host.
+#[derive(Default)]
 struct PreparedClipboardPaste {
     text: Option<String>,
     notice: Option<String>,
+    /// **Every encoding a picture-and-nothing-else clipboard offered**, best
+    /// first, or empty (§7.61).
+    ///
+    /// Not text, because there is no text yet: what is pasted is the path of a
+    /// file that does not exist until somebody writes it, and writing it is an
+    /// encode this thread must not do. The window starts a worker on these bytes
+    /// and spells the path it answers with through the very same
+    /// `shell_literal::paths_text` a copied *file* goes through.
+    picture: Vec<bt_platform::PictureBytes>,
 }
 
 fn prepare_clipboard_paste(
@@ -112730,28 +112950,35 @@ fn prepare_clipboard_paste(
             PreparedClipboardPaste {
                 text: (!insertion.text.is_empty()).then_some(insertion.text),
                 notice: shell_literal::refusal_notice(&insertion.refused),
+                ..PreparedClipboardPaste::default()
             }
         }
         Ok(ClipboardPayload::Text(text)) => PreparedClipboardPaste {
             text: Some(text),
-            notice: None,
+            ..PreparedClipboardPaste::default()
         },
-        Ok(ClipboardPayload::Nothing | ClipboardPayload::Picture(_)) => PreparedClipboardPaste {
-            text: None,
-            notice: None,
+        // **The third rung, and it is third because the clipboard says so**
+        // (§7.61). A source that puts a picture *and* its own text on the board —
+        // every browser does — is a text paste, and a source that puts a file
+        // beside a thumbnail of it is a path paste. This arm is what is left:
+        // a picture and nothing else.
+        Ok(ClipboardPayload::Picture(offered)) => PreparedClipboardPaste {
+            picture: offered,
+            ..PreparedClipboardPaste::default()
         },
+        Ok(ClipboardPayload::Nothing) => PreparedClipboardPaste::default(),
         Ok(ClipboardPayload::Refused(bt_platform::UnsupportedKind::Promise)) => {
             PreparedClipboardPaste {
-                text: None,
                 notice: Some(i18n::Text::PasteClipboardPromise.text().to_owned()),
+                ..PreparedClipboardPaste::default()
             }
         }
         Err(_) => {
             // Native error strings never need to carry the source's names or text into diagnostics.
             eprintln!("clipboard acquisition failed; paste ignored");
             PreparedClipboardPaste {
-                text: None,
                 notice: Some(i18n::Text::PasteClipboardRead.text().to_owned()),
+                ..PreparedClipboardPaste::default()
             }
         }
     }
@@ -168268,6 +168495,7 @@ mod clipboard_path_tests {
     struct MemoryClipboard {
         files: Vec<PathBuf>,
         text: String,
+        picture: Vec<bt_platform::PictureBytes>,
         fetched: Vec<&'static str>,
     }
     impl ClipboardPort for MemoryClipboard {
@@ -168289,6 +168517,10 @@ mod clipboard_path_tests {
         fn text(&mut self) -> Candidate<String> {
             self.fetched.push("text");
             Candidate::Present(self.text.clone())
+        }
+        fn picture(&mut self) -> Candidate<Vec<bt_platform::PictureBytes>> {
+            self.fetched.push("picture");
+            Candidate::Present(self.picture.clone())
         }
         fn finish(&mut self) -> std::result::Result<(), String> {
             Ok(())
@@ -168320,6 +168552,7 @@ mod clipboard_path_tests {
                     "/third".into(),
                 ],
                 text: "Finder leaf name".into(),
+                picture: vec![shot()],
                 fetched: Vec::new(),
             };
             let mut session =
@@ -168364,6 +168597,7 @@ mod clipboard_path_tests {
             let mut clipboard = MemoryClipboard {
                 files: Vec::new(),
                 text: text.into(),
+                picture: vec![shot()],
                 fetched: Vec::new(),
             };
             let prepared = prepare_clipboard_paste(
@@ -168377,6 +168611,113 @@ mod clipboard_path_tests {
         }
     }
 
+    /// One PNG on the clipboard, as the fakes above hand it over.
+    fn shot() -> bt_platform::PictureBytes {
+        bt_platform::PictureBytes {
+            encoding: bt_platform::PictureEncoding::Png,
+            bytes: vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a],
+        }
+    }
+
+    /// PIN (§7.61) — **the clipboard's contents decide, in one order: files,
+    /// then text, then a picture.**
+    ///
+    /// The two fixtures above already hold the first two rungs with a picture
+    /// sitting on the board beside them — which is the case this rule is really
+    /// about, because a browser puts a picture and its own text on the board
+    /// together. This is the third: a picture and nothing else, which is the only
+    /// clipboard that becomes a file.
+    ///
+    /// MUTATION: let the picture arm answer while `files` or `text` did, and the
+    /// two fixtures above stop pasting what they were copied as.
+    #[test]
+    fn a_picture_alone_becomes_a_job_and_a_picture_beside_text_does_not() {
+        let mut beside_text = MemoryClipboard {
+            files: Vec::new(),
+            text: "https://example.test/shot.png".into(),
+            picture: vec![shot()],
+            fetched: Vec::new(),
+        };
+        let prepared = prepare_clipboard_paste(
+            bt_platform::clipboard::read_payload(&mut beside_text),
+            &recipient(),
+            false,
+        );
+        assert_eq!(
+            prepared.text.as_deref(),
+            Some("https://example.test/shot.png")
+        );
+        assert!(prepared.picture.is_empty());
+        assert_eq!(beside_text.fetched, ["files", "text"]);
+
+        let mut alone = MemoryClipboard {
+            files: Vec::new(),
+            text: String::new(),
+            picture: vec![shot()],
+            fetched: Vec::new(),
+        };
+        // An empty string is still text, and text still wins; the rung below is
+        // only reached when the text rung is absent, which is what a
+        // picture-only clipboard answers.
+        assert!(
+            prepare_clipboard_paste(
+                bt_platform::clipboard::read_payload(&mut alone),
+                &recipient(),
+                false,
+            )
+            .picture
+            .is_empty()
+        );
+
+        let prepared = prepare_clipboard_paste(
+            Ok(bt_platform::ClipboardPayload::Picture(vec![shot()])),
+            &recipient(),
+            false,
+        );
+        assert!(prepared.text.is_none());
+        assert!(prepared.notice.is_none());
+        assert_eq!(prepared.picture, vec![shot()]);
+    }
+
+    /// PIN (§7.61) — **the file Folio writes for a picture is spelled by the
+    /// speller a copied file goes through, and by no other.**
+    ///
+    /// `adopt_clipboard_picture` calls `shell_literal::paths_text` with the seat's
+    /// own recipient, which is the call `prepare_clipboard_paste`'s file arm
+    /// makes. This states the consequence — one path, two doors, one string — so
+    /// that a second speller written for the picture lane is a red test rather
+    /// than a quoting difference somebody notices inside `cmd.exe` one day.
+    #[test]
+    fn a_written_picture_is_spelled_exactly_as_a_copied_file_is() {
+        let written = PathBuf::from("/tmp/folio/clipboard/20260916-143012-1.png");
+        for leading_space in [false, true] {
+            let as_a_copied_file = prepare_clipboard_paste(
+                Ok(bt_platform::ClipboardPayload::Files(vec![written.clone()])),
+                &recipient(),
+                leading_space,
+            );
+            let as_a_written_picture = shell_literal::paths_text(
+                std::slice::from_ref(&written),
+                &recipient(),
+                leading_space,
+            );
+            assert_eq!(
+                as_a_copied_file.text.as_deref(),
+                Some(as_a_written_picture.text.as_str())
+            );
+            assert!(as_a_written_picture.refused.is_empty());
+        }
+        // And a name this recipient cannot spell is refused rather than written
+        // raw, which is the same refusal a copied file with that name gets.
+        let refused = shell_literal::paths_text(
+            std::slice::from_ref(&PathBuf::from("/tmp/bad\nname.png")),
+            &recipient(),
+            false,
+        );
+        assert!(refused.text.is_empty());
+        assert!(shell_literal::refusal_notice(&refused.refused).is_some());
+    }
+
     #[test]
     fn nothing_is_silent_and_payload_refusal_acquisition_error_and_path_error_each_report() {
         use bt_platform::{ClipboardPayload, UnsupportedKind};
@@ -168387,6 +168728,7 @@ mod clipboard_path_tests {
             let prepared = prepare_clipboard_paste(Ok(payload), &recipient(), false);
             assert!(prepared.text.is_none());
             assert!(prepared.notice.is_none());
+            assert!(prepared.picture.is_empty());
         }
         for result in [
             Ok(ClipboardPayload::Refused(UnsupportedKind::Promise)),

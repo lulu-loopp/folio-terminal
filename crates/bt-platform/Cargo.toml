@@ -709,6 +709,15 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     # more class.
     "NSGraphicsContext",
     "NSPasteboard",
+    # §7.61: the one picture decoder this crate needs, and it is the system's own.
+    # A picture copied out of Preview or Safari reaches the pasteboard as
+    # `public.tiff` and nothing else, and the workspace's `image` crate is built
+    # without its TIFF feature — turning that on would be a package this lock file
+    # does not have. `NSBitmapImageRep` reads the data and writes PNG back out.
+    # **Not a package**: `objc2-app-kit` is already here and this turns on two more
+    # classes, the second of which is only the first one's superclass.
+    "NSBitmapImageRep",
+    "NSImageRep",
     # `NSResponder`, because a window is one and `makeFirstResponder:` takes
     # one; `NSView`, because that is what a `NativeWindow` holds.
     "NSResponder",
