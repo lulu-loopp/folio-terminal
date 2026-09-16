@@ -76,6 +76,13 @@ impl DirNews {
     /// missing folder is the ordinary case or a broken installation is a fact
     /// about *which* folder, and this type does not know which folder it is
     /// holding.
+    ///
+    /// **The already-armed answer comes before the proxy is cloned, and that
+    /// order is load-bearing** — the reason is written out at
+    /// [`crate::git_watch::GitWatch::sync`]: a clone is an `Arc` bump on Windows
+    /// and, on macOS, a new run loop source and a wake-up of the loop. Arming is
+    /// idempotent and every caller leans on that, so a clone above the early
+    /// return would be one taken per asking however many watches were opened.
     pub fn arm(
         &mut self,
         directory: &Path,
