@@ -107,6 +107,15 @@ All notable changes to Folio are recorded here. The format follows
   unambiguous — one unclosed `$`, the matching one near the start of the next
   line, and nothing in between that starts a new paragraph, bullet or heading — so
   a price at the end of a sentence is still a price.
+- **An inline formula in earlier output stays typeset when the window is
+  resized.** Changing a window's width has every formula on screen set again at
+  the new size. A `$…$` formula inside a command's output had to establish a
+  second time that its line was printed by a command, and the evidence for that
+  leaves when the prompt line the command began on scrolls out of the history —
+  so an older formula came back as the text you typed and stayed that way for
+  the rest of the session, while the `$$…$$` blocks beside it were set again as
+  usual. Where a line was printed is now noted as the line arrives and kept with
+  it, so a resize gives back the formulas it took away.
 - **Copying a formula no longer leaves the window busy.** The tick that confirms
   the copy has always come down after a moment on screen, but the window went on
   asking to be woken for it for as long as it stayed open — one processor core,
