@@ -4,8 +4,7 @@
 
 **Download:** [zip](https://github.com/lulu-loopp/folio-terminal/releases/download/v0.4.1-preview/folio-0.4.1-windows-x64.zip) (Windows 10 1809+ / 11, 64-bit) · [dmg](https://github.com/lulu-loopp/folio-terminal/releases/download/v0.4.1-preview/Folio-0.4.1-macos-arm64.dmg) (macOS 14+, Apple silicon)
 
-**下载：**
-[中文版发布说明](https://github.com/lulu-loopp/folio-terminal/blob/v<version>-preview/docs/plans/release/release-note-v<version>-preview.zh-CN.md)
+**下载：** 上方 zip 与 dmg 即为完整下载，其余为校验和、物料清单与源码。[中文版发布说明](https://github.com/lulu-loopp/folio-terminal/blob/v0.4.1-preview/docs/plans/release/release-note-v0.4.1-preview.zh-CN.md)
 
 ## Highlights
 
