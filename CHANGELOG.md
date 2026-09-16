@@ -6,17 +6,6 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
-### Fixed
-
-- **Typing stays responsive while a pane prints a lot.** A build log or a long
-  answer scrolling past no longer holds the window for seconds at a time: the
-  output is taken in a short turn and the window goes back to answering the
-  keyboard, the pointer and the tab strip between turns, however much is still
-  coming.
-
-- With the search box open, typing in a pane that is printing no longer pauses
-  while the whole history is searched again.
-
 ## 0.4.1-preview — 2026-09-16
 
 ### Added
@@ -83,6 +72,15 @@ All notable changes to Folio are recorded here. The format follows
   script run after a green gate has nothing left to compile.
 
 ### Fixed
+
+- **Typing stays responsive while a pane prints a lot.** A build log or a long
+  answer scrolling past no longer holds the window for seconds at a time: the
+  output is taken in a short turn and the window goes back to answering the
+  keyboard, the pointer and the tab strip between turns, however much is still
+  coming.
+
+- With the search box open, typing in a pane that is printing no longer pauses
+  while the whole history is searched again.
 
 - **On a Mac, a window that is covered or hidden no longer keeps drawing at full
   speed, and the pictures it prepared while hidden no longer pile up on the
