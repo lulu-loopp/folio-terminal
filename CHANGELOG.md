@@ -6,6 +6,15 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Fixed
+
+- **Maximising or resizing a window no longer pauses when a pane has a long
+  history behind it.** Every pane on screen was copying its whole terminal
+  twice at the start of a resize — everything that had scrolled past included,
+  on the window thread, before a single frame at the new size was drawn — and
+  the second of those two copies was thrown away without ever being read. It is
+  gone.
+
 ## 0.4.1-preview — 2026-09-16
 
 ### Added

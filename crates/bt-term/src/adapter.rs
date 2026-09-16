@@ -346,6 +346,16 @@ pub struct TerminalAdapter {
     /// exists — see [`Self::feed`].
     pending_stream: VecDeque<InlineImageStreamAction>,
     resize_canonical: Option<ResizeCanonical>,
+    /// How many times a resize transaction has deep-copied this terminal.
+    ///
+    /// A `Term` owns both grids, and inside a transaction the primary one owns
+    /// the whole mutable resize tail, so a copy of it costs one allocation per
+    /// row of history — on the window thread, for every shown pane, before any
+    /// frame of the new size is drawn. Arming the canonical branch is the one
+    /// copy that path is allowed to make, and this counter is what lets a test
+    /// say it made one rather than that it looks like one. See
+    /// [`Self::arm_resize_canonical`].
+    resize_forks: u64,
     staged_resize_history_size: usize,
     columns: NonZeroU32,
     rows: NonZeroU32,
@@ -434,6 +444,16 @@ struct ResizeCanonical {
     processor: Processor,
     listener: CaptureListener,
 }
+
+/// A [`Handler`] that keeps nothing, for a replay whose only product is parser state.
+///
+/// [`TerminalAdapter::arm_resize_canonical`] replays the uncommitted parser tail to bring a fresh
+/// [`Processor`] to the position the displayed parser already stands at. Every semantic action that
+/// replay dispatches has been applied to the terminal once already, so every one of them has to be
+/// dropped — which is exactly what the vendored trait's own defaults do with all of them.
+struct ParserTailSink;
+
+impl Handler for ParserTailSink {}
 
 #[derive(Default)]
 struct BoundaryPerformer {
@@ -587,6 +607,7 @@ impl TerminalAdapter {
             osc1337_scanner: Osc1337Scanner::default(),
             pending_stream: VecDeque::new(),
             resize_canonical: None,
+            resize_forks: 0,
             staged_resize_history_size: 0,
             columns,
             rows,
@@ -963,19 +984,30 @@ impl TerminalAdapter {
     /// start of a transaction, and each commit inside it. Between two such points the displayed
     /// branch follows the pointer through sizes the child never had, so it is the canonical fork —
     /// which receives the same bytes and exactly one resize — that the next commit installs.
+    ///
+    /// **One clone of the terminal, and it is the branch itself.** The fork is not a picture taken
+    /// to be read and dropped: [`Self::reconcile_resize_transaction_to_viewport`] installs it as
+    /// the displayed terminal, so it has to be a whole terminal — both grids, and during a
+    /// transaction the primary one owns the entire mutable resize tail. That is the one copy this
+    /// path is allowed, and [`Self::resize_forks`] counts it so a test can say so.
     fn arm_resize_canonical(&mut self) {
         let listener = CaptureListener::default();
         let mut term = self.term.fork(listener.clone());
         install_transcript_hook(&mut term, &listener);
+        self.resize_forks = self.resize_forks.saturating_add(1);
 
         // A transaction can begin between two bytes of a CSI/OSC/DCS/UTF-8 sequence or while a
         // synchronized update is buffered. Seed a fresh processor with that exact uncommitted raw
-        // tail against a disposable fork; the canonical term already contains every committed
-        // semantic action and must not receive the tail twice.
-        let seed_listener = CaptureListener::default();
-        let mut seed_term = self.term.fork(seed_listener);
+        // tail; the canonical term already contains every committed semantic action and must not
+        // receive the tail twice, which is why the replay goes to a handler that keeps nothing.
+        //
+        // What is being carried across is the parser's own position, and that is independent of
+        // who is handling it: every `Handler` method returns `()` and the `Processor` reads none
+        // of them back, so a `ParserTailSink` leaves it where a real terminal would. That sink
+        // used to be a second `fork`, which made opening a transaction two deep copies of the whole
+        // resize tail — and then dropped one of them unread.
         let mut processor = Processor::new();
-        processor.advance(&mut seed_term, &self.parser_tail);
+        processor.advance(&mut ParserTailSink, &self.parser_tail);
 
         self.resize_canonical = Some(ResizeCanonical {
             term,
@@ -1169,6 +1201,12 @@ impl TerminalAdapter {
     /// See [`Self::captures`].
     pub fn captures(&self) -> u64 {
         self.captures.get()
+    }
+
+    /// How many times a resize transaction has deep-copied this terminal since it opened.
+    /// See [`Self::resize_forks`].
+    pub fn resize_forks(&self) -> u64 {
+        self.resize_forks
     }
 
     /// Whether `row` soft-wraps into the row below it — the `continues` flag of `visible_row`, read
@@ -2006,6 +2044,66 @@ mod tests {
         assert!(storm.parser_tail.is_empty());
         assert_eq!(storm.visible_text(), direct.visible_text());
         assert_eq!(storm.cursor(), direct.cursor());
+    }
+
+    /// A resize transaction copies this terminal once per point where it arms the canonical
+    /// branch, and the length of the history it is holding does not change that number.
+    ///
+    /// Arming used to `fork` twice: once for the branch a commit installs, and once for a
+    /// throwaway terminal that existed only to give the replayed parser tail somebody to talk to.
+    /// A fork is `Term::clone`, which copies both grids a row at a time, and inside a transaction
+    /// the primary grid owns the whole mutable resize tail — so the second copy was the price of
+    /// the history, paid on the window thread, for every shown pane, before a single frame of the
+    /// new size reached the screen. It is gone. The first one stays, and stays whole, because
+    /// what it arms is not a picture of the terminal but the terminal the commit installs.
+    ///
+    /// The history has to be built inside the transaction because that is the only place this
+    /// terminal has any: steady-state vendor scrollback is [`SCROLLBACK_LINES`], zero, and the
+    /// transcript's frozen lines are not the grid's and were never in the copy.
+    ///
+    /// A count and not a clock. The claim is how many copies were made, and a stopwatch could only
+    /// ever guess at that from how long they took.
+    #[test]
+    fn a_resize_transaction_copies_the_terminal_once_however_long_its_history() {
+        const HISTORY_ROWS: usize = 50_000;
+        const CHUNK_ROWS: usize = 500;
+
+        let mut terminal = TerminalAdapter::new(nz(20), nz(4));
+        terminal.begin_resize_transaction();
+        assert_eq!(
+            terminal.resize_forks(),
+            1,
+            "opening the transaction armed the canonical branch once"
+        );
+
+        let mut row = 0;
+        while row < HISTORY_ROWS {
+            let mut chunk = Vec::new();
+            for _ in 0..CHUNK_ROWS {
+                chunk.extend_from_slice(format!("line {row}\r\n").as_bytes());
+                row += 1;
+            }
+            terminal.feed(&chunk);
+        }
+        // Everything fed but the screenful still on screen has scrolled into native history.
+        assert!(
+            terminal.resize_transaction_history_size() >= HISTORY_ROWS - 4,
+            "the next fork is standing on {} rows of native history",
+            terminal.resize_transaction_history_size()
+        );
+
+        // Arm the next branch mid-sequence as well, so the replay of the uncommitted tail — the
+        // work the second fork used to carry — happens with all of that history in the grid.
+        terminal.feed(b"\x1b[?2026h\x1b[93mheld");
+        assert!(!terminal.parser_tail.is_empty());
+        terminal.resize(nz(20), nz(2));
+        terminal.reconcile_resize_transaction_to_viewport();
+
+        assert_eq!(
+            terminal.resize_forks(),
+            2,
+            "the commit installed the branch and armed one more; neither point copied twice"
+        );
     }
 
     #[test]
