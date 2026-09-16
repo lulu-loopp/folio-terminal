@@ -22230,21 +22230,35 @@ fn wheel_points_sideways(delta: MouseScrollDelta) -> bool {
 /// line on a Mac, where `wheel_columns` was taking a sideways `x` as it stood
 /// while Windows was negating a `y`.
 ///
-/// **Why the rule is safe to apply on every platform.** It asks for two facts at
-/// once: `Shift` is held *and* the report has no vertical component at all. On
-/// Windows and Linux `Shift`+wheel arrives vertical, so the second fact is false
-/// and the report is handed back untouched. A genuine sideways gesture — a tilt
-/// wheel, a trackpad's second finger — is made without `Shift`, so the first fact
-/// is false. What is left is the one report no platform produces except as this
-/// rewrite: a hand holding `Shift` and a wheel that claims to be moving only
-/// sideways.
+/// **It is macOS's rewrite, so it is asked of macOS and of nowhere else**
+/// (0.4.2 release review, X-5). The first landing applied the rule on every
+/// platform, on the reasoning that a genuine sideways gesture comes without
+/// `Shift` — and that is a guess about how a hand is held, not a fact about a
+/// desktop. **A tilt wheel and a trackpad's second finger exist on Windows and
+/// on Linux too**, and there a hand holding `Shift` over one of them is making a
+/// sideways gesture and means it: nothing rewrote it on the way in, and turning
+/// it into a vertical one would move the document under a reader who asked for
+/// the line. So the third fact is the platform, and only the desktop that
+/// actually performs the swap is allowed to have it undone.
+///
+/// `platform_swaps_shift_wheel` is that fact as a **value**, which is §4.3's
+/// rule for every platform decision in this window (`crumb_segments_on`,
+/// `input::effective_modifiers`): a `cfg!` asked inside the function would make
+/// the rule unreadable — and untestable — from any machine but the one it is
+/// about, and the interesting half of this rule is what it does *not* do
+/// elsewhere. The call site asks `bt_platform::host_platform()`, which is where
+/// this process reads a `cfg` once.
 ///
 /// Applied where the platform's report becomes this window's — before
 /// [`WheelBurst`] merges anything — so that every station downstream of the queue
 /// reads one upright currency and none of them has to know which desktop it is
 /// running on.
-fn upright_wheel(delta: MouseScrollDelta, shift: bool) -> MouseScrollDelta {
-    if !shift {
+fn upright_wheel(
+    delta: MouseScrollDelta,
+    shift: bool,
+    platform_swaps_shift_wheel: bool,
+) -> MouseScrollDelta {
+    if !shift || !platform_swaps_shift_wheel {
         return delta;
     }
     match delta {
@@ -95752,7 +95766,16 @@ impl Runtime<'_> {
         // Above the merge, so a burst is accumulated in one currency and every
         // station past it — the math block's pan, the local subpixels, the column
         // arithmetic — reads a report that means what the hand meant.
-        let delta = upright_wheel(reported, self.window.modifiers.shift_key());
+        //
+        // The desktop is asked of `host_platform()` and not of a `cfg!` here, for
+        // [`upright_wheel`]'s stated reason and for `first_run`'s: this window
+        // reads the `cfg` in one place, and a rule that turns on the platform
+        // stays a rule anybody can read from any machine.
+        let delta = upright_wheel(
+            reported,
+            self.window.modifiers.shift_key(),
+            bt_platform::host_platform() == bt_platform::HostPlatform::MacOs,
+        );
         match self.window.wheel_burst {
             Some(burst) => match burst.plus(delta) {
                 Some(merged) => self.window.wheel_burst = Some(merged),
@@ -124525,15 +124548,28 @@ mod tests {
     /// a dead gesture for a backwards one. [`upright_wheel`]'s own doc says why
     /// the swap is sign-preserving; this is that claim in a form that fails.
     ///
+    /// **And the platform is one of the facts** (0.4.2 release review, X-5). The
+    /// first landing of this rule ran it everywhere, which is why ⑥ is here and
+    /// why it is the half of the test that cannot be checked by using the
+    /// product: the desktop that needs the repair is not the desktop the
+    /// regression lands on. `platform_swaps_shift_wheel` is passed as a value for
+    /// exactly that reason, so both answers are reachable from one machine.
+    ///
     /// MUTATION: negate the copy in [`upright_wheel`] — `LineDelta(0.0, -x)`, the
     /// shape "macOS must surely have flipped it too" would take — and ① goes red
     /// on the equality rather than on the shape. Drop the `!shift` guard and ④
     /// goes red: an ordinary tilt wheel and a trackpad's second finger start
     /// scrolling the document up and down. Drop the `y == 0.0` guard and ⑤ goes
-    /// red, taking every diagonal trackpad flick with it.
+    /// red, taking every diagonal trackpad flick with it. Drop the
+    /// `!platform_swaps_shift_wheel` guard — the shipped shape the review caught
+    /// — and ⑥ goes red alone, with every other numbered block still green.
     #[test]
     fn a_mac_reports_shift_wheel_sideways_and_this_window_stands_it_back_up() {
         use bt_term::{MouseTracking, TerminalModes};
+        // The desktop, as the value [`upright_wheel`] takes it: the one that
+        // performs AppKit's swap, and every other one.
+        const MAC: bool = true;
+        const ELSEWHERE: bool = false;
         let rows_of = |delta: MouseScrollDelta| match delta {
             MouseScrollDelta::LineDelta(_, y) => f64::from(y),
             MouseScrollDelta::PixelDelta(at) => at.y,
@@ -124547,8 +124583,8 @@ mod tests {
         };
 
         // ① The rewrite undone, and the equality that is the whole of the fix.
-        let mac = upright_wheel(MouseScrollDelta::LineDelta(3.0, 0.0), true);
-        let windows = upright_wheel(MouseScrollDelta::LineDelta(0.0, 3.0), true);
+        let mac = upright_wheel(MouseScrollDelta::LineDelta(3.0, 0.0), true, MAC);
+        let windows = upright_wheel(MouseScrollDelta::LineDelta(0.0, 3.0), true, MAC);
         assert_eq!(
             mac, windows,
             "one hand movement, one queued report, whichever desktop reported it"
@@ -124560,13 +124596,14 @@ mod tests {
         );
         // The turn that goes back still goes back: a copy, never a negation.
         assert_eq!(
-            upright_wheel(MouseScrollDelta::LineDelta(-3.0, 0.0), true),
+            upright_wheel(MouseScrollDelta::LineDelta(-3.0, 0.0), true, MAC),
             MouseScrollDelta::LineDelta(0.0, -3.0)
         );
         assert_eq!(
             upright_wheel(
                 MouseScrollDelta::PixelDelta(PhysicalPosition::new(-48.0, 0.0)),
-                true
+                true,
+                MAC
             ),
             MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, -48.0)),
             "a trackpad's precise report is stood up by the same rule"
@@ -124604,7 +124641,7 @@ mod tests {
 
         // ④ A report that points sideways on its own is untouched and unrouted:
         // a tilt wheel and a trackpad's second finger come without the key.
-        let tilt = upright_wheel(MouseScrollDelta::LineDelta(3.0, 0.0), false);
+        let tilt = upright_wheel(MouseScrollDelta::LineDelta(3.0, 0.0), false, MAC);
         assert_eq!(
             tilt,
             MouseScrollDelta::LineDelta(3.0, 0.0),
@@ -124631,9 +124668,42 @@ mod tests {
             MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 0.0)),
         ] {
             assert_eq!(
-                upright_wheel(untouched, true),
+                upright_wheel(untouched, true, MAC),
                 untouched,
                 "only a report with no vertical component at all is a rewrite"
+            );
+        }
+
+        // ⑥ **And nowhere but a Mac is touched by any of it** (release review,
+        // X-5). A tilt wheel and a trackpad's second finger are sold on every
+        // desktop, and on the ones that do not perform AppKit's swap a hand
+        // holding `Shift` over one of them is going sideways and means it. The
+        // shipped rule rewrote exactly this report — the one shape no test then
+        // held — and turned a reader's sideways gesture into a vertical one.
+        for sideways in [
+            MouseScrollDelta::LineDelta(3.0, 0.0),
+            MouseScrollDelta::LineDelta(-3.0, 0.0),
+            MouseScrollDelta::PixelDelta(PhysicalPosition::new(48.0, 0.0)),
+        ] {
+            assert_eq!(
+                upright_wheel(sideways, true, ELSEWHERE),
+                sideways,
+                "a desktop that never swapped the axes has nothing to undo"
+            );
+            assert!(
+                wheel_points_sideways(upright_wheel(sideways, true, ELSEWHERE)),
+                "and the gesture reaches the column arithmetic still sideways"
+            );
+            assert_eq!(
+                wheel_zoom_notches(upright_wheel(sideways, true, ELSEWHERE)),
+                0.0,
+                "a sideways report carries no detent for the zoom chord to spend, \
+                 so Ctrl+Shift over a page still scrolls nothing and zooms nothing"
+            );
+            assert_ne!(
+                upright_wheel(sideways, true, MAC),
+                sideways,
+                "while the one desktop that does swap them still has it undone"
             );
         }
     }
