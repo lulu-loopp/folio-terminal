@@ -4,7 +4,7 @@
 
 **Download:** [zip](https://github.com/lulu-loopp/folio-terminal/releases/download/v0.4.1-preview/folio-0.4.1-windows-x64.zip) (Windows 10 1809+ / 11, 64-bit) · [dmg](https://github.com/lulu-loopp/folio-terminal/releases/download/v0.4.1-preview/Folio-0.4.1-macos-arm64.dmg) (macOS 14+, Apple silicon)
 
-**下载：** 上方 zip 与 dmg 即为完整下载，其余为校验和、物料清单与源码。[中文版发布说明](https://github.com/lulu-loopp/folio-terminal/blob/v0.4.1-preview/docs/plans/release/release-note-v0.4.1-preview.zh-CN.md)
+**下载：** 上方 zip 与 dmg 即为完整下载，其余为校验和、物料清单与源码。[中文版发布说明](https://github.com/lulu-loopp/folio-terminal/blob/main/docs/plans/release/release-note-v0.4.1-preview.zh-CN.md)
 
 ## Highlights
 
@@ -90,7 +90,7 @@
 
 | asset | what it is |
 | --- | --- |
-| `folio-0.4.1-windows-x64.zip` | the nine files that belong together, in one folder — `sha256:<hash>` |
+| `folio-0.4.1-windows-x64.zip` | the nine files that belong together, in one folder — `sha256:00e1cdce977cd80176e63b73b64bb72105352ebed7bf065402a7b65fe31f90fd` |
 | `folio-windows-x64.zip` | the same archive under a name that does not change from one release to the next — the same `sha256` |
 | `SHA256SUMS.txt` | the hash of the archive under each of its two names and of the bill of materials, in the format `sha256sum -c` reads |
 | `folio-0.4.1.cdx.json` | the CycloneDX bill of materials for what is in the build |
@@ -122,7 +122,7 @@ sha256sum -c SHA256SUMS.txt
 
 | asset | what it is |
 | --- | --- |
-| `Folio-0.4.1-macos-arm64.dmg` | the application, signed and notarized — `sha256:<hash>` |
+| `Folio-0.4.1-macos-arm64.dmg` | the application, signed and notarized — `sha256:5e01fca25218abb30ec94f04a915edfa01c3c8754cc62ecf806f9806e03db20d` |
 | `Folio-macos-arm64.dmg` | the same image under a name that does not change from one release to the next — the same `sha256` |
 | `SHA256SUMS-macos.txt` | the hash of the image under each of its two names, in the format `shasum -c` reads |
 
