@@ -13813,6 +13813,12 @@ struct FrameTraces<'a> {
     census: &'a mut glyph_trace::CensusEcho,
 }
 
+/// The trigger and candidate picture carried into the present gate together.
+struct PresentIntent {
+    trigger: FrameTrigger,
+    signature: present_gate::PresentSignature,
+}
+
 impl WindowRuntime {
     /// **Whether a frame that did not reach the glass whole is worth asking for
     /// again**, and the place the textless run is counted.
@@ -100185,9 +100191,12 @@ impl Runtime<'_> {
         window: &Window,
         traces: FrameTraces<'_>,
         seat_frames: &[bt_render::SeatFrame<'_>],
-        trigger: FrameTrigger,
-        mut signature: present_gate::PresentSignature,
+        intent: PresentIntent,
     ) -> Result<Option<PresentOutcome>> {
+        let PresentIntent {
+            trigger,
+            mut signature,
+        } = intent;
         let FrameTraces {
             preview,
             census,
@@ -100420,7 +100429,7 @@ impl Runtime<'_> {
                 .iter()
                 .find(|pane| pane.seat == focused_leaf)
                 .copied()
-                .unwrap_or_else(|| PaneDraw {
+                .unwrap_or(PaneDraw {
                     seat: focused_leaf,
                     viewport,
                     clip: viewport,
@@ -100528,8 +100537,7 @@ impl Runtime<'_> {
                 census: &mut self.window.glyph_census_echo,
             },
             &seat_frames,
-            trigger,
-            signature,
+            PresentIntent { trigger, signature },
         )
         .context("re-present the retained terminal picture")?
         {
@@ -100745,8 +100753,7 @@ impl Runtime<'_> {
                 census: &mut self.window.glyph_census_echo,
             },
             &seat_frames,
-            trigger,
-            signature,
+            PresentIntent { trigger, signature },
         )
         .context("render terminal frame")?
         {
