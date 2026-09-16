@@ -86057,11 +86057,25 @@ impl Runtime<'_> {
     /// that pane's own projection. Nothing is invented for the held pane; the
     /// panes that have something new to show simply stop being hostage to it.
     fn repaint_pane_change(&mut self, seat: SeatId) -> Result<()> {
+        self.repaint_pane_change_inner(seat, None)
+    }
+
+    /// A wheel can leave the view at its clamp; other pane changes still owe
+    /// their unconditional frame. The focused frame's digest cannot tell us
+    /// whether an unfocused view moved, so carry that answer from the scroll.
+    fn repaint_pane_change_inner(
+        &mut self,
+        seat: SeatId,
+        wheel_view_moved: Option<bool>,
+    ) -> Result<()> {
         let trigger = FrameTrigger {
             occurred_at: Instant::now(),
             source: FrameSource::Expose,
         };
-        if self.publish_frame_inner(trigger, false)? || seat == self.focused_leaf {
+        if self.publish_frame_inner(trigger, wheel_view_moved.is_some())?
+            || seat == self.focused_leaf
+            || wheel_view_moved == Some(false)
+        {
             return Ok(());
         }
         self.represent_on_screen_frame(trigger)
@@ -95938,7 +95952,9 @@ impl Runtime<'_> {
             }
             WheelRoute::Local => match self.wheel_columns(target_seat, delta) {
                 Some(columns) => self.scroll_seat_by_columns(target_seat, columns),
-                None => self.scroll_view_exact_in(target_seat, event_subpixels),
+                None => self
+                    .scroll_view_exact_in(target_seat, event_subpixels)
+                    .map(|_| ()),
             },
             WheelRoute::Nothing => Ok(()),
         }
@@ -96068,29 +96084,34 @@ impl Runtime<'_> {
     /// The remainder accumulator stays window-wide: it holds the fraction of a
     /// subpixel one physical notch left over, and a notch is a property of the
     /// mouse, not of the pane it landed on.
+    /// Returns whether the clamped view moved, independently of thumb changes.
     fn scroll_view_exact_in(
         &mut self,
         seat: bt_layout::SeatId,
         event_subpixels: f64,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         self.window.local_wheel_subpixel_remainder += event_subpixels;
         let take = drain_whole_units(&mut self.window.local_wheel_subpixel_remainder, 1.0);
         if take == 0 {
-            return Ok(());
+            return Ok(false);
         }
         // A notch lands a band that is still changing face, for `scroll_view`'s reason.
         self.settle_math_toggle()?;
         let active = self.window.active_tab;
         let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) else {
-            return Ok(());
+            return Ok(false);
         };
+        let before = leaf.projection.scroll_offset_subpixels();
         leaf.projection.scroll_by_subpixels(take);
+        let moved = leaf.projection.scroll_offset_subpixels() != before;
+        self.repaint_pane_change_inner(seat, Some(moved))?;
         // A notch is a reason for the bar to be up, and a moved view is a moved
         // thumb: the overlay is built on demand, so a wheel that only
         // republished the pane would slide the text under a mark that stayed
-        // where it was (P2-9 slice 1).
+        // where it was (P2-9 slice 1). Publish the view first so the thumb can
+        // share that frame; at a clamp a changed fade still owes its own frame.
         self.woke_terminal_thumb(seat)?;
-        self.repaint_pane_change(seat)
+        Ok(moved)
     }
 
     /// **Every key this window is told about, and the one gate above the
@@ -130079,10 +130100,23 @@ mod tests {
         /// `publish_frame_inner` for a source that is not PTY output: composes
         /// unconditionally, with no unchanged-frame gate to fall back on.
         fn publish_expose_frame(&mut self) -> bool {
+            self.publish_expose_frame_inner(false)
+        }
+
+        fn publish_expose_frame_inner(&mut self, skip_unchanged: bool) -> bool {
             self.session.refresh_projection(&mut self.projection);
             self.viewport_frames += 1;
             let frame = self.session.viewport_frame(&mut self.projection).unwrap();
             if self.projection.presentation_hold() && self.last_presented.is_some() {
+                return false;
+            }
+            if skip_unchanged
+                && pty_frame_is_unchanged(
+                    self.pending.pending_frame(),
+                    self.last_presented.as_ref(),
+                    &frame,
+                )
+            {
                 return false;
             }
             self.content_revision += 1;
@@ -132647,6 +132681,96 @@ mod tests {
             .plus(MouseScrollDelta::LineDelta(0.0, -1.0)),
             None
         );
+    }
+
+    // Runtime needs a window and a GPU. Exercise real terminal bytes,
+    // projection, equivalence and frame slots here; the wiring test below
+    // checks the Runtime doors that the headless harness cannot call.
+    fn wheel_pane_at_top() -> PtyPresentationHarness {
+        let mut pane = PtyPresentationHarness::new(20, 3);
+        pane.feed_drain(b"zero\r\none\r\ntwo\r\nthree\r\nfour\r\nfive");
+        pane.projection.scroll_to_top();
+        pane.publish_expose_frame();
+        pane.present_pending();
+        assert!(pane.projection.scroll_offset_subpixels() > 0);
+        pane.publications = 0;
+        pane
+    }
+
+    fn flush_test_wheel(pane: &mut PtyPresentationHarness, notches: f32) -> bool {
+        let burst = WheelBurst::of(MouseScrollDelta::LineDelta(0.0, notches / 2.0))
+            .plus(MouseScrollDelta::LineDelta(0.0, notches / 2.0))
+            .unwrap();
+        let MouseScrollDelta::LineDelta(_, lines) = burst.delta() else {
+            panic!("line reports stay in their own currency");
+        };
+        let before = pane.projection.scroll_offset_subpixels();
+        let mut remainder = f64::from(lines) * pane.projection.cell_height_subpixels().get() as f64;
+        pane.projection
+            .scroll_by_subpixels(drain_whole_units(&mut remainder, 1.0));
+        let moved = pane.projection.scroll_offset_subpixels() != before;
+        pane.publish_expose_frame_inner(true);
+        moved
+    }
+
+    #[test]
+    fn wheel_flush_at_the_top_clamp_publishes_no_frame() {
+        let mut pane = wheel_pane_at_top();
+        let revision = pane.content_revision;
+        assert!(!flush_test_wheel(&mut pane, 1.0));
+        assert_eq!(pane.publications, 0);
+        assert_eq!(pane.content_revision, revision);
+        assert!(!pane.present_pending());
+        // The former unconditional wheel publish fails the zero-frame rule.
+        assert!(pane.publish_expose_frame());
+        assert_eq!(pane.publications, 1);
+    }
+
+    #[test]
+    fn wheel_flush_that_moves_the_view_publishes_exactly_one_frame() {
+        let mut pane = wheel_pane_at_top();
+        let before = pane.last_presented.clone().unwrap();
+        assert!(flush_test_wheel(&mut pane, -1.0));
+        assert_eq!(pane.publications, 1);
+        let after = pane.pending.pending_frame().unwrap();
+        assert_ne!(before.viewport_origin, after.viewport_origin);
+        assert!(pane.present_pending());
+        assert!(!pane.present_pending());
+    }
+
+    #[test]
+    fn wheel_flush_at_a_clamp_still_publishes_changed_content() {
+        let mut pane = wheel_pane_at_top();
+        // New live cells still belong to the frame at the bottom clamp.
+        pane.session.feed(b"\x1b[3J\x1b[2J\x1b[Hnew").unwrap();
+        pane.publish_expose_frame();
+        pane.present_pending();
+        pane.publications = 0;
+        pane.session.feed(b" content").unwrap();
+        assert!(!flush_test_wheel(&mut pane, -1.0));
+        assert_eq!(pane.publications, 1);
+    }
+
+    #[test]
+    fn wheel_flush_runtime_skips_unchanged_panes_but_keeps_thumb_frames() {
+        let repaint = method_text("    fn repaint_pane_change_inner(");
+        assert!(repaint.contains("self.publish_frame_inner(trigger,wheel_view_moved.is_some())?"));
+        assert!(repaint.contains("||seat==self.focused_leaf||wheel_view_moved==Some(false)"));
+        assert!(repaint.contains("self.represent_on_screen_frame(trigger)"));
+        let scroll = method_text("    fn scroll_view_exact_in(");
+        assert!(scroll.contains("letbefore=leaf.projection.scroll_offset_subpixels();"));
+        assert!(scroll.contains("letmoved=leaf.projection.scroll_offset_subpixels()!=before;"));
+        let publish = scroll
+            .find("self.repaint_pane_change_inner(seat,Some(moved))?")
+            .unwrap();
+        let thumb = scroll.find("self.woke_terminal_thumb(seat)?").unwrap();
+        assert!(
+            publish < thumb,
+            "the thumb shares a moved view's queued frame"
+        );
+        let wake =
+            method_text("    fn woke_terminal_thumb(&mut self, seat: SeatId) -> Result<()> {");
+        assert!(wake.contains("ifself.refresh_overlay(){self.present_chrome_change()?;"));
     }
 
     #[test]

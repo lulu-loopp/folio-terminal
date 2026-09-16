@@ -101,6 +101,8 @@
 2. **`AppEvent::PtyOutput` 这条臂什么也不做**（与同文件 `GitChanged` 同款）。既然 `about_to_wait` 每轮都 drain，在 `user_event` 里再 drain 一次就是**一轮两次排版**，中间落进来的字节让第一帧必然被覆盖。
 3. **一轮循环只花一格滚轮**（`WheelBurst`）。滚轮按格到达，自由轮或饿住的循环会让好几格挤在一轮里；每格都排一整帧进只装一帧的槽 = N 次排版 1 次上屏。求和是**精确**的：所有路由对 delta 都是线性的，唯一非线性的图片缩放是 `s^a·s^b = s^(a+b)`。两种货币（行/像素）不相加，换货币时先把手里的花掉。
 
+A terminal wheel flush uses the unchanged-frame gate and only re-presents an unfocused pane when its view moved, while thumb or fade changes retain their own frame and the burst still flushes before the next non-wheel event.
+
 **线程分三档**（`bt_platform::ThreadPriority` + `spawn_at_priority`，唯一的 `unsafe` 边界）：事件循环=渲染线程 `ABOVE_NORMAL`；PTY 读线程 `NORMAL`；**所有 worker `BELOW_NORMAL`**——files / git（连它自己起的两条管道线程，**线程不继承父线程优先级**）/ preview / math / image-scale / psreadline 探针 / wsl 探针。优先级在**新线程内部第一句**设置，不是 spawn 之后在 `JoinHandle` 上设——中间那段正是 worker 最忙的那几毫秒。**没有用 MMCSS**：`AvSetMmThreadCharacteristicsW("Window Manager")` 要多一个 `avrt.dll` 和一个必须配对的 revert，它给的提升远不止一档、会让循环在同样的饱和下饿死**本进程自己的** PTY 读线程与 worker，而且 MMCSS 自带 `SystemResponsiveness` 节流，可能反而加延迟。加一档是能回答这个抱怨的最小改动。
 
 **数字**（同一台机器、同一套注入；`before` = 39eba41 + 仅埋点，`after` = 本片全部）：
