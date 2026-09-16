@@ -20,6 +20,38 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **On a Mac, a second Folio started from a terminal now hands over instead of
+  becoming a second writer.** Which Folio is allowed to write your settings and
+  your saved session was decided in a directory whose location came from
+  `TMPDIR` — so a Folio started from the Dock and one started from an `ssh`
+  session, a script or a login shell that clears the environment were each
+  certain they were the only one. Both wrote, the later write erased the
+  earlier, and the second window never found the first to pass your command line
+  to. The location is now asked of macOS itself, which gives every process you
+  run the same answer however it was started.
+- **On a Mac, Folio no longer tells the system it has dealt with a keyboard
+  shortcut that is not its own.** The summon key's handler answered "handled" to
+  every hot key event offered to Folio, including ones registered by something
+  else inside the same application and ones it could not read at all. It now
+  says so only for the press it actually acted on, and leaves the rest to carry
+  on to whoever was waiting for them.
+- **On a Mac, a video left playing no longer builds up memory for as long as it
+  is open.** The thread that plays a video ran without an autorelease pool, so
+  everything the system's media framework handed it in passing was held until
+  the preview was closed rather than released as it went. It now opens and
+  drains one on every pass, so a video that plays for an hour costs what a video
+  that plays for a minute does.
+- **Copying a formula no longer leaves the window busy.** The tick that confirms
+  the copy has always come down after a moment on screen, but the window went on
+  asking to be woken for it for as long as it stayed open — one processor core,
+  spent on a window doing nothing. The confirmation is now finished with when it
+  leaves the screen.
+- **A formula's two marks stay with the formula.** Switching tabs or closing a
+  pane used to leave the marks from the block you had been pointing at standing
+  over whatever came next, until you moved the mouse. And in a window split into
+  panes of different sizes, the marks in an unfocused pane were placed — and
+  could be pressed — as though that pane were the size of the focused one.
+
 - **Maximising or resizing a window no longer pauses when a pane has a long
   history behind it.** Every pane on screen was copying its whole terminal
   twice at the start of a resize — everything that had scrolled past included,
