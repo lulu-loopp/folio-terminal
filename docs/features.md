@@ -344,8 +344,8 @@ folder in front of a shell.
 
 ## English and Chinese
 
-Every string a reader can see is written in both, and the interface is one of
-them at a time.
+Every string in Folio's own interface is written in both, and the interface is
+one of them at a time.
 
 - **Settings > General > Language** offers English, 中文, or the system setting,
   and a change reaches every pane, menu and dialog the moment it is made —
@@ -356,3 +356,7 @@ them at a time.
 - The shortcut table, the settings descriptions and the messages a pane prints
   are all in the same two languages, so switching does not leave a row of one
   standing in the other.
+- Finder's **Open in Folio** is the one exception, and it is outside Folio: the
+  row is a macOS Services item, a translated one needs a translated application
+  bundle, and this application has no translated resources at all — so the row
+  reads English in either language until that changes.
