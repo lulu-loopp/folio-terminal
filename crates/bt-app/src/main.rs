@@ -22089,6 +22089,59 @@ fn wheel_points_sideways(delta: MouseScrollDelta) -> bool {
     x != 0.0 && x.abs() > y.abs()
 }
 
+/// **`Shift`+wheel arrives lying on its side on macOS, and this is where it is
+/// stood back up** (owner report, Mac mini, 0.4.1).
+///
+/// A formula had pushed twenty-one rows above the pane of an alternate-screen
+/// program, the chip said `21 rows above · Shift+wheel`, and the gesture the
+/// chip names did nothing at all. Nothing in this window was wrong about it:
+/// [`wheel_route`] read the `Shift` and ruled [`WheelRoute::Local`] exactly as it
+/// does on Windows. What was wrong was the number. **macOS rewrites `Shift` plus
+/// a vertical wheel into a horizontal scroll event before any application sees
+/// it** — AppKit swaps the axes, so `scrollingDeltaX` carries the turn and
+/// `scrollingDeltaY` is zero — and winit's macOS backend passes both components
+/// through as they stand (`platform_impl/macos/view.rs`, `scrollWheel:`). A local
+/// row scroll asked that report how far down to go, read `y`, and got zero.
+///
+/// **The sign is a copy and not a negation.** winit's own contract is that a
+/// positive component means "the content should move right and down", i.e. reveal
+/// what is left and above, on *both* axes — so "back" is positive either way and
+/// the swap AppKit performs is sign-preserving. A turn away from the hand that
+/// would have been `LineDelta(0, 3)` on Windows reaches us as `LineDelta(3, 0)`
+/// on a Mac, and putting the `3` back on `y` makes the two platforms deliver the
+/// same queued report for the same hand movement — which is the property the
+/// tests pin, and which also fixes the direction of `Shift`+wheel over a long
+/// line on a Mac, where `wheel_columns` was taking a sideways `x` as it stood
+/// while Windows was negating a `y`.
+///
+/// **Why the rule is safe to apply on every platform.** It asks for two facts at
+/// once: `Shift` is held *and* the report has no vertical component at all. On
+/// Windows and Linux `Shift`+wheel arrives vertical, so the second fact is false
+/// and the report is handed back untouched. A genuine sideways gesture — a tilt
+/// wheel, a trackpad's second finger — is made without `Shift`, so the first fact
+/// is false. What is left is the one report no platform produces except as this
+/// rewrite: a hand holding `Shift` and a wheel that claims to be moving only
+/// sideways.
+///
+/// Applied where the platform's report becomes this window's — before
+/// [`WheelBurst`] merges anything — so that every station downstream of the queue
+/// reads one upright currency and none of them has to know which desktop it is
+/// running on.
+fn upright_wheel(delta: MouseScrollDelta, shift: bool) -> MouseScrollDelta {
+    if !shift {
+        return delta;
+    }
+    match delta {
+        MouseScrollDelta::LineDelta(x, y) if y == 0.0 && x != 0.0 => {
+            MouseScrollDelta::LineDelta(0.0, x)
+        }
+        MouseScrollDelta::PixelDelta(at) if at.y == 0.0 && at.x != 0.0 => {
+            MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, at.x))
+        }
+        upright => upright,
+    }
+}
+
 /// **The travel a card aim has been handed and not yet spent** (user report
 /// 2026-08-21: "turning up works, but I have to turn for ages").
 ///
@@ -35543,6 +35596,23 @@ fn drain_may_take_another_slice(slices_taken: usize, elapsed: Duration) -> bool 
     slices_taken < DRAIN_SLICES_PER_TURN && elapsed < DRAIN_TURN_BUDGET
 }
 
+/// Bracket the complete slice loop, including its error return, once for every tab.
+fn in_drain_feed_turn<T, R>(
+    tabs: &mut [T],
+    begin: impl Fn(&mut T),
+    end: impl Fn(&mut T),
+    drain: impl FnOnce(&mut [T]) -> R,
+) -> R {
+    for tab in &mut *tabs {
+        begin(tab);
+    }
+    let result = drain(tabs);
+    for tab in tabs {
+        end(tab);
+    }
+    result
+}
+
 /// What one drain turned up, beyond the bytes.
 ///
 /// Separate answers rather than a `bool` tuple because they drive different
@@ -35730,30 +35800,8 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
         .read_output_slice();
     if !bytes.is_empty() {
         debug_assert!(bytes.len() <= bt_pty::TERM_READ_SLICE.get());
-        // **One thing a smaller read touches that is not in this crate, written
-        // down here because silence is how it gets lost.**
-        // `DualPlaneSession::feed_at` opens a repaint-preservation window when
-        // the bytes it is given carry a clear+home, an erase storm or a DEC 2026
-        // BSU, and closes it at the end of the same call unless a synchronized
-        // update is still open. That window is therefore scoped to *one read*,
-        // and always was: a reprint longer than the read splits across two, and
-        // the second half repaints with no window standing. A smaller read makes
-        // that split likelier — 8 KiB rather than 256 KiB of head room — so what
-        // used to be a quantum-boundary rarity is now an 8 KiB-boundary one.
-        //
-        // What it does **not** do is put a half-repainted picture on the glass:
-        // no frame is published between the slices of a turn
-        // ([`Runtime::drain_pty`] publishes once, at its tail), and records the
-        // reprojection cannot place are held off-band and re-anchored by exact
-        // source equality on the next slice. What is left is a record whose rows
-        // are rewritten in the slice *after* the window closed: it goes to source
-        // until re-detection.
-        //
-        // The repair is to scope that window to the turn rather than to the read
-        // — `feed_at` deferring its two `finish_*_repaint` calls to an explicit
-        // end-of-turn settle — and it belongs in `bt-term` beside
-        // `repaint_flash_oracle`, which is the gate that can prove it. T-DRAIN-BURST
-        // deliberately does not reach into that contract.
+        // The drain brackets all of its slices with begin/end_feed_turn, so a
+        // repaint's proven records stay protected until the whole turn settles.
         leaf.session
             .feed_at(&bytes, Instant::now())
             .context("apply PTY output")?;
@@ -82448,19 +82496,41 @@ impl Runtime<'_> {
         // a leftover two passes ago and has since gone quiet owes this window
         // nothing, and a wake raised for it would be a turn that drains nothing
         // and publishes a frame nobody asked for.
-        let pending = loop {
-            let mut slice_pending = false;
-            for (index, tab) in self.window.tabs.iter_mut().enumerate() {
-                let outcome =
-                    drain_tab_pty(tab, window_focused, index == active_tab, owner_is_a_shell)?;
-                slice_pending |= outcome.pending;
-                outcomes[index].merge(outcome);
-            }
-            slices_taken += 1;
-            if !slice_pending || !drain_may_take_another_slice(slices_taken, now.elapsed()) {
-                break slice_pending;
-            }
-        };
+        let drain_result = in_drain_feed_turn(
+            &mut self.window.tabs,
+            |tab| {
+                for (_, leaf) in tab.leaves_mut() {
+                    leaf.session.begin_feed_turn();
+                }
+            },
+            |tab| {
+                for (_, leaf) in tab.leaves_mut() {
+                    leaf.session.end_feed_turn();
+                }
+            },
+            |tabs| -> Result<bool> {
+                let pending = loop {
+                    let mut slice_pending = false;
+                    for (index, tab) in tabs.iter_mut().enumerate() {
+                        let outcome = drain_tab_pty(
+                            tab,
+                            window_focused,
+                            index == active_tab,
+                            owner_is_a_shell,
+                        )?;
+                        slice_pending |= outcome.pending;
+                        outcomes[index].merge(outcome);
+                    }
+                    slices_taken += 1;
+                    if !slice_pending || !drain_may_take_another_slice(slices_taken, now.elapsed())
+                    {
+                        break slice_pending;
+                    }
+                };
+                Ok(pending)
+            },
+        );
+        let pending = drain_result?;
         for (index, tab) in self.window.tabs.iter_mut().enumerate() {
             let outcome = &mut outcomes[index];
             // **The OSC lane's turn, on the turn the bytes arrived.** A standing request a program
@@ -95386,7 +95456,7 @@ impl Runtime<'_> {
 
     /// Take one notch from the platform. See [`WheelBurst`] for why this is not
     /// [`Self::mouse_wheel`].
-    fn queue_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {
+    fn queue_wheel(&mut self, reported: MouseScrollDelta) -> Result<()> {
         self.window.wheel_events = self.window.wheel_events.saturating_add(1);
         // **The wheel road's own first station** (`BT_MOUSE_TRACE`, §7.60): the
         // *raw* report, as the driver sent it, before [`WheelBurst`] merges it
@@ -95394,18 +95464,31 @@ impl Runtime<'_> {
         // both currencies of the same gesture are in the file; the `events`
         // counter on both lines is what pairs a flush with the reports that fed
         // it, and `carried` is what was already held when this one arrived.
+        //
+        // It stays the platform's word and not this window's, which is what makes
+        // the pair of stations worth having on a Mac: a `Shift` gesture there is
+        // reported sideways and stood back up one line below
+        // ([`upright_wheel`]), so `raw_delta=lines:3,0` at this station against
+        // `flushed=lines:0,3` at the next *is* the rewrite, legible without a
+        // debugger.
         let carried = self.window.wheel_burst;
         let events = self.window.wheel_events;
         self.mouse_trace(|| {
             format!(
                 "wheel_queue raw_delta={} carried={} events={events}",
-                mouse_trace::delta_word(delta),
+                mouse_trace::delta_word(reported),
                 carried.map_or_else(
                     || "none".to_owned(),
                     |burst| mouse_trace::delta_word(burst.delta())
                 ),
             )
         });
+        // **The platform's report becomes this window's here**, and on exactly
+        // one desktop that is a change of shape rather than a change of owner.
+        // Above the merge, so a burst is accumulated in one currency and every
+        // station past it — the math block's pan, the local subpixels, the column
+        // arithmetic — reads a report that means what the hand meant.
+        let delta = upright_wheel(reported, self.window.modifiers.shift_key());
         match self.window.wheel_burst {
             Some(burst) => match burst.plus(delta) {
                 Some(merged) => self.window.wheel_burst = Some(merged),
@@ -96125,9 +96208,17 @@ impl Runtime<'_> {
         // sentence about a hand not being straight now governs both arms of the
         // report rather than the pixel one alone.
         let sideways = wheel_points_sideways(delta);
+        // **Rows this gesture is the only way to reach** — [`wheel_axis`]'s first
+        // half, read off the pane. On the alternate screen the plain wheel is the
+        // program's, so the rows a typeset formula pushed above this pane answer
+        // to `Shift` and to nothing else; on the primary screen they are a plain
+        // notch away and the key is free to name the other axis.
+        let shift_only_rows = self.leaf_terminal_modes(seat).alternate_screen
+            && self.leaf(seat).projection.has_displaced_rows();
         if wheel_axis(
             self.window.modifiers.shift_key(),
             sideways,
+            shift_only_rows,
             axis.max_x_origin().0 > 0,
         ) != WheelAxis::Columns
         {
@@ -107367,6 +107458,47 @@ mod pty_drain_budget_tests {
         );
     }
 
+    #[test]
+    fn the_drain_marks_each_sessions_turn_once_for_any_slice_count() {
+        for slices in [1, 2, super::DRAIN_SLICES_PER_TURN] {
+            for fail in [false, true] {
+                let mut tabs = [Vec::new(), Vec::new()];
+                let result = super::in_drain_feed_turn(
+                    &mut tabs,
+                    |events| events.push("begin"),
+                    |events| events.push("end"),
+                    |tabs| {
+                        for _ in 0..slices {
+                            for events in &mut *tabs {
+                                events.push("slice");
+                            }
+                        }
+                        if fail { Err("feed failed") } else { Ok(()) }
+                    },
+                );
+                assert_eq!(result.is_err(), fail);
+                for events in tabs {
+                    assert_eq!(events.first(), Some(&"begin"));
+                    assert_eq!(events.last(), Some(&"end"));
+                    assert_eq!(events.iter().filter(|event| **event == "begin").count(), 1);
+                    assert_eq!(events.iter().filter(|event| **event == "end").count(), 1);
+                    assert_eq!(
+                        events.iter().filter(|event| **event == "slice").count(),
+                        slices
+                    );
+                }
+            }
+        }
+        // Pin the production loop to the same scope exercised above.
+        let body = method_body("drain_pty");
+        let scope = body.find("in_drain_feed_turn(").unwrap();
+        let slices = body.find("let pending = loop {").unwrap();
+        assert!(scope < slices);
+        assert_eq!(body.matches("leaf.session.begin_feed_turn();").count(), 1);
+        assert_eq!(body.matches("leaf.session.end_feed_turn();").count(), 1);
+        assert!(body[slices..].contains("let pending = drain_result?;"));
+    }
+
     /// PIN (T-DRAIN-BURST) — **the repetition lives where the deadline does, and
     /// the bookkeeping that follows it runs once.**
     ///
@@ -113181,13 +113313,42 @@ enum WheelAxis {
 /// modifier: a report on the x axis is a reader saying "sideways" in the
 /// platform's own words, and the only reason to ask for `Shift` as well would be
 /// that we had not listened.
-fn wheel_axis(shift: bool, sideways: bool, has_column_axis: bool) -> WheelAxis {
+///
+/// # And a pane with rows this gesture is the only way to reach
+///
+/// **The rule, in one sentence: `Shift`+wheel scrolls the axis the pane has to
+/// offer — the rows a formula displaced above the pane when there are any, and
+/// otherwise the columns of a line longer than the pane.**
+///
+/// `shift_only_rows` is the first half of that, and it is asked of the
+/// pane rather than of the key. On the **alternate screen** the plain wheel
+/// belongs to the program ([`wheel_route`]), so the rows a typeset formula pushed
+/// above the pane have exactly one gesture that reaches them — the one the chip
+/// names, `N rows above · Shift+wheel` — and a pane that also happened to have a
+/// second axis would otherwise answer that chip by moving sideways. On the
+/// **primary screen** every one of those rows is a plain notch away, so the key
+/// is free to mean the other axis, and the promise the settings line makes about
+/// a long line ("Scroll sideways with Shift+wheel") is kept word for word.
+///
+/// A sideways report without `Shift` is unchanged by any of this: it still says
+/// "sideways" in the platform's own words and is still taken at its word.
+fn wheel_axis(
+    shift: bool,
+    sideways: bool,
+    shift_only_rows: bool,
+    has_column_axis: bool,
+) -> WheelAxis {
     if !has_column_axis {
         // A pane with one axis has one answer, and it is the one it has always
         // given. This arm is what keeps `Shift`'s old meaning intact everywhere
         // it used to matter — including the alternate screen, whose flattened
         // domain is empty, so a full-screen program's local review is reached by
         // exactly the gesture that reached it before.
+        return WheelAxis::Rows;
+    }
+    if shift && shift_only_rows {
+        // Displaced rows first: the key is being spent on the one axis of this
+        // pane nothing else can move.
         return WheelAxis::Rows;
     }
     if shift || sideways {
@@ -123660,25 +123821,166 @@ mod tests {
         for has_column_axis in [false, true] {
             for shift in [false, true] {
                 for sideways in [false, true] {
-                    situations += 1;
-                    let expected = match (has_column_axis, shift, sideways) {
-                        // One axis, one answer — the answer it has always given.
-                        (false, _, _) => WheelAxis::Rows,
-                        // Two axes: the key that already means "this window's own
-                        // view" says which of its axes, and a report that already
-                        // points sideways needs no key at all.
-                        (true, true, _) | (true, _, true) => WheelAxis::Columns,
-                        (true, false, false) => WheelAxis::Rows,
-                    };
-                    assert_eq!(
-                        wheel_axis(shift, sideways, has_column_axis),
-                        expected,
-                        "shift={shift} sideways={sideways} axis={has_column_axis}"
-                    );
+                    for shift_only_rows in [false, true] {
+                        situations += 1;
+                        let expected = match (has_column_axis, shift, sideways, shift_only_rows) {
+                            // One axis, one answer — the answer it has always
+                            // given.
+                            (false, _, _, _) => WheelAxis::Rows,
+                            // The axis the pane has to offer: rows it displaced
+                            // above itself that nothing but this key reaches,
+                            // before the columns anything can reach.
+                            (true, true, _, true) => WheelAxis::Rows,
+                            // Two axes: the key that already means "this
+                            // window's own view" says which of its axes, and a
+                            // report that already points sideways needs no key
+                            // at all.
+                            (true, true, _, false) | (true, false, true, _) => WheelAxis::Columns,
+                            (true, false, false, _) => WheelAxis::Rows,
+                        };
+                        assert_eq!(
+                            wheel_axis(shift, sideways, shift_only_rows, has_column_axis),
+                            expected,
+                            "shift={shift} sideways={sideways} \
+                             shift_only_rows={shift_only_rows} \
+                             axis={has_column_axis}"
+                        );
+                    }
                 }
             }
         }
-        assert_eq!(situations, 8, "the sweep covered every situation");
+        assert_eq!(situations, 16, "the sweep covered every situation");
+    }
+
+    /// PIN (owner report, Mac mini, 0.4.1): **a typeset formula pushed rows off
+    /// the top of an alternate-screen pane, the chip under it said `21 rows
+    /// above · Shift+wheel`, and on a Mac that gesture did nothing whatsoever.**
+    ///
+    /// Every decision in this window was already right about it: [`wheel_route`]
+    /// read the `Shift`, ruled [`WheelRoute::Local`], and handed the notch to the
+    /// local row scroll exactly as it does on Windows. **The number was wrong, not
+    /// the routing** — macOS rewrites `Shift` plus a vertical wheel into a
+    /// horizontal scroll event before an application ever sees it, so the row
+    /// scroll was reading a `y` that the desktop had emptied, and twenty-one rows
+    /// stayed where they were.
+    ///
+    /// Asserted as a **cross-platform equality** rather than as a shape, because
+    /// the shape is the easy half and the hard half is the sign: the same hand
+    /// movement has to queue the same report on both desktops, or the fix trades
+    /// a dead gesture for a backwards one. [`upright_wheel`]'s own doc says why
+    /// the swap is sign-preserving; this is that claim in a form that fails.
+    ///
+    /// MUTATION: negate the copy in [`upright_wheel`] — `LineDelta(0.0, -x)`, the
+    /// shape "macOS must surely have flipped it too" would take — and ① goes red
+    /// on the equality rather than on the shape. Drop the `!shift` guard and ④
+    /// goes red: an ordinary tilt wheel and a trackpad's second finger start
+    /// scrolling the document up and down. Drop the `y == 0.0` guard and ⑤ goes
+    /// red, taking every diagonal trackpad flick with it.
+    #[test]
+    fn a_mac_reports_shift_wheel_sideways_and_this_window_stands_it_back_up() {
+        use bt_term::{MouseTracking, TerminalModes};
+        let rows_of = |delta: MouseScrollDelta| match delta {
+            MouseScrollDelta::LineDelta(_, y) => f64::from(y),
+            MouseScrollDelta::PixelDelta(at) => at.y,
+        };
+        let alternate = TerminalModes {
+            alternate_screen: true,
+            alternate_scroll: true,
+            sgr_mouse: true,
+            mouse_tracking: MouseTracking::Off,
+            focus_reporting: false,
+        };
+
+        // ① The rewrite undone, and the equality that is the whole of the fix.
+        let mac = upright_wheel(MouseScrollDelta::LineDelta(3.0, 0.0), true);
+        let windows = upright_wheel(MouseScrollDelta::LineDelta(0.0, 3.0), true);
+        assert_eq!(
+            mac, windows,
+            "one hand movement, one queued report, whichever desktop reported it"
+        );
+        assert_eq!(mac, MouseScrollDelta::LineDelta(0.0, 3.0));
+        assert!(
+            !wheel_points_sideways(mac),
+            "and nothing downstream can still read it as a sideways gesture"
+        );
+        // The turn that goes back still goes back: a copy, never a negation.
+        assert_eq!(
+            upright_wheel(MouseScrollDelta::LineDelta(-3.0, 0.0), true),
+            MouseScrollDelta::LineDelta(0.0, -3.0)
+        );
+        assert_eq!(
+            upright_wheel(
+                MouseScrollDelta::PixelDelta(PhysicalPosition::new(-48.0, 0.0)),
+                true
+            ),
+            MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, -48.0)),
+            "a trackpad's precise report is stood up by the same rule"
+        );
+
+        // ② The chip's own gesture, end to end: `Shift` on an alternate screen is
+        // the local override, the pane has rows displaced above it, and the notch
+        // is spent on those rows — with or without a second axis to be tempted by.
+        assert_eq!(
+            wheel_route(true, alternate, false),
+            WheelRoute::Local,
+            "Shift over a full-screen program is this window's view, as ever"
+        );
+        for has_column_axis in [false, true] {
+            assert_eq!(
+                wheel_axis(true, wheel_points_sideways(mac), true, has_column_axis),
+                WheelAxis::Rows,
+                "the axis the pane has to offer is the rows it displaced \
+                 (column axis={has_column_axis})"
+            );
+        }
+        assert_eq!(
+            rows_of(mac),
+            3.0,
+            "and the rows move by the turn the hand made, not by nothing"
+        );
+
+        // ③ The same key over a long line on a pane with nothing displaced still
+        // means sideways — the promise the wrapping setting's own line makes.
+        assert_eq!(
+            wheel_axis(true, wheel_points_sideways(mac), false, true),
+            WheelAxis::Columns,
+            "Shift+wheel still scrolls a long line sideways"
+        );
+
+        // ④ A report that points sideways on its own is untouched and unrouted:
+        // a tilt wheel and a trackpad's second finger come without the key.
+        let tilt = upright_wheel(MouseScrollDelta::LineDelta(3.0, 0.0), false);
+        assert_eq!(
+            tilt,
+            MouseScrollDelta::LineDelta(3.0, 0.0),
+            "no key, no rewrite — this hand really is going sideways"
+        );
+        assert!(wheel_points_sideways(tilt));
+        for shift_only_rows in [false, true] {
+            assert_eq!(
+                wheel_axis(false, true, shift_only_rows, true),
+                WheelAxis::Columns,
+                "a sideways report is taken at its word whatever the pane holds"
+            );
+        }
+
+        // ⑤ And everything else the key is held over passes through as it stands.
+        // The diagonals are the ones that matter: a trackpad flick is never
+        // exactly straight, and a rule that read "mostly sideways" would eat one.
+        for untouched in [
+            MouseScrollDelta::LineDelta(0.0, 3.0),
+            MouseScrollDelta::LineDelta(3.0, 1.0),
+            MouseScrollDelta::LineDelta(0.0, 0.0),
+            MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 40.0)),
+            MouseScrollDelta::PixelDelta(PhysicalPosition::new(40.0, 2.0)),
+            MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 0.0)),
+        ] {
+            assert_eq!(
+                upright_wheel(untouched, true),
+                untouched,
+                "only a report with no vertical component at all is a rewrite"
+            );
+        }
     }
 
     /// **The predicate the gesture turns on is the predicate the bar is drawn
@@ -123699,7 +124001,7 @@ mod tests {
                 VIEWPORT,
                 ContentColumn(0),
             );
-            let gesture = wheel_axis(true, false, axis.max_x_origin().0 > 0);
+            let gesture = wheel_axis(true, false, false, axis.max_x_origin().0 > 0);
             let bar = termscroll::column_bar(
                 BODY,
                 axis.content_extent().0,

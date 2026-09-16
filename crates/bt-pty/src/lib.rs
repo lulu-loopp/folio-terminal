@@ -396,6 +396,54 @@ const CHILD_EXIT_BUDGET: Duration = Duration::from_secs(2);
 /// How often the wait above asks.
 const CHILD_EXIT_POLL: Duration = Duration::from_millis(2);
 
+/// How long a pane's shutdown waits for its reader thread (T-QUIT-HAS-A-DEADLINE).
+///
+/// The reader is blocked inside a `read` on the pseudoconsole's output pipe, and what ends that
+/// read is the host closing its end of it — which is what closing the ring and then dropping the
+/// master does, in that order, a few statements above the join. So this budget is not how long
+/// the ordinary case takes; it is what the *un*ordinary one costs, where the host has not let go
+/// and the read does not return. Two seconds, for [`CHILD_EXIT_BUDGET`]'s reasons: no healthy
+/// close comes near it, and a window closing a pane may not be made to wait on a host.
+const READER_EXIT_BUDGET: Duration = Duration::from_secs(2);
+
+/// How often the join above asks.
+const READER_EXIT_POLL: Duration = Duration::from_millis(2);
+
+/// What a bounded join found.
+#[derive(Debug, Eq, PartialEq)]
+enum ReaderExit {
+    /// It ended.
+    Ended,
+    /// It ended by panicking, which is a fact about this session the caller answers for.
+    Panicked,
+    /// It had not ended when the budget ran out, and has been let go.
+    StillReading,
+}
+
+/// **Join `reader`, and stop waiting after `budget`.**
+///
+/// The bounded shape of a join (T-QUIT-HAS-A-DEADLINE), written as a function of a handle rather
+/// than of a session so the bound itself can be tested with an ordinary thread and no PTY. The
+/// handle is consumed either way: past the budget it is dropped, which detaches the thread, and
+/// that is the only honest thing to do with one parked inside a read nothing in this process can
+/// cancel. What it is holding — a cloned pipe handle and a closed ring — is a handful of bytes
+/// that go when the pipe finally does.
+fn join_within(budget: Duration, reader: JoinHandle<()>) -> ReaderExit {
+    let deadline = Instant::now() + budget;
+    loop {
+        if reader.is_finished() {
+            return match reader.join() {
+                Ok(()) => ReaderExit::Ended,
+                Err(_) => ReaderExit::Panicked,
+            };
+        }
+        if Instant::now() >= deadline {
+            return ReaderExit::StillReading;
+        }
+        std::thread::sleep(READER_EXIT_POLL);
+    }
+}
+
 /// **Ask `reaped` until it answers, and stop asking after `budget`.**
 ///
 /// The bounded shape of a wait on a child (review row R2-6), written as a
@@ -1618,26 +1666,48 @@ impl PtySession {
         // one is already awake and leaving on the `close`.
         self.input.close();
         self.writer.take();
+        // **A reap that fails does not skip the teardown** (crash review C-11). The error is kept
+        // and answered at the end: a child that exited of its own accord between the `try_wait`
+        // and the `kill`, or any other refusal from the reap, used to return from here with the
+        // ring still open, the pseudoconsole still up and the reader thread still standing, and
+        // `Drop` calling `shutdown` again was the only thing that ever took them down.
+        let mut failure: Option<PtyError> = None;
         let status = if let Some(mut child) = self.child.take() {
-            if let Some(status) = child.try_wait()? {
-                Some(status)
-            } else {
-                child.kill()?;
-                // **Bounded** (review row R2-6). This used to be
-                // `WaitForSingleObject(…, INFINITE)` on the window's own thread,
-                // one call after a `TerminateProcess` that a child inside an
-                // uninterruptible kernel wait does not have to answer. A window
-                // closing a pane may not be made to wait for a driver, and the
-                // job object below is what makes the wait's ending safe: what
-                // has not exited by then is killed when the job handle closes.
-                reap_within(CHILD_EXIT_BUDGET, || child.try_wait().ok().flatten())
+            match child.try_wait() {
+                Ok(Some(status)) => Some(status),
+                Ok(None) => match child.kill() {
+                    Err(error) => {
+                        failure = Some(error.into());
+                        None
+                    }
+                    Ok(()) => {
+                        // **Bounded** (review row R2-6). This used to be
+                        // `WaitForSingleObject(…, INFINITE)` on the window's own
+                        // thread, one call after a `TerminateProcess` that a child
+                        // inside an uninterruptible kernel wait does not have to
+                        // answer. A window closing a pane may not be made to wait
+                        // for a driver, and the job object below is what makes the
+                        // wait's ending safe: what has not exited by then is killed
+                        // when the job handle closes.
+                        reap_within(CHILD_EXIT_BUDGET, || child.try_wait().ok().flatten())
+                    }
+                },
+                Err(error) => {
+                    failure = Some(error.into());
+                    None
+                }
             }
         } else {
             // Nothing to reap because a `try_wait` already did, and it wrote down what it found:
             // a shutdown after a reap reports how the child ended rather than reporting nothing.
             self.exited.clone()
         };
-        self.exited = status.clone();
+        // **A budget that ran out does not unlearn an exit.** How the child ended is a fact about
+        // this session ([`Self::exited`]), so a reap that was refused or that reached the end of
+        // its budget leaves whatever an earlier one wrote down exactly where it was.
+        if status.is_some() {
+            self.exited = status.clone();
+        }
         // **The ring is closed before the pseudoconsole is** (review row R2-6).
         // `ClosePseudoConsole` — which is what dropping the master ends up
         // calling — does not return until the host has flushed its output and
@@ -1651,10 +1721,31 @@ impl PtySession {
         // pipe ends, so the flush the host is waiting for can finish.
         self.output.close();
         self.master.take();
+        // **And the join that follows that order is bounded anyway** (T-QUIT-HAS-A-DEADLINE). The
+        // order above is what makes it finish promptly — the ring is closed, so the reader is
+        // draining rather than blocked on the window thread, and the master is gone, so the host
+        // closes the pipe and the drain ends. What the order cannot promise is a host that lets
+        // go: a symbolized hang report of 2026-09-16 put a window thread in this very join for
+        // five seconds while a pane was closing, and an unbounded wait here is the last one left
+        // on this path now that the writer is detached and the reap is bounded.
         if let Some(reader) = self.reader.take() {
-            reader.join().map_err(|_| PtyError::ReaderPanicked)?;
+            match join_within(READER_EXIT_BUDGET, reader) {
+                ReaderExit::Ended => {}
+                ReaderExit::Panicked => {
+                    failure.get_or_insert(PtyError::ReaderPanicked);
+                }
+                ReaderExit::StillReading => {
+                    eprintln!(
+                        "a pane closed while its reader was still inside a read on the \
+                         pseudoconsole, and it was left to end with the pipe"
+                    );
+                }
+            }
         }
-        Ok(status)
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(status),
+        }
     }
 }
 
@@ -3513,6 +3604,44 @@ mod tests {
             reaped.map(|status| status.exit_code()),
             Some(3),
             "a child that does end is reported the moment it does"
+        );
+    }
+
+    /// PIN — **a shutdown stops waiting for a reader that does not return**
+    /// (T-QUIT-HAS-A-DEADLINE).
+    ///
+    /// The reader is stood where a real one stands when the host has not closed the pipe: inside
+    /// a call that ends when somebody else decides, which here is this test. No PTY and no child
+    /// — the bound is written as a function of a handle exactly so it can be asked this.
+    ///
+    /// MUTATION: put a bare `reader.join()` back in `PtySession::shutdown` and the first half of
+    /// this does not go red, it never returns.
+    #[test]
+    fn a_shutdown_stops_waiting_for_a_reader_that_does_not_return() {
+        let (release, released) = mpsc::channel::<()>();
+        let reader = std::thread::spawn(move || {
+            let _ = released.recv();
+        });
+        let started = Instant::now();
+        let outcome = join_within(Duration::from_millis(60), reader);
+        let spent = started.elapsed();
+        assert_eq!(
+            outcome,
+            ReaderExit::StillReading,
+            "it says the reader had not come out of its read"
+        );
+        assert!(
+            spent >= Duration::from_millis(60) && spent < Duration::from_secs(5),
+            "it waited its budget and then let go, not {spent:?}"
+        );
+        // And the thread it let go of ends on its own, the moment its own wait does.
+        drop(release);
+
+        let reader = std::thread::spawn(|| {});
+        assert_eq!(
+            join_within(Duration::from_secs(30), reader),
+            ReaderExit::Ended,
+            "a reader that does end is joined the moment it does"
         );
     }
 

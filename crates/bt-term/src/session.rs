@@ -1167,6 +1167,14 @@ pub struct MathTogglePresentation {
     pub picture_opacity_milli: u16,
 }
 
+/// Facts accumulated while slices share one drain turn. No bytes are buffered here.
+#[derive(Default)]
+struct FeedTurn {
+    fed: bool,
+    primary_reprint_boundary: bool,
+    cursor_memory_reprint_boundary: bool,
+}
+
 /// Per-session actor core. It is the serialized owner required by DESIGN.md §1.3 and composes
 /// terminal facts with lifecycle, transcript, detection, scheduling, and viewport policy.
 pub struct DualPlaneSession {
@@ -1400,6 +1408,7 @@ pub struct DualPlaneSession {
     live_decorations: BTreeMap<u32, LiveDecorationRecord>,
     next_live_occurrence_id: u64,
     offscreen_decorations: VecDeque<LiveDecorationRecord>,
+    feed_turn: Option<FeedTurn>,
     alternate_repaint_snapshot: Option<AlternateRepaintSnapshot>,
     alternate_repaint_in_progress: bool,
     /// True while a primary-screen in-stream transcript reprint is in flight (a clear+home /
@@ -1751,6 +1760,7 @@ impl DualPlaneSession {
             live_decorations: BTreeMap::new(),
             next_live_occurrence_id: 1,
             offscreen_decorations: VecDeque::new(),
+            feed_turn: None,
             alternate_repaint_snapshot: None,
             alternate_repaint_in_progress: false,
             primary_repaint_in_progress: false,
@@ -2870,6 +2880,24 @@ impl DualPlaneSession {
         self.feed_at(bytes, Instant::now())
     }
 
+    /// Group successive feeds into one drain turn. Call `end_feed_turn` even on an error,
+    /// before publishing or running other session work. Standalone feeds need no markers.
+    /// Parsing still happens per slice; only repaint settlement waits for the turn's end.
+    pub fn begin_feed_turn(&mut self) {
+        assert!(self.feed_turn.is_none(), "feed turns must not nest");
+        self.feed_turn = Some(FeedTurn::default());
+    }
+
+    /// Settle a sliced read once. DEC 2026 retains its own buffer and deadline across turns;
+    /// ending a turn never forces a synchronized update to commit.
+    pub fn end_feed_turn(&mut self) {
+        if let Some(turn) = self.feed_turn.take()
+            && turn.fed
+        {
+            self.settle_feed_turn(turn);
+        }
+    }
+
     /// Deterministic replay entry point. Production callers normally use `feed`; integration tests
     /// can supply a monotonic timestamp without sleeping through the resize silence window.
     pub fn feed_at(&mut self, bytes: &[u8], observed_at: Instant) -> Result<(), SessionError> {
@@ -2972,7 +3000,31 @@ impl DualPlaneSession {
             self.primary_repaint_dirty = false;
             self.primary_reprint_history_floor = None;
             self.invalidate_all_live_decorations();
-        } else if self.synchronized_update_deadline().is_none() {
+            if let Some(turn) = &mut self.feed_turn {
+                *turn = FeedTurn::default();
+            }
+            if self.resize_epoch.is_active() {
+                self.stage_resize_history();
+            }
+        } else {
+            let facts = FeedTurn {
+                fed: true,
+                primary_reprint_boundary,
+                cursor_memory_reprint_boundary,
+            };
+            if let Some(turn) = &mut self.feed_turn {
+                turn.fed = true;
+                turn.primary_reprint_boundary |= facts.primary_reprint_boundary;
+                turn.cursor_memory_reprint_boundary |= facts.cursor_memory_reprint_boundary;
+            } else {
+                self.settle_feed_turn(facts);
+            }
+        }
+        result
+    }
+
+    fn settle_feed_turn(&mut self, turn: FeedTurn) {
+        if self.synchronized_update_deadline().is_none() {
             if let Some(snapshot) = self.alternate_repaint_snapshot.take() {
                 self.finish_alternate_repaint(snapshot);
             }
@@ -2981,29 +3033,21 @@ impl DualPlaneSession {
             }
         }
         self.alternate_repaint_in_progress = self.alternate_repaint_snapshot.is_some();
-        if result.is_ok() {
-            // Re-seat already-known path occurrences immediately after an atomic repaint. New
-            // candidates and retirement still wait for the ordinary stability gate below.
-            self.reconcile_live_image_paths(false, &vec![false; self.live_rows.len()]);
-            self.restore_offscreen_decorations();
-            self.reconcile_primary_reprint_presentation_hold(primary_reprint_boundary);
-            // The reprint has landed and its records are re-anchored: end preservation unless a
-            // synchronized update is still buffering the repaint (its damage arrives at the commit).
-            if self.synchronized_update_deadline().is_none() {
-                self.primary_repaint_in_progress = false;
-                self.primary_reprint_history_floor = None;
-            }
-            // An open synchronized repaint still publishes the pre-transaction grid. Its boundary
-            // invalidated the old cursor line above, so do not immediately memorize that stale
-            // cursor again; ESU or the parser timeout records the committed cursor instead.
-            if !(cursor_memory_reprint_boundary && self.synchronized_update_deadline().is_some()) {
-                self.remember_visible_cursor_logical_line();
-            }
+        // Re-seat already-known paths and records only after the whole repaint has landed.
+        self.reconcile_live_image_paths(false, &vec![false; self.live_rows.len()]);
+        self.restore_offscreen_decorations();
+        self.reconcile_primary_reprint_presentation_hold(turn.primary_reprint_boundary);
+        if self.synchronized_update_deadline().is_none() {
+            self.primary_repaint_in_progress = false;
+            self.primary_reprint_history_floor = None;
+        }
+        // A buffering synchronized update still exposes the pre-transaction cursor.
+        if !(turn.cursor_memory_reprint_boundary && self.synchronized_update_deadline().is_some()) {
+            self.remember_visible_cursor_logical_line();
         }
         if self.resize_epoch.is_active() {
             self.stage_resize_history();
         }
-        result
     }
 
     /// `Clear screen` (§7.1.6, §7.1.6l): **the rows above the cursor go, the row the cursor is on
@@ -19113,6 +19157,152 @@ mod tests {
     }
 
     #[test]
+    fn a_single_slice_feed_turn_matches_a_standalone_feed() {
+        let start = Instant::now();
+        for alternate in [false, true] {
+            for repaint in [
+                b"\x1b[2J\x1b[Htop\r\n$$x$$\r\nbarrier".as_slice(),
+                b"\x1b[H\x1b[Ktop\r\n\x1b[K$$x$$\r\n\x1b[Kbarrier".as_slice(),
+                b"\x1b[?2026h\x1b[2J\x1b[Htop\r\n$$x$$\r\nbarrier\x1b[?2026l".as_slice(),
+                b"\x1b[2J\x1b[Hno formula\r\nbarrier".as_slice(),
+            ] {
+                let mut sessions = [
+                    DualPlaneSession::new(nz(40), nz(12)),
+                    DualPlaneSession::new(nz(40), nz(12)),
+                ];
+                for session in &mut sessions {
+                    if alternate {
+                        session.feed_at(b"\x1b[?1049h", start).unwrap();
+                    }
+                    session.feed_at(b"$$x$$\r\nbarrier", start).unwrap();
+                    session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+                    assert_eq!(
+                        complete_detected_live_tasks(session, synthetic_raster(40, 18)),
+                        1
+                    );
+                }
+                sessions[0]
+                    .feed_at(repaint, start + Duration::from_millis(250))
+                    .unwrap();
+                sessions[1].begin_feed_turn();
+                sessions[1]
+                    .feed_at(repaint, start + Duration::from_millis(250))
+                    .unwrap();
+                sessions[1].end_feed_turn();
+                let [plain, marked] = &mut sessions;
+                assert_eq!(
+                    plain.terminal.visible_text(),
+                    marked.terminal.visible_text()
+                );
+                assert_eq!(
+                    plain.live_invalidation_count,
+                    marked.live_invalidation_count
+                );
+                assert_eq!(plain.live_detection_count(), marked.live_detection_count());
+                assert_eq!(plain.screen_revision(), marked.screen_revision());
+                let mut plain_projection = plain.new_projection(plain.layout_key());
+                let mut marked_projection = marked.new_projection(marked.layout_key());
+                assert_eq!(
+                    plain.viewport_frame(&mut plain_projection).unwrap(),
+                    marked.viewport_frame(&mut marked_projection).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_feed_turn_does_not_commit_a_split_synchronized_update() {
+        let mut session = DualPlaneSession::new(nz(40), nz(12));
+        session.feed(b"before").unwrap();
+        session.begin_feed_turn();
+        session.feed(b"\x1b[?2026h\x1b[2J\x1b[Hafter").unwrap();
+        let deadline = session.synchronized_update_deadline().unwrap();
+        session.feed(b" the redraw\x1b[?202").unwrap();
+        session.end_feed_turn();
+        assert_eq!(session.terminal.visible_text()[0], "before");
+        assert_eq!(session.synchronized_update_deadline(), Some(deadline));
+        assert!(session.primary_repaint_in_progress);
+        session.begin_feed_turn();
+        session.feed(b"6l").unwrap();
+        session.end_feed_turn();
+        assert_eq!(session.terminal.visible_text()[0], "after the redraw");
+        assert!(session.synchronized_update_deadline().is_none());
+        assert!(!session.primary_repaint_in_progress);
+
+        // An unterminated update still uses the parser's existing 150 ms deadline.
+        session.begin_feed_turn();
+        session.feed(b"\x1b[?2026h\rtimeout\x1b[K").unwrap();
+        let deadline = session.synchronized_update_deadline().unwrap();
+        session.end_feed_turn();
+        assert_eq!(session.terminal.visible_text()[0], "after the redraw");
+        assert!(session.finish_synchronized_update(deadline).unwrap());
+        assert_eq!(session.terminal.visible_text()[0], "timeout");
+        assert!(session.synchronized_update_deadline().is_none());
+    }
+
+    #[test]
+    fn sliced_repaint_turn_keeps_both_formula_records_and_rasters() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(16));
+        let source = b"$$x$$\r\nbarrier\r\n\r\n$$y$$\r\ntail";
+        session.feed_at(source, start).unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 18)),
+            2
+        );
+        let records: Vec<_> = session
+            .live_decorations
+            .values()
+            .map(|record| {
+                (
+                    record.identity.occurrence_id,
+                    record.artifact.clone().unwrap(),
+                )
+            })
+            .collect();
+        let invalidations = session.live_invalidation_count;
+        // A cursor-addressed redraw first restores its body, then inserts the header and
+        // repositions that body. NUL padding makes the boundary exactly the drain's 8 KiB.
+        let mut repaint = b"\x1b[2J\x1b[H".to_vec();
+        repaint.extend_from_slice(source);
+        repaint.resize(8 * 1024, 0);
+        repaint.extend_from_slice(b"\x1b[Htop\x1b[0K\r\n$$x$$\x1b[0K\r\nbarrier\x1b[0K\r\n\x1b[0K\r\n$$y$$\x1b[0K\r\ntail");
+        session.begin_feed_turn();
+        for slice in repaint.chunks(8 * 1024) {
+            session
+                .feed_at(slice, start + Duration::from_millis(50))
+                .unwrap();
+        }
+        session.end_feed_turn();
+        assert!(session.primary_repaint_snapshot.is_none());
+        assert!(!session.primary_repaint_in_progress);
+        assert_eq!(session.live_decorations.len(), 2);
+        assert_eq!(session.live_invalidation_count, invalidations);
+        for (occurrence, artifact) in records {
+            let record = session
+                .live_decorations
+                .values()
+                .find(|record| record.identity.occurrence_id == occurrence)
+                .expect("the same occurrence survives the sliced repaint");
+            assert!(Arc::ptr_eq(
+                &artifact.rgba,
+                &record.artifact.as_ref().unwrap().rgba
+            ));
+        }
+        assert!(session.take_worker_task().is_none());
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(frame.math_blocks.len(), 2);
+        assert!(
+            frame
+                .math_blocks
+                .iter()
+                .all(|block| block.display == MathBlockDisplay::Rendered)
+        );
+    }
+
+    #[test]
     fn primary_in_stream_reprint_reanchors_proven_formula_instead_of_flashing() {
         // Regression for the primary in-stream reprint flash. Codex reflows and reprints its whole
         // transcript mid-stream (a clear+home boundary). A proven live formula whose row is rewritten
@@ -28297,6 +28487,135 @@ mod tests {
             inline, 1,
             "the frozen scan must carry the captured OSC 133 site, not default to Ineligible"
         );
+    }
+
+    /// T-INLINE-MATH-SURVIVES-RESIZE: real command output, frozen before the window rewraps it.
+    #[test]
+    fn frozen_inline_math_survives_window_resize() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(100), nz(24));
+        seat_inline_metrics(&mut session);
+        session.set_layout_key(LayoutKey {
+            line_wrapping: true,
+            ..session.layout_key()
+        });
+        let document = concat!(
+            "\x1b]133;A\x07PS> \x1b]133;B\x07type math-test.md\x1b]133;C\x07\r\n",
+            r"The integral $\int_{-\infty}^{\infty} e^{-x^2}\,dx = \sqrt{\pi}$ shows up everywhere.",
+            "\r\n$$\r\n",
+            r"\int_{-\infty}^{\infty} e^{-x^2}\,dx = \sqrt{\pi}",
+            "\r\n$$\r\n",
+            r"Euler: $e^{i\pi} + 1 = 0$. Matrix:",
+            "\r\n$$\r\n",
+            r"\begin{pmatrix}1 & 2 \\ 3 & 4\end{pmatrix}",
+            "\r\n$$\r\n",
+            r"The series $\sum_{n=1}^{\infty} \frac{1}{n^2} = \frac{\pi^2}{6}$ converges.",
+            "\r\n\x1b]133;D;0\x07\x1b]133;A\x07PS> \x1b]133;B\x07",
+        );
+        session.feed_at(document.as_bytes(), started).unwrap();
+        session
+            .feed_at("\r\npad".repeat(28).as_bytes(), started)
+            .unwrap();
+        assert!(complete_frozen_math_for_real(&mut session) >= 5);
+        let occurrences = session
+            .decorations
+            .iter()
+            .filter_map(|(id, record)| {
+                let span = record.span.as_ref()?;
+                frozen_artifact_and_scale(record)?;
+                Some((*id, span.clone()))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            occurrences
+                .iter()
+                .filter(|(_, span)| span.mode == MathMode::Inline)
+                .count(),
+            3
+        );
+        assert_eq!(
+            occurrences
+                .iter()
+                .filter(|(_, span)| span.mode == MathMode::Display)
+                .count(),
+            2
+        );
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_to_top();
+        let before = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(rendered_inline_blocks(&before).len(), 3);
+
+        let assert_pictures = |session: &DualPlaneSession, frame: &ViewportFrame| {
+            for (id, span) in &occurrences {
+                let record = session
+                    .decoration(*id)
+                    .expect("rewrap retains the transcript occurrence");
+                assert_eq!(record.span.as_ref(), Some(span));
+                assert!(frozen_artifact_and_scale(record).is_some());
+                assert!(
+                    frame.math_blocks.iter().any(|block| {
+                        block.start == *id && block.display == MathBlockDisplay::Rendered
+                    }),
+                    "the same occurrence must still have a picture"
+                );
+            }
+            assert_eq!(rendered_inline_blocks(frame).len(), 3);
+            assert_eq!(
+                frame
+                    .math_blocks
+                    .iter()
+                    .filter(|block| block.artifact.mode == MathMode::Display)
+                    .count(),
+                2
+            );
+            assert!(
+                !frame.cells.iter().any(|cell| cell.text.contains('$')),
+                "no formula's delimiters return as source"
+            );
+        };
+        assert_pictures(&session, &before);
+        for (step, columns) in [60, 100, 60].into_iter().enumerate() {
+            let resized_at = started + Duration::from_secs(1 + step as u64 * 4);
+            session.resize_at(nz(columns), nz(24), resized_at).unwrap();
+            session.refresh_projection(&mut projection);
+            // Measure the new live/staging extent before positioning the review viewport.
+            session.viewport_frame(&mut projection).unwrap();
+            projection.scroll_to_top();
+            let after = session.viewport_frame(&mut projection).unwrap();
+            assert_eq!(
+                after.columns.get(),
+                columns,
+                "frame must use the resized width"
+            );
+            assert_pictures(&session, &after);
+            let integral_rows = after.cell_anchors.chunks(columns as usize).filter(|row| {
+                row.iter().any(|cell| matches!(cell.start, ContentAnchor::History { id, .. } if id == occurrences[0].0))
+            }).count();
+            assert_eq!(
+                integral_rows,
+                if columns == 60 { 2 } else { 1 },
+                "the frozen integral sentence must really rewrap: first={:?}, layout={:?}, rows={:?}",
+                occurrences[0],
+                session.layout_key(),
+                after
+                    .cell_anchors
+                    .chunks(columns as usize)
+                    .map(|row| &row[0].start)
+                    .collect::<Vec<_>>()
+            );
+            session.mark_pty_resize_requested_at(nz(columns), nz(24), resized_at);
+            assert!(
+                session
+                    .finish_resize_if_quiescent(resized_at + Duration::from_secs(2))
+                    .unwrap()
+            );
+            session.schedule_visible_artifacts(&after);
+            complete_frozen_math_for_real(&mut session);
+            session.refresh_projection(&mut projection);
+            let settled = session.viewport_frame(&mut projection).unwrap();
+            assert_pictures(&session, &settled);
+        }
     }
 
     /// PIN (slice 3): one over-wide run falls back to source alone; its neighbour still renders.
