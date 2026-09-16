@@ -20,6 +20,17 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **A Codex, Claude Code or Copilot configuration file Folio cannot read is now
+  left exactly as it is.** Turning one of the agent rows on Settings ▸ Agents on
+  or off reads that program's own configuration file first — `config.toml`,
+  `settings.json`, `folio.json` — and a file Folio could not read was taken for
+  a file that was not there: a single byte that is not UTF-8 somewhere in it, a
+  permission that withholds it, or another program holding it open, and Folio
+  wrote a fresh file over the one you had written, with no copy kept anywhere.
+  Folio now tells "there is no file" apart from "there is a file and I could not
+  read it". The second one leaves your file untouched, shows the row as
+  something it will not write, and says so when the row is pressed. A file it
+  can read is still copied beside itself before anything is changed, as it was.
 - **On a Mac, a second Folio started from a terminal now hands over instead of
   becoming a second writer.** Which Folio is allowed to write your settings and
   your saved session was decided in a directory whose location came from
