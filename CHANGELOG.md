@@ -20,6 +20,33 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **On a Mac, Shift+wheel now scrolls the rows a formula pushed out of view.**
+  A typeset formula is taller than the line it was typed on, so it lifts the
+  rows above it off the top of the pane; the chip under a full-screen program
+  counts them and offers Shift+wheel to go back and read them. On a Mac that
+  gesture did nothing at all. macOS turns Shift plus a wheel into a sideways
+  scroll before Folio is shown it, so the notch arrived pointing along a line
+  instead of up a document, and a pane asked to move up by nothing moved by
+  nothing. Folio now reads it as the turn your hand made. Shift+wheel over a
+  line longer than the pane still scrolls sideways, and on a Mac it now goes
+  the way it has always gone on Windows rather than the opposite way.
+
+- **Closing Folio no longer waits for ever on a disk that has stopped
+  answering.** Folio writes your session to a file on the way out, and it waited
+  for that write to finish however long it took. On a folder that lives on a
+  network share or a cloud-sync drive that has gone quiet, that is for ever —
+  the windows are already leaving and there is nothing left to click. Folio now
+  gives the save three seconds, writes one line in its own log saying the save
+  did not finish and that the last completed one still stands, and closes. The
+  file itself was never at risk either way: a save replaces it whole or leaves
+  the previous one exactly where it was.
+- **Closing a pane whose reader is stuck no longer hangs the window.** When a
+  pane closes, Folio waits for the thread that was reading that shell's output
+  to come out of its last read. On one machine that wait held the window for
+  five seconds. It is now bounded: the reader gets two seconds, and past that it
+  is left to finish by itself while the window carries on. A shell that refuses
+  to be reaped no longer leaves the console and the reader standing behind it
+  either.
 - **On a Mac, a second Folio started from a terminal now hands over instead of
   becoming a second writer.** Which Folio is allowed to write your settings and
   your saved session was decided in a directory whose location came from
@@ -81,6 +108,11 @@ All notable changes to Folio are recorded here. The format follows
   over whatever came next, until you moved the mouse. And in a window split into
   panes of different sizes, the marks in an unfocused pane were placed — and
   could be pressed — as though that pane were the size of the focused one.
+
+- **A typeset formula no longer flashes back to its source while a program
+  repaints the screen.** A redraw arriving in several pieces now keeps the
+  formula's picture until the whole turn has finished, without waiting for it
+  to be typeset again.
 
 - **Maximising or resizing a window no longer pauses when a pane has a long
   history behind it.** Every pane on screen was copying its whole terminal
