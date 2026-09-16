@@ -306,7 +306,10 @@ pub enum Station {
     Wait = 1,
     /// Inside `window_event`: the platform handed us something.
     Event = 2,
-    /// `Runtime::drain_pty` — every shell's output, one quantum each.
+    /// `Runtime::drain_pty` — every shell's output, a slice at a time until the
+    /// turn's quantum or its millisecond budget runs out (T-DRAIN-BURST). It is
+    /// this station's own measurements — `drain_pty 4386 ms` with the page-fault
+    /// column near zero — that put the clock there.
     Drain = 3,
     /// `Runtime::flush_pending_pty_resize` — the synchronous `ResizePseudoConsole`
     /// round trip into conhost, one per pane per quiet window.

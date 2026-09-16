@@ -6,7 +6,13 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
-Nothing yet.
+### Fixed
+
+- **Typing stays responsive while a pane prints a lot.** A build log or a long
+  answer scrolling past no longer holds the window for seconds at a time: the
+  output is taken in a short turn and the window goes back to answering the
+  keyboard, the pointer and the tab strip between turns, however much is still
+  coming.
 
 ## 0.4.1-preview — 2026-09-16
 
