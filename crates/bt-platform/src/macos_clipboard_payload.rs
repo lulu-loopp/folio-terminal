@@ -1,9 +1,14 @@
 //! AppKit offers no exclusion interval; a changed changeCount discards the acquired result.
 
 use objc2::rc::Retained;
-use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
+use objc2_app_kit::{
+    NSPasteboard, NSPasteboardTypePNG, NSPasteboardTypeString, NSPasteboardTypeTIFF,
+};
 
-use crate::clipboard::{Candidate, ClipboardPayload, ClipboardPort, ClipboardTypes, read_payload};
+use crate::clipboard::{
+    Candidate, ClipboardPayload, ClipboardPort, ClipboardTypes, PictureBytes, PictureEncoding,
+    read_payload,
+};
 
 struct MacClipboard {
     pasteboard: Retained<NSPasteboard>,
@@ -26,7 +31,10 @@ impl ClipboardPort for MacClipboard {
                     found.files = true
                 }
                 "public.utf8-plain-text" => found.text = true,
-                "public.png" => found.picture = true,
+                // Both of AppKit's picture types, because a source that copies a
+                // picture through AppKit rather than through the screenshot key
+                // offers `public.tiff` and nothing else (§7.61).
+                "public.png" | "public.tiff" => found.picture = true,
                 "NSFilesPromisePboardType" | "com.apple.NSFilePromiseItemMetaData" => {
                     found.promise = true
                 }
@@ -43,6 +51,42 @@ impl ClipboardPort for MacClipboard {
         match unsafe { self.pasteboard.stringForType(NSPasteboardTypeString) } {
             Some(text) => Candidate::Present(text.to_string()),
             None => Candidate::Unreadable("pasteboard text acquisition failed".into()),
+        }
+    }
+    /// **Both shapes, best first**, copied and not decoded.
+    ///
+    /// PNG before TIFF, for the reason the Windows arm asks for its registered
+    /// `PNG` first: a source that offers it has already done the encode this
+    /// paste would otherwise have to do, and every screenshot on this platform
+    /// offers it.
+    ///
+    /// A type that is advertised and then hands back nothing is not an error on
+    /// its own — a pasteboard item may promise a representation it declines to
+    /// render — so the rung answers `Absent` and lets the payload fall to
+    /// silence rather than raising a card about a picture nobody asked for.
+    fn picture(&mut self) -> Candidate<Vec<PictureBytes>> {
+        // SAFETY: the two names are AppKit's own constants, and the general pasteboard is
+        // retained through acquisition; every answer is copied before it is dropped.
+        let offered = unsafe {
+            [
+                (NSPasteboardTypePNG, PictureEncoding::Png),
+                (NSPasteboardTypeTIFF, PictureEncoding::Tiff),
+            ]
+        };
+        let mut found = Vec::new();
+        for (kind, encoding) in offered {
+            let Some(data) = self.pasteboard.dataForType(kind) else {
+                continue;
+            };
+            let bytes = data.to_vec();
+            if !bytes.is_empty() {
+                found.push(PictureBytes { encoding, bytes });
+            }
+        }
+        if found.is_empty() {
+            Candidate::Absent
+        } else {
+            Candidate::Present(found)
         }
     }
     fn finish(&mut self) -> Result<(), String> {

@@ -404,6 +404,64 @@ pub fn runtime_directory_from(system_temporary_directory: Option<PathBuf>, uid: 
 /// users.
 const SHARED_TEMPORARY_DIRECTORY: &str = "/tmp";
 
+/// **Where Folio writes a file it made for the machine to take away again**
+/// (§7.61) — `%TEMP%\folio\` on Windows.
+///
+/// A folder of Folio's own inside the system's temporary directory, and not the
+/// temporary directory itself: what goes in here is named after a wall clock and
+/// swept by a rule of Folio's own, and both of those are claims about a folder
+/// nobody else writes into.
+///
+/// Separate from [`runtime_directory`] and deliberately so. That directory holds
+/// the claim on the data directory and the launch socket — things whose whole
+/// meaning is that one process owns them — and it is made `0700`, owner-checked
+/// and refused outright if anything unexpected is standing there. A picture
+/// pasted out of the clipboard is a *file the reader is about to hand to a
+/// shell*, with none of that ceremony around it and none of it owed.
+#[cfg(windows)]
+#[must_use]
+pub fn temporary_directory() -> PathBuf {
+    // `std::env::temp_dir` is `GetTempPath2W`'s answer: `%TMP%`, then `%TEMP%`, then
+    // the profile. Unlike the Unix arm this may be moved by the environment, and that
+    // is correct here — a reader who redirects `%TEMP%` has said where temporary files
+    // of theirs go, and this is one.
+    std::env::temp_dir().join(FOLIO_DIRECTORY)
+}
+
+/// **The same folder on Unix**, under the per-user temporary directory the
+/// *system* names rather than the one `$TMPDIR` names — [`runtime_directory`]'s
+/// own reason, which is that an environment variable is a thing two processes of
+/// one user can disagree about.
+#[cfg(unix)]
+#[must_use]
+pub fn temporary_directory() -> PathBuf {
+    // SAFETY: `geteuid` reads this process's own credentials and cannot fail.
+    let uid = unsafe { libc::geteuid() };
+    temporary_directory_from(per_user_temporary_directory(), uid)
+}
+
+/// **The same rule with its one impure input handed in**, for
+/// [`runtime_directory_from`]'s reason: what it promises is a claim a Windows
+/// runner can check rather than one only a Mac could.
+///
+/// The `<uid>` appears in one arm and not the other, and the asymmetry is the
+/// point. A directory the system made for this user alone already keeps one
+/// user's files from another's, so Folio's own name is the whole of what is
+/// needed inside it. `/tmp` is shared with every account on the machine, so the
+/// name carries the uid there — the same sentence [`runtime_directory_from`]
+/// says, about the same shared parent.
+#[must_use]
+pub fn temporary_directory_from(system_temporary_directory: Option<PathBuf>, uid: u32) -> PathBuf {
+    match system_temporary_directory.filter(|directory| directory.has_root()) {
+        Some(private) => private.join(FOLIO_DIRECTORY),
+        None => PathBuf::from(SHARED_TEMPORARY_DIRECTORY).join(format!("{FOLIO_DIRECTORY}-{uid}")),
+    }
+}
+
+/// The product's own name, which is what a reader who opens their temporary
+/// directory and finds a folder there has to be able to read.
+const FOLIO_DIRECTORY: &str = "folio";
+
 /// **What macOS says this user's own temporary directory is**, asked of the
 /// system rather than read out of the environment (RA-1).
 ///
@@ -988,6 +1046,55 @@ mod tests {
             "this machine's runtime directory leaves no room for an endpoint inside \
              {SOCKET_PATH_LIMIT} bytes of sun_path: {}",
             doorbell.display()
+        );
+    }
+
+    /// **PIN — the folder Folio writes its own temporary files into is not the
+    /// folder it takes its claim in** (§7.61).
+    ///
+    /// Two promises in one pin, and each is a bug somebody would otherwise only
+    /// find on a shared machine:
+    ///
+    /// * A per-user directory the system made needs no uid in the name, because
+    ///   nobody else can reach into it.
+    /// * `/tmp` is everybody's, so the name there carries the uid — without it,
+    ///   the first account to paste a screenshot would own the folder every
+    ///   other account then tried to write into.
+    ///
+    /// MUTATION: drop the uid from the shared arm and the third case fails;
+    /// give the private arm one and the first does.
+    #[test]
+    fn the_temporary_folder_is_private_by_its_parent_or_by_its_name() {
+        let per_user = PathBuf::from("/var/folders/8x/_yq1234n5abc9xyz0000gn/T/");
+        assert_eq!(
+            temporary_directory_from(Some(per_user.clone()), 501),
+            Path::new("/var/folders/8x/_yq1234n5abc9xyz0000gn/T/folio"),
+            "a directory the system made for this user alone is already private"
+        );
+        assert_eq!(
+            temporary_directory_from(Some(per_user.clone()), 502),
+            temporary_directory_from(Some(per_user), 501),
+            "two users with two private parents are two directories already"
+        );
+        assert_eq!(
+            temporary_directory_from(None, 501),
+            Path::new("/tmp/folio-501"),
+            "a shared parent needs the name to do the separating"
+        );
+        assert_ne!(
+            temporary_directory_from(None, 501),
+            temporary_directory_from(None, 502),
+            "two users must not meet in one folder under /tmp"
+        );
+        assert_eq!(
+            temporary_directory_from(Some(PathBuf::from("T")), 501),
+            Path::new("/tmp/folio-501"),
+            "an answer that is not rooted would be a different folder for every              directory a Folio was started in"
+        );
+        assert_ne!(
+            temporary_directory_from(Some(PathBuf::from("/var/folders/8x/T")), 501),
+            runtime_directory_from(Some(PathBuf::from("/var/folders/8x/T")), 501),
+            "the folder pasted pictures go in is not the one holding the lock"
         );
     }
 

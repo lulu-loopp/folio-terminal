@@ -346,6 +346,9 @@ pub enum Text {
     PastePathNushell,
     PasteClipboardPromise,
     PasteClipboardRead,
+    /// The clipboard held a picture and the file Folio writes for it could not
+    /// be written (§7.61).
+    PasteClipboardPicture,
     PasteProfileOverride,
 
     // ── window chrome ──────────────────────────────────────────────────────
@@ -2777,6 +2780,14 @@ impl Text {
                 "The clipboard could not be read. Copy again and retry.",
                 "剪贴板无法读取。重新复制后再试。",
             ),
+            // CHINESE_PENDING: both columns, written 2026-09-16. The English is
+            // the sentence above it with one word changed, and the Chinese owed
+            // is the same change to the Chinese above it.
+            Self::PasteClipboardPicture => pick(
+                lang,
+                "The clipboard picture could not be saved. Copy again and retry.",
+                "The clipboard picture could not be saved. Copy again and retry.",
+            ),
             Self::PasteProfileOverride => pick(
                 lang,
                 "profiles.json: {id}: {key} is unsupported; the default was kept.",
@@ -4969,7 +4980,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 683] = [
+    pub const ALL: [Self; 684] = [
         Self::PastePathEncoding,
         Self::PastePathControl,
         Self::PastePathPowerShellQuote,
@@ -4979,6 +4990,7 @@ impl Text {
         Self::PastePathNushell,
         Self::PasteClipboardPromise,
         Self::PasteClipboardRead,
+        Self::PasteClipboardPicture,
         Self::PasteProfileOverride,
         Self::Settings,
         Self::ToggleSidebar,
@@ -5796,7 +5808,13 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 1] = [
+    const CHINESE_PENDING: [(Self, HostPlatform); 3] = [
+        // zh: pending opus46 — the card raised when a picture on the clipboard
+        // could not be written to a file (§7.61). Both columns, because the
+        // sentence says nothing about the machine: the same file, the same
+        // refusal and the same two words of advice on either platform.
+        (Self::PasteClipboardPicture, HostPlatform::Windows),
+        (Self::PasteClipboardPicture, HostPlatform::MacOs),
         // zh: pending opus46 — the macOS column of the card a local file raises
         // when the engine would not take this window's rules (M4-3, §13.38 ②).
         // The Windows column beside it has had its Chinese since W2; what is
@@ -8254,6 +8272,7 @@ mod tests {
             Text::PastePathNushell,
             Text::PasteClipboardPromise,
             Text::PasteClipboardRead,
+            Text::PasteClipboardPicture,
             Text::PasteProfileOverride,
         ];
         let width = toast::TOAST_WINDOW_WIDTH_LOGICAL_PX

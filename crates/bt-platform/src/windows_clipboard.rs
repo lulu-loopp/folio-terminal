@@ -17,7 +17,10 @@ use windows::{
     core::w,
 };
 
-use crate::clipboard::{Candidate, ClipboardPayload, ClipboardPort, ClipboardTypes, read_payload};
+use crate::clipboard::{
+    Candidate, ClipboardPayload, ClipboardPort, ClipboardTypes, PictureBytes, PictureEncoding,
+    read_payload,
+};
 
 /// WinUser.h standard format identifiers.
 const CF_HDROP: u32 = 15;
@@ -113,10 +116,78 @@ impl ClipboardPort for WindowsClipboard {
             }
         }
     }
+    /// **Every shape the source offered, best first**, copied and not decoded.
+    ///
+    /// `PNG` is a registered format rather than a standard one, so it is asked
+    /// for by the same name the survey registered it under — and it is asked for
+    /// first, because a source that offers it has already done the encode this
+    /// paste would otherwise have to do.
+    ///
+    /// A format that is advertised and then will not render is **not** an error
+    /// on its own: `GetClipboardData` renders delayed formats, and a source that
+    /// can produce a `CF_DIB` but not its own `PNG` is an ordinary source. The
+    /// rung fails only when nothing at all came back, which is what the empty
+    /// list and `Absent` say between them.
+    fn picture(&mut self) -> Candidate<Vec<PictureBytes>> {
+        // SAFETY: registering a format name that is already registered answers the same
+        // identifier; the open interval this object holds covers every read below.
+        let png = unsafe { RegisterClipboardFormatW(w!("PNG")) };
+        let mut found = Vec::new();
+        for (format, encoding) in [
+            (png, PictureEncoding::Png),
+            (CF_DIBV5, PictureEncoding::DibV5),
+            (CF_DIB, PictureEncoding::Dib),
+        ] {
+            if format == 0 {
+                continue;
+            }
+            // SAFETY: availability is asked before the handle is, and the interval is held.
+            if unsafe { IsClipboardFormatAvailable(format) }.is_err() {
+                continue;
+            }
+            if let Some(bytes) = global_bytes(format) {
+                found.push(PictureBytes { encoding, bytes });
+            }
+        }
+        if found.is_empty() {
+            Candidate::Absent
+        } else {
+            Candidate::Present(found)
+        }
+    }
     fn finish(&mut self) -> Result<(), String> {
         self.opened = false;
         // SAFETY: begin successfully opened this clipboard on the calling event-loop thread.
         unsafe { CloseClipboard() }.map_err(|_| "clipboard close failed".to_owned())
+    }
+}
+
+/// **One clipboard format's bytes, copied out of the global it is rendered
+/// into.**
+///
+/// `GlobalSize` bounds the locked slice and the copy is made before the unlock,
+/// which is `text`'s own arrangement one door over. An empty global answers
+/// `None` rather than an empty picture: a zero-byte `CF_DIB` is a format that
+/// was advertised and not rendered, and a file written out of it would be a file
+/// with no picture in it.
+fn global_bytes(format: u32) -> Option<Vec<u8>> {
+    // SAFETY: the handle stays owned by the clipboard for the whole of this open
+    // interval; `GlobalSize` bounds the slice and the owned copy is made before the
+    // unlock, so nothing borrowed from the lock outlives it.
+    unsafe {
+        let handle = GetClipboardData(format).ok()?;
+        let global = HGLOBAL(handle.0);
+        let size = GlobalSize(global);
+        if size == 0 {
+            return None;
+        }
+        let pointer = GlobalLock(global).cast::<u8>();
+        if pointer.is_null() {
+            return None;
+        }
+        let bytes = std::slice::from_raw_parts(pointer, size).to_vec();
+        let _ = GlobalUnlock(global);
+        Some(bytes)
     }
 }
 

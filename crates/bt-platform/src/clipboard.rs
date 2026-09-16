@@ -17,11 +17,22 @@ pub enum UnsupportedKind {
     Promise,
 }
 
+/// The shapes a picture is offered in, **best first**: the order of this enum is
+/// the order [`ClipboardPort::picture`] is asked to list its answers in, and a
+/// reader takes the first one it can turn into a file.
+///
+/// `Png` is first because it is already the bytes Folio writes — a source that
+/// offers it has done the encode, and re-encoding what a screenshot tool
+/// produced would be a second lossless pass for nothing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PictureEncoding {
     Png,
     DibV5,
     Dib,
+    /// macOS' own second shape (`public.tiff`), which is what an application
+    /// that copies a picture through AppKit rather than through a screenshot
+    /// puts on the pasteboard. No Windows source offers it.
+    Tiff,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -52,12 +63,17 @@ pub trait ClipboardPort {
     fn survey(&mut self) -> Result<ClipboardTypes, String>;
     fn files(&mut self) -> Candidate<Vec<PathBuf>>;
     fn text(&mut self) -> Candidate<String>;
+    /// Every encoding the source offers, best first — see [`PictureEncoding`].
+    /// The bytes are copied and nothing is decoded here: a screenshot is
+    /// megabytes, the caller is the event-loop thread, and turning those bytes
+    /// into a picture is the picture worker's job.
+    fn picture(&mut self) -> Candidate<Vec<PictureBytes>>;
     fn finish(&mut self) -> Result<(), String>;
 }
 
 /// The terminal context menu may survey types on the press that opens it, never fetch content.
 /// A failed survey disables the future row without hiding it; ordinary Paste stays enabled.
-/// T-PASTE-2 owns that row and the picture acquisition it enables; T-PASTE-1 adds neither.
+/// The row itself is still unwritten; the acquisition it would enable is the rung below.
 #[must_use]
 pub fn picture_paste_enabled(types: Result<ClipboardTypes, String>, save_picture: bool) -> bool {
     save_picture && types.is_ok_and(|types| types.picture)
@@ -83,7 +99,16 @@ pub fn read_payload(port: &mut impl ClipboardPort) -> Result<ClipboardPayload, S
                 Candidate::Absent => {}
             }
         }
-        // No picture bytes are fetched in T-PASTE-1. A promise is only an advertised refusal.
+        if types.picture {
+            match port.picture() {
+                Candidate::Present(pictures) if !pictures.is_empty() => {
+                    return Ok(ClipboardPayload::Picture(pictures));
+                }
+                Candidate::Unreadable(reason) => return Err(reason),
+                Candidate::Absent | Candidate::Present(_) => {}
+            }
+        }
+        // A promise is only an advertised refusal.
         Ok(if types.promise {
             ClipboardPayload::Refused(UnsupportedKind::Promise)
         } else {
@@ -129,6 +154,7 @@ mod tests {
         types: ClipboardTypes,
         files: Candidate<Vec<PathBuf>>,
         text: Candidate<String>,
+        picture: Candidate<Vec<PictureBytes>>,
         held: bool,
         opened: usize,
         fetched: Vec<&'static str>,
@@ -150,6 +176,7 @@ mod tests {
                 },
                 files,
                 text,
+                picture: Candidate::Absent,
                 held: false,
                 opened: 0,
                 fetched: Vec::new(),
@@ -200,6 +227,11 @@ mod tests {
             self.sequence += 1;
             self.competing_open_failed = !self.competing_copy("replacement");
             self.text.clone()
+        }
+        fn picture(&mut self) -> Candidate<Vec<PictureBytes>> {
+            assert!(self.held);
+            self.fetched.push("picture");
+            self.picture.clone()
         }
         fn finish(&mut self) -> Result<(), String> {
             assert!(self.held);
@@ -263,28 +295,33 @@ mod tests {
                 assert_eq!(result, expected);
                 assert_eq!(fake.opened, 1);
                 assert!(!fake.held);
-                assert_eq!(
-                    fake.fetched.len(),
-                    if matches!(&file, Candidate::Unreadable(_))
-                        || matches!(&file, Candidate::Present(f) if !f.is_empty())
-                    {
-                        1
-                    } else {
-                        2
-                    }
-                );
+                // One rung per answer that was not given: the file rung stops the walk
+                // when it answers or fails, the text rung stops it the same way, and the
+                // picture rung is only reached when both were silent.
+                let expected_rungs: &[&str] = if matches!(&file, Candidate::Unreadable(_))
+                    || matches!(&file, Candidate::Present(f) if !f.is_empty())
+                {
+                    &["files"]
+                } else if matches!(text, Candidate::Absent) {
+                    &["files", "text", "picture"]
+                } else {
+                    &["files", "text"]
+                };
+                assert_eq!(fake.fetched, expected_rungs);
             }
         }
     }
 
     #[test]
-    fn survey_selects_without_fetching_and_picture_only_is_silent_nothing() {
+    fn survey_selects_without_fetching_and_an_unoffered_picture_is_silent_nothing() {
         let mut fake = Fake::new(
             Candidate::Present(vec!["not advertised".into()]),
             Candidate::Unreadable("not advertised".into()),
         );
+        fake.picture = Candidate::Present(vec![shot(PictureEncoding::Png)]);
         fake.types.files = false;
         fake.types.text = false;
+        fake.types.picture = false;
         assert_eq!(read_payload(&mut fake), Ok(ClipboardPayload::Nothing));
         assert!(fake.fetched.is_empty());
         fake.types.promise = true;
@@ -292,11 +329,80 @@ mod tests {
             read_payload(&mut fake),
             Ok(ClipboardPayload::Refused(UnsupportedKind::Promise))
         );
+        assert!(!picture_paste_enabled(Ok(fake.types), true));
+        fake.types.picture = true;
         assert!(picture_paste_enabled(Ok(fake.types), true));
         assert!(!picture_paste_enabled(Err("busy".into()), true));
         assert!(!picture_paste_enabled(Ok(fake.types), false));
-        fake.types.picture = false;
-        assert!(!picture_paste_enabled(Ok(fake.types), true));
+    }
+
+    fn shot(encoding: PictureEncoding) -> PictureBytes {
+        PictureBytes {
+            encoding,
+            bytes: vec![0x89, b'P', b'N', b'G'],
+        }
+    }
+
+    /// **The decision order, all four rungs at once** — files, then text, then a
+    /// picture, then silence.
+    ///
+    /// The rule this pins is the one a reader states as "a screenshot pastes as
+    /// a path *only* when there is nothing else on the clipboard": a source that
+    /// puts both a picture and its own text on the board — every browser does —
+    /// must still paste the text, and a source that puts a file beside a
+    /// thumbnail of it must still paste the file's path.
+    ///
+    /// MUTATION: move the picture rung above the text rung and the second case
+    /// fails; drop the `!pictures.is_empty()` guard and the fourth does.
+    #[test]
+    fn a_picture_is_read_only_when_no_file_and_no_text_answered_first() {
+        let png = shot(PictureEncoding::Png);
+        let cases: [(Candidate<Vec<PathBuf>>, Candidate<String>, ClipboardPayload); 4] = [
+            (
+                Candidate::Present(vec![PathBuf::from("/shot.png")]),
+                Candidate::Present("/shot.png".to_owned()),
+                ClipboardPayload::Files(vec![PathBuf::from("/shot.png")]),
+            ),
+            (
+                Candidate::Absent,
+                Candidate::Present("https://example.test/a.png".to_owned()),
+                ClipboardPayload::Text("https://example.test/a.png".to_owned()),
+            ),
+            (
+                Candidate::Absent,
+                Candidate::Absent,
+                ClipboardPayload::Picture(vec![png.clone()]),
+            ),
+            (
+                Candidate::Absent,
+                Candidate::Absent,
+                ClipboardPayload::Nothing,
+            ),
+        ];
+        for (index, (files, text, expected)) in cases.into_iter().enumerate() {
+            let mut fake = Fake::new(files, text);
+            // The last case is the clipboard that advertised a picture and then had
+            // none to give: an empty list is not a payload, and nothing is said.
+            fake.picture = if index == 3 {
+                Candidate::Present(Vec::new())
+            } else {
+                Candidate::Present(vec![png.clone()])
+            };
+            assert_eq!(read_payload(&mut fake), Ok(expected));
+        }
+    }
+
+    /// A picture rung that fails is a read that failed, not an empty clipboard:
+    /// the reader is told, exactly as a failed file or text rung tells them.
+    #[test]
+    fn an_unreadable_picture_is_an_error_rather_than_silence() {
+        let mut fake = Fake::new(Candidate::Absent, Candidate::Absent);
+        fake.picture = Candidate::Unreadable("clipboard picture acquisition failed".into());
+        assert_eq!(
+            read_payload(&mut fake),
+            Err("clipboard picture acquisition failed".to_owned())
+        );
+        assert!(!fake.held);
     }
 
     #[test]

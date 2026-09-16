@@ -17980,3 +17980,21 @@ pub use macos_clipboard_payload::clipboard_payload;
 pub fn clipboard_payload() -> Result<ClipboardPayload, String> {
     Err("terminal clipboard acquisition is unavailable on this platform".to_owned())
 }
+
+/// The system's own TIFF reader, which is a thing only one platform here has.
+#[cfg(target_os = "macos")]
+mod macos_picture;
+#[cfg(target_os = "macos")]
+pub use macos_picture::png_from_tiff;
+
+/// **The same door on a machine whose clipboard has no TIFF on it.**
+///
+/// Not a stub for a case that could happen and is unhandled: `PictureEncoding::Tiff`
+/// is produced by exactly one acquisition — the macOS pasteboard's — and every
+/// other platform's reader offers PNG and DIB. What this arm buys is a caller
+/// that decodes a clipboard picture without asking which machine it is on,
+/// which is the shape every other lane in this crate has.
+#[cfg(not(target_os = "macos"))]
+pub fn png_from_tiff(_tiff: &[u8]) -> Result<Vec<u8>, String> {
+    Err("TIFF is not a clipboard picture encoding on this platform".to_owned())
+}
