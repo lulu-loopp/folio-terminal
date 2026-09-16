@@ -4365,37 +4365,46 @@ impl ViewportProjection {
             let heights = distributed_row_heights(presentation_height, rows.max(1) as usize);
             // Primary retains free height. Alternate is expand-only: a short formula keeps the
             // complete source-row band and centers inside it; a tall formula expands above it.
+            // Terminal-edge clipping removes logical rows, not their upward presentation extent.
+            // The clipped-top slice is folded into the band's own first row so the live prefix
+            // still measures the complete height that was pushed above the fixed grid. Bottom
+            // anchoring consumes this added height at the pane top; local review can then spend the
+            // same amount to bring the complete box back, with a non-negative content offset.
+            // Clipped-bottom rows remain outside this upward reveal extent.
+            //
+            // **Folded into this artifact's own requirement, before the merge** (owner's ruling
+            // 2026-09-17, the second border review). Added onto the shared row afterwards, it was
+            // added onto whatever another region's band had already put there — so three bands
+            // sharing a row produced six different heights for six orders of the same three
+            // artifacts. A requirement is a property of the artifact that states it; only the
+            // combining is shared.
+            let hidden_top_height = if screen == ScreenId::Alternate {
+                heights
+                    .iter()
+                    .take(artifact.clipped_top_rows as usize)
+                    .copied()
+                    .sum::<i64>()
+            } else {
+                0
+            };
             for offset in 0..visible_rows {
                 let row = artifact.band_start_row.saturating_add(offset) as usize;
                 if let Some(height) = per_row_height.get_mut(row)
                     && let Some(distributed) =
                         heights.get(top_pad_rows.saturating_add(offset) as usize)
                 {
+                    let wanted = if offset == 0 {
+                        distributed.saturating_add(hidden_top_height)
+                    } else {
+                        *distributed
+                    };
                     *height = match claimed.get(row) {
-                        Some(true) => (*height).max(*distributed),
-                        _ => *distributed,
+                        Some(true) => (*height).max(wanted),
+                        _ => wanted,
                     };
                     if let Some(claimed) = claimed.get_mut(row) {
                         *claimed = true;
                     }
-                }
-            }
-            if screen == ScreenId::Alternate && artifact.clipped_top_rows > 0 {
-                // Terminal-edge clipping removes logical rows, not their upward presentation
-                // extent. Fold the clipped-top slice into the first visible band row so the live
-                // prefix still measures the complete height that was pushed above the fixed grid.
-                // Bottom anchoring consumes this added height at the pane top; local review can
-                // then spend the same amount to bring the complete box back, with a non-negative
-                // content offset. Clipped-bottom rows remain outside this upward reveal extent.
-                let clipped_top_height = heights
-                    .iter()
-                    .take(artifact.clipped_top_rows as usize)
-                    .copied()
-                    .sum::<i64>();
-                if let Some(first_visible_height) =
-                    per_row_height.get_mut(artifact.band_start_row as usize)
-                {
-                    *first_visible_height = first_visible_height.saturating_add(clipped_top_height);
                 }
             }
         }
@@ -9077,6 +9086,82 @@ mod tests {
                 render_scale_milli: 1000,
                 source: format!("pane-{occurrence_id}"),
             },
+        }
+    }
+
+    /// One band with a hidden top: `art_cells` cell-heights of picture spread over one clipped-top
+    /// row and the three rows `0..=2` it stands on, in the columns `column_start..column_end`.
+    fn clipped_top_band(
+        occurrence_id: u64,
+        column_start: u32,
+        column_end: Option<u32>,
+        art_cells: u32,
+    ) -> ProjectedLiveMathArtifact {
+        ProjectedLiveMathArtifact {
+            clipped_top_rows: 1,
+            ..pane_band(occurrence_id, 0, 2, column_start, column_end, art_cells)
+        }
+    }
+
+    /// **A band's height is what it asks for, whatever order the bands arrive in** (owner's ruling
+    /// 2026-09-17, the second border review).
+    ///
+    /// Three regions, three bands on the same three rows, each with one row hidden above the grid.
+    /// The hidden extent is part of what a band needs, so it is folded into that band's own first
+    /// row before the three requirements are combined. Added onto the shared row afterwards it was
+    /// added onto whatever the previous band had already left there, and the same three artifacts
+    /// gave six different answers in six orders — 252, 252, 234, 252, 270 and 270 where the rule
+    /// says 216.
+    #[test]
+    fn three_panes_with_hidden_tops_agree_in_every_order() {
+        let cell = cell_height().get();
+        let orders = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+        for order in orders {
+            let bands = order.map(|which| match which {
+                0 => clipped_top_band(1, 0, Some(19), 8),
+                1 => clipped_top_band(2, 20, Some(39), 4),
+                _ => clipped_top_band(3, 40, None, 12),
+            });
+            let tallest = bands
+                .iter()
+                .find(|band| band.occurrence_id == LiveMathOccurrenceId(3))
+                .expect("the tallest band")
+                .artifact
+                .height_subpixels;
+            let mut projection = ViewportProjection::new(
+                key(8),
+                DetectionRevision(1),
+                nz32(12),
+                cell_height(),
+                SourceGeneration(1),
+                GridGeneration(1),
+            );
+            projection.sync_live_math_artifacts(ScreenId::Alternate, bands);
+            let frame = projection
+                .continuous_frame(
+                    &HistoryDocument::default(),
+                    &[],
+                    vec![fixture_row("        ", false); 12],
+                    GridCursor {
+                        row: 11,
+                        column: 0,
+                        visible: true,
+                    },
+                    ScreenId::Alternate,
+                )
+                .unwrap();
+            frame.validate_shape().unwrap();
+            let band = frame
+                .math_blocks
+                .iter()
+                .find(|block| block.artifact.key == "pane-3")
+                .expect("the tallest band");
+            assert_eq!(
+                band.clip_height_subpixels, tallest,
+                "order {order:?} gave the tallest band {} rather than its own {tallest}",
+                band.clip_height_subpixels
+            );
+            assert_eq!(tallest, 12 * cell, "the fixture's own arithmetic");
         }
     }
 

@@ -4,8 +4,9 @@ pub mod border;
 mod ledger;
 pub mod table;
 pub use border::{
-    LiveScreenRegion, LiveScreenSplit, ScreenRegion, find_border_columns, live_region_text,
-    live_screen_regions, region_text, screen_regions,
+    LiveScreenRegion, LiveScreenSplit, ScreenRegion, ScreenSplit, continues_vertical,
+    find_border_columns, live_region_cell_column, live_region_text, live_screen_regions,
+    live_screen_regions_of, region_text, screen_regions, split_screen,
 };
 pub use ledger::{
     ContainmentVerdict, LedgerEntry, LegitimateRejection, OrphanKind, OwnershipLedger,
@@ -1478,14 +1479,14 @@ pub fn detect_math_blocks_with_sites_in_regions<'a>(
     options: DetectionOptions,
 ) -> Vec<RegionMathBlocks> {
     let lines = lines.into_iter().collect::<Vec<_>>();
-    let regions = screen_regions(lines.iter().map(|(_, text, _)| *text));
-    let split = regions.len() > 1;
+    let ScreenSplit { regions, framed } = split_screen(lines.iter().map(|(_, text, _)| *text));
     // Proved once, on the unsliced screen, because a fence opened on one side of a rule is not
     // visible from the other (owner's ruling 2026-09-16). Unsplit this is inert: the one region is
     // the screen, and its own scan already refused everything inside the fence.
-    let fenced = if split {
+    let fenced = if regions.len() > 1 {
         fenced_lines(
             lines.iter().map(|(_, text, _)| *text),
+            &framed,
             DetectionContext::default(),
         )
     } else {
@@ -1512,30 +1513,49 @@ pub fn detect_math_blocks_with_sites_in_regions<'a>(
         .collect()
 }
 
-/// Which lines of a screen are inside a code fence, the fence's own two lines included.
+/// Which lines of a screen are inside a code fence that **the screen owns**, the fence's own two
+/// lines included.
 ///
-/// **A fence the screen proves suppresses every region** (owner's ruling 2026-09-16). A region is a
-/// column of the screen, and a fence is not: the ``` that opens one stands in whichever region it
-/// was printed in, and every other region would begin from a neutral state and read the code
-/// between the fences as text. Thirty-eight rows of `log │ $x^2$` between two fences are thirty-
-/// eight formulas to a region that never saw the fence, and none at all to the screen — and the
-/// screen is right. So the question is asked once, of the unsliced rows, and its answer is imposed
-/// on all of them.
+/// **A fence the screen proves suppresses every region; a fence a pane prints is that pane's**
+/// (owner's rulings 2026-09-16 and 2026-09-17). A region is a column of the screen and a fence is
+/// not, so the ``` that opens one stands in whichever region it was printed in and every other
+/// region would begin from a neutral state. Thirty-eight rows of `log │ $x^2$` between two bare
+/// fence lines are thirty-eight formulas to a region that never saw the fence, and none at all to
+/// the screen — and the screen is right, because those fence lines are not a pane's: the frame does
+/// not run through them. That is the whole of the rule. A fence whose opening row the frame *does*
+/// run through was printed inside a pane, and suppressing the pane across the rule from it would
+/// silence an independent program for something it never printed; that fence is left to the region
+/// that owns it, whose own scan refuses it exactly as it always has.
+///
+/// A fence already open before the first row — `initial_context` says so — was opened on no row of
+/// this screen at all, so it is the screen's and it vetoes from the top.
 fn fenced_lines<'a>(
     lines: impl IntoIterator<Item = &'a str>,
+    framed: &[bool],
     initial_context: DetectionContext,
 ) -> Vec<bool> {
     let mut context = initial_context;
+    let mut screens_own = context.is_commonmark_code();
     lines
         .into_iter()
-        .map(|text| {
+        .enumerate()
+        .map(|(index, text)| {
             let opened_before = context.is_commonmark_code();
             // Only the fence half of the checkpoint is read here, and that is a fact about the
             // text; the identity an opening would be remembered under is never asked for.
             advance_detection_context(&mut context, TranscriptId(0), text);
+            let open_after = context.is_commonmark_code();
+            if !opened_before && open_after {
+                screens_own = !framed.get(index).copied().unwrap_or(false);
+            }
             // The opening line is not yet inside the fence and the closing line is no longer in it,
             // and both are the fence, so a block may not stand on either.
-            opened_before || context.is_commonmark_code()
+            let inside = opened_before || open_after;
+            let vetoed = inside && screens_own;
+            if opened_before && !open_after {
+                screens_own = false;
+            }
+            vetoed
         })
         .collect()
 }
@@ -3222,7 +3242,7 @@ fn live_region_scans(
     initial_context: &DetectionContext,
     options: DetectionOptions,
 ) -> Vec<LiveRegionScan> {
-    let Some(split) = live_screen_regions(inputs) else {
+    let Some(split) = live_screen_regions_of(inputs) else {
         return vec![live_region_scan(
             ScreenRegion::WHOLE,
             Arc::clone(inputs),
@@ -3232,11 +3252,14 @@ fn live_region_scans(
     };
     // The screen's own fences, proven on its unsliced rows and imposed on every region: see
     // [`fenced_lines`]. The regions are cut from exactly these rows and keep their `continues`, so
-    // one logical line of the screen is one logical line of each region, at the same index.
+    // one logical line of the screen is one logical line of each region, at the same index — and so
+    // is the frame map beside them, which says which of those rows a pane owns.
     let screen = live_logical_lines(&split.screen);
+    let framed = live_logical_framed(&split.screen, &split.framed);
     let fenced = fenced_lines(
         screen.iter().map(|line| line.text.as_str()),
-        DetectionContext::default(),
+        &framed,
+        grid_initial_context(inputs, initial_context),
     );
     let index_of = |id: TranscriptId| screen.iter().position(|line| line.id == id);
     split
@@ -3289,6 +3312,46 @@ fn live_region_scan(
         row_to_logical,
         scan,
     }
+}
+
+/// The parser checkpoint immediately before the screen's **first grid row**.
+///
+/// A live window may open with a bounded tail of frozen history, and the caller's checkpoint stands
+/// before that tail rather than before the screen. The regions themselves are scanned from a
+/// neutral state — a frame is a program repainting the host screen, and no scrollback line runs into
+/// a pane — but the question "was a code fence already open when this screen began" is about the
+/// screen as a whole, and its answer is upstream. So the tail is walked, and only the tail.
+fn grid_initial_context(
+    inputs: &[LiveDetectionInput],
+    initial_context: &DetectionContext,
+) -> DetectionContext {
+    let mut context = initial_context.clone();
+    for input in inputs {
+        if matches!(input.source, LiveDetectionSource::Grid { .. }) {
+            break;
+        }
+        advance_detection_context(&mut context, TranscriptId(0), &input.text);
+    }
+    context
+}
+
+/// The per-row frame map, folded onto logical lines the way the rows themselves are folded: a
+/// logical line the frame runs through is one every physical row of which it runs through.
+fn live_logical_framed(inputs: &[LiveDetectionInput], framed: &[bool]) -> Vec<bool> {
+    let mut folded = Vec::new();
+    let mut joins_previous = false;
+    for (index, input) in inputs.iter().enumerate() {
+        let row = framed.get(index).copied().unwrap_or(false);
+        if joins_previous {
+            if let Some(last) = folded.last_mut() {
+                *last = *last && row;
+            }
+        } else {
+            folded.push(row);
+        }
+        joins_previous = input.continues;
+    }
+    folded
 }
 
 /// Every live row a table candidate was refused on, across every region of the screen.

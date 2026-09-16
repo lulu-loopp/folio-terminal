@@ -219,6 +219,69 @@ fn a_fence_the_screen_proves_suppresses_every_region() {
     );
 }
 
+/// **A fence a pane prints is that pane's.** The left pane cats a Markdown file with a code block
+/// in it, on rows the frame runs through. Its own region refuses those rows exactly as it always
+/// has; the pane across the rule is an independent program that never printed a backtick, and
+/// silencing it for four rows of somebody else's output would be the veto over-reaching.
+#[test]
+fn a_fence_one_pane_prints_leaves_the_other_pane_alone() {
+    let mut screen = vec!["log  \u{2502} $x^2$".to_owned(); 40];
+    screen[5] = "```  \u{2502} $x^2$".to_owned();
+    screen[9] = "```  \u{2502} $x^2$".to_owned();
+    let found = regions(&screen);
+    assert_eq!(found.len(), 2);
+    let right = found
+        .iter()
+        .find(|region| region.region.column_start == 6)
+        .expect("the right pane");
+    assert_eq!(
+        right.blocks.len(),
+        40,
+        "every row of the other pane detects"
+    );
+    let left = found
+        .iter()
+        .find(|region| region.region.column_start == 0)
+        .expect("the left pane");
+    assert!(
+        left.blocks.is_empty(),
+        "the pane that printed the fence still honours it"
+    );
+}
+
+/// **A table drawn with box glyphs on every row splits into its cells, and that is harmless.** Its
+/// separator rows carry junctions, which continue the vertical line, so each column becomes a
+/// region — and a cell's math is detected inside its own region exactly as it was detected inside
+/// the whole screen. Cutting a table along the lines it was drawn with takes nothing apart.
+#[test]
+fn a_full_screen_table_splits_into_its_cells_without_losing_their_math() {
+    let mut screen = vec!["\u{2502} name  \u{2502} $x^2$    \u{2502}".to_owned(); 40];
+    screen[0] = "\u{250c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{252c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2510}".to_owned();
+    screen[2] = "\u{251c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{253c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2524}".to_owned();
+    screen[39] = "\u{2514}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2534}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2518}".to_owned();
+    let plain = detect_math_blocks_with_sites(
+        screen.iter().enumerate().map(|(index, text)| {
+            (
+                TranscriptId(index as u64 + 1),
+                text.as_str(),
+                InlineMathSite::AltScreenContent,
+            )
+        }),
+        DetectionOptions::default(),
+    );
+    let found = regions(&screen);
+    assert_eq!(found.len(), 3, "the cells are the regions");
+    assert_eq!(
+        found
+            .iter()
+            .map(|region| region.blocks.len())
+            .sum::<usize>(),
+        plain.len(),
+        "every formula the whole screen proves, the cells prove too"
+    );
+    assert_eq!(plain.len(), 37);
+}
+
 #[test]
 fn a_table_drawn_inside_a_tui_never_splits_the_screen() {
     // Five rows of a boxed table on a forty-row screen. Its rule reaches an eighth of the screen,

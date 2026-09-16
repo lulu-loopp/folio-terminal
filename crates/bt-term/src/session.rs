@@ -18,8 +18,8 @@ use bt_detect::{
     DetectionTask, InlineJoinedFragment, InlineMathRun, InlineMathSite, LiveDetectionInput,
     LiveDetectionSource, LiveDetectionTask, MAX_MATH_SOURCE_BYTES, MathCellSegment, MathSourceLine,
     MathSpan, PlaceholderArtifact, ScreenRegion, StaleArtifact, advance_detection_context,
-    detect_math_blocks_with_sites, frozen_resync_scan_with_options, live_region_text,
-    live_screen_regions, resolve_detection_task, resolve_live_detection_task,
+    detect_math_blocks_with_sites, frozen_resync_scan_with_options, live_region_cell_column,
+    live_region_text, live_screen_regions_of, resolve_detection_task, resolve_live_detection_task,
     resolve_live_detection_tasks,
 };
 use bt_doc::{
@@ -13680,12 +13680,12 @@ fn byte_offset_at_column(boundaries: &[(u32, u32)], column: u32, text_len: usize
 /// On an unframed screen there is one region, the walk runs once, and it is the walk that always
 /// ran.
 fn live_candidate_rows(
-    inputs: &[LiveDetectionInput],
+    inputs: &Arc<[LiveDetectionInput]>,
     context: DetectionContext,
     stable: &[bool],
     inline_formulas: bool,
 ) -> Vec<u32> {
-    let Some(split) = live_screen_regions(inputs) else {
+    let Some(split) = live_screen_regions_of(inputs) else {
         return live_candidate_rows_in_region(inputs, context, stable, inline_formulas);
     };
     let mut candidates = split
@@ -14209,10 +14209,11 @@ fn live_snapshot_logical_line_text(
 
 /// Frame cells one live-grid `$…$` run occupies, as `(row, left column, cell indices)`.
 ///
-/// Columns come from `UnicodeWidthStr::width` over the row's own text — the display width, not a
-/// character count — because that is what the grid drew and what `render_task_math` measured the
-/// run's available box with. The two must agree or a CJK line places its formula in the wrong
-/// cells.
+/// Columns come from the row's **captured cell boundaries** — the grid's own answer for where each
+/// character was drawn, wide spacers included — and this is the same lookup detection anchored the
+/// occurrence with (`bt_detect::live_region_cell_column`). One source of truth, because two would
+/// disagree the moment a region's slice drops a cluster straddling its first column: the width of
+/// the region's text would then be measured from a column the region does not begin at.
 ///
 /// The run is looked up across every physical row of its logical line, and the row and column
 /// returned are the ones its **first** cell sits on: a run the fold split still owns all of its
@@ -14249,14 +14250,12 @@ fn live_fragment_cells(
     if run_start >= run_end {
         return None;
     }
-    // The cells are the frame's, and the frame is the whole screen: a region's first column is
-    // where its own column zero is drawn, so every column counted inside it is measured from there.
-    let origin_column = region.column_start as usize;
     let rows = live_logical_line_rows(inputs, live_row, region);
     let mut origin = None;
     let mut cells = Vec::new();
     for (grid_row, byte_start) in rows {
-        let text = live_region_text(live_grid_input(inputs, grid_row)?, region);
+        let input = live_grid_input(inputs, grid_row)?;
+        let text = live_region_text(input, region);
         let byte_end = byte_start.saturating_add(text.len());
         let from = run_start.max(byte_start);
         let to = run_end.min(byte_end);
@@ -14267,11 +14266,8 @@ fn live_fragment_cells(
             .row_map
             .iter()
             .position(|mapped| mapped.live_grid_row == Some(grid_row))?;
-        let start_column =
-            origin_column.saturating_add(UnicodeWidthStr::width(text.get(..from - byte_start)?));
-        let end_column = start_column.saturating_add(UnicodeWidthStr::width(
-            text.get(from - byte_start..to - byte_start)?,
-        ));
+        let start_column = live_region_cell_column(input, region, from - byte_start)? as usize;
+        let end_column = live_region_cell_column(input, region, to - byte_start)? as usize;
         if start_column >= end_column || end_column > columns {
             return None;
         }
@@ -16159,7 +16155,7 @@ mod tests {
         (" spaces", "   1     +"),
         (
             "",
-            "weiyishi@WeiyideMac-mini ~ % sh -c 'cat /Users/weiyishi/folio-port/tools/",
+            "username@example-machine ~ % sh -c 'cat /Users/username/folio-port/tools/",
         ),
         (" · math", "math.md; sleep 30'"),
         ("", "Inline: $e^{i\\pi}+1=0$ stays inline."),
@@ -16177,7 +16173,7 @@ mod tests {
         ("", "$$"),
         (
             "",
-            "sh -c 'cat /Users/weiyishi/folio-port/tools/math.md; sleep 45'",
+            "sh -c 'cat /Users/username/folio-port/tools/math.md; sleep 45'",
         ),
         ("", ""),
         ("", ""),
@@ -16438,6 +16434,64 @@ mod tests {
                 "a block stops at the rule, not at the pane's far edge"
             );
         }
+    }
+
+    /// **A pane of wide characters places its formula in the cells the grid drew it in.**
+    ///
+    /// The sidebar is CJK and so is the pane's own prose, so every column on this screen is a cell
+    /// count and not a character count. Detection anchors the occurrence through the region's
+    /// captured boundaries; placement looks its cells up the same way. The assertion is that the two
+    /// are the same number — which is the whole of the rule, and which inferring the origin from the
+    /// width of a slice cannot promise.
+    #[test]
+    fn a_framed_pane_of_wide_characters_places_its_formula_in_the_grid_cells() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(20));
+        session.feed_at(b"\x1b[?1049h\x1b[2J", start).unwrap();
+        let mut bytes = Vec::new();
+        for row in 1..=20usize {
+            // Eight cells of CJK sidebar, the rule in column 8, then the pane from column 9.
+            let pane = match row {
+                3 => "前置 $e^{i\\pi}+1=0$ 之后",
+                _ => "普通输出",
+            };
+            bytes
+                .extend_from_slice(format!("\x1b[{row};1H目录条目\u{2502}{pane}\x1b[K").as_bytes());
+        }
+        session.feed_at(&bytes, start).unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 18)),
+            1,
+            "the inline formula in the pane"
+        );
+
+        let record = session
+            .live_decorations
+            .values()
+            .find(|record| record.span.mode == MathMode::Inline)
+            .expect("the inline formula");
+        assert_eq!(
+            record.region,
+            ScreenRegion {
+                column_start: 9,
+                column_end: None
+            }
+        );
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let run = record.span.inline_runs.first().expect("its run");
+        let (_, left, cells) =
+            live_inline_run_cells(&frame, &record.inputs, record.start.row, record.region, run)
+                .expect("the run's cells");
+        assert_eq!(
+            left, record.start.column,
+            "placement and detection name one column"
+        );
+        assert!(
+            cells.iter().all(|index| index % 60 >= 9),
+            "and no cell of the sidebar is claimed"
+        );
     }
 
     /// Drive the exact app zoom sequence (`reconcile_authoritative_dpi`): remeasure the cell metrics,
