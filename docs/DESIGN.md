@@ -651,6 +651,12 @@ Term grid，保证 surface/live 视觉跟随；App 仅保存最后 `(cols, rows,
 没有新 `Resized` 后才向 ConPTY 发这一个最终尺寸。若提交前又来事件，deadline 与最终值一起
 覆盖。§3.3 pane divider 的 debounce 由此推广到窗口级。
 
+**Arming the canonical branch clones the terminal exactly once** (`arm_resize_canonical`,
+`crates/bt-term/src/adapter.rs`): that clone is not a picture taken to be read and dropped but the
+terminal the next commit installs, so it has to be whole, while the uncommitted parser tail is
+replayed into a handler that keeps nothing rather than into a second clone of the same history that
+was discarded unread.
+
 **事务结束与收割**：最终 ConPTY 请求发出后，最后一批非空 PTY chunk 再静默 200ms 才结束；
 新 resize 会撤销“已到最终请求”状态并继续同一 owner 事务。结束时按 oldest→newest 一次性取出
 vendor history、恢复 history limit=0，再移交 normal transcript 管线。同一个 harvest 批次来自
