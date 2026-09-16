@@ -6,6 +6,19 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Fixed
+
+- **On a Mac, an idle Folio window no longer keeps a processor core busy.** A
+  window left open behind other windows — nothing typed into it, nothing
+  printing, no watched file having moved — ran at a full core for as long as
+  it stayed open. Every turn, Folio brings its file, folder and repository
+  watches level with what the window is showing; doing so took out a small
+  handle on the window's own loop, and on macOS taking one of those out is
+  itself a request for another turn, so the window kept asking itself to wake
+  up. The handle is now taken where it was always meant to be — once, at the
+  moment a watch is actually opened — and a turn that changes nothing costs
+  nothing.
+
 ## 0.4.1-preview — 2026-09-16
 
 ### Added
