@@ -2328,6 +2328,20 @@ impl ViewportProjection {
         self.scroll_offset_subpixels() != 0
     }
 
+    /// **Whether this pane has rows displaced above its own top**, which is the
+    /// same number three ways: the resting top cut, the local-review capacity,
+    /// and the count behind the "N rows above" chip (see
+    /// `last_live_overflow_subpixels`). It is what a typeset formula does to a
+    /// band — the live plane grows taller than the pane, and the rows at the top
+    /// of it go out of view.
+    ///
+    /// The capacity and not what is left of it, so the answer does not change
+    /// under a reader halfway through a review: a pane with displaced rows has
+    /// somewhere to go in both directions until it has none.
+    pub fn has_displaced_rows(&self) -> bool {
+        self.last_live_overflow_subpixels > 0
+    }
+
     /// Tell the projection whether a resize transaction is currently open. The session pushes this
     /// each frame; it gates the frame hold so a user-initiated clear (not a resize) never holds.
     pub fn set_resize_reflow_active(&mut self, active: bool) {

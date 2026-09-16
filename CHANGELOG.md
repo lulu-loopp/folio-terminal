@@ -32,6 +32,46 @@ All notable changes to Folio are recorded here. The format follows
   rule as its own body of text, beginning at its own first column. Nothing about
   what counts as a formula changed: every question that was asked of a line
   before is asked of it now, of the pane's own line.
+
+- **On a Mac, Shift+wheel now scrolls the rows a formula pushed out of view.**
+  A typeset formula is taller than the line it was typed on, so it lifts the
+  rows above it off the top of the pane; the chip under a full-screen program
+  counts them and offers Shift+wheel to go back and read them. On a Mac that
+  gesture did nothing at all. macOS turns Shift plus a wheel into a sideways
+  scroll before Folio is shown it, so the notch arrived pointing along a line
+  instead of up a document, and a pane asked to move up by nothing moved by
+  nothing. Folio now reads it as the turn your hand made. Shift+wheel over a
+  line longer than the pane still scrolls sideways, and on a Mac it now goes
+  the way it has always gone on Windows rather than the opposite way.
+
+- **Closing Folio no longer waits for ever on a disk that has stopped
+  answering.** Folio writes your session to a file on the way out, and it waited
+  for that write to finish however long it took. On a folder that lives on a
+  network share or a cloud-sync drive that has gone quiet, that is for ever —
+  the windows are already leaving and there is nothing left to click. Folio now
+  gives the save three seconds, writes one line in its own log saying the save
+  did not finish and that the last completed one still stands, and closes. The
+  file itself was never at risk either way: a save replaces it whole or leaves
+  the previous one exactly where it was.
+- **Closing a pane whose reader is stuck no longer hangs the window.** When a
+  pane closes, Folio waits for the thread that was reading that shell's output
+  to come out of its last read. On one machine that wait held the window for
+  five seconds. It is now bounded: the reader gets two seconds, and past that it
+  is left to finish by itself while the window carries on. A shell that refuses
+  to be reaped no longer leaves the console and the reader standing behind it
+  either.
+
+- **A Codex, Claude Code or Copilot configuration file Folio cannot read is now
+  left exactly as it is.** Turning one of the agent rows on Settings ▸ Agents on
+  or off reads that program's own configuration file first — `config.toml`,
+  `settings.json`, `folio.json` — and a file Folio could not read was taken for
+  a file that was not there: a single byte that is not UTF-8 somewhere in it, a
+  permission that withholds it, or another program holding it open, and Folio
+  wrote a fresh file over the one you had written, with no copy kept anywhere.
+  Folio now tells "there is no file" apart from "there is a file and I could not
+  read it". The second one leaves your file untouched, shows the row as
+  something it will not write, and says so when the row is pressed. A file it
+  can read is still copied beside itself before anything is changed, as it was.
 - **On a Mac, a second Folio started from a terminal now hands over instead of
   becoming a second writer.** Which Folio is allowed to write your settings and
   your saved session was decided in a directory whose location came from
@@ -84,6 +124,11 @@ All notable changes to Folio are recorded here. The format follows
   over whatever came next, until you moved the mouse. And in a window split into
   panes of different sizes, the marks in an unfocused pane were placed — and
   could be pressed — as though that pane were the size of the focused one.
+
+- **A typeset formula no longer flashes back to its source while a program
+  repaints the screen.** A redraw arriving in several pieces now keeps the
+  formula's picture until the whole turn has finished, without waiting for it
+  to be typeset again.
 
 - **Maximising or resizing a window no longer pauses when a pane has a long
   history behind it.** Every pane on screen was copying its whole terminal
