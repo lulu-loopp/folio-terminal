@@ -316,7 +316,7 @@ fn slow_hold_threshold_ms() -> u64 {
 /// Held against [`Station`] by `every_station_has_a_slot_in_the_ledger`: a
 /// further variant added without widening this would have its milliseconds
 /// charged to nobody, and the line would silently stop adding up.
-const STATION_COUNT: usize = 48;
+const STATION_COUNT: usize = 50;
 
 /// How many reports are kept. The oldest beyond this are deleted.
 ///
@@ -377,6 +377,16 @@ pub enum Station {
     Present = 5,
     /// `Runtime::flush_wheel` — a coalesced burst of notches being spent.
     Wheel = 6,
+    /// `Runtime::flush_dropped_files` — the paths one drop put on this window,
+    /// spelled for a shell and written into it (GitHub issue #1 ②).
+    ///
+    /// [`Self::Wheel`]'s twin, one gesture over and collected the same way:
+    /// winit delivers a dropped file per event with no batch marker, so the
+    /// paths accumulate until the turn boundary and are spent here, once. Its
+    /// own station rather than [`Self::EventFileDrop`]'s for the reason the
+    /// wheel's pair states — one is an addition to a list and the other is a
+    /// write onto a child's input, and the two are repaired differently.
+    FileDrop = 48,
     /// `Runtime::advance_web_page` — a call into WebView2 and therefore into
     /// another process.
     WebPage = 7,
@@ -688,6 +698,15 @@ pub enum Station {
     /// the preview files no kernel would speak for, which is the only thing
     /// either arm asks a disk.
     EventFocus = 46,
+    /// `WindowEvent::DroppedFile` — one path a hand let go of over this window,
+    /// added to the batch the turn boundary spends ([`Self::FileDrop`]).
+    ///
+    /// **`HoveredFile` and `HoveredFileCancelled` are deliberately not here.**
+    /// A drag passing over this window changes nothing on the glass — the drop
+    /// affordance the files column would need is a ruling nobody has made — so
+    /// both kinds fall through the dispatcher's own catch-all and answer
+    /// [`Self::EventOther`], which is exactly what that label is for.
+    EventFileDrop = 49,
     /// Every kind `window_event`'s match ends in `_ => Ok(())` for.
     ///
     /// **The label says `other` rather than naming them**, because the set is
@@ -751,6 +770,8 @@ impl Station {
             Self::EventWindow => "window state",
             Self::EventRedraw => "redraw",
             Self::EventFocus => "focused",
+            Self::FileDrop => "flush_dropped_files",
+            Self::EventFileDrop => "dropped_file",
             Self::EventOther => "window_event other",
         }
     }
@@ -820,6 +841,8 @@ impl Station {
             45 => Self::EventRedraw,
             46 => Self::EventFocus,
             47 => Self::EventOther,
+            48 => Self::FileDrop,
+            49 => Self::EventFileDrop,
             _ => Self::Starting,
         }
     }

@@ -6,6 +6,18 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- **Dropping a file onto Folio now puts its path on the command line.** Drag a
+  file out of File Explorer or the Finder and let go of it over a split, and its
+  path arrives in the terminal you dropped it on — not the one you happened to
+  be typing in — spelled for the shell running there. It is the same quoting a
+  file you *copied* has had since 0.4.1, so PowerShell, `cmd`, a WSL shell and
+  the rest each get the spelling they read. Several files let go of together
+  arrive on one line, one argument each, and a name the shell has no way to
+  spell is reported instead of being mangled. Nothing is run: the path is put in
+  front of the cursor for you to finish the line.
+
 ### Changed
 
 - **When Folio's window stops answering, its own log now says which kind of

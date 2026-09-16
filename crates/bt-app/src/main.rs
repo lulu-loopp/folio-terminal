@@ -12389,6 +12389,22 @@ struct WindowRuntime {
     /// The notches that have arrived since the loop last acted on one. See
     /// [`WheelBurst`].
     wheel_burst: Option<WheelBurst>,
+    /// **The paths one drop put on this window, waiting for the turn boundary**
+    /// (GitHub issue #1 ②).
+    ///
+    /// winit reports a drop as one `WindowEvent::DroppedFile` per file with
+    /// nothing marking where the batch begins or ends, so "three files were
+    /// dropped together" is a fact only the *loop* holds: the whole run arrives
+    /// inside one dispatch of one platform message — `IDropTarget::Drop` walks
+    /// the `HDROP` in a single call on Windows, `performDragOperation:` walks
+    /// the pasteboard in a single call on macOS — and the loop cannot come round
+    /// in the middle of either. So this collects them exactly as
+    /// [`WheelBurst`] collects notches, and
+    /// [`Runtime::flush_dropped_files`] spends the batch as one paste: three
+    /// files on one command line, not three command lines.
+    ///
+    /// Empty on every turn but the one after a drop.
+    dropped_files: Vec<PathBuf>,
     /// When the last present happened, so the trace can report the *interval*
     /// between two pictures rather than only the cost of making one. The cost of
     /// a frame is what a profiler measures; the gap between frames is what a
@@ -36456,6 +36472,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         wheel_events: 0,
         wheel_routings: 0,
         wheel_burst: None,
+        dropped_files: Vec::new(),
         last_present_at: None,
         perf_trace_us: 0,
         strip_animation_ticked_at: None,
@@ -95698,6 +95715,121 @@ impl Runtime<'_> {
         spent
     }
 
+    /// **Spend whatever one drop put on this window** (GitHub issue #1 ②).
+    ///
+    /// [`Self::flush_wheel`]'s twin, and called from the same two doors for the
+    /// same reason: the top of `window_event` for every event that is not
+    /// another file of this drop, and the top of a turn. Free — one `is_empty`
+    /// — on every turn in which nobody dropped anything.
+    ///
+    /// **One paste, however many files.** The whole batch goes to
+    /// [`Self::paste_paths_into`] as one list, which is what puts three files on
+    /// one command line rather than running the first two.
+    ///
+    /// The station is entered only when there is a drop to spend and is handed
+    /// back on the way out, on [`hang_watch::enter`]'s own rule: this door
+    /// stands inside two other functions, and a name it kept would be charged to
+    /// the keystroke or the turn that came after it.
+    fn flush_dropped_files(&mut self) -> Result<()> {
+        if self.window.dropped_files.is_empty() {
+            return Ok(());
+        }
+        let paths = std::mem::take(&mut self.window.dropped_files);
+        let leaving = hang_watch::enter(hang_watch::Station::FileDrop);
+        // **The cursor is asked for here and exactly once**, for the batch and
+        // not for the file: the query crosses into Win32 or AppKit, and a drop
+        // of forty files would otherwise cross forty times to be told the same
+        // point. It is also the only moment at which the question is worth
+        // asking — the hand is still where it let go, and the flush's own rule
+        // guarantees no event has moved it since the drop.
+        let point = self.dropped_files_point();
+        let seat = self.dropped_files_seat(point);
+        let pasted = self.paste_paths_into(seat, paths);
+        hang_watch::at(leaving);
+        pasted
+    }
+
+    /// **Which pane a dropped path is typed into** (GitHub issue #1 ②).
+    ///
+    /// The pane under the pointer, asked of the same router a press is asked of
+    /// — a float's claim is terminal, an open rail or focus column covers what
+    /// is behind it, and what is left is [`seats::pane_at`]. A point that is
+    /// none of those is chrome or no pane at all, and the answer there is the
+    /// pane holding the keyboard: a path is going onto a command line, and the
+    /// command line the reader is typing on is the only one this window can
+    /// honestly mean.
+    ///
+    /// **A pane that is not a terminal is still that pane's drop.** The files
+    /// column is a leaf of the layout tree like any other, and so is a preview
+    /// pane; [`Self::paste_paths_into`] finds no shell on either and does
+    /// nothing, which is the honest answer rather than sending the path
+    /// somewhere the hand was not. It is also what keeps §7.1.1's 2026-07-17
+    /// ruling intact from the other side: the column's own drag vocabulary is
+    /// about *views*, and a path appearing in a shell because a file was let go
+    /// of over a file tree would be the text verb leaking back into it.
+    ///
+    /// **Where the point comes from, given that winit throws it away.** winit
+    /// 0.30 reports a drop as a path and nothing else: the Windows backend is
+    /// handed `POINTL` in `IDropTarget::Drop` and discards it, and the macOS
+    /// backend never reads the dragging location out of
+    /// `performDragOperation:`. Neither platform sends a pointer event while
+    /// another application's drag is over the window either, so a drag that
+    /// began in Explorer or the Finder arrives at a window whose pointer has
+    /// already left it and `pointer_position` is `None` — which is *most*
+    /// drops. [`Self::dropped_files_point`] is what closes that: the cursor is
+    /// asked of the platform, once, at the moment of the flush. The keyboard's
+    /// pane is what is left when even that answers nothing, which is a window
+    /// on a session with no desktop to read.
+    fn dropped_files_seat(&mut self, position: Option<PhysicalPosition<f64>>) -> SeatId {
+        let covered = position.is_some_and(|position| {
+            matches!(
+                self.pointer_target_at(position),
+                Some(PointerTarget::Float(..))
+            ) || self.panel_covers(position)
+        });
+        dropped_files_seat_at(&self.seat_layout, position, covered, self.focused_leaf)
+    }
+
+    /// **Where the hand let go**, in this window's own pixels (GitHub issue #1
+    /// ②, owner's ruling 2026-09-16: a drop lands in the pane under the cursor).
+    ///
+    /// The live pointer where there is one — a drag that began *inside* this
+    /// window leaves it standing — and otherwise the platform's own cursor,
+    /// which is the only witness left once winit has dropped the point and the
+    /// pointer events have stopped.
+    ///
+    /// **The two are the same units and no conversion happens here**, which was
+    /// checked rather than assumed. `pointer_position` is
+    /// `WindowEvent::CursorMoved`'s `PhysicalPosition` stored raw
+    /// ([`Self::pointer_moved`]). On Windows that is `WM_MOUSEMOVE`'s `lParam`:
+    /// physical pixels from the client area's top-left, which is precisely what
+    /// `GetCursorPos` put through `ScreenToClient` answers. On macOS winit takes
+    /// its view's point and multiplies by the window's backing scale, which is
+    /// precisely what the AppKit arm does with `NSEvent.mouseLocation` after the
+    /// same two conversions. So the platform's answer is already in the window's
+    /// physical pixels and is used as it stands; scaling it again here would
+    /// square the factor on every Retina and every 150% display.
+    ///
+    /// [`WindowRuntime::pointer_last_seen`] is still deliberately not read: it
+    /// says where the hand was *before* the drag, which is not where this drop
+    /// landed, and a routing built on it would be a guess wearing a
+    /// measurement's clothes. The cursor query is the opposite of that — it is
+    /// the hand's position now, and now is when the file was let go of.
+    fn dropped_files_point(&self) -> Option<PhysicalPosition<f64>> {
+        let live = self.window.pointer_position;
+        let queried = match live {
+            // A window that already knows where its pointer is does not pay for
+            // the question. The query crosses into Win32 or AppKit, and this
+            // `match` is where "only when the batch has no pointer of its own"
+            // is actually enforced.
+            Some(_) => None,
+            None => native_window(&self.window.window)
+                .ok()
+                .and_then(bt_platform::pointer_position_in_window),
+        };
+        dropped_files_point_from(live, queried)
+    }
+
     fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {
         // **The wheel road's opening station** (`BT_MOUSE_TRACE`, §7.60), which
         // is `mouse_input`'s own opening station said in the wheel's words and
@@ -97444,6 +97576,49 @@ impl Runtime<'_> {
         let payload = bt_platform::clipboard_payload();
         hang_watch::at(leaving);
         let prepared = prepare_clipboard_paste(payload, &recipient, leading_space);
+        self.deliver_paste(seat, prepared, "write clipboard paste to PTY")
+    }
+
+    /// **The same paste, with the paths already in hand** — what a drop onto a
+    /// pane leaves behind (GitHub issue #1 ②).
+    ///
+    /// The only difference between a file *copied* in Explorer or Finder and one
+    /// *dropped* on this window is how the list of paths reached this process,
+    /// and that is the one thing neither the shell nor the reader can see. So it
+    /// is also the only thing that differs here: the paths go through
+    /// [`prepare_dropped_paste`] into the very function the clipboard's own
+    /// road uses, which is what makes the quoting, the `paste_paths_as` profile
+    /// key, the joining of several files into one command line and the refusal
+    /// notices one implementation rather than two that drift.
+    ///
+    /// **Focus does not move**, on [`Self::paste_from_clipboard_into`]'s own
+    /// rule: a drop is a pointer gesture, and a pointer gesture does not take
+    /// the keyboard away from the pane the reader was typing in.
+    fn paste_paths_into(&mut self, seat: SeatId, paths: Vec<PathBuf>) -> Result<()> {
+        let active = self.window.active_tab;
+        let Some(leaf) = self.window.tabs[active].sessions.get(&seat) else {
+            return Ok(());
+        };
+        let recipient = leaf.paste_recipient.clone();
+        let leading_space = input_line_needs_a_space_first(&leaf.session);
+        let prepared = prepare_dropped_paste(paths, &recipient, leading_space);
+        self.deliver_paste(seat, prepared, "write dropped paths to PTY")
+    }
+
+    /// **What a prepared paste does to one named pane**, whichever road
+    /// prepared it.
+    ///
+    /// The tail [`Self::paste_from_clipboard_into`] always had, given a name on
+    /// the day a second road arrived at it. `context` is the one thing the two
+    /// roads do not share: it names the write for a reader of the error, and a
+    /// drop that could not reach a shell is not a clipboard that could not.
+    fn deliver_paste(
+        &mut self,
+        seat: SeatId,
+        prepared: PreparedClipboardPaste,
+        context: &'static str,
+    ) -> Result<()> {
+        let active = self.window.active_tab;
         if let Some(notice) = prepared.notice {
             self.toast(
                 toast::ToastKind::Error,
@@ -97465,7 +97640,7 @@ impl Runtime<'_> {
             return Ok(());
         };
         paste_text(session, projection, &text, |bytes| {
-            write_pty_input(pty.as_ref(), bytes, "write clipboard paste to PTY")
+            write_pty_input(pty.as_ref(), bytes, context)
         })?;
         // A paste is one gesture landing in one named pane, so it answers whatever that pane was
         // asking — and it is the pane the clipboard went into, not the one holding the keyboard
@@ -101152,6 +101327,11 @@ impl Runtime<'_> {
         // the queue has just run dry, so whatever the wheel collected while the
         // loop was away is one burst and gets one frame. See [`WheelBurst`].
         self.flush_wheel()?;
+        // **And the drop beside it, for the same reason and at the same door**
+        // (GitHub issue #1 ②). This is the boundary the batch is defined by: the
+        // queue has just run dry, so every `DroppedFile` of one drop has arrived
+        // and the paths in hand are that drop and no other.
+        self.flush_dropped_files()?;
         // **Directly after it, and before anything that reads a cell** (§7.50).
         // A DPI change the drag wrote down is a window whose font is still
         // measured for the display it left; every clock below this line that
@@ -103438,6 +103618,7 @@ mod hold_station_tests {
     fn a_scoped_station_hands_the_callers_back() {
         for signature in [
             "    fn flush_wheel(&mut self) -> Result<()> {",
+            "    fn flush_dropped_files(&mut self) -> Result<()> {",
             "    fn refresh_chrome(&mut self) -> bool {",
             "    fn refresh_search(&mut self, forced: bool) -> Result<()> {",
         ] {
@@ -112616,6 +112797,20 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             self.fail(event_loop, error);
             return;
         }
+        // **And a drop is spent before anything that is not another file of the
+        // same drop**, on the line above's own reasoning (GitHub issue #1 ②).
+        // The batch is one command line going into a shell, so an event that
+        // reaches the same shell — a keystroke, most of all — must not overtake
+        // it. It is also what makes the drop's routing honest: the pointer
+        // position the batch is hit-tested against cannot have moved between the
+        // drop and this flush, because the event that would have moved it is the
+        // event that flushes first.
+        if !matches!(event, WindowEvent::DroppedFile(_))
+            && let Err(error) = runtime.flush_dropped_files()
+        {
+            self.fail(event_loop, error);
+            return;
+        }
         // Whether this event asked the window to shut, answered before the
         // borrow is given back: `raise_dirty_gate` is the one gate that has to be
         // able to *stop* the event, which is why it is asked here rather than
@@ -112718,6 +112913,23 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             WindowEvent::CursorLeft { .. } => runtime.pointer_left(),
             WindowEvent::MouseInput { state, button, .. } => runtime.mouse_input(state, button),
             WindowEvent::MouseWheel { delta, .. } => runtime.queue_wheel(delta),
+            // **A file let go of over this window** (GitHub issue #1 ②). One
+            // event per file and no marker between drops, so the path is
+            // written down here and the batch is spent at the turn boundary —
+            // [`Runtime::flush_dropped_files`], and [`WheelBurst`]'s reasoning
+            // one gesture over.
+            //
+            // `HoveredFile` and `HoveredFileCancelled` are not answered at all.
+            // They would be the drop affordance, and a drag that lights
+            // something up over the files column is a ruling nobody has made:
+            // §7.1.1's 2026-07-17 decision took "insert path" off the *internal*
+            // drag precisely so one gesture would not mean two families of
+            // thing, and inventing a highlight here would be this window
+            // answering that question for itself.
+            WindowEvent::DroppedFile(path) => {
+                runtime.window.dropped_files.push(path);
+                Ok(())
+            }
             WindowEvent::Resized(size) => runtime.resized(size),
             // **The engine is told the window moved** (§7.7 ⑩, user report
             // 2026-08-25). The pages are drawn through DirectComposition and
@@ -113004,6 +113216,7 @@ fn window_event_station(event: &WindowEvent) -> hang_watch::Station {
         }
         WindowEvent::RedrawRequested => Station::EventRedraw,
         WindowEvent::Focused(_) => Station::EventFocus,
+        WindowEvent::DroppedFile(_) => Station::EventFileDrop,
         _ => Station::EventOther,
     }
 }
@@ -113209,6 +113422,70 @@ fn prepare_clipboard_paste(
             }
         }
     }
+}
+
+/// **The rule [`Runtime::dropped_files_seat`] applies, with the window's two
+/// questions already answered** (GitHub issue #1 ②).
+///
+/// `position` is where the pointer is — not where it was — and `covered` is
+/// whether a floating window or an open rail has claimed that point. A free
+/// function so the routing can be read against a real solved layout without a
+/// window: which pane a point falls in is arithmetic, and arithmetic is the half
+/// of this that can go wrong silently.
+fn dropped_files_seat_at(
+    layout: &SeatLayout,
+    position: Option<PhysicalPosition<f64>>,
+    covered: bool,
+    focused: SeatId,
+) -> SeatId {
+    match position {
+        Some(position) if !covered => {
+            seats::pane_at(layout, position.x, position.y).unwrap_or(focused)
+        }
+        // No pointer, or a point that belongs to something standing over the
+        // panes: the keyboard's pane is the only command line this window can
+        // honestly mean.
+        Some(_) | None => focused,
+    }
+}
+
+/// **Which of the two witnesses a drop's point is**, with both already in hand
+/// (GitHub issue #1 ②).
+///
+/// `live` is `WindowEvent::CursorMoved`'s last word and `queried` is what the
+/// platform's own cursor answered, in the window's physical pixels. The live one
+/// wins because it is free and cannot be stale — no event that could have moved
+/// it has run since the drop — and the query is what a drag from another
+/// application leaves as the only witness.
+///
+/// A free function so the choice and the unit conversion can be read without a
+/// window: the call underneath it is native on both platforms and is the one
+/// thing a test cannot reach.
+fn dropped_files_point_from(
+    live: Option<PhysicalPosition<f64>>,
+    queried: Option<(i32, i32)>,
+) -> Option<PhysicalPosition<f64>> {
+    live.or_else(|| queried.map(|(x, y)| PhysicalPosition::new(f64::from(x), f64::from(y))))
+}
+
+/// **A dropped file's path is a copied file's path** (GitHub issue #1 ②).
+///
+/// One line, and the line is the whole point: a drop hands this process the same
+/// thing a copy does — a list of paths — so it is turned into the same payload
+/// and spelled by the same code. Nothing here decides anything. The day somebody
+/// wants a drop quoted differently from a copy, this function is where that
+/// decision would have to be written down, and
+/// `a_dropped_path_is_spelled_like_a_copied_one` is what would go red first.
+fn prepare_dropped_paste(
+    paths: Vec<PathBuf>,
+    recipient: &shell_literal::Recipient,
+    leading_space: bool,
+) -> PreparedClipboardPaste {
+    prepare_clipboard_paste(
+        Ok(bt_platform::ClipboardPayload::Files(paths)),
+        recipient,
+        leading_space,
+    )
 }
 
 /// Deliver one string to a shell the way a paste is delivered.
@@ -159215,6 +159492,141 @@ mod tests {
         );
     }
 
+    /// **A dropped file's path goes into the pane it was let go of over**
+    /// (GitHub issue #1 ②), and into the keyboard's pane when the drop belongs
+    /// to nothing the layout can name.
+    ///
+    /// The routing half of the drop, read against a real solved three-pane
+    /// layout: the same arithmetic a press is answered by, asked of the same
+    /// rectangles. The rest of the rule is its fall-backs — a point a float or
+    /// an open rail has claimed, a point in no pane at all, and a drop with
+    /// neither a pointer of its own nor a cursor the platform would answer with,
+    /// which is the last resort and is now much narrower than it was: since the
+    /// owner's ruling of 2026-09-16 a drag that came from another application is
+    /// routed by the queried cursor, and the closing block reads that road all
+    /// the way through.
+    ///
+    /// MUTATION ①: ignore `covered` and a point a floating window has claimed
+    /// answers with the pane it is standing on top of — the second assertion in
+    /// the loop goes red for all three. MUTATION ②: go back to routing a
+    /// pointerless drop to the keyboard's pane and the closing block goes red,
+    /// because that is the pane the cursor is deliberately *not* over.
+    #[test]
+    fn a_drop_lands_in_the_pane_under_it_and_otherwise_on_the_keyboards_pane() {
+        let seats = cross_seats(3);
+        let (layout, _) = cross_solve(&seats);
+        let rects = pane_rects_of(&layout);
+        assert_eq!(rects.len(), 3, "a three-pane tab places three rectangles");
+        // Which pane holds the keyboard is the caller's to say, and here it is
+        // the tree's primary leaf. What the test needs of it is only that it is
+        // a real pane of this layout and that two of the three points below are
+        // *not* it — without that, a routing that always answered the fall-back
+        // would pass.
+        let focused = seats.identity();
+        let mut elsewhere = 0;
+        for (seat, rect) in &rects {
+            let middle = PhysicalPosition::new(
+                f64::from((rect[0] + rect[2]) / 2.0),
+                f64::from((rect[1] + rect[3]) / 2.0),
+            );
+            assert_eq!(
+                dropped_files_seat_at(&layout, Some(middle), false, focused),
+                *seat,
+                "a drop in the middle of {seat:?} is that pane's"
+            );
+            assert_eq!(
+                dropped_files_seat_at(&layout, Some(middle), true, focused),
+                focused,
+                "a float or an open rail standing over {seat:?} keeps the drop \
+                 off the pane it is covering"
+            );
+            if *seat != focused {
+                elsewhere += 1;
+            }
+        }
+        assert_eq!(
+            elsewhere, 2,
+            "two of the three panes are not the keyboard's, so the assertions \
+             above are about the routing and not about the fall-back"
+        );
+
+        let off_every_pane = PhysicalPosition::new(-1.0, -1.0);
+        assert_eq!(
+            dropped_files_seat_at(&layout, Some(off_every_pane), false, focused),
+            focused,
+            "a drop on the chrome is the keyboard's pane's"
+        );
+        assert_eq!(
+            dropped_files_seat_at(&layout, None, false, focused),
+            focused,
+            "and so is a drop with no pointer of its own *and* no cursor the \
+             platform would answer with — the last resort and nothing less"
+        );
+
+        // **The road a drag from another application really takes** (owner's
+        // ruling 2026-09-16). The window's own pointer left when the hand went
+        // to Explorer, so the point comes from the cursor query; the query
+        // itself is native, and what is read here is the plumbing under it —
+        // the choice between the two witnesses, the physical pixels they are
+        // both in, and the pane that arithmetic then names.
+        let (elsewhere_seat, elsewhere_rect) = *rects
+            .iter()
+            .find(|(seat, _)| *seat != focused)
+            .expect("a three-pane tab has a pane that is not the keyboard's");
+        let cursor = (
+            ((elsewhere_rect[0] + elsewhere_rect[2]) / 2.0) as i32,
+            ((elsewhere_rect[1] + elsewhere_rect[3]) / 2.0) as i32,
+        );
+        let point = dropped_files_point_from(None, Some(cursor));
+        assert_eq!(
+            point,
+            Some(PhysicalPosition::new(
+                f64::from(cursor.0),
+                f64::from(cursor.1)
+            )),
+            "the platform's answer is already in the window's physical pixels \
+             and is not scaled a second time"
+        );
+        assert_eq!(
+            dropped_files_seat_at(&layout, point, false, focused),
+            elsewhere_seat,
+            "a drop whose point came from the cursor lands in the pane under it, \
+             not in the pane holding the keyboard"
+        );
+    }
+
+    /// **The live pointer first, the platform's cursor second, nothing third**
+    /// (GitHub issue #1 ②, owner's ruling 2026-09-16).
+    ///
+    /// The choice [`dropped_files_point_from`] is, read on its own. The first
+    /// row is a drag that began inside this window — there is a pointer, and
+    /// paying for a system call to be told what the window already knows would
+    /// be worse in both directions, cost and freshness. The second is every drag
+    /// that came from another application. The third is a machine that will not
+    /// say, which is the only road left to the keyboard's pane.
+    ///
+    /// MUTATION: put the query first and the first row goes red, which is a
+    /// window asking the system a question it has a better answer to.
+    #[test]
+    fn a_drops_point_is_the_live_pointer_or_the_platforms_cursor() {
+        let live = PhysicalPosition::new(640.0, 360.0);
+        assert_eq!(
+            dropped_files_point_from(Some(live), Some((1, 2))),
+            Some(live),
+            "a window that knows where its pointer is uses that and asks nothing"
+        );
+        assert_eq!(
+            dropped_files_point_from(None, Some((37, 41))),
+            Some(PhysicalPosition::new(37.0, 41.0)),
+            "and one that does not takes the cursor, in the pixels it arrives in"
+        );
+        assert_eq!(
+            dropped_files_point_from(None, None),
+            None,
+            "and answers nothing when neither witness can speak"
+        );
+    }
+
     /// A drag is measured from the body of the pane it began in, and stays inside
     /// that pane however far the pointer travels.
     ///
@@ -169216,5 +169628,184 @@ mod clipboard_path_tests {
         assert!(k144.contains("self.seats.set_focus(seat)"));
         assert!(k144.contains("paste_text("));
         assert!(!k144.contains("to_string_lossy"));
+    }
+
+    /// A PowerShell recipient whose quote policy is named by the caller.
+    ///
+    /// `powershell_doubled_quotes` is empty in production until PROBE 2 has
+    /// measured both PowerShell versions, so both halves are worth reading here:
+    /// what today's build does with an apostrophe, and what it will do the day
+    /// the measurement lands.
+    fn powershell_recipient(doubled: &'static [char]) -> shell_literal::Recipient {
+        shell_literal::Recipient {
+            encoder: shell_literal::Encoder {
+                grammar: shell_literal::ShellGrammar::PowerShell,
+                named_cmd: false,
+                delayed_expansion: false,
+                powershell_doubled_quotes: doubled,
+            },
+            namespace: bt_transcript::paths::PrintedPathNamespace::Windows,
+            spelling: None,
+            wsl_distribution: None,
+        }
+    }
+
+    /// **A dropped path is spelled exactly as a copied one is** (GitHub issue
+    /// #1 ②).
+    ///
+    /// The promise the issue actually asks for is not "a drop pastes something"
+    /// — it is that a file let go of over a pane arrives the way the same file
+    /// copied in Explorer has arrived since 0.4.1. The two roads are compared
+    /// character for character over the characters that make spelling hard: a
+    /// space, a double quote, and the apostrophe that PowerShell can refuse.
+    ///
+    /// MUTATION: give the drop a speller of its own — even one that is right
+    /// today — and this goes red on the first row, which is what stops the two
+    /// quoting rules from drifting apart one release at a time.
+    #[test]
+    fn a_dropped_path_is_spelled_like_a_copied_one() {
+        use bt_platform::ClipboardPayload;
+        for path in [
+            r"D:\Reports\Q3 draft.txt",
+            "D:\\Reports\\a \"quoted\" name.txt",
+            r"D:\Reports\it's here.txt",
+        ] {
+            for doubled in [&[] as &'static [char], &['\''] as &'static [char]] {
+                for leading_space in [false, true] {
+                    let recipient = powershell_recipient(doubled);
+                    let dropped =
+                        prepare_dropped_paste(vec![path.into()], &recipient, leading_space);
+                    let copied = prepare_clipboard_paste(
+                        Ok(ClipboardPayload::Files(vec![path.into()])),
+                        &recipient,
+                        leading_space,
+                    );
+                    assert_eq!(
+                        dropped.text, copied.text,
+                        "{path} is spelled differently when it is dropped"
+                    );
+                    assert_eq!(
+                        dropped.notice, copied.notice,
+                        "{path} is refused differently when it is dropped"
+                    );
+                }
+            }
+        }
+
+        // The red gate: the comparison above would also pass on two roads that
+        // both produced nothing, so this states what the PowerShell speller
+        // actually says.
+        let apostrophe = r"D:\Reports\it's here.txt";
+        let measured = powershell_recipient(&['\'']);
+        let spelled = prepare_dropped_paste(vec![apostrophe.into()], &measured, false);
+        assert_eq!(
+            spelled.text.as_deref(),
+            Some(r"'D:\Reports\it''s here.txt' "),
+            "an apostrophe inside a single-quoted word is doubled, and the space \
+             needs no escape of its own"
+        );
+        let unmeasured =
+            prepare_dropped_paste(vec![apostrophe.into()], &powershell_recipient(&[]), false);
+        assert!(
+            unmeasured.text.is_none() && unmeasured.notice.is_some(),
+            "until PROBE 2 an apostrophe is refused with a notice rather than \
+             guessed at — for a drop exactly as for a copy"
+        );
+    }
+
+    /// **Three files let go of together are one command line** (GitHub issue #1
+    /// ②).
+    ///
+    /// winit reports a drop as one `DroppedFile` per file and marks neither the
+    /// beginning nor the end of the run, so the batch is the loop's to keep: the
+    /// arm writes each path down, and the turn boundary spends whatever is
+    /// there. Both halves are read here — the accumulation, which must leave
+    /// nothing behind to be pasted a second time, and the spelling, which must
+    /// put all three on one line rather than running the first two.
+    ///
+    /// MUTATION: paste from the dispatcher's arm instead of collecting, and
+    /// three files dropped on a shell become three commands, the first two of
+    /// which run.
+    #[test]
+    fn three_files_of_one_drop_become_one_command_line() {
+        let mut batch: Vec<PathBuf> = Vec::new();
+        for path in ["/first", "/second file", "/third"] {
+            batch.push(path.into());
+        }
+        let paths = std::mem::take(&mut batch);
+        assert_eq!(paths.len(), 3, "one drop, three events, one batch");
+        assert!(
+            batch.is_empty(),
+            "a batch the flush has taken is not left behind for the next turn to \
+             paste again"
+        );
+        let prepared = prepare_dropped_paste(paths, &recipient(), true);
+        assert!(prepared.notice.is_none());
+        assert_eq!(
+            prepared.text.as_deref(),
+            Some(" '/first' '/second file' '/third' "),
+            "three paths, three arguments, one command line"
+        );
+    }
+
+    /// **The drop is collected in the dispatcher and spent at the turn
+    /// boundary, and nowhere else** (GitHub issue #1 ②).
+    ///
+    /// The shape [`three_files_of_one_drop_become_one_command_line`] depends on
+    /// and cannot itself reach: an event loop is not constructible in a test, so
+    /// what holds the wiring is which call stands where. The two doors are the
+    /// wheel's own two — the top of `window_event` for anything that is not
+    /// another file of this drop, and the top of a turn.
+    #[test]
+    fn a_drop_is_collected_in_the_dispatcher_and_spent_at_the_turn_boundary() {
+        let source = include_str!("main.rs");
+        let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
+        for (once, what) in [
+            (
+                "runtime.window.dropped_files.push(path);",
+                "the arm writes the path down and pastes nothing itself",
+            ),
+            (
+                "std::mem::take(&mut self.window.dropped_files)",
+                "the batch has one reader, and it takes the whole of it",
+            ),
+            (
+                "self.paste_paths_into(seat, paths)",
+                "a dropped batch reaches a shell through one door",
+            ),
+            (
+                "self.dropped_files_point()",
+                "the cursor is asked for once per batch and not once per file",
+            ),
+            (
+                "bt_platform::pointer_position_in_window",
+                "and there is one door onto the platform's cursor in this window",
+            ),
+            (
+                "runtime.flush_dropped_files()",
+                "the dispatcher spends the drop before any other event",
+            ),
+            (
+                "self.flush_dropped_files()?;",
+                "and a turn spends whatever is still there",
+            ),
+        ] {
+            assert_eq!(
+                before_this_fixture.matches(once).count(),
+                1,
+                "`{once}` — {what}"
+            );
+        }
+        let arm = before_this_fixture
+            .split_once("            WindowEvent::DroppedFile(path) => {")
+            .expect("the dispatcher answers a dropped file")
+            .1
+            .split_once("            WindowEvent::Resized(size)")
+            .expect("and the arm is closed by the one after it")
+            .0;
+        assert!(
+            !arm.contains("paste"),
+            "the arm collects; pasting from it would be one command line per file"
+        );
     }
 }
