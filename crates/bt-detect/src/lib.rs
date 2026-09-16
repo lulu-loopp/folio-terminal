@@ -896,14 +896,30 @@ pub fn may_carry_inline_math(text: &str) -> bool {
     }
 }
 
-/// Could this row carry the closing half of a formula the row above left open, and *only* that?
+/// Could this row carry the closing half of a formula the row above left open?
 ///
-/// [`may_carry_inline_math`] minus the pair: the question the frozen scan window asks before it
-/// reaches one line further back, where a row that can prove a run by itself needs no such reach.
-/// Same single pass, same bounded column walk.
+/// **The frozen scan window's question, and it has to be the join's own.** The window asks this to
+/// decide whether to reach one line further back than the candidate, and the row above is the only
+/// place the opening fragment can be. So an answer narrower than
+/// [`detect_inline_math_across_rows`] would give is not a conservatism, it is a silent loss: the
+/// pair the detector is perfectly willing to join never reaches it, and the formula stays raw
+/// source with nothing anywhere recording why. This is therefore not a second rule about closing
+/// rows — it is [`first_inline_closer`], the join's own closer test, asked without the row above.
+///
+/// It once read the row's dollars as a census and demanded a *lone* one, which is the question
+/// [`may_carry_inline_math`] asks and not the question the join asks. A closing row may carry
+/// dollars of its own: the closer is the row's **first** `$`, and everything past it re-pairs from
+/// a clean state, which is how `…the quadratic formula $x` over `= \frac{…}{2a}$, and the density
+/// $\varphi(x) = e^{-x^2/2}$.` keeps both of its formulas. Under the census the second one made
+/// the first one unreachable — the window opened at the closing row, the fragment above was never
+/// in it, and the sentence that reported the split lost the very formula it reported (release
+/// review 2026-09-17, X-6).
+///
+/// One `$` scan and the same bounded column walk: the budget on [`may_carry_inline_math`] holds
+/// here unchanged.
 #[must_use]
 pub fn may_close_row_split_inline_math(text: &str) -> bool {
-    matches!(dollar_census(text), DollarCensus::Lone(close) if closes_a_row_split(text, close))
+    first_inline_closer(text).is_some()
 }
 
 /// Can the `$` at `close` be read as the closer of a formula the row above left open?
@@ -965,6 +981,11 @@ fn lone_trailing_opener(text: &str) -> Option<usize> {
 }
 
 /// The row's first `$`, when it can be read as the closer of a formula opened above.
+///
+/// The one closer rule there is. [`detect_inline_math_across_rows`] pairs with it and
+/// [`may_close_row_split_inline_math`] arms the scan window with it, so the two sides of the join
+/// cannot drift apart: whatever this refuses is never joined, and whatever it accepts is always
+/// read with the row above it.
 fn first_inline_closer(text: &str) -> Option<usize> {
     let close = text.find('$')?;
     closes_a_row_split(text, close).then_some(close)
@@ -4085,12 +4106,52 @@ mod tests {
             r"= \frac{-b}{2a}$, and the rest",
             "4ac}}{2a}$ and so on",
             "a}$ text",
+            // A closer with a whole formula of its own behind it. The row carries three dollars
+            // and is a closing row all the same: the closer is the first of them (X-6).
+            r"= \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}$, and the density $\varphi(x) = e^{-x^2/2}$.",
         ] {
             assert!(
                 may_close_row_split_inline_math(text),
                 "{text:?} could close a formula left open above and must be asked about"
             );
         }
+    }
+
+    /// **One closer rule, asked by both sides.** The frozen scan window decides whether the row
+    /// above a candidate is read at all; the join decides what happens when it is. Let the two
+    /// disagree and the formula is simply lost — the worker is handed one row, the opening fragment
+    /// is not in it, and nothing anywhere records that a join was refused. That is exactly what
+    /// happened to the reported sentence, whose closing row the window read as a census of dollars
+    /// and therefore refused for carrying a second, whole formula (release review 2026-09-17, X-6).
+    ///
+    /// So the window's question is [`first_inline_closer`], the join's own, and this holds the two
+    /// answers together over every line of the false-positive corpus and over both halves of the
+    /// report. It is a property of the code rather than of the corpus, which is the point: no new
+    /// closing row can be admitted on one side alone.
+    #[test]
+    fn the_scan_window_and_the_join_agree_on_every_closing_row() {
+        let mut disagreed = Vec::new();
+        for text in INLINE_FALSE_POSITIVE_CORPUS
+            .iter()
+            .map(|(line, _)| *line)
+            .chain([SPLIT_HEAD, SPLIT_TAIL, "and Pro costs $15", "no dollars"])
+        {
+            if join(SPLIT_HEAD, text).is_some() && !may_close_row_split_inline_math(text) {
+                disagreed.push(format!("{text:?} joins, but its row above is never read"));
+            }
+        }
+        assert!(
+            disagreed.is_empty(),
+            "{} closing rows the window refuses and the join accepts:\n  {}",
+            disagreed.len(),
+            disagreed.join("\n  ")
+        );
+        assert!(
+            may_close_row_split_inline_math(SPLIT_TAIL),
+            "the reported sentence's own closing row carries three dollars and has to reach the \
+             row above it: the closer is the first of them, and the density behind it is a run of \
+             its own"
+        );
     }
 
     #[test]
