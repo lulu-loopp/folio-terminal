@@ -74,10 +74,25 @@ pub fn directory() -> PathBuf {
 
 /// **`yyyymmdd-hhmmss`, in UTC.**
 ///
-/// UTC and not the reader's own clock, for the reason `bt_persist`'s rejected
-/// siblings are stamped the same way: the name has to sort the way the files
-/// were written, and a local clock goes backwards an hour twice a year. The
-/// calendar is `seed`'s, which is this crate's one Gregorian calendar.
+/// **UTC and not the reader's own clock, deliberately**, and the trade is worth
+/// stating because the other side of it is real: a reader in UTC+8 who pastes at
+/// half past ten at night gets a file named `143012`, which is not the time on
+/// their wall. What buys that is the one property the folder's rule is built out
+/// of — [`plan`] decides which files the cap retires by *comparing these strings*,
+/// so the name has to rise every second, for ever. A local clock does not: it
+/// goes backwards an hour once a year, and for that hour the newest file sorts
+/// oldest and the sweep deletes the picture that was just pasted. The same
+/// choice, for the same reason, as `bt_persist`'s rejected siblings — and the
+/// same one every other timestamp this product writes down is made with.
+///
+/// **What the other answer would cost**, said here so it can be reconsidered
+/// with the price in view rather than as a preference: this workspace has no
+/// date-time dependency and no time-zone door at all, so a local name needs a
+/// new platform call on both arms (`GetTimeZoneInformationForYear` /
+/// `localtime_r`), and the cap's order would have to stop being the name and
+/// start being something recorded beside it.
+///
+/// The calendar is `seed`'s, which is this crate's one Gregorian calendar.
 #[must_use]
 pub fn stamp(at: SystemTime) -> String {
     let seconds = match at.duration_since(UNIX_EPOCH) {
@@ -282,9 +297,26 @@ mod tests {
         assert_eq!(stamp(UNIX_EPOCH), "19700101-000000");
         // 2026-09-16T14:30:12Z.
         assert_eq!(stamp(at(1_789_569_012)), "20260916-143012");
-        assert!(stamp(at(1_789_569_012)) < stamp(at(1_789_403_413)));
         // A leap day, which is the case a lookup table gets wrong.
         assert_eq!(stamp(at(1_709_208_000)), "20240229-120000");
+        // The shape, over inputs this test names rather than over a clock: no
+        // machine's own time zone, no today, nothing this can answer differently
+        // on a runner than on the machine it was written on.
+        for seconds in [0, 1, 1_709_208_000, 1_789_569_012, 4_102_444_799] {
+            let name = stamp(at(seconds));
+            assert_eq!(name.len(), 15, "{name}");
+            assert_eq!(name.as_bytes()[8], b'-', "{name}");
+            assert!(
+                name.bytes()
+                    .enumerate()
+                    .all(|(index, byte)| index == 8 || byte.is_ascii_digit()),
+                "{name}"
+            );
+            // **One second later is one name later, in the order the sweep reads
+            // them**: the cap is decided by comparing these strings, so a name
+            // that did not rise would be a newer file swept before an older one.
+            assert!(stamp(at(seconds)) < stamp(at(seconds + 1)), "{name}");
+        }
     }
 
     /// PIN — **twenty files survive a write and the twenty-first pushes the
