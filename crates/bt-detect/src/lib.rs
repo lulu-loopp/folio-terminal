@@ -1,7 +1,12 @@
 //! Conservative block-level `$$...$$` detection and the dual lifecycle/version gate.
 
+pub mod border;
 mod ledger;
 pub mod table;
+pub use border::{
+    LiveScreenRegion, ScreenRegion, find_border_columns, live_screen_regions, region_text,
+    screen_regions,
+};
 pub use ledger::{
     ContainmentVerdict, LedgerEntry, LegitimateRejection, OrphanKind, OwnershipLedger,
     SourceIntegrityAnnotation, StructuralDelimiterKind, TokenFate,
@@ -321,6 +326,13 @@ pub struct LiveDetectionTask {
     /// Exact parser checkpoint immediately before `inputs[0]`.
     pub initial_context: DetectionContext,
     pub inputs: Arc<[LiveDetectionInput]>,
+    /// **The columns of the screen this block was proved in.** [`ScreenRegion::WHOLE`] on an
+    /// unframed screen, and on every task before the scanner has looked at it; the pane's own
+    /// columns once a multiplexer's rule has cut the screen (see [`crate::border`]). `start` and
+    /// `end` below are already screen columns either way — the region is what the presentation
+    /// layer needs in order to know which columns the band *owns*, which is not the same question
+    /// as where its text begins.
+    pub region: ScreenRegion,
     pub start: GridPoint,
     pub end: GridPoint,
     /// Inclusive live-grid row band reserved for presentation. Detection initializes this to the
@@ -1439,6 +1451,51 @@ pub fn detect_math_blocks_with_sites<'a>(
         None,
     )
     .blocks
+}
+
+/// Everything one region of a framed screen proved, and the columns it proved it in.
+///
+/// `blocks` are scanned over the region's own lines, so their byte offsets and sources are that
+/// region's; `region.column_start` is the cell column those lines begin at. A caller placing a
+/// block on the screen adds it. (The scanner's own `cell_segments` on this path carry the
+/// provisional char-count columns documented at [`MathCellSegment`] and are region-local like the
+/// bytes; the live path replaces them with real captured cells, already in screen columns.)
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RegionMathBlocks {
+    pub region: ScreenRegion,
+    pub blocks: Vec<DetectedMathBlock>,
+}
+
+/// [`detect_math_blocks_with_sites`] over a screen a multiplexer may have framed.
+///
+/// The rows are the complete screen. They are measured for border columns
+/// ([`border::find_border_columns`]), cut into regions, and each region is scanned over its own
+/// columns — where a pane's text starts at the region's first column rather than behind a sidebar
+/// and a rule. A screen with no frame yields exactly one region, [`ScreenRegion::WHOLE`], holding
+/// exactly what [`detect_math_blocks_with_sites`] returns for the same rows.
+pub fn detect_math_blocks_with_sites_in_regions<'a>(
+    lines: impl IntoIterator<Item = (TranscriptId, &'a str, InlineMathSite)>,
+    options: DetectionOptions,
+) -> Vec<RegionMathBlocks> {
+    let lines = lines.into_iter().collect::<Vec<_>>();
+    let regions = screen_regions(lines.iter().map(|(_, text, _)| *text));
+    regions
+        .into_iter()
+        .map(|region| {
+            let texts = lines
+                .iter()
+                .map(|(_, text, _)| region_text(text, region))
+                .collect::<Vec<_>>();
+            let blocks = detect_math_blocks_with_sites(
+                lines
+                    .iter()
+                    .zip(&texts)
+                    .map(|((id, _, site), text)| (*id, *text, *site)),
+                options,
+            );
+            RegionMathBlocks { region, blocks }
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3081,57 +3138,58 @@ fn frozen_occurrence_segments(
 
 /// Resolve a live-grid candidate through the exact same conservative detector as frozen history.
 /// Temporary transcript IDs are a detector-local indexing device; they never escape as anchors.
-pub fn resolve_live_detection_task(task: &mut LiveDetectionTask) -> bool {
-    if task.resolved {
-        return true;
-    }
-    if task.detection_complete {
-        return false;
-    }
-    let logical = live_logical_lines(&task.inputs);
-    let row_to_logical = live_grid_logical_ids(&logical, &task.inputs);
-    let Some(candidate_id) = row_to_logical.get(&task.candidate_row).copied() else {
-        task.detection_complete = true;
-        return false;
-    };
-    let live_grid_boundary = live_grid_boundary_index(&logical, &task.inputs);
-    let clipped = clipped_open_index(
-        &logical,
-        live_grid_first_index(&logical, &task.inputs),
-        &task.initial_context,
-        task.options,
-    );
-    let scan = scan_live_math_blocks_in_context(
-        logical.iter().map(|line| (line.id, line.text.as_str())),
-        task.initial_context.clone(),
-        task.options,
-        Some(&live_logical_sites(&logical)),
-        Some(&live_logical_captured_columns(&logical)),
-        live_grid_boundary,
-        clipped,
-    );
-    task.refused_table_rows = refused_table_rows(&scan, &row_to_logical);
-    let detected = scan
-        .blocks
-        .into_iter()
-        .find(|block| block.end == candidate_id);
-    task.detection_complete = true;
-    let Some(block) = detected else {
-        return false;
-    };
-    apply_live_detected_block(task, &block, &logical)
+/// One region of a live screen, scanned.
+///
+/// An unframed screen makes exactly one of these over the whole window, which is the scan that has
+/// always run. A framed screen makes one per pane.
+struct LiveRegionScan {
+    region: ScreenRegion,
+    inputs: Arc<[LiveDetectionInput]>,
+    logical: Vec<LiveLogicalLine>,
+    row_to_logical: BTreeMap<u32, TranscriptId>,
+    scan: MathScanResult,
 }
 
-/// Resolve every candidate from one stable snapshot with one O(n) scanner pass. Non-matches are
-/// marked complete as well, preserving the observable candidate queue without repeating the scan
-/// once per delimiter-looking row.
-pub fn resolve_live_detection_tasks(tasks: &mut [LiveDetectionTask]) {
-    let Some(first) = tasks.first() else {
-        return;
-    };
-    let inputs = Arc::clone(&first.inputs);
-    let initial_context = first.initial_context.clone();
-    let options = first.options;
+/// Scan a live-detection window, region by region.
+///
+/// When the screen carries no border column the window is scanned whole, from the caller's own
+/// parser checkpoint, exactly as before regions existed. When it does, each region is scanned over
+/// its own columns from a **neutral** checkpoint: a rule running the height of the screen is proof
+/// that the screen is a frame drawn by a program, so neither the host's scrollback nor a delimiter
+/// left open above it continues into a pane. The frozen history prefix is dropped for the same
+/// reason, which also leaves each region a pure-grid window with no seam to resynchronise.
+fn live_region_scans(
+    inputs: &Arc<[LiveDetectionInput]>,
+    initial_context: &DetectionContext,
+    options: DetectionOptions,
+) -> Vec<LiveRegionScan> {
+    match live_screen_regions(inputs) {
+        None => vec![live_region_scan(
+            ScreenRegion::WHOLE,
+            Arc::clone(inputs),
+            initial_context.clone(),
+            options,
+        )],
+        Some(regions) => regions
+            .into_iter()
+            .map(|region| {
+                live_region_scan(
+                    region.region,
+                    region.inputs,
+                    DetectionContext::default(),
+                    options,
+                )
+            })
+            .collect(),
+    }
+}
+
+fn live_region_scan(
+    region: ScreenRegion,
+    inputs: Arc<[LiveDetectionInput]>,
+    initial_context: DetectionContext,
+    options: DetectionOptions,
+) -> LiveRegionScan {
     let logical = live_logical_lines(&inputs);
     let row_to_logical = live_grid_logical_ids(&logical, &inputs);
     let live_grid_boundary = live_grid_boundary_index(&logical, &inputs);
@@ -3143,18 +3201,89 @@ pub fn resolve_live_detection_tasks(tasks: &mut [LiveDetectionTask]) {
     );
     let scan = scan_live_math_blocks_in_context(
         logical.iter().map(|line| (line.id, line.text.as_str())),
-        initial_context.clone(),
+        initial_context,
         options,
         Some(&live_logical_sites(&logical)),
         Some(&live_logical_captured_columns(&logical)),
         live_grid_boundary,
         clipped,
     );
-    let blocks = scan
-        .blocks
+    LiveRegionScan {
+        region,
+        inputs,
+        logical,
+        row_to_logical,
+        scan,
+    }
+}
+
+/// Every live row a table candidate was refused on, across every region of the screen.
+fn refused_rows_of_regions(scans: &[LiveRegionScan]) -> Vec<u32> {
+    let mut rows = scans
         .iter()
-        .map(|block| (block.end, block))
-        .collect::<BTreeMap<_, _>>();
+        .flat_map(|plane| refused_table_rows(&plane.scan, &plane.row_to_logical))
+        .collect::<Vec<_>>();
+    rows.sort_unstable();
+    rows.dedup();
+    rows
+}
+
+pub fn resolve_live_detection_task(task: &mut LiveDetectionTask) -> bool {
+    if task.resolved {
+        return true;
+    }
+    if task.detection_complete {
+        return false;
+    }
+    let scans = live_region_scans(&task.inputs, &task.initial_context, task.options);
+    task.detection_complete = true;
+    task.refused_table_rows = refused_rows_of_regions(&scans);
+    for plane in &scans {
+        let Some(candidate_id) = plane.row_to_logical.get(&task.candidate_row).copied() else {
+            continue;
+        };
+        let Some(block) = plane
+            .scan
+            .blocks
+            .iter()
+            .find(|block| block.end == candidate_id)
+        else {
+            continue;
+        };
+        if apply_live_detected_block(task, block, &plane.logical, &plane.inputs, plane.region) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Resolve every candidate from one stable snapshot with one O(n) scanner pass per region.
+/// Non-matches are marked complete as well, preserving the observable candidate queue without
+/// repeating the scan once per delimiter-looking row.
+///
+/// A candidate row is one row of the screen and a task is keyed on it alone, so when two panes of a
+/// split both close a block on the same row the leftmost region's block is the one the task
+/// carries. That is the one place the row-keyed live plane is narrower than the detection under it.
+pub fn resolve_live_detection_tasks(tasks: &mut [LiveDetectionTask]) {
+    let Some(first) = tasks.first() else {
+        return;
+    };
+    let inputs = Arc::clone(&first.inputs);
+    let initial_context = first.initial_context.clone();
+    let options = first.options;
+    let scans = live_region_scans(&inputs, &initial_context, options);
+    let refused = refused_rows_of_regions(&scans);
+    let indexed = scans
+        .iter()
+        .map(|plane| {
+            plane
+                .scan
+                .blocks
+                .iter()
+                .map(|block| (block.end, block))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .collect::<Vec<_>>();
     for task in tasks {
         if task.resolved || task.detection_complete {
             continue;
@@ -3167,14 +3296,19 @@ pub fn resolve_live_detection_tasks(tasks: &mut [LiveDetectionTask]) {
             continue;
         }
         task.detection_complete = true;
-        task.refused_table_rows = refused_table_rows(&scan, &row_to_logical);
-        let Some(block) = row_to_logical
-            .get(&task.candidate_row)
-            .and_then(|id| blocks.get(id))
-        else {
-            continue;
-        };
-        let _ = apply_live_detected_block(task, block, &logical);
+        task.refused_table_rows = refused.clone();
+        for (plane, blocks) in scans.iter().zip(&indexed) {
+            let Some(block) = plane
+                .row_to_logical
+                .get(&task.candidate_row)
+                .and_then(|id| blocks.get(id))
+            else {
+                continue;
+            };
+            if apply_live_detected_block(task, block, &plane.logical, &plane.inputs, plane.region) {
+                break;
+            }
+        }
     }
 }
 
@@ -3198,14 +3332,20 @@ fn refused_table_rows(
         .collect()
 }
 
+/// Fill a task in from a block one region proved.
+///
+/// `inputs` are that region's rows, whose cell boundaries carry the **screen's** columns, so every
+/// coordinate this writes — `start`, `end`, every `MathCellSegment` — is already in screen
+/// coordinates and needs no offset applied after the fact.
 fn apply_live_detected_block(
     task: &mut LiveDetectionTask,
     block: &DetectedMathBlock,
     logical: &[LiveLogicalLine],
+    inputs: &[LiveDetectionInput],
+    region: ScreenRegion,
 ) -> bool {
     let mut occurrence = block.span.clone();
-    let Some(cell_segments) =
-        live_occurrence_segments(&occurrence, block.start, logical, &task.inputs)
+    let Some(cell_segments) = live_occurrence_segments(&occurrence, block.start, logical, inputs)
     else {
         return false;
     };
@@ -3253,6 +3393,7 @@ fn apply_live_detected_block(
     };
     task.band_start_row = start_row;
     task.band_end_row = end_row;
+    task.region = region;
     task.span = occurrence;
     task.resolved = true;
     true
@@ -5248,6 +5389,7 @@ abla f",
                     })
                     .collect::<Vec<_>>(),
             ),
+            region: ScreenRegion::WHOLE,
             start: GridPoint {
                 row: candidate_row,
                 column: 0,

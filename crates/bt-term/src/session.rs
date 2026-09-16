@@ -17,9 +17,9 @@ use bt_detect::{
     DecorationRecord, DelimiterKind, DetectionContext, DetectionInput, DetectionOptions,
     DetectionTask, InlineJoinedFragment, InlineMathRun, InlineMathSite, LiveDetectionInput,
     LiveDetectionSource, LiveDetectionTask, MAX_MATH_SOURCE_BYTES, MathCellSegment, MathSourceLine,
-    MathSpan, PlaceholderArtifact, StaleArtifact, advance_detection_context,
-    detect_math_blocks_with_sites, frozen_resync_scan_with_options, resolve_detection_task,
-    resolve_live_detection_task, resolve_live_detection_tasks,
+    MathSpan, PlaceholderArtifact, ScreenRegion, StaleArtifact, advance_detection_context,
+    detect_math_blocks_with_sites, frozen_resync_scan_with_options, live_screen_regions,
+    resolve_detection_task, resolve_live_detection_task, resolve_live_detection_tasks,
 };
 use bt_doc::{
     AnchorError, AnchorId, Bias, BlockKind, ContentAnchor, DecorationIntent, DecorationLifecycle,
@@ -749,6 +749,10 @@ struct LiveDecorationRecord {
     end: GridPoint,
     band_start_row: u32,
     band_end_row: u32,
+    /// The columns of the screen this block was proved in, and the only ones it owns. A
+    /// multiplexer's pane rule cuts the screen into regions (`bt_detect::border`);
+    /// [`ScreenRegion::WHOLE`] on the unframed screen that is nearly every screen.
+    region: ScreenRegion,
     /// Frozen transcript rows (opener and body) that already committed to scrollback while this
     /// occurrence's closer is still in the live grid. Empty for an ordinary all-live block. Ordered
     /// top to bottom, immediately preceding the live band; the presentation layer bridges the two
@@ -3659,6 +3663,8 @@ impl DualPlaneSession {
                 options: self.detection_options(),
                 initial_context: initial_context.clone(),
                 inputs: Arc::clone(&inputs),
+                // The scanner names the region it proves a block in; a candidate has none yet.
+                region: ScreenRegion::WHOLE,
                 start: GridPoint {
                     row: candidate_row,
                     column: 0,
@@ -6079,6 +6085,8 @@ impl DualPlaneSession {
                 options: self.detection_options(),
                 initial_context: initial_context.clone(),
                 inputs: Arc::clone(&inputs),
+                // The scanner names the region it proves a block in; a candidate has none yet.
+                region: ScreenRegion::WHOLE,
                 start: GridPoint {
                     row: candidate_row,
                     column: 0,
@@ -6304,6 +6312,7 @@ impl DualPlaneSession {
                     options: self.detection_options(),
                     initial_context: record.initial_context.clone(),
                     inputs: Arc::clone(&record.inputs),
+                    region: record.region,
                     start: record.start,
                     end: record.end,
                     band_start_row: record.band_start_row,
@@ -6621,6 +6630,7 @@ impl DualPlaneSession {
                     options: self.detection_options(),
                     initial_context: record.initial_context.clone(),
                     inputs: Arc::clone(&record.inputs),
+                    region: record.region,
                     start: record.start,
                     end: record.end,
                     band_start_row: record.band_start_row,
@@ -7215,8 +7225,15 @@ impl DualPlaneSession {
                     record.vertical_scroll_px,
                 )
             });
-        self.live_decorations
-            .retain(|_, record| record.end.row < task.start.row || record.start.row > task.end.row);
+        // Rows alone did not use to be able to name two blocks, and on a screen a multiplexer has
+        // split they can: a band in one pane stands over the same rows as a band in the other and
+        // neither is in the other's way. A record is displaced only when it shares this block's
+        // rows *and* its columns.
+        self.live_decorations.retain(|_, record| {
+            record.end.row < task.start.row
+                || record.start.row > task.end.row
+                || !record.region.overlaps(task.region)
+        });
         let (show_source, hovered, horizontal_scroll_px, vertical_scroll_px) =
             remembered.unwrap_or((false, false, 0, 0));
         let occurrence_id = LiveMathOccurrenceId(self.next_live_occurrence_id);
@@ -7248,6 +7265,7 @@ impl DualPlaneSession {
                 end: task.end,
                 band_start_row: task.band_start_row,
                 band_end_row: task.band_end_row,
+                region: task.region,
                 frozen_prefix,
                 staging_prefix: Vec::new(),
                 clipped_top_rows: 0,
@@ -8342,6 +8360,8 @@ impl DualPlaneSession {
                     end: record.end,
                     band_start_row: record.band_start_row,
                     band_end_row: record.band_end_row,
+                    column_start: record.region.column_start,
+                    column_end: record.region.column_end,
                     clipped_top_rows: record.clipped_top_rows,
                     clipped_bottom_rows: record.clipped_bottom_rows,
                     occluded_source_rows: record.placement.occluded_source_rows,
@@ -8390,6 +8410,8 @@ impl DualPlaneSession {
                 end: *point,
                 band_start_row: start.row,
                 band_end_row: point.row,
+                column_start: 0,
+                column_end: None,
                 clipped_top_rows: 0,
                 clipped_bottom_rows: 0,
                 occluded_source_rows: 0,
@@ -8751,6 +8773,12 @@ impl DualPlaneSession {
                         0
                     };
                     placement.vertical_scroll_px = record.vertical_scroll_px;
+                    // The picture is drawn under the pane the formula was printed in. On an
+                    // unframed screen the region starts at column zero and this adds nothing.
+                    placement.left_subpixels = placement.left_subpixels.saturating_add(
+                        i64::from(record.region.column_start)
+                            .saturating_mul(self.cell_width_subpixels.get()),
+                    );
                 }
             }
         }
@@ -8888,7 +8916,8 @@ impl DualPlaneSession {
                 source: record.span.original_source.clone(),
                 artifact,
                 top_subpixels: first_mapped.top_subpixels,
-                left_subpixels: 0,
+                left_subpixels: i64::from(record.region.column_start)
+                    .saturating_mul(self.cell_width_subpixels.get()),
                 content_offset_subpixels: 0,
                 clip_height_subpixels: band_height,
                 display: MathBlockDisplay::Source,
@@ -10976,6 +11005,7 @@ impl DualPlaneSession {
                 options: detection_options,
                 initial_context: record.initial_context.clone(),
                 inputs: Arc::clone(&record.inputs),
+                region: record.region,
                 start: record.start,
                 end: record.end,
                 band_start_row: record.band_start_row,
@@ -13546,7 +13576,41 @@ fn byte_offset_at_column(boundaries: &[(u32, u32)], column: u32, text_len: usize
         .min(text_len)
 }
 
+/// Every live-grid row that might close a block, across every region of the screen.
+///
+/// A multiplexer's pane rule cuts the screen into regions, and the arming walk below reads whole
+/// logical lines — so on a framed screen it has to be run once per pane, over that pane's own
+/// columns, or a fence opened in one pane would silence the other. A row survives as a candidate
+/// if any region arms it; the scanner then decides which region actually proved a block there.
+/// On an unframed screen there is one region, the walk runs once, and it is the walk that always
+/// ran.
 fn live_candidate_rows(
+    inputs: &[LiveDetectionInput],
+    context: DetectionContext,
+    stable: &[bool],
+    inline_formulas: bool,
+) -> Vec<u32> {
+    let Some(regions) = live_screen_regions(inputs) else {
+        return live_candidate_rows_in_region(inputs, context, stable, inline_formulas);
+    };
+    let mut candidates = regions
+        .iter()
+        .flat_map(|region| {
+            // Each pane is a self-contained window, exactly as the scanner reads it.
+            live_candidate_rows_in_region(
+                &region.inputs,
+                DetectionContext::default(),
+                stable,
+                inline_formulas,
+            )
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_unstable();
+    candidates.dedup();
+    candidates
+}
+
+fn live_candidate_rows_in_region(
     inputs: &[LiveDetectionInput],
     mut context: DetectionContext,
     stable: &[bool],
@@ -15929,6 +15993,109 @@ mod tests {
             }
         }
         completed
+    }
+
+    /// The screen `herdr` 0.8.2 repaints the host alternate screen with, as `herdr_client.bin`
+    /// (100x40, `TERM=xterm-256color`) decodes: `(sidebar, pane)` for each of the forty rows. The
+    /// sidebar is twenty-five cells wide and a `│` stands in column 25 on every one of them.
+    const HERDR_SCREEN: [(&str, &str); 40] = [
+        (" spaces", "   1     +"),
+        (
+            "",
+            "weiyishi@WeiyideMac-mini ~ % sh -c 'cat /Users/weiyishi/folio-port/tools/",
+        ),
+        (" · math", "math.md; sleep 30'"),
+        ("", "Inline: $e^{i\\pi}+1=0$ stays inline."),
+        ("", ""),
+        ("", "$$"),
+        ("", "\\frac{1}{2}"),
+        ("", "$$"),
+        ("", ""),
+        ("", "$$"),
+        ("", "\\begin{pmatrix}"),
+        ("", "a & b \\\\"),
+        ("", "c & d \\\\"),
+        ("", "e & f"),
+        ("", "\\end{pmatrix}"),
+        ("", "$$"),
+        (
+            "",
+            "sh -c 'cat /Users/weiyishi/folio-port/tools/math.md; sleep 45'",
+        ),
+        ("", ""),
+        ("", ""),
+        (" new               ● menu", ""),
+        ("─────────────────────────", ""),
+        (" agents           grouped", ""),
+        ("", ""),
+        ("", ""),
+        ("", ""),
+        ("", ""),
+        ("", ""),
+        ("", ""),
+        ("", ""),
+        ("", ""),
+        ("", ""),
+        ("", ""),
+        ("", ""),
+        ("", ""),
+        ("", ""),
+        ("", ""),
+        ("", ""),
+        ("", ""),
+        ("", ""),
+        ("                        «", ""),
+    ];
+
+    /// The bytes `herdr` writes for that screen, in the shape the capture holds them: the cursor is
+    /// addressed to column 1, the sidebar is painted, the rule is written, the cursor is addressed
+    /// to column 27, and only then does the pane's own text go down. No newline, no carriage return
+    /// and no OSC 133 appear anywhere in the stream.
+    fn herdr_repaint() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for (index, (sidebar, pane)) in HERDR_SCREEN.iter().enumerate() {
+            let row = index + 1;
+            let padding = 25usize.saturating_sub(bt_unicode::text_width(sidebar));
+            bytes.extend_from_slice(format!("\x1b[{row};1H{sidebar}").as_bytes());
+            bytes.extend(std::iter::repeat_n(b' ', padding));
+            bytes.extend_from_slice("│".as_bytes());
+            bytes.extend_from_slice(format!("\x1b[{row};27H{pane}\x1b[K").as_bytes());
+        }
+        bytes
+    }
+
+    /// **Formulas typeset inside `herdr`.** Every pane row the multiplexer paints begins with
+    /// twenty-five blank cells and a `│`, which read as one line is four-space-indented CommonMark
+    /// code opening with a character that is not a delimiter — so all three formulas stayed source.
+    /// The rule is now recognised as a border column, each side of it is scanned over its own
+    /// columns, and the pane's thirteen lines prove exactly what they prove outside a multiplexer.
+    #[test]
+    fn herdr_pane_rows_typeset_behind_their_sidebar() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(100), nz(40));
+        session.feed_at(b"\x1b[?1049h\x1b[2J", start).unwrap();
+        session.feed_at(&herdr_repaint(), start).unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 18)),
+            3,
+            "one inline formula and two display blocks"
+        );
+        assert_eq!(session.live_decorations.len(), 3);
+        for record in session.live_decorations.values() {
+            assert_eq!(
+                record.region,
+                ScreenRegion {
+                    column_start: 26,
+                    column_end: None
+                },
+                "every block stands in the pane, right of the rule"
+            );
+            assert!(
+                record.start.column >= 26,
+                "a block's cells are the pane's cells, not the sidebar's"
+            );
+        }
     }
 
     /// Drive the exact app zoom sequence (`reconcile_authoritative_dpi`): remeasure the cell metrics,

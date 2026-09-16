@@ -454,6 +454,18 @@ pub struct ProjectedLiveMathArtifact {
     pub end: GridPoint,
     pub band_start_row: u32,
     pub band_end_row: u32,
+    /// **First cell column this band owns**, and one past its last.
+    ///
+    /// A terminal multiplexer draws a vertical rule beside its panes and repaints the host screen
+    /// itself, which cuts the screen into regions that each hold their own text
+    /// (`bt_detect::border`). A block proved inside one of them stands in that region's columns and
+    /// nowhere else: its picture is drawn from `column_start`, and the source cells it covers up
+    /// are only the ones between these two, so the pane on the other side of the rule keeps its
+    /// text. On an unframed screen — which is nearly every screen — this is column zero and no
+    /// limit, and every column of every row the band stands on is its own, as it always was.
+    pub column_start: u32,
+    /// One past the band's last column, or `None` when its region runs to the screen's right edge.
+    pub column_end: Option<u32>,
     /// Rows of this proven block that remain above live row zero. They still participate in the
     /// complete presentation geometry; only their pixels and terminal cells are clipped.
     pub clipped_top_rows: u32,
@@ -3442,7 +3454,16 @@ impl ViewportProjection {
                 let visible_last = block_last.min(last.saturating_sub(1));
                 for live_row in visible_first..=visible_last {
                     let row = &mut presented[visible_live_start + live_row - first];
-                    for cell in &mut row.visual.cells {
+                    // Only the columns this band owns. On an unframed screen that is the whole
+                    // row, as it always was; inside a multiplexer's split it is this pane's
+                    // columns, and the rule and the pane beside it keep their cells.
+                    let cells = row.visual.cells.len();
+                    let clear_from = (live_math.column_start as usize).min(cells);
+                    let clear_to = live_math
+                        .column_end
+                        .map_or(cells, |end| end as usize)
+                        .clamp(clear_from, cells);
+                    for cell in &mut row.visual.cells[clear_from..clear_to] {
                         suppress_math_source_cell(cell);
                     }
                 }
@@ -6190,6 +6211,8 @@ mod tests {
                 end: GridPoint { row: 1, column: 3 },
                 band_start_row: 1,
                 band_end_row: 1,
+                column_start: 0,
+                column_end: None,
                 clipped_top_rows: 0,
                 clipped_bottom_rows: 0,
                 occluded_source_rows: 0,
@@ -8746,6 +8769,8 @@ mod tests {
                     end: GridPoint { row: 3, column: 4 },
                     band_start_row,
                     band_end_row,
+                    column_start: 0,
+                    column_end: None,
                     clipped_top_rows: 0,
                     clipped_bottom_rows: 0,
                     occluded_source_rows: 0,
@@ -8894,6 +8919,8 @@ mod tests {
                 },
                 band_start_row,
                 band_end_row,
+                column_start: 0,
+                column_end: None,
                 clipped_top_rows,
                 clipped_bottom_rows,
                 occluded_source_rows,
@@ -9032,6 +9059,8 @@ mod tests {
                 end: GridPoint { row: 3, column: 4 },
                 band_start_row: 1,
                 band_end_row: 3,
+                column_start: 0,
+                column_end: None,
                 clipped_top_rows: 0,
                 clipped_bottom_rows: 0,
                 occluded_source_rows: 1,
@@ -9264,6 +9293,8 @@ mod tests {
                 end: GridPoint { row: 0, column: 2 },
                 band_start_row: 0,
                 band_end_row: 0,
+                column_start: 0,
+                column_end: None,
                 clipped_top_rows: 0,
                 clipped_bottom_rows: 0,
                 occluded_source_rows: 0,
@@ -9423,6 +9454,8 @@ mod tests {
             end: GridPoint { row: 3, column: 4 },
             band_start_row: 2,
             band_end_row: 3,
+            column_start: 0,
+            column_end: None,
             clipped_top_rows: 0,
             clipped_bottom_rows: 0,
             occluded_source_rows: 0,
@@ -9497,6 +9530,8 @@ mod tests {
                 },
                 band_start_row,
                 band_end_row,
+                column_start: 0,
+                column_end: None,
                 clipped_top_rows,
                 clipped_bottom_rows: 0,
                 occluded_source_rows: 0,
@@ -11136,6 +11171,8 @@ mod tests {
             end: GridPoint { row: 4, column: 7 },
             band_start_row: 3,
             band_end_row: 4,
+            column_start: 0,
+            column_end: None,
             clipped_top_rows: 0,
             clipped_bottom_rows: 0,
             occluded_source_rows: 0,

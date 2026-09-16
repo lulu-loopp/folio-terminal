@@ -1317,6 +1317,8 @@ mod tests {
                 end: GridPoint { row: 0, column: 4 },
                 band_start_row: 0,
                 band_end_row: 0,
+                column_start: 0,
+                column_end: None,
                 clipped_top_rows: 0,
                 clipped_bottom_rows: 0,
                 occluded_source_rows: 0,

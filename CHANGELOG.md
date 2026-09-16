@@ -20,6 +20,18 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **A formula now typesets inside a terminal multiplexer that draws a border
+  beside the pane.** In `herdr`, and in a `tmux` vertical split, every row of a
+  pane reaches the terminal with the frame in front of it: blank columns, a
+  vertical rule, and only then the text the program printed. Folio read each row
+  as one line, so a line that really begins `$$` began instead with twenty-five
+  spaces and a rule — indented code by one rule of Markdown, and no opening
+  delimiter at all by another — and every formula in the pane stayed as the
+  program wrote it, while the same file typeset in a plain window. Folio now
+  finds the columns a screen draws a vertical rule in and reads each side of the
+  rule as its own body of text, beginning at its own first column. Nothing about
+  what counts as a formula changed: every question that was asked of a line
+  before is asked of it now, of the pane's own line.
 - **On a Mac, a second Folio started from a terminal now hands over instead of
   becoming a second writer.** Which Folio is allowed to write your settings and
   your saved session was decided in a directory whose location came from
