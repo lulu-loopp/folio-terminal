@@ -19680,7 +19680,8 @@ mod tests {
     #[test]
     fn a_live_block_turned_over_keeps_its_source_face_across_the_freeze() {
         let start = Instant::now();
-        let mut session = DualPlaneSession::new(nz(40), nz(8));
+        // Leave room above the eight-row visible-text floor for a block the reader can turn over.
+        let mut session = DualPlaneSession::new(nz(40), nz(12));
         session.feed_at(b"$$x^2$$\r\nbarrier", start).unwrap();
         hide_cursor(&mut session, start);
         session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
@@ -19696,12 +19697,14 @@ mod tests {
             .expect("the live block renders before it is turned over");
         let mut projection = session.new_projection(session.layout_key());
         let rendered = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(rendered.math_blocks.len(), 1, "the live block is visible");
+        assert_eq!(rendered.math_blocks[0].display, MathBlockDisplay::Rendered);
         let anchor = rendered.math_blocks[0].anchor.clone();
         assert!(session.toggle_math_source(&anchor));
 
-        // Eight lines scroll both source rows out of the grid, so the occurrence hands its raster
-        // to the history record it becomes.
-        for index in 0..8 {
+        // Twelve lines scroll the formula's source row out of the grid, so the occurrence hands
+        // its raster to the history record it becomes.
+        for index in 0..12 {
             session
                 .feed_at(
                     format!("\r\nscroll-{index}").as_bytes(),
