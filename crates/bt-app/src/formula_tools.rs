@@ -1655,6 +1655,74 @@ mod tests {
         assert!(!ridden.ride(&source_face, None, settled, Motion::Full));
     }
 
+    /// **The band once the change has landed**, as `bt_render` now answers for a source face
+    /// (owner's report 2026-09-15, T-MATH-MARKS-IN-SOURCE-FACE): the region is the rows' own band
+    /// — column zero to the pane's right edge — and the two marks are flush against its right
+    /// edge on its midline, because rows that run to the pane's edge leave no reserve to be
+    /// centred in.
+    ///
+    /// Deliberately a *wider* rectangle than [`toggled`]'s, which is the band mid-flight while the
+    /// block is still an artifact: that difference is the leftover rect the pin below is about.
+    fn source_band() -> MathToolBoxes {
+        MathToolBoxes {
+            display: MathBlockDisplay::Source,
+            block: [8.0, 10.0, 420.0, 70.0],
+            source: [380.0, 30.5, 399.0, 49.5],
+            copy: [401.0, 30.5, 420.0, 49.5],
+            ..boxes(MathBlockDisplay::Rendered)
+        }
+    }
+
+    /// RED GATE (owner's report 2026-09-15, T-MATH-MARKS-IN-SOURCE-FACE; §7.1.5p ⑨ ii + ⑪):
+    /// **when the change lands, the marks settle on the source band's own rect and keep nothing of
+    /// the rect they rode.**
+    ///
+    /// The ride settles the placement on every frame of the flight, which is right — the block's
+    /// height is the journey and easing towards a box that is itself easing is two journeys over
+    /// one distance. What that leaves is a placement *settled on the last rect of the flight*, and
+    /// the flight's last rect is the band as an **artifact**: the picture's region, at the height
+    /// it travelled to. The document is told on that same frame and the band becomes rows, whose
+    /// region is a different rectangle — so the handover from `ride` back to `follow` is the one
+    /// place a typeset rect can be left standing under a source face, which is the owner's
+    /// screenshot: marks short of the block's right edge and low of its middle.
+    ///
+    /// MUTATIONS: settle the ride and never follow again (drop `follow`'s `retarget`) and ② holds
+    /// the ridden rect for ever. Let `ride` go on running after the flight is over — the `riding`
+    /// test in `sync_math_tools` — and ② holds it too, one frame at a time.
+    #[test]
+    fn the_marks_settle_on_the_source_bands_own_rect_when_the_change_lands() {
+        let now = Instant::now();
+        let typeset = boxes(MathBlockDisplay::Rendered);
+        let mut follow = FormulaToolFollow::arriving(&typeset, None, now);
+        let settled = now + tooltip::TOOLTIP_FADE;
+
+        // ① The flight: the marks are carried on the band, so they stand on the rect the artifact
+        //    is presented at — which is a picture's region and not the rows'.
+        let travelling = toggled(&typeset);
+        assert!(follow.ride(&travelling, None, settled, Motion::Full));
+        assert_eq!(follow.placed(settled, Motion::Full).block, travelling.block);
+
+        // ② It lands. The document has been told, the band is rows, and the marks travel to the
+        //    rect those rows stand on — exactly, with nothing of the flight's left in it.
+        let landed = source_band();
+        assert!(follow.follow(&landed, None, settled, Motion::Full));
+        let arrived = settled + tooltip::TOOLTIP_FADE;
+        let placed = follow.placed(arrived, Motion::Full);
+        assert_eq!(
+            placed.block, landed.block,
+            "a typeset rect outlived the change"
+        );
+        assert_eq!(placed.source, landed.source);
+        assert_eq!(placed.copy, landed.copy);
+        assert_eq!(placed.display, MathBlockDisplay::Source);
+        assert!(!follow.owes_frames(arrived, Motion::Full));
+
+        // ③ And where they came to rest is a legal seat for a source face: inside the band, on its
+        //    midline, flush with its right edge.
+        assert!(seated_inside_the_block(&placed));
+        assert_eq!(placed.copy[2], placed.block[2]);
+    }
+
     /// One cell of the grid these fixtures are measured on, in subpixels.
     const CELL: i64 = 18 * 1024;
 

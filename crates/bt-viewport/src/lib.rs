@@ -59,6 +59,22 @@ pub struct LayoutCacheKey {
     pub source_gen: SourceGeneration,
     pub detection_rev: DetectionRevision,
     pub layout: LayoutKey,
+    /// The band height this line is standing at, for a line an artifact is
+    /// standing on — `None` for the ordinary lines, which are every line but a
+    /// block's opener.
+    ///
+    /// **It is in the key because the measurement is a function of it**
+    /// (T-MATH-MARKS-IN-SOURCE-FACE). A block's [`MeasuredLayout`] is its
+    /// height and the rows that height takes; without this field two different
+    /// heights for one span produced one key, and the only thing that kept the
+    /// cache honest was [`ViewportProjection::sync_math_artifacts`] throwing the
+    /// entry away — which it could only do by walking the whole cache and
+    /// declaring the whole projection dirty. A block **changing face** moves
+    /// this number on every frame of the ninety milliseconds (§7.1.5p ⑪), so
+    /// that walk and that rebuild were the price of one animation frame, paid
+    /// over the length of the scrollback. Keyed, the stale entry is simply
+    /// unreachable and the height can be moved in place.
+    pub artifact_height: Option<i64>,
 }
 
 /// Everything one projected line costs a walk of its own text to learn, measured once and kept
@@ -357,6 +373,56 @@ pub struct ProjectedMathArtifact {
     /// sit inside it, in the same raster-pixel space as `width_px` — so a hit test scales them by
     /// `render_scale_milli` exactly as it scales the block. Empty for display math.
     pub inline_runs: Vec<InlineRunPlacement>,
+}
+
+impl ProjectedMathArtifact {
+    /// **The same block, presented at a different height** — the one difference a
+    /// change of face makes to this type for the ninety milliseconds it takes
+    /// (`docs/DESIGN.md` §7.1.5p ⑪ i: "what travels is presentation … it enters
+    /// the frame at the one place a band's height has ever entered projection").
+    ///
+    /// [`ViewportProjection::sync_math_artifacts`] asks this to tell that frame
+    /// from every other reason an artifact map changes, because it is the one
+    /// reason that can be answered by moving a number rather than by projecting
+    /// the document again.
+    ///
+    /// Written out field by field, and deliberately without `..`: a field added
+    /// to this struct must be classified here, and the compiler is what asks.
+    /// `rgba` is compared by pointer rather than by content — the same bytes
+    /// behind a second `Arc` answer `false` and take the rebuild road, which is
+    /// merely the slower correct answer, while comparing sixty-four megabytes of
+    /// pixels per frame would be a worse bill than the one this exists to remove.
+    #[must_use]
+    pub fn stands_at_another_height(&self, other: &Self) -> bool {
+        let Self {
+            key,
+            end,
+            rgba,
+            width_px,
+            height_px,
+            height_subpixels,
+            baseline_subpixels,
+            mode,
+            kind,
+            vertical_padding_subpixels,
+            render_scale_milli,
+            source,
+            inline_runs,
+        } = self;
+        *height_subpixels != other.height_subpixels
+            && *key == other.key
+            && *end == other.end
+            && Arc::ptr_eq(rgba, &other.rgba)
+            && *width_px == other.width_px
+            && *height_px == other.height_px
+            && *baseline_subpixels == other.baseline_subpixels
+            && *mode == other.mode
+            && *kind == other.kind
+            && *vertical_padding_subpixels == other.vertical_padding_subpixels
+            && *render_scale_milli == other.render_scale_milli
+            && *source == other.source
+            && *inline_runs == other.inline_runs
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1790,6 +1856,16 @@ pub struct ViewportProjection {
     /// is behind the cache. A rebuild that re-segments lines it already knows shows up here as a
     /// count proportional to the scrollback, which is what the toggle's stutter was.
     line_text_measurements: u64,
+    /// How many times [`Self::project`] has taken the **rebuild** road — cleared the id list and
+    /// the two trees and pushed the whole projected document back through them — against
+    /// [`Self::bands_moved`], how many times a band changing face was moved where it stood
+    /// instead (T-MATH-MARKS-IN-SOURCE-FACE).
+    ///
+    /// The pair is what makes `BT_PERF_TRACE projection` decisive about a toggle: a reader can
+    /// see `lines_measured=0` on a frame that still walked the whole scrollback to rebuild two
+    /// Fenwick trees, and could not tell that from the cheap road without these.
+    rebuilds: u64,
+    bands_moved: u64,
     scroll_offset_subpixels: i64,
     pending_scroll_offset_subpixels: Option<i64>,
     /// A review offset preserved across an application transcript rewrite. Codex-style TUIs
@@ -1976,6 +2052,8 @@ impl ViewportProjection {
             grid_generation,
             cache_misses: 0,
             line_text_measurements: 0,
+            rebuilds: 0,
+            bands_moved: 0,
             scroll_offset_subpixels: 0,
             pending_scroll_offset_subpixels: None,
             displaced_review_subpixels: None,
@@ -2131,6 +2209,16 @@ impl ViewportProjection {
     /// history moves it by the size of history.
     pub fn line_text_measurements(&self) -> u64 {
         self.line_text_measurements
+    }
+    /// How many times `project` has rebuilt the whole projected document, and how many times a
+    /// band changing face was moved where it stood instead — see the fields' own note.
+    #[must_use]
+    pub fn rebuilds(&self) -> u64 {
+        self.rebuilds
+    }
+    #[must_use]
+    pub fn bands_moved(&self) -> u64 {
+        self.bands_moved
     }
     /// How many history lines this projection is currently laying out — the denominator the
     /// number above is only meaningful against.
@@ -3909,7 +3997,7 @@ impl ViewportProjection {
             .copied()
             .filter(|id| self.math_artifacts.get(id) != next.get(id))
             .collect::<HashSet<_>>();
-        if !changed.is_empty() {
+        if !changed.is_empty() && !self.move_artifact_bands(&changed, &next) {
             self.cache
                 .retain(|key, _| !changed.contains(&key.span.start));
             self.projection_dirty = true;
@@ -3919,6 +4007,74 @@ impl ViewportProjection {
             .map(|(id, artifact)| (*id, artifact.height_subpixels))
             .collect();
         self.math_artifacts = next;
+    }
+
+    /// **The blocks that changed are the blocks this projection is already
+    /// showing, at another height** — move them where they stand, and answer
+    /// `true`; `false` for every other kind of change, which takes the rebuild
+    /// road above.
+    ///
+    /// This is the frame of a block **changing face** (`docs/DESIGN.md` §7.1.5p
+    /// ⑪; owner's report 2026-09-15, T-MATH-MARKS-IN-SOURCE-FACE). For the
+    /// ninety milliseconds the change takes, the session hands this the same
+    /// artifact map it handed it last frame with one number moved — the band's
+    /// presented height — and nothing else about the document, the suppressed
+    /// ids, the layout or any line's own text is different. The rebuild road is
+    /// the answer to a change in **which lines are projected**; asked of a
+    /// height it walked the whole layout cache, cleared the id list and the two
+    /// trees, and pushed every line of the scrollback back through a hash lookup
+    /// — once per animation frame, which is the stutter the owner reported.
+    ///
+    /// A height is `heights.set`, which is a Fenwick update: `O(log n)` for the
+    /// whole prefix map, against `O(document)` for the road. The rows that
+    /// height takes are the same arithmetic [`Self::project`] applies to an
+    /// artifact line, spoken once here and once there because they are the same
+    /// fact seen from the incremental and the from-scratch side — and the pin
+    /// that they agree is `a_band_changing_face_moves_where_it_stands`.
+    ///
+    /// **It refuses on anything it cannot prove**, and every refusal is merely
+    /// the old road: a rebuild already owed, an id the projection is not showing
+    /// (so there is no index to move), an artifact that differs in anything but
+    /// its height, and an id that arrived or departed.
+    fn move_artifact_bands(
+        &mut self,
+        changed: &HashSet<TranscriptId>,
+        next: &HashMap<TranscriptId, ProjectedMathArtifact>,
+    ) -> bool {
+        if self.projection_dirty {
+            return false;
+        }
+        let cell = self.cell_height_subpixels.get();
+        // Proven whole before anything is moved: a half-applied move would leave the two trees
+        // disagreeing with the height map for the rest of the window's life.
+        let mut moves = Vec::with_capacity(changed.len());
+        for id in changed {
+            let (Some(before), Some(after)) = (self.math_artifacts.get(id), next.get(id)) else {
+                return false;
+            };
+            if !before.stands_at_another_height(after) {
+                return false;
+            }
+            let Ok(index) = self.ordered_ids.binary_search(id) else {
+                return false;
+            };
+            if index >= self.visual_rows.len() {
+                return false;
+            }
+            moves.push((index, after.height_subpixels));
+        }
+        for (index, height) in moves {
+            let visual_lines =
+                u32::try_from(height.max(1).saturating_add(cell - 1) / cell).unwrap_or(u32::MAX);
+            self.visual_rows[index] = visual_lines as usize;
+            self.visual_row_heights.set(index, i64::from(visual_lines));
+            self.heights.set(index, height);
+        }
+        // Everything under the band stands somewhere new, so the frame is a new view of the
+        // document — the one thing the road above would have done for us.
+        self.view_generation.0 = self.view_generation.0.saturating_add(1);
+        self.bands_moved = self.bands_moved.saturating_add(1);
+        true
     }
 
     /// Synchronize images appended below path-bearing transcript lines. Unlike display math and
@@ -4233,6 +4389,53 @@ impl ViewportProjection {
         }
     }
 
+    /// **The height half of [`Self::math_source_face`], without laying the rows
+    /// out** — the number, and no `String`s.
+    ///
+    /// §7.1.5p ⑪ iv has the far end of a change of face **re-read on every
+    /// turn**, so that a pane which re-wrapped under the flight lands the change
+    /// instead of carrying it to a height the block does not stand at. That is
+    /// the right rule and it is asked far more often than the animation has
+    /// frames — `turn` runs on every pass of the loop — and until this accessor
+    /// the only way to ask it was to build the whole other face: one
+    /// `layout_frozen_line` per line of the block, every cluster of every row
+    /// materialized into a `CapturedCell`, and a `String` allocated per row, all
+    /// of it thrown away because the caller wanted `heights()` (owner's report
+    /// 2026-09-15, T-MATH-MARKS-IN-SOURCE-FACE).
+    ///
+    /// **It is the same answer and not a second one.** `layout_frozen_line` cuts
+    /// a frozen line into rows at exactly the columns `frozen_visual_line_count`
+    /// counts them at — zero-width clusters carried, a cluster wider than what is
+    /// left starting the next row — and under `vertical_reading`, which
+    /// is `Some` exactly when wrapping is off, it yields the one flattened row
+    /// that `frozen_visual_line_count` answers `1` for. `project` has relied on
+    /// that agreement for every line of history since it existed; the pin that
+    /// the two answer alike for a block's own lines is
+    /// `a_source_faces_height_is_the_rows_it_would_lay_out`.
+    ///
+    /// The rows themselves are still [`Self::math_source_face`]'s, asked once
+    /// when the change begins or turns round, which is where a `Vec<String>` is
+    /// actually wanted.
+    #[must_use]
+    pub fn math_source_height_subpixels(
+        &self,
+        document: &HistoryDocument,
+        start: TranscriptId,
+        end: TranscriptId,
+    ) -> i64 {
+        let columns = self.layout_key.width_cells.get() as usize;
+        let rows: usize = document
+            .entries()
+            .range(start..=end)
+            .map(|(_, entry)| {
+                frozen_visual_line_count(&entry.line.text, columns, self.layout_key.line_wrapping)
+            })
+            .sum();
+        i64::try_from(rows)
+            .unwrap_or(i64::MAX)
+            .saturating_mul(self.cell_height_subpixels.get())
+    }
+
     pub fn project(&mut self, document: &HistoryDocument) {
         // **One ordered walk of history, carrying each line with its id.** The loop at the foot
         // needs the entry itself — its generation keys the measurement — and asking the map for it
@@ -4259,6 +4462,7 @@ impl ViewportProjection {
             0
         };
         if !append_only {
+            self.rebuilds = self.rebuilds.saturating_add(1);
             // Plan §5.2's lifetime rule, and the reason it is a diff rather than a `clear`: a
             // rebuild is not always a deletion — a settings change or a formula swallowing its
             // source rows takes this road too — and an index about a line still on screen is worth
@@ -4310,6 +4514,7 @@ impl ViewportProjection {
                 source_gen: entry.line.source_generation,
                 detection_rev: self.detection_rev,
                 layout: self.layout_key,
+                artifact_height: self.artifact_heights.get(id).copied(),
             };
             let measured = if let Some(measured) = self.cache.get(&cache_key).copied() {
                 measured
@@ -11184,6 +11389,129 @@ mod tests {
             202,
             "a toggle back to the picture measured the scrollback again instead of one line"
         );
+    }
+
+    /// RED GATE (owner's report 2026-09-15, T-MATH-MARKS-IN-SOURCE-FACE; §7.1.5p ⑪ i): **a band
+    /// changing face is moved where it stands, and the document is not projected again.**
+    ///
+    /// ⑪ i's whole arrangement is that the session keeps the representation it is in for the
+    /// ninety milliseconds and hands the projection one number that moves: the band's presented
+    /// height. Until this ticket that number arrived through the same door as "a formula swallowed
+    /// its source rows" — `projection_dirty`, a walk of the whole layout cache, and the rebuild
+    /// road, which clears the id list and both trees and pushes every projected line of history
+    /// back through a hash lookup. Once per animation frame. On a long scrollback that is the
+    /// stutter the owner reported, and no line was ever re-measured while it happened, so
+    /// `lines_measured` could not see it.
+    ///
+    /// MUTATIONS: take the rebuild road for a height (drop `move_artifact_bands`' call) → ②.
+    /// Move the tree and forget `visual_rows` / `visual_row_heights` → ④, where a fresh projection
+    /// at the same height disagrees about the rows. Forget the view generation → ③. Let a change
+    /// that is *not* only a height through → ⑤.
+    #[test]
+    fn a_band_changing_face_moves_where_it_stands() {
+        let (store, document, ids) = toggle_fixture();
+        let mut projection = toggle_projection(&store);
+        let cell = cell_height().get();
+
+        let block = toggle_block(ids[7]);
+        projection.sync_math_artifacts([(ids[4], block.clone())]);
+        projection.project(&document);
+        let rebuilds = projection.rebuilds();
+        let measurements = projection.line_text_measurements();
+        let generation = projection.view_generation();
+        let total = projection.heights().total();
+
+        // **One frame of the change.** The same artifact — the same raster behind the same `Arc`,
+        // which is what a re-projection of an unchanged record hands over — presented two rows
+        // taller.
+        let travelling = ProjectedMathArtifact {
+            height_subpixels: cell * 5,
+            ..block.clone()
+        };
+        projection.sync_math_artifacts([(ids[4], travelling.clone())]);
+        projection.project(&document);
+
+        // ① The band really did move, and everything below it with it.
+        assert_eq!(projection.heights().total(), total + cell * 2);
+
+        // ② And it moved without a rebuild and without measuring a line.
+        assert_eq!(projection.rebuilds(), rebuilds, "the tween took the road");
+        assert_eq!(projection.bands_moved(), 1);
+        assert_eq!(projection.line_text_measurements(), measurements);
+
+        // ③ The frame is still a new view of the document.
+        assert_ne!(projection.view_generation(), generation);
+
+        // ④ **And it is the projection a fresh one would be.** Both trees, line for line, against
+        //    a projection built from nothing at the height the band travelled to.
+        let mut fresh = toggle_projection(&store);
+        fresh.sync_math_artifacts([(ids[4], travelling)]);
+        fresh.project(&document);
+        assert_eq!(fresh.rebuilds(), 1, "the fixture must prove the two roads");
+        let lines = projection.projected_line_count();
+        assert_eq!(fresh.projected_line_count(), lines);
+        assert_eq!(projection.visual_rows, fresh.visual_rows);
+        for index in 0..=lines {
+            assert_eq!(
+                projection.heights().prefix_sum(index),
+                fresh.heights().prefix_sum(index),
+                "line {index} stands somewhere a fresh projection does not put it"
+            );
+            assert_eq!(
+                projection.visual_row_heights.prefix_sum(index),
+                fresh.visual_row_heights.prefix_sum(index),
+                "line {index} takes a different number of rows than a fresh projection gives it"
+            );
+        }
+
+        // ⑤ A change that is not only a height is not this road: swapping the raster changes what
+        //    the band *is*, and that still goes the long way round.
+        let elsewhere = ProjectedMathArtifact {
+            rgba: Arc::from(vec![7; 4]),
+            ..block
+        };
+        let rebuilds = projection.rebuilds();
+        projection.sync_math_artifacts([(ids[4], elsewhere)]);
+        projection.project(&document);
+        assert_eq!(projection.rebuilds(), rebuilds + 1);
+    }
+
+    /// RED GATE (T-MATH-MARKS-IN-SOURCE-FACE; §7.1.5p ⑪ ii): **the source face's height is the rows
+    /// it would lay out — counted, not laid out.**
+    ///
+    /// ⑪ ii reduces the whole clause to one identity, *the presented height at the far end is the
+    /// real row count times the cell*, and makes both halves come from one answer. This keeps that
+    /// promise while letting the half that is asked on **every turn** stop building a `Vec<String>`
+    /// of the block's rows: `math_source_height_subpixels` counts the rows `layout_frozen_line`
+    /// would cut, and the two are asserted equal here rather than assumed.
+    ///
+    /// MUTATION: count the block's *lines* instead of its rows and the wrapped case falls; drop
+    /// `line_wrapping` from the counter and the flattened case does.
+    #[test]
+    fn a_source_faces_height_is_the_rows_it_would_lay_out() {
+        let (store, document, ids) = toggle_fixture();
+        for layout in [unwrapped(64), key(64), key(24)] {
+            let projection = ViewportProjection::new(
+                layout,
+                DetectionRevision(1),
+                nz32(6),
+                cell_height(),
+                store.source_generation(),
+                GridGeneration(1),
+            );
+            // `ids[5]` is the fixture's long line, so `key(24)` genuinely wraps it and the two
+            // answers have something to disagree about.
+            let face = projection.math_source_face(&document, ids[4], ids[7]);
+            assert_eq!(
+                face.height_subpixels,
+                projection.math_source_height_subpixels(&document, ids[4], ids[7]),
+                "the counted height and the laid-out one part company at {layout:?}"
+            );
+            assert_eq!(
+                face.height_subpixels,
+                i64::try_from(face.rows.len()).unwrap() * cell_height().get()
+            );
+        }
     }
 
     #[test]
