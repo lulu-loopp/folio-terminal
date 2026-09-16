@@ -6,7 +6,10 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
-Nothing yet.
+### Fixed
+
+- With the search box open, typing in a pane that is printing no longer pauses
+  while the whole history is searched again.
 
 ## 0.4.1-preview — 2026-09-16
 
