@@ -128,6 +128,7 @@ mod text_field;
 mod toast;
 mod tooltip;
 mod trace;
+mod trace_sink;
 mod update;
 mod version;
 mod video_seat;
@@ -1407,10 +1408,10 @@ impl MathWorker {
                     };
                     let (leaf, completion) = request.completion();
                     if let Some(started) = started {
-                        eprintln!(
+                        trace_sink::stderr_line(format!(
                             "BT_PERF_TRACE image_scale purpose={purpose:?} size={width}x{height} lanczos_us={}",
                             started.elapsed().as_micros(),
-                        );
+                        ));
                     }
                     if scale_result_tx
                         .send(MathWorkerResult { leaf, completion })
@@ -12379,6 +12380,16 @@ struct WindowRuntime {
     /// a frame is what a profiler measures; the gap between frames is what a
     /// hand feels, and under CPU starvation the two stop being the same number.
     last_present_at: Option<Instant>,
+    /// **What the previous present line cost to write**, reported on the next
+    /// one as `trace_us` (T-TRACE-OFF-THREAD).
+    ///
+    /// The renderer's own `perf_trace_us` seen from this side, and carried
+    /// forward for its reason: a line cannot carry the cost of writing itself,
+    /// so present *n* reports what present *n-1* spent formatting its line and
+    /// handing it to `trace_sink`. Under a queue that is microseconds; under the
+    /// synchronous `eprintln!` this replaced it was, four times in one hour,
+    /// seconds.
+    perf_trace_us: u128,
     /// When [`Self::advance_strip_animation`] last ran, so
     /// [`STRIP_ANIMATION_FRAME`] can be the rate it claims to be rather than a
     /// floor nothing stands on. `None` until the first tick.
@@ -28293,42 +28304,35 @@ fn dump_focus_thumb_frame(
     stats: focus_thumb::ThumbStats,
     pages: web_thumb::WebThumbStats,
 ) {
-    let Some(path) = diagnostics::named_file(std::env::var_os("BT_FOCUS_THUMB_DUMP")) else {
-        return;
-    };
     // **The page lane on the same line and not on a second switch** (W2 slice
     // ⑥). It is the same budget seen from the one seat whose content this
     // window cannot compute, and a reader watching a card fill in wants the
     // projection counters and the capture counters against one another: a
     // `captures` that never moves beside a `hidden` that climbs is the whole
     // story of a column full of background tabs, and two files could not say it.
-    let line = format!(
-        "focus-thumb visible={visible} projections={} unchanged={} throttled={} dropped={} \
-         captures={} pictures={} page-frames={} page-hidden={} page-closing={} page-blank={} \
-         page-inflight={} page-throttled={} page-unchanged={} page-stale={}\n",
-        stats.projections,
-        stats.skipped_unchanged,
-        stats.skipped_throttled,
-        stats.dropped_offscreen,
-        pages.captures,
-        pages.pictures,
-        pages.frames,
-        pages.skipped_hidden,
-        pages.skipped_closing,
-        pages.skipped_blank,
-        pages.skipped_in_flight,
-        pages.skipped_throttled,
-        pages.skipped_unchanged,
-        pages.dropped_stale,
-    );
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        use std::io::Write as _;
-        let _ = file.write_all(line.as_bytes());
-    }
+    static FOCUS_THUMB_DUMP: trace::Dump = trace::Dump::new("BT_FOCUS_THUMB_DUMP");
+    FOCUS_THUMB_DUMP.line(|| {
+        format!(
+            "focus-thumb visible={visible} projections={} unchanged={} throttled={} dropped={} \
+             captures={} pictures={} page-frames={} page-hidden={} page-closing={} \
+             page-blank={} page-inflight={} page-throttled={} page-unchanged={} \
+             page-stale={}",
+            stats.projections,
+            stats.skipped_unchanged,
+            stats.skipped_throttled,
+            stats.dropped_offscreen,
+            pages.captures,
+            pages.pictures,
+            pages.frames,
+            pages.skipped_hidden,
+            pages.skipped_closing,
+            pages.skipped_blank,
+            pages.skipped_in_flight,
+            pages.skipped_throttled,
+            pages.skipped_unchanged,
+            pages.dropped_stale,
+        )
+    });
 }
 
 /// The same probe, for the overlay stack — see [`dump_chrome_frame`].
@@ -36302,6 +36306,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         wheel_routings: 0,
         wheel_burst: None,
         last_present_at: None,
+        perf_trace_us: 0,
         strip_animation_ticked_at: None,
         cards: focus_thumb::CardClock::default(),
         preedit: None,
@@ -37130,9 +37135,9 @@ impl Runtime<'_> {
             // The spike printed exactly these two lines, and they are what a
             // machine that goes wrong here will be asked for: the chosen mode
             // alone leaves "why not the other one" unanswerable.
-            eprintln!("BT_STARTUP alpha target={:?}", alpha.target);
-            eprintln!("BT_STARTUP alpha offered={:?}", alpha.offered);
-            eprintln!("BT_STARTUP alpha chosen={:?}", alpha.chosen);
+            trace_sink::stderr_line(format!("BT_STARTUP alpha target={:?}", alpha.target));
+            trace_sink::stderr_line(format!("BT_STARTUP alpha offered={:?}", alpha.offered));
+            trace_sink::stderr_line(format!("BT_STARTUP alpha chosen={:?}", alpha.chosen));
         }
         // What the Background opacity row is allowed to offer, taken from the
         // surface that was actually configured rather than assumed (§7.1.6c-4b).
@@ -37340,7 +37345,7 @@ impl Runtime<'_> {
         );
         renderer.set_seat_viewport(terminal_seat);
         if trace_startup || trace_resize {
-            eprintln!("BT_CONPTY_SOURCE sources={conpty_sources:?}");
+            trace_sink::stderr_line(format!("BT_CONPTY_SOURCE sources={conpty_sources:?}"));
         }
         let pty_time = phase_started.elapsed();
         let math_worker = MathWorker::spawn(proxy.clone())?;
@@ -37539,7 +37544,7 @@ impl Runtime<'_> {
         runtime.dress_new_window(native)?;
         if trace_startup {
             let renderer_phases = runtime.window.renderer.init_timings(&runtime.app.gpu);
-            eprintln!(
+            trace_sink::stderr_line(format!(
                 "BT_STARTUP window={}ms adapter={}ms device={}ms surface={}ms fonts={}ms metrics={}ms render_resources={}ms renderer_total={}ms pty_spawn={}ms probe_input={} conpty_sources={conpty_sources:?} runtime_ready={}ms",
                 window_time.as_millis(),
                 renderer_phases.adapter.as_millis(),
@@ -37552,7 +37557,7 @@ impl Runtime<'_> {
                 pty_time.as_millis(),
                 probe_input.as_ref().map_or(0, Vec::len),
                 startup_started.elapsed().as_millis(),
-            );
+            ));
         }
         runtime.show_new_window(restored.is_some_and(|placement| placement.maximized))?;
         // **Every page the file said this window's panes were on**, and here for
@@ -37586,10 +37591,10 @@ impl Runtime<'_> {
         let background_visible = startup_started.elapsed();
         runtime.window.background_visible = Some(background_visible);
         if trace_startup {
-            eprintln!(
+            trace_sink::stderr_line(format!(
                 "BT_STARTUP background_visible={}ms",
                 background_visible.as_millis()
-            );
+            ));
         }
         // The facade's two borrows end here, at their last use: what a launch
         // hands back is the layers themselves.
@@ -42447,14 +42452,14 @@ impl Runtime<'_> {
         // every other one. A recording where it tracks `frozen_lines` while a shell prints is the
         // incremental step having been lost.
         if self.app.trace_perf {
-            eprintln!(
+            trace_sink::stderr_line(format!(
                 "BT_PERF_TRACE search_scan lines_scanned={} frozen_lines={} history_us={history_us} history_hits={} live_rows={} volatile_hits={}",
                 history.lines_scanned,
                 history.scan.window().len,
                 history.scan.hits().len(),
                 live.len(),
                 volatile_hits.len(),
-            );
+            ));
         }
         // Nothing happened when the question, the plane's window and the volatile hits are all the
         // ones the last scan saw. The window stands in for the history hits because it is what they
@@ -63487,13 +63492,13 @@ impl Runtime<'_> {
                 .map_or(f32::NAN, |(body, image_px)| {
                     image_zoom_scale(body, image_px, zoom)
                 });
-            eprintln!(
+            trace_sink::stderr_line(format!(
                 "BT_PERF_TRACE image_zoom scale={scale:.4} layout_us={} chrome_us={} present_us={} total_us={}",
                 (laid_out - started).as_micros(),
                 (chromed - laid_out).as_micros(),
                 chromed.elapsed().as_micros(),
                 started.elapsed().as_micros(),
-            );
+            ));
         }
         Ok(true)
     }
@@ -64630,10 +64635,10 @@ impl Runtime<'_> {
                     || "none".to_owned(),
                     |raster| format!("{}x{}", raster.width_px, raster.height_px),
                 );
-            eprintln!(
+            trace_sink::stderr_line(format!(
                 "BT_PERF_TRACE image_resample want={}x{} held={held_at} display={display_width}x{display_height}",
                 raster_width, raster_height,
-            );
+            ));
         }
         let task = peek_scale_task(&target, rgba, native_width, native_height);
         if self
@@ -64758,7 +64763,7 @@ impl Runtime<'_> {
             published_at,
             next_grid,
         ) {
-            eprintln!(
+            trace_sink::stderr_line(format!(
                 "BT_PERF_TRACE resize_frame solve_us={} actor_us={} publish_us={} redraw_us={} total_us={} queued={} columns={} rows={}",
                 solved.saturating_duration_since(started).as_micros(),
                 resized.saturating_duration_since(solved).as_micros(),
@@ -64770,7 +64775,7 @@ impl Runtime<'_> {
                 u8::from(!synchronous_present),
                 next_grid.columns,
                 next_grid.rows,
-            );
+            ));
         }
         Ok(())
     }
@@ -64912,7 +64917,7 @@ impl Runtime<'_> {
             let projection_started_at = trace_perf.then(Instant::now);
             leaf.session.refresh_projection(&mut leaf.projection);
             if let Some(started_at) = projection_started_at {
-                eprintln!(
+                trace_sink::stderr_line(format!(
                     "BT_PERF_TRACE projection source={:?} refresh_us={} lines_measured={} projected_lines={} rebuilt={} band_moved={}",
                     trigger.source,
                     started_at.elapsed().as_micros(),
@@ -64924,7 +64929,7 @@ impl Runtime<'_> {
                     leaf.projection
                         .bands_moved()
                         .saturating_sub(bands_moved_before),
-                );
+                ));
             }
             let frame = leaf
                 .session
@@ -64948,12 +64953,12 @@ impl Runtime<'_> {
         if self.shell().projection.presentation_hold() && self.window.last_presented_frame.is_some()
         {
             if self.app.trace_perf {
-                eprintln!(
+                trace_sink::stderr_line(format!(
                     "BT_PERF_TRACE hold=presentation source={:?} review={} exact_source={}",
                     trigger.source,
                     u8::from(self.shell().projection.review_hold()),
                     u8::from(self.shell().projection.exact_source_reprint_hold()),
-                );
+                ));
             }
             return Ok(false);
         }
@@ -65066,13 +65071,13 @@ impl Runtime<'_> {
                 let digest = frame_content_digest(&composed.frame);
                 let alternate_screen = frame_is_alternate_screen(&composed.frame);
                 let digest_elapsed = digest_started.elapsed();
-                eprintln!(
+                trace_sink::stderr_line(format!(
                     "BT_PERF_TRACE skip=unchanged source={:?} content_fnv={:016x} alt={} digest_us={}",
                     trigger.source,
                     digest.content_fnv,
                     u8::from(alternate_screen),
                     digest_elapsed.as_micros(),
-                );
+                ));
             }
             return Ok(false);
         }
@@ -82015,7 +82020,7 @@ impl Runtime<'_> {
         if published || !sync_open {
             self.pending_keyboard_at = None;
         } else if self.app.trace_perf {
-            eprintln!("BT_PERF_TRACE defer=synchronized-update");
+            trace_sink::stderr_line("BT_PERF_TRACE defer=synchronized-update".to_owned());
         }
         Ok(())
     }
@@ -82040,7 +82045,9 @@ impl Runtime<'_> {
             .map(|pty| pty.conpty_source().to_string())
             .unwrap_or_else(|| "direct-input".to_string());
         for event in &trace[self.window.resize_trace_logged_events.min(trace.len())..] {
-            eprintln!("BT_RESIZE_TRACE conpty_source={conpty_source:?} {event:?}");
+            trace_sink::stderr_line(format!(
+                "BT_RESIZE_TRACE conpty_source={conpty_source:?} {event:?}"
+            ));
         }
         self.window.resize_trace_logged_events = trace.len();
     }
@@ -83951,12 +83958,12 @@ impl Runtime<'_> {
                     .line()
                 });
                 if trace {
-                    eprintln!(
+                    trace_sink::stderr_line(format!(
                         "BT_RESIZE_TRACE conpty tab={index} seat={} cols={} rows={}",
                         seat.0,
                         leaf.conpty_grid.columns.get(),
                         leaf.conpty_grid.rows.get()
-                    );
+                    ));
                 }
                 committed_any = true;
                 reflowed_any |= commit.reflowed;
@@ -97221,16 +97228,8 @@ impl Runtime<'_> {
         // grepped, and the question "did the IME say that, or did we" has to
         // be answered from what the IME actually said. Written before any
         // routing so a swallowed event is still on the record.
-        if let Some(path) = diagnostics::named_file(std::env::var_os("BT_IME_TRACE")) {
-            use std::io::Write as _;
-            if let Ok(mut file) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-            {
-                let _ = writeln!(file, "{:?} {:?}", Instant::now(), event);
-            }
-        }
+        static IME_TRACE: trace::Dump = trace::Dump::new("BT_IME_TRACE");
+        IME_TRACE.line(|| format!("{:?} {:?}", Instant::now(), event));
         let composing = matches!(event, Ime::Preedit(..) | Ime::Commit(_));
         // **Which rung this composition was started in**, written above every
         // one of them so that the answer is the same one that routes the letters
@@ -100276,8 +100275,13 @@ impl Runtime<'_> {
         let Ok(latency) = receipt.latency() else {
             return;
         };
-        eprintln!(
-            "BT_PERF_TRACE present source={source:?} retained={} event_to_present_us={} event_to_submit_us={} since_previous_us={} composed={} slot_overwrites={} wheel_events={} wheel_routings={}",
+        // **The clock the line itself is measured on** — see
+        // [`WindowRuntime::perf_trace_us`]. It starts before the `format!`,
+        // because building the fields is part of what a trace costs a frame,
+        // and stops once the sink has the line.
+        let trace_started = Instant::now();
+        trace_sink::stderr_line(format!(
+            "BT_PERF_TRACE present source={source:?} retained={} event_to_present_us={} event_to_submit_us={} since_previous_us={} composed={} slot_overwrites={} wheel_events={} wheel_routings={} trace_us={}",
             u8::from(retained),
             latency.event_to_present_call.as_micros(),
             latency.event_to_submit.as_micros(),
@@ -100286,7 +100290,9 @@ impl Runtime<'_> {
             self.window.pending_frames.overwrites(),
             self.window.wheel_events,
             self.window.wheel_routings,
-        );
+            self.window.perf_trace_us,
+        ));
+        self.window.perf_trace_us = trace_started.elapsed().as_micros();
     }
 
     /// Put the picture that is already on the glass back on the glass, with
@@ -100635,22 +100641,22 @@ impl Runtime<'_> {
                     && matches!(trigger.source, FrameSource::Resize)
                     && let Ok(latency) = latency
                 {
-                    eprintln!(
+                    trace_sink::stderr_line(format!(
                         "BT_RESIZE present={}us columns={} rows={}",
                         latency.event_to_present_call.as_micros(),
                         frame.columns,
                         frame.grid_rows
-                    );
+                    ));
                 }
                 if has_text && !self.window.first_text_presented {
                     self.window.first_text_presented = true;
                     if self.app.trace_startup {
                         let text_visible = self.app.startup_started.elapsed();
                         self.window.first_text_visible = Some(text_visible);
-                        eprintln!(
+                        trace_sink::stderr_line(format!(
                             "BT_STARTUP first_text_present={}ms",
                             text_visible.as_millis()
-                        );
+                        ));
                     }
                 }
                 // Each pane keeps the frame it just drew, so a pointer question
@@ -114377,14 +114383,14 @@ fn trace_surface_size_clamp(
     {
         return;
     }
-    eprintln!(
+    trace_sink::stderr_line(format!(
         "{prefix} surface_size_clamped requested={}x{} configured={}x{} max_texture_dimension_2d={}",
         requested.width,
         requested.height,
         presentation.swapchain_size.0,
         presentation.swapchain_size.1,
         presentation.max_texture_dimension_2d,
-    );
+    ));
 }
 
 /// Put the stored pair of schemes in force, resolving each name against this
@@ -118208,11 +118214,23 @@ fn main() -> Result<()> {
     // Before `hang_watch::start`, so the watchdog's own line lands in the log
     // and never in somebody's shell — which is the report that opened this.
     let channel = diagnostics::enter_resident_run(&storage);
+    // **And from here no trace line is written by the thread that made it**
+    // (T-TRACE-OFF-THREAD). `trace_sink` starts one writer thread — and only
+    // for a run that asked for a trace — behind a bounded queue that drops and
+    // counts rather than waiting. After `enter_resident_run` has decided where
+    // `stderr` points, and before frame traces: the renderer's receipt is the line
+    // that spent 5.9 seconds inside `ZwWriteFile` on the window thread.
+    //
+    // The door is `bt_viewport`'s because `bt-app` depends on the three crates
+    // that write these lines and none of them can name this module; see
+    // `bt_viewport::trace`.
+    let _trace_shutdown = trace_sink::start();
+    bt_render::set_trace_writer(trace_sink::stderr_line);
     if diagnostics::switched_on(std::env::var_os("BT_STARTUP_TRACE")) {
-        eprintln!(
+        trace_sink::stderr_line(format!(
             "BT_STARTUP_TRACE: from here Folio talks to {}",
             channel.label()
-        );
+        ));
     }
     // **And the witness to the day this thread stops answering** (§1.5).
     // Started from here, on the window thread, before the loop exists: it needs
@@ -118381,17 +118399,19 @@ fn main() -> Result<()> {
     let code = match &outcome {
         Ok(()) => 0,
         Err(error) => {
-            eprintln!("{APP_NAME} stopped: {error:#}");
+            trace_sink::stderr_line(format!("{APP_NAME} stopped: {error:#}"));
             1
         }
     };
-    eprintln!(
-        "{}",
-        diagnostics::run_footer(
-            &hang_watch::utc_timestamp(std::time::SystemTime::now()),
-            code
-        )
-    );
+    trace_sink::stderr_line(diagnostics::run_footer(
+        &hang_watch::utc_timestamp(std::time::SystemTime::now()),
+        code,
+    ));
+    // **And what the trace still has queued, before the process goes**
+    // (T-TRACE-OFF-THREAD). Under a bound — see `trace_sink::FLUSH_TIMEOUT`:
+    // the failure that queue exists for is a writer stuck in a kernel write,
+    // and waiting on it forever here would move the hang to the end of the run.
+    trace_sink::flush();
     bt_platform::leave_process(code)
 }
 
@@ -125265,7 +125285,7 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_file(&path);
-        let trace = crate::trace::Trace::create(&path, "# pin").expect("open a scratch trace");
+        let trace = crate::trace::Trace::create(&path, "# pin");
         let read = |from: usize| -> Vec<String> {
             std::fs::read_to_string(&path)
                 .expect("the trace file was created")
@@ -126363,7 +126383,7 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_file(&path);
-        let trace = trace::Trace::create(&path, HEADER).expect("open a trace at a temporary path");
+        let trace = trace::Trace::create(&path, HEADER);
         let write = |message: String| mouse_trace::emit(Some(&trace), || message);
 
         // A driver that speaks half a detent at a time — the shape a

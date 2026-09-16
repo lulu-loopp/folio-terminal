@@ -244,6 +244,48 @@ B: 根本没建 diagnostics.log——这次运行要的就是控制台
 A 那一路的意义是**根治**:folio 压根不在那个组里,`CTRL_CLOSE_EVENT` 送不到它。B 那一路的意义是**兜底**:它在组里(因为运行自己要求的),收到了一次真的 Ctrl+C,而它活着——没有 `SetConsoleCtrlHandler`,默认处理会把它终止。
 
 
+### 1.5c Trace writes leave the window thread (T-TRACE-OFF-THREAD, 2026-09-16)
+
+A symbolized hang report put the window thread in `ntdll!ZwWriteFile`, under
+`_eprint` in `bt_render::WindowRenderer::compose_frame`, for 5.9 seconds. The
+`BT_PERF_TRACE frame` line was waiting for a stalled stderr pipe. Its `total_us`
+was sampled before formatting, so that number did not include the blocked write.
+
+`bt_app::trace_sink` now has one writer and a queue bounded to 4096 lines.
+Producers format and timestamp their lines, then `try_send`. A full queue or
+contended producer lock drops the line and increments a counter. The writer
+reports the cumulative count as `BT_PERF_TRACE dropped=N`; its batches are also
+bounded so continuous input cannot grow a batch forever. File opens, headers,
+appends, and flushes happen on the writer. A header accompanies the first
+accepted line rather than occupying a separately droppable queue entry.
+
+The sink starts after stderr routing, only with a nonempty `BT_...TRACE...` or
+`BT_FOCUS_THUMB_DUMP` variable. A failed thread spawn leaves a disconnected
+queue; it never restores synchronous trace writes. Orderly shutdown closes the
+queue and allows at most one second to drain and join. A scope guard covers
+startup errors after the sink starts; the explicit flush precedes process exit.
+Tests and tools that never start a sink keep their synchronous fallback.
+
+`bt_render::set_trace_writer` installs the callback in a shared
+`OnceLock<Box<dyn Fn(String) + Send + Sync>>` in `bt_viewport::trace`. This lets
+renderer, terminal, and viewport traces reach the same sink without depending
+on `bt-app`. With no callback installed, the hook falls back to `eprintln!`.
+The app's performance and resize lines and the file traces using `trace::Gate`
+or `trace::Dump` share this sink, including mouse, card, focus-thumbnail, and IME.
+Their line formats are preserved except for the timing changes below.
+
+The renderer still samples `total_us` before formatting. Both `frame` and
+`present` add `trace_us`, the previous line's formatting and hand-off cost
+(zero on the first line). A line cannot include its own completed hand-off.
+`submit_present_us` becomes `submit_us` and `present_us`, using the existing
+`submitted_at` and `present_called_at` timestamps.
+
+Ordinary diagnostics and the hold logger remain outside this queue. The exit
+error and footer do use it when active: a synchronous footer would otherwise
+wait for the same stderr lock held by a stalled trace write before shutdown
+could reach its deadline.
+
+
 ## 2. 渲染管线
 
 同 v3（cell 宽度权威在 bt-term；延迟指标事件→present 提交，60/120/144Hz 分测，洪水注入法；M-1 做一次光子侧基线校准）。

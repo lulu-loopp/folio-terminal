@@ -2,6 +2,7 @@
 
 mod height_tree;
 pub mod horizontal;
+pub mod trace;
 
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
@@ -4189,13 +4190,13 @@ impl ViewportProjection {
                 if !accepted
                     && std::env::var_os("BT_PERF_TRACE").is_some_and(|value| !value.is_empty())
                 {
-                    eprintln!(
+                    crate::trace::line(format!(
                         "BT_PERF_TRACE live_math_event=source-fallback row={} box_subpixels={} per_block_limit_subpixels={} min_text_rows={} reason=block-exceeds-visible-text-floor",
                         artifact.start.row,
                         box_height,
                         per_block_limit,
                         LIVE_MIN_VISIBLE_TEXT_ROWS,
-                    );
+                    ));
                 }
                 accepted
             })

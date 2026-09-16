@@ -44,6 +44,12 @@ use thiserror::Error;
 use unicode_properties::emoji::{EmojiStatus, UnicodeEmoji};
 use wgpu::util::DeviceExt;
 
+/// Install the process-wide trace destination before constructing a renderer.
+/// A standalone renderer keeps the stderr fallback when no writer is installed.
+pub fn set_trace_writer(writer: impl Fn(String) + Send + Sync + 'static) {
+    bt_viewport::trace::set_writer(writer);
+}
+
 pub use glyph_census::{GlyphCensus, LaneGlyphDemand};
 
 pub use contrast::{
@@ -4841,6 +4847,21 @@ pub struct WindowRenderer {
     preview_text_renderer: TextRenderer,
     trace_perf: bool,
     perf_frame: u64,
+    /// **What the previous frame's own trace line cost**, reported on the next
+    /// one as `trace_us` (T-TRACE-OFF-THREAD).
+    ///
+    /// Carried forward rather than measured in place, because the thing being
+    /// measured is the statement that prints the measurement: a line cannot
+    /// carry the cost of writing itself. So frame *n* reports what frame *n-1*
+    /// spent formatting its line and handing it to the sink, and a `trace_us`
+    /// of four million on the line after a stall is the whole answer to "was the
+    /// instrument the stall".
+    ///
+    /// It is `total_us`'s missing half. `total_us` is sampled *before* the line
+    /// is built (that is deliberate — it is the cost of the frame, not of
+    /// reporting it), which is exactly why a blocked write used to be invisible
+    /// in every number the renderer printed.
+    perf_trace_us: u128,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -7385,6 +7406,7 @@ impl WindowRenderer {
             preview_text_renderer,
             trace_perf,
             perf_frame: 0,
+            perf_trace_us: 0,
         })
     }
 
@@ -9818,8 +9840,14 @@ impl WindowRenderer {
             let alternate_screen = frame_is_alternate_screen(frame);
             let digest_elapsed = digest_started.elapsed();
             self.perf_frame = self.perf_frame.saturating_add(1);
-            eprintln!(
-                "BT_PERF_TRACE frame={} seats={} source={:?} cells={} nonblank_cells={} first_text_row={} last_text_row={} content_fnv={:016x} alt={} digest_us={} validate_us={} viewport_us={} row_compose_us={} rows_reshaped={} row_cache_hits={} row_cache_misses={} row_cache_evictions={} row_cache_resident_bytes={} shape_miss_us={} narrow_hits={} narrow_misses={} narrow_evictions={} narrow_resident_bytes={} wide_hits={} wide_misses={} wide_evictions={} wide_resident_bytes={} atlas_prepare_upload_us={} atlas_hits=unmeasurable_glyphon_0_12 atlas_misses=unmeasurable_glyphon_0_12 atlas_grows=unmeasurable_glyphon_0_12 atlas_evictions=unmeasurable_glyphon_0_12 atlas_upload_bytes=unmeasurable_glyphon_0_12 rectangles_us={} math_prepare_upload_us={} math_blocks={} math_texture_evictions={} math_texture_refusals={} textureless_math_blocks={} math_texture_resident_bytes={} acquire_us={} encode_us={} submit_present_us={} total_us={}",
+            // **The clock the line itself is measured on** — see
+            // [`WindowRenderer::perf_trace_us`]. It starts before the `format!`
+            // because formatting a kilobyte of fields is part of what a trace
+            // costs a frame, and it stops after the sink has the line, which in
+            // a run with a sink is a `try_send` and nothing else.
+            let trace_started = Instant::now();
+            bt_viewport::trace::line(format!(
+                "BT_PERF_TRACE frame={} seats={} source={:?} cells={} nonblank_cells={} first_text_row={} last_text_row={} content_fnv={:016x} alt={} digest_us={} validate_us={} viewport_us={} row_compose_us={} rows_reshaped={} row_cache_hits={} row_cache_misses={} row_cache_evictions={} row_cache_resident_bytes={} shape_miss_us={} narrow_hits={} narrow_misses={} narrow_evictions={} narrow_resident_bytes={} wide_hits={} wide_misses={} wide_evictions={} wide_resident_bytes={} atlas_prepare_upload_us={} atlas_hits=unmeasurable_glyphon_0_12 atlas_misses=unmeasurable_glyphon_0_12 atlas_grows=unmeasurable_glyphon_0_12 atlas_evictions=unmeasurable_glyphon_0_12 atlas_upload_bytes=unmeasurable_glyphon_0_12 rectangles_us={} math_prepare_upload_us={} math_blocks={} math_texture_evictions={} math_texture_refusals={} textureless_math_blocks={} math_texture_resident_bytes={} acquire_us={} encode_us={} submit_us={} present_us={} total_us={} trace_us={}",
                 self.perf_frame,
                 seats.len(),
                 trigger.source,
@@ -9857,9 +9885,12 @@ impl WindowRenderer {
                 gpu.math_textures.resident_bytes(),
                 (surface_acquired_at - rectangles_prepared_at).as_micros(),
                 (encoded_at - surface_acquired_at).as_micros(),
-                (present_called_at - encoded_at).as_micros(),
+                (submitted_at - encoded_at).as_micros(),
+                (present_called_at - submitted_at).as_micros(),
                 total_elapsed.as_micros(),
-            );
+                self.perf_trace_us,
+            ));
+            self.perf_trace_us = trace_started.elapsed().as_micros();
         }
         Ok(present_outcome(text_complete, receipt))
     }
@@ -10016,9 +10047,9 @@ impl WindowRenderer {
     fn note_math_texture_refusal(&mut self, key: &str, resident_bytes: usize) {
         self.math_texture_refusals = self.math_texture_refusals.saturating_add(1);
         if self.trace_perf {
-            eprintln!(
+            bt_viewport::trace::line(format!(
                 "BT_PERF_TRACE math_texture_refused key={key} bytes={resident_bytes} budget={MATH_TEXTURE_CACHE_BUDGET_BYTES}"
-            );
+            ));
         }
     }
 
@@ -10027,10 +10058,10 @@ impl WindowRenderer {
     fn note_textureless_block(&mut self, gpu: &GpuContext, key: &str, resident_bytes: usize) {
         self.textureless_math_blocks = self.textureless_math_blocks.saturating_add(1);
         if self.trace_perf {
-            eprintln!(
+            bt_viewport::trace::line(format!(
                 "BT_PERF_TRACE math_block_without_texture key={key} bytes={resident_bytes} resident={}",
                 gpu.math_textures.resident_bytes(),
-            );
+            ));
         }
     }
 
