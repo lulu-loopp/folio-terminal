@@ -86,6 +86,11 @@ All notable changes to Folio are recorded here. The format follows
   panes of different sizes, the marks in an unfocused pane were placed — and
   could be pressed — as though that pane were the size of the focused one.
 
+- **A typeset formula no longer flashes back to its source while a program
+  repaints the screen.** A redraw arriving in several pieces now keeps the
+  formula's picture until the whole turn has finished, without waiting for it
+  to be typeset again.
+
 - **Maximising or resizing a window no longer pauses when a pane has a long
   history behind it.** Every pane on screen was copying its whole terminal
   twice at the start of a resize — everything that had scrolled past included,
