@@ -98,7 +98,12 @@
 //!   [`park`] and [`woke`], at the two ends of the platform's own wait.
 //! - **Per turn of the loop**, [`beat`] is one `Instant::now()` (which
 //!   `about_to_wait` already calls for its own clocks) plus four stores, and
-//!   [`park`] at the other end of the turn is two more.
+//!   [`park`] at the other end of the turn is two more — **plus the one kernel
+//!   query a hold opens with** ([`Heartbeat::open_footprint`], which is where
+//!   the reason it cannot be deferred is written down). It is the one kernel
+//!   query this facility deliberately makes on the window thread, it is made on
+//!   a turn that already carries a frame and a platform round trip, and a
+//!   parked thread makes none of them: no hold is open, so nothing is sampled.
 //! - **Per two seconds, forever**, the watchdog does one `Instant::now()`, four
 //!   atomic loads and a comparison, then sleeps again. **Zero allocation**: the
 //!   idle path never touches the heap, never opens a file, and never creates the
@@ -153,6 +158,48 @@
 //! window thread; the window thread's whole part is a `try_lock` it never waits
 //! on and a `push`.
 //!
+//! # A run that asked to be measured is judged sooner
+//!
+//! The two instruments above cover each other exactly only while a stall is
+//! either shorter than [`SLOW_HOLD_THRESHOLD`] or longer than
+//! [`HANG_THRESHOLD`]. The owner's traced run of 2026-09-15 landed between
+//! them — `held control for 3971 ms on turn 15341 — window_event 3960 ms` —
+//! and that line is the whole of what this facility could say about it: four
+//! seconds went into an event. Four seconds is a dead window by any reader's
+//! account, and the question the line leaves is *where inside the event*, which
+//! nothing but a stack answers.
+//!
+//! So a run started with `BT_PERF_TRACE` set is judged against
+//! [`TRACED_HANG_THRESHOLD`] — two seconds — and every other run against
+//! [`HANG_THRESHOLD`]. It is the only thing that variable changes in here, and
+//! it is opt-in for the reason the rest of this facility is resident: a report
+//! suspends the window thread for two kernel calls and leaves somebody a file,
+//! and a machine that stalls for two seconds under a compile asked for neither.
+//! A machine whose owner set the variable did. The variable is read once, on
+//! the window thread, beside every other reader of it, and handed to [`start`];
+//! the watchdog thread asks the environment nothing, and a report prints the
+//! threshold it actually crossed.
+//!
+//! # Whose seconds they were
+//!
+//! A line reading `flush_wheel 1928 ms` names where the time went and cannot
+//! say **whose time it was**. Two seconds inside one call is either two seconds
+//! of this program's own work, which is repaired here, or two seconds of this
+//! program standing still while the operating system reads its working set back
+//! in, which is not a fault in this program at all — and the machines where
+//! this instrument earns its keep are exactly the ones carrying more committed
+//! memory than they have RAM. The two demand opposite repairs and, until the
+//! counters below, the log could not tell them apart.
+//!
+//! So a hold now also carries [`Paging`]: the process's page faults and
+//! resident size, sampled at the two ends of the hold and appended to the line
+//! after a middle dot. The sampling rule is the one thing worth stating twice —
+//! **the opening sample is taken at every hold and the closing one only at a
+//! hold that is being reported**, because *slow* is not known until a hold ends
+//! and a baseline read after the paging is over measures nothing. See
+//! [`Heartbeat::open_footprint`] for why the two cheaper-looking designs both
+//! print `faults +0` on the holds they exist for.
+//!
 //! The watchdog runs in the `BelowNormal` band with every other worker (§1.4).
 //! That is the right band even though its job is to run when the window thread
 //! cannot: the hangs in question are a thread that is *blocked*, not a machine
@@ -166,6 +213,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use bt_platform::mem::Footprint;
 
 pub use bt_platform::hang::Answer;
 
@@ -192,7 +241,33 @@ const ANSWER_WITHIN: Duration = Duration::from_secs(1);
 /// a 1.25 s frame under 24-way `cargo` — and it is also the neighbourhood where
 /// Windows itself starts drawing the ghost window and saying `Not Responding`,
 /// which is the symptom the user reports.
+///
+/// **The threshold an ordinary run is judged against.** A run that was started
+/// in order to be measured is judged against [`TRACED_HANG_THRESHOLD`] instead,
+/// and which of the two applies is settled once, in [`start`].
 const HANG_THRESHOLD: Duration = Duration::from_secs(5);
+
+/// How long the pump may be silent before it is a hang, **on a run that asked
+/// to be measured** (`BT_PERF_TRACE`).
+///
+/// Two seconds. The two instruments this module carries cover each other
+/// exactly only while a stall is either shorter than [`SLOW_HOLD_THRESHOLD`] or
+/// longer than [`HANG_THRESHOLD`], and the owner's traced run of 2026-09-15
+/// landed between them: `the window thread held control for 3971 ms on turn
+/// 15341 — window_event 3960 ms`. The ledger named the lane, and the watchdog —
+/// never past its own threshold — took no stack, so the one question that line
+/// leaves had no answer in the run that produced it.
+///
+/// Not a threshold an ordinary run could carry. A report suspends the window
+/// thread for two kernel calls and writes a file, and a person whose machine
+/// stalls for two seconds under a compile asked for neither; a person who set
+/// `BT_PERF_TRACE` asked for exactly that, and this is the only thing the
+/// variable changes in this module.
+///
+/// Two and not one, because the watchdog wakes every [`WATCH_INTERVAL`]: a
+/// threshold shorter than the poll would be crossed and gone before anything
+/// looked at it, and two seconds is crossed within four.
+const TRACED_HANG_THRESHOLD: Duration = Duration::from_secs(2);
 
 /// How long the loop may take to reach its **first** turn before that, too, is a
 /// hang.
@@ -241,7 +316,7 @@ fn slow_hold_threshold_ms() -> u64 {
 /// Held against [`Station`] by `every_station_has_a_slot_in_the_ledger`: a
 /// further variant added without widening this would have its milliseconds
 /// charged to nobody, and the line would silently stop adding up.
-const STATION_COUNT: usize = 25;
+const STATION_COUNT: usize = 48;
 
 /// How many reports are kept. The oldest beyond this are deleted.
 ///
@@ -277,9 +352,23 @@ pub enum Station {
     Starting = 0,
     /// The top of `about_to_wait`: the loop is going round.
     Wait = 1,
-    /// Inside `window_event`: the platform handed us something.
+    /// Inside `window_event`, and **outside the handler the event went to**:
+    /// the id lookup, the three gates a retiring or leaving window is refused
+    /// at, the wheel burst spent before anything that is not a notch, and the
+    /// four application doors the dispatch closes with.
+    ///
+    /// **It used to be the whole of it** (T-WINDOW-EVENT-STATIONS). Every kind
+    /// winit delivers wore this one word, so the owner's traced run of
+    /// 2026-09-15 — `held control for 3971 ms on turn 15341 — window_event
+    /// 3960 ms` — said that four seconds had gone into *an event* and could not
+    /// say which: a keystroke, a wheel notch, a redraw and a resize are four
+    /// lanes, repaired four different ways. The thirteen stations at the foot
+    /// of this enum are those lanes.
     Event = 2,
-    /// `Runtime::drain_pty` — every shell's output, one quantum each.
+    /// `Runtime::drain_pty` — every shell's output, a slice at a time until the
+    /// turn's quantum or its millisecond budget runs out (T-DRAIN-BURST). It is
+    /// this station's own measurements — `drain_pty 4386 ms` with the page-fault
+    /// column near zero — that put the clock there.
     Drain = 3,
     /// `Runtime::flush_pending_pty_resize` — the synchronous `ResizePseudoConsole`
     /// round trip into conhost, one per pane per quiet window.
@@ -335,6 +424,12 @@ pub enum Station {
     /// is left against this label is a wake that named no lane: the arms that do
     /// nothing because `about_to_wait` is about to do it, and any untagged code
     /// on the way in.
+    ///
+    /// **And narrower again since T-STATION-SPLIT.** A hold *opens* at this
+    /// station, so everything the loop did before it reached its first named
+    /// call was charged here — which was the whole of `about_to_wait`'s
+    /// application prologue. That has its own name now
+    /// ([`Self::AppTurn`]), and what is left is the wake itself.
     Woken = 11,
     /// `Runtime::apply_preview_results` — a preview read landing: the head of a
     /// file, the whole of one a reader asked to edit, a picture's pixels, an
@@ -368,6 +463,15 @@ pub enum Station {
     /// here says "something a probe answered", which is as far as this ledger can
     /// usefully divide a family that costs nothing — and further splitting is a
     /// line to add on the day one of them is the answer.
+    ///
+    /// **And since T-STATION-SPLIT the label is literally true**:
+    /// `Runtime::refresh_chrome` enters this station itself and hands the
+    /// caller's back on the way out, so the rebuild is named at *every* one of
+    /// its two hundred-odd doors rather than only on the probes' road. It is
+    /// the heaviest call a keystroke or a hover can make outside a frame — the
+    /// strip, the rail, every pane head, every preview card's measured verb and
+    /// the focus column's thumbnails, all rebuilt — and until then it borrowed
+    /// whichever name happened to be standing when it was reached.
     Chrome = 22,
     /// `Runtime::drive_web_page` — the turn a hosted page's callbacks are read
     /// on. Its own station rather than [`Self::WebPage`]'s, which is
@@ -390,6 +494,209 @@ pub enum Station {
     /// picker's width measured through the renderer, and the profile and scheme
     /// lists it reads afresh each time.
     Settings = 24,
+    /// Synchronous clipboard acquisition may wait on another process's delayed renderer.
+    ClipboardRead = 25,
+    /// `Runtime::settle_deferred_dpi` and `Runtime::settle_dpi_rectangle` — the
+    /// two halves of a display change, taken at the top of a turn.
+    ///
+    /// A no-op on almost every turn and expensive on the ones it is not: the
+    /// window's font is re-measured at the new scale, every pane is re-solved
+    /// and the shells are told their new grids. Its own station because it sits
+    /// between [`Self::Wheel`] and [`Self::Drain`], where a hold used to be
+    /// charged to a wheel nobody had touched.
+    DpiSettle = 26,
+    /// `Runtime::apply_math_context_menu_result`,
+    /// `Runtime::apply_folder_pick_result` and
+    /// `Runtime::apply_image_pick_result` — what a turn does with the answer a
+    /// modal the platform owns left behind.
+    ///
+    /// **One station for three arms**, on [`Self::Chrome`]'s reasoning: all
+    /// three are a no-op unless a dialog was up, all three end in a path being
+    /// opened or a formula being written, and a reader who sees time here has
+    /// the one fact they need — a picker had just closed.
+    Pickers = 27,
+    /// `Runtime::settle_pane_notices` and `Runtime::settle_preview_rails` — the
+    /// two rows a turn can add to or take from a pane.
+    ///
+    /// Grouped because they are the same kind of change and cost the same kind
+    /// of work: a row appearing or going is a pane's height changing, which
+    /// re-solves the seat and re-measures the grid behind it.
+    PaneRows = 28,
+    /// Every "has anything changed out there" poll a turn makes:
+    /// `advance_scheme_watch`, `advance_storage_watch`, `advance_preview_watch`,
+    /// `advance_files_watch` and `advance_git_watch`.
+    ///
+    /// **One station for five polls**, which is [`Self::Chrome`]'s judgement
+    /// again and for a sharper reason: what they have in common is the thing
+    /// that can make one of them slow, which is a disk that has stopped
+    /// answering. A hold here says "a watch was asking the file system", and
+    /// which watch it was is the stack's question rather than this label's.
+    ///
+    /// They are not contiguous in `turn` — two of them stand on the application
+    /// clock and three do not — so this station is entered more than once on a
+    /// turn that runs them all, and the ledger adds the pieces up.
+    Watches = 29,
+    /// `Runtime::finish_synchronized_update_if_due` — the end of a DEC 2026
+    /// block, where a screenful of output a program asked to have held back is
+    /// handed to the grid in one go.
+    ///
+    /// Its own station because it is the one call in the clock run that can be
+    /// handed an unbounded amount of text: everything else on that lane is a
+    /// deadline comparison, and this one is a feed.
+    SyncUpdate = 30,
+    /// **Every clock a window keeps**, run in order once a turn: the first-run
+    /// and PSReadLine invitations, the cursor and rename blinks, the tab press,
+    /// the strip animation, the composition owner and the IME caret, the resize
+    /// and preview-scale settlements, the live-math and hover clocks, the four
+    /// menus, the drag spring and its autoscroll, the maths toggle and its
+    /// tools, the layout peek, the tooltip, the key and card hints, the toasts,
+    /// the command flash and rails, the terminal thumbs, the file peek, the
+    /// float, the foot reveal, the page feet and the preview notices.
+    ///
+    /// **Born to take forty-eight calls off the autosave's name**
+    /// (T-STATION-SPLIT). `SessionStore::flush_if_due` names itself
+    /// ([`Self::Autosave`]) and was the last station entered before this whole
+    /// run, so a hold anywhere in it was reported as the autosave — a lane that
+    /// writes one small file and had nothing to do with any of it.
+    ///
+    /// One station for the run rather than one per clock, because what they
+    /// have in common is exactly what a reader needs: each is an `if due` over a
+    /// deadline this window set, each ends in the chrome being rebuilt, and none
+    /// of them waits on anything outside this process. A hold here is this
+    /// window drawing itself, and the stack says which clock.
+    Clocks = 31,
+    /// The arithmetic at the foot of a turn that decides when the loop should be
+    /// woken again — every clock's deadline read and the earliest of them taken.
+    ///
+    /// Its own station so that [`Self::PtyResize`] names the synchronous
+    /// `ResizePseudoConsole` round trip it was built to name, and nothing else.
+    /// Nothing here can block; time against it is a turn that is doing
+    /// arithmetic over a great many windows, and that is worth being able to
+    /// see rather than to assume.
+    Deadlines = 32,
+    /// `FolioApp::about_to_wait_inner`'s own prologue — everything one turn owes
+    /// the *application* before any window takes its turn: the window directory,
+    /// the ring, an application change, a restore answer, a drag handed over, a
+    /// window asked for or launched, the delegate's events, the summoned
+    /// terminal, the quit, the menu bar, the drag broker, and the reaping of
+    /// windows that have left.
+    ///
+    /// **It was the last thing left under [`Self::Woken`]** (T-STATION-SPLIT).
+    /// A hold opens at the wake and the station is stamped `Woken` there, so
+    /// until this variant every one of those calls was reported as a wake that
+    /// named no lane — including the two that are by far the most expensive
+    /// things this loop can do on a turn: **opening** a window, which builds a
+    /// surface and a swapchain, and **reaping** one, which shuts its shells and
+    /// waits for its pages.
+    AppTurn = 33,
+    /// `search::scan_history` and `search::scan_volatile` — the capsule's own
+    /// regular expression run over this pane's whole transcript.
+    ///
+    /// **The one piece of work on the typing path that is O(the document)**
+    /// (T-STATION-SPLIT). A terminal's find is live by design: every keystroke
+    /// in the box bumps the search revision, which is what makes the cached
+    /// history hits unusable, so every keystroke re-runs the pattern over every
+    /// frozen line — a hundred thousand of them at the default scrollback. It is
+    /// the right answer to the right question and it is not a fault; what it was
+    /// missing was a name, and without one it was reported as whatever call had
+    /// last been tagged, which on the owner's recording of 2026-09-15 was
+    /// `flush_wheel` while the hand was typing and the wheel was untouched.
+    ///
+    /// Entered and left around the two scans themselves rather than around
+    /// `refresh_search`, which leaves through eight doors: a station that is put
+    /// back on only one of them would be a worse lie than the one this replaces.
+    SearchScan = 34,
+    /// `WindowEvent::CloseRequested` — the dirty gate, which asks the reader
+    /// about preview buffers that would not survive the shut, and the summoned
+    /// terminal's `×`, which sets a bit and returns.
+    ///
+    /// **The head of the window-event family, whose one rule is stated here.**
+    /// Each of the thirteen is opened by `window_event` over the length of its
+    /// match and handed back at the foot of it ([`enter`]), so a handler's
+    /// milliseconds are the handler's and the dispatch around them stays
+    /// [`Self::Event`]'s. Which one an event opens is
+    /// [`crate::window_event_station`] — [`crate::AppEvent::station`]'s twin,
+    /// one door over and born of the same finding.
+    EventClose = 35,
+    /// `Runtime::keyboard_input` — the ladder every press and release of a key
+    /// in this window walks.
+    ///
+    /// The heaviest thing a key can do without leaving this process, and almost
+    /// none of it is charged here: the search box's live scan
+    /// ([`Self::SearchScan`]), the chrome rebuild ([`Self::Chrome`]) and the
+    /// frame ([`Self::Present`]) all name themselves, so what is left against
+    /// this label is the ladder that reached them.
+    EventKey = 36,
+    /// `Runtime::ime_input` — one composition event from the input method,
+    /// which on Windows arrives on IMM32's own synchronous call.
+    EventIme = 37,
+    /// `WindowEvent::ModifiersChanged` — **the one door every modifier state in
+    /// this process comes through** (M1-7, §8 Q9).
+    ///
+    /// Three statements long and not therefore cheap: the pointer's shape is
+    /// re-decided from it and the key hint is told about it, and either can end
+    /// in the chrome being rebuilt.
+    EventModifiers = 38,
+    /// `Runtime::pointer_moved` and `Runtime::pointer_left` — the hover road,
+    /// walked once per pointer sample the platform delivers.
+    ///
+    /// **One station for two arms**, because they are the same lane read at its
+    /// two ends and because the same thing makes either slow: a hit test over
+    /// every seat in the window, and the rebuild a hover that changed something
+    /// asks for.
+    EventPointer = 39,
+    /// `Runtime::mouse_input` — a button going down or coming up, and every
+    /// verb a press can reach from a tab strip, a pane head, a files row, a
+    /// card or a rendered page.
+    EventMouse = 40,
+    /// `Runtime::queue_wheel` — one notch being added to the burst.
+    ///
+    /// Its own station rather than [`Self::Wheel`]'s, which is `flush_wheel`
+    /// and is where the burst is actually spent: one is an addition and the
+    /// other is a scroll, so a hold that lands here has named a very short
+    /// piece of code — which is worth being able to read rather than assume.
+    EventWheel = 41,
+    /// `Runtime::resized` — a rectangle from the platform, with the solve, the
+    /// re-measure and the shell resizes that follow it.
+    EventResize = 42,
+    /// `Runtime::scale_factor_changed` — this window arriving on a display with
+    /// a different scale, which re-measures the font and re-solves every pane.
+    EventScale = 43,
+    /// `Runtime::window_moved`, `Runtime::os_theme_changed`, and the frame a
+    /// window that has been uncovered owes (GitHub issue #5).
+    ///
+    /// **One station for three arms**, on [`Self::Chrome`]'s reasoning: each is
+    /// the platform telling this window something about *itself* rather than
+    /// about a hand, and a reader who sees time here has the fact they need.
+    /// The move is the suspicious one of the three — it is a synchronous call
+    /// into WebView2, and therefore into another process, on every drag of a
+    /// window that has a page in it.
+    EventWindow = 44,
+    /// `Runtime::redraw` — the whole of a frame this window was asked for.
+    ///
+    /// Its own station rather than [`Self::Present`]'s, which is
+    /// `publish_frame_inner` and is entered inside it: the difference between
+    /// the two is everything a redraw does before it composes, and the two are
+    /// repaired differently.
+    EventRedraw = 45,
+    /// `WindowEvent::Focused` — the keyboard arriving at this window or leaving
+    /// it.
+    ///
+    /// One station for both arms, because they are the same list of things
+    /// being put down and picked up again. The arm that can be slow is the
+    /// arriving one: a window that has been away re-reads its git surfaces and
+    /// the preview files no kernel would speak for, which is the only thing
+    /// either arm asks a disk.
+    EventFocus = 46,
+    /// Every kind `window_event`'s match ends in `_ => Ok(())` for.
+    ///
+    /// **The label says `other` rather than naming them**, because the set is
+    /// winit's and grows with it: an event this window does nothing for has
+    /// cost a lookup and a comparison, and thirty stations that can never be
+    /// the answer would bury the twelve that can. Time against this label is
+    /// the dispatch itself — and, since that is very nearly impossible, a kind
+    /// this window has started answering without being given a name.
+    EventOther = 47,
 }
 
 impl Station {
@@ -422,6 +729,29 @@ impl Station {
             Self::Chrome => "refresh_chrome",
             Self::WebSpoke => "drive_web_page",
             Self::Settings => "settings_layout",
+            Self::ClipboardRead => "clipboard read",
+            Self::DpiSettle => "settle_dpi",
+            Self::Pickers => "apply_pick_results",
+            Self::PaneRows => "settle_pane_rows",
+            Self::Watches => "watches",
+            Self::SyncUpdate => "finish_synchronized_update",
+            Self::Clocks => "window clocks",
+            Self::Deadlines => "wake deadlines",
+            Self::AppTurn => "application turn",
+            Self::SearchScan => "search scan",
+            Self::EventClose => "close_requested",
+            Self::EventKey => "keyboard_input",
+            Self::EventIme => "ime_input",
+            Self::EventModifiers => "modifiers_changed",
+            Self::EventPointer => "pointer_moved",
+            Self::EventMouse => "mouse_input",
+            Self::EventWheel => "queue_wheel",
+            Self::EventResize => "resized",
+            Self::EventScale => "scale_factor_changed",
+            Self::EventWindow => "window state",
+            Self::EventRedraw => "redraw",
+            Self::EventFocus => "focused",
+            Self::EventOther => "window_event other",
         }
     }
 
@@ -467,6 +797,29 @@ impl Station {
             22 => Self::Chrome,
             23 => Self::WebSpoke,
             24 => Self::Settings,
+            25 => Self::ClipboardRead,
+            26 => Self::DpiSettle,
+            27 => Self::Pickers,
+            28 => Self::PaneRows,
+            29 => Self::Watches,
+            30 => Self::SyncUpdate,
+            31 => Self::Clocks,
+            32 => Self::Deadlines,
+            33 => Self::AppTurn,
+            34 => Self::SearchScan,
+            35 => Self::EventClose,
+            36 => Self::EventKey,
+            37 => Self::EventIme,
+            38 => Self::EventModifiers,
+            39 => Self::EventPointer,
+            40 => Self::EventMouse,
+            41 => Self::EventWheel,
+            42 => Self::EventResize,
+            43 => Self::EventScale,
+            44 => Self::EventWindow,
+            45 => Self::EventRedraw,
+            46 => Self::EventFocus,
+            47 => Self::EventOther,
             _ => Self::Starting,
         }
     }
@@ -553,6 +906,56 @@ pub struct Pulse {
     pub park: Park,
 }
 
+/// **What the memory manager did to this process across one hold** — the other
+/// half of the account, and the half the stations cannot give.
+///
+/// A ledger that says `flush_wheel 1928 ms` names where the milliseconds were
+/// spent and says nothing about *whose* they were. Two seconds inside one call
+/// is either two seconds of this program's own work — which is repaired here —
+/// or this program standing still while the operating system reads its working
+/// set back in, which is not a fault in this program at all and is exactly what
+/// the machine the fault is reported on does when it is carrying more committed
+/// memory than it has RAM. The counters below are how a reader tells those
+/// apart without being at the machine: faults climbing by tens of thousands
+/// while the resident size climbs beside them is a second that belonged to the
+/// memory manager, and a hold that spends one with both numbers flat spent it
+/// here.
+///
+/// See [`bt_platform::mem`] for what "a fault" counts on each platform — the
+/// two are not the same quantity and the difference is written down there.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Paging {
+    /// Page faults taken between the two ends of the hold.
+    ///
+    /// A difference and not a reading: the platform's counter is cumulative
+    /// since the process started, and the only interesting number is how much
+    /// of it belongs to this hold.
+    pub faults: u64,
+    /// The resident size in bytes as the hold opened.
+    pub working_set_before: u64,
+    /// The resident size in bytes as it closed. Printed beside the one above
+    /// rather than as a difference, because the direction is not the point:
+    /// **a working set that grew is a set being read back in, and one that
+    /// shrank during a long hold is one being trimmed while the thread was
+    /// held** — and a signed delta would print the same digit for two opposite
+    /// stories.
+    pub working_set_after: u64,
+}
+
+/// One binary megabyte, which is the megabyte a reader's Task Manager and
+/// Activity Monitor both print.
+const BYTES_PER_MEGABYTE: u64 = 1024 * 1024;
+
+/// `bytes` as the megabytes the line prints, rounded to the nearest.
+///
+/// Rounded rather than truncated because the pair is read as a movement — 179
+/// to 412 — and a truncation makes a set that grew by a megabyte and a half
+/// look like one that grew by one.
+#[must_use]
+fn megabytes(bytes: u64) -> u64 {
+    bytes.saturating_add(BYTES_PER_MEGABYTE / 2) / BYTES_PER_MEGABYTE
+}
+
 /// **One hold of the window thread that ran long, and where its time went.**
 ///
 /// A hold is `woke` → `park`: everything between the platform handing this
@@ -575,6 +978,9 @@ pub struct SlowHold {
     pub held_ms: u64,
     /// Milliseconds per station, indexed by [`Station::slot`].
     pub spent_ms: [u64; STATION_COUNT],
+    /// What the machine's memory manager did while the hold ran, when this
+    /// platform counts it and both ends were sampled. See [`Paging`].
+    pub paging: Option<Paging>,
 }
 
 impl SlowHold {
@@ -617,10 +1023,23 @@ impl SlowHold {
                 .collect::<Vec<_>>()
                 .join(", ")
         };
-        format!(
+        let mut line = format!(
             "Folio: the window thread held control for {} ms on turn {} — {where_}",
             self.held_ms, self.turn
-        )
+        );
+        // Appended, never interleaved, and behind a separator no station label
+        // contains: every line this instrument has ever written keeps its
+        // shape, and a reader who greps for `held control for` or for a station
+        // name finds the same lines they found before the counters existed.
+        if let Some(paging) = self.paging {
+            line.push_str(&format!(
+                " · faults +{}, working set {} → {} MB",
+                paging.faults,
+                megabytes(paging.working_set_before),
+                megabytes(paging.working_set_after),
+            ));
+        }
+        line
     }
 }
 
@@ -664,6 +1083,25 @@ pub struct Heartbeat {
     slow: Mutex<Vec<SlowHold>>,
     /// Slow holds that found the queue full or busy.
     slow_dropped: AtomicU64,
+    /// **Where the two footprint readings come from.**
+    ///
+    /// A function pointer rather than a direct call to
+    /// [`bt_platform::mem::footprint`], for the reason the four `_at` verbs take
+    /// a clock: the arithmetic worth pinning is *this* module's — which sample
+    /// is taken when, and what the line says about the pair — and a test that
+    /// could only get numbers out of the real memory manager could state none of
+    /// it. A pointer and not a boxed closure, so the field costs one word, the
+    /// struct keeps its derived `Debug`, and the call is the same indirect jump
+    /// on the window thread as a direct one through a `LazyLock`.
+    footprint: fn() -> Option<Footprint>,
+    /// The process's fault count as the hold in progress opened.
+    held_faults: AtomicU64,
+    /// Its resident size at that same instant, in bytes.
+    held_working_set: AtomicU64,
+    /// Whether the two above were actually taken. A flag rather than a sentinel
+    /// in either number, because both of them have legitimate values everywhere
+    /// in their range and a platform with no arm answers nothing at all.
+    held_footprint: AtomicBool,
 }
 
 impl Default for Heartbeat {
@@ -675,7 +1113,17 @@ impl Default for Heartbeat {
 impl Heartbeat {
     #[must_use]
     pub fn new() -> Self {
+        Self::sampling(bt_platform::mem::footprint)
+    }
+
+    /// [`Self::new`], with the footprint sampler named. See [`Self::footprint`].
+    #[must_use]
+    fn sampling(footprint: fn() -> Option<Footprint>) -> Self {
         Self {
+            footprint,
+            held_faults: AtomicU64::new(0),
+            held_working_set: AtomicU64::new(0),
+            held_footprint: AtomicBool::new(false),
             origin: Instant::now(),
             at_ms: AtomicU64::new(0),
             turn: AtomicU64::new(0),
@@ -749,14 +1197,79 @@ impl Heartbeat {
         self.station.store(station as u8, Ordering::Relaxed);
     }
 
-    /// **A hold begins**: the ledger is emptied and the clock started.
+    /// **A hold begins**: the ledger is emptied, the footprint taken and the
+    /// clock started.
     fn open_hold(&self, now_ms: u64) {
         for spent in &self.spent_ms {
             spent.store(0, Ordering::Relaxed);
         }
+        self.open_footprint();
         self.station_since_ms.store(now_ms, Ordering::Relaxed);
         self.held_since_ms
             .store(now_ms.saturating_add(1), Ordering::Relaxed);
+    }
+
+    /// **The one system call this instrument makes on an ordinary turn**, and
+    /// it is made here — at the opening of every hold, slow or not — because
+    /// there is no later moment that could have it.
+    ///
+    /// The tempting design is to sample only the holds that turn out to be
+    /// reported, and it cannot be built: *slow* is a fact about a hold that is
+    /// not known until the hold ends, and the baseline has to have been taken
+    /// before it began. The two ways of learning about a long hold while it is
+    /// still running both fail on the case the instrument exists for:
+    ///
+    /// * **The window thread noticing at a station** — the crossing could be
+    ///   tested for free inside [`Self::move_to`], which already holds the
+    ///   clock. But a hold that is *one long call* passes no station while it
+    ///   runs; a 1928 ms `flush_wheel` would arm the sampler on its way out, the
+    ///   baseline would be read after the paging was over, and the line would
+    ///   print `faults +0` on precisely the hold it was built to explain.
+    /// * **The watchdog noticing from outside** — it wakes every
+    ///   [`WATCH_INTERVAL`], four times longer than [`SLOW_HOLD_THRESHOLD`], and
+    ///   a fault counter it reads is a fact about the moment *it* woke rather
+    ///   than about either end of somebody else's hold.
+    ///
+    /// So the bill is one kernel query per hold — a hold being a turn of the
+    /// loop — against a turn that already carries a frame, a drain and a
+    /// platform round trip, and nothing whatever on the turns in between,
+    /// because a parked thread opens no hold. The other end,
+    /// [`Self::close_footprint`], is on the reporting path alone and is reached
+    /// by roughly none of them.
+    fn open_footprint(&self) {
+        if let Some(footprint) = (self.footprint)() {
+            self.held_faults.store(footprint.faults, Ordering::Relaxed);
+            self.held_working_set
+                .store(footprint.working_set_bytes, Ordering::Relaxed);
+            self.held_footprint.store(true, Ordering::Relaxed);
+        } else {
+            self.held_footprint.store(false, Ordering::Relaxed);
+        }
+    }
+
+    /// **The second sample, taken only for a hold that is already going to be
+    /// written down.**
+    ///
+    /// `None` when this platform counts nothing, when the opening sample was
+    /// refused, or when this one is — a line that named one end of a movement
+    /// would be worse than a line that names neither.
+    #[must_use]
+    fn close_footprint(&self) -> Option<Paging> {
+        if !self.held_footprint.load(Ordering::Relaxed) {
+            return None;
+        }
+        let closing = (self.footprint)()?;
+        Some(Paging {
+            // Saturating, which is the harmless direction: the only way this
+            // subtraction can go negative is the 32-bit Windows counter having
+            // wrapped mid-hold, and a `+0` reads as "nothing to see here" while
+            // a wrapped difference would read as four billion faults.
+            faults: closing
+                .faults
+                .saturating_sub(self.held_faults.load(Ordering::Relaxed)),
+            working_set_before: self.held_working_set.load(Ordering::Relaxed),
+            working_set_after: closing.working_set_bytes,
+        })
     }
 
     /// **A hold ends**, and if it ran long it is queued for the watchdog.
@@ -777,10 +1290,13 @@ impl Heartbeat {
         if held_ms < slow_hold_threshold_ms() {
             return;
         }
+        // Below the threshold this line is never reached, which is the whole of
+        // what keeps the second system call off the ordinary turn.
         let hold = SlowHold {
             turn: self.turn.load(Ordering::Relaxed),
             held_ms,
             spent_ms,
+            paging: self.close_footprint(),
         };
         // `try_lock` and never `lock`: see [`Self::slow`].
         if let Ok(mut queue) = self.slow.try_lock()
@@ -1256,6 +1772,12 @@ pub fn render_report(facts: &ReportFacts<'_>) -> String {
         }
     );
     let _ = writeln!(out, "when asked     : {}", facts.answer.phrase());
+    // **And which `WindowEvent` it was, which this same line answers.** A thread
+    // wedged inside a handler is stamped at that handler's own station — see
+    // [`Station::Event`] and the family under it — so `last station :
+    // keyboard_input` names the kind as well as the call, and a separate
+    // `last event` line would be one fact written twice and able to disagree
+    // with itself.
     let _ = writeln!(
         out,
         "last station   : {} (the last one entered, not necessarily the one it is in)",
@@ -1300,15 +1822,9 @@ pub fn render_report(facts: &ReportFacts<'_>) -> String {
     if tally.is_clean() {
         out.push_str("  surface acquires: clean — nothing has failed in this run\n");
     } else {
-        let _ = writeln!(
-            out,
-            "  surface acquires: unavailable {}, outdated {}, lost {}, validation {} (total {})",
-            tally.unavailable,
-            tally.outdated,
-            tally.lost,
-            tally.validation,
-            tally.total()
-        );
+        // The tally spells itself, so this footer and the decade lines
+        // `bt-render` writes into `diagnostics.log` cannot drift apart.
+        let _ = writeln!(out, "  surface acquires: {tally}");
     }
     out
 }
@@ -1396,19 +1912,31 @@ pub fn prune_reports(directory: &Path, keep: usize) -> std::io::Result<usize> {
 /// moment of the program's choosing, and so that a test can point it somewhere
 /// private.
 ///
+/// `trace_perf` is whether this run was started with `BT_PERF_TRACE` set, and
+/// it is the caller's answer for the same reason `reports` is: the variable is
+/// read once per run, on the window thread, beside every other reader of it.
+/// What it decides is the threshold — see [`TRACED_HANG_THRESHOLD`] — and it is
+/// decided here rather than on the watchdog, which asks the environment
+/// nothing.
+///
 /// Failing to spawn is said out loud and dropped: a terminal that refused to
 /// start because it could not arrange to diagnose itself would be a worse
 /// program than one that starts without the diagnosis.
-pub fn start(reports: PathBuf) {
+pub fn start(reports: PathBuf, trace_perf: bool) {
     let ui_thread_id = bt_platform::hang::current_thread_id();
     // Touch the heartbeat here so its origin is the start of the run rather
     // than the first station, which makes `uptime` in a report mean what it
     // says.
     let _ = heartbeat().now_ms();
+    let threshold = if trace_perf {
+        TRACED_HANG_THRESHOLD
+    } else {
+        HANG_THRESHOLD
+    };
     if let Err(error) = bt_platform::spawn_at_priority(
         "bt-hang-watch",
         bt_platform::ThreadPriority::BelowNormal,
-        move || watch_forever(reports, ui_thread_id),
+        move || watch_forever(reports, ui_thread_id, threshold),
     ) {
         eprintln!("Folio could not start its hang watchdog: {error}");
     }
@@ -1466,8 +1994,12 @@ pub fn can_come_round(now_ms: u64, pulse: Pulse, allowance_ms: u64) -> bool {
 }
 
 /// The watchdog thread's whole life.
-fn watch_forever(reports: PathBuf, ui_thread_id: u32) {
-    let mut watch = HangWatch::new(HANG_THRESHOLD, STARTUP_THRESHOLD);
+///
+/// `threshold` is [`start`]'s answer and not this thread's: see
+/// [`TRACED_HANG_THRESHOLD`] for which run gets which, and for why the reading
+/// is not taken here.
+fn watch_forever(reports: PathBuf, ui_thread_id: u32, threshold: Duration) {
+    let mut watch = HangWatch::new(threshold, STARTUP_THRESHOLD);
     // The file the stall in progress was reported to, so its healing line lands
     // in the same file rather than in a second one nobody would connect to it.
     let mut open_report: Option<PathBuf> = None;
@@ -1686,13 +2218,65 @@ pub fn run_selftest_if_due() {}
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use super::{
-        Answer, HangWatch, Heartbeat, Park, Pulse, ReportFacts, STATION_COUNT, SlowHold, Station,
-        Verdict, can_come_round, prune_reports, render_healed, render_report, report_filename,
-        slow_hold_threshold_ms, utc_timestamp,
+        Answer, Footprint, HangWatch, Heartbeat, Paging, Park, Pulse, ReportFacts, STATION_COUNT,
+        SlowHold, Station, Verdict, can_come_round, prune_reports, render_healed, render_report,
+        report_filename, slow_hold_threshold_ms, utc_timestamp,
     };
+
+    /// A heartbeat on a platform that counts nothing, which is what every test
+    /// about the **stations** wants: the line it prints is the one this module
+    /// wrote before the counters existed, and the arithmetic under test is the
+    /// milliseconds.
+    fn no_footprint() -> Option<Footprint> {
+        None
+    }
+
+    // The footprints `fake_footprint` hands back, in order, and how many times
+    // it has been asked. A `//` comment and not a `///` one: the item is inside
+    // a macro, so a doc comment here documents nothing and `unused_doc_comment`
+    // says so.
+    //
+    // Thread-local because libtest gives each case its own thread and runs them
+    // at once: a static here would have two tests handing each other their
+    // numbers, which is the kind of shared fixture this repository's own
+    // conventions call a bug factory.
+    thread_local! {
+        static FAKE_FOOTPRINTS: RefCell<(Vec<Footprint>, usize)> =
+            const { RefCell::new((Vec::new(), 0)) };
+    }
+
+    /// A sampler that answers the queued footprints in turn, and nothing once
+    /// they run out.
+    fn fake_footprint() -> Option<Footprint> {
+        FAKE_FOOTPRINTS.with(|fake| {
+            let mut fake = fake.borrow_mut();
+            let asked = fake.1;
+            fake.1 += 1;
+            fake.0.get(asked).copied()
+        })
+    }
+
+    /// Queue what the fake sampler will answer, and forget what it was asked
+    /// before.
+    fn queue_footprints(footprints: &[(u64, u64)]) {
+        let queued: Vec<Footprint> = footprints
+            .iter()
+            .map(|(faults, working_set_bytes)| Footprint {
+                faults: *faults,
+                working_set_bytes: *working_set_bytes,
+            })
+            .collect();
+        FAKE_FOOTPRINTS.with(|fake| *fake.borrow_mut() = (queued, 0));
+    }
+
+    /// How many times the fake sampler has been asked since [`queue_footprints`].
+    fn footprints_asked() -> usize {
+        FAKE_FOOTPRINTS.with(|fake| fake.borrow().1)
+    }
 
     /// A thread holding control at `station`: it has not handed anything back to
     /// the platform, so the loop coming round is owed.
@@ -2658,7 +3242,7 @@ mod tests {
     /// instrument, it is the log.
     #[test]
     fn an_ordinary_hold_is_never_written_down() {
-        let heart = Heartbeat::new();
+        let heart = Heartbeat::sampling(no_footprint);
         heart.woke_at(1_000);
         heart.at_station(Station::Event, 1_001);
         heart.beat_at(1_002);
@@ -2676,7 +3260,7 @@ mod tests {
     /// five seconds nor says anything about a thread that answered.
     #[test]
     fn a_slow_hold_names_the_station_that_spent_the_time() {
-        let heart = Heartbeat::new();
+        let heart = Heartbeat::sampling(no_footprint);
         heart.woke_at(1_000);
         heart.at_station(Station::Event, 1_010);
         heart.at_station(Station::WebPage, 1_020);
@@ -2711,7 +3295,7 @@ mod tests {
     /// eighty seconds go back to `woken`, which is this assertion inverted.
     #[test]
     fn a_hold_spent_on_a_workers_answer_names_the_lane_that_landed() {
-        let heart = Heartbeat::new();
+        let heart = Heartbeat::sampling(no_footprint);
         heart.woke_at(1_000);
         // Ten milliseconds of untagged wake, then a preview body landing, then
         // the turn that draws it.
@@ -2766,7 +3350,7 @@ mod tests {
     /// this one's arithmetic said twice.
     #[test]
     fn the_ledger_is_emptied_between_holds() {
-        let heart = Heartbeat::new();
+        let heart = Heartbeat::sampling(no_footprint);
         heart.woke_at(0);
         heart.at_station(Station::WebPage, 10);
         heart.park_at(Park::Indefinite, 3_000);
@@ -2785,7 +3369,7 @@ mod tests {
     /// turn's body leaves early in six places and every one of them parks.
     #[test]
     fn a_second_park_with_no_wake_between_records_nothing() {
-        let heart = Heartbeat::new();
+        let heart = Heartbeat::sampling(no_footprint);
         heart.woke_at(0);
         heart.at_station(Station::WebPage, 10);
         heart.park_at(Park::Indefinite, 2_000);
@@ -2800,7 +3384,7 @@ mod tests {
     /// to nothing would file the whole of startup as a stall.
     #[test]
     fn a_turn_with_no_wake_before_it_opens_its_own_hold() {
-        let heart = Heartbeat::new();
+        let heart = Heartbeat::sampling(no_footprint);
         heart.beat_at(8_000);
         heart.at_station(Station::Drain, 8_010);
         heart.park_at(Park::Indefinite, 8_030);
@@ -2815,7 +3399,7 @@ mod tests {
     /// rather than from a number written down a second time.
     #[test]
     fn the_threshold_is_the_one_the_module_states() {
-        let heart = Heartbeat::new();
+        let heart = Heartbeat::sampling(no_footprint);
         let bound = slow_hold_threshold_ms();
         heart.woke_at(0);
         heart.park_at(Park::Indefinite, bound - 1);
@@ -2850,6 +3434,25 @@ mod tests {
         );
     }
 
+    /// **No two stations print the same word** (T-STATION-SPLIT).
+    ///
+    /// The line is read as a list of lanes and their milliseconds, so two lanes
+    /// answering to one word would be a reader adding up two numbers that are
+    /// about different work — and the slice that split one span into seven is
+    /// exactly the kind of change that can reach for a word already taken.
+    #[test]
+    fn every_station_prints_its_own_word() {
+        let mut words: Vec<&'static str> = Vec::new();
+        for slot in 0..STATION_COUNT {
+            let station = Station::from_byte(u8::try_from(slot).expect("a slot is one byte"));
+            words.push(station.label());
+        }
+        let spoken = words.len();
+        words.sort_unstable();
+        words.dedup();
+        assert_eq!(words.len(), spoken, "two stations print the same word");
+    }
+
     /// A hold whose stations all rounded to nothing still states its length.
     #[test]
     fn a_hold_with_no_named_station_still_states_its_length() {
@@ -2857,10 +3460,233 @@ mod tests {
             turn: 7,
             held_ms: 900,
             spent_ms: [0; STATION_COUNT],
+            paging: None,
         };
         assert_eq!(
             hold.line(),
             "Folio: the window thread held control for 900 ms on turn 7 — no station held it",
+        );
+    }
+
+    // ══ Whose seconds they were: the footprint at the two ends of a hold ══
+
+    /// **The line says what the memory manager did**, in the shape the ticket
+    /// fixed: everything that was there before, then a middle dot, then the
+    /// faults as a difference and the working set as a movement.
+    ///
+    /// Pure — a `SlowHold` and nothing else — which is the same rule
+    /// [`SlowHold::line`] is written to and the reason the shape of a log line
+    /// is a thing this repository can state without running a program.
+    #[test]
+    fn a_slow_holds_line_states_what_the_machine_did_to_its_memory() {
+        let mut spent_ms = [0; STATION_COUNT];
+        spent_ms[Station::Present.slot()] = 2_092;
+        spent_ms[Station::Wheel.slot()] = 1_928;
+        let hold = SlowHold {
+            turn: 3_937_579,
+            held_ms: 4_056,
+            spent_ms,
+            paging: Some(Paging {
+                faults: 38_210,
+                working_set_before: 179 * 1024 * 1024,
+                working_set_after: 412 * 1024 * 1024,
+            }),
+        };
+        assert_eq!(
+            hold.line(),
+            "Folio: the window thread held control for 4056 ms on turn 3937579 — \
+             publish_frame_inner 2092 ms, flush_wheel 1928 ms · \
+             faults +38210, working set 179 → 412 MB",
+        );
+    }
+
+    /// **A hold nobody could sample prints exactly the line it always printed.**
+    ///
+    /// The grep the whole facility is read through is `held control for`, and
+    /// the stations after it are read by eye; a platform with no counters, or a
+    /// call the kernel refused, must not move either. This is the assertion that
+    /// would go red if the new fields were ever put in the middle of the line or
+    /// printed as zeroes when there was nothing to print.
+    #[test]
+    fn a_hold_with_no_footprint_prints_the_line_it_always_printed() {
+        let mut spent_ms = [0; STATION_COUNT];
+        spent_ms[Station::Wheel.slot()] = 1_928;
+        let hold = SlowHold {
+            turn: 3_937_579,
+            held_ms: 4_056,
+            spent_ms,
+            paging: None,
+        };
+        assert_eq!(
+            hold.line(),
+            "Folio: the window thread held control for 4056 ms on turn 3937579 — \
+             flush_wheel 1928 ms",
+        );
+    }
+
+    /// **Megabytes are rounded to the nearest, and they are the ones Task
+    /// Manager prints** — 1024-based, which is the whole reason this is a
+    /// function and not an inline division somebody would write the other way
+    /// the second time.
+    #[test]
+    fn a_working_set_is_printed_in_the_megabytes_a_reader_recognises() {
+        let hold = |before: u64, after: u64| SlowHold {
+            turn: 0,
+            held_ms: 900,
+            spent_ms: [0; STATION_COUNT],
+            paging: Some(Paging {
+                faults: 0,
+                working_set_before: before,
+                working_set_after: after,
+            }),
+        };
+        // Half a megabyte short of 180 rounds up; a hair over 179 stays.
+        let before = 180 * 1024 * 1024 - 512 * 1024;
+        let after = 179 * 1024 * 1024 + 1;
+        let line = hold(before, after).line();
+        assert!(
+            line.ends_with("· faults +0, working set 180 → 179 MB"),
+            "rounded to the nearest, both ends: {line}"
+        );
+        assert!(
+            hold(0, 0).line().ends_with("working set 0 → 0 MB"),
+            "nothing resident is nothing, not a division that trapped"
+        );
+    }
+
+    /// **The counters are sampled at the two ends of the hold**, so the number
+    /// the line carries is the hold's own and not the run's.
+    ///
+    /// The fake sampler is handed two readings: one for the wake that opens the
+    /// hold, one for the park that reports it. What the line prints is their
+    /// difference and their pair — an instrument that printed the closing
+    /// reading alone would print this process's lifetime fault count, which is
+    /// in the millions and says nothing about any hold at all.
+    #[test]
+    fn a_slow_hold_carries_the_faults_taken_between_its_own_two_ends() {
+        queue_footprints(&[
+            (1_000_000, 179 * 1024 * 1024),
+            (1_038_210, 412 * 1024 * 1024),
+        ]);
+        let heart = Heartbeat::sampling(fake_footprint);
+        heart.woke_at(1_000);
+        heart.at_station(Station::Wheel, 1_010);
+        heart.park_at(Park::Indefinite, 2_900);
+        let (slow, _) = heart.take_slow_holds();
+        let [hold] = slow.as_slice() else {
+            panic!("one hold ran long: {slow:?}")
+        };
+        assert_eq!(
+            hold.paging,
+            Some(Paging {
+                faults: 38_210,
+                working_set_before: 179 * 1024 * 1024,
+                working_set_after: 412 * 1024 * 1024,
+            }),
+            "the difference across the hold, not the process's running total",
+        );
+        assert_eq!(footprints_asked(), 2, "one end, then the other");
+        assert!(
+            hold.line()
+                .ends_with("· faults +38210, working set 179 → 412 MB"),
+            "{}",
+            hold.line(),
+        );
+    }
+
+    /// **An ordinary hold is sampled once and never asks again** — the cost
+    /// rule, stated as a number rather than as a comment.
+    ///
+    /// Sixty turns a second each pay the opening query, because *slow* is not
+    /// known until a hold ends and a baseline taken later measures nothing (see
+    /// [`Heartbeat::open_footprint`]). What none of them pay is the second one:
+    /// it lives past the threshold check, on the path that produces a line.
+    ///
+    /// MUTATION: move `close_footprint` above that check and this reads 2.
+    #[test]
+    fn an_ordinary_hold_asks_the_sampler_once_and_the_reporting_path_twice() {
+        queue_footprints(&[(10, 1024), (20, 2048), (30, 4096)]);
+        let heart = Heartbeat::sampling(fake_footprint);
+        heart.woke_at(1_000);
+        heart.at_station(Station::Present, 1_004);
+        heart.park_at(Park::Indefinite, 1_012);
+        assert_eq!(heart.take_slow_holds(), (Vec::new(), 0));
+        assert_eq!(
+            footprints_asked(),
+            1,
+            "a hold nobody writes down takes one sample and stops",
+        );
+        let bound = slow_hold_threshold_ms();
+        heart.woke_at(2_000);
+        heart.park_at(Park::Indefinite, 2_000 + bound);
+        assert_eq!(heart.take_slow_holds().0.len(), 1);
+        assert_eq!(
+            footprints_asked(),
+            3,
+            "the slow one opened with a sample and closed with a second",
+        );
+    }
+
+    /// **A platform that counts nothing says nothing**, and a hold whose
+    /// opening sample was refused does not print the closing one on its own.
+    ///
+    /// Two different silences, and they have to read the same in the log: half
+    /// a movement printed as a whole one is the kind of number a reader would
+    /// act on.
+    #[test]
+    fn a_hold_whose_first_sample_was_refused_prints_no_counters() {
+        // Nothing queued, so the opening sample is refused; the second entry
+        // would be answered if anything asked for it.
+        queue_footprints(&[]);
+        let heart = Heartbeat::sampling(fake_footprint);
+        heart.woke_at(0);
+        heart.at_station(Station::Drain, 10);
+        heart.park_at(Park::Indefinite, 3_000);
+        let (slow, _) = heart.take_slow_holds();
+        let [hold] = slow.as_slice() else {
+            panic!("one hold ran long: {slow:?}")
+        };
+        assert_eq!(hold.paging, None);
+        assert_eq!(
+            footprints_asked(),
+            1,
+            "with no baseline there is nothing a second sample could be \
+             subtracted from, so it is not taken",
+        );
+        assert_eq!(
+            hold.line(),
+            "Folio: the window thread held control for 3000 ms on turn 0 — \
+             drain_pty 2990 ms, woken 10 ms",
+        );
+    }
+
+    /// **The baseline belongs to the hold in progress, not to the one before
+    /// it.** A run of holds each open with their own sample, so a fault taken
+    /// while the thread was parked is charged to nobody.
+    #[test]
+    fn each_hold_opens_with_its_own_baseline() {
+        queue_footprints(&[
+            // The short hold's baseline, which is the only sample it takes,
+            (100, 1024 * 1024),
+            // then the long hold's two ends.
+            (500, 2 * 1024 * 1024),
+            (700, 3 * 1024 * 1024),
+        ]);
+        let heart = Heartbeat::sampling(fake_footprint);
+        heart.woke_at(0);
+        heart.park_at(Park::Indefinite, 10);
+        assert_eq!(heart.take_slow_holds(), (Vec::new(), 0));
+        heart.woke_at(1_000);
+        heart.park_at(Park::Indefinite, 4_000);
+        let (slow, _) = heart.take_slow_holds();
+        let [hold] = slow.as_slice() else {
+            panic!("the second hold ran long: {slow:?}")
+        };
+        assert_eq!(
+            hold.paging.map(|paging| paging.faults),
+            Some(200),
+            "the 400 faults taken across the first hold and the park after it \
+             are not this hold's",
         );
     }
 }

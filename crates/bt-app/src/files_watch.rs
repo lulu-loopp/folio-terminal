@@ -103,14 +103,22 @@ impl FilesWatch {
     /// nothing in this file parses a notification: what a column should do about
     /// a folder is the window's business, and this type does not know that a
     /// column exists.
+    ///
+    /// **The proxy is borrowed here and cloned only where a watch is actually
+    /// opened**, on [`crate::git_watch::GitWatch::sync`]'s reason and with its
+    /// weight: a clone of an `EventLoopProxy` is an `Arc` bump on Windows and,
+    /// on macOS, a new run loop source added to the main run loop and a
+    /// **wake-up** of it. This is asked on every turn, so a clone taken at the
+    /// top of it would schedule the next turn and the turn after that, for ever,
+    /// over a window nobody is looking at. The clone belongs in [`subscribe`],
+    /// once per folder a subscription is opened on, and nowhere on this path.
     pub fn sync(
         &mut self,
         wanted: &BTreeSet<PathBuf>,
         proxy: &EventLoopProxy<AppEvent>,
     ) -> Vec<PathBuf> {
         let news = Arc::clone(&self.news);
-        let proxy = proxy.clone();
-        self.sync_with(wanted, move |directory| subscribe(&news, &proxy, directory))
+        self.sync_with(wanted, |directory| subscribe(&news, proxy, directory))
     }
 
     /// [`Self::sync`]'s bookkeeping, with the opening of a watch handed in.
@@ -216,6 +224,9 @@ impl FilesWatch {
 /// A free function and not a method for `git_watch::subscribe`'s reason: it is
 /// called from inside a closure `sync_with` holds while it holds `self` mutably,
 /// and what it needs is the mailbox and the proxy rather than the registry.
+///
+/// **And it is the only place in this file the proxy is cloned** — once per
+/// folder a watch is opened on, for the reason [`FilesWatch::sync`] states.
 fn subscribe(
     news: &Arc<Mutex<BTreeMap<PathBuf, Instant>>>,
     proxy: &EventLoopProxy<AppEvent>,

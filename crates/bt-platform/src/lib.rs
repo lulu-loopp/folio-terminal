@@ -3067,6 +3067,19 @@ pub fn order_monospace_families(mut families: Vec<MonospaceFamily>) -> Vec<Monos
 /// crate that can deadlock the process if its statements are reordered.
 pub mod hang;
 
+/// **What the memory manager is doing to this process** — the page-fault
+/// counter and the resident size, in one call.
+///
+/// Beside [`hang`] because it answers the other half of the same question: that
+/// module says *where* the window thread was when it stopped answering, and
+/// this one says whether the seconds it spent there were its own work or the
+/// machine paging its working set back in. It is **not** a boundary of the kind
+/// `hang` is — one kernel query about the calling process, no handle, no lock,
+/// nothing that can block — and both of its arms are in the one file for
+/// [`instance`]'s reason: the two platforms count faults differently, and that
+/// difference should be readable on one screen.
+pub mod mem;
+
 /// **Everything this product gives to the machine** — the shell, the browser,
 /// Explorer, and the helper programs it starts to ask a question.
 ///
@@ -5900,7 +5913,7 @@ mod windows_impl {
     /// `ImmGetContext` answers the same `HIMC` for any window of this thread —
     /// which is why [`cancel_composition`] cancels the composition in flight
     /// whichever of this process's windows it is handed.
-    fn owner_window() -> Result<HWND, String> {
+    pub(super) fn owner_window() -> Result<HWND, String> {
         let mut owners = CLIPBOARD_OWNERS
             .get_or_init(|| Mutex::new(Vec::new()))
             .lock()
@@ -5910,7 +5923,7 @@ mod windows_impl {
             .ok_or_else(|| "no window of this thread owns the clipboard".to_owned())
     }
 
-    fn open_clipboard_with_retry(hwnd: HWND) -> Result<(), String> {
+    pub(super) fn open_clipboard_with_retry(hwnd: HWND) -> Result<(), String> {
         retry_open_clipboard(
             || {
                 // SAFETY: `hwnd` is a live window of the calling thread — see `owner_window` — and
@@ -12498,12 +12511,23 @@ mod macos_window_backend_tests {
     /// door still does the four things the take-over *is*, and the reading is
     /// still off the buttons AppKit drew rather than off a constant.
     ///
+    /// **The fifth call is `setMovable(false)`** (T-MAC-TAB-DRAG, owner report
+    /// 2026-09-16), and it is on this list for the same reason the background
+    /// flag is: it is a sentence of the ruling that this window's header is
+    /// Folio's to route. The background flag alone leaves AppKit's own
+    /// title-bar drag standing, and on a `FullSizeContentView` window AppKit
+    /// decides that one by asking the view under the press whether it may move
+    /// the window — a view of winit's, which answers `YES`. Every drag begun in
+    /// the header was AppKit's, so a tab could be neither reordered nor torn
+    /// out: the press armed the tab and the motion moved the window.
+    ///
     /// MUTATION: drop `FullSizeContentView` and Folio's first row of tabs is
     /// pushed below a title bar that is still reserving its own height; drop
     /// `titleVisibility` and the window shows two titles; turn
     /// `MovableByWindowBackground` on and every drag anywhere in the window
-    /// moves it; answer a constant instead of `standardWindowButton` and this
-    /// names it.
+    /// moves it; drop `setMovable(false)` and every drag in the header moves it,
+    /// the ones that began on a tab included; answer a constant instead of
+    /// `standardWindowButton` and this names it.
     #[test]
     fn the_macos_title_bar_is_kept_and_emptied_rather_than_taken_away() {
         let body_of = |needle: &str| {
@@ -12520,6 +12544,7 @@ mod macos_window_backend_tests {
             "setTitlebarAppearsTransparent(true)",
             "setTitleVisibility(NSWindowTitleVisibility::Hidden)",
             "setMovableByWindowBackground(false)",
+            "setMovable(false)",
             "measure_window_chrome(",
         ] {
             assert!(
@@ -17904,4 +17929,22 @@ mod macos_player_signature_tests {
              autoreleased on this thread: {pump}"
         );
     }
+}
+
+/// Gesture-only terminal clipboard acquisition; text fields retain `clipboard_text`.
+pub mod clipboard;
+pub use clipboard::{ClipboardPayload, PictureBytes, PictureEncoding, UnsupportedKind};
+#[cfg(windows)]
+mod windows_clipboard;
+#[cfg(windows)]
+pub use windows_clipboard::clipboard_payload;
+#[cfg(target_os = "macos")]
+mod macos_clipboard_payload;
+#[cfg(target_os = "macos")]
+mod macos_file_urls;
+#[cfg(target_os = "macos")]
+pub use macos_clipboard_payload::clipboard_payload;
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn clipboard_payload() -> Result<ClipboardPayload, String> {
+    Err("terminal clipboard acquisition is unavailable on this platform".to_owned())
 }

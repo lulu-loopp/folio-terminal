@@ -1028,6 +1028,13 @@ windows = { version = "0.62.2", features = [
     # `EnumProcessModulesEx` / `GetModuleInformation` / `GetModuleBaseNameW`:
     # the module map that turns a raw return address into `folio.exe+0x…`. Built
     # before the suspend, because it takes the loader lock — see `src/hang.rs`.
+    #
+    # And `GetProcessMemoryInfo` / `PROCESS_MEMORY_COUNTERS` beside them
+    # (`src/mem.rs`): the page-fault count and resident size the slow-hold line
+    # carries, which is what separates a second this program spent from a second
+    # the memory manager spent on it. The same namespace and therefore **no
+    # change to this manifest at all** beyond these lines — which is why the
+    # feature list above is exactly what it was.
     "Win32_System_ProcessStatus",
     # The Explorer verb: `RegCreateKeyExW`, `RegSetValueExW`, `RegQueryValueExW`
     # and `RegDeleteTreeW`, all against `HKEY_CURRENT_USER`. `RegCreateKeyExW`

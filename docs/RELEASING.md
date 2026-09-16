@@ -299,7 +299,7 @@ cargo build --release
 ./scripts/release/sbom.ps1
 ./scripts/release/package.ps1 -Sign
 ./scripts/release/smoke.ps1 -Exe target/release/folio.exe -ExpectSigned `
-    -Msix target/release-package/folio-0.4.0-windows-x64.zip
+    -Msix target/release-package/folio-0.4.1-windows-x64.zip
 ```
 
 `package.ps1 -Sign` signs `folio.exe` where the build left it and `folio.msix`
@@ -469,14 +469,14 @@ written into the steps they belong to:
 # The body, which is the repo file with its first line — the banner saying what
 # the file is — and the blank line after it taken off. See **Release note
 # shape** below.
-$note = 'docs/plans/release/release-note-v0.4.0-preview.md'
+$note = 'docs/plans/release/release-note-v0.4.1-preview.md'
 $body = Join-Path ([IO.Path]::GetTempPath()) 'folio-release-body.md'
 [IO.File]::WriteAllText($body, (((Get-Content -LiteralPath $note) | Select-Object -Skip 2) -join "`n") + "`n")
 
 $assets = @(Get-ChildItem target/release-package -File | ForEach-Object { $_.FullName })
-$arguments = @('release', 'create', 'v0.4.0-preview') + $assets + @(
+$arguments = @('release', 'create', 'v0.4.1-preview') + $assets + @(
     '--draft',
-    '--title', 'Folio 0.4.0',
+    '--title', 'Folio 0.4.1',
     '--notes-file', $body)
 & gh @arguments
 ```
