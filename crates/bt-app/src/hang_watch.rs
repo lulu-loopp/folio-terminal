@@ -268,7 +268,7 @@ fn slow_hold_threshold_ms() -> u64 {
 /// Held against [`Station`] by `every_station_has_a_slot_in_the_ledger`: a
 /// further variant added without widening this would have its milliseconds
 /// charged to nobody, and the line would silently stop adding up.
-const STATION_COUNT: usize = 26;
+const STATION_COUNT: usize = 35;
 
 /// How many reports are kept. The oldest beyond this are deleted.
 ///
@@ -362,6 +362,12 @@ pub enum Station {
     /// is left against this label is a wake that named no lane: the arms that do
     /// nothing because `about_to_wait` is about to do it, and any untagged code
     /// on the way in.
+    ///
+    /// **And narrower again since T-STATION-SPLIT.** A hold *opens* at this
+    /// station, so everything the loop did before it reached its first named
+    /// call was charged here — which was the whole of `about_to_wait`'s
+    /// application prologue. That has its own name now
+    /// ([`Self::AppTurn`]), and what is left is the wake itself.
     Woken = 11,
     /// `Runtime::apply_preview_results` — a preview read landing: the head of a
     /// file, the whole of one a reader asked to edit, a picture's pixels, an
@@ -395,6 +401,15 @@ pub enum Station {
     /// here says "something a probe answered", which is as far as this ledger can
     /// usefully divide a family that costs nothing — and further splitting is a
     /// line to add on the day one of them is the answer.
+    ///
+    /// **And since T-STATION-SPLIT the label is literally true**:
+    /// `Runtime::refresh_chrome` enters this station itself and hands the
+    /// caller's back on the way out, so the rebuild is named at *every* one of
+    /// its two hundred-odd doors rather than only on the probes' road. It is
+    /// the heaviest call a keystroke or a hover can make outside a frame — the
+    /// strip, the rail, every pane head, every preview card's measured verb and
+    /// the focus column's thumbnails, all rebuilt — and until then it borrowed
+    /// whichever name happened to be standing when it was reached.
     Chrome = 22,
     /// `Runtime::drive_web_page` — the turn a hosted page's callbacks are read
     /// on. Its own station rather than [`Self::WebPage`]'s, which is
@@ -419,6 +434,116 @@ pub enum Station {
     Settings = 24,
     /// Synchronous clipboard acquisition may wait on another process's delayed renderer.
     ClipboardRead = 25,
+    /// `Runtime::settle_deferred_dpi` and `Runtime::settle_dpi_rectangle` — the
+    /// two halves of a display change, taken at the top of a turn.
+    ///
+    /// A no-op on almost every turn and expensive on the ones it is not: the
+    /// window's font is re-measured at the new scale, every pane is re-solved
+    /// and the shells are told their new grids. Its own station because it sits
+    /// between [`Self::Wheel`] and [`Self::Drain`], where a hold used to be
+    /// charged to a wheel nobody had touched.
+    DpiSettle = 26,
+    /// `Runtime::apply_math_context_menu_result`,
+    /// `Runtime::apply_folder_pick_result` and
+    /// `Runtime::apply_image_pick_result` — what a turn does with the answer a
+    /// modal the platform owns left behind.
+    ///
+    /// **One station for three arms**, on [`Self::Chrome`]'s reasoning: all
+    /// three are a no-op unless a dialog was up, all three end in a path being
+    /// opened or a formula being written, and a reader who sees time here has
+    /// the one fact they need — a picker had just closed.
+    Pickers = 27,
+    /// `Runtime::settle_pane_notices` and `Runtime::settle_preview_rails` — the
+    /// two rows a turn can add to or take from a pane.
+    ///
+    /// Grouped because they are the same kind of change and cost the same kind
+    /// of work: a row appearing or going is a pane's height changing, which
+    /// re-solves the seat and re-measures the grid behind it.
+    PaneRows = 28,
+    /// Every "has anything changed out there" poll a turn makes:
+    /// `advance_scheme_watch`, `advance_storage_watch`, `advance_preview_watch`,
+    /// `advance_files_watch` and `advance_git_watch`.
+    ///
+    /// **One station for five polls**, which is [`Self::Chrome`]'s judgement
+    /// again and for a sharper reason: what they have in common is the thing
+    /// that can make one of them slow, which is a disk that has stopped
+    /// answering. A hold here says "a watch was asking the file system", and
+    /// which watch it was is the stack's question rather than this label's.
+    ///
+    /// They are not contiguous in `turn` — two of them stand on the application
+    /// clock and three do not — so this station is entered more than once on a
+    /// turn that runs them all, and the ledger adds the pieces up.
+    Watches = 29,
+    /// `Runtime::finish_synchronized_update_if_due` — the end of a DEC 2026
+    /// block, where a screenful of output a program asked to have held back is
+    /// handed to the grid in one go.
+    ///
+    /// Its own station because it is the one call in the clock run that can be
+    /// handed an unbounded amount of text: everything else on that lane is a
+    /// deadline comparison, and this one is a feed.
+    SyncUpdate = 30,
+    /// **Every clock a window keeps**, run in order once a turn: the first-run
+    /// and PSReadLine invitations, the cursor and rename blinks, the tab press,
+    /// the strip animation, the composition owner and the IME caret, the resize
+    /// and preview-scale settlements, the live-math and hover clocks, the four
+    /// menus, the drag spring and its autoscroll, the maths toggle and its
+    /// tools, the layout peek, the tooltip, the key and card hints, the toasts,
+    /// the command flash and rails, the terminal thumbs, the file peek, the
+    /// float, the foot reveal, the page feet and the preview notices.
+    ///
+    /// **Born to take forty-eight calls off the autosave's name**
+    /// (T-STATION-SPLIT). `SessionStore::flush_if_due` names itself
+    /// ([`Self::Autosave`]) and was the last station entered before this whole
+    /// run, so a hold anywhere in it was reported as the autosave — a lane that
+    /// writes one small file and had nothing to do with any of it.
+    ///
+    /// One station for the run rather than one per clock, because what they
+    /// have in common is exactly what a reader needs: each is an `if due` over a
+    /// deadline this window set, each ends in the chrome being rebuilt, and none
+    /// of them waits on anything outside this process. A hold here is this
+    /// window drawing itself, and the stack says which clock.
+    Clocks = 31,
+    /// The arithmetic at the foot of a turn that decides when the loop should be
+    /// woken again — every clock's deadline read and the earliest of them taken.
+    ///
+    /// Its own station so that [`Self::PtyResize`] names the synchronous
+    /// `ResizePseudoConsole` round trip it was built to name, and nothing else.
+    /// Nothing here can block; time against it is a turn that is doing
+    /// arithmetic over a great many windows, and that is worth being able to
+    /// see rather than to assume.
+    Deadlines = 32,
+    /// `FolioApp::about_to_wait_inner`'s own prologue — everything one turn owes
+    /// the *application* before any window takes its turn: the window directory,
+    /// the ring, an application change, a restore answer, a drag handed over, a
+    /// window asked for or launched, the delegate's events, the summoned
+    /// terminal, the quit, the menu bar, the drag broker, and the reaping of
+    /// windows that have left.
+    ///
+    /// **It was the last thing left under [`Self::Woken`]** (T-STATION-SPLIT).
+    /// A hold opens at the wake and the station is stamped `Woken` there, so
+    /// until this variant every one of those calls was reported as a wake that
+    /// named no lane — including the two that are by far the most expensive
+    /// things this loop can do on a turn: **opening** a window, which builds a
+    /// surface and a swapchain, and **reaping** one, which shuts its shells and
+    /// waits for its pages.
+    AppTurn = 33,
+    /// `search::scan_history` and `search::scan_volatile` — the capsule's own
+    /// regular expression run over this pane's whole transcript.
+    ///
+    /// **The one piece of work on the typing path that is O(the document)**
+    /// (T-STATION-SPLIT). A terminal's find is live by design: every keystroke
+    /// in the box bumps the search revision, which is what makes the cached
+    /// history hits unusable, so every keystroke re-runs the pattern over every
+    /// frozen line — a hundred thousand of them at the default scrollback. It is
+    /// the right answer to the right question and it is not a fault; what it was
+    /// missing was a name, and without one it was reported as whatever call had
+    /// last been tagged, which on the owner's recording of 2026-09-15 was
+    /// `flush_wheel` while the hand was typing and the wheel was untouched.
+    ///
+    /// Entered and left around the two scans themselves rather than around
+    /// `refresh_search`, which leaves through eight doors: a station that is put
+    /// back on only one of them would be a worse lie than the one this replaces.
+    SearchScan = 34,
 }
 
 impl Station {
@@ -452,6 +577,15 @@ impl Station {
             Self::WebSpoke => "drive_web_page",
             Self::Settings => "settings_layout",
             Self::ClipboardRead => "clipboard read",
+            Self::DpiSettle => "settle_dpi",
+            Self::Pickers => "apply_pick_results",
+            Self::PaneRows => "settle_pane_rows",
+            Self::Watches => "watches",
+            Self::SyncUpdate => "finish_synchronized_update",
+            Self::Clocks => "window clocks",
+            Self::Deadlines => "wake deadlines",
+            Self::AppTurn => "application turn",
+            Self::SearchScan => "search scan",
         }
     }
 
@@ -498,6 +632,15 @@ impl Station {
             23 => Self::WebSpoke,
             24 => Self::Settings,
             25 => Self::ClipboardRead,
+            26 => Self::DpiSettle,
+            27 => Self::Pickers,
+            28 => Self::PaneRows,
+            29 => Self::Watches,
+            30 => Self::SyncUpdate,
+            31 => Self::Clocks,
+            32 => Self::Deadlines,
+            33 => Self::AppTurn,
+            34 => Self::SearchScan,
             _ => Self::Starting,
         }
     }
@@ -3094,6 +3237,25 @@ mod tests {
             Station::Starting,
             "a station past the ledger's width would be charged to `starting`",
         );
+    }
+
+    /// **No two stations print the same word** (T-STATION-SPLIT).
+    ///
+    /// The line is read as a list of lanes and their milliseconds, so two lanes
+    /// answering to one word would be a reader adding up two numbers that are
+    /// about different work — and the slice that split one span into seven is
+    /// exactly the kind of change that can reach for a word already taken.
+    #[test]
+    fn every_station_prints_its_own_word() {
+        let mut words: Vec<&'static str> = Vec::new();
+        for slot in 0..STATION_COUNT {
+            let station = Station::from_byte(u8::try_from(slot).expect("a slot is one byte"));
+            words.push(station.label());
+        }
+        let spoken = words.len();
+        words.sort_unstable();
+        words.dedup();
+        assert_eq!(words.len(), spoken, "two stations print the same word");
     }
 
     /// A hold whose stations all rounded to nothing still states its length.

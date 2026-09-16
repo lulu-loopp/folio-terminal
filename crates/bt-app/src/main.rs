@@ -39300,6 +39300,20 @@ impl Runtime<'_> {
     /// Rebuild the chrome quads and labels from the current solve. Returns
     /// whether anything visible changed.
     fn refresh_chrome(&mut self) -> bool {
+        // **The one heavy call in this window that borrowed whichever name
+        // happened to be standing** (T-STATION-SPLIT). It is reached from two
+        // hundred-odd doors — a keystroke, a hover, a press, a probe's answer,
+        // every frame that changes the furniture — and it rebuilds the whole of
+        // the chrome: the strip, the rail, every pane head, every preview card's
+        // measured verb, and the focus column's thumbnails. None of those doors
+        // stamped a station, so a hold in here was reported as the last call
+        // before it, which on the owner's typing recording was `flush_wheel`.
+        //
+        // `enter` and not `at`, on that function's own rule: this stands inside
+        // somebody else's function every time, so the caller's name is handed
+        // back at the end rather than kept. There is no early return in this
+        // body — the bracket is exact.
+        let leaving_station = hang_watch::enter(hang_watch::Station::Chrome);
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let (width, _) = self.window.renderer.presentation_geometry().swapchain_size;
         // **The window's own drag handler is told what the bar is wearing now**
@@ -40316,6 +40330,7 @@ impl Runtime<'_> {
         // it, so every path that already knew to repaint on a resize, a DPI
         // change or a theme switch carries the dialog with it for free.
         let overlay_changed = self.refresh_overlay();
+        hang_watch::at(leaving_station);
         chrome_changed || overlay_changed
     }
 
@@ -42307,7 +42322,16 @@ impl Runtime<'_> {
                 cache.seat == seat && cache.revision == revision && cache.history == history_key
             })
             .map(|cache| cache.history_hits.clone());
-        let history_hits = reusable.unwrap_or_else(|| search::scan_history(&compiled, transcript));
+        // **The pattern over every frozen line, under its own name**
+        // (T-STATION-SPLIT) — see [`hang_watch::Station::SearchScan`]. Bracketed
+        // around the scan itself and not around this function, which leaves
+        // through eight doors; there is no early return between these two lines.
+        let history_hits = reusable.unwrap_or_else(|| {
+            let leaving = hang_watch::enter(hang_watch::Station::SearchScan);
+            let found = search::scan_history(&compiled, transcript);
+            hang_watch::at(leaving);
+            found
+        });
         // The two volatile planes, every time: fifty rows of grid and whatever has scrolled out but
         // not frozen. Their cost is a property of the screen, so re-scanning them unconditionally
         // is what buys "the word you are typing is findable the instant it is echoed".
@@ -42318,8 +42342,10 @@ impl Runtime<'_> {
             .enumerate()
             .map(|(row, captured)| search::live_row(row as u32, &captured.cells))
             .collect();
+        let leaving_scan = hang_watch::enter(hang_watch::Station::SearchScan);
         let volatile_hits =
             search::scan_volatile(&compiled, transcript, &live, leaf.session.grid_generation());
+        hang_watch::at(leaving_scan);
         let unchanged = self.window.search_scan.as_ref().is_some_and(|cache| {
             cache.seat == seat
                 && cache.revision == revision
@@ -95167,13 +95193,25 @@ impl Runtime<'_> {
     /// `window_event` for every event that is not itself a notch, and the top of
     /// `about_to_wait`. Free — one `Option` read — for the overwhelming majority
     /// of turns, in which nobody touched the wheel.
+    ///
+    /// **The station is entered only when there is a notch to spend, and it is
+    /// given back on the way out** (T-STATION-SPLIT). It used to be stamped
+    /// unconditionally and never restored, and this door stands at the top of
+    /// `window_event` — so every keystroke, every press and every resize ran
+    /// under the name of a wheel nobody had turned, and the owner's own
+    /// recording says so out loud: `held control for 1261 ms — flush_wheel
+    /// 1104 ms` on a turn where the hand was typing. `enter`'s own rule
+    /// ([`hang_watch::enter`]): a station that stands inside another's function
+    /// hands the enclosing one back rather than keeping the rest of it.
     fn flush_wheel(&mut self) -> Result<()> {
-        hang_watch::at(hang_watch::Station::Wheel);
         let Some(burst) = self.window.wheel_burst.take() else {
             return Ok(());
         };
+        let leaving = hang_watch::enter(hang_watch::Station::Wheel);
         self.window.wheel_routings = self.window.wheel_routings.saturating_add(1);
-        self.mouse_wheel(burst.delta())
+        let spent = self.mouse_wheel(burst.delta());
+        hang_watch::at(leaving);
+        spent
     }
 
     fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {
@@ -100474,6 +100512,12 @@ impl Runtime<'_> {
         // publishes a frame would publish that one. The hand has let go by the
         // time this returns true, so nothing here is done to a window that is
         // still moving.
+        //
+        // **And it says its own name from here** (T-STATION-SPLIT): the stretch
+        // between the wheel's door and the drain used to be charged to
+        // `flush_wheel`, which is the one call in it that had nothing to do with
+        // a display move.
+        hang_watch::at(hang_watch::Station::DpiSettle);
         self.settle_deferred_dpi()?;
         // **And directly after that one**, for the half of a DPI change that is
         // owed to a rectangle rather than to a hand (T-CARD-ANCHOR-DPI). Every
@@ -100482,6 +100526,9 @@ impl Runtime<'_> {
         // hand is the one the window is keeping. It is a no-op on every road
         // where a `Resized` did arrive, which is most of them.
         self.settle_dpi_rectangle()?;
+        // The three answers a platform modal can have left behind, under their
+        // own name (T-STATION-SPLIT) — see [`hang_watch::Station::Pickers`].
+        hang_watch::at(hang_watch::Station::Pickers);
         self.apply_math_context_menu_result();
         self.apply_folder_pick_result()?;
         self.apply_image_pick_result()?;
@@ -100491,6 +100538,11 @@ impl Runtime<'_> {
         // time, and whether an OSC 133 has landed. Polled here rather than
         // pushed from the probe's thread for the reason the invitation below is:
         // this changes a pane's height, and the panes are this thread's.
+        //
+        // **The drain's name stops here** (T-STATION-SPLIT). Everything from
+        // this line to the page below used to be charged to `drain_pty`, which
+        // is the one call in the run that is about a shell's output.
+        hang_watch::at(hang_watch::Station::PaneRows);
         self.settle_pane_notices()?;
         // **And the row under a preview head, on the same terms** (user ruling
         // 2026-08-24). It is polled beside the notice strip because it is the
@@ -100505,12 +100557,19 @@ impl Runtime<'_> {
         // **The first-run card is asked first**, because it is the one surface
         // that can be owed on a launch where nothing has happened yet, and
         // because its own gate closes the moment it goes up.
+        //
+        // **The clock run begins here** — see [`hang_watch::Station::Clocks`].
+        hang_watch::at(hang_watch::Station::Clocks);
         self.raise_first_run_if_due()?;
         self.raise_psreadline_invite_if_due()?;
         self.advance_cursor_blink_if_due(now)?;
         if application_clocks {
+            // A poll of the world outside this process, put back on the clock
+            // run's name the moment it returns (T-STATION-SPLIT).
+            let leaving = hang_watch::enter(hang_watch::Station::Watches);
             self.advance_scheme_watch(now)?;
             self.advance_storage_watch(now)?;
+            hang_watch::at(leaving);
         }
         self.advance_rename_blink_if_due(now)?;
         // The preview seats' own watch (W2 slice 5). This window's and not the
@@ -100518,6 +100577,7 @@ impl Runtime<'_> {
         // two above because it is the same shape: a clock that asks for a
         // wake-up only while it is holding news, over subscriptions that are
         // brought level with what the seats are showing on the same turn.
+        hang_watch::at(hang_watch::Station::Watches);
         self.advance_preview_watch(now)?;
         // And the file trees', beside it and on the same terms: this window's
         // and not the application's, because which folders are on the glass is a
@@ -100531,8 +100591,12 @@ impl Runtime<'_> {
         // Ahead of the strip's own animation tick: paying the press's promise
         // activates a tab, and the strip that is redrawn afterwards should be
         // the one the switch produced.
+        hang_watch::at(hang_watch::Station::Clocks);
         self.advance_tab_press_if_due(now)?;
         self.advance_strip_animation(now)?;
+        // A screenful of held-back output arriving at once, under its own name
+        // rather than the web page's — see [`hang_watch::Station::SyncUpdate`].
+        hang_watch::at(hang_watch::Station::SyncUpdate);
         self.finish_synchronized_update_if_due(now)?;
         // The watcher's own clock (R31's D), beside the rest of this window's:
         // it asks for a wake-up only while it is holding news, and the
@@ -100545,7 +100609,12 @@ impl Runtime<'_> {
         // above, and the news it produces reaches the pages through the caches
         // those pages own.
         if application_clocks {
+            hang_watch::at(hang_watch::Station::Watches);
             self.advance_git_watch(now)?;
+            // `flush_if_due` stamps [`hang_watch::Station::Autosave`] itself,
+            // and since T-STATION-SPLIT that name covers the file it writes and
+            // nothing else: the clock run below says its own name on the very
+            // next line.
             self.app.session_store.flush_if_due(now);
         }
         // **The one rule, in the one place it can be kept.** Whichever rung holds
@@ -100562,6 +100631,12 @@ impl Runtime<'_> {
         // here, on the identical argument — every way the keyboard can move has
         // already happened by the time this line runs, so nothing has to
         // enumerate them.
+        //
+        // **And the run this line opens says its own name** (T-STATION-SPLIT).
+        // Every clock from here to the pane resize below used to be charged to
+        // `session flush_if_due`, the last station entered above — a lane that
+        // writes one small file and had nothing to do with any of them.
+        hang_watch::at(hang_watch::Station::Clocks);
         self.settle_composition_owner()?;
         self.offer_ime_caret(None);
         self.flush_ime_cursor_area(now);
@@ -100681,6 +100756,10 @@ impl Runtime<'_> {
         // Service the PTY gate after every other due task that can mutate session state, then carry
         // the deadline derived from that exact sample into the control-flow decision below.
         let pty_resize_deadline = self.flush_pending_pty_resize(now)?;
+        // **And the round trip's name stops there** (T-STATION-SPLIT): the
+        // deadline arithmetic below is this window reading its own clocks, not
+        // conhost answering.
+        hang_watch::at(hang_watch::Station::Deadlines);
         let startup_deadline =
             startup_poll_delay(self.window.first_text_presented).map(|delay| now + delay);
         // Every leaf, not every tab's focused leaf: an unfocused pane runs its own resize
@@ -102564,6 +102643,146 @@ mod recent_folder_door_tests {
                 "{signature} takes its folder from a shell and not from a hand"
             );
         }
+    }
+}
+
+/// **A hold's stations name the work they cover** (T-STATION-SPLIT).
+///
+/// The hang ledger charges the station the thread was *last in*, so a station's
+/// bill is everything between its own line and the next one — and until this
+/// slice `turn` entered six stations across sixty-odd calls. The owner's
+/// recording of 2026-09-15 is what that costs a reader: `held control for
+/// 1261 ms — flush_wheel 1104 ms` on a turn where the hand was typing and the
+/// wheel had not been touched, because `flush_wheel` stamped a station
+/// unconditionally at the top of `window_event` and never gave it back.
+///
+/// What a pin can hold here is not a duration — it is **which line comes before
+/// which**, which is exactly the property that decays when somebody adds a call
+/// in the middle of the run. So this reads the file as text, for
+/// [`mouse_trace_station_tests`]' reason exactly, and asserts that every station
+/// `turn` enters stands where the work it names begins.
+///
+/// Two halves. The first is the order, read off the source. The second is the
+/// one rule that makes the order mean anything: a station that stands inside
+/// somebody else's function hands the caller's back on the way out, which is
+/// `hang_watch::enter`'s own contract — a `flush_wheel` or a `refresh_chrome`
+/// that stamped and walked away is the defect this whole module is about.
+#[cfg(test)]
+mod hold_station_tests {
+    /// This file, read as text.
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The text of one method, from its signature to the next method's —
+    /// [`super::mouse_trace_station_tests`]' own reader.
+    fn body(signature: &str) -> &'static str {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        let end = rest.find("\n    fn ").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// Where `needle` first stands in `text`.
+    ///
+    /// The first and not the only one: two stations are entered more than once a
+    /// turn — the clock run is interrupted by the web page and the autosave, and
+    /// the watches are not contiguous — and the head of each run is what the
+    /// order below is about.
+    fn first_at(text: &str, needle: &str) -> usize {
+        text.find(needle)
+            .unwrap_or_else(|| panic!("`{needle}` is not in this function any more"))
+    }
+
+    /// **Each station stands at the head of the run it names.**
+    ///
+    /// The pairs are read in the order a turn runs them: the station's own line,
+    /// and the first call it is claiming. A call that moves above its station, or
+    /// a station that drifts below the work it is for, is a line in the report
+    /// that names the wrong lane — silently, which is the whole problem.
+    #[test]
+    fn a_turn_enters_its_stations_where_the_work_begins() {
+        let turning = body("    fn turn(&mut self, now: Instant, application_clocks: bool)");
+        // (the station, the first call it claims) — in the order `turn` runs them.
+        let run = [
+            ("Station::DpiSettle", "self.settle_deferred_dpi()?;"),
+            ("Station::Pickers", "self.apply_math_context_menu_result();"),
+            ("Station::PaneRows", "self.settle_pane_notices()?;"),
+            ("Station::Clocks", "self.raise_first_run_if_due()?;"),
+            ("Station::SyncUpdate", "self.finish_synchronized_update_if_due(now)?;"),
+            ("Station::Deadlines", "let startup_deadline ="),
+        ];
+        let mut previous = 0;
+        for (station, first_call) in run {
+            let at = first_at(turning, station);
+            let call = first_at(turning, first_call);
+            assert!(
+                at < call,
+                "{station} stands after the work it names, so `{first_call}` is \
+                 charged to whatever came before it"
+            );
+            assert!(at > previous, "{station} is out of the turn's own order");
+            previous = at;
+        }
+        // The drain names itself from inside, and still sits between the pickers
+        // above it and the rows below.
+        let drain = first_at(turning, "self.drain_pty()?;");
+        assert!(
+            drain > first_at(turning, "Station::Pickers")
+                && drain < first_at(turning, "Station::PaneRows"),
+            "the drain has moved out of the run the two stations beside it bracket"
+        );
+        // Neither of the two interrupted runs has lost a piece: the watches are
+        // three separate polls and the clock run is broken twice, by the page and
+        // by the autosave, each of which names itself. Counted with the closing
+        // bracket of the call, so a doc link in a comment beside one is not
+        // mistaken for a station being entered.
+        assert_eq!(
+            turning.matches("hang_watch::Station::Watches)").count(),
+            3,
+            "a poll of the world outside this process is standing under somebody else's name"
+        );
+        assert_eq!(
+            turning.matches("hang_watch::Station::Clocks)").count(),
+            3,
+            "a clock is standing under the name of the call that interrupted the run"
+        );
+    }
+
+    /// **A station inside somebody else's function gives the name back.**
+    ///
+    /// `enter` answers the station being left precisely so the caller can put it
+    /// back; a door that calls `enter` and never calls `at` keeps the rest of its
+    /// caller's function under its own name, which is the defect this slice
+    /// exists to remove — `flush_wheel` did exactly that at the top of
+    /// `window_event`, and every keystroke paid for it.
+    #[test]
+    fn a_scoped_station_hands_the_callers_back() {
+        for signature in [
+            "    fn flush_wheel(&mut self) -> Result<()> {",
+            "    fn refresh_chrome(&mut self) -> bool {",
+            "    fn refresh_search(&mut self, forced: bool) -> Result<()> {",
+        ] {
+            let text = body(signature);
+            let entered = text.matches("hang_watch::enter(").count();
+            assert!(entered > 0, "{signature} no longer names its own work");
+            assert_eq!(
+                text.matches("hang_watch::at(").count(),
+                entered,
+                "{signature} enters a station it does not hand back:\n{text}"
+            );
+        }
+        // And the one door that must *not* be scoped: `window_event`'s own
+        // station is the event, and the handler under it is what it names.
+        //
+        // Spelled in two pieces because this pin stands *above* the door it
+        // reads, and a whole signature written here would be the first match in
+        // the file — the reader takes the first, so it would read this line.
+        let event = body(&["    fn window", "_event("].concat());
+        assert!(
+            event.contains("hang_watch::at(hang_watch::Station::Event);"),
+            "the event's own name has left the door it is about"
+        );
     }
 }
 
@@ -110479,6 +110698,13 @@ impl FolioApp {
         if self.app.is_none() {
             return;
         }
+        // **What one turn owes the application, under its own name**
+        // (T-STATION-SPLIT). A hold opens at the wake with the station stamped
+        // `woken`, and until this line nothing between there and the first
+        // window's own turn ever said anything else — so opening a window,
+        // reaping one, or rebuilding the menu bar was reported as a wake that
+        // named no lane. See [`hang_watch::Station::AppTurn`].
+        hang_watch::at(hang_watch::Station::AppTurn);
         // **Whether a second launch may still be promised anything** (§7.59, review C-2
         // 2026-09-11), mirrored into the listener thread's own flag once a turn and **above the
         // retirement arm's early return**, which is the whole reason it is here: that arm is the
