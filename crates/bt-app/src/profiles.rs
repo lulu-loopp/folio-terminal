@@ -30,6 +30,7 @@
 //!   came from — and the answer it gets wrong is silent.
 
 use std::{
+    collections::BTreeMap,
     ffi::{OsStr, OsString},
     path::{Component, Path, PathBuf, Prefix},
     sync::{
@@ -2002,7 +2003,7 @@ impl ProfileTable {
             .into_iter()
             .filter(|index| {
                 self.profiles.get(*index).is_none_or(|profile| {
-                    profile.origin != Origin::Builtin || programs.is_available(*index)
+                    profile.origin != Origin::Builtin || programs.is_available(&profile.id)
                 })
             })
             .collect()
@@ -3455,6 +3456,25 @@ pub fn row(index: usize) -> Option<Profile> {
     with_table(|table| table.get(index).cloned())
 }
 
+/// **The same row asked for by its stable id** — what a seat and a seed hold, and
+/// therefore what the spawn path resolves through (T-PROFILE-TABLE-MOVE).
+///
+/// [`row`]'s twin and the reason the spawn no longer has an out-of-bounds case to
+/// assert about: a position stops naming a profile the moment Settings ▸ Profiles
+/// moves the table, and every window in this process shares that table, so a
+/// window holding a position was holding an answer another window could change.
+/// An id names the same row wherever it sits and `None` only when the row is
+/// genuinely gone, which is a fact the caller can degrade on rather than a
+/// disagreement between two authorities.
+#[must_use]
+pub fn row_of(id: &str) -> Option<Profile> {
+    with_table(|table| {
+        table
+            .position_of_id(id)
+            .and_then(|index| table.get(index).cloned())
+    })
+}
+
 /// The same question as the editor's picker holds it: the rule, or the answer.
 #[must_use]
 pub fn integration_choice(index: usize) -> IntegrationChoice {
@@ -3596,14 +3616,14 @@ pub fn page_lines(programs: &ProfilePrograms, default: usize, automatic: bool) -
             .iter()
             .enumerate()
             .map(|(index, profile)| {
-                let available = programs.is_available(index);
+                let available = programs.is_available(&profile.id);
                 let is_agent = agent_command(profile).is_some();
                 ProfileLine {
                     index,
                     mark: profile.mark,
                     title: title(index),
                     command: match (available, is_agent) {
-                        (true, _) => command_line(profile, programs.program(index)),
+                        (true, _) => command_line(profile, programs.program(&profile.id)),
                         // An agent this window did not find says **where it
                         // looked**, because the answer to "but I use it every
                         // day" is very often "inside WSL" and a row that only
@@ -4062,7 +4082,13 @@ fn shipped_order_for(platform: SeedPlatform) -> &'static [&'static str] {
 /// PowerShell 7 opens with it the next morning, and one that loses it stops.
 #[must_use]
 pub fn default_profile(stored: &str, programs: &ProfilePrograms) -> usize {
-    with_table(|table| default_profile_in(table, stored, |index| programs.is_available(index)))
+    with_table(|table| {
+        default_profile_in(table, stored, |index| {
+            table
+                .get(index)
+                .is_some_and(|row| programs.is_available(&row.id))
+        })
+    })
 }
 
 /// Whether the answer above came from the machine rather than from the reader —
@@ -4076,7 +4102,12 @@ pub fn default_profile(stored: &str, programs: &ProfilePrograms) -> usize {
 #[must_use]
 pub fn default_profile_is_automatic(stored: &str, programs: &ProfilePrograms) -> bool {
     with_table(|table| {
-        chosen_profile_in(table, stored, |index| programs.is_available(index)).is_none()
+        chosen_profile_in(table, stored, |index| {
+            table
+                .get(index)
+                .is_some_and(|row| programs.is_available(&row.id))
+        })
+        .is_none()
     })
 }
 
@@ -4747,9 +4778,20 @@ pub fn find_git(environment: &dyn ShellEnvironment) -> Option<PathBuf> {
 /// otherwise every test of this module would be a test of what happens to be
 /// installed on the machine running it, and "Git Bash is greyed" would pass on
 /// the build server and fail on the developer's laptop for the same code.
+///
+/// **Keyed by [`Profile::id`] and never by row position** (T-PROFILE-TABLE-MOVE).
+/// A snapshot is a value that outlives the frame it was taken on, and the table
+/// under it has a settings page with `Move up` and `Move down` on every row: a
+/// vector indexed by position answers "is row 3 startable" with whatever row was
+/// third when the probe ran, so a window holding one of these read a reorder as
+/// every pane changing shell. An id is the one thing about a row that a move
+/// does not touch, so a snapshot keyed on it cannot observe a move at all — a
+/// row that was startable stays startable wherever it now sits, and a row that
+/// is not in the snapshot is a row this window has not probed yet, which is the
+/// same answer as "not on this machine" and degrades the same way.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProfilePrograms {
-    resolved: Vec<Option<OsString>>,
+    resolved: BTreeMap<String, Option<OsString>>,
 }
 
 impl ProfilePrograms {
@@ -4768,35 +4810,68 @@ impl ProfilePrograms {
     #[must_use]
     pub fn probe_rows(rows: &[Profile], environment: &dyn ShellEnvironment) -> Self {
         Self {
-            resolved: {
-                rows.iter()
-                    .map(|profile| match &profile.program {
-                        // A real `None` on a machine with no PowerShell 7, which
-                        // is what greys the row rather than starting 5.1 under
-                        // 7's name.
-                        ProgramSource::PowerShellSeven => resolve_powershell_seven(environment),
-                        ProgramSource::FirstOf(candidates) => candidates
-                            .iter()
-                            .filter_map(|candidate| Self::candidate_path(candidate, environment))
-                            .find(|candidate| environment.is_file(candidate))
-                            .map(PathBuf::into_os_string),
-                        // A path the user named is a path or it is not: there is
-                        // no list to walk, and a program that is not there greys
-                        // the row exactly as a missing built-in does.
-                        ProgramSource::Path(path) => environment
-                            .is_file(path)
-                            .then(|| path.clone().into_os_string()),
-                    })
-                    .collect()
-            },
+            resolved: rows
+                .iter()
+                .map(|profile| (profile.id.clone(), Self::resolve_row(profile, environment)))
+                .collect(),
         }
     }
 
-    /// The program this profile would start, or `None` when this machine has
-    /// nowhere to start it from.
+    /// Where one row's program is on this machine, or `None` when it is nowhere.
+    ///
+    /// Lifted out of [`Self::probe_rows`] when the probe became a map keyed by id:
+    /// the pair being built is the interesting line of that function now, and a
+    /// three-armed match nested inside the closure that builds it buried it.
+    fn resolve_row(profile: &Profile, environment: &dyn ShellEnvironment) -> Option<OsString> {
+        match &profile.program {
+            // A real `None` on a machine with no PowerShell 7, which is what
+            // greys the row rather than starting 5.1 under 7's name.
+            ProgramSource::PowerShellSeven => resolve_powershell_seven(environment),
+            ProgramSource::FirstOf(candidates) => candidates
+                .iter()
+                .filter_map(|candidate| Self::candidate_path(candidate, environment))
+                .find(|candidate| environment.is_file(candidate))
+                .map(PathBuf::into_os_string),
+            // A path the user named is a path or it is not: there is no list to
+            // walk, and a program that is not there greys the row exactly as a
+            // missing built-in does.
+            ProgramSource::Path(path) => environment
+                .is_file(path)
+                .then(|| path.clone().into_os_string()),
+        }
+    }
+
+    /// The program the profile with this **id** would start, or `None` when this
+    /// machine has nowhere to start it from — and equally when this snapshot was
+    /// taken before the row existed.
+    ///
+    /// The two are one answer on purpose: a caller that cannot start a program
+    /// and a caller that has never looked for one both owe the reader the same
+    /// degradation, and a third state here would be a third arm at every call
+    /// site for a difference nobody can act on.
     #[must_use]
-    pub fn program(&self, profile: usize) -> Option<&OsStr> {
-        self.resolved.get(profile)?.as_deref()
+    pub fn program(&self, id: &str) -> Option<&OsStr> {
+        self.resolved.get(id)?.as_deref()
+    }
+
+    /// The same answer about **the row standing at one position of the live
+    /// table** — the form the pickers and the Profiles page ask in.
+    ///
+    /// Those callers are drawing the table as it is right now, so a position is
+    /// what they hold and the id is one lookup away; taking the lookup here is
+    /// what keeps the position from being carried any further than the frame it
+    /// was read on. A position the table does not hold resolves to no id and so
+    /// to no program, which is the same degradation as every other miss.
+    #[must_use]
+    pub fn row_program(&self, index: usize) -> Option<&OsStr> {
+        self.program(&id(index))
+    }
+
+    /// [`Self::is_available`] asked about a live-table position — see
+    /// [`Self::row_program`].
+    #[must_use]
+    pub fn row_is_available(&self, index: usize) -> bool {
+        self.row_program(index).is_some()
     }
 
     /// **A machine on which exactly these profiles resolve**, for tests about
@@ -4813,11 +4888,17 @@ impl ProfilePrograms {
     pub(crate) fn with_only(available: &[usize]) -> Self {
         Self {
             resolved: with_table(|table| {
-                (0..table.profiles.len())
-                    .map(|index| {
-                        available
-                            .contains(&index)
-                            .then(|| OsString::from(format!("C:\\fake\\{index}.exe")))
+                table
+                    .profiles
+                    .iter()
+                    .enumerate()
+                    .map(|(index, profile)| {
+                        (
+                            profile.id.clone(),
+                            available
+                                .contains(&index)
+                                .then(|| OsString::from(format!("C:\\fake\\{index}.exe"))),
+                        )
                     })
                     .collect()
             }),
@@ -4876,8 +4957,8 @@ impl ProfilePrograms {
     /// and note that this answer is still what those menus grey a row of the
     /// reader's *own* with — the rule drops built-in rows only.
     #[must_use]
-    pub fn is_available(&self, profile: usize) -> bool {
-        self.program(profile).is_some()
+    pub fn is_available(&self, id: &str) -> bool {
+        self.program(id).is_some()
     }
 }
 
@@ -5078,7 +5159,7 @@ impl ProfileMenuLayout {
             .profiles
             .iter()
             .zip(&self.items)
-            .filter(|(index, _)| !programs.is_available(**index))
+            .filter(|(index, _)| !programs.row_is_available(**index))
             .map(|(index, rect)| (MenuRow::Profile(*index), *rect, unavailable_tip(*index)));
         let recents = self
             .recent
@@ -5419,7 +5500,7 @@ pub fn hit(
             let index = layout.profiles[row];
             return Some(
                 programs
-                    .is_available(index)
+                    .row_is_available(index)
                     .then_some(MenuRow::Profile(index)),
             );
         }
@@ -5465,7 +5546,11 @@ pub fn hit(
 /// has a file (§7.1.6h).
 fn recent_is_available(seed: &Seed, programs: &ProfilePrograms) -> bool {
     match seed {
-        Seed::Term { profile_id, .. } => programs.is_available(index_of_id(profile_id)),
+        // `index_of_id` and then the row it lands on: a Recent row naming an
+        // id this table no longer holds revives as the fallback profile, so
+        // what the grey has to answer for is the profile that would really
+        // start.
+        Seed::Term { profile_id, .. } => programs.row_is_available(index_of_id(profile_id)),
         Seed::Files { .. } | Seed::Preview { .. } => true,
         // **A window is offered while any one of its tabs can still be opened**
         // (multiwindow slice D). Greying it because one shell of six has gone
@@ -5546,7 +5631,7 @@ pub fn build(
 
     for (row, item) in layout.items.iter().enumerate() {
         let index = layout.profiles[row];
-        let available = programs.is_available(index);
+        let available = programs.row_is_available(index);
         push_row(
             &Row {
                 rect: *item,
@@ -11769,7 +11854,7 @@ fn push_submenu(
                         // whose program this machine does not have cannot start
                         // a shell, and a row that lights under the pointer and
                         // then does nothing is worse than one that says so.
-                        available: programs.is_available(of),
+                        available: programs.row_is_available(of),
                         pin: None,
                     },
                     scale,
@@ -15359,7 +15444,11 @@ mod tests {
         assert!(faults.is_empty(), "{faults:?}");
         let table = ProfileTable { profiles: built };
         let nothing_at_all = ProfilePrograms {
-            resolved: table.profiles().iter().map(|_| None).collect(),
+            resolved: table
+                .profiles()
+                .iter()
+                .map(|profile| (profile.id.clone(), None))
+                .collect(),
         };
         assert_eq!(
             table
@@ -15496,20 +15585,27 @@ mod tests {
         // whole of what splitting them buys.
         let both = ProfilePrograms::probe(&FakeMachine::fully_equipped());
         assert_eq!(
-            both.program(seven)
+            both.row_program(seven)
                 .map(|p| p.to_string_lossy().into_owned()),
             Some(r"C:\Program Files\PowerShell\7\pwsh.exe".to_owned())
         );
         assert_eq!(
-            both.program(five).map(|p| p.to_string_lossy().into_owned()),
+            both.row_program(five)
+                .map(|p| p.to_string_lossy().into_owned()),
             Some(r"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe".to_owned())
         );
 
         // On a machine with only what Windows ships, the 7 row says so rather
         // than starting 5.1 under 7's name, and the 5.1 row is still there.
         let plain = bare();
-        assert!(!plain.is_available(seven), "no install, no row that works");
-        assert!(plain.is_available(five), "and this one is part of the OS");
+        assert!(
+            !plain.row_is_available(seven),
+            "no install, no row that works"
+        );
+        assert!(
+            plain.row_is_available(five),
+            "and this one is part of the OS"
+        );
         assert_eq!(five, fallback_profile());
 
         // `BT_SHELL` still belongs to the 7 row (Q4) and still bypasses the
@@ -15520,13 +15616,13 @@ mod tests {
         );
         assert_eq!(
             overridden
-                .program(seven)
+                .row_program(seven)
                 .map(|p| p.to_string_lossy().into_owned()),
             Some(r"C:\Tools\pwsh.exe".to_owned())
         );
         assert_eq!(
             overridden
-                .program(five)
+                .row_program(five)
                 .map(|p| p.to_string_lossy().into_owned()),
             Some(r"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe".to_owned()),
             "and it does not reach across into the row it is not for"
@@ -15604,8 +15700,8 @@ mod tests {
             "and never the row that is allowed to answer `no` — a fallback chain              whose bottom can be greyed has a hole in it"
         );
         // Even on a machine with nothing else on it.
-        assert!(bare().is_available(fallback_profile()));
-        assert!(equipped().is_available(fallback_profile()));
+        assert!(bare().row_is_available(fallback_profile()));
+        assert!(equipped().row_is_available(fallback_profile()));
     }
 
     /// PIN — `default` is a caption on the *chosen* row, not on the first one.
@@ -15789,7 +15885,7 @@ mod tests {
             layout
                 .profiles
                 .iter()
-                .all(|index| bare().is_available(*index)),
+                .all(|index| bare().row_is_available(*index)),
             "which is the same sentence read off the list rather than the tips"
         );
 
@@ -15914,7 +16010,7 @@ mod tests {
         for stored in ["cmd", "gitbash", "wsl", "pwsh", "", "nonsense"] {
             for machine in [&all, &bare()] {
                 assert!(
-                    machine.is_available(default_profile(stored, machine)),
+                    machine.row_is_available(default_profile(stored, machine)),
                     "the default resolved for {stored:?} must be startable"
                 );
             }
@@ -15951,7 +16047,12 @@ mod tests {
         };
         let programs = ProfilePrograms::probe_rows(&table.profiles, machine);
         let index = automatic_profile_in(&table, shipped_order_for(platform), |index| {
-            programs.is_available(index)
+            // By the row's own id and not by `row_is_available`: this table is a
+            // macOS seed being asked about on a Windows runner, so a position
+            // in it names nothing in this process's live table.
+            table
+                .get(index)
+                .is_some_and(|row| programs.is_available(&row.id))
         });
         table
             .get(index)
@@ -16825,12 +16926,88 @@ mod tests {
     /// (`%LocalAppData%\Programs\Git`) is the default for anybody without
     /// administrator rights, so "Git Bash is greyed on a machine that has Git
     /// Bash" is not a corner case, it is a whole class of user.
+    /// PIN (T-PROFILE-TABLE-MOVE) — **a probe answers about a row and not about
+    /// a position**, so the table moving under a window that is holding one
+    /// cannot change what any of its panes is allowed to start.
+    ///
+    /// A `ProfilePrograms` is deliberately a value and not a function: it is
+    /// probed once, when a window opens, and every picker frame and every spawn
+    /// for the life of that window reads it. The table under it is not still —
+    /// Settings ▸ Profiles moves, duplicates and deletes rows, and every window
+    /// in this process shares the result — so a snapshot indexed by position
+    /// answered "is row 3 startable" with whatever row happened to be third when
+    /// the probe ran. That is the disagreement the spawn used to panic on.
+    ///
+    /// Red gate: key the probe by position again and the loop below fails on the
+    /// first row whose neighbour answers differently, which on a bare Windows box
+    /// is every row but one.
+    #[test]
+    fn a_probe_answers_about_a_row_and_not_about_a_position() {
+        let machine = FakeMachine::bare_windows();
+        let mut rows = table().profiles().to_vec();
+        assert!(rows.len() > 2, "the fixture needs a table worth moving");
+
+        let before = ProfilePrograms::probe_rows(&rows, &machine);
+        assert!(
+            rows.iter().any(|row| before.is_available(&row.id))
+                && rows.iter().any(|row| !before.is_available(&row.id)),
+            "a move is only visible while the rows disagree about this machine"
+        );
+
+        // The reorder, as the page's arrows make it: every row is somewhere else
+        // and no row is anything else.
+        rows.rotate_right(1);
+        let after = ProfilePrograms::probe_rows(&rows, &machine);
+        for row in &rows {
+            assert_eq!(
+                before.is_available(&row.id),
+                after.is_available(&row.id),
+                "{} answers the same before and after the table moved",
+                row.id
+            );
+            assert_eq!(before.program(&row.id), after.program(&row.id));
+        }
+
+        // And an id no probe ever saw is "not on this machine" — an answer, not
+        // a read off the end of something.
+        assert!(!before.is_available("a-row-nobody-has"));
+        assert!(before.program("a-row-nobody-has").is_none());
+    }
+
+    /// PIN (T-PROFILE-TABLE-MOVE) — **the row a seat holds is found by its id, and
+    /// an id the table has not got is `None` rather than a panic.**
+    ///
+    /// [`row_of`]'s whole reason: the spawn used to take the seat's position,
+    /// read `row(index)` off the live table and assert the result, which is an
+    /// assertion about a table another window is free to shorten. This is the
+    /// same question asked in a spelling that has an honest answer for the case
+    /// that used to be a crash.
+    #[test]
+    fn a_row_asked_for_by_id_answers_or_says_there_is_none() {
+        assert_eq!(
+            row_of(fallback_profile_id()).map(|row| row.id),
+            Some(fallback_profile_id().to_owned()),
+            "the one row every machine has"
+        );
+        for index in 0..count() {
+            assert_eq!(
+                row_of(&id(index)).map(|row| row.id),
+                Some(id(index)),
+                "every row of the table is findable by the id it carries"
+            );
+        }
+        assert!(
+            row_of("a-row-nobody-has").is_none(),
+            "and a row that is gone is gone, which is a thing a caller can act on"
+        );
+    }
+
     #[test]
     fn a_profile_is_offered_when_this_machine_has_its_program_and_greyed_when_it_does_not() {
         let none = bare();
         assert_eq!(
             (0..count())
-                .filter(|index| none.is_available(*index))
+                .filter(|index| none.row_is_available(*index))
                 .collect::<Vec<_>>(),
             vec![fallback_profile()],
             "a bare Windows box offers PowerShell and says the truth about the rest"
@@ -16839,13 +17016,13 @@ mod tests {
         let all = equipped();
         for (index, profile) in shipped_rows().iter().enumerate() {
             assert!(
-                all.is_available(index),
+                all.row_is_available(index),
                 "{} is installed here and must be offered",
                 profile.id
             );
         }
         assert_eq!(
-            all.program(index_of_id("cmd")),
+            all.program("cmd"),
             Some(OsStr::new(r"C:\WINDOWS\System32\cmd.exe")),
             "the resolved program is the probed path, not the profile's id"
         );
@@ -16857,12 +17034,12 @@ mod tests {
                 .with_file(r"C:\Users\dev\AppData\Local\Programs\Git\bin\bash.exe"),
         );
         assert_eq!(
-            per_user.program(index_of_id("gitbash")),
+            per_user.program("gitbash"),
             Some(OsStr::new(
                 r"C:\Users\dev\AppData\Local\Programs\Git\bin\bash.exe"
             ))
         );
-        assert!(!per_user.is_available(index_of_id("wsl")));
+        assert!(!per_user.is_available("wsl"));
 
         // The candidate list is an *order*: the first well-known path that
         // exists wins, so a machine carrying both installs starts the
@@ -16875,7 +17052,7 @@ mod tests {
                 .with_file(r"C:\Users\dev\AppData\Local\Programs\Git\bin\bash.exe"),
         );
         assert_eq!(
-            both.program(index_of_id("gitbash")),
+            both.program("gitbash"),
             Some(OsStr::new(r"C:\Program Files\Git\bin\bash.exe"))
         );
     }
@@ -16910,7 +17087,7 @@ mod tests {
                 .with_file(r"D:\App\Tool\Git\bin\bash.exe"),
         );
         assert_eq!(
-            custom.program(index_of_id("gitbash")),
+            custom.program("gitbash"),
             Some(OsStr::new(r"D:\App\Tool\Git\bin\bash.exe")),
             "a Git that is on the path is a Git we can find, wherever it was put"
         );
@@ -16929,7 +17106,7 @@ mod tests {
                 )
                 .with_file(r"D:\App\Tool\Git\cmd\git.exe"),
         );
-        assert!(!tool_only.is_available(index_of_id("gitbash")));
+        assert!(!tool_only.is_available("gitbash"));
 
         // And the anchor is tried first, so the install the user actually works
         // with wins over a stale copy in `%ProgramFiles%`.
@@ -16948,7 +17125,7 @@ mod tests {
                 .with_file(r"C:\Program Files\Git\bin\bash.exe"),
         );
         assert_eq!(
-            both.program(index_of_id("gitbash")),
+            both.program("gitbash"),
             Some(OsStr::new(r"D:\App\Tool\Git\bin\bash.exe"))
         );
     }
@@ -20843,7 +21020,9 @@ mod tests {
             "a bare Windows box cannot start every row this build ships"
         );
         assert!(
-            child_rows.iter().all(|index| machine.is_available(*index)),
+            child_rows
+                .iter()
+                .all(|index| machine.row_is_available(*index)),
             "and every row it does draw is one a press can spend"
         );
 
