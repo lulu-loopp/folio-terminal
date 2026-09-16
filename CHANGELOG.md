@@ -6,6 +6,13 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Fixed
+
+- **A picture that has not changed no longer asks the GPU to draw it again.**
+  Repeated redraws compare each pane and the chrome around it with the last
+  complete picture. Caret blinks, hover marks and moving panes still redraw;
+  resizing and replacing a surface always get their own frame.
+
 ## 0.4.1-preview — 2026-09-16
 
 ### Added

@@ -4709,6 +4709,23 @@ enum SurfaceAcquisition {
     Offscreen(wgpu::TextureView),
 }
 
+/// The non-terminal inputs sampled at the presentation door. Retained setters
+/// advance `retained_revision` only when their drawing values change; chrome
+/// quads/labels include hover marks, notices, thumbs and sampled animation phases.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RendererPresentState {
+    pub retained_revision: u64,
+    pub surface_generation: u64,
+    pub size: (u32, u32),
+    pub scale_factor: u64,
+    pub font_revision: u64,
+    pub theme_revision: u64,
+    pub cursor_style: CursorStyle,
+    pub cursor_blink_visible: bool,
+    pub window_focused: bool,
+    pub seat: SeatViewport,
+}
+
 /// One window's half of the renderer: its surface, its resolution, its metrics,
 /// and every cache that is keyed by a pixel font size.
 ///
@@ -4718,6 +4735,8 @@ enum SurfaceAcquisition {
 /// size and two windows at 1.5x and 2.0x are two sets of pixel font sizes
 /// (spike Q3).
 pub struct WindowRenderer {
+    retained_revision: u64,
+    surface_generation: u64,
     target: FrameTarget,
     config: wgpu::SurfaceConfiguration,
     /// What the adapter offered this surface and what it was configured with,
@@ -7108,6 +7127,10 @@ impl WindowRenderer {
     /// touch them, so releasing them early would buy nothing but a second state
     /// this type can be in.
     fn surrender_target(&mut self) {
+        self.surface_generation = self
+            .surface_generation
+            .checked_add(1)
+            .expect("surface generation exhausted");
         self.target = FrameTarget::Surrendered;
     }
 
@@ -7345,6 +7368,8 @@ impl WindowRenderer {
         // swapchain pays for that counting only when someone asked for it.
         let measure_shaping = trace_perf || matches!(target, FrameTarget::Offscreen(_));
         Ok(Self {
+            retained_revision: 0,
+            surface_generation: 0,
             target,
             config,
             // Filled in by `from_surface`, which is the only constructor with a
@@ -7545,6 +7570,22 @@ impl WindowRenderer {
         }
     }
 
+    /// All retained inputs to `compose_frame`, without touching the device.
+    pub fn present_state(&self) -> RendererPresentState {
+        RendererPresentState {
+            retained_revision: self.retained_revision,
+            surface_generation: self.surface_generation,
+            size: (self.config.width, self.config.height),
+            scale_factor: self.metrics.scale_factor.to_bits(),
+            font_revision: self.font_revision,
+            theme_revision: theme_revision(),
+            cursor_style: current_cursor_style(),
+            cursor_blink_visible: self.cursor_blink_visible,
+            window_focused: self.window_focused,
+            seat: self.seat,
+        }
+    }
+
     /// Select the cursor presentation without changing terminal DEC cursor visibility.
     pub fn set_window_focused(&mut self, focused: bool) -> bool {
         let changed = self.window_focused != focused;
@@ -7590,12 +7631,19 @@ impl WindowRenderer {
             (None, None) => false,
             (Some(current), Some(next)) => {
                 current.key != next.key
+                    || current.seat != next.seat
+                    || current.width_px != next.width_px
+                    || current.height_px != next.height_px
                     || current.pointer_x != next.pointer_x
                     || current.pointer_y != next.pointer_y
             }
             _ => true,
         };
         self.peek_overlay = overlay;
+        self.retained_revision = self
+            .retained_revision
+            .checked_add(u64::from(changed))
+            .expect("renderer revision exhausted");
         changed
     }
 
@@ -7645,6 +7693,10 @@ impl WindowRenderer {
                 .zip(images.iter())
                 .any(|(current, next)| !drawn_the_same(current, next));
         self.preview_images = images;
+        self.retained_revision = self
+            .retained_revision
+            .checked_add(u64::from(changed))
+            .expect("renderer revision exhausted");
         changed
     }
 
@@ -7707,6 +7759,10 @@ impl WindowRenderer {
     pub fn set_video_layers(&mut self, layers: Vec<VideoLayer>) -> bool {
         let changed = self.video_layers != layers;
         self.video_layers = layers;
+        self.retained_revision = self
+            .retained_revision
+            .checked_add(u64::from(changed))
+            .expect("renderer revision exhausted");
         changed
     }
 
@@ -7719,6 +7775,10 @@ impl WindowRenderer {
     pub fn set_preview_bodies(&mut self, bodies: Vec<PreviewBody>) -> bool {
         let changed = self.preview_bodies != bodies;
         self.preview_bodies = bodies;
+        self.retained_revision = self
+            .retained_revision
+            .checked_add(u64::from(changed))
+            .expect("renderer revision exhausted");
         changed
     }
 
@@ -7761,6 +7821,10 @@ impl WindowRenderer {
     pub fn set_web_holes(&mut self, holes: Vec<WebHole>) -> bool {
         let changed = self.web_holes != holes;
         self.web_holes = holes;
+        self.retained_revision = self
+            .retained_revision
+            .checked_add(u64::from(changed))
+            .expect("renderer revision exhausted");
         changed
     }
 
@@ -7779,6 +7843,10 @@ impl WindowRenderer {
     pub fn set_table_blocks(&mut self, blocks: HashMap<String, TableBlockPaint>) -> bool {
         let changed = self.table_blocks != blocks;
         self.table_blocks = blocks;
+        self.retained_revision = self
+            .retained_revision
+            .checked_add(u64::from(changed))
+            .expect("renderer revision exhausted");
         changed
     }
 
@@ -7953,6 +8021,10 @@ impl WindowRenderer {
         let changed = image.seat != seat || image.clip != clip;
         image.seat = seat;
         image.clip = clip;
+        self.retained_revision = self
+            .retained_revision
+            .checked_add(u64::from(changed))
+            .expect("renderer revision exhausted");
         changed
     }
 
@@ -7960,6 +8032,10 @@ impl WindowRenderer {
         if width == 0 || height == 0 {
             return Ok(());
         }
+        self.surface_generation = self
+            .surface_generation
+            .checked_add(1)
+            .expect("surface generation exhausted");
         let swapchain_size = surface_config_size(width, height, gpu.max_texture_dimension_2d);
         self.config.width = swapchain_size.0;
         self.config.height = swapchain_size.1;
@@ -8114,6 +8190,10 @@ impl WindowRenderer {
         self.chrome_quads = quads;
         self.chrome_labels = labels;
         self.chrome_icons = icons;
+        self.retained_revision = self
+            .retained_revision
+            .checked_add(u64::from(changed))
+            .expect("renderer revision exhausted");
         changed
     }
 
@@ -8133,6 +8213,10 @@ impl WindowRenderer {
     pub fn set_modal_overlay(&mut self, layers: Vec<OverlayLayer>) -> bool {
         let changed = self.overlay_layers != layers;
         self.overlay_layers = layers;
+        self.retained_revision = self
+            .retained_revision
+            .checked_add(u64::from(changed))
+            .expect("renderer revision exhausted");
         changed
     }
 
@@ -10668,6 +10752,10 @@ impl WindowRenderer {
     /// leave `configured_size` equal to `config`, which is the only thing the
     /// rest of the frame reads.
     fn configure_surface(&mut self, gpu: &GpuContext) -> Result<(), RenderError> {
+        self.surface_generation = self
+            .surface_generation
+            .checked_add(1)
+            .expect("surface generation exhausted");
         match &mut self.target {
             FrameTarget::Surface(surface) => surface.configure(&gpu.device, &self.config),
             // Nothing to bring up to a size. The window is between two devices,
