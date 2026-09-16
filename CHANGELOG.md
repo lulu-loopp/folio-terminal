@@ -75,6 +75,10 @@ Nothing yet.
 
 ### Fixed
 
+- **On a Mac, a window that is covered or hidden no longer keeps drawing at full
+  speed, and the pictures it prepared while hidden no longer pile up on the
+  GPU.**
+
 - **Text sent from a phone keyboard, or from another program that types for you,
   now reaches the terminal.** A sentence typed on a phone through its desktop
   companion, or pasted in by a tool that types on your behalf, arrived as
