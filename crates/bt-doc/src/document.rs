@@ -6,7 +6,7 @@ use bt_transcript::{
 
 use crate::{
     AnchorError, AnchorId, Bias, ContentAnchor, DecorationIntent, GridGeneration, GridPoint,
-    ScreenId, Selection,
+    InlineMathSite, ScreenId, Selection,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -21,6 +21,21 @@ pub struct LiveRowRemoval {
 pub struct HistoryEntry {
     pub line: FrozenLine,
     pub decoration: DecorationIntent,
+    /// Where this line stood in the shell's command lifecycle at the moment it froze.
+    ///
+    /// **This is a stored fact, not a derived one, and the difference is the whole point.** A
+    /// line's site is a proof taken while the evidence existed: the OSC 133 region that covered
+    /// it was alive and its anchors still resolved when the line entered history, so the session
+    /// wrote the verdict down here. Asking the question again later cannot reach the same answer,
+    /// because the region dies with its own first line — eviction, mark retirement, a reflow that
+    /// declined to re-seat an anchor — while the output lines below it stay resident and keep
+    /// showing what the command printed. A re-derived site therefore decays to
+    /// [`InlineMathSite::Ineligible`] and un-typesets an inline formula that was proven eligible
+    /// when it was printed; a recorded one does not.
+    ///
+    /// Only the session may write it ([`HistoryDocument::set_inline_site`]); a line that has not
+    /// been judged reads [`InlineMathSite::Ineligible`], which is the conservative verdict.
+    pub inline_site: InlineMathSite,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -256,6 +271,7 @@ impl HistoryDocument {
             HistoryEntry {
                 line: finalized.line,
                 decoration: DecorationIntent::Plain,
+                inline_site: InlineMathSite::Ineligible,
             },
         );
         for (id, anchor) in replacements {
@@ -266,6 +282,17 @@ impl HistoryDocument {
     pub fn set_decoration(&mut self, id: TranscriptId, intent: DecorationIntent) {
         if let Some(entry) = self.entries.get_mut(&id) {
             entry.decoration = intent;
+        }
+    }
+
+    /// Record where a line stood in the command lifecycle, once, as it freezes.
+    ///
+    /// The caller is the session, which is the only holder of the OSC 133 bookkeeping this answer
+    /// comes from, and it asks while that bookkeeping is still standing. See
+    /// [`HistoryEntry::inline_site`] for why the answer is kept instead of asked again.
+    pub fn set_inline_site(&mut self, id: TranscriptId, site: InlineMathSite) {
+        if let Some(entry) = self.entries.get_mut(&id) {
+            entry.inline_site = site;
         }
     }
 

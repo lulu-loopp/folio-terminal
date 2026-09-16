@@ -7294,6 +7294,37 @@ mod windows_impl {
         Some((point.x, point.y))
     }
 
+    /// **Where the pointer is inside one window's client area**, in physical
+    /// pixels measured from its top-left corner (GitHub issue #1 ②).
+    ///
+    /// [`pointer_position`] with one call added, and the call is the whole of
+    /// it: `ScreenToClient` is the transform that turns the desktop's point into
+    /// the one every pointer event this window receives is already stated in —
+    /// `WM_MOUSEMOVE` carries client coordinates in `lParam`, which is exactly
+    /// what winit hands up as `CursorMoved`'s `PhysicalPosition`. So the answer
+    /// here and the position a hand that moved would have left behind are the
+    /// same number in the same units, and a caller may use one where it has no
+    /// other.
+    ///
+    /// **Its one caller is a file drop.** `IDropTarget::Drop` is handed the
+    /// point the hand let go at and winit discards it, and no pointer event is
+    /// delivered while another application's drag is over this window — so a
+    /// drop is the one gesture whose position this process must go and ask for.
+    ///
+    /// `None` when Win32 will not say, which is what it answers on a session
+    /// with no desktop to read.
+    #[must_use]
+    pub fn pointer_position_in_window(window: NativeWindow) -> Option<(i32, i32)> {
+        let mut point = POINT::default();
+        // SAFETY: `point` stays valid and exclusively borrowed across both
+        // read-only calls, each of which writes two integers and nothing else.
+        // The handle came from a live winit window.
+        unsafe { GetCursorPos(&mut point) }.ok()?;
+        let mapped =
+            unsafe { windows::Win32::Graphics::Gdi::ScreenToClient(window.as_hwnd(), &mut point) };
+        mapped.as_bool().then_some((point.x, point.y))
+    }
+
     /// The work area of the monitor **this screen point** is on, in physical
     /// pixels (multiwindow slice F5).
     ///
@@ -10296,11 +10327,11 @@ pub use windows_impl::{
     hide_every_window_of_this_process, install_console_ctrl_handler, install_context_menu,
     install_window_class_background, is_window_cloaked, is_window_minimized, leave_process,
     message_box, monitor_id_at, monospace_font_families, os_ui_language, pointer_position,
-    read_context_menu, recycle, redirect_std_streams_to_file, register_clipboard_owner,
-    remove_context_menu, request_window_close, set_clipboard_text, set_current_thread_priority,
-    set_system_backdrop, set_window_dark_mode, set_window_outer_rect, set_window_topmost,
-    silence_std_streams, spawn_at_priority, stand_window_at, std_error_is_console,
-    system_backdrop_available, system_uses_light_apps, take_keyboard_focus,
+    pointer_position_in_window, read_context_menu, recycle, redirect_std_streams_to_file,
+    register_clipboard_owner, remove_context_menu, request_window_close, set_clipboard_text,
+    set_current_thread_priority, set_system_backdrop, set_window_dark_mode, set_window_outer_rect,
+    set_window_topmost, silence_std_streams, spawn_at_priority, stand_window_at,
+    std_error_is_console, system_backdrop_available, system_uses_light_apps, take_keyboard_focus,
     taskbar_auto_hidden_from_state, taskbar_is_auto_hidden, thread_mouse_capture,
     top_level_window_at, virtual_key_for_character, virtual_screen_rect, wheel_scroll_amount,
     window_is_exposed, work_area_at, write_to_console,
@@ -10383,10 +10414,10 @@ pub use portable_impl::{monospace_font_families, recycle};
 pub use portable_impl::{
     SystemSettingsWatch, client_area_animation_enabled, dpi_at, get_dpi_for_window,
     get_window_rect, get_work_area, install_window_class_background, is_window_minimized,
-    monitor_id_at, os_ui_language, pointer_position, request_window_close, set_window_dark_mode,
-    set_window_outer_rect, set_window_topmost, stand_window_at, system_uses_light_apps,
-    take_keyboard_focus, top_level_window_at, virtual_screen_rect, wheel_scroll_amount,
-    window_is_exposed, work_area_at,
+    monitor_id_at, os_ui_language, pointer_position, pointer_position_in_window,
+    request_window_close, set_window_dark_mode, set_window_outer_rect, set_window_topmost,
+    stand_window_at, system_uses_light_apps, take_keyboard_focus, top_level_window_at,
+    virtual_screen_rect, wheel_scroll_amount, window_is_exposed, work_area_at,
 };
 
 /// **The window and the screen, over AppKit** (M1-3).
@@ -10407,10 +10438,10 @@ mod macos_impl;
 pub use macos_impl::{
     SystemSettingsWatch, client_area_animation_enabled, dpi_at, get_dpi_for_window,
     get_window_rect, get_work_area, install_window_class_background, is_window_minimized,
-    monitor_id_at, os_ui_language, pointer_position, request_window_close, set_window_dark_mode,
-    set_window_outer_rect, set_window_topmost, stand_window_at, system_uses_light_apps,
-    take_keyboard_focus, top_level_window_at, virtual_screen_rect, wheel_scroll_amount,
-    window_is_exposed, work_area_at,
+    monitor_id_at, os_ui_language, pointer_position, pointer_position_in_window,
+    request_window_close, set_window_dark_mode, set_window_outer_rect, set_window_topmost,
+    stand_window_at, system_uses_light_apps, take_keyboard_focus, top_level_window_at,
+    virtual_screen_rect, wheel_scroll_amount, window_is_exposed, work_area_at,
 };
 
 /// **The two doors that own the surface's view, on macOS** (M1-4).
@@ -12118,7 +12149,7 @@ mod macos_window_backend_tests {
 
     /// **The window and screen group**, named once for both pins — the doors
     /// M1-3 moved, in the order the re-export lists spell them.
-    const DOORS: [&str; 22] = [
+    const DOORS: [&str; 23] = [
         "client_area_animation_enabled",
         "dpi_at",
         "get_dpi_for_window",
@@ -12129,6 +12160,7 @@ mod macos_window_backend_tests {
         "monitor_id_at",
         "os_ui_language",
         "pointer_position",
+        "pointer_position_in_window",
         "request_window_close",
         "set_window_dark_mode",
         "set_window_outer_rect",

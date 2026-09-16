@@ -88,6 +88,7 @@ mod pdf;
 mod peek_strip;
 mod persist;
 mod pins;
+mod present_gate;
 mod preview;
 mod preview_edit;
 mod preview_live;
@@ -8545,9 +8546,9 @@ fn git_full_path(root: &Path, path: &str) -> PathBuf {
 /// The manual name is not here because it is not a fact about a shell: it is the
 /// tab's (`TabSeed::manual_name`), and a restart that never touches a tab keeps
 /// it by construction rather than by copying it.
-fn restart_seed(profile: usize, last_reported_cwd: Option<&Path>) -> LeafSeed {
+fn restart_seed(profile: &str, last_reported_cwd: Option<&Path>) -> LeafSeed {
     LeafSeed {
-        profile,
+        profile: profile.to_owned(),
         cwd: last_reported_cwd.map(Path::to_path_buf),
         // A running pane's profile is one this build has, by construction — it
         // started a process from it.
@@ -10369,7 +10370,8 @@ struct LeafSession {
     /// behind it — has nothing to re-point and says so, rather than holding a
     /// cell no thread reads.
     wake: Option<Arc<LeafWake>>,
-    /// Which of [`profiles::PROFILES`] this pane's shell was started from.
+    /// **The stable id of the profile this pane's shell was started from**
+    /// (§7.1.4's 「稳定 profile_id」, T-PROFILE-TABLE-MOVE).
     ///
     /// **Here, and not on the tab.** It is a fact about the process — this is
     /// the struct that owns the process — and so it survives every gesture that
@@ -10379,7 +10381,18 @@ struct LeafSession {
     /// whichever tab the pane landed in. Under the old tab-level field, tearing
     /// a Git Bash pane out of a PowerShell tab produced a tab that said
     /// PowerShell over a running bash.
-    profile: usize,
+    ///
+    /// **An id and not a row index**, which is the second thing it survives. A
+    /// position is only a profile for as long as nobody moves the table, and
+    /// Settings ▸ Profiles has `Move up`, `Move down`, `Duplicate` and `Delete`
+    /// on every row — a pane holding position 3 across one of those verbs was
+    /// silently a different shell afterwards, and a pane holding a position the
+    /// shortened table no longer had reached the spawn and panicked the window
+    /// thread. The id is what a move cannot touch, so the pane goes on naming
+    /// its own profile whatever the table does; a row that is really gone is the
+    /// one case left, and it degrades the way a missing program does — the
+    /// fallback profile, said out loud (see [`startable_profile`]).
+    profile: String,
     /// Captured at spawn: profile edits cannot change an already running shell’s paste grammar.
     paste_recipient: shell_literal::Recipient,
     /// **Which shell integration door this pane's shell was started behind.**
@@ -12376,6 +12389,7 @@ struct WindowRuntime {
     /// the newest thing anyone has composed" — the whole of the chrome-only
     /// path's licence.
     presented_picture_revision: u64,
+    present_gate: present_gate::PresentGate,
     /// A present that redraws only what the renderer already holds.
     ///
     /// Set by [`Runtime::publish_chrome_frame`] when an animation moved
@@ -12452,6 +12466,22 @@ struct WindowRuntime {
     /// The notches that have arrived since the loop last acted on one. See
     /// [`WheelBurst`].
     wheel_burst: Option<WheelBurst>,
+    /// **The paths one drop put on this window, waiting for the turn boundary**
+    /// (GitHub issue #1 ②).
+    ///
+    /// winit reports a drop as one `WindowEvent::DroppedFile` per file with
+    /// nothing marking where the batch begins or ends, so "three files were
+    /// dropped together" is a fact only the *loop* holds: the whole run arrives
+    /// inside one dispatch of one platform message — `IDropTarget::Drop` walks
+    /// the `HDROP` in a single call on Windows, `performDragOperation:` walks
+    /// the pasteboard in a single call on macOS — and the loop cannot come round
+    /// in the middle of either. So this collects them exactly as
+    /// [`WheelBurst`] collects notches, and
+    /// [`Runtime::flush_dropped_files`] spends the batch as one paste: three
+    /// files on one command line, not three command lines.
+    ///
+    /// Empty on every turn but the one after a drop.
+    dropped_files: Vec<PathBuf>,
     /// When the last present happened, so the trace can report the *interval*
     /// between two pictures rather than only the cost of making one. The cost of
     /// a frame is what a profiler measures; the gap between frames is what a
@@ -13888,9 +13918,21 @@ struct WindowRuntime {
 /// because they leave it together: a frame that says nothing new to one of them
 /// usually says nothing new to the other, and a caller that had to remember two
 /// separate borrows would be a caller that could forget one.
+// The same boundary carries the no-op counter and the conditions under which
+// equality may pay the frame without producing a presentation receipt.
 struct FrameTraces<'a> {
+    gate: &'a mut present_gate::PresentGate,
+    trace_perf: bool,
+    slot_overwrites: u64,
+    conditions: present_gate::PresentConditions,
     preview: &'a mut preview_trace::FrameEcho,
     census: &'a mut glyph_trace::CensusEcho,
+}
+
+/// The trigger and candidate picture carried into the present gate together.
+struct PresentIntent {
+    trigger: FrameTrigger,
+    signature: present_gate::PresentSignature,
 }
 
 impl WindowRuntime {
@@ -16106,7 +16148,7 @@ impl TabState {
     /// the layer that falls through and the set that decides whether it does are
     /// describing one shell.
     fn focused_announcement_set(&self) -> Vec<&'static str> {
-        profiles::announcement_set(self.leaf_profile(self.focused_leaf))
+        profiles::announcement_set(profiles::index_of_id(&self.leaf_profile(self.focused_leaf)))
     }
 
     /// **What one seat calls itself**, through the one function every pane head
@@ -16133,16 +16175,18 @@ impl TabState {
         .to_owned()
     }
 
-    /// Which profile the focused pane is running, or the fallback for a tab with
-    /// no shell to be running anything.
+    /// Which profile the focused pane is running — its stable id — or the
+    /// fallback's for a tab with no shell to be running anything.
     ///
     /// Read off [`Self::focused`] rather than through `sessions[&focused_leaf]`
     /// for a reason that survives the `Option`: a caller pairing this profile
     /// with a folder must get both off one leaf or it is describing a pane that
     /// does not exist.
-    fn session_profile(&self) -> usize {
-        self.focused()
-            .map_or_else(profiles::fallback_profile, |leaf| leaf.profile)
+    fn session_profile(&self) -> String {
+        self.focused().map_or_else(
+            || profiles::fallback_profile_id().to_owned(),
+            |leaf| leaf.profile.clone(),
+        )
     }
 
     /// The name the focused pane's *own* profile goes by.
@@ -16153,7 +16197,7 @@ impl TabState {
     /// has never reported a folder is not called PowerShell. It is the same
     /// mistake the mark made, one column to the right.
     fn focused_profile_title(&self) -> &'static str {
-        profiles::title(self.leaf_profile(self.focused_leaf))
+        profiles::title(profiles::index_of_id(&self.leaf_profile(self.focused_leaf)))
     }
 
     /// What this tab's tooltip says (M140).
@@ -16230,7 +16274,14 @@ impl TabState {
     /// it left with the program. Your name for the tab did not.
     fn term_leaf(&self, seat: SeatId, remember_the_command: bool) -> TermLeafV1 {
         TermLeafV1 {
-            profile_id: profiles::id(self.leaf_profile(seat)),
+            // **The leaf's own id, written straight through** — it is what the
+            // leaf holds, so the save has nothing to resolve and nothing a table
+            // move could resolve differently (T-PROFILE-TABLE-MOVE). This used to
+            // read `profiles::id(<the leaf's index>)`, which is the row standing
+            // at that position *now*: a pane saved after a reorder named whichever
+            // profile had slid into its slot, and that wrong id then came back off
+            // disk as the pane's shell on the next launch.
+            profile_id: self.leaf_profile(seat),
             cwd: self
                 .sessions
                 .get(&seat)
@@ -16297,17 +16348,19 @@ impl TabState {
     /// the one leaf a tab is reopened as when you ask for it back by name. A
     /// vault entry is one address, and a tab with two panes has to answer with
     /// one of them; the identity terminal is the one the tab has always been.
-    /// Which profile the shell in `seat` was started from.
+    /// **Which profile the shell in `seat` was started from** — its stable id,
+    /// which is what the leaf holds (see [`LeafSession::profile`]).
     ///
-    /// [`profiles::fallback_profile()`] for a seat this tab holds no shell for,
+    /// [`profiles::fallback_profile_id()`] for a seat this tab holds no shell for,
     /// which is not a fallback so much as the only answer available: the callers
     /// are the chrome, asking what mark to draw over a seat, and a Files or
     /// Preview seat has no profile because it has no shell. Those callers pick
     /// their own mark by [`SeatKind`] before ever reaching here.
-    fn leaf_profile(&self, seat: SeatId) -> usize {
-        self.sessions
-            .get(&seat)
-            .map_or(profiles::fallback_profile(), |leaf| leaf.profile)
+    fn leaf_profile(&self, seat: SeatId) -> String {
+        self.sessions.get(&seat).map_or_else(
+            || profiles::fallback_profile_id().to_owned(),
+            |leaf| leaf.profile.clone(),
+        )
     }
 
     /// The mark the chrome draws for one seat's shell — this tab's per-seat half
@@ -16325,7 +16378,7 @@ impl TabState {
     fn leaf_marks(&self) -> BTreeMap<SeatId, marks::ChromeMark> {
         self.sessions
             .iter()
-            .map(|(seat, leaf)| (*seat, profiles::mark(leaf.profile)))
+            .map(|(seat, leaf)| (*seat, profiles::mark(profiles::index_of_id(&leaf.profile))))
             .collect()
     }
 
@@ -16382,7 +16435,9 @@ impl TabState {
         // used to do unconditionally, was harmless only while the preview arm
         // ignored the argument.
         let content = match kind {
-            bt_layout::SeatKind::Terminal => Some(profiles::mark(self.leaf_profile(seat))),
+            bt_layout::SeatKind::Terminal => Some(profiles::mark(profiles::index_of_id(
+                &self.leaf_profile(seat),
+            ))),
             // **And the site's own icon where it has one** (§7.7 ②) — which is
             // why the argument is a map and not the set it was: "this leaf holds
             // a page" and "this is the icon that page wears" are one fact about
@@ -17236,7 +17291,7 @@ impl TabState {
             // pane split out of a PowerShell tab was measured against the word
             // "PowerShell", so its honest `Command Prompt` title read as an
             // announcement while a second PowerShell pane's did not.
-            &profiles::announcement_set(self.leaf_profile(seat)),
+            &profiles::announcement_set(profiles::index_of_id(&self.leaf_profile(seat))),
         )
         .map(|(name, _)| name)
     }
@@ -24576,7 +24631,7 @@ fn attention_delivery(
         title: notify::toast_title(
             carried,
             tab.terminal_name(seat).as_deref(),
-            profiles::title(tab.leaf_profile(seat)),
+            profiles::title(profiles::index_of_id(&tab.leaf_profile(seat))),
         ),
         body: raised.body,
     }
@@ -31604,7 +31659,17 @@ fn revive_plan(
             (
                 seat,
                 LeafSeed {
-                    profile: profiles::index_of_id(&leaf.profile_id),
+                    // **The saved id, kept as an id** — and swapped for the
+                    // fallback's here and only here, which is where the reader is
+                    // owed the sentence about it. Below this line the seed names a
+                    // profile that exists, so nothing downstream has to carry the
+                    // distinction; above it, `unknown_profile_id` carries the name
+                    // the banner quotes.
+                    profile: if profiles::has_id(&leaf.profile_id) {
+                        leaf.profile_id.clone()
+                    } else {
+                        profiles::fallback_profile_id().to_owned()
+                    },
                     unknown_profile_id: (!profiles::has_id(&leaf.profile_id))
                         .then(|| leaf.profile_id.clone()),
                     cwd: Some(leaf.cwd.as_str())
@@ -32449,8 +32514,12 @@ struct TabSeed {
 /// field that only ever serializes its own default.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct LeafSeed {
-    /// Index into [`profiles::PROFILES`].
-    profile: usize,
+    /// **The stable id of the profile this pane is to be started from** — see
+    /// [`LeafSession::profile`] for why a seed may not carry a row index either.
+    /// A seed outlives the frame it was built on by more than a leaf does: it
+    /// waits on a folder chooser, travels with a torn-out tab, and comes back off
+    /// `session.json` a week later.
+    profile: String,
     /// The `profile_id` that was on disk when this build has no such profile.
     ///
     /// `None` for every seed that named a profile this build has, which is every
@@ -33663,11 +33732,21 @@ fn split_axis(direction: bt_persist::SplitDirectionV1, auto: Axis) -> Axis {
 /// rather than a path it cannot read, and starts where a fresh tab of that
 /// profile starts — `cwd_for_spawn`'s own rule, not a second one.
 fn new_tab_cwd(
-    profile: usize,
+    profile: &str,
     place: Option<&Path>,
-    source_profile: usize,
+    source_profile: &str,
     focused: Option<&Path>,
 ) -> Option<PathBuf> {
+    // **Both profiles are named by id and placed against the table here**, one
+    // call before the answer is used. `index_of_id` is the standing rule for an
+    // id the table no longer holds — the fallback profile, never the reader's
+    // configured default — so a folder crossed for a profile that has been
+    // deleted is crossed into the namespace of the shell that is really going to
+    // start.
+    let (profile, source_profile) = (
+        profiles::index_of_id(profile),
+        profiles::index_of_id(source_profile),
+    );
     match place {
         Some(place) => profiles::translate_cwd(
             profiles::PathNamespace::Windows,
@@ -33785,7 +33864,11 @@ enum SplitSeed {
     /// Windows spelling is how a pane opens at `~` with no explanation.
     /// `profiles::cwd_for_spawn` is the one place that translation lives, and
     /// the tab strip's Recent rows already go through it.
-    Profile(usize),
+    ///
+    /// **The profile's stable id**, for [`LeafSeed::profile`]'s reason: this
+    /// value is minted when a menu row is pressed and spent a split later, and
+    /// a row index does not survive a table that moves in between.
+    Profile(String),
     /// The source pane's profile, in a folder the user named — the system
     /// chooser's answer.
     Folder(PathBuf),
@@ -33794,10 +33877,10 @@ enum SplitSeed {
 impl SplitSeed {
     /// The seed a split actually spawns, given what the source pane is and where
     /// it stands.
-    fn applied(&self, source_profile: usize, source_cwd: Option<&Path>) -> LeafSeed {
+    fn applied(&self, source_profile: &str, source_cwd: Option<&Path>) -> LeafSeed {
         match self {
             Self::Inherit => LeafSeed {
-                profile: source_profile,
+                profile: source_profile.to_owned(),
                 cwd: source_cwd.map(Path::to_path_buf),
                 // A running pane's profile is one this build has, by construction.
                 unknown_profile_id: None,
@@ -33809,8 +33892,12 @@ impl SplitSeed {
                 prefill: None,
             },
             Self::Profile(profile) => LeafSeed {
-                profile: *profile,
-                cwd: profiles::cwd_for_spawn(source_profile, *profile, source_cwd),
+                profile: profile.clone(),
+                cwd: profiles::cwd_for_spawn(
+                    profiles::index_of_id(source_profile),
+                    profiles::index_of_id(profile),
+                    source_cwd,
+                ),
                 unknown_profile_id: None,
                 card_skip: 0,
                 prefill: None,
@@ -33821,10 +33908,10 @@ impl SplitSeed {
             // when that profile speaks Windows, and `cwd_for_spawn` is asked the
             // same translation question with `pwsh` as the origin.
             Self::Folder(path) => LeafSeed {
-                profile: source_profile,
+                profile: source_profile.to_owned(),
                 cwd: profiles::translate_cwd(
                     profiles::PathNamespace::Windows,
-                    profiles::paths(source_profile),
+                    profiles::paths(profiles::index_of_id(source_profile)),
                     path,
                 ),
                 unknown_profile_id: None,
@@ -33979,28 +34066,52 @@ fn apply_stored_terminal_font(
 /// not start. [`Started::Nothing`] is the third answer and it is the machine
 /// with nothing at all: the pane exists, holds its place in the tree, and wears
 /// the face a pane whose shell could not start already wears.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// # The second way the two authorities came apart (T-PROFILE-TABLE-MOVE)
+///
+/// The rule above was asked of the window's `ProfilePrograms` snapshot alone,
+/// and the spawn under it then read the **live, process-global** table for the
+/// row to start. Those are two authorities about one question, and Settings ▸
+/// Profiles is where they disagree: any window can move, duplicate or delete a
+/// row while every other window's snapshot goes on describing the table as it
+/// was. A pane spawned across that moment was answered `AsAsked` about a row
+/// that had slid somewhere else — and, when the table had shortened, about a row
+/// that was no longer there at all, which the spawn met as an out-of-bounds read
+/// and a panic on the window thread that took every tab in the process with it.
+///
+/// So this function asks about an **id** and asks the live table first: a
+/// profile is startable when the table still holds it *and* this machine had
+/// somewhere to start it from. Both halves degrade into the same rule the doc
+/// above already states, which is the whole point of putting them together —
+/// "the profile you asked for is gone" and "its program is gone" are one event
+/// from the reader's side, and one sentence answers them.
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Started {
     /// The profile the caller asked for, which this machine can run.
     AsAsked,
     /// The default profile, because the asked-for one resolved to nothing here.
-    /// The index carried is the one to start; the one asked for is the caller's.
-    FellBack(usize),
+    /// The id carried is the one to start; the one asked for is the caller's.
+    FellBack(String),
     /// Not even the default profile resolves. There is no shell to start.
     Nothing,
 }
 
-fn startable_profile(requested: usize, programs: &profiles::ProfilePrograms) -> Started {
-    if programs.is_available(requested) {
+fn startable_profile(requested: &str, programs: &profiles::ProfilePrograms) -> Started {
+    // **Both authorities, in one place, about one id.** `has_id` is the live
+    // table — the only thing that can say whether a row still exists — and the
+    // snapshot is this window's answer about the machine. Neither alone is the
+    // question the spawn is about.
+    let startable = |id: &str| profiles::has_id(id) && programs.is_available(id);
+    if startable(requested) {
         return Started::AsAsked;
     }
-    let fallback = profiles::fallback_profile();
+    let fallback = profiles::fallback_profile_id();
     // The fallback answering for itself is not a fallback: a default profile
     // this machine cannot start has nowhere further to fall, and saying
     // `FellBack(fallback)` there would put a banner on a pane about a swap that
     // did not happen.
-    if fallback != requested && programs.is_available(fallback) {
-        return Started::FellBack(fallback);
+    if fallback != requested && startable(fallback) {
+        return Started::FellBack(fallback.to_owned());
     }
     Started::Nothing
 }
@@ -34059,17 +34170,16 @@ fn create_leaf_session(
     // the file named. A WSL leaf falling back to PowerShell must not be handed
     // `/home/me`, and a Git Bash falling back to Windows PowerShell is a pane
     // that does want the PSReadLine probe.
-    let started = startable_profile(seed.profile, programs);
-    let spawn_profile = match started {
-        Started::AsAsked | Started::Nothing => seed.profile,
-        Started::FellBack(to) => to,
+    let started = startable_profile(&seed.profile, programs);
+    let spawn_profile = match &started {
+        Started::AsAsked | Started::Nothing => seed.profile.as_str(),
+        Started::FellBack(to) => to.as_str(),
     };
-    let chosen_id = profiles::id(spawn_profile);
     // **The one trigger.** A user who only ever opens WSL or `pwsh` never starts
     // this process, because the module that is broken is the one `Windows
     // PowerShell 5.1` ships and nothing else on this machine is affected by it.
     // Idempotent — see `psreadline::begin_probe`.
-    if chosen_id == profiles::WINDOWS_POWERSHELL_ID {
+    if spawn_profile == profiles::WINDOWS_POWERSHELL_ID {
         psreadline::begin_probe();
     }
     // There used to be a second trigger here (§7.40 ③): a `wsl.exe` started
@@ -34102,7 +34212,7 @@ fn create_leaf_session(
     // second rung of §7.1.4's ladder and a leaf is asked where it stands whether
     // or not a process was started behind it.
     let place = profiles::spawn_place(
-        spawn_profile,
+        profiles::index_of_id(spawn_profile),
         seed.cwd.clone(),
         &bt_pty::SystemShellEnvironment,
     );
@@ -34113,7 +34223,27 @@ fn create_leaf_session(
     // leaf — there is no table to prune, because the value lives on the thing it names.
     let capability = attention_wire::mint_capability();
     let mut resolved_program = None;
-    let mut pty = if probe_input.is_none() && started != Started::Nothing {
+    // **The two facts the spawn is made of, both read by id and both able to say
+    // no** (T-PROFILE-TABLE-MOVE).
+    //
+    // `row_of` is the live table asked the question the *panic* used to ask: it
+    // read `profiles::row(index)` and asserted, on the strength of a guard that
+    // had consulted only this window's snapshot, that the position was still a
+    // row. Any window in this process could make that false between the guard
+    // and the read — delete a profile below this one and the table is shorter
+    // than the position the seat is holding — and the answer was a panic on the
+    // window thread, which is every tab in the process.
+    //
+    // There is nothing left to assert. `startable_profile` has already answered
+    // about this id against the same two authorities these lines read, so both
+    // are `Some` for `AsAsked` and `FellBack` and the program is `None` for
+    // `Nothing` — which is exactly when there is to be no child. The shape of
+    // the code says that rather than a comment claiming it: no shell is started
+    // unless the row and the program are both in hand.
+    let spawn_row = profiles::row_of(spawn_profile);
+    let mut pty = if let (Some(row), Some(program)) = (&spawn_row, programs.program(spawn_profile))
+        && probe_input.is_none()
+    {
         // **The line the picker was missing.** Choosing a profile used to change
         // a tab's title and its mark and nothing else — `spawn_default_in` was
         // not told which one had been picked, so every row of the menu started
@@ -34121,17 +34251,6 @@ fn create_leaf_session(
         // this profile resolved to on this machine, with this profile's own
         // arguments.
         //
-        // **Resolved, never asserted** (review row R4-1). This used to be an
-        // `expect` on the invariant that the picker refuses a row it cannot
-        // start — which is true of the picker and was never true of the startup
-        // restore, where the profile comes out of a file written on a machine
-        // that has since changed. `startable_profile` has already chosen an
-        // index this machine can run, so the `expect` below is on that choice
-        // rather than on the file: `Started::Nothing` never reaches this branch,
-        // and neither of the other two names a profile with no program.
-        let program = programs
-            .program(spawn_profile)
-            .expect("startable_profile answers with a profile this machine can start");
         // **And what makes it legible.** The profile's own arguments, the place,
         // and — for the bash family — the init file that installs OSC 133 and
         // OSC 7 into this one shell without touching anything the user owns.
@@ -34139,14 +34258,8 @@ fn create_leaf_session(
         // environment is one of the things the spawn now lays down, and a
         // function that asked this module five separate questions about one
         // index is a function no test can put a profile in front of.
-        let row = profiles::row(spawn_profile).unwrap_or_else(|| {
-            panic!(
-                "profile {:?} reached spawn with no row in the table: the picker                  must not offer a row the table does not hold",
-                chosen_id
-            )
-        });
         let mut command = shell_integration::shell_command(
-            &row,
+            row,
             &place.arguments,
             shell_integration::Scripts::installed(),
             &bt_pty::SystemShellEnvironment,
@@ -34187,7 +34300,7 @@ fn create_leaf_session(
             .with_context(|| {
                 format!(
                     "spawn the {} profile in ConPTY",
-                    profiles::title(spawn_profile)
+                    profile_banner_name(spawn_profile)
                 )
             })?,
         )
@@ -34218,7 +34331,7 @@ fn create_leaf_session(
         // one fact that field exists to answer is "what is behind this pane", so
         // it follows the swap the same way the profile does.
         resolved_program = Some(PathBuf::from(fallback.started));
-        profiles::fallback_profile()
+        profiles::fallback_profile_id().to_owned()
     } else {
         // **The profile that was started, not the one that was asked for**
         // (review row R4-1). The same sentence the arm above it writes for
@@ -34227,7 +34340,7 @@ fn create_leaf_session(
         // leaf still claiming to be Git Bash would write `"gitbash"` back into
         // `session.json` for a shell that is not one — so the next launch would
         // meet the same missing program and say the same thing again, for ever.
-        spawn_profile
+        spawn_profile.to_owned()
     };
     let columns = nonzero_u32(grid.columns.get());
     let rows = nonzero_u32(grid.rows.get());
@@ -34275,11 +34388,11 @@ fn create_leaf_session(
     // profile that was asked for, the one standing in for it, one line, dim —
     // because from the reader's side it is the same event: the pane is back, and
     // it is not the shell they left in it.
-    match started {
+    match &started {
         Started::AsAsked => {}
         Started::FellBack(to) => {
             session
-                .feed(missing_program_banner(seed.profile, to).as_bytes())
+                .feed(missing_program_banner(&seed.profile, to).as_bytes())
                 .context("write the missing-program banner into the leaf's first line")?;
         }
         // Nothing on this machine can stand in, so there is no shell behind this
@@ -34287,7 +34400,7 @@ fn create_leaf_session(
         // holds its place in the tree and says why it is empty.
         Started::Nothing => {
             session
-                .feed(no_program_banner(seed.profile).as_bytes())
+                .feed(no_program_banner(&seed.profile).as_bytes())
                 .context("write the no-program banner into the leaf's first line")?;
         }
     }
@@ -34296,7 +34409,7 @@ fn create_leaf_session(
             // `seed.profile`, not `profile`: the banner's subject is the profile
             // the user asked for, which is exactly the one the line above has
             // just stopped this leaf from claiming to be.
-            .feed(fallback_banner(fallback, seed.profile).as_bytes())
+            .feed(fallback_banner(fallback, &seed.profile).as_bytes())
             .context("write the shell fallback banner into the leaf's first line")?;
     }
     if let Some(bytes) = probe_input {
@@ -34317,7 +34430,7 @@ fn create_leaf_session(
     // place that holds it. A Git Bash prints `/d/Demo/report.md` and a WSL bash prints
     // `/mnt/d/Demo/report.md` for files that are really on this disk.
     session.set_path_namespace(profiles::printed_path_namespace(
-        seed.profile,
+        profiles::index_of_id(&seed.profile),
         &bt_pty::SystemShellEnvironment,
     ));
     let projection = session.new_projection(session.layout_key());
@@ -34326,13 +34439,16 @@ fn create_leaf_session(
         // when there is no ConPTY — see the field.
         wake: pty.is_some().then_some(wake),
         pty,
-        profile,
-        paste_recipient: profiles::paste_recipient(profile, &bt_pty::SystemShellEnvironment),
+        paste_recipient: profiles::paste_recipient(
+            profiles::index_of_id(&profile),
+            &bt_pty::SystemShellEnvironment,
+        ),
         // The door of the profile this pane actually came up as, read once,
         // here, where that profile is finally known — after both fallbacks. See
         // the field for why it is not read again later.
-        integration: profiles::row(profile)
+        integration: profiles::row_of(&profile)
             .map_or(profiles::Integration::None, |row| profiles::served_by(&row)),
+        profile,
         program: resolved_program,
         spawn_place,
         // **What this pane is owed at its first prompt** (§7.54e ④). `None` for every pane in the
@@ -34416,8 +34532,9 @@ fn create_tab_state(
     seed: TabSeed,
     programs: &profiles::ProfilePrograms,
     // What a Terminal seat with no entry in `leaves` is started as — the
-    // resolved `settings.json` default, never `LeafSeed::default()`'s zero.
-    default_profile: usize,
+    // resolved `settings.json` default, by id like every other profile a seed
+    // names (T-PROFILE-TABLE-MOVE).
+    default_profile: &str,
     policy: SizePolicy,
     rail: seats::RailState,
     // The other half of the stage this tab is born into — see [`solve_seats`].
@@ -34461,9 +34578,10 @@ fn create_tab_state(
         //
         // Not `LeafSeed::default()`, which is what it used to be: a `usize`'s own
         // `Default` is `0`, and that was the same profile only for as long as the
-        // default was a constant. This is mock-up 7575 — `bootFresh()` opening
-        // its first tab from `defaultProfile()` — and it is the half of "新 tab，
-        // 和启动" that the `+` does not cover.
+        // default was a constant — which is also why the answer travels as an id.
+        // This is mock-up 7575 — `bootFresh()` opening its first tab from
+        // `defaultProfile()` — and it is the half of "新 tab，和启动" that the `+`
+        // does not cover.
         let leaf = create_leaf_session(
             renderer,
             body,
@@ -34471,7 +34589,7 @@ fn create_tab_state(
             wake,
             (seat == terminal_seat_id).then_some(probe_input).flatten(),
             &leaves.get(&seat).cloned().unwrap_or(LeafSeed {
-                profile: default_profile,
+                profile: default_profile.to_owned(),
                 cwd: None,
                 unknown_profile_id: None,
                 card_skip: 0,
@@ -36422,6 +36540,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         first_visible_present_dpi_checked: false,
         first_text_presented: false,
         last_presented_frame: None,
+        present_gate: present_gate::PresentGate::default(),
         terminal_content_revision: 0,
         presented_picture_revision: 0,
         chrome_present_pending: false,
@@ -36431,6 +36550,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         wheel_events: 0,
         wheel_routings: 0,
         wheel_burst: None,
+        dropped_files: Vec::new(),
         last_present_at: None,
         perf_trace_us: 0,
         strip_animation_ticked_at: None,
@@ -37095,9 +37215,11 @@ impl Runtime<'_> {
         // machine to boot before it could ask for a window, and the console
         // Windows handed that `wsl.exe` was a Windows Terminal window opening in
         // front of Folio. What is left costs microseconds and starts nothing.
-        wsl::start(profile_programs.program(profiles::index_of_id("wsl")));
+        wsl::start(profile_programs.program("wsl"));
         let default_profile =
             profiles::default_profile(&settings_store.loaded().default_profile, &profile_programs);
+        // The same answer as an id, for the seeds — see `Runtime::default_profile_id`.
+        let default_profile_id = profiles::id(default_profile);
         // The command line, put to this machine: the folder asked about, the
         // profile looked up in this build's table, and the crossing into that
         // profile's namespace. Everything it could not honour comes back in the
@@ -37335,7 +37457,7 @@ impl Runtime<'_> {
                     (
                         seat,
                         LeafSeed {
-                            profile: cli_plan.profile,
+                            profile: profiles::id(cli_plan.profile),
                             cwd: cli_plan.cwd.clone(),
                             // A profile the command line named and this build has
                             // not got is reported on a card naming the id, not by
@@ -37411,7 +37533,7 @@ impl Runtime<'_> {
                 &preview,
                 seed,
                 &profile_programs,
-                default_profile,
+                &default_profile_id,
                 // Startup: the opening rectangle is the program's own.
                 SizePolicy::Lawful,
                 // **The panel this window is opening with, both halves of it.**
@@ -37764,6 +37886,8 @@ impl Runtime<'_> {
             &app.settings_store.loaded().default_profile,
             &app.profile_programs,
         );
+        // The same answer as an id, for the seeds — see `Runtime::default_profile_id`.
+        let default_profile_id = profiles::id(default_profile);
         // **Where this window opens** (multiwindow slice D). The saved rectangle
         // when the file asked for the window, and the product's own size when a
         // verb did: a second window opened exactly on top of the first is a
@@ -38052,7 +38176,7 @@ impl Runtime<'_> {
                 &preview,
                 seed,
                 &app.profile_programs,
-                default_profile,
+                &default_profile_id,
                 // The opening rectangle is this program's, exactly as the first
                 // window's is: nobody has taken hold of a frame that has not been
                 // shown yet.
@@ -38518,7 +38642,7 @@ impl Runtime<'_> {
     fn launch_profile(
         &self,
         request: &launch_wire::LaunchRequest,
-    ) -> (usize, Vec<cli::CliRefusal>) {
+    ) -> (String, Vec<cli::CliRefusal>) {
         let plan = cli::resolve(
             &cli::CliRequest {
                 cwd: request.cwd.clone(),
@@ -38532,7 +38656,7 @@ impl Runtime<'_> {
             self.default_profile(),
             cli::machine_path_kind,
         );
-        (plan.profile, plan.refusals)
+        (profiles::id(plan.profile), plan.refusals)
     }
 
     /// One card per thing a second launch asked for and did not get — the same
@@ -38558,7 +38682,8 @@ impl Runtime<'_> {
     /// so there is one sentence about what "new tab" means rather than a button's
     /// and a key's.
     fn new_tab(&mut self) -> Result<()> {
-        self.new_tab_with_profile(self.default_profile(), None)
+        let profile = self.default_profile_id();
+        self.new_tab_with_profile(&profile, None)
     }
 
     /// The picker's verb: a tab on the profile the row names, optionally
@@ -38587,7 +38712,7 @@ impl Runtime<'_> {
     /// that has no name for the chosen folder inherits nothing rather than a
     /// path it cannot read, which is `cwd_for_spawn`'s own rule and not a second
     /// one: it then starts where a fresh tab of that profile starts.
-    fn new_tab_with_profile(&mut self, profile: usize, place: Option<PathBuf>) -> Result<()> {
+    fn new_tab_with_profile(&mut self, profile: &str, place: Option<PathBuf>) -> Result<()> {
         // **Both facts are read off the *same* leaf** — the focused session,
         // which is also what `working_directory()` is asked of. A profile taken
         // from one pane and a directory from another would be the exact mismatch
@@ -38601,7 +38726,8 @@ impl Runtime<'_> {
         let source_cwd = self
             .focused()
             .and_then(|leaf| leaf.session.working_directory().map(Path::to_path_buf));
-        self.new_tab_seeded_from(profile, place, self.session_profile(), source_cwd)
+        let source_profile = self.session_profile();
+        self.new_tab_seeded_from(profile, place, &source_profile, source_cwd)
     }
 
     /// **A tab, seeded from a leaf the caller names** (丙2, `Duplicate tab`).
@@ -38625,12 +38751,16 @@ impl Runtime<'_> {
     /// from another describes a pane that does not exist.
     fn new_tab_seeded_from(
         &mut self,
-        profile: usize,
+        profile: &str,
         place: Option<PathBuf>,
-        source_profile: usize,
+        source_profile: &str,
         source_cwd: Option<PathBuf>,
     ) -> Result<()> {
-        debug_assert!(profile < profiles::count());
+        // No assertion that the table still holds this id, and that is the point
+        // of the id: `Duplicate tab` names the profile the source pane is
+        // *running*, and a reader may have deleted that row while the pane went
+        // on running it. The seed carries the id either way and the spawn
+        // degrades on it once, where the reader can be told (`startable_profile`).
         let render_physical =
             presentation_physical_size(self.window.renderer.presentation_geometry());
         let wake = &self.window.pty_wake;
@@ -38648,7 +38778,7 @@ impl Runtime<'_> {
         let leaves = BTreeMap::from([(
             seats.identity(),
             LeafSeed {
-                profile,
+                profile: profile.to_owned(),
                 cwd,
                 unknown_profile_id: None,
                 card_skip: 0,
@@ -38669,7 +38799,7 @@ impl Runtime<'_> {
             &PreviewRestore::default(),
             TabSeed::default(),
             &self.app.profile_programs,
-            self.default_profile(),
+            &self.default_profile_id(),
             self.window.size_policy,
             // The posture and not the stored preference, for
             // [`Self::resolve_seat_layout`]'s reason: a tab born while the card
@@ -38863,7 +38993,13 @@ impl Runtime<'_> {
                 let leaves = BTreeMap::from([(
                     seats.identity(),
                     LeafSeed {
-                        profile: profiles::index_of_id(&profile_id),
+                        // The saved id, or the fallback's when this build has no
+                        // such row — `revive_plan`'s own line, for the same reason.
+                        profile: if profiles::has_id(&profile_id) {
+                            profile_id.clone()
+                        } else {
+                            profiles::fallback_profile_id().to_owned()
+                        },
                         cwd: profiles::revived_cwd(
                             profiles::index_of_id(&profile_id),
                             Path::new(&cwd),
@@ -38994,7 +39130,7 @@ impl Runtime<'_> {
                 pinned: false,
             },
             &self.app.profile_programs,
-            self.default_profile(),
+            &self.default_profile_id(),
             self.window.size_policy,
             // The posture, for [`Self::resolve_seat_layout`]'s reason.
             self.rail_posture(),
@@ -39164,7 +39300,7 @@ impl Runtime<'_> {
                 &preview,
                 seed,
                 &self.app.profile_programs,
-                self.default_profile(),
+                &self.default_profile_id(),
                 self.window.size_policy,
                 // The posture, for [`Self::resolve_seat_layout`]'s reason.
                 self.rail_posture(),
@@ -43909,7 +44045,8 @@ impl Runtime<'_> {
                     // This leaf's own shell, off the session that is running in
                     // it — the same map every other per-seat fact in this frame
                     // comes from.
-                    profile_mark: session.map(|leaf| profiles::mark(leaf.profile)),
+                    profile_mark: session
+                        .map(|leaf| profiles::mark(profiles::index_of_id(&leaf.profile))),
                     // The short name, and C28's own two lengths are why. A pane
                     // head has a whole bar and answers "where is this" with the
                     // place entire; this popup is a 210px thumbnail whose names
@@ -44627,7 +44764,7 @@ impl Runtime<'_> {
             ) && self.app.psreadline_documents.is_some(),
             psreadline_remove_available: psreadline::remove_available(self.psreadline_row_state()),
             profile_available: (0..profiles::count())
-                .map(|index| self.app.profile_programs.is_available(index))
+                .map(|index| self.app.profile_programs.row_is_available(index))
                 .collect(),
             editor: self.editor_subject(),
             background_image: !self.app.settings_store.loaded().background_image.is_empty(),
@@ -44722,6 +44859,17 @@ impl Runtime<'_> {
             &self.app.settings_store.loaded().default_profile,
             &self.app.profile_programs,
         )
+    }
+
+    /// The same answer in the spelling a seed takes it in (T-PROFILE-TABLE-MOVE).
+    ///
+    /// The resolution itself is a question about *this* table and is asked here,
+    /// against the table as it stands; what leaves this function is the row's
+    /// stable id, because everything downstream of a new-tab door holds its
+    /// profile across at least one gesture — a folder chooser, a tear-out, a
+    /// save — and a position does not survive one.
+    fn default_profile_id(&self) -> String {
+        profiles::id(self.default_profile())
     }
 
     /// Whether that answer came from the machine rather than from the reader —
@@ -45456,7 +45604,7 @@ impl Runtime<'_> {
                     kind,
                     self.sessions
                         .get(&seat)
-                        .map(|leaf| profiles::mark(leaf.profile)),
+                        .map(|leaf| profiles::mark(profiles::index_of_id(&leaf.profile))),
                     bt_render::chrome_palette(),
                 )
                 .0,
@@ -46042,7 +46190,7 @@ impl Runtime<'_> {
                     kind,
                     tab.sessions
                         .get(&seat)
-                        .map(|leaf| profiles::mark(leaf.profile)),
+                        .map(|leaf| profiles::mark(profiles::index_of_id(&leaf.profile))),
                     palette,
                 );
                 // The dragged seat's own name, by id — the ghost and the
@@ -47910,7 +48058,7 @@ impl Runtime<'_> {
         if index >= profiles::count() {
             return Ok(());
         }
-        let program = profiles::program_text(index, self.app.profile_programs.program(index));
+        let program = profiles::program_text(index, self.app.profile_programs.row_program(index));
         self.window.settings.open_editor(settings::ProfileEditor {
             index,
             name: text_field::TextField::holding(&profiles::display_title(index)),
@@ -47981,10 +48129,15 @@ impl Runtime<'_> {
     /// degrade banner the restarting seat already prints.
     fn delete_profile(&mut self, index: usize) -> Result<()> {
         let title = profiles::title(index).to_owned();
+        // **The row's id, read before the table moves**, because that is what the
+        // panes are holding: counting them by position would count whichever rows
+        // happen to sit where this one sat, and after the delete there is no
+        // position left to ask about at all.
+        let subject = profiles::id(index);
         let panes = self
             .sessions
             .values()
-            .filter(|leaf| leaf.profile == index)
+            .filter(|leaf| leaf.profile == subject)
             .count();
         let Some(removed) = profiles::delete(index) else {
             return Ok(());
@@ -51724,11 +51877,13 @@ impl Runtime<'_> {
     ///   certificate and not a contract: the program and the environment of a
     ///   shell that is already up are in a process, and nothing on this side of
     ///   the pipe can re-argue them. What each pane *does* follow is its own
-    ///   profile **by id**, because the index it holds is a position in a table
-    ///   somebody may have just reordered in a text editor — see
-    ///   `profiles::index_of_id`, whose standing answer for a profile that is
-    ///   gone (the fallback, and never the reader's configured default) applies
-    ///   here unchanged.
+    ///   profile **by id**, and it follows it by construction now rather than by
+    ///   a pass made here: a leaf holds the id, not a position in a table
+    ///   somebody may have just reordered in a text editor. A pane whose row has
+    ///   been removed from the file keeps its id, goes on running the shell it
+    ///   started, and meets the standing answer for a profile that is gone — the
+    ///   fallback, and never the reader's configured default — the next time it
+    ///   is asked to start something (`startable_profile`).
     /// * **The editor sub-page keeps its draft and follows its subject**, for
     ///   the reason a scheme row follows its file: the reader is looking at the
     ///   thing that just changed, and a page that reseeded its fields would be
@@ -51774,25 +51929,16 @@ impl Runtime<'_> {
             .settings
             .editor()
             .map(|editor| profiles::id(editor.index));
-        let seated: Vec<Vec<String>> = self
-            .window
-            .tabs
-            .iter()
-            .map(|tab| {
-                tab.sessions
-                    .values()
-                    .map(|leaf| profiles::id(leaf.profile))
-                    .collect()
-            })
-            .collect();
-
+        // **Nothing to re-point on the panes** (T-PROFILE-TABLE-MOVE). There used
+        // to be a capture of every leaf's id here and a second pass putting the
+        // new positions back on them, and it was the only by-id re-resolution in
+        // the product — which is why every *other* way the table moves (this
+        // dialog's own `Move up`, `Delete`, `Duplicate`, `Undo`) left the panes
+        // naming whichever row had slid into their slot. A leaf holds the id now,
+        // so a table that moves cannot move a pane's profile at all, and the loop
+        // that used to heal one door of four is a loop with nothing left to do.
         let faults = profiles::install(self.app.profiles_store.loaded());
 
-        for (tab, held) in self.window.tabs.iter_mut().zip(seated) {
-            for (leaf, id) in tab.sessions.values_mut().zip(held) {
-                leaf.profile = profiles::index_of_id(&id);
-            }
-        }
         if let Some(id) = editing {
             match profiles::table().position_of_id(&id) {
                 Some(index) => {
@@ -52618,7 +52764,7 @@ impl Runtime<'_> {
         // `position_of` and not `index_of_id`: that one must answer with *some*
         // profile because a pane has to start something, and "this table has no
         // such row" is exactly the answer this question needs.
-        profiles::position_of(id).is_some_and(|index| self.app.profile_programs.is_available(index))
+        profiles::has_id(id) && self.app.profile_programs.is_available(id)
     }
 
     /// Write down that the card has been up. Nothing shows it again.
@@ -54001,8 +54147,13 @@ impl Runtime<'_> {
         let inherited = self
             .sessions
             .get(&source)
-            .map(|leaf| seed.applied(leaf.profile, leaf.session.working_directory()))
-            .unwrap_or_default();
+            .map(|leaf| seed.applied(&leaf.profile, leaf.session.working_directory()))
+            // A seat with no shell to inherit from has no profile to inherit
+            // either, and the fallback is the one answer that is startable by
+            // construction. Said here rather than left to `LeafSeed::default()`,
+            // whose profile is now the empty id — which names no row and would
+            // reach the spawn as a degradation nobody caused.
+            .unwrap_or_else(|| seed.applied(profiles::fallback_profile_id(), None));
         let wake = &self.window.pty_wake;
         let formulas = FormulaSwitches::from_settings(self.app.settings_store.loaded());
         let scrollback = scrollback_quota(self.app.settings_store.loaded().scrollback_lines);
@@ -64942,6 +65093,34 @@ impl Runtime<'_> {
     /// which is what the caller did unconditionally before.
     fn publish_chrome_frame(&mut self, now: Instant) -> Result<()> {
         if chrome_tick_reuses_picture(self.picture_on_glass()) {
+            let bodies = self.pane_draws(now);
+            let (seat_ids, seats) = Self::retained_seats(
+                &self.window.tabs[self.window.active_tab],
+                self.window
+                    .last_presented_frame
+                    .as_ref()
+                    .filter(|_| self.focused().is_some()),
+                &bodies,
+                self.focused_leaf,
+                self.window.renderer.seat_viewport(),
+                self.keyboard_owner_is_a_shell(),
+            );
+            let signature = self.present_signature(&seat_ids, &seats);
+            if self.app.gpu.device_loss().is_none()
+                && self
+                    .window
+                    .present_gate
+                    .unchanged(&signature, self.present_conditions(FrameSource::Expose))
+            {
+                trace_unchanged_present(
+                    self.app.trace_perf,
+                    &mut self.window.present_gate,
+                    FrameSource::Expose,
+                    self.window.last_presented_frame.as_ref(),
+                    self.window.pending_frames.overwrites(),
+                );
+                return Ok(());
+            }
             self.window.chrome_present_pending = true;
             self.window.window.request_redraw();
             return Ok(());
@@ -65198,11 +65377,13 @@ impl Runtime<'_> {
                 let alternate_screen = frame_is_alternate_screen(&composed.frame);
                 let digest_elapsed = digest_started.elapsed();
                 trace_sink::stderr_line(format!(
-                    "BT_PERF_TRACE skip=unchanged source={:?} content_fnv={:016x} alt={} digest_us={}",
+                    "BT_PERF_TRACE skip=unchanged source={:?} content_fnv={:016x} alt={} digest_us={} present_unchanged={} slot_overwrites={}",
                     trigger.source,
                     digest.content_fnv,
                     u8::from(alternate_screen),
                     digest_elapsed.as_micros(),
+                    self.window.present_gate.unchanged,
+                    self.window.pending_frames.overwrites(),
                 ));
             }
             return Ok(false);
@@ -71060,7 +71241,8 @@ impl Runtime<'_> {
             // the `+`'s tooltip) — this row chose a *place*, and choosing a shell
             // as well is what the four rows above it are for.
             FolderPick::NewTabIn => {
-                self.new_tab_with_profile(self.default_profile(), Some(path))?;
+                let profile = self.default_profile_id();
+                self.new_tab_with_profile(&profile, Some(path))?;
             }
         }
         Ok(())
@@ -73685,7 +73867,13 @@ impl Runtime<'_> {
         // `pane_menu_layer`'s own sentence, read at this menu's door: a pane you
         // split from a Git Bash is a Git Bash, and a child that ticked PowerShell
         // on it would be telling you about the window rather than about the pane.
-        let current = self.sessions.get(&seat).map(|leaf| leaf.profile);
+        // `position_of` and not `index_of_id`: the tick names a row of the table
+        // being drawn, and a pane whose profile has been deleted has no row to
+        // tick rather than the fallback's.
+        let current = self
+            .sessions
+            .get(&seat)
+            .and_then(|leaf| profiles::position_of(&leaf.profile));
         let programs = &self.app.profile_programs;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
@@ -74446,13 +74634,13 @@ impl Runtime<'_> {
         let Some(leaf) = state.focused() else {
             return Ok(());
         };
-        let profile = leaf.profile;
+        let profile = leaf.profile.clone();
         let cwd = leaf.session.working_directory().map(Path::to_path_buf);
         // The source profile *is* the target profile, so `cwd_for_spawn` has no
         // namespace to cross and the folder arrives exactly as the shell reported
         // it. That is the sentence this row promises — the same shell, in the
         // same place — said in the one function that knows how to say it.
-        self.new_tab_seeded_from(profile, None, profile, cwd)
+        self.new_tab_seeded_from(&profile, None, &profile, cwd)
     }
 
     /// **`Move tab to new window`** — the row 丙2 exists for.
@@ -74762,7 +74950,7 @@ impl Runtime<'_> {
         let Some(leaf) = self.sessions.get(&seat) else {
             return Ok(());
         };
-        let seed = restart_seed(leaf.profile, leaf.session.working_directory());
+        let seed = restart_seed(&leaf.profile, leaf.session.working_directory());
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let Some(body) = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)
         else {
@@ -74994,7 +75182,13 @@ impl Runtime<'_> {
         // never the window's default. A pane you split from a Git Bash is a Git
         // Bash, and a submenu that ticked PowerShell on it would be telling you
         // about the window rather than about the pane the menu was raised on.
-        let current = self.sessions.get(&seat).map(|leaf| leaf.profile);
+        // `position_of` and not `index_of_id`: the tick names a row of the table
+        // being drawn, and a pane whose profile has been deleted has no row to
+        // tick rather than the fallback's.
+        let current = self
+            .sessions
+            .get(&seat)
+            .and_then(|leaf| profiles::position_of(&leaf.profile));
         let windows = self.other_window_rows();
         let programs = &self.app.profile_programs;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
@@ -76751,11 +76945,14 @@ impl Runtime<'_> {
             profiles::PaneMenuHit::Zone(zone) => {
                 self.split_seat(seat, zone.axis(), zone.leading(), SplitSeed::Inherit)
             }
+            // The row's id, read off the table the submenu was drawn from: the
+            // press is the last moment this position is certainly that profile,
+            // and the split it seeds may be a frame or a folder chooser later.
             profiles::PaneMenuHit::Submenu(profile) => self.split_seat(
                 seat,
                 self.settings_split_axis(seat),
                 false,
-                SplitSeed::Profile(profile),
+                SplitSeed::Profile(profiles::id(profile)),
             ),
             profiles::PaneMenuHit::Row(row) => match row {
                 // The heading is not a verb: pressing it opens the submenu, and
@@ -77287,7 +77484,8 @@ impl Runtime<'_> {
     /// because "the default profile" is what *new tab* means everywhere else in
     /// this build.
     fn new_terminal_in_folder(&mut self, path: &Path) -> Result<()> {
-        self.new_tab_with_profile(self.default_profile(), Some(path.to_path_buf()))
+        let profile = self.default_profile_id();
+        self.new_tab_with_profile(&profile, Some(path.to_path_buf()))
     }
 
     /// Put one row's whole path on the clipboard (K143).
@@ -89990,7 +90188,7 @@ impl Runtime<'_> {
                 pinned: false,
             },
             &self.app.profile_programs,
-            self.default_profile(),
+            &self.default_profile_id(),
             self.window.size_policy,
             self.rail_posture(),
             self.platform_chrome(),
@@ -92371,7 +92569,10 @@ impl Runtime<'_> {
                         // different things in two different sections.
                         match row {
                             Some(profiles::MenuRow::Profile(index)) => {
-                                self.new_tab_with_profile(index, None)?;
+                                // The row's id, taken on the frame the row was
+                                // drawn from: the press is the last moment this
+                                // position is certainly that profile.
+                                self.new_tab_with_profile(&profiles::id(index), None)?;
                             }
                             Some(profiles::MenuRow::Recent(index)) => {
                                 self.reopen_recent(index)?;
@@ -93949,7 +94150,9 @@ impl Runtime<'_> {
                     section: palette::Section::Places,
                     label,
                     hint,
-                    mark: Some(profiles::mark(tab.leaf_profile(*seat))),
+                    mark: Some(profiles::mark(profiles::index_of_id(
+                        &tab.leaf_profile(*seat),
+                    ))),
                     awaiting: leaf.attention.ticket().is_some(),
                     verb: palette::Verb::Go {
                         tab: tab.id,
@@ -95588,6 +95791,121 @@ impl Runtime<'_> {
         let spent = self.mouse_wheel(burst.delta());
         hang_watch::at(leaving);
         spent
+    }
+
+    /// **Spend whatever one drop put on this window** (GitHub issue #1 ②).
+    ///
+    /// [`Self::flush_wheel`]'s twin, and called from the same two doors for the
+    /// same reason: the top of `window_event` for every event that is not
+    /// another file of this drop, and the top of a turn. Free — one `is_empty`
+    /// — on every turn in which nobody dropped anything.
+    ///
+    /// **One paste, however many files.** The whole batch goes to
+    /// [`Self::paste_paths_into`] as one list, which is what puts three files on
+    /// one command line rather than running the first two.
+    ///
+    /// The station is entered only when there is a drop to spend and is handed
+    /// back on the way out, on [`hang_watch::enter`]'s own rule: this door
+    /// stands inside two other functions, and a name it kept would be charged to
+    /// the keystroke or the turn that came after it.
+    fn flush_dropped_files(&mut self) -> Result<()> {
+        if self.window.dropped_files.is_empty() {
+            return Ok(());
+        }
+        let paths = std::mem::take(&mut self.window.dropped_files);
+        let leaving = hang_watch::enter(hang_watch::Station::FileDrop);
+        // **The cursor is asked for here and exactly once**, for the batch and
+        // not for the file: the query crosses into Win32 or AppKit, and a drop
+        // of forty files would otherwise cross forty times to be told the same
+        // point. It is also the only moment at which the question is worth
+        // asking — the hand is still where it let go, and the flush's own rule
+        // guarantees no event has moved it since the drop.
+        let point = self.dropped_files_point();
+        let seat = self.dropped_files_seat(point);
+        let pasted = self.paste_paths_into(seat, paths, "write dropped paths to PTY");
+        hang_watch::at(leaving);
+        pasted
+    }
+
+    /// **Which pane a dropped path is typed into** (GitHub issue #1 ②).
+    ///
+    /// The pane under the pointer, asked of the same router a press is asked of
+    /// — a float's claim is terminal, an open rail or focus column covers what
+    /// is behind it, and what is left is [`seats::pane_at`]. A point that is
+    /// none of those is chrome or no pane at all, and the answer there is the
+    /// pane holding the keyboard: a path is going onto a command line, and the
+    /// command line the reader is typing on is the only one this window can
+    /// honestly mean.
+    ///
+    /// **A pane that is not a terminal is still that pane's drop.** The files
+    /// column is a leaf of the layout tree like any other, and so is a preview
+    /// pane; [`Self::paste_paths_into`] finds no shell on either and does
+    /// nothing, which is the honest answer rather than sending the path
+    /// somewhere the hand was not. It is also what keeps §7.1.1's 2026-07-17
+    /// ruling intact from the other side: the column's own drag vocabulary is
+    /// about *views*, and a path appearing in a shell because a file was let go
+    /// of over a file tree would be the text verb leaking back into it.
+    ///
+    /// **Where the point comes from, given that winit throws it away.** winit
+    /// 0.30 reports a drop as a path and nothing else: the Windows backend is
+    /// handed `POINTL` in `IDropTarget::Drop` and discards it, and the macOS
+    /// backend never reads the dragging location out of
+    /// `performDragOperation:`. Neither platform sends a pointer event while
+    /// another application's drag is over the window either, so a drag that
+    /// began in Explorer or the Finder arrives at a window whose pointer has
+    /// already left it and `pointer_position` is `None` — which is *most*
+    /// drops. [`Self::dropped_files_point`] is what closes that: the cursor is
+    /// asked of the platform, once, at the moment of the flush. The keyboard's
+    /// pane is what is left when even that answers nothing, which is a window
+    /// on a session with no desktop to read.
+    fn dropped_files_seat(&mut self, position: Option<PhysicalPosition<f64>>) -> SeatId {
+        let covered = position.is_some_and(|position| {
+            matches!(
+                self.pointer_target_at(position),
+                Some(PointerTarget::Float(..))
+            ) || self.panel_covers(position)
+        });
+        dropped_files_seat_at(&self.seat_layout, position, covered, self.focused_leaf)
+    }
+
+    /// **Where the hand let go**, in this window's own pixels (GitHub issue #1
+    /// ②, owner's ruling 2026-09-16: a drop lands in the pane under the cursor).
+    ///
+    /// The live pointer where there is one — a drag that began *inside* this
+    /// window leaves it standing — and otherwise the platform's own cursor,
+    /// which is the only witness left once winit has dropped the point and the
+    /// pointer events have stopped.
+    ///
+    /// **The two are the same units and no conversion happens here**, which was
+    /// checked rather than assumed. `pointer_position` is
+    /// `WindowEvent::CursorMoved`'s `PhysicalPosition` stored raw
+    /// ([`Self::pointer_moved`]). On Windows that is `WM_MOUSEMOVE`'s `lParam`:
+    /// physical pixels from the client area's top-left, which is precisely what
+    /// `GetCursorPos` put through `ScreenToClient` answers. On macOS winit takes
+    /// its view's point and multiplies by the window's backing scale, which is
+    /// precisely what the AppKit arm does with `NSEvent.mouseLocation` after the
+    /// same two conversions. So the platform's answer is already in the window's
+    /// physical pixels and is used as it stands; scaling it again here would
+    /// square the factor on every Retina and every 150% display.
+    ///
+    /// [`WindowRuntime::pointer_last_seen`] is still deliberately not read: it
+    /// says where the hand was *before* the drag, which is not where this drop
+    /// landed, and a routing built on it would be a guess wearing a
+    /// measurement's clothes. The cursor query is the opposite of that — it is
+    /// the hand's position now, and now is when the file was let go of.
+    fn dropped_files_point(&self) -> Option<PhysicalPosition<f64>> {
+        let live = self.window.pointer_position;
+        let queried = match live {
+            // A window that already knows where its pointer is does not pay for
+            // the question. The query crosses into Win32 or AppKit, and this
+            // `match` is where "only when the batch has no pointer of its own"
+            // is actually enforced.
+            Some(_) => None,
+            None => native_window(&self.window.window)
+                .ok()
+                .and_then(bt_platform::pointer_position_in_window),
+        };
+        dropped_files_point_from(live, queried)
     }
 
     fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {
@@ -97335,7 +97653,74 @@ impl Runtime<'_> {
         let leaving = hang_watch::enter(hang_watch::Station::ClipboardRead);
         let payload = bt_platform::clipboard_payload();
         hang_watch::at(leaving);
-        let prepared = prepare_clipboard_paste(payload, &recipient, leading_space);
+        let mut prepared = prepare_clipboard_paste(payload, &recipient, leading_space);
+        // **The picture cannot travel down [`Self::deliver_paste`], because there is
+        // no text yet** (§7.61): what a picture pastes is the path of a file nobody
+        // has written, and writing it is a PNG encode this thread must not do. It is
+        // lifted out *here* rather than answered before the line below, so that a
+        // refusal notice still leaves by the one door every paste's notices leave by
+        // — and the line below is then an ordinary paste with nothing in it.
+        let offered = std::mem::take(&mut prepared.picture);
+        self.deliver_paste(seat, prepared, "write clipboard paste to PTY")?;
+        if offered.is_empty() {
+            return Ok(());
+        }
+        self.save_clipboard_picture(seat, offered)
+    }
+
+    /// **The same paste, with the paths already in hand** — what a drop onto a
+    /// pane leaves behind (GitHub issue #1 ②).
+    ///
+    /// The only difference between a file *copied* in Explorer or Finder and one
+    /// *dropped* on this window is how the list of paths reached this process,
+    /// and that is the one thing neither the shell nor the reader can see. So it
+    /// is also the only thing that differs here: the paths go through
+    /// [`prepare_dropped_paste`] into the very function the clipboard's own
+    /// road uses, which is what makes the quoting, the `paste_paths_as` profile
+    /// key, the joining of several files into one command line and the refusal
+    /// notices one implementation rather than two that drift.
+    ///
+    /// **Focus does not move**, on [`Self::paste_from_clipboard_into`]'s own
+    /// rule: a drop is a pointer gesture, and a pointer gesture does not take
+    /// the keyboard away from the pane the reader was typing in.
+    ///
+    /// **Two roads arrive here and not one** (§7.61). The second is the file
+    /// Folio writes for a picture on the clipboard, which by the time it has a
+    /// name is a path in hand and nothing else — the same sentence this
+    /// function's first paragraph makes about a drop, said about a third way of
+    /// coming by a path. `context` is all they do not share: it names the write
+    /// for a reader of the error, and a picture that could not reach a shell is
+    /// not a drop that could not.
+    fn paste_paths_into(
+        &mut self,
+        seat: SeatId,
+        paths: Vec<PathBuf>,
+        context: &'static str,
+    ) -> Result<()> {
+        let active = self.window.active_tab;
+        let Some(leaf) = self.window.tabs[active].sessions.get(&seat) else {
+            return Ok(());
+        };
+        let recipient = leaf.paste_recipient.clone();
+        let leading_space = input_line_needs_a_space_first(&leaf.session);
+        let prepared = prepare_dropped_paste(paths, &recipient, leading_space);
+        self.deliver_paste(seat, prepared, context)
+    }
+
+    /// **What a prepared paste does to one named pane**, whichever road
+    /// prepared it.
+    ///
+    /// The tail [`Self::paste_from_clipboard_into`] always had, given a name on
+    /// the day a second road arrived at it. `context` is the one thing the two
+    /// roads do not share: it names the write for a reader of the error, and a
+    /// drop that could not reach a shell is not a clipboard that could not.
+    fn deliver_paste(
+        &mut self,
+        seat: SeatId,
+        prepared: PreparedClipboardPaste,
+        context: &'static str,
+    ) -> Result<()> {
+        let active = self.window.active_tab;
         if let Some(notice) = prepared.notice {
             self.toast(
                 toast::ToastKind::Error,
@@ -97344,26 +97729,9 @@ impl Runtime<'_> {
                 notice,
             )?;
         }
-        if !prepared.picture.is_empty() {
-            return self.save_clipboard_picture(seat, prepared.picture);
-        }
         let Some(text) = prepared.text else {
             return Ok(());
         };
-        self.deliver_paste(seat, &text)
-    }
-
-    /// **The half of a paste that is the same whatever the clipboard held** —
-    /// the bytes onto the child's input, the selection gone, the view back at the
-    /// bottom, and the four pieces of bookkeeping a paste owes the window.
-    ///
-    /// Its own function because a picture's path arrives on a *later turn* than
-    /// the press that asked for it, and a second copy of this for that lane would
-    /// be a second place the attention answer, the typing note and the frame's
-    /// clock are decided — which is the very reason `paste_text` was pulled out
-    /// for K144.
-    fn deliver_paste(&mut self, seat: SeatId, text: &str) -> Result<()> {
-        let active = self.window.active_tab;
         let Some(LeafSession {
             pty,
             session,
@@ -97373,8 +97741,8 @@ impl Runtime<'_> {
         else {
             return Ok(());
         };
-        paste_text(session, projection, text, |bytes| {
-            write_pty_input(pty.as_ref(), bytes, "write clipboard paste to PTY")
+        paste_text(session, projection, &text, |bytes| {
+            write_pty_input(pty.as_ref(), bytes, context)
         })?;
         // A paste is one gesture landing in one named pane, so it answers whatever that pane was
         // asking — and it is the pane the clipboard went into, not the one holding the keyboard
@@ -97453,17 +97821,21 @@ impl Runtime<'_> {
         Ok(())
     }
 
-    /// **The file the picture worker wrote, spelled and pasted** (§7.61).
+    /// **The file the picture worker wrote, pasted as the path it now is**
+    /// (§7.61).
     ///
-    /// The path goes through `shell_literal::paths_text` — the same call, with
-    /// the same recipient, that a copied *file* goes through — so a picture
-    /// pasted into a `cmd.exe` and one pasted into a `fish` are quoted by the
-    /// grammar each of them actually reads, and a path this recipient cannot
-    /// spell is refused with the same sentence rather than written raw.
+    /// One line of its own and then [`Self::paste_paths_into`], which is the
+    /// whole point: by the time a picture has a file it *is* a path in hand, and
+    /// a path in hand is what a drop leaves and what a copy leaves. So the
+    /// quoting, the `paste_paths_as` spelling, the refusal notice and the
+    /// delivery are the same implementation those two use rather than a third
+    /// that drifts — `a_written_picture_is_spelled_exactly_as_a_copied_file_is`
+    /// is what goes red if somebody writes one.
     ///
-    /// **The recipient and the leading space are read now, not when the paste
-    /// was asked for.** They are facts about the line the bytes are about to land
-    /// on, and that line has had the whole of the encode to change.
+    /// **The recipient and the leading space are therefore read now, not when
+    /// the paste was asked for**, because that road reads them itself: they are
+    /// facts about the line the bytes are about to land on, and that line has had
+    /// the whole of the encode to change.
     ///
     /// A seat that is no longer in the tab on top is dropped in silence, on
     /// [`Self::adopt_background_picture`]'s footing: it answers a gesture that
@@ -97485,26 +97857,11 @@ impl Runtime<'_> {
                 );
             }
         };
-        let active = self.window.active_tab;
-        let Some(leaf) = self.window.tabs[active].sessions.get(&landed.seat) else {
-            return Ok(());
-        };
-        let recipient = leaf.paste_recipient.clone();
-        let leading_space = input_line_needs_a_space_first(&leaf.session);
-        let insertion =
-            shell_literal::paths_text(std::slice::from_ref(&path), &recipient, leading_space);
-        if let Some(notice) = shell_literal::refusal_notice(&insertion.refused) {
-            self.toast(
-                toast::ToastKind::Error,
-                toast::ToastAnchor::Window,
-                None,
-                notice,
-            )?;
-        }
-        if insertion.text.is_empty() {
-            return Ok(());
-        }
-        self.deliver_paste(landed.seat, &insertion.text)
+        self.paste_paths_into(
+            landed.seat,
+            vec![path],
+            "write clipboard picture path to PTY",
+        )
     }
 
     /// A composition event, routed by [`ime_owner`].
@@ -100460,9 +100817,33 @@ impl Runtime<'_> {
         window: &Window,
         traces: FrameTraces<'_>,
         seat_frames: &[bt_render::SeatFrame<'_>],
-        trigger: FrameTrigger,
-    ) -> Result<PresentOutcome> {
-        let FrameTraces { preview, census } = traces;
+        intent: PresentIntent,
+    ) -> Result<Option<PresentOutcome>> {
+        let PresentIntent {
+            trigger,
+            mut signature,
+        } = intent;
+        let FrameTraces {
+            preview,
+            census,
+            gate,
+            trace_perf,
+            slot_overwrites,
+            conditions,
+        } = traces;
+        if gpu.device_loss().is_none() && gate.unchanged(&signature, conditions) {
+            trace_unchanged_present(
+                trace_perf,
+                gate,
+                trigger.source,
+                seat_frames.first().map(|seat| seat.frame),
+                slot_overwrites,
+            );
+            return Ok(None);
+        }
+        // Failure, textless presentation, or even a failed commit must not
+        // leave an old signature claiming that the surface is still complete.
+        gate.invalidate();
         // **What the frame is allowed to cost to measure**, decided at the one
         // funnel because that is the one place every frame passes. Counting a
         // frame's demand on the glyph atlas means rasterizing each distinct
@@ -100520,7 +100901,12 @@ impl Runtime<'_> {
                 window.request_redraw();
             }
         }
-        Ok(outcome)
+        if matches!(outcome, PresentOutcome::Presented(_)) {
+            // A successful resize may configure the surface inside this call.
+            signature.renderer = renderer.present_state();
+            gate.presented(signature);
+        }
+        Ok(Some(outcome))
     }
 
     /// **What one present cost, printed once for every present this window
@@ -100589,6 +100975,133 @@ impl Runtime<'_> {
         self.window.perf_trace_us = trace_started.elapsed().as_micros();
     }
 
+    fn present_conditions(&self, source: FrameSource) -> present_gate::PresentConditions {
+        present_gate::PresentConditions {
+            visible: self.window.window_shown
+                && self.window.window.is_visible() == Some(true)
+                && !self.window.window_hidden
+                && self.window.window_exposed,
+            resize_pending: self.pending_resize_present.is_some()
+                || matches!(source, FrameSource::Resize),
+            skirt_pending: self.window.compositor.skirt_covers_anything(),
+        }
+    }
+
+    /// The signature is gathered only after pane_draws sampled the transforms
+    /// and placed previews. Equality includes the complete terminal projection,
+    /// so selection, hover marks and both viewport origins advance a seat's
+    /// picture revision even when its terminal bytes did not change.
+    fn present_signature(
+        &self,
+        seat_ids: &[SeatId],
+        seats: &[bt_render::SeatFrame<'_>],
+    ) -> present_gate::PresentSignature {
+        debug_assert_eq!(seat_ids.len(), seats.len());
+        let tab = &self.window.tabs[self.window.active_tab];
+        let seats = seat_ids
+            .iter()
+            .zip(seats)
+            .map(|(id, seat)| {
+                let owner = (tab.id.0, id.0);
+                let same_picture = tab
+                    .sessions
+                    .get(id)
+                    .and_then(|leaf| leaf.last_presented_frame.as_ref())
+                    .is_some_and(|previous| present_gate::pictures_match(previous, seat.frame));
+                present_gate::SeatSignature {
+                    owner,
+                    picture_revision: self
+                        .window
+                        .present_gate
+                        .picture_revision(owner, same_picture),
+                    viewport: seat.seat,
+                    clip: seat.clip,
+                    focused: seat.focused,
+                }
+            })
+            .collect();
+        let size = self.window.window.inner_size();
+        present_gate::PresentSignature {
+            renderer: self.window.renderer.present_state(),
+            window_visible: self.window.window_shown
+                && self.window.window.is_visible() == Some(true),
+            seats,
+            native_pages: self
+                .window
+                .web
+                .iter()
+                .map(|(leaf, page)| present_gate::NativePageSignature {
+                    owner: (leaf.tab.0, leaf.seat.0),
+                    state: page.present_state(),
+                })
+                .collect(),
+            window_size: (size.width, size.height),
+            dpi: self.window.window.scale_factor().to_bits(),
+        }
+    }
+
+    fn retained_seats<'a>(
+        tab: &'a TabState,
+        focused_frame: Option<&'a ViewportFrame>,
+        bodies: &[PaneDraw],
+        focused_leaf: SeatId,
+        viewport: bt_render::SeatViewport,
+        focused: bool,
+    ) -> (Vec<SeatId>, Vec<bt_render::SeatFrame<'a>>) {
+        let mut seat_ids = Vec::with_capacity(bodies.len());
+        let mut seat_frames = Vec::with_capacity(bodies.len());
+        // **The focused seat frame is pushed only when there is a shell to push
+        // one for** (§7.1.6h). On a folder tab the retained window picture is
+        // the *previous* tab's, and the fallback rectangle below is the whole
+        // viewport — so pushing it would paint another tab's terminal across
+        // this one and leave the chrome to cover its own tracks. The list is
+        // then simply empty, and `present_frame` composes zero seats and the
+        // chrome over them, which is exactly what such a tab is made of.
+        if let Some(frame) = focused_frame {
+            let focused_body = bodies
+                .iter()
+                .find(|pane| pane.seat == focused_leaf)
+                .copied()
+                .unwrap_or(PaneDraw {
+                    seat: focused_leaf,
+                    viewport,
+                    clip: viewport,
+                });
+            seat_ids.push(focused_leaf);
+            seat_frames.push(bt_render::SeatFrame {
+                seat: focused_body.viewport,
+                clip: focused_body.clip,
+                frame,
+                focused,
+            });
+        }
+        // Each unfocused pane's own last picture, for the same reason the
+        // focused one's is reused: a pane that has not been given anything new
+        // to say is showing what it last said, and re-projecting it would be
+        // asking it to say the same thing at the price of a whole capture.
+        // A pane that has never presented is simply not drawn this present —
+        // it has nothing on the glass to keep.
+        for pane in bodies {
+            if pane.seat == focused_leaf {
+                continue;
+            }
+            let Some(leaf) = tab.sessions.get(&pane.seat) else {
+                continue;
+            };
+            let Some(projected) = leaf.last_presented_frame.as_ref() else {
+                continue;
+            };
+            seat_ids.push(pane.seat);
+            seat_frames.push(bt_render::SeatFrame {
+                seat: pane.viewport,
+                clip: pane.clip,
+                frame: projected,
+                focused: false,
+            });
+        }
+        (seat_ids, seat_frames)
+    }
+
     /// Put the picture that is already on the glass back on the glass, with
     /// whatever the renderer has been told since.
     ///
@@ -100626,65 +101139,19 @@ impl Runtime<'_> {
             ),
         );
         self.refresh_table_paints(&table_sources);
-        let active = self.window.active_tab;
-        let mut seat_frames = Vec::with_capacity(bodies.len());
-        // **The focused seat frame is pushed only when there is a shell to push
-        // one for** (§7.1.6h). On a folder tab the retained window picture is
-        // the *previous* tab's, and the fallback rectangle below is the whole
-        // viewport — so pushing it would paint another tab's terminal across
-        // this one and leave the chrome to cover its own tracks. The list is
-        // then simply empty, and `present_frame` composes zero seats and the
-        // chrome over them, which is exactly what such a tab is made of.
-        let keeps_a_terminal_picture =
-            self.focused().is_some() && self.window.last_presented_frame.is_some();
-        if keeps_a_terminal_picture {
-            let focused_body = bodies
-                .iter()
-                .find(|pane| pane.seat == focused_leaf)
-                .copied()
-                .unwrap_or_else(|| {
-                    let viewport = self.window.renderer.seat_viewport();
-                    PaneDraw {
-                        seat: focused_leaf,
-                        viewport,
-                        clip: viewport,
-                    }
-                });
-            let frame = self
-                .window
+        let (seat_ids, seat_frames) = Self::retained_seats(
+            &self.window.tabs[self.window.active_tab],
+            self.window
                 .last_presented_frame
                 .as_ref()
-                .expect("`keeps_a_terminal_picture` was true one statement ago");
-            seat_frames.push(bt_render::SeatFrame {
-                seat: focused_body.viewport,
-                clip: focused_body.clip,
-                frame,
-                focused: self.keyboard_owner_is_a_shell(),
-            });
-        }
-        // Each unfocused pane's own last picture, for the same reason the
-        // focused one's is reused: a pane that has not been given anything new
-        // to say is showing what it last said, and re-projecting it would be
-        // asking it to say the same thing at the price of a whole capture.
-        // A pane that has never presented is simply not drawn this present —
-        // it has nothing on the glass to keep.
-        for pane in &bodies {
-            if pane.seat == focused_leaf {
-                continue;
-            }
-            let Some(leaf) = self.window.tabs[active].sessions.get(&pane.seat) else {
-                continue;
-            };
-            let Some(projected) = leaf.last_presented_frame.as_ref() else {
-                continue;
-            };
-            seat_frames.push(bt_render::SeatFrame {
-                seat: pane.viewport,
-                clip: pane.clip,
-                frame: projected,
-                focused: false,
-            });
-        }
+                .filter(|_| self.focused().is_some()),
+            &bodies,
+            focused_leaf,
+            self.window.renderer.seat_viewport(),
+            self.keyboard_owner_is_a_shell(),
+        );
+        let signature = self.present_signature(&seat_ids, &seat_frames);
+        let conditions = self.present_conditions(FrameSource::Expose);
         let trigger = FrameTrigger {
             occurred_at: now,
             source: FrameSource::Expose,
@@ -100695,15 +101162,20 @@ impl Runtime<'_> {
             &self.window.compositor,
             &self.window.window,
             FrameTraces {
+                gate: &mut self.window.present_gate,
+                trace_perf: self.app.trace_perf,
+                slot_overwrites: self.window.pending_frames.overwrites(),
+                conditions,
                 preview: &mut self.window.preview_trace_echo,
                 census: &mut self.window.glyph_census_echo,
             },
             &seat_frames,
-            trigger,
+            PresentIntent { trigger, signature },
         )
         .context("re-present the retained terminal picture")?
         {
-            PresentOutcome::Presented(receipt) => {
+            None => Ok(()),
+            Some(PresentOutcome::Presented(receipt)) => {
                 self.window.textless_frames = 0;
                 // A picture on the glass is the only proof a device is real, and
                 // it is what closes a device-loss episode — see
@@ -100730,10 +101202,12 @@ impl Runtime<'_> {
             // them — the picture it owes is unchanged by being invisible — and
             // differs only in that `may_ask_again` will not ask for the turn
             // that pays it. See [`ask_again_after`].
-            outcome @ (PresentOutcome::PresentedWithoutText(_)
-            | PresentOutcome::Skipped
-            | PresentOutcome::SkippedNotVisible
-            | PresentOutcome::Reconfigure) => {
+            Some(
+                outcome @ (PresentOutcome::PresentedWithoutText(_)
+                | PresentOutcome::Skipped
+                | PresentOutcome::SkippedNotVisible
+                | PresentOutcome::Reconfigure),
+            ) => {
                 self.window.chrome_present_pending = true;
                 if self.window.may_ask_again(&outcome) {
                     self.window.window.request_redraw();
@@ -100893,21 +101367,34 @@ impl Runtime<'_> {
                 focused: false,
             });
         }
+        let seat_ids: Vec<_> = std::iter::once(focused_leaf)
+            .chain(unfocused_frames.iter().map(|(pane, _)| pane.seat))
+            .collect();
+        let signature = self.present_signature(&seat_ids, &seat_frames);
+        let conditions = self.present_conditions(trigger.source);
         match Self::present_seats_and_commit(
             &mut self.app.gpu,
             &mut self.window.renderer,
             &self.window.compositor,
             &self.window.window,
             FrameTraces {
+                gate: &mut self.window.present_gate,
+                trace_perf: self.app.trace_perf,
+                slot_overwrites: self.window.pending_frames.overwrites(),
+                conditions,
                 preview: &mut self.window.preview_trace_echo,
                 census: &mut self.window.glyph_census_echo,
             },
             &seat_frames,
-            trigger,
+            PresentIntent { trigger, signature },
         )
         .context("render terminal frame")?
         {
-            PresentOutcome::Presented(receipt) => {
+            outcome @ (Some(PresentOutcome::Presented(_)) | None) => {
+                let receipt = outcome.and_then(|outcome| match outcome {
+                    PresentOutcome::Presented(receipt) => Some(receipt),
+                    _ => unreachable!(),
+                });
                 // A whole frame ends whatever textless run was going, which is
                 // what makes the next refusal a new question rather than the
                 // continuation of an old one ([`WindowRuntime::may_ask_again`]).
@@ -100915,7 +101402,9 @@ impl Runtime<'_> {
                 // And it ends a device-loss episode for the same kind of reason:
                 // a device that has drawn is a device this process is willing to
                 // lose again ([`DeviceLossPilot::a_frame_reached_the_glass`]).
-                self.app.device_loss_pilot.a_frame_reached_the_glass();
+                if receipt.is_some() {
+                    self.app.device_loss_pilot.a_frame_reached_the_glass();
+                }
                 // The glass now holds the newest picture anyone composed. This
                 // is the equality [`chrome_tick_reuses_picture`] reads as its
                 // licence to answer the next animation tick from the screen.
@@ -100929,11 +101418,13 @@ impl Runtime<'_> {
                     self.window.first_visible_present_dpi_checked = true;
                     self.reconcile_authoritative_dpi("first-present")?;
                 }
-                let latency = receipt.latency();
-                self.trace_present(trigger.source, receipt, false);
+                let latency = receipt.map(|receipt| receipt.latency());
+                if let Some(receipt) = receipt {
+                    self.trace_present(trigger.source, receipt, false);
+                }
                 if self.app.trace_startup
                     && matches!(trigger.source, FrameSource::Resize)
-                    && let Ok(latency) = latency
+                    && let Some(Ok(latency)) = latency
                 {
                     trace_sink::stderr_line(format!(
                         "BT_RESIZE present={}us columns={} rows={}",
@@ -100998,10 +101489,12 @@ impl Runtime<'_> {
             // slot with the rest of them, and waits there: `may_ask_again` is
             // what declines to ask for the turn, not this arm. See
             // [`ask_again_after`].
-            outcome @ (PresentOutcome::PresentedWithoutText(_)
-            | PresentOutcome::Skipped
-            | PresentOutcome::SkippedNotVisible
-            | PresentOutcome::Reconfigure) => {
+            Some(
+                outcome @ (PresentOutcome::PresentedWithoutText(_)
+                | PresentOutcome::Skipped
+                | PresentOutcome::SkippedNotVisible
+                | PresentOutcome::Reconfigure),
+            ) => {
                 self.window
                     .pending_frames
                     .publish(frame, trigger)
@@ -101033,6 +101526,11 @@ impl Runtime<'_> {
         // the queue has just run dry, so whatever the wheel collected while the
         // loop was away is one burst and gets one frame. See [`WheelBurst`].
         self.flush_wheel()?;
+        // **And the drop beside it, for the same reason and at the same door**
+        // (GitHub issue #1 ②). This is the boundary the batch is defined by: the
+        // queue has just run dry, so every `DroppedFile` of one drop has arrived
+        // and the paths in hand are that drop and no other.
+        self.flush_dropped_files()?;
         // **Directly after it, and before anything that reads a cell** (§7.50).
         // A DPI change the drag wrote down is a window whose font is still
         // measured for the display it left; every clock below this line that
@@ -102402,7 +102900,7 @@ mod launch_landing_tests {
     fn a_request_opens_its_tab_where_it_asked_and_raises_the_window() {
         let tab = body(concat!("    fn ", "open_a_tab_for_a_launch("));
         assert!(
-            tab.contains("runtime.new_tab_with_profile(profile, request.cwd.clone())"),
+            tab.contains("runtime.new_tab_with_profile(&profile, request.cwd.clone())"),
             "the tab door is not reached with the request's own folder:\n{tab}"
         );
         assert!(
@@ -103319,6 +103817,7 @@ mod hold_station_tests {
     fn a_scoped_station_hands_the_callers_back() {
         for signature in [
             "    fn flush_wheel(&mut self) -> Result<()> {",
+            "    fn flush_dropped_files(&mut self) -> Result<()> {",
             "    fn refresh_chrome(&mut self) -> bool {",
             "    fn refresh_search(&mut self, forced: bool) -> Result<()> {",
         ] {
@@ -110453,7 +110952,7 @@ impl FolioApp {
             return Ok(());
         };
         let (profile, refusals) = runtime.launch_profile(request);
-        runtime.new_tab_with_profile(profile, request.cwd.clone())?;
+        runtime.new_tab_with_profile(&profile, request.cwd.clone())?;
         runtime.report_launch_refusals(refusals)
     }
 
@@ -110497,7 +110996,7 @@ impl FolioApp {
             return Ok(Some(opened));
         };
         let (profile, refusals) = runtime.launch_profile(request);
-        runtime.new_tab_with_profile(profile, request.cwd.clone())?;
+        runtime.new_tab_with_profile(&profile, request.cwd.clone())?;
         if let Some(stand_in) = stand_in {
             runtime.retire_the_stand_in(stand_in)?;
         }
@@ -112504,6 +113003,20 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             self.fail(event_loop, error);
             return;
         }
+        // **And a drop is spent before anything that is not another file of the
+        // same drop**, on the line above's own reasoning (GitHub issue #1 ②).
+        // The batch is one command line going into a shell, so an event that
+        // reaches the same shell — a keystroke, most of all — must not overtake
+        // it. It is also what makes the drop's routing honest: the pointer
+        // position the batch is hit-tested against cannot have moved between the
+        // drop and this flush, because the event that would have moved it is the
+        // event that flushes first.
+        if !matches!(event, WindowEvent::DroppedFile(_))
+            && let Err(error) = runtime.flush_dropped_files()
+        {
+            self.fail(event_loop, error);
+            return;
+        }
         // Whether this event asked the window to shut, answered before the
         // borrow is given back: `raise_dirty_gate` is the one gate that has to be
         // able to *stop* the event, which is why it is asked here rather than
@@ -112606,6 +113119,23 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             WindowEvent::CursorLeft { .. } => runtime.pointer_left(),
             WindowEvent::MouseInput { state, button, .. } => runtime.mouse_input(state, button),
             WindowEvent::MouseWheel { delta, .. } => runtime.queue_wheel(delta),
+            // **A file let go of over this window** (GitHub issue #1 ②). One
+            // event per file and no marker between drops, so the path is
+            // written down here and the batch is spent at the turn boundary —
+            // [`Runtime::flush_dropped_files`], and [`WheelBurst`]'s reasoning
+            // one gesture over.
+            //
+            // `HoveredFile` and `HoveredFileCancelled` are not answered at all.
+            // They would be the drop affordance, and a drag that lights
+            // something up over the files column is a ruling nobody has made:
+            // §7.1.1's 2026-07-17 decision took "insert path" off the *internal*
+            // drag precisely so one gesture would not mean two families of
+            // thing, and inventing a highlight here would be this window
+            // answering that question for itself.
+            WindowEvent::DroppedFile(path) => {
+                runtime.window.dropped_files.push(path);
+                Ok(())
+            }
             WindowEvent::Resized(size) => runtime.resized(size),
             // **The engine is told the window moved** (§7.7 ⑩, user report
             // 2026-08-25). The pages are drawn through DirectComposition and
@@ -112892,6 +113422,7 @@ fn window_event_station(event: &WindowEvent) -> hang_watch::Station {
         }
         WindowEvent::RedrawRequested => Station::EventRedraw,
         WindowEvent::Focused(_) => Station::EventFocus,
+        WindowEvent::DroppedFile(_) => Station::EventFileDrop,
         _ => Station::EventOther,
     }
 }
@@ -113114,6 +113645,70 @@ fn prepare_clipboard_paste(
             }
         }
     }
+}
+
+/// **The rule [`Runtime::dropped_files_seat`] applies, with the window's two
+/// questions already answered** (GitHub issue #1 ②).
+///
+/// `position` is where the pointer is — not where it was — and `covered` is
+/// whether a floating window or an open rail has claimed that point. A free
+/// function so the routing can be read against a real solved layout without a
+/// window: which pane a point falls in is arithmetic, and arithmetic is the half
+/// of this that can go wrong silently.
+fn dropped_files_seat_at(
+    layout: &SeatLayout,
+    position: Option<PhysicalPosition<f64>>,
+    covered: bool,
+    focused: SeatId,
+) -> SeatId {
+    match position {
+        Some(position) if !covered => {
+            seats::pane_at(layout, position.x, position.y).unwrap_or(focused)
+        }
+        // No pointer, or a point that belongs to something standing over the
+        // panes: the keyboard's pane is the only command line this window can
+        // honestly mean.
+        Some(_) | None => focused,
+    }
+}
+
+/// **Which of the two witnesses a drop's point is**, with both already in hand
+/// (GitHub issue #1 ②).
+///
+/// `live` is `WindowEvent::CursorMoved`'s last word and `queried` is what the
+/// platform's own cursor answered, in the window's physical pixels. The live one
+/// wins because it is free and cannot be stale — no event that could have moved
+/// it has run since the drop — and the query is what a drag from another
+/// application leaves as the only witness.
+///
+/// A free function so the choice and the unit conversion can be read without a
+/// window: the call underneath it is native on both platforms and is the one
+/// thing a test cannot reach.
+fn dropped_files_point_from(
+    live: Option<PhysicalPosition<f64>>,
+    queried: Option<(i32, i32)>,
+) -> Option<PhysicalPosition<f64>> {
+    live.or_else(|| queried.map(|(x, y)| PhysicalPosition::new(f64::from(x), f64::from(y))))
+}
+
+/// **A dropped file's path is a copied file's path** (GitHub issue #1 ②).
+///
+/// One line, and the line is the whole point: a drop hands this process the same
+/// thing a copy does — a list of paths — so it is turned into the same payload
+/// and spelled by the same code. Nothing here decides anything. The day somebody
+/// wants a drop quoted differently from a copy, this function is where that
+/// decision would have to be written down, and
+/// `a_dropped_path_is_spelled_like_a_copied_one` is what would go red first.
+fn prepare_dropped_paste(
+    paths: Vec<PathBuf>,
+    recipient: &shell_literal::Recipient,
+    leading_space: bool,
+) -> PreparedClipboardPaste {
+    prepare_clipboard_paste(
+        Ok(bt_platform::ClipboardPayload::Files(paths)),
+        recipient,
+        leading_space,
+    )
 }
 
 /// Deliver one string to a shell the way a paste is delivered.
@@ -114123,6 +114718,22 @@ mod tab_close_tip_tests {
     }
 }
 
+/// **What a banner calls a profile**, given the id the pane is holding.
+///
+/// The row's own title while the table still holds it, and the bare id once it
+/// does not. A deleted row has no title left to read — it is not in the table to
+/// have one — and the two wrong answers are both worse than the id: resolving it
+/// through `index_of_id` first would name *the fallback profile* and print
+/// "PowerShell could not be started; using PowerShell instead", and leaving the
+/// sentence out would be the silent replacement `M2-restart-shell-contract.md`
+/// §3 forbids. The id is what stands in `profiles.json` and `session.json`, so
+/// it is also the one name the reader can act on.
+fn profile_banner_name(id: &str) -> String {
+    profiles::position_of(id)
+        .map(|index| profiles::title(index).to_owned())
+        .unwrap_or_else(|| id.to_owned())
+}
+
 /// The first line of a pane whose profile's shell would not start —
 /// `M2-restart-shell-contract.md` §3's "首行可见降级横幅", and §5#3's ruling that
 /// the swap is *never* silent.
@@ -114165,7 +114776,7 @@ mod tab_close_tip_tests {
 /// *why* Git Bash did not start is not going to learn it from an error number
 /// on their prompt line, and a person who wants to know *what they are typing
 /// into now* learns it from exactly this.
-fn fallback_banner(fallback: &bt_pty::ShellFallback, requested: usize) -> String {
+fn fallback_banner(fallback: &bt_pty::ShellFallback, requested: &str) -> String {
     // The record's `started` is `powershell.exe`, and `fallback_profile()` is the
     // profile that resolves to it — one shell, and the name the user knows it
     // by is the profile's.
@@ -114174,7 +114785,7 @@ fn fallback_banner(fallback: &bt_pty::ShellFallback, requested: usize) -> String
             .started
             .eq_ignore_ascii_case(bt_pty::WINDOWS_POWERSHELL)
     );
-    let (requested, started) = if requested == profiles::fallback_profile() {
+    let (requested, started) = if requested == profiles::fallback_profile_id() {
         // **The one case the profiles cannot name**, and it is reachable rather
         // than theoretical: `BT_SHELL` points the PowerShell profile at a shell
         // that is not there, or a `pwsh` install is removed between sessions, and
@@ -114197,8 +114808,8 @@ fn fallback_banner(fallback: &bt_pty::ShellFallback, requested: usize) -> String
         )
     } else {
         (
-            profiles::title(requested).to_owned(),
-            profiles::title(profiles::fallback_profile()).to_owned(),
+            profile_banner_name(requested),
+            profile_banner_name(profiles::fallback_profile_id()),
         )
     };
     banner_line(&i18n::fallback_banner_text(&requested, &started))
@@ -114241,10 +114852,10 @@ fn unknown_profile_banner(unknown: &str) -> String {
 /// the program the profile names would not run, and this one ran instead. Which
 /// half of the machine noticed — this process before the spawn, or `bt-pty`
 /// during it — is our bookkeeping and not the reader's.
-fn missing_program_banner(requested: usize, started: usize) -> String {
+fn missing_program_banner(requested: &str, started: &str) -> String {
     banner_line(&i18n::fallback_banner_text(
-        profiles::title(requested),
-        profiles::title(started),
+        &profile_banner_name(requested),
+        &profile_banner_name(started),
     ))
 }
 
@@ -114256,8 +114867,10 @@ fn missing_program_banner(requested: usize, started: usize) -> String {
 /// pane exists, holds its place in the tree, and says the one true thing about
 /// itself — which is strictly better than the panic before the first window that
 /// this replaced.
-fn no_program_banner(requested: usize) -> String {
-    banner_line(&i18n::profile_not_installed(profiles::title(requested)))
+fn no_program_banner(requested: &str) -> String {
+    banner_line(&i18n::profile_not_installed(&profile_banner_name(
+        requested,
+    )))
 }
 
 /// The layout identity this window hands every session it owns.
@@ -117033,6 +117646,31 @@ fn nonzero_u32(value: u16) -> NonZeroU32 {
 fn frame_matches_grid(frame: &ViewportFrame, grid: GridSize) -> bool {
     frame.columns.get() == u32::from(grid.columns.get())
         && frame.grid_rows.get() == u32::from(grid.rows.get())
+}
+
+fn trace_unchanged_present(
+    enabled: bool,
+    gate: &mut present_gate::PresentGate,
+    source: FrameSource,
+    frame: Option<&ViewportFrame>,
+    slot_overwrites: u64,
+) {
+    gate.unchanged = gate.unchanged.saturating_add(1);
+    if !enabled {
+        return;
+    }
+    let started = Instant::now();
+    let content_fnv = frame.map_or(0, |frame| frame_content_digest(frame).content_fnv);
+    let alternate = frame.is_some_and(frame_is_alternate_screen);
+    eprintln!(
+        "BT_PERF_TRACE skip=unchanged source={:?} content_fnv={:016x} alt={} digest_us={} present_unchanged={} slot_overwrites={}",
+        source,
+        content_fnv,
+        u8::from(alternate),
+        started.elapsed().as_micros(),
+        gate.unchanged,
+        slot_overwrites,
+    );
 }
 
 fn presentation_equivalent(previous: &ViewportFrame, next: &ViewportFrame) -> bool {
@@ -121994,8 +122632,10 @@ mod tests {
         let tab = saved_tab("wsl-ubuntu", "C:\\a", Some("notes"), true);
         let (seats, seed, leaves, _files, _preview) = revive_plan(&tab);
         assert_eq!(
-            leaves.get(&seats.identity()).map(|leaf| leaf.profile),
-            Some(profiles::fallback_profile()),
+            leaves
+                .get(&seats.identity())
+                .map(|leaf| leaf.profile.as_str()),
+            Some(profiles::fallback_profile_id()),
             "an id this build cannot place falls to the default profile"
         );
         assert_eq!(
@@ -122043,7 +122683,7 @@ mod tests {
         assert_eq!(
             leaves[&left],
             LeafSeed {
-                profile: profiles::index_of_id("pwsh"),
+                profile: "pwsh".to_owned(),
                 cwd: Some(here),
                 unknown_profile_id: None,
                 card_skip: 0,
@@ -122053,7 +122693,7 @@ mod tests {
         assert_eq!(
             leaves[&right],
             LeafSeed {
-                profile: profiles::index_of_id("cmd"),
+                profile: "cmd".to_owned(),
                 cwd: None,
                 unknown_profile_id: None,
                 card_skip: 0,
@@ -127772,20 +128412,21 @@ mod tests {
     fn a_profile_this_machine_cannot_start_falls_back_instead_of_panicking() {
         let git = profiles::index_of_id("gitbash");
         let fallback = profiles::fallback_profile();
+        let fallback_id = profiles::fallback_profile_id();
         assert_ne!(git, fallback, "the fixture needs two different rows");
 
         let equipped = profiles::ProfilePrograms::with_only(&[git, fallback]);
-        assert_eq!(startable_profile(git, &equipped), Started::AsAsked);
+        assert_eq!(startable_profile("gitbash", &equipped), Started::AsAsked);
 
         // Git uninstalled between two launches, which is the row's own case.
         let gitless = profiles::ProfilePrograms::with_only(&[fallback]);
         assert_eq!(
-            startable_profile(git, &gitless),
-            Started::FellBack(fallback),
+            startable_profile("gitbash", &gitless),
+            Started::FellBack(fallback_id.to_owned()),
             "the pane comes back running what this machine does have"
         );
         assert_eq!(
-            startable_profile(fallback, &gitless),
+            startable_profile(fallback_id, &gitless),
             Started::AsAsked,
             "and the profile standing in for the others is not standing in for itself"
         );
@@ -127793,8 +128434,19 @@ mod tests {
         // Nothing at all: a machine with no Windows PowerShell, or a `BT_SHELL`
         // pointed at a program that is not there.
         let bare = profiles::ProfilePrograms::with_only(&[]);
-        assert_eq!(startable_profile(git, &bare), Started::Nothing);
-        assert_eq!(startable_profile(fallback, &bare), Started::Nothing);
+        assert_eq!(startable_profile("gitbash", &bare), Started::Nothing);
+        assert_eq!(startable_profile(fallback_id, &bare), Started::Nothing);
+
+        // **An id the table does not hold at all** — a row somebody deleted in
+        // Settings ▸ Profiles while a pane was running it, which the snapshot
+        // above still has a program for. The live table is asked first, so this
+        // is the fall and not the old out-of-bounds read.
+        assert!(!profiles::has_id("a-row-nobody-has"));
+        assert_eq!(
+            startable_profile("a-row-nobody-has", &equipped),
+            Started::FellBack(fallback_id.to_owned()),
+            "a profile that is gone degrades exactly as a missing program does"
+        );
     }
 
     /// RED (review row R4-7) — **a restored window's title bar is on a monitor,
@@ -135700,7 +136352,7 @@ mod tests {
             requested: std::ffi::OsString::from("D:\\App\\Tool\\Git\\bin\\bash.exe\0"),
             started: bt_pty::WINDOWS_POWERSHELL,
         };
-        let banner = fallback_banner(&fallback, profiles::index_of_id("gitbash"));
+        let banner = fallback_banner(&fallback, "gitbash");
         let mut session = DualPlaneSession::with_quotas_and_cell_height(
             nonzero_u32(80),
             nonzero_u32(6),
@@ -135736,7 +136388,7 @@ mod tests {
             requested: std::ffi::OsString::from(r"C:\Program Files\PowerShell\7\pwsh.exe"),
             started: bt_pty::WINDOWS_POWERSHELL,
         };
-        let banner = fallback_banner(&inside, profiles::fallback_profile());
+        let banner = fallback_banner(&inside, profiles::fallback_profile_id());
         let mut one = DualPlaneSession::with_quotas_and_cell_height(
             nonzero_u32(80),
             nonzero_u32(6),
@@ -135916,8 +136568,7 @@ mod tests {
     /// And the cancel: a chooser that comes back with nothing asks for nothing.
     #[test]
     fn a_tab_opened_in_a_chosen_folder_stands_there_and_not_where_the_pane_was() {
-        let pwsh = profiles::index_of_id("pwsh");
-        let wsl = profiles::index_of_id("wsl");
+        let (pwsh, wsl) = ("pwsh", "wsl");
         let chosen = PathBuf::from(r"D:\Developer\folio-terminal");
         let pane = PathBuf::from(r"C:\Users\dev\elsewhere");
 
@@ -140070,7 +140721,7 @@ mod tests {
     /// assertion names the shell the pane would have come back as.
     #[test]
     fn a_restart_carries_the_seats_own_profile_and_its_last_reported_folder() {
-        let profile = profiles::index_of_id("gitbash");
+        let profile = "gitbash";
         let reported = PathBuf::from(r"D:\Developer\folio-terminal");
 
         let seed = restart_seed(profile, Some(reported.as_path()));
@@ -158418,14 +159069,14 @@ mod tests {
             // A shell-less fixture is not a shell of some other kind: these
             // panes exist to carry scrollback, and the default profile is what
             // the pane they stand in for would have been started as.
-            profile: profiles::fallback_profile(),
+            profile: profiles::fallback_profile_id().to_owned(),
             paste_recipient: profiles::paste_recipient(
                 profiles::fallback_profile(),
                 &bt_pty::SystemShellEnvironment,
             ),
             // And the door that profile is served through, which is the one the
             // spawn would have read for it.
-            integration: profiles::row(profiles::fallback_profile())
+            integration: profiles::row_of(profiles::fallback_profile_id())
                 .map_or(profiles::Integration::None, |row| profiles::served_by(&row)),
             // And no program either, which is the honest shape of the same
             // fact: nothing was started, so nothing can have announced itself.
@@ -159064,6 +159715,141 @@ mod tests {
         );
     }
 
+    /// **A dropped file's path goes into the pane it was let go of over**
+    /// (GitHub issue #1 ②), and into the keyboard's pane when the drop belongs
+    /// to nothing the layout can name.
+    ///
+    /// The routing half of the drop, read against a real solved three-pane
+    /// layout: the same arithmetic a press is answered by, asked of the same
+    /// rectangles. The rest of the rule is its fall-backs — a point a float or
+    /// an open rail has claimed, a point in no pane at all, and a drop with
+    /// neither a pointer of its own nor a cursor the platform would answer with,
+    /// which is the last resort and is now much narrower than it was: since the
+    /// owner's ruling of 2026-09-16 a drag that came from another application is
+    /// routed by the queried cursor, and the closing block reads that road all
+    /// the way through.
+    ///
+    /// MUTATION ①: ignore `covered` and a point a floating window has claimed
+    /// answers with the pane it is standing on top of — the second assertion in
+    /// the loop goes red for all three. MUTATION ②: go back to routing a
+    /// pointerless drop to the keyboard's pane and the closing block goes red,
+    /// because that is the pane the cursor is deliberately *not* over.
+    #[test]
+    fn a_drop_lands_in_the_pane_under_it_and_otherwise_on_the_keyboards_pane() {
+        let seats = cross_seats(3);
+        let (layout, _) = cross_solve(&seats);
+        let rects = pane_rects_of(&layout);
+        assert_eq!(rects.len(), 3, "a three-pane tab places three rectangles");
+        // Which pane holds the keyboard is the caller's to say, and here it is
+        // the tree's primary leaf. What the test needs of it is only that it is
+        // a real pane of this layout and that two of the three points below are
+        // *not* it — without that, a routing that always answered the fall-back
+        // would pass.
+        let focused = seats.identity();
+        let mut elsewhere = 0;
+        for (seat, rect) in &rects {
+            let middle = PhysicalPosition::new(
+                f64::from((rect[0] + rect[2]) / 2.0),
+                f64::from((rect[1] + rect[3]) / 2.0),
+            );
+            assert_eq!(
+                dropped_files_seat_at(&layout, Some(middle), false, focused),
+                *seat,
+                "a drop in the middle of {seat:?} is that pane's"
+            );
+            assert_eq!(
+                dropped_files_seat_at(&layout, Some(middle), true, focused),
+                focused,
+                "a float or an open rail standing over {seat:?} keeps the drop \
+                 off the pane it is covering"
+            );
+            if *seat != focused {
+                elsewhere += 1;
+            }
+        }
+        assert_eq!(
+            elsewhere, 2,
+            "two of the three panes are not the keyboard's, so the assertions \
+             above are about the routing and not about the fall-back"
+        );
+
+        let off_every_pane = PhysicalPosition::new(-1.0, -1.0);
+        assert_eq!(
+            dropped_files_seat_at(&layout, Some(off_every_pane), false, focused),
+            focused,
+            "a drop on the chrome is the keyboard's pane's"
+        );
+        assert_eq!(
+            dropped_files_seat_at(&layout, None, false, focused),
+            focused,
+            "and so is a drop with no pointer of its own *and* no cursor the \
+             platform would answer with — the last resort and nothing less"
+        );
+
+        // **The road a drag from another application really takes** (owner's
+        // ruling 2026-09-16). The window's own pointer left when the hand went
+        // to Explorer, so the point comes from the cursor query; the query
+        // itself is native, and what is read here is the plumbing under it —
+        // the choice between the two witnesses, the physical pixels they are
+        // both in, and the pane that arithmetic then names.
+        let (elsewhere_seat, elsewhere_rect) = *rects
+            .iter()
+            .find(|(seat, _)| *seat != focused)
+            .expect("a three-pane tab has a pane that is not the keyboard's");
+        let cursor = (
+            ((elsewhere_rect[0] + elsewhere_rect[2]) / 2.0) as i32,
+            ((elsewhere_rect[1] + elsewhere_rect[3]) / 2.0) as i32,
+        );
+        let point = dropped_files_point_from(None, Some(cursor));
+        assert_eq!(
+            point,
+            Some(PhysicalPosition::new(
+                f64::from(cursor.0),
+                f64::from(cursor.1)
+            )),
+            "the platform's answer is already in the window's physical pixels \
+             and is not scaled a second time"
+        );
+        assert_eq!(
+            dropped_files_seat_at(&layout, point, false, focused),
+            elsewhere_seat,
+            "a drop whose point came from the cursor lands in the pane under it, \
+             not in the pane holding the keyboard"
+        );
+    }
+
+    /// **The live pointer first, the platform's cursor second, nothing third**
+    /// (GitHub issue #1 ②, owner's ruling 2026-09-16).
+    ///
+    /// The choice [`dropped_files_point_from`] is, read on its own. The first
+    /// row is a drag that began inside this window — there is a pointer, and
+    /// paying for a system call to be told what the window already knows would
+    /// be worse in both directions, cost and freshness. The second is every drag
+    /// that came from another application. The third is a machine that will not
+    /// say, which is the only road left to the keyboard's pane.
+    ///
+    /// MUTATION: put the query first and the first row goes red, which is a
+    /// window asking the system a question it has a better answer to.
+    #[test]
+    fn a_drops_point_is_the_live_pointer_or_the_platforms_cursor() {
+        let live = PhysicalPosition::new(640.0, 360.0);
+        assert_eq!(
+            dropped_files_point_from(Some(live), Some((1, 2))),
+            Some(live),
+            "a window that knows where its pointer is uses that and asks nothing"
+        );
+        assert_eq!(
+            dropped_files_point_from(None, Some((37, 41))),
+            Some(PhysicalPosition::new(37.0, 41.0)),
+            "and one that does not takes the cursor, in the pixels it arrives in"
+        );
+        assert_eq!(
+            dropped_files_point_from(None, None),
+            None,
+            "and answers nothing when neither witness can speak"
+        );
+    }
+
     /// A drag is measured from the body of the pane it began in, and stays inside
     /// that pane however far the pointer travels.
     ///
@@ -159198,15 +159984,15 @@ mod tests {
         // be wrong about: under the old model the new tab took `from.profile`,
         // the tab's single answer, and a bash pane torn out of a PowerShell tab
         // arrived calling itself PowerShell.
-        let gitbash = profiles::index_of_id("gitbash");
+        let gitbash = "gitbash";
         source
             .sessions
             .get_mut(&SeatId(2))
             .expect("the right-hand pane")
-            .profile = gitbash;
+            .profile = gitbash.to_owned();
         assert_ne!(
             gitbash,
-            profiles::fallback_profile(),
+            profiles::fallback_profile_id(),
             "the two panes differ"
         );
         let torn = tear_pane_into_tab(
@@ -159247,12 +160033,12 @@ mod tests {
         );
         assert_eq!(
             torn.tab_mark(&BTreeMap::new()),
-            profiles::mark(gitbash),
+            profiles::mark(profiles::index_of_id(gitbash)),
             "so the strip draws the new tab as the shell actually running in it"
         );
         assert_eq!(
             source.leaf_profile(SeatId(1)),
-            profiles::fallback_profile(),
+            profiles::fallback_profile_id(),
             "and the pane that stayed is still its own shell, not the one that left"
         );
         assert_eq!(
@@ -161290,8 +162076,7 @@ mod tests {
     /// pane opens at `~` with no explanation.
     #[test]
     fn a_seeded_split_carries_the_profile_and_the_directory_the_row_promised() {
-        let pwsh = profiles::index_of_id("pwsh");
-        let wsl = profiles::index_of_id("wsl");
+        let (pwsh, wsl) = ("pwsh", "wsl");
         let here = PathBuf::from(r"D:\Developer");
 
         // Duplicate: both halves, unchanged.
@@ -161301,7 +162086,7 @@ mod tests {
 
         // Split with… : the named profile, standing where this pane stands, in
         // the spelling the named profile can read.
-        let crossed = SplitSeed::Profile(wsl).applied(pwsh, Some(&here));
+        let crossed = SplitSeed::Profile(wsl.to_owned()).applied(pwsh, Some(&here));
         assert_eq!(crossed.profile, wsl);
         assert_eq!(
             crossed.cwd.as_deref(),
@@ -161311,7 +162096,10 @@ mod tests {
 
         // A pane whose shell has never named a directory hands over nothing,
         // which is an absence rather than a guess.
-        assert_eq!(SplitSeed::Profile(wsl).applied(pwsh, None).cwd, None);
+        assert_eq!(
+            SplitSeed::Profile(wsl.to_owned()).applied(pwsh, None).cwd,
+            None
+        );
 
         // New terminal in folder… : this pane's own profile, in the folder the
         // chooser answered with — and that answer is a Windows path, so it too
@@ -161326,6 +162114,107 @@ mod tests {
             Some(Path::new("/mnt/d/Developer")),
             "the chooser speaks Windows, and a WSL pane does not"
         );
+    }
+
+    /// PIN (T-PROFILE-TABLE-MOVE) — **a pane names its profile by the one thing
+    /// a table move cannot touch**, so reordering Settings ▸ Profiles cannot
+    /// change what a split, a restart or a save says that pane is.
+    ///
+    /// The bug this closes had two faces and one cause. A seat held a *position*
+    /// in a table every window in the process shares, and the Profiles page moves
+    /// positions for a living: after `Move up` on the row above it, a split
+    /// spawned whichever row had slid into the seat's slot (the wrong shell,
+    /// silently, with no banner), and the save wrote that row's id into
+    /// `session.json`, so the wrong answer outlived the window. After a `Delete`
+    /// the position could name no row at all, and the spawn read past the end of
+    /// the table and panicked the window thread, which is every tab in the
+    /// process.
+    ///
+    /// There is no position left to move. Every value below is the id the leaf
+    /// itself holds, carried through unchanged, which is why the test can state
+    /// the property with an id the table does not hold at all — the strongest
+    /// form of "nothing here is resolved against the table" that can be written.
+    ///
+    /// Red gate: put the index back on `LeafSession` and the last block cannot be
+    /// expressed at all — there is no `usize` that means "a row this table has
+    /// not got" — and the first three assertions become a statement about
+    /// whatever row happens to sit where `cmd` sat.
+    #[test]
+    fn a_pane_carries_its_profile_by_id_so_a_table_move_cannot_move_it() {
+        let mut tab = cross_tab(1, &["ALPHA", "BETA"]);
+        let [left, right] = tab.seats.terminals()[..] else {
+            panic!("the fixture is a row of two terminals");
+        };
+        for (seat, id) in [(left, "cmd"), (right, "gitbash")] {
+            tab.sessions
+                .get_mut(&seat)
+                .expect("the fixture files a session under every terminal")
+                .profile = id.to_owned();
+        }
+
+        // What the chrome, the seeds and the save all read is the same string.
+        assert_eq!(tab.leaf_profile(left), "cmd");
+        assert_eq!(tab.leaf_profile(right), "gitbash");
+        let seed = restart_seed(&tab.leaf_profile(left), None);
+        assert_eq!(seed.profile, "cmd", "a restart is the seat's own shell");
+        assert_eq!(
+            SplitSeed::Inherit
+                .applied(&tab.leaf_profile(right), None)
+                .profile,
+            "gitbash",
+            "and so is `another one of these`"
+        );
+        assert_eq!(
+            SplitSeed::Profile("wsl".to_owned())
+                .applied(&tab.leaf_profile(left), None)
+                .profile,
+            "wsl",
+            "a row the reader named is that row and not its place in the list"
+        );
+
+        // And the save writes each pane's own id rather than resolving a
+        // position against the table as it stands at save time.
+        assert_eq!(tab.term_leaf(left, false).profile_id, "cmd");
+        assert_eq!(tab.term_leaf(right, false).profile_id, "gitbash");
+
+        // **A row that is really gone**, which is the case a position could not
+        // even express. The pane goes on running the shell it started, the save
+        // keeps the name of what it was, and the revive spends the degradation
+        // once — the fallback profile, with the missing id carried so the pane's
+        // first line can say it.
+        tab.sessions.get_mut(&left).expect("the left pane").profile = "a-row-nobody-has".to_owned();
+        assert!(!profiles::has_id("a-row-nobody-has"));
+        assert_eq!(tab.term_leaf(left, false).profile_id, "a-row-nobody-has");
+
+        let saved = TabV1 {
+            root: tab
+                .seats
+                .to_persisted(&|seat| tab.term_leaf(seat, false), &|seat| {
+                    tab.files_state(seat)
+                }),
+            pinned: false,
+            focused_leaf: "leaf-0".to_owned(),
+            preview: None,
+        };
+        let (seats, _seed, leaves, _files, _preview) = revive_plan(&saved);
+        let [revived_left, revived_right] = seats.terminals()[..] else {
+            panic!("two saved terminals come back as two seats");
+        };
+        assert_eq!(
+            leaves[&revived_left].profile,
+            profiles::fallback_profile_id(),
+            "a profile this table has not got costs the pane its shell choice"
+        );
+        assert_eq!(
+            leaves[&revived_left].unknown_profile_id.as_deref(),
+            Some("a-row-nobody-has"),
+            "and never the pane, nor the sentence that says what it was"
+        );
+        assert_eq!(
+            leaves[&revived_right].profile, "gitbash",
+            "the pane beside it is untouched by any of that"
+        );
+        assert_eq!(leaves[&revived_right].unknown_profile_id, None);
     }
 
     /// PIN — **a cancelled chooser asks the window for nothing**, and neither
@@ -169077,5 +169966,184 @@ mod clipboard_path_tests {
         assert!(k144.contains("self.seats.set_focus(seat)"));
         assert!(k144.contains("paste_text("));
         assert!(!k144.contains("to_string_lossy"));
+    }
+
+    /// A PowerShell recipient whose quote policy is named by the caller.
+    ///
+    /// `powershell_doubled_quotes` is empty in production until PROBE 2 has
+    /// measured both PowerShell versions, so both halves are worth reading here:
+    /// what today's build does with an apostrophe, and what it will do the day
+    /// the measurement lands.
+    fn powershell_recipient(doubled: &'static [char]) -> shell_literal::Recipient {
+        shell_literal::Recipient {
+            encoder: shell_literal::Encoder {
+                grammar: shell_literal::ShellGrammar::PowerShell,
+                named_cmd: false,
+                delayed_expansion: false,
+                powershell_doubled_quotes: doubled,
+            },
+            namespace: bt_transcript::paths::PrintedPathNamespace::Windows,
+            spelling: None,
+            wsl_distribution: None,
+        }
+    }
+
+    /// **A dropped path is spelled exactly as a copied one is** (GitHub issue
+    /// #1 ②).
+    ///
+    /// The promise the issue actually asks for is not "a drop pastes something"
+    /// — it is that a file let go of over a pane arrives the way the same file
+    /// copied in Explorer has arrived since 0.4.1. The two roads are compared
+    /// character for character over the characters that make spelling hard: a
+    /// space, a double quote, and the apostrophe that PowerShell can refuse.
+    ///
+    /// MUTATION: give the drop a speller of its own — even one that is right
+    /// today — and this goes red on the first row, which is what stops the two
+    /// quoting rules from drifting apart one release at a time.
+    #[test]
+    fn a_dropped_path_is_spelled_like_a_copied_one() {
+        use bt_platform::ClipboardPayload;
+        for path in [
+            r"D:\Reports\Q3 draft.txt",
+            "D:\\Reports\\a \"quoted\" name.txt",
+            r"D:\Reports\it's here.txt",
+        ] {
+            for doubled in [&[] as &'static [char], &['\''] as &'static [char]] {
+                for leading_space in [false, true] {
+                    let recipient = powershell_recipient(doubled);
+                    let dropped =
+                        prepare_dropped_paste(vec![path.into()], &recipient, leading_space);
+                    let copied = prepare_clipboard_paste(
+                        Ok(ClipboardPayload::Files(vec![path.into()])),
+                        &recipient,
+                        leading_space,
+                    );
+                    assert_eq!(
+                        dropped.text, copied.text,
+                        "{path} is spelled differently when it is dropped"
+                    );
+                    assert_eq!(
+                        dropped.notice, copied.notice,
+                        "{path} is refused differently when it is dropped"
+                    );
+                }
+            }
+        }
+
+        // The red gate: the comparison above would also pass on two roads that
+        // both produced nothing, so this states what the PowerShell speller
+        // actually says.
+        let apostrophe = r"D:\Reports\it's here.txt";
+        let measured = powershell_recipient(&['\'']);
+        let spelled = prepare_dropped_paste(vec![apostrophe.into()], &measured, false);
+        assert_eq!(
+            spelled.text.as_deref(),
+            Some(r"'D:\Reports\it''s here.txt' "),
+            "an apostrophe inside a single-quoted word is doubled, and the space \
+             needs no escape of its own"
+        );
+        let unmeasured =
+            prepare_dropped_paste(vec![apostrophe.into()], &powershell_recipient(&[]), false);
+        assert!(
+            unmeasured.text.is_none() && unmeasured.notice.is_some(),
+            "until PROBE 2 an apostrophe is refused with a notice rather than \
+             guessed at — for a drop exactly as for a copy"
+        );
+    }
+
+    /// **Three files let go of together are one command line** (GitHub issue #1
+    /// ②).
+    ///
+    /// winit reports a drop as one `DroppedFile` per file and marks neither the
+    /// beginning nor the end of the run, so the batch is the loop's to keep: the
+    /// arm writes each path down, and the turn boundary spends whatever is
+    /// there. Both halves are read here — the accumulation, which must leave
+    /// nothing behind to be pasted a second time, and the spelling, which must
+    /// put all three on one line rather than running the first two.
+    ///
+    /// MUTATION: paste from the dispatcher's arm instead of collecting, and
+    /// three files dropped on a shell become three commands, the first two of
+    /// which run.
+    #[test]
+    fn three_files_of_one_drop_become_one_command_line() {
+        let mut batch: Vec<PathBuf> = Vec::new();
+        for path in ["/first", "/second file", "/third"] {
+            batch.push(path.into());
+        }
+        let paths = std::mem::take(&mut batch);
+        assert_eq!(paths.len(), 3, "one drop, three events, one batch");
+        assert!(
+            batch.is_empty(),
+            "a batch the flush has taken is not left behind for the next turn to \
+             paste again"
+        );
+        let prepared = prepare_dropped_paste(paths, &recipient(), true);
+        assert!(prepared.notice.is_none());
+        assert_eq!(
+            prepared.text.as_deref(),
+            Some(" '/first' '/second file' '/third' "),
+            "three paths, three arguments, one command line"
+        );
+    }
+
+    /// **The drop is collected in the dispatcher and spent at the turn
+    /// boundary, and nowhere else** (GitHub issue #1 ②).
+    ///
+    /// The shape [`three_files_of_one_drop_become_one_command_line`] depends on
+    /// and cannot itself reach: an event loop is not constructible in a test, so
+    /// what holds the wiring is which call stands where. The two doors are the
+    /// wheel's own two — the top of `window_event` for anything that is not
+    /// another file of this drop, and the top of a turn.
+    #[test]
+    fn a_drop_is_collected_in_the_dispatcher_and_spent_at_the_turn_boundary() {
+        let source = include_str!("main.rs");
+        let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
+        for (once, what) in [
+            (
+                "runtime.window.dropped_files.push(path);",
+                "the arm writes the path down and pastes nothing itself",
+            ),
+            (
+                "std::mem::take(&mut self.window.dropped_files)",
+                "the batch has one reader, and it takes the whole of it",
+            ),
+            (
+                "self.paste_paths_into(seat, paths,",
+                "a dropped batch reaches a shell through one door",
+            ),
+            (
+                "self.dropped_files_point()",
+                "the cursor is asked for once per batch and not once per file",
+            ),
+            (
+                "bt_platform::pointer_position_in_window",
+                "and there is one door onto the platform's cursor in this window",
+            ),
+            (
+                "runtime.flush_dropped_files()",
+                "the dispatcher spends the drop before any other event",
+            ),
+            (
+                "self.flush_dropped_files()?;",
+                "and a turn spends whatever is still there",
+            ),
+        ] {
+            assert_eq!(
+                before_this_fixture.matches(once).count(),
+                1,
+                "`{once}` — {what}"
+            );
+        }
+        let arm = before_this_fixture
+            .split_once("            WindowEvent::DroppedFile(path) => {")
+            .expect("the dispatcher answers a dropped file")
+            .1
+            .split_once("            WindowEvent::Resized(size)")
+            .expect("and the arm is closed by the one after it")
+            .0;
+        assert!(
+            !arm.contains("paste"),
+            "the arm collects; pasting from it would be one command line per file"
+        );
     }
 }

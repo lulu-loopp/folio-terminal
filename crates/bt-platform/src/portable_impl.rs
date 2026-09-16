@@ -887,6 +887,16 @@ pub fn pointer_position() -> Option<(i32, i32)> {
     None
 }
 
+/// Where the pointer is inside one window's client area, in physical pixels from
+/// its top-left corner. `NSEvent.mouseLocation` put through the window and the
+/// view; GitHub issue #1 ②.
+#[cfg(not(any(windows, target_os = "macos")))]
+#[must_use]
+pub fn pointer_position_in_window(window: NativeWindow) -> Option<(i32, i32)> {
+    let _ = window;
+    None
+}
+
 /// Which top-level window the window manager puts under a screen point. M1-3.
 #[cfg(not(any(windows, target_os = "macos")))]
 #[must_use]

@@ -8,6 +8,16 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Added
 
+- **Dropping a file onto Folio now puts its path on the command line.** Drag a
+  file out of File Explorer or the Finder and let go of it over a split, and its
+  path arrives in the terminal you dropped it on — not the one you happened to
+  be typing in — spelled for the shell running there. It is the same quoting a
+  file you *copied* has had since 0.4.1, so PowerShell, `cmd`, a WSL shell and
+  the rest each get the spelling they read. Several files let go of together
+  arrive on one line, one argument each, and a name the shell has no way to
+  spell is reported instead of being mangled. Nothing is run: the path is put in
+  front of the cursor for you to finish the line.
+
 - **A picture on the clipboard now pastes as the path of a file Folio writes
   for it.** A screenshot taken with `Win`+`Shift`+`S`, or with
   `⌘`+`Ctrl`+`Shift`+`4` on a Mac, is on the clipboard as a picture rather than
@@ -76,6 +86,25 @@ All notable changes to Folio are recorded here. The format follows
   read it". The second one leaves your file untouched, shows the row as
   something it will not write, and says so when the row is pressed. A file it
   can read is still copied beside itself before anything is changed, as it was.
+
+- **A picture that has not changed no longer asks the GPU to draw it again.**
+  Repeated redraws compare each pane and the window furniture around it with the last
+  complete picture. Caret blinks, hover marks and moving panes still redraw;
+  resizing and replacing a surface always get their own frame.
+
+- **Reordering your profiles no longer closes the window when a pane is
+  opened.** Moving a row in Settings ▸ Profiles, or deleting one, changed which
+  profile every already-open pane thought it was running: a pane held the row's
+  place in the list rather than the profile itself, and the list had just moved
+  under it. Splitting or restarting such a pane started whichever profile had
+  slid into that place, without saying so, and that wrong profile was written
+  into your saved session, so it came back the same way the next morning. When
+  the list had grown shorter than the place a pane was holding, opening a pane
+  closed Folio outright, taking every tab in every window with it. A pane now
+  names its profile by the profile, so a list that moves cannot move it; a row
+  you really did delete costs that pane its shell choice and nothing else, and
+  the pane says so in its first line.
+
 - **On a Mac, a second Folio started from a terminal now hands over instead of
   becoming a second writer.** Which Folio is allowed to write your settings and
   your saved session was decided in a directory whose location came from
@@ -118,6 +147,15 @@ All notable changes to Folio are recorded here. The format follows
   unambiguous — one unclosed `$`, the matching one near the start of the next
   line, and nothing in between that starts a new paragraph, bullet or heading — so
   a price at the end of a sentence is still a price.
+- **An inline formula in earlier output stays typeset when the window is
+  resized.** Changing a window's width has every formula on screen set again at
+  the new size. A `$…$` formula inside a command's output had to establish a
+  second time that its line was printed by a command, and the evidence for that
+  leaves when the prompt line the command began on scrolls out of the history —
+  so an older formula came back as the text you typed and stayed that way for
+  the rest of the session, while the `$$…$$` blocks beside it were set again as
+  usual. Where a line was printed is now noted as the line arrives and kept with
+  it, so a resize gives back the formulas it took away.
 - **Copying a formula no longer leaves the window busy.** The tick that confirms
   the copy has always come down after a moment on screen, but the window went on
   asking to be woken for it for as long as it stayed open — one processor core,
