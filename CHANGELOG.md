@@ -50,6 +50,18 @@ All notable changes to Folio are recorded here. The format follows
   current first screen whenever the file is written. Unsaved edits of your own
   are still never replaced — the notice about the file having changed stays up,
   with the same two answers on it.
+
+- **A formula broken across two lines is now typeset.** When a program wraps its
+  own text — Claude Code does, at the width of the pane — a formula that does not
+  fit the rest of a line is split in two, with `$x` left at the end of one line
+  and the rest of it starting the next. Folio read each line by itself, so the
+  formula between them stayed as you typed it while the ones that happened to fit
+  on a line were typeset around it. The two halves are now read together: the
+  formula is set on the line that finishes it, and the piece left hanging above is
+  taken down with it. A line only joins the one below it when the reading is
+  unambiguous — one unclosed `$`, the matching one near the start of the next
+  line, and nothing in between that starts a new paragraph, bullet or heading — so
+  a price at the end of a sentence is still a price.
 - **Copying a formula no longer leaves the window busy.** The tick that confirms
   the copy has always come down after a moment on screen, but the window went on
   asking to be woken for it for as long as it stayed open — one processor core,

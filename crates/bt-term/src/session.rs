@@ -15,11 +15,11 @@ use std::{
 
 use bt_detect::{
     DecorationRecord, DelimiterKind, DetectionContext, DetectionInput, DetectionOptions,
-    DetectionTask, InlineMathRun, InlineMathSite, LiveDetectionInput, LiveDetectionSource,
-    LiveDetectionTask, MAX_MATH_SOURCE_BYTES, MathCellSegment, MathSourceLine, MathSpan,
-    PlaceholderArtifact, StaleArtifact, advance_detection_context, detect_math_blocks_with_sites,
-    frozen_resync_scan_with_options, resolve_detection_task, resolve_live_detection_task,
-    resolve_live_detection_tasks,
+    DetectionTask, InlineJoinedFragment, InlineMathRun, InlineMathSite, LiveDetectionInput,
+    LiveDetectionSource, LiveDetectionTask, MAX_MATH_SOURCE_BYTES, MathCellSegment, MathSourceLine,
+    MathSpan, PlaceholderArtifact, StaleArtifact, advance_detection_context,
+    detect_math_blocks_with_sites, frozen_resync_scan_with_options, resolve_detection_task,
+    resolve_live_detection_task, resolve_live_detection_tasks,
 };
 use bt_doc::{
     AnchorError, AnchorId, Bias, BlockKind, ContentAnchor, DecorationIntent, DecorationLifecycle,
@@ -3679,6 +3679,7 @@ impl DualPlaneSession {
                     kind: BlockKind::Math,
                     cell_segments: Vec::new(),
                     inline_runs: Vec::new(),
+                    inline_joined_head: None,
                 },
                 detection_complete: false,
                 resolved: false,
@@ -8944,6 +8945,26 @@ impl DualPlaneSession {
                 |run| frozen_inline_run_cells(frame, *start, &entry.line, run),
                 artifact.width_px,
             );
+            // A formula the producer's own wrap split across two rows is drawn whole on the row
+            // that closes it (run 0). The opening fragment above is the same formula's other half,
+            // so once that picture is standing the fragment is redundant text and comes down with
+            // the cells under the picture. Only then: a run that fell back to source leaves both
+            // halves exactly as the producer wrote them.
+            let joined_head_cells = span
+                .inline_joined_head
+                .as_ref()
+                .filter(|_| {
+                    placements
+                        .iter()
+                        .any(|placement| placement.runs.iter().any(|run| run.run == 0))
+                })
+                .and_then(|head| frozen_joined_head_cells(frame, &self.document, *start, head));
+            for index in joined_head_cells.into_iter().flatten() {
+                if let Some(cell) = frame.cells.get_mut(index) {
+                    cell.text.clear();
+                    cell.wide_spacer = false;
+                }
+            }
             for placement in placements {
                 let Some((top_subpixels, row_height_subpixels)) = frame
                     .row_map
@@ -9016,6 +9037,26 @@ impl DualPlaneSession {
                 |run| live_inline_run_cells(frame, &record.inputs, record.start.row, run),
                 artifact.width_px,
             );
+            // The joined opening fragment on the row above, cleared under the same rule the frozen
+            // plane applies: only once the picture that replaces it is actually standing.
+            let joined_head_cells = record
+                .span
+                .inline_joined_head
+                .as_ref()
+                .filter(|_| {
+                    placements
+                        .iter()
+                        .any(|placement| placement.runs.iter().any(|run| run.run == 0))
+                })
+                .and_then(|head| {
+                    live_joined_head_cells(frame, &record.inputs, record.start.row, head)
+                });
+            for index in joined_head_cells.into_iter().flatten() {
+                if let Some(cell) = frame.cells.get_mut(index) {
+                    cell.text.clear();
+                    cell.wide_spacer = false;
+                }
+            }
             for placement in placements {
                 let Some(mapped) = frame.row_map.get(placement.row as usize) else {
                     continue;
@@ -11112,6 +11153,25 @@ impl DualPlaneSession {
         (start != candidate).then_some(start)
     }
 
+    /// The one line above `candidate` an inline row-split join has to be read with.
+    ///
+    /// The certified frontier usually reaches further back than this and makes it moot. Usually is
+    /// not always: with the frontier immediately above the candidate — or with the fallback window,
+    /// whose `required_start` for a line outside any display block is that line itself — the scan
+    /// would see the closing fragment alone and could not join anything, and whether a formula
+    /// renders would depend on where the last `$$` happened to be. One line, and only for a
+    /// candidate whose own text says it could be a closing fragment at all.
+    fn frozen_inline_join_window_start(&self, candidate: TranscriptId) -> Option<TranscriptId> {
+        if !self.inline_math_bands {
+            return None;
+        }
+        let entries = self.document.entries();
+        if !bt_detect::may_close_row_split_inline_math(&entries.get(&candidate)?.line.text) {
+            return None;
+        }
+        entries.range(..candidate).next_back().map(|(id, _)| *id)
+    }
+
     /// The resident lines past `candidate` a table ending there has to be read with.
     ///
     /// The same sentence as [`Self::frozen_table_window_start`], pointing the other way. Rule 2 of
@@ -11208,6 +11268,13 @@ impl DualPlaneSession {
             (Some(certified), Some(table)) => Some(certified.min(table)),
             (certified, table) => certified.or(table),
         };
+        // And the line above, when this candidate could be closing an inline formula the producer's
+        // own wrapping left open on it.
+        let join_start = self.frozen_inline_join_window_start(candidate_id);
+        let anchor = match (anchor, join_start) {
+            (Some(anchor), Some(join)) => Some(anchor.min(join)),
+            (anchor, join) => anchor.or(join),
+        };
         // And one line past the candidate when the candidate is a table row, because that line is
         // half of rule 2's question (see `frozen_table_window_end`).
         let window_end = self
@@ -11236,7 +11303,9 @@ impl DualPlaneSession {
             self.enqueue_task(task);
             return;
         }
-        let required_start = candidate_context.required_start(candidate_id);
+        let required_start = candidate_context
+            .required_start(candidate_id)
+            .map(|start| join_start.map_or(start, |join| start.min(join)));
         let mut initial_context = candidate_context.clone();
         let mut inputs = Vec::new();
         if let Some(start) = required_start {
@@ -12472,12 +12541,17 @@ fn may_contain_display_math(text: &str) -> bool {
 
 /// Could this line carry an inline `$…$` run? The cheapest structurally honest question.
 ///
-/// A run needs a *pair* of delimiters, so one `$` can never make one and a single-dollar line is
-/// not armed — `echo $PATH` and `Cost: $5` cost a two-byte scan and nothing else. Two is where the
-/// pre-filter has to stop being clever: `$5 和 $10` also has two, and deciding that it is currency
-/// rather than mathematics is the disambiguator's job, not a prefilter's.
+/// A run needs a *pair* of delimiters — or a lone `$` that closes one the line above left open,
+/// which is the row-split case. Both readings come out of **one pass over this line's dollars**,
+/// because this runs once per line for every line a frame can see; `bt_detect`'s
+/// [`bt_detect::may_carry_inline_math`] states the budget and holds it. A single-dollar line that
+/// is a sigil — `echo $PATH`, `Cost: $5` — still costs that one scan and nothing else.
+///
+/// Two dollars is where the pre-filter has to stop being clever: `$5 和 $10` also has two, and
+/// deciding that it is currency rather than mathematics is the disambiguator's job, not a
+/// prefilter's.
 fn may_contain_inline_math(text: &str) -> bool {
-    text.bytes().filter(|byte| *byte == b'$').take(2).count() == 2
+    bt_detect::may_carry_inline_math(text)
 }
 
 /// Could this line take part in a math detection at *some* site? The membership test for the live
@@ -12728,6 +12802,7 @@ fn empty_live_math_span() -> MathSpan {
         kind: BlockKind::Math,
         cell_segments: Vec::new(),
         inline_runs: Vec::new(),
+        inline_joined_head: None,
     }
 }
 
@@ -13444,6 +13519,7 @@ fn live_task_is_current(
         kind: BlockKind::Math,
         cell_segments: Vec::new(),
         inline_runs: Vec::new(),
+        inline_joined_head: None,
     };
     current_task.detection_complete = false;
     current_task.resolved = false;
@@ -13841,14 +13917,24 @@ fn frozen_inline_run_cells(
     line: &FrozenLine,
     run: &InlineMathRun,
 ) -> Option<(u32, u32, Vec<usize>)> {
+    frozen_fragment_cells(frame, id, line, run.byte_start, run.byte_end)
+}
+
+/// Frame cells one byte range of one frozen logical line occupies, as `(row, left column, cell
+/// indices)`.
+///
+/// The run lookup above and the joined-head lookup below ask the identical question of different
+/// ranges — where was *this* slice of *this* line drawn — so they ask it in one place.
+fn frozen_fragment_cells(
+    frame: &ViewportFrame,
+    id: TranscriptId,
+    line: &FrozenLine,
+    byte_start: u32,
+    byte_end: u32,
+) -> Option<(u32, u32, Vec<usize>)> {
     let columns = frame.columns.get() as usize;
-    let start = u32::try_from(
-        line.grapheme_boundaries
-            .binary_search(&run.byte_start)
-            .ok()?,
-    )
-    .ok()?;
-    let end = u32::try_from(line.grapheme_boundaries.binary_search(&run.byte_end).ok()?).ok()?;
+    let start = u32::try_from(line.grapheme_boundaries.binary_search(&byte_start).ok()?).ok()?;
+    let end = u32::try_from(line.grapheme_boundaries.binary_search(&byte_end).ok()?).ok()?;
     let mut origin = None;
     let mut cells = Vec::new();
     for (index, anchors) in frame
@@ -13943,9 +14029,26 @@ fn live_inline_run_cells(
     live_row: u32,
     run: &InlineMathRun,
 ) -> Option<(u32, u32, Vec<usize>)> {
+    live_fragment_cells(
+        frame,
+        inputs,
+        live_row,
+        usize::try_from(run.byte_start).ok()?,
+        usize::try_from(run.byte_end).ok()?,
+    )
+}
+
+/// Frame cells one byte range of one live logical line occupies, as `(row, left column, cell
+/// indices)`. The byte offsets are offsets into the **logical** line, whichever of its physical
+/// rows they land on.
+fn live_fragment_cells(
+    frame: &ViewportFrame,
+    inputs: &[LiveDetectionInput],
+    live_row: u32,
+    run_start: usize,
+    run_end: usize,
+) -> Option<(u32, u32, Vec<usize>)> {
     let columns = frame.columns.get() as usize;
-    let run_start = usize::try_from(run.byte_start).ok()?;
-    let run_end = usize::try_from(run.byte_end).ok()?;
     if run_start >= run_end {
         return None;
     }
@@ -13981,6 +14084,55 @@ fn live_inline_run_cells(
     }
     let (row, left) = origin?;
     Some((row, left, cells))
+}
+
+/// Frame cells the opening fragment of a row-split inline formula still occupies on the frozen
+/// line above the one its picture stands on.
+///
+/// **Two proofs before a single cell is cleared.** The line above is the transcript's own
+/// predecessor of the occurrence's line — not an index arithmetic guess — and the bytes it holds at
+/// the recorded range must still be exactly the fragment the join was proved on. If either fails,
+/// nothing is cleared and the fragment stays visible beside the picture: a redundant `$x` is a
+/// blemish, and erasing a line the producer has since rewritten is data loss.
+fn frozen_joined_head_cells(
+    frame: &ViewportFrame,
+    document: &HistoryDocument,
+    start: TranscriptId,
+    head: &InlineJoinedFragment,
+) -> Option<Vec<usize>> {
+    let (head_id, entry) = document.entries().range(..start).next_back()?;
+    let begin = usize::try_from(head.byte_start).ok()?;
+    let end = usize::try_from(head.byte_end).ok()?;
+    if entry.line.text.get(begin..end) != Some(head.text.as_str()) {
+        return None;
+    }
+    let (_, _, cells) =
+        frozen_fragment_cells(frame, *head_id, &entry.line, head.byte_start, head.byte_end)?;
+    Some(cells)
+}
+
+/// The live-grid mirror of [`frozen_joined_head_cells`].
+///
+/// The line above is the logical line ending on the row before this occurrence's first row, and the
+/// same text proof stands guard: an alternate-screen application repaints constantly, and between
+/// the moment the join was proved and the moment this frame is painted the row above may have
+/// become something else entirely.
+fn live_joined_head_cells(
+    frame: &ViewportFrame,
+    inputs: &[LiveDetectionInput],
+    live_row: u32,
+    head: &InlineJoinedFragment,
+) -> Option<Vec<usize>> {
+    let (first_row, _) = *live_logical_line_rows(inputs, live_row).first()?;
+    let head_row = first_row.checked_sub(1)?;
+    let head_text = live_snapshot_logical_line_text(inputs, head_row);
+    let begin = usize::try_from(head.byte_start).ok()?;
+    let end = usize::try_from(head.byte_end).ok()?;
+    if head_text.get(begin..end) != Some(head.text.as_str()) {
+        return None;
+    }
+    let (_, _, cells) = live_fragment_cells(frame, inputs, head_row, begin, end)?;
+    Some(cells)
 }
 
 /// One physical row's share of an inline occurrence: where its picture stands, which cells it
@@ -28028,6 +28180,74 @@ mod tests {
         );
     }
 
+    /// T-MATH-INLINE-WRAP: a formula the producer's own wrapping split across two printed rows.
+    ///
+    /// Claude Code wraps its answers itself, with hard newlines at the pane width, so a formula
+    /// that does not fit the rest of a row arrives as two rows and neither half is a formula. The
+    /// user saw the identities that happened to land whole typeset and the one that did not left as
+    /// raw text between them (2026-09-15).
+    ///
+    /// Driven end to end — real VT bytes, real OSC 133 markers, the real rasterizer — because the
+    /// join has to be true in three places at once and any one of them alone reads green: the
+    /// arming prefilter has to ask about a row carrying one `$`, the scan window has to reach the
+    /// row above, and the placer has to take down the fragment it left there.
+    #[test]
+    fn a_formula_split_across_two_printed_rows_is_joined_and_typeset() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut session);
+        let stream = concat!(
+            "\x1b]133;A\x07PS> \x1b]133;B\x07show\x1b]133;C\x07\r\n",
+            r"Euler wrote $e^{i\theta}",
+            "\r\n",
+            r"= \cos\theta + i\sin\theta$ and it holds",
+            "\r\n",
+        );
+        session.feed_at(stream.as_bytes(), started).unwrap();
+        assert_eq!(
+            grid_site_of(&session, "Euler"),
+            InlineMathSite::CommandOutput,
+            "both halves must really be one command's output"
+        );
+
+        assert_eq!(
+            session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL),
+            1,
+            "the closing row carries one `$` and must still be armed; the opening row's `$` is \
+             glued to an identifier and must not be"
+        );
+        assert_eq!(
+            complete_live_math_for_real(&mut session),
+            1,
+            "the armed row must resolve, which it can only do by reading the row above it"
+        );
+
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let blocks = rendered_inline_blocks(&frame);
+        assert_eq!(
+            blocks.len(),
+            1,
+            "one picture for one formula: {:?}",
+            frame
+                .math_blocks
+                .iter()
+                .map(|block| (block.artifact.mode, block.display))
+                .collect::<Vec<_>>()
+        );
+        let closing = frame_row_text(&frame, 2);
+        assert!(
+            !closing.contains('$') && closing.contains("and it holds"),
+            "the picture stands on the closing row, over its own fragment only: {closing:?}"
+        );
+        let opening = frame_row_text(&frame, 1);
+        assert_eq!(
+            opening.trim_end(),
+            "Euler wrote",
+            "and the fragment it left above comes down with it, delimiter and all: {opening:?}"
+        );
+    }
+
     /// PIN (blocker 3): the same run keeps its verdict once the line is frozen scrollback.
     ///
     /// The frozen worker scans text with no idea where a line sat in the command lifecycle, so
@@ -28601,9 +28821,11 @@ mod tests {
     /// * **The question that replaced them is asked once per line.** Not once per `$` — a screen
     ///   whose lines carry six times as many dollars in the same forty rows produces a ledger
     ///   identical to the byte, which is the whole difference between a prefilter and the scan it
-    ///   is standing in front of. And not at all where the two-byte dollar scan has already
-    ///   answered: a screen of lines carrying one `$` each never reaches the site question, which
-    ///   is what makes `echo $PATH` cost two bytes and nothing else.
+    ///   is standing in front of. And not at all where the row alone has already answered: a
+    ///   screen whose one `$` per line is a sigil — `$HOME`, `$PATH`, `$1` — never reaches the site
+    ///   question, which is what makes `echo $PATH` cost a byte scan and nothing else. (A lone `$`
+    ///   is no longer *automatically* an answer, since one can close a formula the row above left
+    ///   open; a lone `$` glued to an identifier still is, and that is every sigil there is.)
     #[test]
     fn a_pathological_dollar_screen_arms_nothing_where_the_site_can_never_answer_yes() {
         const ROWS: u32 = 40;
@@ -28734,8 +28956,8 @@ mod tests {
         );
         assert_eq!(
             lone.ledger.site_questions, 0,
-            "a single `$` cannot make a run, so the two-byte scan answers and the site is never \
-             asked"
+            "a single `$` glued to an identifier is a sigil and can neither open a run nor close \
+             one left open above, so the byte scan answers and the site is never asked"
         );
         assert!(
             alt.armed > 0,
