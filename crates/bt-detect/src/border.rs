@@ -16,13 +16,39 @@
 //! `$$` delimiters, the prose checks, the inline-site rules — is untouched and sees a region-local
 //! line. Nothing is loosened; the detector is simply no longer shown a line that is really two.
 //!
-//! **What counts as a rule.** A column is a border only when (nearly) every row of the screen
-//! carries *the same* vertical box-drawing glyph in it — [`vertical_rule`] lists them — at a share
-//! of [`BORDER_ROW_SHARE_PERMILLE`] of all the screen's rows, and over at least
+//! **What counts as a rule**, in two tests a column must pass both of.
+//!
+//! *The share.* The same vertical box-drawing glyph — [`vertical_rule`] lists them — stands in the
+//! column on at least [`BORDER_ROW_SHARE_PERMILLE`] of all the screen's rows and on at least
 //! [`BORDER_MINIMUM_ROWS`] of them. The denominator is every row handed in, never a subset, and
 //! that is what keeps a table drawn *inside* a TUI from cutting the screen: a table occupies a
-//! handful of a screen's rows, so its pipes reach nowhere near nine tenths of them, while a pane
+//! handful of a screen's rows, so its rules reach nowhere near nine tenths of them, while a pane
 //! rule runs the full height by construction.
+//!
+//! *The frame is unbroken* (owner's ruling 2026-09-16). A share is not proof, because the rows it
+//! leaves over are rows the cut still runs through. So on every row where the glyph is **not** the
+//! rule, the column must be **clear**: the cell is blank, and the row's text does not cross it —
+//! no writing immediately left of it *and* immediately right of it. Exactly one row may break
+//! that, and only the topmost or the bottommost, never a middle one: a pane may have a status line
+//! under it, and nothing else looks like this.
+//!
+//! The ruling's own counter-example is what it is for. Thirty-six rows of `log  │ text`, one row of
+//! `log  │ $$x^2$$`, three plain rows: nine tenths of the screen draws the rule in column five, and
+//! the row between them writes straight through it. That screen is one body of text with a glyph in
+//! it — pipe-aligned output — and cutting it would take the formula apart and lose it, which is a
+//! formula that used to typeset. The same rows with the crossing one *last* are a pane with a
+//! status line under it, and do split. A junction (`├`, `┼`, …) where a TUI's horizontal separator
+//! meets the rule is neither the rule glyph nor blank, so it spends the one exemption or vetoes the
+//! column: a box whose interior rule is interrupted has not shown that the text on either side of
+//! it is two independent streams.
+//!
+//! **A fence the whole screen proves suppresses every region** (owner's ruling 2026-09-16). A
+//! region is a column of the screen and a code fence is not: the ``` that opens one stands in
+//! whichever region it was printed in, and every other region would begin from a neutral state and
+//! read the code between the fences as ordinary text. Thirty-eight rows of `log │ $x^2$` between
+//! two fences are thirty-eight formulas to a region that never saw the fence, and none at all to
+//! the screen — and the screen is right. So the question is asked once, of the unsliced rows
+//! (`bt_detect`'s `fenced_lines`), and no region may prove anything on a row its answer covers.
 //!
 //! **Why ASCII `|` is not a rule.** It was considered and refused. A screen whose rows all carry a
 //! `|` in one column is far more often a table — `mysql`, `column -t`, a markdown table long
@@ -144,24 +170,106 @@ fn text_cell_boundaries(text: &str) -> Vec<(u32, u32)> {
     boundaries
 }
 
-/// Every column of one row that holds a one-cell vertical rule, with the glyph drawn there.
-fn rule_columns(text: &str, boundaries: &[(u32, u32)], out: &mut Vec<(u32, char)>) {
-    out.clear();
+/// One screen row, measured for the two questions a border column asks of it: is the rule drawn
+/// here, and — where it is not — is this column clear.
+///
+/// `runs` are the row's non-blank cell ranges, merged, so "is column `c` covered by text" and "does
+/// text cross column `c`" are both answered by looking `c`, `c - 1` and `c + 1` up in them. `rules`
+/// are the columns holding a one-cell vertical rule, with the glyph drawn there.
+#[derive(Default)]
+struct RowGeometry {
+    runs: Vec<(u32, u32)>,
+    rules: Vec<(u32, char)>,
+}
+
+impl RowGeometry {
+    fn covered(&self, column: u32) -> bool {
+        self.runs
+            .iter()
+            .any(|(start, end)| (*start..*end).contains(&column))
+    }
+
+    /// Is this column clear of the row's text — empty itself, and not a column the row's text
+    /// crosses?
+    ///
+    /// Crossing is asked of the two neighbouring cells because that is the whole question: a rule
+    /// column with writing on both sides of it on some row is a column that row's producer wrote
+    /// straight through, which is what a column of `column -t` output looks like and what a frame
+    /// never does.
+    fn clear_at(&self, column: u32) -> bool {
+        if self.covered(column) {
+            return false;
+        }
+        let crosses = column
+            .checked_sub(1)
+            .is_some_and(|left| self.covered(left) && self.covered(column.saturating_add(1)));
+        !crosses
+    }
+
+    fn draws_rule(&self, column: u32, glyph: char) -> bool {
+        self.rules.binary_search(&(column, glyph)).is_ok()
+    }
+}
+
+/// Measure one row: its non-blank runs and the columns it draws a vertical rule in.
+fn row_geometry(text: &str, boundaries: &[(u32, u32)]) -> RowGeometry {
+    let mut geometry = RowGeometry::default();
     for pair in boundaries.windows(2) {
         let (start_byte, start_column) = pair[0];
         let (end_byte, end_column) = pair[1];
-        if end_column != start_column.saturating_add(1) {
-            continue;
-        }
         let Some(cluster) = text.get(start_byte as usize..end_byte as usize) else {
             continue;
         };
-        if let Some(glyph) = vertical_rule(cluster) {
-            out.push((start_column, glyph));
+        if end_column <= start_column {
+            continue;
+        }
+        if !cluster.trim_matches([' ', '\t']).is_empty() {
+            match geometry.runs.last_mut() {
+                Some((_, run_end)) if *run_end == start_column => *run_end = end_column,
+                _ => geometry.runs.push((start_column, end_column)),
+            }
+        }
+        if end_column == start_column.saturating_add(1)
+            && let Some(glyph) = vertical_rule(cluster)
+        {
+            geometry.rules.push((start_column, glyph));
         }
     }
-    out.sort_unstable();
-    out.dedup();
+    geometry.rules.sort_unstable();
+    geometry.rules.dedup();
+    geometry
+}
+
+/// **Is this column a frame on every row it cuts?** (owner's ruling 2026-09-16.)
+///
+/// A share of the rows is not proof. The column has to be a column *of the screen*, which means
+/// every row where the rule is not drawn must be a row the column is clear on: empty at the column
+/// and not crossed by that row's text. One row may break it — a status line — and only the topmost
+/// or the bottommost, never a middle row, because a frame with a hole in the middle of it is not a
+/// frame and the hole is text the cut would run through.
+///
+/// This is what refuses a screen of `log  │ text` rows with one `log  │ $$x^2$$` row among them:
+/// that row's writing crosses the column, so the column is not a rule and the screen is one body of
+/// text with a glyph in it — which is exactly what it is. The same screen with that row at the
+/// bottom is a pane with a status line under it, and does split.
+///
+/// A junction (`├`, `┼`, …) where a TUI's horizontal separator meets the rule is not the rule
+/// glyph and is not blank, so it spends the one exemption or vetoes the column. That is the
+/// ruling's deliberate cost: a box whose interior rule is interrupted has not shown that the text
+/// on either side of it is two independent streams.
+fn frame_is_unbroken(geometry: &[RowGeometry], column: u32, glyph: char) -> bool {
+    let last = geometry.len().saturating_sub(1);
+    let mut exempted = false;
+    for (index, row) in geometry.iter().enumerate() {
+        if row.draws_rule(column, glyph) || row.clear_at(column) {
+            continue;
+        }
+        if exempted || (index != 0 && index != last) {
+            return false;
+        }
+        exempted = true;
+    }
+    true
 }
 
 /// The border columns of a screen whose rows are already paired with their capture geometry.
@@ -169,22 +277,27 @@ fn border_columns_of_rows(rows: &[(&str, &[(u32, u32)])]) -> Vec<u32> {
     if rows.len() < BORDER_MINIMUM_ROWS {
         return Vec::new();
     }
+    let geometry = rows
+        .iter()
+        .map(|(text, boundaries)| row_geometry(text, boundaries))
+        .collect::<Vec<_>>();
     let mut tally = BTreeMap::<(u32, char), usize>::new();
-    let mut columns = Vec::new();
-    for (text, boundaries) in rows {
-        rule_columns(text, boundaries, &mut columns);
-        for entry in &columns {
+    for row in &geometry {
+        for entry in &row.rules {
             *tally.entry(*entry).or_default() += 1;
         }
     }
-    // `count / rows >= 900/1000`, in integers. At this share two different glyphs cannot both
-    // carry one column, so the map — already ordered by column — yields each border once.
+    // Two tests, and a column must pass both. The share says the column is mostly a rule — which
+    // is what stops a table's few rows from nominating one — and `frame_is_unbroken` says it is a
+    // rule everywhere else too. At this share two different glyphs cannot both carry one column, so
+    // the map, already ordered by column, yields each border once.
     let mut borders = tally
         .into_iter()
-        .filter(|(_, count)| {
+        .filter(|((column, glyph), count)| {
             *count >= BORDER_MINIMUM_ROWS
                 && count.saturating_mul(1000)
                     >= rows.len().saturating_mul(BORDER_ROW_SHARE_PERMILLE)
+                && frame_is_unbroken(&geometry, *column, *glyph)
         })
         .map(|((column, _), _)| column)
         .collect::<Vec<_>>();
@@ -278,6 +391,17 @@ pub fn region_text(text: &str, region: ScreenRegion) -> &str {
     text[start..end].trim_end_matches([' ', '\t'])
 }
 
+/// A live screen its frame cuts into regions, and the screen's own rows beside them.
+#[derive(Clone, Debug)]
+pub struct LiveScreenSplit {
+    /// The screen's grid rows, unsliced and in scan order. The regions are cut from exactly these,
+    /// so anything the screen as a whole proves about a row — that it is inside a code fence, above
+    /// all — is proved on these and lines up with the regions row for row.
+    pub screen: Arc<[LiveDetectionInput]>,
+    /// The regions, left to right.
+    pub regions: Vec<LiveScreenRegion>,
+}
+
 /// One region of a live screen, with the screen's rows cut down to that region's columns.
 #[derive(Clone, Debug)]
 pub struct LiveScreenRegion {
@@ -298,7 +422,7 @@ pub struct LiveScreenRegion {
 /// proof that the screen is a frame: no line above it continues into a pane. Each region is
 /// therefore a self-contained window, which is also why its scan begins from a neutral context.
 #[must_use]
-pub fn live_screen_regions(inputs: &[LiveDetectionInput]) -> Option<Vec<LiveScreenRegion>> {
+pub fn live_screen_regions(inputs: &[LiveDetectionInput]) -> Option<LiveScreenSplit> {
     let grid = inputs
         .iter()
         .filter(|input| matches!(input.source, LiveDetectionSource::Grid { .. }))
@@ -311,8 +435,12 @@ pub fn live_screen_regions(inputs: &[LiveDetectionInput]) -> Option<Vec<LiveScre
     if borders.is_empty() {
         return None;
     }
-    Some(
-        regions_from_borders(&borders)
+    Some(LiveScreenSplit {
+        screen: grid
+            .iter()
+            .map(|input| region_input(input, ScreenRegion::WHOLE))
+            .collect(),
+        regions: regions_from_borders(&borders)
             .into_iter()
             .map(|region| LiveScreenRegion {
                 region,
@@ -322,7 +450,7 @@ pub fn live_screen_regions(inputs: &[LiveDetectionInput]) -> Option<Vec<LiveScre
                     .collect(),
             })
             .collect(),
-    )
+    })
 }
 
 /// Byte range of one screen row that its region reads.
@@ -413,12 +541,47 @@ mod tests {
 
     #[test]
     fn nine_tenths_is_enough_and_less_is_not() {
+        // The rows that are not the rule are clear of the column, so only the share is in question.
         let mut nine = vec!["a│b"; 36];
-        nine.extend(["plain"; 4]);
+        nine.extend([""; 4]);
         assert_eq!(rows(&nine), vec![1]);
         let mut eight = vec!["a│b"; 35];
-        eight.extend(["plain"; 5]);
+        eight.extend([""; 5]);
         assert_eq!(rows(&eight), Vec::<u32>::new());
+    }
+
+    /// Thirty-six rows draw the rule in column 5 and three more are clear of it, which is nine
+    /// tenths of the screen. The row between them writes straight through column 5, so the column
+    /// is not a frame: this screen is one body of text with a glyph in it, and cutting it would
+    /// take the formula apart.
+    #[test]
+    fn a_row_whose_text_crosses_the_column_vetoes_it() {
+        let mut screen = vec!["log  │ text".to_owned(); 36];
+        screen.push("$$x^2$$".to_owned());
+        screen.extend(std::iter::repeat_n("plain".to_owned(), 3));
+        assert_eq!(
+            find_border_columns(screen.iter().map(String::as_str)),
+            Vec::<u32>::new()
+        );
+    }
+
+    /// The same rows with the crossing one last. A pane may have a status line under it, so one
+    /// broken row at an edge — one, and only at an edge — is spent rather than fatal.
+    #[test]
+    fn one_crossing_row_at_the_bottom_is_a_status_line() {
+        let mut screen = vec!["log  │ text".to_owned(); 36];
+        screen.extend(std::iter::repeat_n("plain".to_owned(), 3));
+        screen.push("$$x^2$$".to_owned());
+        assert_eq!(
+            find_border_columns(screen.iter().map(String::as_str)),
+            vec![5]
+        );
+        // Two broken rows are not a status line, wherever they stand.
+        screen.insert(0, "$$x^2$$".to_owned());
+        assert_eq!(
+            find_border_columns(screen.iter().map(String::as_str)),
+            Vec::<u32>::new()
+        );
     }
 
     #[test]

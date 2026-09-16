@@ -186,6 +186,39 @@ fn prose_left_of_the_rule_still_splits_the_screen() {
     assert_eq!(only_detecting_region(&found), (33, 1, 2));
 }
 
+/// **A fence the screen proves suppresses every region.** Thirty-eight rows of pipe-aligned text
+/// between two fences are a code block, and the screen says so. Cut into columns, the side the
+/// fences were never printed in begins from a neutral state and reads all thirty-eight as formulas.
+/// The fence is therefore proven once, on the unsliced rows, and no region may detect on a row it
+/// covers.
+#[test]
+fn a_fence_the_screen_proves_suppresses_every_region() {
+    let mut screen = vec!["```".to_owned()];
+    screen.extend(std::iter::repeat_n("log  \u{2502} $x^2$".to_owned(), 38));
+    screen.push("```".to_owned());
+    let plain = detect_math_blocks_with_sites(
+        screen.iter().enumerate().map(|(index, text)| {
+            (
+                TranscriptId(index as u64 + 1),
+                text.as_str(),
+                InlineMathSite::AltScreenContent,
+            )
+        }),
+        DetectionOptions::default(),
+    );
+    assert!(plain.is_empty(), "the screen proves this is code");
+    let found = regions(&screen);
+    assert_eq!(found.len(), 2, "the rule still cuts the screen");
+    assert_eq!(
+        found
+            .iter()
+            .map(|region| region.blocks.len())
+            .sum::<usize>(),
+        0,
+        "and no region may detect inside the fence"
+    );
+}
+
 #[test]
 fn a_table_drawn_inside_a_tui_never_splits_the_screen() {
     // Five rows of a boxed table on a forty-row screen. Its rule reaches an eighth of the screen,

@@ -617,6 +617,12 @@ pub struct MathBlockPlacement {
     pub artifact: ProjectedMathArtifact,
     pub top_subpixels: i64,
     pub left_subpixels: i64,
+    /// **This block's own first cell column**, or `None` when its left edge is the pane's own.
+    ///
+    /// The mirror of [`Self::right_limit_columns`] and there for the same reason: a block's ground
+    /// keeps a whole cell column left of its ink, and for a block standing immediately right of a
+    /// multiplexer's rule that column is the rule.
+    pub left_limit_columns: Option<u32>,
     /// **One past this block's own last cell column**, or `None` when the block's right edge is
     /// the pane's own.
     ///
@@ -3061,6 +3067,7 @@ impl ViewportProjection {
                                     .sum::<i64>(),
                             ),
                             left_subpixels: 0,
+                            left_limit_columns: None,
                             right_limit_columns: None,
                             content_offset_subpixels: artifact.vertical_padding_subpixels,
                             clip_height_subpixels: artifact.height_subpixels,
@@ -3211,6 +3218,7 @@ impl ViewportProjection {
                                 artifact: artifact.clone(),
                                 top_subpixels: image_top,
                                 left_subpixels: 0,
+                                left_limit_columns: None,
                                 right_limit_columns: None,
                                 content_offset_subpixels: 0,
                                 clip_height_subpixels: artifact.height_subpixels,
@@ -3448,8 +3456,10 @@ impl ViewportProjection {
                     artifact,
                     top_subpixels,
                     left_subpixels: 0,
-                    // The right edge of the region this band was proved in — the rule beside the
-                    // pane, when a multiplexer drew one — and the pane's own edge otherwise.
+                    // The edges of the region this band was proved in — the rules beside the
+                    // pane, when a multiplexer drew them — and the pane's own otherwise.
+                    left_limit_columns: (live_math.column_start != 0)
+                        .then_some(live_math.column_start),
                     right_limit_columns: live_math.column_end,
                     content_offset_subpixels,
                     // The shared live prefix map expands this owned band before all following
@@ -4253,6 +4263,23 @@ impl ViewportProjection {
         };
         let mut per_row_height =
             vec![self.cell_height_subpixels.get(); self.live_rows.get() as usize];
+        // **Which rows a band has already sized this pass** (owner's ruling 2026-09-16, the
+        // border review's B-3).
+        //
+        // A screen a multiplexer has framed puts two panes on the same terminal rows, and two bands
+        // may then need the same row to be two different heights. The rows are one stack — the
+        // frame publishes one row of cells across the whole width and `live_row_prefix` gives one
+        // row one top — so a row cannot be sixty pixels on the left and eighteen on the right
+        // without a per-region row projection, source suppression and hit mapping behind it. What
+        // the shared stack can honour is the **larger** requirement, and that is what a band needs
+        // in order not to be cut: the taller block keeps its whole height, and the shorter pane's
+        // rows move down with it exactly as any unrelated text on a band's rows already does.
+        //
+        // First writer assigns and later writers take the max, rather than max against the initial
+        // cell height, because a primary band is allowed to be *shorter* than the row it stands on.
+        // A row only one band claims is therefore sized precisely as it was before regions existed,
+        // which is every row of every screen no multiplexer has framed.
+        let mut claimed = vec![false; per_row_height.len()];
         for artifact in &accepted {
             if matches!(
                 artifact.artifact.kind,
@@ -4339,12 +4366,18 @@ impl ViewportProjection {
             // Primary retains free height. Alternate is expand-only: a short formula keeps the
             // complete source-row band and centers inside it; a tall formula expands above it.
             for offset in 0..visible_rows {
-                if let Some(height) =
-                    per_row_height.get_mut(artifact.band_start_row.saturating_add(offset) as usize)
+                let row = artifact.band_start_row.saturating_add(offset) as usize;
+                if let Some(height) = per_row_height.get_mut(row)
                     && let Some(distributed) =
                         heights.get(top_pad_rows.saturating_add(offset) as usize)
                 {
-                    *height = *distributed;
+                    *height = match claimed.get(row) {
+                        Some(true) => (*height).max(*distributed),
+                        _ => *distributed,
+                    };
+                    if let Some(claimed) = claimed.get_mut(row) {
+                        *claimed = true;
+                    }
                 }
             }
             if screen == ScreenId::Alternate && artifact.clipped_top_rows > 0 {
@@ -8992,6 +9025,127 @@ mod tests {
         let block = &frame.math_blocks[0];
         assert_eq!(block.display, MathBlockDisplay::Rendered);
         (block.clip_height_subpixels, art_h, frame.clone())
+    }
+
+    /// One band of `art_cells` cell-heights standing on `band_start_row..=band_end_row`, in the
+    /// columns `column_start..column_end`.
+    fn pane_band(
+        occurrence_id: u64,
+        band_start_row: u32,
+        band_end_row: u32,
+        column_start: u32,
+        column_end: Option<u32>,
+        art_cells: u32,
+    ) -> ProjectedLiveMathArtifact {
+        let art_h = i64::from(art_cells) * cell_height().get();
+        let height_px = (art_cells * 18) as usize;
+        ProjectedLiveMathArtifact {
+            occurrence_id: LiveMathOccurrenceId(occurrence_id),
+            screen: ScreenId::Alternate,
+            start: GridPoint {
+                row: band_start_row,
+                column: column_start,
+            },
+            end: GridPoint {
+                row: band_end_row,
+                column: column_start + 4,
+            },
+            band_start_row,
+            band_end_row,
+            column_start,
+            column_end,
+            clipped_top_rows: 0,
+            clipped_bottom_rows: 0,
+            occluded_source_rows: 0,
+            occluded_visible_rows: Vec::new(),
+            transition_stale: false,
+            frozen_prefix: Vec::new(),
+            staging_prefix: Vec::new(),
+            generation: GridGeneration(1),
+            artifact: ProjectedMathArtifact {
+                inline_runs: Vec::new(),
+                key: format!("pane-{occurrence_id}"),
+                end: TranscriptId(0),
+                rgba: Arc::from(vec![255; height_px * 4]),
+                width_px: 1,
+                height_px: height_px as u32,
+                height_subpixels: art_h,
+                baseline_subpixels: 0,
+                mode: MathMode::Display,
+                kind: RgbaArtifactKind::Math,
+                vertical_padding_subpixels: 0,
+                render_scale_milli: 1000,
+                source: format!("pane-{occurrence_id}"),
+            },
+        }
+    }
+
+    /// **Two panes of one split, two bands of different heights on rows they share** (owner's
+    /// ruling 2026-09-16, the border review's B-3).
+    ///
+    /// The live rows are one stack: the frame publishes one row of cells across the whole width and
+    /// one top per row, so a row cannot be two heights at once and per-region row geometry would
+    /// need a per-region row projection, source suppression and hit mapping behind it. What the
+    /// shared stack can honour is the larger requirement, and it is the one that keeps a band whole.
+    /// Assigning each band's own distribution in turn — which is what this did — let the second one
+    /// give rows 1 and 2 back to a single cell height and cut the first band to a third of itself.
+    #[test]
+    fn two_panes_sharing_rows_keep_the_taller_band_whole() {
+        let cell = cell_height().get();
+        let mut projection = ViewportProjection::new(
+            key(8),
+            DetectionRevision(1),
+            nz32(12),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        // Left pane: three rows tall over rows 0..=2, drawn nine cell-heights tall.
+        // Right pane: three rows over rows 1..=3, drawn at its own source height.
+        projection.sync_live_math_artifacts(
+            ScreenId::Alternate,
+            [
+                pane_band(1, 0, 2, 0, Some(49), 9),
+                pane_band(2, 1, 3, 50, None, 3),
+            ],
+        );
+        let frame = projection
+            .continuous_frame(
+                &HistoryDocument::default(),
+                &[],
+                vec![fixture_row("        ", false); 12],
+                GridCursor {
+                    row: 11,
+                    column: 0,
+                    visible: true,
+                },
+                ScreenId::Alternate,
+            )
+            .unwrap();
+        frame.validate_shape().unwrap();
+        let left = frame
+            .math_blocks
+            .iter()
+            .find(|block| block.artifact.key == "pane-1")
+            .expect("the left pane's band");
+        assert_eq!(
+            left.clip_height_subpixels,
+            9 * cell,
+            "the taller band keeps every row of its own height"
+        );
+        let right = frame
+            .math_blocks
+            .iter()
+            .find(|block| block.artifact.key == "pane-2")
+            .expect("the right pane's band");
+        // The shorter band is not shortened either: its rows are the ones the taller band expanded,
+        // which is what a shared row stack means and what the ruling accepts.
+        assert!(
+            right.clip_height_subpixels >= 3 * cell,
+            "the shorter band stands on the rows the stack now has"
+        );
+        assert_eq!(left.right_limit_columns, Some(49));
+        assert_eq!(right.right_limit_columns, None);
     }
 
     /// The first-render / transition-frame defect: a display block sitting wholly inside the live

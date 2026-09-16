@@ -4,8 +4,8 @@ pub mod border;
 mod ledger;
 pub mod table;
 pub use border::{
-    LiveScreenRegion, ScreenRegion, find_border_columns, live_region_text, live_screen_regions,
-    region_text, screen_regions,
+    LiveScreenRegion, LiveScreenSplit, ScreenRegion, find_border_columns, live_region_text,
+    live_screen_regions, region_text, screen_regions,
 };
 pub use ledger::{
     ContainmentVerdict, LedgerEntry, LegitimateRejection, OrphanKind, OwnershipLedger,
@@ -1479,6 +1479,19 @@ pub fn detect_math_blocks_with_sites_in_regions<'a>(
 ) -> Vec<RegionMathBlocks> {
     let lines = lines.into_iter().collect::<Vec<_>>();
     let regions = screen_regions(lines.iter().map(|(_, text, _)| *text));
+    let split = regions.len() > 1;
+    // Proved once, on the unsliced screen, because a fence opened on one side of a rule is not
+    // visible from the other (owner's ruling 2026-09-16). Unsplit this is inert: the one region is
+    // the screen, and its own scan already refused everything inside the fence.
+    let fenced = if split {
+        fenced_lines(
+            lines.iter().map(|(_, text, _)| *text),
+            DetectionContext::default(),
+        )
+    } else {
+        Vec::new()
+    };
+    let index_of = |id: TranscriptId| lines.iter().position(|(line, _, _)| *line == id);
     regions
         .into_iter()
         .map(|region| {
@@ -1486,16 +1499,62 @@ pub fn detect_math_blocks_with_sites_in_regions<'a>(
                 .iter()
                 .map(|(_, text, _)| region_text(text, region))
                 .collect::<Vec<_>>();
-            let blocks = detect_math_blocks_with_sites(
+            let mut blocks = detect_math_blocks_with_sites(
                 lines
                     .iter()
                     .zip(&texts)
                     .map(|((id, _, site), text)| (*id, *text, *site)),
                 options,
             );
+            blocks.retain(|block| !block_stands_in_a_fence(block, &fenced, &index_of));
             RegionMathBlocks { region, blocks }
         })
         .collect()
+}
+
+/// Which lines of a screen are inside a code fence, the fence's own two lines included.
+///
+/// **A fence the screen proves suppresses every region** (owner's ruling 2026-09-16). A region is a
+/// column of the screen, and a fence is not: the ``` that opens one stands in whichever region it
+/// was printed in, and every other region would begin from a neutral state and read the code
+/// between the fences as text. Thirty-eight rows of `log │ $x^2$` between two fences are thirty-
+/// eight formulas to a region that never saw the fence, and none at all to the screen — and the
+/// screen is right. So the question is asked once, of the unsliced rows, and its answer is imposed
+/// on all of them.
+fn fenced_lines<'a>(
+    lines: impl IntoIterator<Item = &'a str>,
+    initial_context: DetectionContext,
+) -> Vec<bool> {
+    let mut context = initial_context;
+    lines
+        .into_iter()
+        .map(|text| {
+            let opened_before = context.is_commonmark_code();
+            // Only the fence half of the checkpoint is read here, and that is a fact about the
+            // text; the identity an opening would be remembered under is never asked for.
+            advance_detection_context(&mut context, TranscriptId(0), text);
+            // The opening line is not yet inside the fence and the closing line is no longer in it,
+            // and both are the fence, so a block may not stand on either.
+            opened_before || context.is_commonmark_code()
+        })
+        .collect()
+}
+
+/// Does any line of this block stand where the screen proves there is code?
+fn block_stands_in_a_fence(
+    block: &DetectedMathBlock,
+    fenced: &[bool],
+    index_of: &impl Fn(TranscriptId) -> Option<usize>,
+) -> bool {
+    if fenced.is_empty() {
+        return false;
+    }
+    let (Some(start), Some(end)) = (index_of(block.start), index_of(block.end)) else {
+        return false;
+    };
+    fenced
+        .get(start.min(end)..=start.max(end))
+        .is_some_and(|rows| rows.iter().any(|fenced| *fenced))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3163,25 +3222,40 @@ fn live_region_scans(
     initial_context: &DetectionContext,
     options: DetectionOptions,
 ) -> Vec<LiveRegionScan> {
-    match live_screen_regions(inputs) {
-        None => vec![live_region_scan(
+    let Some(split) = live_screen_regions(inputs) else {
+        return vec![live_region_scan(
             ScreenRegion::WHOLE,
             Arc::clone(inputs),
             initial_context.clone(),
             options,
-        )],
-        Some(regions) => regions
-            .into_iter()
-            .map(|region| {
-                live_region_scan(
-                    region.region,
-                    region.inputs,
-                    DetectionContext::default(),
-                    options,
-                )
-            })
-            .collect(),
-    }
+        )];
+    };
+    // The screen's own fences, proven on its unsliced rows and imposed on every region: see
+    // [`fenced_lines`]. The regions are cut from exactly these rows and keep their `continues`, so
+    // one logical line of the screen is one logical line of each region, at the same index.
+    let screen = live_logical_lines(&split.screen);
+    let fenced = fenced_lines(
+        screen.iter().map(|line| line.text.as_str()),
+        DetectionContext::default(),
+    );
+    let index_of = |id: TranscriptId| screen.iter().position(|line| line.id == id);
+    split
+        .regions
+        .into_iter()
+        .map(|region| {
+            let mut plane = live_region_scan(
+                region.region,
+                region.inputs,
+                DetectionContext::default(),
+                options,
+            );
+            plane
+                .scan
+                .blocks
+                .retain(|block| !block_stands_in_a_fence(block, &fenced, &index_of));
+            plane
+        })
+        .collect()
 }
 
 fn live_region_scan(

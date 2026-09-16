@@ -8894,6 +8894,7 @@ impl DualPlaneSession {
                 artifact,
                 top_subpixels: first_mapped.top_subpixels,
                 left_subpixels: 0,
+                left_limit_columns: None,
                 right_limit_columns: None,
                 content_offset_subpixels: 0,
                 clip_height_subpixels: last_mapped
@@ -8988,6 +8989,8 @@ impl DualPlaneSession {
                 top_subpixels: first_mapped.top_subpixels,
                 left_subpixels: i64::from(record.region.column_start)
                     .saturating_mul(self.cell_width_subpixels.get()),
+                left_limit_columns: (record.region.column_start != 0)
+                    .then_some(record.region.column_start),
                 right_limit_columns: record.region.column_end,
                 content_offset_subpixels: 0,
                 clip_height_subpixels: band_height,
@@ -9091,6 +9094,7 @@ impl DualPlaneSession {
                     top_subpixels,
                     left_subpixels: i64::from(placement.left_column)
                         .saturating_mul(self.cell_width_subpixels.get()),
+                    left_limit_columns: None,
                     right_limit_columns: None,
                     content_offset_subpixels: 0,
                     clip_height_subpixels: row_height_subpixels,
@@ -9206,6 +9210,8 @@ impl DualPlaneSession {
                     top_subpixels,
                     left_subpixels: i64::from(placement.left_column)
                         .saturating_mul(self.cell_width_subpixels.get()),
+                    left_limit_columns: (record.region.column_start != 0)
+                        .then_some(record.region.column_start),
                     right_limit_columns: record.region.column_end,
                     content_offset_subpixels: 0,
                     clip_height_subpixels: row_height_subpixels,
@@ -13679,10 +13685,11 @@ fn live_candidate_rows(
     stable: &[bool],
     inline_formulas: bool,
 ) -> Vec<u32> {
-    let Some(regions) = live_screen_regions(inputs) else {
+    let Some(split) = live_screen_regions(inputs) else {
         return live_candidate_rows_in_region(inputs, context, stable, inline_formulas);
     };
-    let mut candidates = regions
+    let mut candidates = split
+        .regions
         .iter()
         .flat_map(|region| {
             // Each pane is a self-contained window, exactly as the scanner reads it.
