@@ -35527,6 +35527,23 @@ fn drain_may_take_another_slice(slices_taken: usize, elapsed: Duration) -> bool 
     slices_taken < DRAIN_SLICES_PER_TURN && elapsed < DRAIN_TURN_BUDGET
 }
 
+/// Bracket the complete slice loop, including its error return, once for every tab.
+fn in_drain_feed_turn<T, R>(
+    tabs: &mut [T],
+    begin: impl Fn(&mut T),
+    end: impl Fn(&mut T),
+    drain: impl FnOnce(&mut [T]) -> R,
+) -> R {
+    for tab in &mut *tabs {
+        begin(tab);
+    }
+    let result = drain(tabs);
+    for tab in tabs {
+        end(tab);
+    }
+    result
+}
+
 /// What one drain turned up, beyond the bytes.
 ///
 /// Separate answers rather than a `bool` tuple because they drive different
@@ -35714,30 +35731,8 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
         .read_output_slice();
     if !bytes.is_empty() {
         debug_assert!(bytes.len() <= bt_pty::TERM_READ_SLICE.get());
-        // **One thing a smaller read touches that is not in this crate, written
-        // down here because silence is how it gets lost.**
-        // `DualPlaneSession::feed_at` opens a repaint-preservation window when
-        // the bytes it is given carry a clear+home, an erase storm or a DEC 2026
-        // BSU, and closes it at the end of the same call unless a synchronized
-        // update is still open. That window is therefore scoped to *one read*,
-        // and always was: a reprint longer than the read splits across two, and
-        // the second half repaints with no window standing. A smaller read makes
-        // that split likelier — 8 KiB rather than 256 KiB of head room — so what
-        // used to be a quantum-boundary rarity is now an 8 KiB-boundary one.
-        //
-        // What it does **not** do is put a half-repainted picture on the glass:
-        // no frame is published between the slices of a turn
-        // ([`Runtime::drain_pty`] publishes once, at its tail), and records the
-        // reprojection cannot place are held off-band and re-anchored by exact
-        // source equality on the next slice. What is left is a record whose rows
-        // are rewritten in the slice *after* the window closed: it goes to source
-        // until re-detection.
-        //
-        // The repair is to scope that window to the turn rather than to the read
-        // — `feed_at` deferring its two `finish_*_repaint` calls to an explicit
-        // end-of-turn settle — and it belongs in `bt-term` beside
-        // `repaint_flash_oracle`, which is the gate that can prove it. T-DRAIN-BURST
-        // deliberately does not reach into that contract.
+        // The drain brackets all of its slices with begin/end_feed_turn, so a
+        // repaint's proven records stay protected until the whole turn settles.
         leaf.session
             .feed_at(&bytes, Instant::now())
             .context("apply PTY output")?;
@@ -82431,19 +82426,41 @@ impl Runtime<'_> {
         // a leftover two passes ago and has since gone quiet owes this window
         // nothing, and a wake raised for it would be a turn that drains nothing
         // and publishes a frame nobody asked for.
-        let pending = loop {
-            let mut slice_pending = false;
-            for (index, tab) in self.window.tabs.iter_mut().enumerate() {
-                let outcome =
-                    drain_tab_pty(tab, window_focused, index == active_tab, owner_is_a_shell)?;
-                slice_pending |= outcome.pending;
-                outcomes[index].merge(outcome);
-            }
-            slices_taken += 1;
-            if !slice_pending || !drain_may_take_another_slice(slices_taken, now.elapsed()) {
-                break slice_pending;
-            }
-        };
+        let drain_result = in_drain_feed_turn(
+            &mut self.window.tabs,
+            |tab| {
+                for (_, leaf) in tab.leaves_mut() {
+                    leaf.session.begin_feed_turn();
+                }
+            },
+            |tab| {
+                for (_, leaf) in tab.leaves_mut() {
+                    leaf.session.end_feed_turn();
+                }
+            },
+            |tabs| -> Result<bool> {
+                let pending = loop {
+                    let mut slice_pending = false;
+                    for (index, tab) in tabs.iter_mut().enumerate() {
+                        let outcome = drain_tab_pty(
+                            tab,
+                            window_focused,
+                            index == active_tab,
+                            owner_is_a_shell,
+                        )?;
+                        slice_pending |= outcome.pending;
+                        outcomes[index].merge(outcome);
+                    }
+                    slices_taken += 1;
+                    if !slice_pending || !drain_may_take_another_slice(slices_taken, now.elapsed())
+                    {
+                        break slice_pending;
+                    }
+                };
+                Ok(pending)
+            },
+        );
+        let pending = drain_result?;
         for (index, tab) in self.window.tabs.iter_mut().enumerate() {
             let outcome = &mut outcomes[index];
             // **The OSC lane's turn, on the turn the bytes arrived.** A standing request a program
@@ -107230,6 +107247,47 @@ mod pty_drain_budget_tests {
             "the drain's budget ({budget:?}) has to leave a frame room for the \
              frame it ends with"
         );
+    }
+
+    #[test]
+    fn the_drain_marks_each_sessions_turn_once_for_any_slice_count() {
+        for slices in [1, 2, super::DRAIN_SLICES_PER_TURN] {
+            for fail in [false, true] {
+                let mut tabs = [Vec::new(), Vec::new()];
+                let result = super::in_drain_feed_turn(
+                    &mut tabs,
+                    |events| events.push("begin"),
+                    |events| events.push("end"),
+                    |tabs| {
+                        for _ in 0..slices {
+                            for events in &mut *tabs {
+                                events.push("slice");
+                            }
+                        }
+                        if fail { Err("feed failed") } else { Ok(()) }
+                    },
+                );
+                assert_eq!(result.is_err(), fail);
+                for events in tabs {
+                    assert_eq!(events.first(), Some(&"begin"));
+                    assert_eq!(events.last(), Some(&"end"));
+                    assert_eq!(events.iter().filter(|event| **event == "begin").count(), 1);
+                    assert_eq!(events.iter().filter(|event| **event == "end").count(), 1);
+                    assert_eq!(
+                        events.iter().filter(|event| **event == "slice").count(),
+                        slices
+                    );
+                }
+            }
+        }
+        // Pin the production loop to the same scope exercised above.
+        let body = method_body("drain_pty");
+        let scope = body.find("in_drain_feed_turn(").unwrap();
+        let slices = body.find("let pending = loop {").unwrap();
+        assert!(scope < slices);
+        assert_eq!(body.matches("leaf.session.begin_feed_turn();").count(), 1);
+        assert_eq!(body.matches("leaf.session.end_feed_turn();").count(), 1);
+        assert!(body[slices..].contains("let pending = drain_result?;"));
     }
 
     /// PIN (T-DRAIN-BURST) — **the repetition lives where the deadline does, and
