@@ -170,7 +170,7 @@ use bt_term::{
     TerminalPalette, normalized_local_image_path_key, render_detection_task,
     render_live_detection_task,
 };
-use bt_transcript::{DEFAULT_STAGING_QUOTA, SourceGeneration, TranscriptId};
+use bt_transcript::DEFAULT_STAGING_QUOTA;
 use bt_viewport::{
     HyperlinkHit, MathBlockAnchor, ViewSelection, ViewportFrame, ViewportProjection,
     horizontal::ContentColumn,
@@ -19618,37 +19618,36 @@ enum FlashBand {
     Pane,
 }
 
-/// What a search scan was of, so the next one can skip the half that has not moved.
+/// What a search scan was of, so the next one can skip everything that has not moved.
 ///
 /// # The incremental rule, and why it is drawn here rather than inside the engine
 ///
-/// A hundred thousand frozen lines take about twelve milliseconds to scan (S1-data measured it),
-/// and the ticket's own instruction is that a keystroke's result must be on the *next* frame — no
-/// debounce, no timer. Both are affordable at once because the two things that change do not change
-/// together: **history grows at the bottom and is otherwise immutable**, while the live grid and
-/// the staged rows change with every character the shell echoes and are fifty rows between them.
+/// A keystroke's result must be on the *next* frame — no debounce, no timer — while the frozen
+/// plane may hold a hundred thousand lines. Both are affordable at once because the three planes do
+/// not change together: **history only grows at the bottom and loses lines off the top**, while the
+/// live grid and the staged rows change with every character the shell echoes and are fifty rows
+/// between them.
 ///
-/// So the scan is split by plane. History is re-scanned only when [`Self::history`] moves — which
-/// it does when a line freezes, when a line is evicted, or when ED3 empties the whole thing — and
-/// the two volatile planes are re-scanned every time the search is asked, because doing so costs
-/// microseconds. What makes that *correct* rather than merely fast is that the frozen plane is
-/// append-and-evict-only: no line already in it can change its text without the transcript's own
-/// generation moving, which is one of the four numbers below.
+/// So the scan is split by plane, and the history half is split again by *how much of it moved*.
+/// The two volatile planes are re-scanned every time the search is asked, because fifty rows cost
+/// microseconds. History is carried forward through [`search::scan_history_after`]: a line
+/// freezing costs that one line, an eviction costs dropping its hits, and only a changed question —
+/// a pattern, a toggle, another pane — is worth reading the plane again.
+///
+/// **That is the whole of this ticket.** Under the old key — length, both end ids and the store's
+/// generation — every one of those was equally invalidating, so a shell printing while the capsule
+/// was open re-ran the pattern over the entire history on the next frame, once per line printed.
+/// Typing into a busy pane is exactly the case where those two coincide, and the hold logger billed
+/// it to the scan.
 #[derive(Clone, Debug, PartialEq)]
 struct SearchScanCache {
     seat: SeatId,
     /// [`WindowRuntime::search_revision`] — what was typed and how it was switched.
     revision: u64,
-    /// The frozen plane's identity: how many lines, which ones the ends are, and the generation
-    /// their text belongs to. Any edit history can undergo moves at least one of the four.
-    history: (
-        usize,
-        Option<TranscriptId>,
-        Option<TranscriptId>,
-        SourceGeneration,
-    ),
-    /// The hits history held at that identity, kept so a volatile-only rescan can re-use them.
-    history_hits: Vec<search::Hit>,
+    /// The frozen plane's hits and the window of line ids they were found over — what the next
+    /// scan starts from instead of starting again. The window is also what says whether history
+    /// moved at all, which is half of the "nothing happened" test below.
+    history: search::HistoryScan,
     /// The hits the two volatile planes held, kept so a rescan that found the same ones can decide
     /// that nothing happened and leave the current match — and the highlight buffers — alone.
     volatile_hits: Vec<search::Hit>,
@@ -42395,22 +42394,18 @@ impl Runtime<'_> {
         let revision = self.window.search_revision;
         let leaf = self.sessions.get(&seat).expect("the seat was just checked");
         let transcript = leaf.session.transcript();
-        let frozen = transcript.frozen();
-        let history_key = (
-            frozen.len(),
-            frozen.front().map(|line| line.id),
-            frozen.back().map(|line| line.id),
-            transcript.source_generation(),
-        );
-        let reusable = self
+        // **The previous answer, and only while it is an answer to the same question.** Seat and
+        // revision are what "the same question" means here; the plane having moved under it is not
+        // a reason to throw it away, it is the reason it is passed in.
+        let previous = self
             .window
             .search_scan
             .as_ref()
-            .filter(|cache| {
-                cache.seat == seat && cache.revision == revision && cache.history == history_key
-            })
-            .map(|cache| cache.history_hits.clone());
-        let history_hits = reusable.unwrap_or_else(|| search::scan_history(&compiled, transcript));
+            .filter(|cache| cache.seat == seat && cache.revision == revision);
+        let scan_started = self.app.trace_perf.then(Instant::now);
+        let history =
+            search::scan_history_after(&compiled, transcript, previous.map(|cache| &cache.history));
+        let history_us = scan_started.map_or(0, |at| at.elapsed().as_micros());
         // The two volatile planes, every time: fifty rows of grid and whatever has scrolled out but
         // not frozen. Their cost is a property of the screen, so re-scanning them unconditionally
         // is what buys "the word you are typing is findable the instant it is echoed".
@@ -42423,11 +42418,26 @@ impl Runtime<'_> {
             .collect();
         let volatile_hits =
             search::scan_volatile(&compiled, transcript, &live, leaf.session.grid_generation());
-        let unchanged = self.window.search_scan.as_ref().is_some_and(|cache| {
-            cache.seat == seat
-                && cache.revision == revision
-                && cache.history == history_key
-                && cache.volatile_hits == volatile_hits
+        // **What the scan cost, and how much of it was new** — one line per frame the capsule is
+        // open on a terminal. `lines_scanned` is the number this split exists to hold down: the
+        // whole plane on the frame a question changes, and the lines the shell has frozen since on
+        // every other one. A recording where it tracks `frozen_lines` while a shell prints is the
+        // incremental step having been lost.
+        if self.app.trace_perf {
+            eprintln!(
+                "BT_PERF_TRACE search_scan lines_scanned={} frozen_lines={} history_us={history_us} history_hits={} live_rows={} volatile_hits={}",
+                history.lines_scanned,
+                history.scan.window().len,
+                history.scan.hits().len(),
+                live.len(),
+                volatile_hits.len(),
+            );
+        }
+        // Nothing happened when the question, the plane's window and the volatile hits are all the
+        // ones the last scan saw. The window stands in for the history hits because it is what they
+        // are a function of: same seat, same revision, same window, same answer.
+        let unchanged = previous.is_some_and(|cache| {
+            cache.history.window() == history.scan.window() && cache.volatile_hits == volatile_hits
         });
         if unchanged && !forced {
             return Ok(());
@@ -42439,7 +42449,7 @@ impl Runtime<'_> {
             .projection
             .scroll_anchor()
             .map(|anchor| anchor.source.clone());
-        let mut hits = history_hits.clone();
+        let mut hits = history.scan.hits().to_vec();
         hits.extend(volatile_hits.iter().cloned());
         self.window
             .search
@@ -42447,8 +42457,7 @@ impl Runtime<'_> {
         self.window.search_scan = Some(SearchScanCache {
             seat,
             revision,
-            history: history_key,
-            history_hits,
+            history: history.scan,
             volatile_hits,
         });
         self.install_search_highlights(seat);
@@ -74637,9 +74646,12 @@ impl Runtime<'_> {
             self.window.last_presented_frame = None;
         }
         // The capsule's hits were cut from a transcript that no longer exists,
-        // and so was the cache that decides whether to re-cut them: its key is a
-        // count and a pair of ids, and an empty transcript's key is the same
-        // whichever shell emptied it. Both go.
+        // and so was the cache the next scan would have carried forward: its
+        // line ids name lines *inside one transcript*, and the fresh one hands
+        // the same ids to different text. **This is the guarantee
+        // [`search::scan_history_after`] names**, and it is why it is discharged
+        // here rather than guessed at there — nothing about two windows of ids
+        // can tell a reader which transcript minted them. Both go.
         self.clear_search_highlights(seat);
         self.window.search_scan = None;
         self.settle_seat_set_change()?;

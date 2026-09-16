@@ -14,6 +14,9 @@ All notable changes to Folio are recorded here. The format follows
   keyboard, the pointer and the tab strip between turns, however much is still
   coming.
 
+- With the search box open, typing in a pane that is printing no longer pauses
+  while the whole history is searched again.
+
 ## 0.4.1-preview — 2026-09-16
 
 ### Added

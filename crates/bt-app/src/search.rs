@@ -60,7 +60,9 @@ use bt_render::{
     rounded_overlay_fill,
 };
 use bt_transcript::search::{ByteRange, CompiledSearch, SearchError, SearchQuery, compile};
-use bt_transcript::{GraphemeOffset, SourceGeneration, StagingId, TranscriptStore};
+use bt_transcript::{
+    FrozenLine, GraphemeOffset, SourceGeneration, StagingId, TranscriptId, TranscriptStore,
+};
 use bt_viewport::{SearchHighlights, SearchHit, SearchLine};
 
 use crate::cmdrail::{RAIL_LANE_GAP_LOGICAL_PX, RAIL_PADDING_X_LOGICAL_PX, TICK_LENGTH_LOGICAL_PX};
@@ -843,33 +845,229 @@ fn unit_range(boundaries: &[u32], range: ByteRange) -> (u32, u32) {
     (start, last.saturating_add(1).max(start.saturating_add(1)))
 }
 
-/// The frozen plane, scanned.
+/// The frozen plane, scanned from scratch.
 ///
 /// **Split from [`scan_volatile`] because the two are re-asked at different rates**, which is the
-/// whole of this block's answer to R1: history is append-and-evict-only and costs about twelve
-/// milliseconds at a hundred thousand lines, so it is scanned when it moves; the other two planes
-/// are fifty rows between them and are scanned every time anything is asked. The split is honest
-/// rather than a shortcut, because the frozen plane genuinely cannot change under a caller that has
-/// not seen its length, its two end ids or its generation move.
+/// whole of this block's answer to R1: history is append-and-evict-only, so it is scanned when it
+/// moves; the other two planes are fifty rows between them and are scanned every time anything is
+/// asked. The split is honest rather than a shortcut, because the frozen plane genuinely cannot
+/// change under a caller that has not seen its two end ids move.
+///
+/// **This is the whole-plane answer, and it is owed to exactly one event: the question changing.**
+/// A pattern, a toggle or a new pane has nothing to carry forward, so every line is read. What a
+/// line *freezing* owes is [`scan_history_after`]'s much smaller answer — see its head for why
+/// running this one per frame instead is what a reader feels as a pause while they type.
 #[must_use]
 pub fn scan_history(compiled: &CompiledSearch, transcript: &TranscriptStore) -> Vec<Hit> {
     let mut hits = Vec::new();
     for line in transcript.frozen() {
-        push_hits(
-            &mut hits,
-            compiled,
-            &line.text,
-            GraphemeStarts(&line.grapheme_boundaries),
-            SearchLine::History(line.id),
-            |offset| ContentAnchor::History {
-                id: line.id,
-                offset,
-                bias: Bias::Before,
-                generation: line.source_generation,
-            },
-        );
+        push_frozen_hits(&mut hits, compiled, line);
     }
     hits
+}
+
+/// **Which frozen lines an answer was found over** — how many, and the ids at the two ends.
+///
+/// # The id semantics this rests on, read out of the only writer
+///
+/// `bt_transcript::TranscriptStore` owns the frozen deque privately and touches it in exactly
+/// three places: `finalize` pushes at the **back** with an id taken from a counter that only ever
+/// increases and is never reset (not even by `clear_history`), `evict_oldest` pops at the
+/// **front**, and `clear_history` drains the lot. There is no `frozen_mut`, no `iter_mut`, no
+/// `get_mut` — so:
+///
+/// * ids **ascend front to back**, which makes document order and id order the same order;
+/// * a line already frozen **cannot be rewritten in place**. A reprint is a fresh `finalize` and
+///   therefore a fresh id, which this window sees as an append. That is why an id alone is a
+///   sufficient per-line key and no revision number is needed beside it;
+/// * a line's `source_generation` is stamped at freeze time and never restamped, so the anchor a
+///   hit carries stays the anchor a fresh scan would mint for that line. The store's *own*
+///   generation moves on eviction and on `invalidate_staging`, which is why it is **not** in this
+///   key: it moves for reasons that leave every surviving frozen line exactly as it was, and
+///   holding it here is what made a rescan of a hundred thousand lines the price of a program
+///   clearing its staged rows.
+///
+/// Width is not in the key either: the frozen plane is wrap-transparent — [`scan_history`] reads
+/// `FrozenLine::text`, the rejoined logical line, and addresses it by grapheme — so a resize
+/// cannot move a history hit.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct HistoryWindow {
+    /// How many lines stood in the plane.
+    pub len: usize,
+    /// The oldest line's id; `None` on an empty plane.
+    pub front: Option<TranscriptId>,
+    /// The newest line's id; `None` on an empty plane.
+    pub back: Option<TranscriptId>,
+}
+
+impl HistoryWindow {
+    /// The window a transcript is showing right now.
+    #[must_use]
+    pub fn of(transcript: &TranscriptStore) -> Self {
+        let frozen = transcript.frozen();
+        Self {
+            len: frozen.len(),
+            front: frozen.front().map(|line| line.id),
+            back: frozen.back().map(|line| line.id),
+        }
+    }
+
+    /// What a scan of `self` still answers about `later`, when `later` is `self` after the plane's
+    /// only two moves — lines appended at the back, lines evicted at the front.
+    ///
+    /// `Some((oldest_kept, newest_scanned))`: every hit on a line older than `oldest_kept` is gone
+    /// with its line, every line newer than `newest_scanned` has never been read, and everything
+    /// between the two is untouched by the argument above.
+    ///
+    /// `None` when there is nothing to carry — an empty plane at either end of the step. It is not
+    /// a refusal to handle a case: the plane being empty *now* means the answer is no hits, and the
+    /// plane having been empty *then* means the previous scan read nothing that could be reused, so
+    /// both roads cost what deciding it costs.
+    ///
+    /// The ends can only move forwards, and a window whose ends moved backwards is not a step of
+    /// this plane at all — it is some other transcript's window — so it carries nothing.
+    #[must_use]
+    fn step_to(self, later: Self) -> Option<(TranscriptId, TranscriptId)> {
+        let (front, back) = (self.front?, self.back?);
+        let (later_front, later_back) = (later.front?, later.back?);
+        (later_front >= front && later_back >= back).then_some((later_front, back))
+    }
+}
+
+/// A history scan, kept so the next one does not have to be a history scan.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct HistoryScan {
+    window: HistoryWindow,
+    hits: Vec<Hit>,
+}
+
+impl HistoryScan {
+    /// Which lines this was found over. Two scans with the same window over the same seat and the
+    /// same query are the same answer, which is what lets a caller decide that nothing happened.
+    #[must_use]
+    pub fn window(&self) -> HistoryWindow {
+        self.window
+    }
+
+    /// The hits, in document order.
+    #[must_use]
+    pub fn hits(&self) -> &[Hit] {
+        &self.hits
+    }
+}
+
+/// A history scan and what it cost.
+///
+/// The cost is carried out rather than logged in here so that the scan stays a pure function of
+/// the plane and the pattern: `lines_scanned` is a number about this call, not about the answer,
+/// and storing it inside [`HistoryScan`] would make two equal answers compare unequal.
+#[derive(Clone, Debug)]
+pub struct HistoryRescan {
+    /// The answer, and the window to hand back next time.
+    pub scan: HistoryScan,
+    /// How many frozen lines the pattern was actually run over — the whole plane on a scan from
+    /// scratch, and the lines that have frozen since on an incremental one. What
+    /// `BT_PERF_TRACE search_scan` prints.
+    pub lines_scanned: usize,
+}
+
+/// The frozen plane, scanned **from where the last scan left off**.
+///
+/// # Why this exists
+///
+/// The capsule's history scan used to be cached under a key that included the plane's length and
+/// its two end ids, which is correct and is also invalidated by *every line the shell prints*.
+/// Typing into a busy pane freezes lines; each frozen line moved the key; the next frame ran the
+/// pattern over all hundred thousand lines again. With the capsule open that is a hold the reader
+/// feels in the pane they are typing into — the thing they are doing is the thing that pays.
+///
+/// So the plane's two moves are answered at their own size instead. An eviction drops the hits of
+/// the lines it took, an append scans the lines it brought, and the lines between the two — which
+/// is nearly always all of them — are not read at all. A changed pattern, a different pane and a
+/// plane that has been emptied all still cost a full scan, because for those there is genuinely
+/// nothing to carry: `previous` is what the caller passes only while the question has not changed.
+///
+/// # Document order, and adjacency
+///
+/// The result is the retained tail of the previous answer followed by the new lines' hits, and ids
+/// ascend front to back, so the list stays in document order without being sorted — which
+/// `SearchState::install`, `first_at_or_after` and the walk all read. One line's hits also stay
+/// **adjacent**, because a line is either kept whole or scanned whole and never both:
+/// `SearchHighlights::new` groups by adjacency before it sorts, so a line arriving in two pieces
+/// would leave one piece unpainted.
+///
+/// # What the caller owes
+///
+/// `previous` must be a scan of **this** transcript. A `TranscriptId` names a line inside one
+/// store's counter and nothing wider — a pane whose shell is restarted begins again at 1 and hands
+/// those ids to different text — so no comparison of two windows can discover that the plane
+/// underneath was replaced, and a check here that pretended to would be a guard that cannot go red.
+/// The one place that knows is the one that does the replacing: `Runtime::restart_shell` drops the
+/// cache, and `refresh_search` passes `previous` only for the same seat and the same query.
+#[must_use]
+pub fn scan_history_after(
+    compiled: &CompiledSearch,
+    transcript: &TranscriptStore,
+    previous: Option<&HistoryScan>,
+) -> HistoryRescan {
+    let frozen = transcript.frozen();
+    let window = HistoryWindow::of(transcript);
+    let step = previous.and_then(|previous| {
+        previous
+            .window
+            .step_to(window)
+            .map(|step| (&previous.hits, step))
+    });
+    let Some((carried, (oldest_kept, newest_scanned))) = step else {
+        return HistoryRescan {
+            scan: HistoryScan {
+                window,
+                hits: scan_history(compiled, transcript),
+            },
+            lines_scanned: window.len,
+        };
+    };
+    // The evicted lines' hits are a **prefix** of the carried list: hits are in document order and
+    // document order is id order, so everything on a line older than the new front stands in front
+    // of everything that survives. `SearchLine`'s own ordering puts `History` before the other two
+    // planes, so this comparison says "an older history line" for any hit a history scan can hold.
+    let dropped = carried.partition_point(|hit| hit.line < SearchLine::History(oldest_kept));
+    let mut hits = carried[dropped..].to_vec();
+    // And the appended lines are a **suffix**, for the same reason — so finding them costs their
+    // own number and not the plane's.
+    let appended = frozen
+        .iter()
+        .rev()
+        .take_while(|line| line.id > newest_scanned)
+        .count();
+    for line in frozen.range(frozen.len() - appended..) {
+        push_frozen_hits(&mut hits, compiled, line);
+    }
+    HistoryRescan {
+        scan: HistoryScan { window, hits },
+        lines_scanned: appended,
+    }
+}
+
+/// One frozen line's hits, appended.
+///
+/// The two scans share it so that the anchor an incremental scan mints cannot drift from the one a
+/// scan from scratch mints for the same line — which is the property the property test asserts and
+/// this function is the reason it can hold.
+fn push_frozen_hits(into: &mut Vec<Hit>, compiled: &CompiledSearch, line: &FrozenLine) {
+    push_hits(
+        into,
+        compiled,
+        &line.text,
+        GraphemeStarts(&line.grapheme_boundaries),
+        SearchLine::History(line.id),
+        |offset| ContentAnchor::History {
+            id: line.id,
+            offset,
+            bias: Bias::Before,
+            generation: line.source_generation,
+        },
+    );
 }
 
 /// The staged rows and the live grid, scanned.
@@ -1659,6 +1857,292 @@ mod tests {
             "the three runs of `a` in `banana`, and nothing at all for the empty matches"
         );
         assert!(hits.iter().all(|hit| hit.end > hit.start));
+    }
+
+    // ── the incremental history scan ────────────────────────────────────────
+
+    /// A deterministic 64-bit xorshift.
+    ///
+    /// Written here rather than taken as a dependency for the reason a property test needs most:
+    /// a failure has to come back. The seed is in the test, so a red run is a red run again.
+    struct Rng(u64);
+
+    impl Rng {
+        fn bits(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, bound: u64) -> u64 {
+            self.bits() % bound
+        }
+    }
+
+    /// A store nothing evicts behind the test's back, so an eviction in one of these is an
+    /// eviction the test asked for.
+    fn growing_store() -> TranscriptStore {
+        TranscriptStore::with_quotas(
+            NonZeroUsize::new(64).unwrap(),
+            NonZeroUsize::new(1_000_000).unwrap(),
+        )
+    }
+
+    fn freeze(store: &mut TranscriptStore, text: &str) {
+        store.capture(CapturedRow::plain(text, false));
+    }
+
+    /// Whether one line's hits all stand together — what `SearchHighlights::new` requires, since it
+    /// groups by adjacency before it sorts and would leave a second run of the same line unpainted.
+    fn lines_are_unbroken_runs(hits: &[Hit]) -> bool {
+        let mut seen: Vec<SearchLine> = Vec::new();
+        for hit in hits {
+            if seen.last() != Some(&hit.line) {
+                if seen.contains(&hit.line) {
+                    return false;
+                }
+                seen.push(hit.line);
+            }
+        }
+        true
+    }
+
+    /// PIN — **an incremental history scan is the scan from scratch**, over random sequences of
+    /// the only two things the frozen plane does.
+    ///
+    /// The property, and the reason this is a property rather than three examples: `scan_history`
+    /// is the definition, and `scan_history_after` is an optimisation that is allowed to be faster
+    /// and nothing else. Every step here asks both and compares the whole answer — the hits, their
+    /// offsets **and their anchors**, since an anchor carries the line's `source_generation` and a
+    /// carried-forward hit that had re-stamped it would jump the viewport somewhere else.
+    ///
+    /// MUTATIONS: drop the eviction arm (keep the hits of lines that have gone) and the comparison
+    /// goes red within a few steps; scan from the new front instead of from the previous back and
+    /// the surviving lines are counted twice.
+    #[test]
+    fn an_incremental_scan_equals_a_full_one_under_random_appends_and_evictions() {
+        let compiled = engine_for("cat", SearchFlags::default());
+        // Five lines to draw from: one is the query, one holds it twice, one holds it inside a
+        // longer word and one is blank — so a line carries zero, one or two hits, and the runs a
+        // step keeps or drops are not all the same length.
+        let words = ["cat", "dog", "cat-cat", "concatenate", ""];
+        for seed in [0x1234_5678_9abc_def1_u64, 0xfeed_face_dead_beef, 7] {
+            let mut rng = Rng(seed);
+            let mut store = growing_store();
+            let mut previous: Option<HistoryScan> = None;
+            for step in 0..400 {
+                match rng.below(3) {
+                    // Append a burst, which is what a shell printing looks like.
+                    0 | 1 => {
+                        for _ in 0..=rng.below(4) {
+                            let text = words[rng.below(words.len() as u64) as usize];
+                            freeze(&mut store, text);
+                        }
+                    }
+                    // Evict from the front, which is what the quota looks like.
+                    _ => {
+                        let count = rng.below(3) as usize;
+                        store.evict_oldest(count);
+                    }
+                }
+                let full = scan_history(&compiled, &store);
+                let rescan = scan_history_after(&compiled, &store, previous.as_ref());
+                assert_eq!(
+                    rescan.scan.hits(),
+                    full.as_slice(),
+                    "seed {seed:#x}, step {step}: the incremental answer is not the answer"
+                );
+                assert!(
+                    lines_are_unbroken_runs(rescan.scan.hits()),
+                    "seed {seed:#x}, step {step}: a line's hits arrived in two runs"
+                );
+                previous = Some(rescan.scan);
+            }
+        }
+    }
+
+    /// PIN — **the lines a scan reads are the lines that have frozen since the last one**, which is
+    /// the whole of what this split buys: a shell printing into a pane with the capsule open pays
+    /// for its own line and not for the hundred thousand behind it.
+    ///
+    /// MUTATION: make `scan_history_after` ignore `previous` and the second assertion reads 5_000
+    /// instead of 3 — which is the bug this test exists for, and is what a reader felt as a pause
+    /// in the pane they were typing into.
+    #[test]
+    fn a_line_freezing_costs_that_line_and_not_the_plane_behind_it() {
+        let compiled = engine_for("cat", SearchFlags::default());
+        let mut store = growing_store();
+        for index in 0..5_000 {
+            freeze(&mut store, if index % 100 == 0 { "cat" } else { "dog" });
+        }
+        let first = scan_history_after(&compiled, &store, None);
+        assert_eq!(first.lines_scanned, 5_000, "the first scan reads the plane");
+        assert_eq!(first.scan.hits().len(), 50);
+
+        for text in ["cat", "dog", "cat"] {
+            freeze(&mut store, text);
+        }
+        let second = scan_history_after(&compiled, &store, Some(&first.scan));
+        assert_eq!(second.lines_scanned, 3);
+        assert_eq!(second.scan.hits().len(), 52);
+        assert_eq!(second.scan.hits(), scan_history(&compiled, &store));
+
+        // And a frame on which nothing at all froze reads nothing at all.
+        let third = scan_history_after(&compiled, &store, Some(&second.scan));
+        assert_eq!(third.lines_scanned, 0);
+        assert_eq!(third.scan.hits(), second.scan.hits());
+    }
+
+    /// PIN — **an eviction drops exactly the hits of the lines it took**, and reads nothing.
+    #[test]
+    fn an_eviction_drops_the_evicted_lines_hits_and_scans_nothing() {
+        let compiled = engine_for("cat", SearchFlags::default());
+        let mut store = growing_store();
+        for text in ["cat one", "dog", "cat two", "cat three"] {
+            freeze(&mut store, text);
+        }
+        let first = scan_history_after(&compiled, &store, None);
+        assert_eq!(first.scan.hits().len(), 3);
+        let doomed = first.scan.hits()[0].line;
+
+        // The two oldest lines: one of them carries a hit, the other does not.
+        store.evict_oldest(2);
+        let second = scan_history_after(&compiled, &store, Some(&first.scan));
+        assert_eq!(second.lines_scanned, 0, "an eviction reads no line");
+        assert_eq!(second.scan.hits().len(), 2);
+        assert!(
+            second.scan.hits().iter().all(|hit| hit.line != doomed),
+            "the evicted line's hit is the one that went"
+        );
+        assert_eq!(second.scan.hits(), &first.scan.hits()[1..]);
+        assert_eq!(second.scan.hits(), scan_history(&compiled, &store));
+
+        // Everything evicted at once — ED3's shape — leaves nothing to carry and nothing to find.
+        store.clear_history();
+        let third = scan_history_after(&compiled, &store, Some(&second.scan));
+        assert!(third.scan.hits().is_empty());
+        assert_eq!(third.lines_scanned, 0);
+    }
+
+    /// PIN — **a changed question reads the plane again.**
+    ///
+    /// The caller withholds `previous` when the query or a toggle moved, and that is the whole
+    /// mechanism: there is nothing about a hit set for `cat` that answers anything about `dog`.
+    /// Handing the old scan back anyway would be the bug, so this states both halves.
+    #[test]
+    fn a_changed_pattern_reads_the_whole_plane_again() {
+        let mut store = growing_store();
+        for text in ["cat", "dog", "cat dog"] {
+            freeze(&mut store, text);
+        }
+        let cats = scan_history_after(&engine_for("cat", SearchFlags::default()), &store, None);
+        assert_eq!(cats.lines_scanned, 3);
+        assert_eq!(cats.scan.hits().len(), 2);
+
+        let dogs = scan_history_after(&engine_for("dog", SearchFlags::default()), &store, None);
+        assert_eq!(dogs.lines_scanned, 3, "a new question is a full read");
+        assert_eq!(dogs.scan.hits().len(), 2);
+        assert_eq!(
+            dogs.scan.hits(),
+            scan_history(&engine_for("dog", SearchFlags::default()), &store)
+        );
+
+        // The two windows are equal, which is exactly why the window alone cannot be the key: the
+        // caller's seat-and-revision filter is what keeps one question's answer out of another's.
+        assert_eq!(cats.scan.window(), dogs.scan.window());
+    }
+
+    /// PIN — **a frozen line cannot be rewritten in place, so its id is a sufficient key.**
+    ///
+    /// This is the fact the whole incremental rule rests on, read out of `bt_transcript`: the
+    /// frozen deque is private, is pushed at the back by `finalize` with an id from a counter that
+    /// never decreases, and is popped at the front. A shell reprinting a line does not edit the
+    /// frozen one — it freezes **another** line with **another** id, which this scan sees as the
+    /// append it is.
+    ///
+    /// MUTATION: were a reprint able to rewrite line 1 in place — a progress bar or a prompt
+    /// repainting itself over the line it had already frozen — this scan would carry a hit on a
+    /// line whose text no longer holds the word, and a revision number would have to join the id
+    /// in the per-line key. The third assertion is the one that says it cannot.
+    #[test]
+    fn a_reprinted_line_is_a_new_id_and_not_a_rewrite() {
+        let compiled = engine_for("cat", SearchFlags::default());
+        let mut store = growing_store();
+        freeze(&mut store, "cat");
+        let first = scan_history_after(&compiled, &store, None);
+        assert_eq!(first.scan.hits().len(), 1);
+
+        // The same physical row, printed over with something else. What reaches the store is
+        // another freeze, and a freeze only ever pushes.
+        freeze(&mut store, "dog");
+        let ids: Vec<_> = store.frozen().iter().map(|line| line.id).collect();
+        assert_eq!(ids.len(), 2, "the plane grew rather than changed");
+        assert!(ids[0] < ids[1], "ids ascend front to back");
+        assert_eq!(
+            store.frozen()[0].text,
+            "cat",
+            "the line the first scan read is the line it read"
+        );
+
+        let second = scan_history_after(&compiled, &store, Some(&first.scan));
+        assert_eq!(second.lines_scanned, 1, "the reprint is an append");
+        assert_eq!(second.scan.hits(), first.scan.hits());
+        assert_eq!(second.scan.hits(), scan_history(&compiled, &store));
+    }
+
+    /// PIN — **the store's own generation is not the key.**
+    ///
+    /// `invalidate_staging` is RIS and DECCOLM: it bumps `source_generation` and retains every
+    /// frozen line. It was in the old key, so a program resetting the terminal re-read the whole
+    /// history; the lines it kept are the same lines, so nothing is owed.
+    ///
+    /// MUTATION: put the store generation back in the key and `lines_scanned` here reads 3.
+    #[test]
+    fn a_generation_bump_that_keeps_every_line_reads_no_line() {
+        let compiled = engine_for("cat", SearchFlags::default());
+        let mut store = growing_store();
+        for text in ["cat", "dog", "cat"] {
+            freeze(&mut store, text);
+        }
+        let first = scan_history_after(&compiled, &store, None);
+        let before = store.source_generation();
+        store.invalidate_staging();
+        assert_ne!(store.source_generation(), before);
+
+        let second = scan_history_after(&compiled, &store, Some(&first.scan));
+        assert_eq!(second.lines_scanned, 0);
+        assert_eq!(second.scan.hits(), first.scan.hits());
+        assert_eq!(second.scan.hits(), scan_history(&compiled, &store));
+    }
+
+    /// PIN — **the ends of the window can only move forwards**, and a window whose ends moved back
+    /// is not a later look at the same plane. Nothing is carried from it.
+    ///
+    /// The case is a pane whose shell was restarted: the new transcript's ids begin again at 1, and
+    /// this is the half of that hazard the scan itself can see. The other half — a fresh transcript
+    /// that has already run *past* the old ids — is the caller's, and `Runtime::restart_shell`
+    /// discharges it by dropping the cache.
+    #[test]
+    fn a_window_that_moved_backwards_carries_nothing() {
+        let compiled = engine_for("cat", SearchFlags::default());
+        let mut long = growing_store();
+        for _ in 0..10 {
+            freeze(&mut long, "cat");
+        }
+        let long_scan = scan_history_after(&compiled, &long, None);
+        assert_eq!(long_scan.scan.hits().len(), 10);
+
+        let mut restarted = growing_store();
+        for text in ["cat", "dog"] {
+            freeze(&mut restarted, text);
+        }
+        let after = scan_history_after(&compiled, &restarted, Some(&long_scan.scan));
+        assert_eq!(
+            after.lines_scanned, 2,
+            "the whole of the new plane was read"
+        );
+        assert_eq!(after.scan.hits(), scan_history(&compiled, &restarted));
     }
 
     /// PIN — **the three keyboard toggles are VS Code's, and they are the only three.**
