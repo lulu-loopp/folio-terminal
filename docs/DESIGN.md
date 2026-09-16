@@ -3867,7 +3867,7 @@ Recent 的 `previews` 是这份文件里唯一一列裸标量,所以它的判别
 
 **④ 通用 preview-file watcher：住在窗口里，盯着座位手上的那一份文件。** `crates/bt-app/src/preview_watch.rs`，形状抄 `git_watch`，时钟就是 `watch_clock::WatchClock` 本人——**不是第二份去抖**，因为两份去抖就是两个表面迟早对「它不动了」给出两个答案。三条纪律：
 
-* **订阅跟着座位走。** `sync` 收下「此刻这扇窗里每个预览 pane 打开的那份文件」这个集合，出集合的当场丢句柄。**跨 tab 而不只看在屏的那张**——`git_watch` 的门是「在屏」，这里不是，理由是主体不同：一个 buffer 是内容、归 tab，回到那张 tab 时它不会被重读，所以按可见性设门只会让「切回去」成为这扇窗唯一明知在展示过期内容的地方。
+* **订阅跟着座位走。** `sync` 收下「此刻这扇窗里每个预览 pane 打开的那份文件」这个集合，出集合的当场丢句柄。**跨 tab 而不只看在屏的那张**——`git_watch` 的门是「在屏」，这里不是，理由是主体不同：一个 buffer 是内容、归 tab，回到那张 tab 时它不会被重读，所以按可见性设门只会让「切回去」成为这扇窗唯一明知在展示过期内容的地方。**The proxy is cloned where a watch is opened and never on the per-turn path** (ticket T-PROXY-CLONE-PER-TURN): cloning a winit `EventLoopProxy` is an `Arc` bump on Windows but on macOS a fresh run loop source added to the main run loop *and a wake-up of it*, so a clone taken at the top of `sync` — which every turn of the loop walks — made an idle window schedule the very turn that took the next one, measured with `sample` at one full core; `git_watch` and `files_watch` carried the same line and were corrected with it.
 * **一个文件夹，不是一棵树。** Windows 没法订阅一个文件，所以句柄开在它所在的目录上——新的 `bt_platform::DirWatch::start_shallow`，`ReadDirectoryChangesW` 的 `bWatchSubtree=false`。**这是给既有原语加一个参数，不是另造一套**：预览一个仓库根目录里的 README 不该让一次 `cargo build` 写进 `target\debug` 的每个 .obj 都叫醒这个线程。
 * **通知不是答案。** 浅订阅照样为同目录的**兄弟**说话，而一个文件夹里放着好几份文档是常态。所以时钟到期时问那份文件自己的**修改时间与长度**，只有和上次读到的不同才是消息。这是**因为内核说了话**才做的一次 `metadata`——`watch_clock` 的头里写着的那条与轮询的分别。文件没了同样是消息：戳记从 `Some` 变 `None`，两边不等，rename/delete/recreate 因此不必是特例。
 
