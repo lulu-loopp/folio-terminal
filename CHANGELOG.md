@@ -6,6 +6,10 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+Nothing yet.
+
+## 0.4.2-preview — 2026-09-17
+
 ### Added
 
 - **Dropping a file onto Folio now puts its path on the command line.** Drag a
@@ -156,16 +160,6 @@ All notable changes to Folio are recorded here. The format follows
   the rest of the session, while the `$$…$$` blocks beside it were set again as
   usual. Where a line was printed is now noted as the line arrives and kept with
   it, so a resize gives back the formulas it took away.
-- **Copying a formula no longer leaves the window busy.** The tick that confirms
-  the copy has always come down after a moment on screen, but the window went on
-  asking to be woken for it for as long as it stayed open — one processor core,
-  spent on a window doing nothing. The confirmation is now finished with when it
-  leaves the screen.
-- **A formula's two marks stay with the formula.** Switching tabs or closing a
-  pane used to leave the marks from the block you had been pointing at standing
-  over whatever came next, until you moved the mouse. And in a window split into
-  panes of different sizes, the marks in an unfocused pane were placed — and
-  could be pressed — as though that pane were the size of the focused one.
 
 - **A typeset formula no longer flashes back to its source while a program
   repaints the screen.** A redraw arriving in several pieces now keeps the
