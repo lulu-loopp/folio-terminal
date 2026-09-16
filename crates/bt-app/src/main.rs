@@ -35460,6 +35460,70 @@ fn absorb_tab_into_layout(
     ejected
 }
 
+/// **How long one turn may spend reading shells before it hands the window
+/// back** (T-DRAIN-BURST).
+///
+/// The defect this is the repair for: a turn was bounded in *bytes* — one
+/// [`bt_pty::TERM_READ_QUANTUM`] per pane — and in nothing else. The owner's
+/// `diagnostics.log` for the night of 2026-09-15 carries a run of window-thread
+/// holds charged almost entirely to this one station: `4386 ms — drain_pty
+/// 4386`, `2791 — drain_pty 2787`, `1862 — drain_pty 1858`, `3112 — drain_pty
+/// 2213, advance_web_page 895`, and many between 600 and 1000 ms, all of them
+/// with the 0.4.1 page-fault column reading near zero beside them. Nothing was
+/// paging; the thread was parsing. What the reader feels is that typed
+/// characters do not appear for seconds while a pane prints a build log.
+///
+/// **A number of bytes cannot bound a length of time here**, because what a
+/// quantum of output costs is not what its bytes cost. A quarter megabyte of a
+/// build log is some three thousand logical lines, and every line that leaves
+/// the top of the screen is frozen into the transcript, given a decoration
+/// record, put to the math and table arming prefilters, scanned for image and
+/// link references and offered to the detection scheduler. That is the work the
+/// holds above are made of, and it scales with lines, not with the read.
+///
+/// So the turn is given a clock as well. **Eight milliseconds — half of a 60 Hz
+/// frame** — because the other half is the frame this same turn publishes
+/// ([`Runtime::publish_pty_drain_frame`], at the tail of the drain) plus the
+/// platform round trip. A turn that keeps to both halves answers a keypress in
+/// the frame after the one it arrived in; the budget is the whole of what makes
+/// the first half true.
+///
+/// It is a floor for a turn's usefulness, not a ceiling on throughput: a turn
+/// takes as many slices as fit, so on content that parses quickly a turn still
+/// carries its whole quantum, and only content that is genuinely expensive per
+/// byte gets cut short — which is exactly the content the reader was waiting
+/// through.
+const DRAIN_TURN_BUDGET: Duration = Duration::from_millis(8);
+
+/// **How many slices a turn may take from one pane before the quantum is
+/// spent** (T-DRAIN-BURST).
+///
+/// Derived rather than written down, because the two figures it stands between
+/// are the ones with meanings: `DESIGN.md` §1.3's quantum is still exactly what
+/// one turn may carry out of one pane, and [`bt_pty::TERM_READ_SLICE`] is how
+/// finely the turn is allowed to look at the clock while carrying it. This is
+/// their quotient and must not become a third independent number.
+const DRAIN_SLICES_PER_TURN: usize =
+    bt_pty::TERM_READ_QUANTUM.get() / bt_pty::TERM_READ_SLICE.get();
+
+/// **May the drain go round again?** — the whole of T-DRAIN-BURST's decision, in
+/// one function so that it can be put to a test without a window.
+///
+/// `slices_taken` counts passes over every pane, not reads of one pane: the
+/// panes are drained round-robin so that a quiet pane's few hundred bytes are
+/// not stuck behind a noisy sibling's quarter megabyte, and a pass is therefore
+/// the unit both halves of this budget are spent in.
+///
+/// Both bounds are "whichever comes first", and each is there for a case the
+/// other does not cover. The clock is the one that matters while a pane prints;
+/// the slice count is what keeps a turn from carrying more than §1.3 says it
+/// may when the output is cheap enough that the clock never runs out —
+/// megabytes of blank lines would otherwise be drained in a single turn, and a
+/// turn that long is the defect however fast it parsed.
+fn drain_may_take_another_slice(slices_taken: usize, elapsed: Duration) -> bool {
+    slices_taken < DRAIN_SLICES_PER_TURN && elapsed < DRAIN_TURN_BUDGET
+}
+
 /// What one drain turned up, beyond the bytes.
 ///
 /// Separate answers rather than a `bool` tuple because they drive different
@@ -35474,10 +35538,12 @@ struct DrainOutcome {
     /// **A pane's ring still held bytes when its turn was over.**
     ///
     /// The turn is bounded — [`drain_leaf_pty`] takes one
-    /// [`bt_pty::TERM_READ_QUANTUM`] out of a pane and goes back to the message
-    /// pump — so the loop has to be told that there is more, or a shell printing
-    /// faster than the window drains would sit in a full ring with nobody coming
-    /// back for it. [`PtyWakeSignal::raise`] is what this becomes, and the reason
+    /// [`bt_pty::TERM_READ_SLICE`] out of a pane and returns, and
+    /// [`Runtime::drain_pty`] stops going round at [`DRAIN_TURN_BUDGET`] or
+    /// [`DRAIN_SLICES_PER_TURN`], whichever comes first — so the loop has to be
+    /// told that there is more, or a shell printing faster than the window
+    /// drains would sit in a full ring with nobody coming back for it.
+    /// [`PtyWakeSignal::raise`] is what this becomes, and the reason
     /// it cannot simply be left to the reader thread is that a thread blocked in
     /// `bt_pty::OutputRing::push` is a thread that will not raise anything: it is
     /// waiting for the very drain it would be asking for.
@@ -35596,10 +35662,10 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
     // and only for a pane that asked to hear about it (DEC 2031).
     leaf.session.set_color_palette(terminal_palette_in_force());
     let mut changed = false;
-    // **One quantum, and then back to the message pump.**
+    // **One slice, and then back to the caller that is holding the clock.**
     //
     // This was `loop { read; if empty { break } ; feed }`, and the exit it named
-    // is one a busy pane never reaches. `read_output` is
+    // is one a busy pane never reaches. The read is
     // [`bt_pty::OutputRing::try_pop`] over a one-MiB ring that a *reader thread*
     // refills while this runs, so "the ring is empty" is a question about one
     // instant, and while the child prints at least as fast as `feed_at` absorbs
@@ -35625,13 +35691,50 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
     // the wake. A pane that outruns the window is throttled by the ring and the
     // pipe behind it, which is what backpressure is for and what the ring was
     // built to do.
+    //
+    // **What T-DRAIN-BURST changed is the size of the ask, and nothing else in
+    // this function.** A quantum bounds a turn in *bytes*, and the owner's
+    // diagnostics log says what that is worth: holds of 4386, 2791, 1862 and
+    // 3112 ms charged to `drain_pty`, page faults near zero beside them, while
+    // a pane printed a build log. A number of bytes is not a length of time,
+    // because the time a quantum costs is the time its *lines* cost — see
+    // [`DRAIN_TURN_BUDGET`] for the account. So the read is a
+    // [`bt_pty::TERM_READ_SLICE`] now, and the quantum is spent a slice at a
+    // time by [`Runtime::drain_pty`], which looks at the clock in between. One
+    // read per call is unchanged and load-bearing: the caller cannot stop a call
+    // it is already inside, so the loop that repeats this one lives up there,
+    // where the deadline is.
     let bytes = leaf
         .pty
         .as_ref()
         .expect("PTY mode checked above")
-        .read_output();
+        .read_output_slice();
     if !bytes.is_empty() {
-        debug_assert!(bytes.len() <= bt_pty::TERM_READ_QUANTUM.get());
+        debug_assert!(bytes.len() <= bt_pty::TERM_READ_SLICE.get());
+        // **One thing a smaller read touches that is not in this crate, written
+        // down here because silence is how it gets lost.**
+        // `DualPlaneSession::feed_at` opens a repaint-preservation window when
+        // the bytes it is given carry a clear+home, an erase storm or a DEC 2026
+        // BSU, and closes it at the end of the same call unless a synchronized
+        // update is still open. That window is therefore scoped to *one read*,
+        // and always was: a reprint longer than the read splits across two, and
+        // the second half repaints with no window standing. A smaller read makes
+        // that split likelier — 8 KiB rather than 256 KiB of head room — so what
+        // used to be a quantum-boundary rarity is now an 8 KiB-boundary one.
+        //
+        // What it does **not** do is put a half-repainted picture on the glass:
+        // no frame is published between the slices of a turn
+        // ([`Runtime::drain_pty`] publishes once, at its tail), and records the
+        // reprojection cannot place are held off-band and re-anchored by exact
+        // source equality on the next slice. What is left is a record whose rows
+        // are rewritten in the slice *after* the window closed: it goes to source
+        // until re-detection.
+        //
+        // The repair is to scope that window to the turn rather than to the read
+        // — `feed_at` deferring its two `finish_*_repaint` calls to an explicit
+        // end-of-turn settle — and it belongs in `bt-term` beside
+        // `repaint_flash_oracle`, which is the gate that can prove it. T-DRAIN-BURST
+        // deliberately does not reach into that contract.
         leaf.session
             .feed_at(&bytes, Instant::now())
             .context("apply PTY output")?;
@@ -82174,7 +82277,6 @@ impl Runtime<'_> {
         let mut moved = false;
         let mut command_ends: Vec<PathBuf> = Vec::new();
         let mut raised: Vec<AttentionDelivery> = Vec::new();
-        let mut pending = false;
         // **The two window-wide bits of [`seat_holds_the_keyboard`], read once**
         // — this window has the desktop's keyboard, and what has it here is a
         // shell rather than a page, a files tree, a search capsule or a menu.
@@ -82244,10 +82346,53 @@ impl Runtime<'_> {
         // column is up and its debt is not already standing.
         let mut spoke: Vec<usize> = Vec::new();
         let collect_speakers = self.collecting_card_speakers();
+        // **The reading half of the turn, and it is the half that is on a clock**
+        // (T-DRAIN-BURST).
+        //
+        // Every pane is asked for one [`bt_pty::TERM_READ_SLICE`], in tab order,
+        // and then — if any of them still had more to say and the turn has spent
+        // neither its [`DRAIN_TURN_BUDGET`] nor its [`DRAIN_SLICES_PER_TURN`] —
+        // every pane is asked again. Round-robin rather than pane-at-a-time, so
+        // that a pane with two hundred bytes to say is not behind a sibling's
+        // quarter megabyte; the passes preserve each pane's own byte order
+        // because [`bt_pty::OutputRing::try_pop`] is a queue.
+        //
+        // The clock is read once per pass, between two calls and never inside
+        // one: a read already under way cannot be shortened, which is the whole
+        // reason the slice is small. So a turn overruns its budget by at most
+        // what one pass costs, and that is the number
+        // [`bt_pty::TERM_READ_SLICE`] was chosen to bound.
+        //
+        // **What each tab said is gathered and acted on once**, below, rather
+        // than on every pass. Two reasons, and the second is the ticket's:
+        // `deliver_osc_attention` stamps the pane a program spoke in with the
+        // turn's single `now`, so passes are not turns as far as it is
+        // concerned; and `active_changed` is an *assignment* — a later pass that
+        // drained nothing would otherwise erase the earlier pass that did. One
+        // small allocation per turn buys both, against a turn that already
+        // samples the window's placement through the kernel and publishes a
+        // frame.
+        let mut outcomes = vec![DrainOutcome::default(); self.window.tabs.len()];
+        let mut slices_taken = 0_usize;
+        // The *last* pass's answer and not the accumulated one: a pane that had
+        // a leftover two passes ago and has since gone quiet owes this window
+        // nothing, and a wake raised for it would be a turn that drains nothing
+        // and publishes a frame nobody asked for.
+        let pending = loop {
+            let mut slice_pending = false;
+            for (index, tab) in self.window.tabs.iter_mut().enumerate() {
+                let outcome =
+                    drain_tab_pty(tab, window_focused, index == active_tab, owner_is_a_shell)?;
+                slice_pending |= outcome.pending;
+                outcomes[index].merge(outcome);
+            }
+            slices_taken += 1;
+            if !slice_pending || !drain_may_take_another_slice(slices_taken, now.elapsed()) {
+                break slice_pending;
+            }
+        };
         for (index, tab) in self.window.tabs.iter_mut().enumerate() {
-            let outcome =
-                drain_tab_pty(tab, window_focused, index == active_tab, owner_is_a_shell)?;
-            pending |= outcome.pending;
+            let outcome = &mut outcomes[index];
             // **The OSC lane's turn, on the turn the bytes arrived.** A standing request a program
             // wrote down its own tty becomes an episode here, a message it wrote beside one lends
             // that request its words, and a message on a pane with nothing standing is an event of
@@ -82265,14 +82410,14 @@ impl Runtime<'_> {
                 attention_trace::global(),
                 &mut raised,
             );
-            if index == self.window.active_tab {
+            if index == active_tab {
                 active_changed = outcome.arrived;
                 active_changed_off_focus = outcome.arrived_off_focus;
                 // **Only the tab on screen** (R31): a Git page in a tab nobody is
                 // looking at is not a surface looking at a repository, and the
                 // first frame after that tab is switched to asks its own
                 // questions anyway.
-                command_ends = outcome.command_ends;
+                command_ends = std::mem::take(&mut outcome.command_ends);
             }
             chrome_changed |= outcome.renamed;
             moved |= outcome.moved;
@@ -82301,8 +82446,9 @@ impl Runtime<'_> {
         self.panes_spoke(&spoke, now);
         // **A ring that still holds bytes is a turn this window owes itself.**
         //
-        // [`drain_leaf_pty`] takes one quantum from a pane and returns, so the
-        // rest of a burst is answered by coming back — and coming back has to be
+        // [`drain_leaf_pty`] takes one slice from a pane and returns, and the
+        // loop above stops going round at [`DRAIN_TURN_BUDGET`], so the rest of
+        // a burst is answered by coming back — and coming back has to be
         // asked for here, because the thread that would otherwise ask is the
         // reader, and a reader with a full ring is blocked inside
         // [`bt_pty::OutputRing::push`] waiting for this very drain. Left to it,
@@ -106415,10 +106561,19 @@ mod quit_transaction_tests {
 /// bounds one is what keeps the other alive. Nothing here can be asked of a
 /// `LeafSession` in a unit test — the drain needs a live ConPTY with a child
 /// printing into it, which is what the acceptance in `HANDOFF`/`DESIGN` is for —
-/// so what is pinned is the *shape*: that the read is taken once and not in a
-/// loop, that the leftover is reported, and that the report becomes a wake.
+/// so what is pinned is mostly the *shape*: that the read is taken once and not
+/// in a loop, that the leftover is reported, and that the report becomes a wake.
+///
+/// **The budget itself is not shape and is not pinned as shape**
+/// (T-DRAIN-BURST). `drain_may_take_another_slice` is the whole of the decision
+/// and it is a free function over two plain values, so it is put to an ordinary
+/// test with synthetic durations — no window, no clock, no sleeping. What a
+/// burst does to a real ring is tested where the ring lives
+/// (`bt_pty::tests::a_two_mib_burst_leaves_a_pane_a_turn_at_a_time_in_order`).
 #[cfg(test)]
 mod pty_drain_budget_tests {
+    use std::time::Duration;
+
     /// This file as text, for [`application_change_tests::SOURCE`]'s reason.
     const SOURCE: &str = include_str!("main.rs");
 
@@ -106473,16 +106628,23 @@ mod pty_drain_budget_tests {
     /// just ahead of the terminal at rest falls behind while the frame is being
     /// dragged.
     ///
+    /// **T-DRAIN-BURST narrowed the ask and left the shape alone.** The read is
+    /// a [`bt_pty::TERM_READ_SLICE`] rather than a whole quantum, because the
+    /// caller wants the clock between reads and cannot interrupt a call it is
+    /// already inside; that the read happens *once per call*, outside any loop,
+    /// is what puts the repetition — and therefore the deadline — up in
+    /// `drain_pty` where it can be enforced.
+    ///
     /// Mutation: put the read back in a `loop`, or drop the `pending` report,
     /// or stop raising the wake for it.
     #[test]
     fn one_turn_takes_one_quantum_from_a_pane_and_says_what_is_left() {
         let drain = free_fn_body("drain_leaf_pty");
         let read = drain
-            .find("read_output()")
+            .find("read_output_slice()")
             .expect("`drain_leaf_pty` reads its pane's ring");
         assert_eq!(
-            drain.matches("read_output()").count(),
+            drain.matches("read_output_slice()").count(),
             1,
             "one turn asks a pane for its output exactly once; a second ask is \
              the unbounded loop coming back"
@@ -106550,6 +106712,120 @@ mod pty_drain_budget_tests {
         assert!(
             all.pending,
             "and a quiet pane drained after it does not cancel it"
+        );
+    }
+
+    /// RED (T-DRAIN-BURST, owner's `diagnostics.log` 2026-09-15) — **a turn is
+    /// bounded by a clock as well as by a byte count, and the clock is the one
+    /// that ends a burst.**
+    ///
+    /// The defect this stands on: `drain_pty` was bounded in bytes alone — one
+    /// `bt_pty::TERM_READ_QUANTUM` per pane — and a quarter megabyte of a build
+    /// log is *seconds* of VT parsing, transcript freezing and arming, not
+    /// milliseconds of byte shuffling. The log carries `held control for
+    /// 4386 ms — drain_pty 4386 ms`, `2791 ms — drain_pty 2787`, `1862 —
+    /// drain_pty 1858`, many between 600 and 1000, with 0.4.1's page-fault
+    /// column near zero beside them: the thread was working, not paging.
+    ///
+    /// Both bounds have to be here and each one has a case the other misses. Cut
+    /// the clock and the pathological content is unbounded again; cut the count
+    /// and cheap content — megabytes of blank lines — is carried whole in one
+    /// turn, which is the same defect arrived at from the fast side.
+    ///
+    /// Mutation: make either bound `<=`, drop either conjunct, or let
+    /// `DRAIN_SLICES_PER_TURN` become a number of its own instead of the
+    /// quantum-over-slice quotient.
+    #[test]
+    fn a_turn_stops_at_the_clock_or_at_the_quantum_whichever_comes_first() {
+        let budget = super::DRAIN_TURN_BUDGET;
+        let last = super::DRAIN_SLICES_PER_TURN - 1;
+
+        assert!(
+            super::drain_may_take_another_slice(0, Duration::ZERO),
+            "a turn that has done nothing may do something"
+        );
+        assert!(
+            super::drain_may_take_another_slice(last, budget - Duration::from_micros(1)),
+            "and may go round once more with a microsecond of its budget left"
+        );
+        assert!(
+            !super::drain_may_take_another_slice(super::DRAIN_SLICES_PER_TURN, Duration::ZERO),
+            "a quantum is spent however fast it went"
+        );
+        assert!(
+            !super::drain_may_take_another_slice(0, budget),
+            "and the budget is spent however little was carried — this is the \
+             arm the 4386 ms hold needed"
+        );
+        assert!(
+            !super::drain_may_take_another_slice(0, Duration::from_secs(4)),
+            "a pass that overran by itself does not buy a second one"
+        );
+
+        // The two figures this quotient stands between are the ones with
+        // meanings; a third independent number here is how they start to drift.
+        assert_eq!(
+            super::DRAIN_SLICES_PER_TURN,
+            bt_pty::TERM_READ_QUANTUM.get() / bt_pty::TERM_READ_SLICE.get()
+        );
+        assert_eq!(
+            super::DRAIN_SLICES_PER_TURN * bt_pty::TERM_READ_SLICE.get(),
+            bt_pty::TERM_READ_QUANTUM.get(),
+            "the slices must spend the quantum exactly, or a turn quietly \
+             carries less than DESIGN.md §1.3 allows it"
+        );
+
+        // Half a 60 Hz frame, with the other half for the frame this same turn
+        // publishes and the platform round trip after it. The claim the ticket
+        // is answering is "a keystroke is answered within a frame or two", and
+        // it is this inequality that makes the first half of it true.
+        let frame = Duration::from_nanos(16_666_667);
+        assert!(
+            budget * 2 <= frame,
+            "the drain's budget ({budget:?}) has to leave a frame room for the \
+             frame it ends with"
+        );
+    }
+
+    /// PIN (T-DRAIN-BURST) — **the repetition lives where the deadline does, and
+    /// the bookkeeping that follows it runs once.**
+    ///
+    /// `drain_leaf_pty` takes one slice per call, so something has to call it
+    /// again; that something is the pass loop in `drain_pty`, and the only exit
+    /// it has is `drain_may_take_another_slice`. A loop with any other exit —
+    /// "until the ring is empty" above all — is the 2026-08-24 hang rebuilt one
+    /// level up, where the reader thread refills faster than the window drains.
+    ///
+    /// The second half is the ticket's other clause: what a tab said is gathered
+    /// across the passes and acted on once per turn. `deliver_osc_attention`
+    /// stamps a pane with the turn's single `now`, and `active_changed` is an
+    /// assignment rather than an `|=` — both are sentences about a turn, and a
+    /// pass is not a turn.
+    ///
+    /// Mutation: exit the pass loop on the ring instead of the budget, or move
+    /// `deliver_osc_attention` back inside it.
+    #[test]
+    fn the_drain_repeats_under_the_budget_and_settles_up_once() {
+        let body = method_body("drain_pty");
+        let gate = body
+            .find("drain_may_take_another_slice(")
+            .expect("`drain_pty` asks the budget whether it may go round again");
+        assert_eq!(
+            body.matches("drain_tab_pty(").count(),
+            1,
+            "one call site, inside the budgeted loop; a second is a road round it"
+        );
+        let settle = body
+            .find("deliver_osc_attention(")
+            .expect("`drain_pty` delivers what the panes said");
+        assert!(
+            gate < settle,
+            "the passes finish before anything is done about what they heard"
+        );
+        assert!(
+            body[..gate].contains("slice_pending |= outcome.pending;"),
+            "and what decides another pass is the leftover this pass found, not \
+             the leftover the turn has accumulated"
         );
     }
 
