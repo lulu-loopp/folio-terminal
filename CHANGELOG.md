@@ -6,6 +6,16 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Changed
+
+- **The tinted block behind a formula's source now stops where the text does.**
+  Pressing the show-source mark on a display formula used to lay a shaded band
+  across the whole width of the pane, however short the `$$…$$` lines standing on
+  it were, with the two marks out at the far right edge of the window. The band
+  now fits the longest of those lines, with the same clear column around it that
+  the typeset formula's block has, and the show-source and copy marks sit at that
+  edge — so both forms of a formula read as the same block.
+
 ## 0.4.1-preview — 2026-09-16
 
 ### Added

@@ -1656,19 +1656,20 @@ mod tests {
     }
 
     /// **The band once the change has landed**, as `bt_render` now answers for a source face
-    /// (owner's report 2026-09-15, T-MATH-MARKS-IN-SOURCE-FACE): the region is the rows' own band
-    /// — column zero to the pane's right edge — and the two marks are flush against its right
-    /// edge on its midline, because rows that run to the pane's edge leave no reserve to be
-    /// centred in.
+    /// (owner's ruling 2026-09-16, T-MATH-SOURCE-BAND-HUGS-TEXT): the region is the rows' own
+    /// band, which begins at column zero and **stops where the longest of those rows stops**, plus
+    /// the ground ⑨ i keeps round it — so the two marks stand in that ground's right-hand columns,
+    /// centred in them on the band's midline, exactly as a typeset face's do. It was the whole
+    /// pane until that ruling, and the marks were flush against the far edge of it.
     ///
     /// Deliberately a *wider* rectangle than [`toggled`]'s, which is the band mid-flight while the
     /// block is still an artifact: that difference is the leftover rect the pin below is about.
     fn source_band() -> MathToolBoxes {
         MathToolBoxes {
             display: MathBlockDisplay::Source,
-            block: [8.0, 10.0, 420.0, 70.0],
-            source: [380.0, 30.5, 399.0, 49.5],
-            copy: [401.0, 30.5, 420.0, 49.5],
+            block: [8.0, 10.0, 400.0, 70.0],
+            source: [355.0, 30.5, 374.0, 49.5],
+            copy: [376.0, 30.5, 395.0, 49.5],
             ..boxes(MathBlockDisplay::Rendered)
         }
     }
@@ -1718,9 +1719,16 @@ mod tests {
         assert!(!follow.owes_frames(arrived, Motion::Full));
 
         // ③ And where they came to rest is a legal seat for a source face: inside the band, on its
-        //    midline, flush with its right edge.
+        //    midline, in the room the band keeps at its right edge rather than jammed into the
+        //    corner of it. Since the band hugs its rows (owner's ruling 2026-09-16) there is a
+        //    reserve to be centred in, so a source face takes ⑨ ii's own seat and not the
+        //    degradation of it the full-pane band left as the only possibility.
         assert!(seated_inside_the_block(&placed));
-        assert_eq!(placed.copy[2], placed.block[2]);
+        assert!(
+            placed.copy[2] < placed.block[2],
+            "{:?} is jammed into the band's corner",
+            placed.copy
+        );
     }
 
     /// One cell of the grid these fixtures are measured on, in subpixels.
