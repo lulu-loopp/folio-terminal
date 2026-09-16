@@ -38,22 +38,50 @@
 //!
 //! *One row may break it, and it must be a status line.* Only the topmost or the bottommost, never a
 //! middle one, because a frame with a hole in the middle of it is not a frame and the hole is text
-//! the cut would run through. And only a row carrying no `$`: the exempt row is still sliced, so
-//! exempting a row with a formula on it is throwing that formula away, and a formula the screen can
-//! prove outranks a split the screen only infers. A status line never carries math.
+//! the cut would run through. And only a row carrying no delimiter **the math grammar recognises**
+//! ([`crate::line_carries_math_delimiter`]): the exempt row is still sliced, so exempting a row with
+//! a formula on it is throwing that formula away, and a formula the screen can prove outranks a
+//! split the screen only infers. The test is the grammar's and not a character's, because `\[x^2\]`
+//! carries no `$` and is a display formula — asking for a dollar lost exactly that one (owner's
+//! ruling 2026-09-17).
 //!
-//! The rulings' own counter-example is what this is for. Thirty-six rows of `log  │ text`, one bare
+//! *A formula's own blanks are not a gap.* Clearance is otherwise the two neighbouring cells, and
+//! `$$x   +y$$` defeats that on its own: the column lands on one of the three spaces, the cell left
+//! of it is a space too, and the cut goes straight through the middle of a proven formula. So the
+//! row's own spans are asked as well ([`crate::math_spans_on_line`]) and a column inside one is
+//! never clear. The span is the unit; the cell is not.
+//!
+//! The rulings' own counter-examples are what this is for. Thirty-six rows of `log  │ text`, one bare
 //! `$$x^2$$` row, three `plain` rows: nine tenths of the screen draws the rule in column five, and
 //! that one row writes straight through it. The screen is one body of text with a glyph in it —
 //! pipe-aligned output — and cutting it would take the formula apart and lose one that used to
-//! typeset. Move the `$$x^2$$` row to the bottom and it is still refused, because it carries a
-//! dollar; put a `bash 12:00` status line there instead and the screen splits.
+//! typeset. Move that row to an edge and it is still refused, because it carries a formula; put a
+//! `bash 12:00` status line there instead and the screen splits. Put `$$x   +y$$` on a middle row
+//! and the screen is refused too, on the blanks inside it. A table whose inner rule is missing on
+//! the one row where a formula spans two of its cells keeps its intact outer rules and loses only
+//! the inner cut.
 //!
-//! **A table drawn with box glyphs on every row now splits into its cells, and that is harmless.**
-//! Its separator rows carry junctions, which continue the line, so each column of it becomes a
-//! region. Nothing is lost by that: a cell's math is proved inside its own region exactly as it was
-//! proved inside the whole screen, because a table's rules are drawn *between* its cells and a cut
-//! along them runs through no text.
+//! **The price a status line pays.** A row carrying `status cost $5` is refused the exemption, so a
+//! screen whose only broken row is a status line with a price in it does not split. That is the
+//! ruling's own preference stated plainly: native source is worth more than an inferred cut, and no
+//! character test tells a price from a formula. Nothing is lost by it — the screen is read exactly
+//! as it was before regions existed.
+//!
+//! **What is deliberately not protected: a formula containing the rule itself.** `$x   │+y$` reads
+//! as one inline run to a scanner looking at the whole row, and under a proven frame it is not one:
+//! it is two panes' text with a dollar on each side of the rule. The row draws the rule, so the
+//! frame test never reaches the span question at all, and the split stands. Protecting it would mean
+//! letting a formula straddle a pane border, which is the one thing the frame says cannot happen.
+//!
+//! **A table drawn with box glyphs on every row now splits into its cells.** Its separator rows
+//! carry junctions, which continue the line, so each column of it becomes a region. An ordinary
+//! cell keeps its math: a table's rules are drawn *between* its cells, so a cut along a rule that is
+//! really there runs through no text, and the formula in a cell is proved inside that cell's region
+//! exactly as it was proved inside the whole screen. A rule that is *not* really there on some row —
+//! a merged cell, a formula spanning two columns — is no longer a rule at all on that screen, by the
+//! paragraph above. What is not claimed is that two cells never share a formula: a `$…$` written
+//! across an intact rule is refused, and that is the scope stated below rather than a property
+//! proved.
 //!
 //! **A fence the screen owns suppresses every region; a fence a pane prints is that pane's**
 //! (owner's rulings 2026-09-16 and 2026-09-17). A region is a column of the screen and a code fence
@@ -82,7 +110,9 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::{LiveDetectionInput, LiveDetectionSource};
+use crate::{
+    LiveDetectionInput, LiveDetectionSource, line_carries_math_delimiter, math_spans_on_line,
+};
 
 /// Share of a screen's rows that must carry the same vertical rule in one column before that
 /// column is a border, in thousandths.
@@ -242,9 +272,13 @@ struct RowGeometry {
     /// junctions. A superset question from [`Self::rules`] and asked separately, because one
     /// nominates a column and the other only keeps it alive.
     joints: Vec<u32>,
-    /// Does this row carry a `$` anywhere? A status line does not, and a row that does is a row
-    /// whose content a cut could destroy (owner's ruling 2026-09-17).
-    carries_a_dollar: bool,
+    /// Cell ranges this row's own formulas occupy, blanks inside them included — see
+    /// [`crate::math_spans_on_line`]. A column landing in one of these is a column a cut would run
+    /// through a formula at, however empty the cell itself looks.
+    math_columns: Vec<(u32, u32)>,
+    /// Does this row carry any delimiter the math grammar recognises? A status line does not, and a
+    /// row that does is a row whose content a cut would destroy (owner's rulings 2026-09-17).
+    carries_math: bool,
 }
 
 impl RowGeometry {
@@ -258,15 +292,27 @@ impl RowGeometry {
             .is_some_and(|(_, end)| column < *end)
     }
 
-    /// Is this column clear of the row's text — empty itself, and not a column the row's text
-    /// crosses?
+    /// Is this column clear of the row's text — empty itself, not a column the row's text crosses,
+    /// and not a column inside one of the row's own formulas?
     ///
-    /// Crossing is asked of the two neighbouring cells because that is the whole question: a rule
+    /// Crossing is asked of the two neighbouring cells because that is most of the question: a
     /// column with writing on both sides of it on some row is a column that row's producer wrote
-    /// straight through, which is what a column of `column -t` output looks like and what a frame
-    /// never does.
+    /// straight through, which is what `column -t` output looks like and what a frame never does.
+    ///
+    /// **A formula's own blanks are not a gap** (owner's ruling 2026-09-17). `$$x   +y$$` is one
+    /// formula with three spaces in the middle of it; the two-neighbour test lands on the middle
+    /// space, finds a blank on its left, and lets a cut through the formula. So the row's proven
+    /// spans are asked as well, and a column inside one of them is never clear — the span is the
+    /// unit, not the cell.
     fn clear_at(&self, column: u32) -> bool {
         if self.covered(column) {
+            return false;
+        }
+        if self
+            .math_columns
+            .iter()
+            .any(|(start, end)| (*start..*end).contains(&column))
+        {
             return false;
         }
         let crosses = column
@@ -289,9 +335,32 @@ impl RowGeometry {
 }
 
 /// Measure one row: its non-blank runs and the columns it draws a vertical rule in.
+/// The cell columns a byte range of this row occupies, widened to whole cells.
+///
+/// Widened rather than rounded because the one caller is a veto: a formula that reaches half into a
+/// cell has reached into it, and a cut there would still take the formula apart.
+fn columns_of_bytes(boundaries: &[(u32, u32)], byte_start: usize, byte_end: usize) -> (u32, u32) {
+    let start = u32::try_from(byte_start).unwrap_or(u32::MAX);
+    let end = u32::try_from(byte_end).unwrap_or(u32::MAX);
+    let first = boundaries
+        .iter()
+        .take_while(|(byte, _)| *byte <= start)
+        .last()
+        .map_or(0, |(_, column)| *column);
+    let last = boundaries
+        .iter()
+        .find(|(byte, _)| *byte >= end)
+        .map_or(u32::MAX, |(_, column)| *column);
+    (first, last.max(first))
+}
+
 fn row_geometry(text: &str, boundaries: &[(u32, u32)]) -> RowGeometry {
     let mut geometry = RowGeometry {
-        carries_a_dollar: text.contains('$'),
+        carries_math: line_carries_math_delimiter(text),
+        math_columns: math_spans_on_line(text)
+            .into_iter()
+            .map(|(byte_start, byte_end)| columns_of_bytes(boundaries, byte_start, byte_end))
+            .collect(),
         ..RowGeometry::default()
     };
     for pair in boundaries.windows(2) {
@@ -339,9 +408,10 @@ fn row_geometry(text: &str, boundaries: &[(u32, u32)]) -> RowGeometry {
 /// **One row may break it, and it must be a status line** (owner's rulings 2026-09-16 and
 /// 2026-09-17). Only the topmost or the bottommost, never a middle row, because a frame with a hole
 /// in the middle of it is not a frame and the hole is text the cut would run through. And only a row
-/// carrying no `$`: the exempt row is still sliced, so exempting a row with a formula on it is
-/// throwing that formula away, and a formula the screen can prove outranks a split the screen only
-/// infers. A status line never carries math.
+/// carrying no delimiter the math grammar recognises — asked of the grammar and not of a character,
+/// so `\[x^2\]` and `\begin{pmatrix}` are as protected as `$$`: the exempt row is still sliced, so
+/// exempting a row with a formula on it is throwing that formula away, and a formula the screen can
+/// prove outranks a split the screen only infers. A status line never carries math.
 ///
 /// This is what refuses a screen of `log  │ text` rows with one bare `$$x^2$$` row among them: that
 /// row's writing crosses the column, so the column is not a rule and the screen is one body of text
@@ -355,7 +425,7 @@ fn frame_is_unbroken(geometry: &[RowGeometry], column: u32, glyph: char) -> bool
         if row.draws_rule(column, glyph) || row.carries_the_line(column) || row.clear_at(column) {
             continue;
         }
-        if exempted || (index != 0 && index != last) || row.carries_a_dollar {
+        if exempted || (index != 0 && index != last) || row.carries_math {
             return false;
         }
         exempted = true;
@@ -823,6 +893,43 @@ mod tests {
             Vec::<u32>::new(),
             "and so does any row carrying a dollar at all"
         );
+    }
+
+    /// The exemption asks the grammar, not a character. Every one of these rows carries a formula
+    /// the scanner supports; none of the first three carries a dollar.
+    #[test]
+    fn the_edge_exemption_asks_the_math_grammar() {
+        for row in [
+            r"\[x^2\]",
+            r"\begin{pmatrix} a \end{pmatrix}",
+            r"see \(x\) inline",
+            "$$x^2$$",
+            "costs $5",
+        ] {
+            assert!(
+                line_carries_math_delimiter(row),
+                "{row} carries a delimiter"
+            );
+        }
+        for row in [
+            "[0] 0:bash* host 12:00",
+            "plain",
+            "",
+            "a backslash \\n but no math",
+            "left      ",
+        ] {
+            assert!(!line_carries_math_delimiter(row), "{row} carries none");
+        }
+    }
+
+    /// A formula is one span, and the blanks inside it belong to it.
+    #[test]
+    fn a_formulas_own_blanks_are_part_of_it() {
+        assert_eq!(math_spans_on_line("$$x   +y$$"), vec![(0, 10)]);
+        assert_eq!(math_spans_on_line(r"\[x^2\]"), vec![(0, 7)]);
+        assert!(math_spans_on_line("log  \u{2502} text").is_empty());
+        // The completeness gate still stands between an environment variable and a veto.
+        assert!(math_spans_on_line("PATH=$HOME/bin:$PATH").is_empty());
     }
 
     /// **A junction continues the rule** (owner's ruling 2026-09-17): the row a TUI draws its

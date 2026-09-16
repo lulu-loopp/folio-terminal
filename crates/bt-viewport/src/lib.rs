@@ -9115,7 +9115,14 @@ mod tests {
     #[test]
     fn three_panes_with_hidden_tops_agree_in_every_order() {
         let cell = cell_height().get();
-        let orders = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+        let orders = [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ];
         for order in orders {
             let bands = order.map(|which| match which {
                 0 => clipped_top_band(1, 0, Some(19), 8),

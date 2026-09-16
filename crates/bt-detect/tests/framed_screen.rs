@@ -11,7 +11,7 @@
 
 use bt_detect::{
     DetectionOptions, InlineMathSite, MathMode, RegionMathBlocks, ScreenRegion,
-    detect_math_blocks_with_sites, detect_math_blocks_with_sites_in_regions,
+    detect_math_blocks_with_sites, detect_math_blocks_with_sites_in_regions, find_border_columns,
 };
 use bt_transcript::TranscriptId;
 
@@ -280,6 +280,87 @@ fn a_full_screen_table_splits_into_its_cells_without_losing_their_math() {
         "every formula the whole screen proves, the cells prove too"
     );
     assert_eq!(plain.len(), 37);
+}
+
+/// Every formula this screen proves whole, its regions prove too.
+fn keeps_every_formula(screen: &[String]) -> usize {
+    let lines = || {
+        screen.iter().enumerate().map(|(index, text)| {
+            (
+                TranscriptId(index as u64 + 1),
+                text.as_str(),
+                InlineMathSite::AltScreenContent,
+            )
+        })
+    };
+    let whole = detect_math_blocks_with_sites(lines(), DetectionOptions::default());
+    let regional = detect_math_blocks_with_sites_in_regions(lines(), DetectionOptions::default())
+        .into_iter()
+        .flat_map(|region| region.blocks)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        regional.len(),
+        whole.len(),
+        "the screen proves {} formulas and its regions prove {}",
+        whole.len(),
+        regional.len()
+    );
+    whole.len()
+}
+
+/// **No dollar does not mean no formula** (owner's ruling 2026-09-17). `\[x^2\]` is display math
+/// the scanner supports and carries no `$` at all, so a test that looked for one let the edge
+/// exemption be spent on it and the cut took it apart. The exemption now asks the grammar.
+#[test]
+fn a_dollar_free_formula_at_an_edge_keeps_the_screen_whole() {
+    for edge in [0, 39] {
+        let mut screen = vec!["log  \u{2502} text".to_owned(); 40];
+        screen[edge] = "\\[x^2\\]".to_owned();
+        assert_eq!(
+            find_border_columns(screen.iter().map(String::as_str)),
+            Vec::<u32>::new(),
+            "the row at {edge} carries a formula and spends no exemption"
+        );
+        assert_eq!(keeps_every_formula(&screen), 1);
+    }
+    // An environment opener is a delimiter too, even standing alone on its row.
+    let mut screen = vec!["log  \u{2502} text".to_owned(); 40];
+    screen[39] = "\\begin{pmatrix}".to_owned();
+    assert_eq!(
+        find_border_columns(screen.iter().map(String::as_str)),
+        Vec::<u32>::new()
+    );
+}
+
+/// **A formula's own blanks are not a gap** (owner's ruling 2026-09-17). `$$x   +y$$` is one
+/// formula with three spaces in the middle of it: the column lands on a space, the cell to its left
+/// is a space too, and a test that asks only about the two neighbouring cells sees clearance and
+/// cuts the formula in half. The row's proven spans are now asked as well.
+#[test]
+fn a_cut_never_runs_through_a_formulas_own_blanks() {
+    let mut screen = vec!["log  \u{2502} text".to_owned(); 40];
+    screen[20] = "$$x   +y$$".to_owned();
+    assert_eq!(
+        find_border_columns(screen.iter().map(String::as_str)),
+        Vec::<u32>::new(),
+        "column five stands inside the formula, blank or not"
+    );
+    assert_eq!(keeps_every_formula(&screen), 1);
+}
+
+/// The same defect in the shape it arrives in: a table whose inner rule is missing on the one row
+/// where a formula occupies a merged cell across it. The outer rules are intact on every row and
+/// still cut the screen; the inner column is not a rule on row 20 and no longer pretends to be.
+#[test]
+fn a_table_is_not_cut_through_the_cell_a_formula_merged() {
+    let mut screen = vec!["\u{2502} a  \u{2502} text    \u{2502}".to_owned(); 40];
+    screen[20] = "\u{2502}$x   +y$      \u{2502}".to_owned();
+    assert_eq!(
+        find_border_columns(screen.iter().map(String::as_str)),
+        vec![0, 15],
+        "the intact outer rules stand; the missing inner one does not"
+    );
+    assert_eq!(keeps_every_formula(&screen), 1);
 }
 
 #[test]

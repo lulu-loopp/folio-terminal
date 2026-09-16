@@ -588,6 +588,82 @@ pub fn redetect_document(
     detected
 }
 
+/// **Does this line carry any delimiter the math grammar recognises?**
+///
+/// Asked of a row a cut would run through, because cutting a row destroys whatever delimiter is on
+/// it and a delimiter is what a formula is made of. It is deliberately the *grammar's* question and
+/// not a character test: `\[x^2\]` carries no `$` and is a display formula, and inferring "no
+/// formula" from a test narrower than the grammar is exactly how that one was lost (owner's ruling
+/// 2026-09-17).
+///
+/// Deliberately broader than [`math_spans_on_line`] below, in two directions. A lone opener or
+/// closer counts — half a formula is still a formula whose other half is on another row, and a cut
+/// through the half that is here unmakes both. And `\(…\)` counts although no scanner here pairs
+/// it, because a row carrying it is a row someone wrote mathematics on, and the cost of being
+/// wrong is one screen that does not split, which is what every screen did before regions existed.
+#[must_use]
+pub fn line_carries_math_delimiter(text: &str) -> bool {
+    if text.contains('$') {
+        return true;
+    }
+    // Every remaining delimiter of the grammar begins with a backslash, so a line with none cannot
+    // carry one and never reaches the parsers below.
+    if !text.contains('\\') {
+        return false;
+    }
+    if text.contains(r"\[") || text.contains(r"\]") || text.contains(r"\(") || text.contains(r"\)")
+    {
+        return true;
+    }
+    line_opens_or_closes_an_environment(text)
+}
+
+/// A `\begin{…}` or `\end{…}` naming a math environment, anywhere on the line.
+///
+/// [`environment_token`] asks whether the text *starts* with one, which is the question a delimiter
+/// line is asked; this asks whether one is present at all, which is the question a row a cut would
+/// destroy is asked.
+fn line_opens_or_closes_an_environment(text: &str) -> bool {
+    [r"\begin{", r"\end{"].iter().any(|prefix| {
+        text.match_indices(prefix).any(|(at, _)| {
+            text[at + prefix.len()..]
+                .split_once('}')
+                .is_some_and(|(environment, _)| is_math_environment(environment))
+        })
+    })
+}
+
+/// **Byte ranges of the formulas this one line proves by itself** — a display block that opens and
+/// closes on it, and every inline run of it.
+///
+/// The span finder a cut consults before running through a row's *blank* cells. `$$x   +y$$` is one
+/// formula with three spaces in the middle of it, and a column that lands on those spaces has
+/// writing on both sides of it — the check that looks only at the two neighbouring cells sees a gap
+/// and lets the cut through (owner's ruling 2026-09-17). Inside a span there are no gaps: the whole
+/// span is the formula.
+///
+/// Inline runs are asked for at [`InlineMathSite::AltScreenContent`] because the question is the
+/// grammar's and not the terminal's: whether *this* screen would have rendered the run is a
+/// different question from whether cutting through it would destroy one. The content gates — the
+/// escapes, the code-like refusal and the completeness rule — all still apply, which is what keeps
+/// `PATH=$HOME/bin:$PATH` from protecting a column.
+#[must_use]
+pub fn math_spans_on_line(text: &str) -> Vec<(usize, usize)> {
+    if !text.contains('$') && !text.contains('\\') {
+        return Vec::new();
+    }
+    let mut spans = Vec::new();
+    if let Some((_, open_start, _, _, close_end)) = complete_display_on_line(text) {
+        spans.push((open_start, close_end));
+    }
+    spans.extend(
+        detect_inline_math(text, InlineMathSite::AltScreenContent)
+            .into_iter()
+            .map(|run| (run.byte_start as usize, run.byte_end as usize)),
+    );
+    spans
+}
+
 pub fn detect_block_math(text: &str) -> Vec<MathSpan> {
     detect_math_blocks([(TranscriptId(1), text)])
         .into_iter()
