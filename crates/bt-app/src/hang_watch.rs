@@ -1494,15 +1494,9 @@ pub fn render_report(facts: &ReportFacts<'_>) -> String {
     if tally.is_clean() {
         out.push_str("  surface acquires: clean — nothing has failed in this run\n");
     } else {
-        let _ = writeln!(
-            out,
-            "  surface acquires: unavailable {}, outdated {}, lost {}, validation {} (total {})",
-            tally.unavailable,
-            tally.outdated,
-            tally.lost,
-            tally.validation,
-            tally.total()
-        );
+        // The tally spells itself, so this footer and the decade lines
+        // `bt-render` writes into `diagnostics.log` cannot drift apart.
+        let _ = writeln!(out, "  surface acquires: {tally}");
     }
     out
 }

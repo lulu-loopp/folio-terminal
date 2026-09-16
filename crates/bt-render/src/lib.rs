@@ -1608,6 +1608,33 @@ pub enum PresentOutcome {
     /// the first refusal; the retry then lands on the frame after it.
     PresentedWithoutText(PresentReceipt),
     Skipped,
+    /// The swapchain refused a back buffer **because the window is not on
+    /// screen** — covered, hidden or miniaturised (GitHub issue #5).
+    ///
+    /// The same skip as [`Self::Skipped`] in everything the renderer does: the
+    /// frame is not drawn, what it staged is flushed, and the picture is still
+    /// owed. It is a *different outcome* only in what the caller may conclude
+    /// from it, and the difference is the whole of the defect it is named for.
+    ///
+    /// `Skipped` means "not this instant, ask again" — the swapchain is what
+    /// changes between the two turns, so the ask is unconditional and right.
+    /// This one means "not until something changes", and nothing about a
+    /// repeated ask changes it: on macOS
+    /// (`wgpu-hal/src/metal/surface.rs`, `acquire_texture`) a window whose
+    /// `NSWindowOcclusionState` lacks `Visible` returns `Occluded` from *every*
+    /// acquire, for as long as it is off screen. Asked again unconditionally,
+    /// that is a closed loop with no wait in it — winit's macOS
+    /// `request_redraw` wakes the run loop rather than going through an AppKit
+    /// display cycle, so it spins at CPU speed and every turn of it stages
+    /// another frame's worth of uploads that no submit ever retires.
+    ///
+    /// What ends the wait is the same predicate that started it, read by the
+    /// other side: winit's `windowDidChangeOcclusionState:` tests the very same
+    /// `Visible` bit and delivers `WindowEvent::Occluded(false)`, which asks for
+    /// one redraw. Any ordinary invalidation — a keystroke, PTY output, a
+    /// timer, a focus change — does the same, so a window that never hears the
+    /// occlusion event is woken by whatever else it was going to be woken by.
+    SkippedNotVisible,
     Reconfigure,
 }
 
@@ -3534,7 +3561,17 @@ enum PrepareFailurePolicy {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SurfaceFailure {
+    /// No back buffer this instant, and the next instant may differ — wgpu's
+    /// `Timeout`, and the window that is between two devices.
     Unavailable,
+    /// No back buffer **because the window is not on screen**, which the next
+    /// instant will not differ about — wgpu's `Occluded`, which only the Metal
+    /// backend ever returns (GitHub issue #5).
+    ///
+    /// Split from [`Self::Unavailable`] because the two are absorbed the same
+    /// way and may be *re-asked* in opposite ways; see
+    /// [`PresentOutcome::SkippedNotVisible`] for the whole argument.
+    NotVisible,
     Outdated,
     Lost,
     Validation,
@@ -3543,6 +3580,9 @@ enum SurfaceFailure {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SurfaceFailurePolicy {
     Skip,
+    /// Skip this frame, and do not ask for another one until the window is
+    /// visible again.
+    SkipUntilVisible,
     Reconfigure,
     FatalValidation,
 }
@@ -3880,6 +3920,7 @@ fn present_outcome(text_complete: bool, receipt: PresentReceipt) -> PresentOutco
 fn surface_failure_policy(failure: SurfaceFailure) -> SurfaceFailurePolicy {
     match failure {
         SurfaceFailure::Unavailable => SurfaceFailurePolicy::Skip,
+        SurfaceFailure::NotVisible => SurfaceFailurePolicy::SkipUntilVisible,
         SurfaceFailure::Outdated | SurfaceFailure::Lost => SurfaceFailurePolicy::Reconfigure,
         SurfaceFailure::Validation => SurfaceFailurePolicy::FatalValidation,
     }
@@ -3902,7 +3943,8 @@ fn surface_failure_policy(failure: SurfaceFailure) -> SurfaceFailurePolicy {
 /// investigation from "the pump stopped and the swapchain has been fine all
 /// day". Relaxed on both sides — these are tallies, not a protocol, and no
 /// reader is deciding anything from the order two of them were written in.
-static SURFACE_FAILURES: [AtomicU64; 4] = [
+static SURFACE_FAILURES: [AtomicU64; 5] = [
+    AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -3914,6 +3956,15 @@ static SURFACE_FAILURES: [AtomicU64; 4] = [
 pub struct SurfaceFailureTally {
     /// No back buffer available this instant; the frame is skipped.
     pub unavailable: u64,
+    /// No back buffer because the window is not on screen; the frame is
+    /// skipped and not asked for again until it is (GitHub issue #5).
+    ///
+    /// Counted apart from [`Self::unavailable`] because the two are the same
+    /// absorption with opposite diagnoses: a run of `unavailable` is a
+    /// swapchain that keeps missing its moment, a run of `not_visible` is a
+    /// window somebody covered up. A report that cannot tell them apart cannot
+    /// tell the two hypotheses apart either.
+    pub not_visible: u64,
     /// The swapchain no longer matches the window; it is reconfigured.
     pub outdated: u64,
     /// The device dropped the surface; it is reconfigured.
@@ -3924,7 +3975,7 @@ pub struct SurfaceFailureTally {
 
 impl SurfaceFailureTally {
     /// Whether anything has failed at all, which is what lets a report say
-    /// "clean" in one word instead of printing four zeroes.
+    /// "clean" in one word instead of printing five zeroes.
     #[must_use]
     pub fn is_clean(self) -> bool {
         self == Self::default()
@@ -3934,9 +3985,30 @@ impl SurfaceFailureTally {
     #[must_use]
     pub fn total(self) -> u64 {
         self.unavailable
+            .saturating_add(self.not_visible)
             .saturating_add(self.outdated)
             .saturating_add(self.lost)
             .saturating_add(self.validation)
+    }
+}
+
+/// **One wording for this tally, wherever it is read out** — the hang
+/// reporter's run-counter footer and the decade line
+/// [`count_surface_failure`] writes into `diagnostics.log` are the same five
+/// numbers, and two spellings of them would be two things for a future reader
+/// to reconcile.
+impl std::fmt::Display for SurfaceFailureTally {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            out,
+            "unavailable {}, not visible {}, outdated {}, lost {}, validation {} (total {})",
+            self.unavailable,
+            self.not_visible,
+            self.outdated,
+            self.lost,
+            self.validation,
+            self.total()
+        )
     }
 }
 
@@ -3945,20 +4017,66 @@ impl SurfaceFailureTally {
 pub fn surface_failure_tally() -> SurfaceFailureTally {
     SurfaceFailureTally {
         unavailable: SURFACE_FAILURES[0].load(AtomicOrdering::Relaxed),
-        outdated: SURFACE_FAILURES[1].load(AtomicOrdering::Relaxed),
-        lost: SURFACE_FAILURES[2].load(AtomicOrdering::Relaxed),
-        validation: SURFACE_FAILURES[3].load(AtomicOrdering::Relaxed),
+        not_visible: SURFACE_FAILURES[1].load(AtomicOrdering::Relaxed),
+        outdated: SURFACE_FAILURES[2].load(AtomicOrdering::Relaxed),
+        lost: SURFACE_FAILURES[3].load(AtomicOrdering::Relaxed),
+        validation: SURFACE_FAILURES[4].load(AtomicOrdering::Relaxed),
     }
 }
 
+/// Whether `count` is 10, 100, 1000 … — the ladder the skip counters say
+/// themselves out loud on.
+///
+/// Exact equality and not "past the next decade", because the caller reaches
+/// every value exactly once (`fetch_add` returns the one before), so an equality
+/// fires once per decade however many threads are counting, and no state has to
+/// be kept to remember which decades have been said.
+fn a_decade_was_reached(count: u64) -> bool {
+    let mut decade = 10_u64;
+    while decade <= count {
+        if decade == count {
+            return true;
+        }
+        // 10^19 is the last decade a `u64` holds; there is no decade above it
+        // for `count` to be, so the ladder simply ends.
+        let Some(next) = decade.checked_mul(10) else {
+            return false;
+        };
+        decade = next;
+    }
+    false
+}
+
+/// Count one absorbed acquire failure, and — for the two that a window can sit
+/// in for minutes — say so once per decade.
+///
+/// **Per run, not per frame.** A line every time a swapchain refused a back
+/// buffer is the unusable terminal [`SURFACE_FAILURES`] exists to avoid; a line
+/// at the tenth, the hundredth and the thousandth is at most nineteen lines in
+/// the life of a process, and it is the line that would have turned GitHub
+/// issue #5 from a mystery into a reading. The other three failures are left
+/// silent: an ordinary resize walks through `Outdated` a few dozen times, so a
+/// decade of *those* says nothing a reader can act on.
 fn count_surface_failure(failure: SurfaceFailure) {
     let slot = match failure {
         SurfaceFailure::Unavailable => 0,
-        SurfaceFailure::Outdated => 1,
-        SurfaceFailure::Lost => 2,
-        SurfaceFailure::Validation => 3,
+        SurfaceFailure::NotVisible => 1,
+        SurfaceFailure::Outdated => 2,
+        SurfaceFailure::Lost => 3,
+        SurfaceFailure::Validation => 4,
     };
-    SURFACE_FAILURES[slot].fetch_add(1, AtomicOrdering::Relaxed);
+    let reached = SURFACE_FAILURES[slot].fetch_add(1, AtomicOrdering::Relaxed) + 1;
+    let why = match failure {
+        SurfaceFailure::NotVisible => "the window was not on screen",
+        SurfaceFailure::Unavailable => "no back buffer was available",
+        SurfaceFailure::Outdated | SurfaceFailure::Lost | SurfaceFailure::Validation => return,
+    };
+    if a_decade_was_reached(reached) {
+        eprintln!(
+            "Folio skipped {reached} frames because {why} — surface acquires: {}",
+            surface_failure_tally()
+        );
+    }
 }
 
 /// The glyphon state one Terminal seat needs to put text on the glass.
@@ -6583,10 +6701,11 @@ impl GpuContext {
                 // can count, and the count is the whole diagnosis.
                 eprintln!("{}", note_a_repack(&mut self.glyph_atlas_refits));
             }
-            // A refused frame on a packing that is already fresh, and the three
-            // ends that say nothing about text at all (a skipped or reconfigured
-            // swapchain, a frame that never composed): the trim every frame owes,
-            // and nothing else.
+            // A refused frame on a packing that is already fresh, and the four
+            // ends that say nothing about text at all (a swapchain skipped
+            // either way — this instant, or until the window is on screen again
+            // — a reconfigured one, a frame that never composed): the trim every
+            // frame owes, and nothing else.
             _ => self.atlas.trim(),
         }
     }
@@ -10407,6 +10526,67 @@ impl WindowRenderer {
         Some((marker, hit))
     }
 
+    /// The one way a frame ends without a back buffer — and the one place that
+    /// pays what such a frame still owes.
+    ///
+    /// # No exit from a frame may leave its uploads staged (GitHub issue #5)
+    ///
+    /// The sibling of the rule `close_the_frame` states for the shared atlas,
+    /// pinned by `no_exit_from_a_frame_may_skip_the_atlas_trim`: **no exit from
+    /// a frame may skip what the frame owes the device.** The atlas debt is the
+    /// trim; this is the other one.
+    ///
+    /// By the time the acquire is asked, the whole frame has already been
+    /// staged — every glyphon prepare, every formula, icon, preview and video
+    /// raster — and each of those is a `Queue::write_buffer` or
+    /// `write_texture`, which in wgpu 30 allocates a real mapped GPU buffer
+    /// (`wgpu-core/src/resource.rs`, `StagingBuffer::new`) and parks it in the
+    /// queue's `PendingWrites::temp_resources` together with a blit recorded
+    /// into one command encoder that is left open
+    /// (`wgpu-core/src/device/queue.rs`, `PendingWrites::consume` and
+    /// `activate`). That pile is drained in exactly one place —
+    /// `PendingWrites::pre_submit` — and `pre_submit` is reached only from a
+    /// submit or a real present. `device.poll()` does not reach it.
+    ///
+    /// So a frame that returned here returned *above* the compose path's only
+    /// `queue.submit`, and everything it staged stayed staged. One skipped
+    /// frame is a few tens of kilobytes plus a page of wired memory per mapped
+    /// buffer; a window that skipped for seven minutes is a Metal device that
+    /// refuses the next allocation, which is the reported
+    /// `Folio lost the GPU device — Unknown: Out of memory`, and a single
+    /// command buffer holding minutes of copies for whoever finally submits it.
+    ///
+    /// `queue.submit` with an empty iterator is the drain, and it is the whole
+    /// drain: `Queue::submit` skips its command-buffer preparation when the
+    /// list is empty and then runs `submit_pending_submission` exactly as a
+    /// full submit does, which calls `pre_submit`, ends the open encoder,
+    /// submits it, and moves `temp_resources` into the submission that frees
+    /// them when the GPU retires it. When nothing was staged, `pre_submit` sees
+    /// `is_recording == false`, clears three empty maps and returns `None`, and
+    /// the cost is a submission index and one empty command buffer — cheap
+    /// enough to owe on every absorbed failure rather than guessing which ones
+    /// staged something.
+    ///
+    /// Unconditional for the same reason the counter above it is: a rule with an
+    /// exception is a rule somebody has to re-derive. The reconfigure path
+    /// staged just as much as the skip path did, and the fatal path is the last
+    /// chance this process has to hand the pile back.
+    ///
+    /// # Why here, and not beside the atlas trim
+    ///
+    /// [`Self::present_frame`] is the one place *outside* every exit a frame
+    /// has, which is what the atlas debt needed. This debt is narrower on
+    /// purpose. The exits that skip the submit are of two kinds: the absorbed
+    /// surface failures, which a window repeats for as long as it is off screen
+    /// and which is the whole defect; and the `?`s, every one of which is a
+    /// `RenderError` the caller answers once — by rebuilding the device or by
+    /// stopping — never in a loop, and the first of them is a device that is
+    /// already gone. Submitting on a device that has been lost is how a return
+    /// this process handles becomes a panic it does not, so the drain is owed
+    /// where the frame is *absorbed* and not where it fails. Everything
+    /// [`WindowRenderer::compose_frame`] reaches here has passed
+    /// `still_has_its_device` and has just staged a whole frame against that
+    /// device.
     fn handle_surface_failure(
         &mut self,
         gpu: &GpuContext,
@@ -10417,8 +10597,13 @@ impl WindowRenderer {
         // footer should say so. See [`SURFACE_FAILURES`] for why a silent
         // absorption still owes a number.
         count_surface_failure(failure);
+        // **Second, and unconditionally** — see this function's own note. The
+        // frame staged its uploads before it asked for a back buffer, and it is
+        // leaving without the submit that retires them.
+        gpu.queue.submit(std::iter::empty());
         match surface_failure_policy(failure) {
             SurfaceFailurePolicy::Skip => Ok(PresentOutcome::Skipped),
+            SurfaceFailurePolicy::SkipUntilVisible => Ok(PresentOutcome::SkippedNotVisible),
             SurfaceFailurePolicy::Reconfigure => {
                 self.configure_surface(gpu)?;
                 Ok(PresentOutcome::Reconfigure)
@@ -10481,8 +10666,19 @@ impl WindowRenderer {
                 wgpu::CurrentSurfaceTexture::Suboptimal(texture) => {
                     SurfaceAcquisition::Suboptimal(texture)
                 }
-                wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                wgpu::CurrentSurfaceTexture::Timeout => {
                     SurfaceAcquisition::Failed(SurfaceFailure::Unavailable)
+                }
+                // Only ever seen on macOS, where it is not a moment that passes
+                // but the steady state of a window somebody covered up:
+                // `wgpu-hal`'s Metal surface reads `NSWindowOcclusionState` and
+                // refuses every acquire while `Visible` is missing from it.
+                // Asking again is what it costs a device (GitHub issue #5) — so
+                // this one is answered with a skip that does not re-ask, and the
+                // window waits for the `Occluded(false)` that is the same bit
+                // read from the other side.
+                wgpu::CurrentSurfaceTexture::Occluded => {
+                    SurfaceAcquisition::Failed(SurfaceFailure::NotVisible)
                 }
                 wgpu::CurrentSurfaceTexture::Outdated => {
                     SurfaceAcquisition::Failed(SurfaceFailure::Outdated)
@@ -21600,6 +21796,74 @@ mod tests {
         );
     }
 
+    fn handle_surface_failure_source() -> String {
+        let source = production_source();
+        let start = source
+            .find("fnhandle_surface_failure(&mutself,gpu:&GpuContext,")
+            .expect("handle_surface_failure");
+        let end = source[start..]
+            .find("fnconfigure_surface_if_needed(")
+            .expect("configure_surface_if_needed follows handle_surface_failure");
+        source[start..start + end].to_owned()
+    }
+
+    /// PIN (GitHub issue #5) — **no exit from a frame may leave its uploads
+    /// staged.**
+    ///
+    /// The sibling of `no_exit_from_a_frame_may_skip_the_atlas_trim`, and the
+    /// same sentence about a different debt: a frame that gives up owes the
+    /// device what it already handed it.
+    ///
+    /// Everything a frame draws is staged before it asks for a back buffer —
+    /// every glyphon prepare, every formula, icon, preview and video raster —
+    /// and in wgpu 30 each of those parks a real mapped GPU buffer plus a blit
+    /// in the queue's `PendingWrites`, which only a submit or a real present
+    /// drains (`PendingWrites::pre_submit`; `device.poll()` does not reach it).
+    /// `compose_frame` returns into this function *above* its only
+    /// `queue.submit`, so before this drain existed every absorbed acquire left
+    /// its whole frame staged. On macOS an off-screen window is refused an
+    /// acquire on every turn, so the reporter's session piled up seven minutes
+    /// of copies and mapped buffers until the Metal device refused an
+    /// allocation: `Folio lost the GPU device — Unknown: Out of memory`.
+    ///
+    /// The drain has to stand *above* the policy, because two of the four
+    /// policies leave this function immediately and a third can fail on its way
+    /// out.
+    ///
+    /// Mutation: move the submit into one arm of the policy match, or put
+    /// anything that can return above it.
+    #[test]
+    fn no_exit_from_a_frame_may_leave_its_uploads_staged() {
+        let body = handle_surface_failure_source();
+        let drained = body
+            .find("gpu.queue.submit(std::iter::empty());")
+            .unwrap_or_else(|| panic!("a frame that gives up must flush what it staged: {body}"));
+        let counted = body
+            .find("count_surface_failure(failure);")
+            .expect("an absorbed failure still owes a number");
+        assert!(
+            counted < drained,
+            "the number is owed first, so that a drain that panics is still \
+             counted: {body}"
+        );
+        let decided = body
+            .find("matchsurface_failure_policy(failure){")
+            .expect("the policy decides what this failure costs the frame");
+        assert!(
+            drained < decided,
+            "the drain must be paid before any policy can leave: {body}"
+        );
+        let above = &body[..drained];
+        assert!(
+            !above.contains('?'),
+            "no fallible call may stand above the drain: {body}"
+        );
+        assert!(
+            !above.contains("return"),
+            "no early return may stand above the drain: {body}"
+        );
+    }
+
     /// PIN — **and nothing inside the frame trims, either.**
     ///
     /// A trim taken mid-frame unprotects the glyphs the seats already prepared
@@ -25390,8 +25654,87 @@ mod tests {
         );
     }
 
+    /// RED (GitHub issue #5) — **"no back buffer this instant" and "no back
+    /// buffer while nobody can see this window" are two failures, because they
+    /// are re-asked in opposite ways.**
+    ///
+    /// They were one, and the one they were was the unconditional re-ask, which
+    /// is right for a swapchain that keeps missing its moment and is a spin
+    /// against a window somebody covered up: on macOS every acquire reads
+    /// `NSWindowOcclusionState` and refuses for as long as `Visible` is missing
+    /// from it, so the answer to the second ask is the answer to the first,
+    /// forever. Both still skip the frame and both still drain what the frame
+    /// staged; only the outcome the caller reads differs.
+    ///
+    /// Mutation: map `Occluded` back onto `Unavailable` and this says so.
+    #[test]
+    fn a_window_that_is_off_screen_is_skipped_without_being_re_asked() {
+        assert_eq!(
+            surface_failure_policy(SurfaceFailure::Unavailable),
+            SurfaceFailurePolicy::Skip
+        );
+        assert_eq!(
+            surface_failure_policy(SurfaceFailure::NotVisible),
+            SurfaceFailurePolicy::SkipUntilVisible
+        );
+        assert_ne!(
+            surface_failure_policy(SurfaceFailure::NotVisible),
+            surface_failure_policy(SurfaceFailure::Unavailable),
+            "the whole of the fix is that these two are not the same answer"
+        );
+        // And the acquire is what tells them apart: `Occluded` is the only
+        // reading that means the window itself, and only the Metal backend ever
+        // returns it.
+        let source = production_source();
+        assert!(
+            source.contains(concat!(
+                "wgpu::CurrentSurfaceTexture::Occluded=>{SurfaceAcquisition::Failed(",
+                "SurfaceFailure::NotVisible)}"
+            )),
+            "an occluded acquire is the one that must not be re-asked"
+        );
+        assert!(
+            source.contains(concat!(
+                "wgpu::CurrentSurfaceTexture::Timeout=>{SurfaceAcquisition::Failed(",
+                "SurfaceFailure::Unavailable)}"
+            )),
+            "and a timeout keeps the unconditional ask it always had"
+        );
+    }
+
+    /// PIN (GitHub issue #5) — **the ladder a skip counter says itself out loud
+    /// on is the decades, and only the decades.**
+    ///
+    /// A line per skipped frame is the unusable terminal the tally exists to
+    /// avoid; a line at the tenth, the hundredth and the thousandth is at most
+    /// nineteen lines in the life of a process and is the line that turns a
+    /// report of this shape into a reading. Exact equality is what makes it fire
+    /// once per decade without keeping any state: the caller reaches every value
+    /// exactly once.
+    #[test]
+    fn a_skip_counter_speaks_once_per_decade() {
+        assert!(!super::a_decade_was_reached(0));
+        assert!(!super::a_decade_was_reached(1));
+        assert!(!super::a_decade_was_reached(9));
+        assert!(super::a_decade_was_reached(10));
+        assert!(!super::a_decade_was_reached(11));
+        assert!(!super::a_decade_was_reached(99));
+        assert!(super::a_decade_was_reached(100));
+        assert!(super::a_decade_was_reached(1_000));
+        assert!(super::a_decade_was_reached(1_000_000));
+        assert!(super::a_decade_was_reached(10_000_000_000_000_000_000));
+        // Above the last decade a `u64` holds the ladder ends rather than
+        // wrapping into a value it would say the wrong thing about.
+        assert!(!super::a_decade_was_reached(u64::MAX));
+        // Exactly one line over a whole spin, not one per frame.
+        let spoken = (1..=100_000_u64)
+            .filter(|count| super::a_decade_was_reached(*count))
+            .count();
+        assert_eq!(spoken, 5, "10, 100, 1000, 10 000, 100 000 and nothing else");
+    }
+
     /// PIN (hang reporter, 2026-08-25) — **every way of failing to get a back
-    /// buffer leaves a number behind, including the three that are absorbed in
+    /// buffer leaves a number behind, including the four that are absorbed in
     /// silence.**
     ///
     /// The tally is process-global and this test runs beside others, so it is
@@ -25402,6 +25745,7 @@ mod tests {
         let before = super::surface_failure_tally();
         for failure in [
             SurfaceFailure::Unavailable,
+            SurfaceFailure::NotVisible,
             SurfaceFailure::Outdated,
             SurfaceFailure::Outdated,
             SurfaceFailure::Lost,
@@ -25411,6 +25755,12 @@ mod tests {
         }
         let after = super::surface_failure_tally();
         assert_eq!(after.unavailable - before.unavailable, 1);
+        assert_eq!(
+            after.not_visible - before.not_visible,
+            1,
+            "a window that was covered up is its own diagnosis, not a swapchain \
+             that missed its moment"
+        );
         assert_eq!(
             after.outdated - before.outdated,
             2,
@@ -25422,7 +25772,10 @@ mod tests {
             1,
             "the fatal one is counted before the policy decides it is fatal"
         );
-        assert_eq!(after.total() - before.total(), 5);
+        assert_eq!(after.total() - before.total(), 6);
+        // The tally spells itself, once, for the hang report's footer and for
+        // the decade lines alike.
+        assert!(after.to_string().contains("not visible"));
         assert!(
             !after.is_clean(),
             "a run that has absorbed anything is not a clean run"

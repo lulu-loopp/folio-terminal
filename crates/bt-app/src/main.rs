@@ -100172,8 +100172,14 @@ impl Runtime<'_> {
             // the same reason and re-filed the same way: what is on the glass is
             // not the picture this window means to be showing, and the atlas the
             // renderer trimmed on its way out has room for it next time.
+            //
+            // A window that is not on screen re-files the debt with the rest of
+            // them — the picture it owes is unchanged by being invisible — and
+            // differs only in that `may_ask_again` will not ask for the turn
+            // that pays it. See [`ask_again_after`].
             outcome @ (PresentOutcome::PresentedWithoutText(_)
             | PresentOutcome::Skipped
+            | PresentOutcome::SkippedNotVisible
             | PresentOutcome::Reconfigure) => {
                 self.window.chrome_present_pending = true;
                 if self.window.may_ask_again(&outcome) {
@@ -100434,8 +100440,14 @@ impl Runtime<'_> {
             // recording it as presented would leave `presented_picture_revision`
             // claiming the glass holds a frame it does not — which is the licence
             // the animation path reads before answering a tick from the screen.
+            //
+            // The frame a window that is off screen composed goes back in the
+            // slot with the rest of them, and waits there: `may_ask_again` is
+            // what declines to ask for the turn, not this arm. See
+            // [`ask_again_after`].
             outcome @ (PresentOutcome::PresentedWithoutText(_)
             | PresentOutcome::Skipped
+            | PresentOutcome::SkippedNotVisible
             | PresentOutcome::Reconfigure) => {
                 self.window
                     .pending_frames
@@ -107134,6 +107146,24 @@ fn ask_again_after(outcome: &PresentOutcome, textless_run: &mut u32) -> bool {
         // turn and the next is the swapchain, not this window, so the ask is
         // unconditional — it always was.
         PresentOutcome::Skipped | PresentOutcome::Reconfigure => true,
+        // **Except when what the swapchain said was "this window is not on
+        // screen"** (GitHub issue #5). Then nothing changes between this turn
+        // and the next: on macOS the acquire reads the window's occlusion state
+        // and refuses for as long as it is covered, hidden or miniaturised, so
+        // an unconditional ask is a closed loop with no wait in it — winit's
+        // macOS `request_redraw` wakes the run loop rather than going through a
+        // display cycle, so it spins at CPU speed against a window nobody can
+        // see, and it was still doing that seven minutes later.
+        //
+        // The frame is still owed and is still re-filed by both present sites;
+        // what is dropped is only the ask. What pays the debt is the next real
+        // invalidation — `WindowEvent::Occluded(false)`, which winit raises off
+        // the very same `Visible` bit the acquire tested, and equally a
+        // keystroke, PTY output, a focus change or an animation tick. A window
+        // that becomes visible with none of those to show for it is a window
+        // whose picture has not changed since the last one that reached the
+        // glass.
+        PresentOutcome::SkippedNotVisible => false,
         PresentOutcome::PresentedWithoutText(_) => {
             *textless_run = textless_run.saturating_add(1);
             *textless_run <= TEXTLESS_RETRY_BUDGET
@@ -107141,8 +107171,12 @@ fn ask_again_after(outcome: &PresentOutcome, textless_run: &mut u32) -> bool {
     }
 }
 
-/// What a window does with a frame that reached the glass without its
-/// characters — `bt-render`'s [`PresentOutcome::PresentedWithoutText`].
+/// What a window does with a frame that did not reach the glass whole — one
+/// that arrived without its characters
+/// (`bt-render`'s [`PresentOutcome::PresentedWithoutText`]) and one that never
+/// arrived at all because nobody could see the window
+/// ([`PresentOutcome::SkippedNotVisible`]). Both are frames the window still
+/// owes; they differ in whether asking again is worth a turn.
 #[cfg(test)]
 mod textless_present_tests {
     use super::{PresentOutcome, TEXTLESS_RETRY_BUDGET, ask_again_after};
@@ -107285,6 +107319,86 @@ mod textless_present_tests {
                 "`{method}` asks for the retry outside the textless arm"
             );
         }
+    }
+
+    /// PIN (GitHub issue #5) — **a window nobody can see is not asked to draw
+    /// itself again, and is drawn once as soon as it can be seen.**
+    ///
+    /// On macOS every acquire against a window whose `NSWindowOcclusionState`
+    /// lacks `Visible` is refused, for as long as it is covered, hidden or
+    /// miniaturised — so the unconditional re-ask that is right for the other
+    /// two swapchain refusals is, for this one, a closed loop with no wait in
+    /// it. winit's macOS `request_redraw` wakes the run loop rather than going
+    /// through an AppKit display cycle, so there is no 60 Hz to slow it: the
+    /// reporter's window spun a core for seven minutes, and every turn of the
+    /// spin staged another frame's worth of GPU uploads that no submit retired,
+    /// until the Metal device refused an allocation.
+    ///
+    /// Three properties, and the defect needs all three to be gone:
+    ///
+    /// 1. the occluded skip asks for no turn, however many times it happens;
+    /// 2. it is still *re-filed* by both present sites — the picture is owed,
+    ///    not abandoned, or a window would come back from the Dock blank;
+    /// 3. and the window that became visible again asks for exactly one frame.
+    ///
+    /// Mutation: group `SkippedNotVisible` with `Skipped` in `ask_again_after`
+    /// and ① fails; drop it from either present site's arm and ② fails; take
+    /// `publish_frame` out of the `Occluded(false)` arm and ③ fails.
+    #[test]
+    fn a_window_that_is_not_on_screen_stops_asking_and_is_woken_once() {
+        // ① It does not ask, and it does not spend the textless run either.
+        let mut run = 0_u32;
+        for turn in 0..1_000 {
+            assert!(
+                !ask_again_after(&PresentOutcome::SkippedNotVisible, &mut run),
+                "turn {turn}: a window that is off screen asked for another \
+                 turn, and that ask is the spin"
+            );
+        }
+        assert_eq!(run, 0, "no image is not a textless image");
+        // The swapchain's other two refusals are untouched: what changes
+        // between *their* turns really is the swapchain.
+        assert!(ask_again_after(&PresentOutcome::Skipped, &mut run));
+        assert!(ask_again_after(&PresentOutcome::Reconfigure, &mut run));
+        assert_eq!(run, 0);
+
+        // ② Both present sites still owe the picture.
+        for method in ["redraw", "present_retained_picture"] {
+            let body = fn_body(method);
+            let owed = body
+                .find("PresentOutcome::SkippedNotVisible")
+                .unwrap_or_else(|| {
+                    panic!("`{method}` must re-file the frame of a window that is off screen")
+                });
+            let paid = body
+                .find("PresentOutcome::Presented(_)")
+                .or_else(|| body.find("PresentOutcome::Presented(receipt)"))
+                .unwrap_or_else(|| panic!("`{method}` must name the presented outcome"));
+            assert!(
+                owed > paid,
+                "`{method}` recorded an invisible window's skip as a delivery"
+            );
+        }
+
+        // ③ And the turn that pays the debt exists, on the event winit raises
+        // from the very same `Visible` bit the acquire tested.
+        //
+        // The needle is spelled in two pieces so that this test cannot find
+        // itself: the event-loop arm it is looking for stands *later* in this
+        // file than the test does.
+        let woken = SOURCE
+            .find(concat!(
+                "WindowEvent::Occluded(false) => runtime.",
+                "publish_frame(FrameTrigger {"
+            ))
+            .expect("the event loop answers the window that came back on screen");
+        let arm = &SOURCE[woken..];
+        let end = arm.find("\n            _ => Ok(())").unwrap_or(arm.len());
+        assert_eq!(
+            arm[..end].matches("publish_frame").count(),
+            1,
+            "a window that came back composes and asks for exactly one frame"
+        );
     }
 }
 
@@ -111561,6 +111675,21 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     })
                 })
             }
+            // **The window is on screen again, and this is the one turn that
+            // owes it a picture** (GitHub issue #5).
+            //
+            // It always composed and published one frame here — `publish_frame`
+            // requests exactly one redraw — and since a skip caused by occlusion
+            // stopped asking for turns of its own ([`ask_again_after`]), this is
+            // the event that pays whatever the window went dark owing. winit
+            // raises it from `windowDidChangeOcclusionState:`, off the same
+            // `NSWindowOcclusionState::Visible` bit that `wgpu-hal`'s Metal
+            // surface tests before it refuses an acquire, so the moment it
+            // arrives is exactly the moment the acquire starts succeeding.
+            //
+            // `Occluded(true)` is deliberately not handled: a window does not
+            // need to be told it has gone dark. The frame path finds out by
+            // being refused, which is the only reading that cannot be stale.
             WindowEvent::Occluded(false) => runtime.publish_frame(FrameTrigger {
                 occurred_at: Instant::now(),
                 source: FrameSource::Expose,
