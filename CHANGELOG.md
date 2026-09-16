@@ -35,12 +35,8 @@ All notable changes to Folio are recorded here. The format follows
   the typeset formula's block has, and the show-source and copy marks sit at that
   edge — so both forms of a formula read as the same block.
 
-### Fixed
-
 - **On a Mac, a tab can be dragged to reorder it or out into its own window
   again; the window moves only when the empty part of the header is dragged.**
-
-### Fixed
 
 - **A Markdown line beginning with an angle bracket and carrying non-ASCII
   text no longer crashes the preview.** Such a line now stays readable, and
