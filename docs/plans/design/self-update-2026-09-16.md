@@ -1,421 +1,520 @@
-# T-SELF-UPDATE — stage 1 design, 2026-09-16
+# T-SELF-UPDATE — stage 1 design, rev 2, 2026-09-16
 
-Design only. Inspected `design/self-update` at `134ff9c0`; no product code, no
-build, no test run, no application launch belongs to this stage. Paths below are
-this worktree's unless said otherwise.
+Design only. Inspected `design/self-update` at `0f737e65`; no product code, no build, no test run, no application launch belongs to this stage.
+
+**Rev 2 replaces rev 1's §C entirely.** The adversarial review
+(`docs/plans/design/self-update-review-codex-2026-09-16.md`, `0f737e65`) was right
+on its four blockers and on nearly every must-fix; its evidence was re-read against
+the source and holds. Rev 1 treated the replacement as an ordered set of renames a
+live worker could undo. It is not: the worker dies with the process, a half-swapped
+Windows install has no executable left to run a repair, and a successful
+`CreateProcess` is not a working Folio. §C is now written around a recovery
+contract instead. §I is a ledger answering R-1…R-23 by number.
 
 The owner reversed two standing rulings on 2026-09-16: `crates/bt-app/src/update.rs`
 may now download, and `docs/plans/port/macos-plan-2026-09-12.md` §M4's deferral of
-in-place self-update out of 0.4 no longer holds. Folio 0.4.2 ships an in-app
-updater. Everything below is written against that reversal.
+in-place self-update out of 0.4 no longer holds.
 
 ## A. What the rule becomes
 
-The feature that exists today is one `GET` of `api.github.com/repos/lulu-loopp/folio-terminal/releases`,
-at most once a day across every window, answered by a dot on the gear and a
-sentence on the General page's last row (`crates/bt-app/src/update.rs:1-40`,
-`docs/DESIGN.md` §7.52). **That whole mechanism stays.** It is the *check*, and
-the updater is a second thing that starts where the check ends. Nothing in §7.52's
-①–⑧ about cadence, the claim file, the two-window rule, version precedence, the
-`User-Agent`, the silence of a refusal, or the privacy documents changes.
-
-What changes is one clause, in five places:
+The check that exists today — one `GET` of the releases list, at most once a day
+across every window, answered by a dot on the gear and a sentence on the General
+page's last row (`crates/bt-app/src/update.rs:1-40`, `docs/DESIGN.md` §7.52) —
+**stays exactly as it is**. Cadence, the claim file, the two-window rule, version
+precedence, the `User-Agent`, the silence of a refusal: none of it changes. The
+updater is a second thing that starts where the check ends.
 
 | Where | Sentence today | Sentence after |
 |---|---|---|
-| `update.rs:1-2` module title | "answered by a mark on the gear, and **never acted on**" | "…and acted on only when the reader presses *Update and restart*" |
+| `update.rs:1-2` | "answered by a mark on the gear, and **never acted on**" | "…and acted on only when the reader presses *Update and restart*" |
 | `update.rs:10` | "…and **downloading nothing** whatever it learns" | "…and downloading nothing until a press asks it to" |
-| `update.rs:31-34` bullet **Downloads nothing** | "There is no installer, no replacement, no restart. The most this feature can do is put a dot on a gear and a sentence in a dialog." | Becomes **Downloads nothing unasked**: the check itself still downloads nothing; the download, the verification and the swap are a separate module that only a press can enter, and a launch on which nobody presses is byte-for-byte the launch this module describes today. |
-| §7.52 block quote ("每 24 小时至多一次…**不下载、不替换、不重启。**") | the three negatives are the stated bound | the bound becomes: the *check* downloads nothing, replaces nothing and restarts nothing; a *press* may do all three, and never anything else |
-| §7.52 ① ("**系统 toast**…出局" / "有新版不是一件需要打断人的事") | the three-verb surface was rejected as disproportionate | a card is now warranted, and the reason is in the ruling: the offer is no longer "go and read a page", it is a thing the reader can finish here. The toast stays out — it is still outside the window. The pane notice strip (`crates/bt-app/src/notice.rs`) stays out for its own original reason: it eats 30 px of a working pane's body for as long as it is up, and a download is minutes. |
+| `update.rs:31-34` bullet **Downloads nothing** | "There is no installer, no replacement, no restart." | Becomes **Downloads nothing unasked**: the check downloads nothing; the download, the verification and the replacement are a separate module only a press can enter, and a launch on which nobody presses is byte-for-byte the launch this module describes today. |
+| §7.52 block quote ("**不下载、不替换、不重启。**") | the three negatives are the stated bound | the bound becomes: the *check* downloads nothing, replaces nothing, restarts nothing; a *press* may do all three and nothing else |
+| §7.52 ① ("有新版不是一件需要打断人的事") | a three-verb surface was disproportionate | a card is warranted now, because the offer is a thing the reader can finish here. The system toast stays out — still outside the window. The pane notice strip stays out — it eats 30 px of a working pane for the length of a download. |
 
-Two more documents carry the old claim and must be revised in stage 2 with the
-code, not before: `docs/plans/port/macos-plan-2026-09-12.md:48-49` and `:153-154`
-("in-place self-update, which becomes 'open the release page'") and its **M4-10**
-row, and `docs/PRIVACY.md`, which must gain the one new fact — that pressing
-*Update and restart* fetches two named files from `github.com` and nothing else.
-**No new settings key and no `settings.json` schema bump.** `SettingsV1::update_check`
-already exists and already defaults to on (`crates/bt-persist/src/settings.rs`,
-schema v34); the General row already stands last on its page
-(`crates/bt-app/src/settings.rs:5385`). The owner's "Check for updates automatically"
-is a **rename of `Text::RowUpdateCheck` and a rewrite of `Text::DescUpdateCheck`**
-(`crates/bt-app/src/i18n.rs:2921-2926`), because the present description —
-"Checks once a day for a newer Folio. The new version is named on this row." —
-is now the smaller half of what the switch buys.
+Also revised **with the code, not before**: `docs/plans/port/macos-plan-2026-09-12.md:48-49`,
+`:153-154` and its **M4-10** row; and `docs/PRIVACY.md`, which must gain the new
+facts — that a press fetches two named files from `github.com` **and from whatever
+asset host GitHub redirects to** (`objects.githubusercontent.com` today), that
+macOS additionally consults Apple's notarization service through Gatekeeper, and
+that none of this happens without the press.
+
+**No `settings.json` schema bump.** `SettingsV1::update_check` already exists,
+already defaults on, and its row already stands last on General
+(`crates/bt-app/src/settings.rs:5385`). The owner's "Check for updates
+automatically" is a rename of `Text::RowUpdateCheck` and a rewrite of
+`Text::DescUpdateCheck` (`crates/bt-app/src/i18n.rs:2921-2926`).
 
 ## B. The state machine
 
-One machine per process, owned by the window thread, driven by messages from one
-worker. `Idle` is every launch on which nobody presses.
+One **job** per process, owned by the application and not by a window. A job is an
+immutable **offer** — `{ txn, tag, asset, hash_doc, to_version }` — captured when
+the card is raised and never re-derived. A later check that moves `latest_tag`
+under an open card does not change the job.
 
 ```
-Idle ──offer──> Available(tag) ──press──> Downloading{tag, got, total}
-                     │                         │
-                     │                         ├─ok─> Verified{tag, staged}
-                     └─Later / Skip ─> Idle    └─fail─> Failed(reason) ─dismiss─> Idle
-                                               ↑
-Verified ──ready──> Swapping{tag} ──ok──> Relaunching{child} ──> (quit)
-                         │                      │
-                         └─fail(rolled back)────┴─fail─> Failed(reason)
+Idle ─offer→ Available ─press→ Downloading ─→ Staged ─→ Verified
+  ↑              │                  │                      │
+  └─Later/Skip───┘                  └─fail→ Failed          │
+                                                            ↓ Restart now
+                          Quitting (the ordinary quit, cancelable)
+                             │cancelled / save failed → Verified (says why)
+                             ↓ session landed
+                          Committing  →  [process exits; see §C]
 ```
 
-**`Available(tag)` is entered** when `update::newer_than(latest_tag, VERSION)`
-answers `Some(tag)`, the tag is not `skipped_tag`, the install location is one
-the updater owns (§D), and this build is a release build (§D). It is entered at
-most **once per launch**, in the most recently active ordinary window — the same
-"most recently active window, and never the summoned terminal" rule §7.59 already
-states for a handed-off launch. The gear dot keeps its own meaning and is
-unchanged: it is lit by `latest_tag != seen_tag` and put out by the reader
-reaching the page the row is on (§7.52 ①).
+`Available` is entered at most once per launch, in the most recently active
+ordinary window (never the summoned terminal, §7.59's own rule), when **all** of:
+the switch is on; `update::newer_than` answers a tag; that tag has higher
+precedence than `skipped_tag`; §D classifies the install as **ours**; and this
+build is updater-capable (§D). An offer suppressed because a cached tag was skipped
+does not consume the once-per-launch gate — a newer tag arriving later still gets
+its card.
 
 **The card.** A float window on the first-run card's footing —
-`settings::push_float_window` (`crates/bt-app/src/settings.rs:14840`), the `.btn`
-pair, `restore::wrap` (`crates/bt-app/src/first_run.rs:22-27`) — with
-`first_run::Card`'s exact shape: a `Card` struct the window owns, a `Target` enum
-for what a press means, a `raise_…_if_due` on the window thread and an
-`answer_…(target)` beside `main.rs:52411` / `main.rs:52595`. It shows the version
-number, one highlight line, and three verbs. It never dims the window behind it,
-for `notice.rs`'s stated reason: the shell behind it is working.
+`settings::push_float_window` (`settings.rs:14840`), the `.btn` pair, `restore::wrap`
+(`first_run.rs:22-27`) — with `first_run::Card`'s shape: a `Card` the application
+owns, a `Target` enum, `raise_…_if_due` / `answer_…(target)` beside `main.rs:52411`
+and `:52595`. Escape and the close box mean **Later**. It never dims the window
+behind it. Content is recomputed from live state every paint, on the web-fault
+card's footing (`webhost.rs:1791`, `seats.rs:20302`), which is what lets a progress
+bar live on it. **There is no progress surface to reuse**: the only thing called
+progress today is `ChromeMark::ProgressRing` on a tab title, a different assertion
+on a different surface. The determinate bar is new drawing.
 
-**The card is rebuilt from live state every frame**, on the web-fault card's
-footing rather than the first-run card's: `WebSeat.fault` is a field, and
-`seats::PreviewCardContent` is recomputed from it each paint
-(`crates/bt-app/src/webhost.rs:1791`, `crates/bt-app/src/seats.rs:20302`), which is
-why overwriting the field is both raise and update. A progress bar needs exactly
-that and nothing else. **There is no progress surface in the product to reuse**:
-the only thing called progress today is `ChromeMark::ProgressRing` on a tab title,
-which is a different assertion on a different surface. The determinate bar is new
-drawing, and it belongs to ticket 1.
-
-| State | What the card says | The three verbs |
+| State | What the card says | Verbs |
 |---|---|---|
-| `Available(tag)` | `0.4.2 is available.` + one highlight line | **Update and restart** · **Later** · **Skip this version** |
-| `Downloading` | `Downloading 0.4.2 — 12 MB of 41 MB` + a determinate bar | **Cancel** replaces the first verb; the other two are gone |
-| `Verified` | `0.4.2 is ready. Every tab's program will be closed. Your tabs and layout come back.` | **Restart now** · **Later** |
-| `Swapping` | `Replacing the installed files…` | none |
-| `Relaunching` | `Starting 0.4.2…` | none |
-| `Failed(reason)` | the reason, then `Nothing installed was changed.` | **Open releases page** · **Close** |
+| `Available` | `0.4.2 is available.` + the highlight line | **Download and install** · **Later** · **Skip this version** |
+| `Downloading` | `Downloading 0.4.2 — 12 MB of 41 MB`, or `12 MB` with an indeterminate bar when the length is unknown | **Cancel** |
+| `Staged`/`Verified` | `0.4.2 is ready. Every tab's program will be closed. Your tabs and layout come back.` | **Restart now** · **Later** |
+| `Quitting` | whatever the ordinary quit is asking (its own card) | the quit's own |
+| `Failed(reason)` | the reason, then either `Nothing installed was changed.` or `The previous version was put back.` | **Open releases page** · **Close** |
+| manager-owned (§D) | `Folio was installed by Homebrew. Run brew upgrade --cask folio.` | **Copy command** · **Close** |
 
-**"Later"** closes the card and writes nothing. The dot stays lit, the row keeps
-naming the version, and the card is offered again on the next launch. **"Skip this
-version"** writes `skipped_tag = tag` **and** `seen_tag = tag` into
-`update-check.json` — Skip is an answer, so the dot goes out too — and the card is
-not offered again until `latest_tag` moves past it. Skip is per tag, never a mode:
-there is no "stop updating" state, because the switch on the General page is that.
+The first verb is **Download and install**, not "Update and restart": the press
+downloads, and the restart is asked for again at `Verified`. The owner's three
+verbs are preserved in shape; only the first one's wording is made honest.
 
-**Failure edges.** Every one of them ends in `Failed(reason)` with the installed
-files untouched, and every reason is a sentence the card prints: the releases page
-could not be reached; the download did not finish; the download is larger than the
-updater will take (the cap is 200 MB; the archive is ~40 MB); `SHA256SUMS.txt` did
-not name the asset; the hash did not match; the new `folio.exe` is not signed by
-this product's certificate; the new bundle did not pass `codesign`; this folder
-cannot be written to; a file could not be renamed; the new build would not start.
-The last two roll back first and say so (§C).
+**Later** writes nothing; the dot stays as it was, and the card returns next
+launch. From `Verified`, **Later** keeps the staged transaction and leaves a
+**Restart to finish updating** entry on the General row's picker foot, so the work
+is not stranded and not silently discarded; the staging is swept if it is still
+unfinished two launches later. **Skip this version** writes `skipped_tag` **and**
+`seen_tag`; it is compared by **precedence**, not equality, so a withdrawn release
+does not re-offer an older-but-still-newer tag. Turning the switch off cancels an
+in-flight job and suppresses cached offers.
 
-**If the window closes mid-download.** The worker holds a cancel flag and a
-`Weak` back to nothing else; the window thread sets the flag on its way out and
-does not wait. The partial file is under `<data>/Folio/update/<tag>/` and is
-deleted by the *next* launch's sweep, not by the dying one — a process on its way
-out must not block on a filesystem. If the process is killed outright, the sweep
-still finds it, because the sweep's rule is "anything under `update/` that is not
-this launch's staging directory". **Nothing installed can be mid-swap at that
-moment**: the swap (§C) happens on the worker between the session save and the
-quit, and the quit does not start until the swap reports.
+**Cancel / window close / process death during `Downloading` or `Staged`** touches
+nothing installed: the job lives under its own transaction directory and is swept
+by the startup pass of §C.6. Closing the presenting window does not cancel a job
+that other windows can still be told about; it re-presents on the next active
+window. There is no reachable state in which a card verb exists with no handler:
+the enumeration above is total and is gated by a test.
 
-## C. The swap, step by step
+## C. The replacement, as a recovery contract
 
-Two owners throughout. **W** is the window thread; **K** is the one worker thread,
-started at `ThreadPriority::BelowNormal` through `bt_platform::spawn_at_priority`
-exactly as `update::begin` starts the check's thread. Every message from K to W
-arrives as `AppEvent::UpdateProgress` / `AppEvent::UpdateOutcome` through the
-existing `EventLoopProxy` (`crates/bt-app/src/main.rs:36798-36800`), and both need
-an arm in `AppEvent::station` (`main.rs:588`) — that is where `user_event` reads
-the station it opens. Every W step
-below stands at a new `hang_watch::Station::UpdateSwap`, entered with
-`hang_watch::enter` and put back with `hang_watch::at`
-(`crates/bt-app/src/hang_watch.rs:1440-1466`). K never touches a window, a
-compositor, or `KNOWN`; W never opens a socket or a file bigger than a listing.
+### C.0 Actors, and the one invariant
 
-**Shared, both platforms (K unless marked):**
-
-1. **(W)** press → set `Downloading`, hand K the tag. One press, one worker; a
-   second press is ignored while a worker is live.
-2. Create `<data>/Folio/update/<tag>/`; sweep every sibling that is not it.
-3. `GET github.com/lulu-loopp/folio-terminal/releases/download/<tag>/SHA256SUMS.txt`
-   (or `SHA256SUMS-macos.txt`). Text, small, through today's `bt_platform::https_get`.
-4. `GET …/releases/download/<tag>/folio-windows-x64.zip` (or `Folio-macos-arm64.dmg`)
-   through the **new** `bt_platform::https_download` (§E). Progress to W on each
-   chunk, coalesced to at most one message per 100 ms.
-5. Hash the file; compare to the line `SHA256SUMS.txt` carries for that bare name.
-   Mismatch or missing line → `Failed`, files deleted.
-6. Unpack (Windows) or attach (macOS) and run the platform check below. A failure
-   here is `Failed` and the staging directory is deleted.
-7. **(W)** `Verified`. On **Restart now**: flush the session store so `session.json`
-   (schema v15, `crates/bt-persist/src/session.rs:51`) holds every window's
-   placement, tab strip, pane tree and per-pane directory as it stands, then hand
-   K the go-ahead. The flush must be forced rather than waited for: the store's
-   1.5 s debounce (`crates/bt-app/src/persist.rs:248`) is longer than the gap
-   between this step and the quit.
-8. K performs the platform swap, then spawns the new build (below), then reports.
-9. **(W)** on success, the ordinary quit path — the same one `Quit` runs, which
-   closes every window and releases the data-directory claim.
-
-### Windows
-
-The nine files are `folio.exe`, `folio.msix`, `conpty.dll`, `OpenConsole.exe`,
-`folio-here.cmd`, `LICENSE-MIT`, `LICENSE-APACHE`, `THIRD-PARTY-NOTICES.md`,
-`TRADEMARK.md` (`scripts/release/package.ps1:278-298`).
-
-1. Extract the zip into `<data>/Folio/update/<tag>/new/`. Refuse any entry whose
-   path is not exactly one of the nine bare names — no directories, no traversal.
-2. `WinVerifyTrust` on `new\folio.exe` and on `new\folio.msix`: the signature must
-   verify, must carry a countersignature time stamp, and the signer's subject must
-   be the same distinguished name as the **running** `folio.exe`'s, compared with
-   `bt_platform::msix::distinguished_name` / `publisher_matches_subject`
-   (`crates/bt-platform/src/msix.rs:121,175`). Reading our own certificate rather
-   than a baked-in literal is the point: the day the certificate is renewed, the
-   updater does not need a new build to accept it. `scripts/release/smoke.ps1:342-365`
-   is the same check made on the artefact at release time.
-3. **The writability probe.** `MoveFileExW` the running `folio.exe` to
-   `folio.exe.old`. This *is* the probe — a running image can be renamed but not
-   overwritten, and no other test answers the question honestly. Failure here is
-   the whole of "this folder is not ours": Program Files, a read-only share, a
-   locked folder. It ends in `Failed` with the release page offered, and nothing
-   has moved.
-4. Rename the other eight the same way, in the listed order. Any failure retries
-   that one rename 5 times at 200 ms — the bound `persist.rs:32-47` already sets
-   for a file an antivirus or a sync client is holding — and then **rolls back**:
-   every `.old` renamed back, in reverse order, and `Failed`.
-5. `MoveFileExW` the nine staged files in, with `MOVEFILE_REPLACE_EXISTING` unset
-   (nothing is there). A failure rolls back both halves.
-6. **Spawn before quitting.** `bt_platform::quiet_command(install_dir\folio.exe)`
-   with `--await-exit <our pid>`, detached. If the spawn fails, roll back
-   completely and `Failed` — the window is still up, so this is recoverable, and
-   that is exactly why the spawn precedes the quit.
-7. The old files are **not** deleted here. The next start deletes `*.old` beside
-   `folio.exe`, best-effort, on K. That is the "never delete the old files until
-   the new build has started once" rule, mechanically.
-
-**The sparse MSIX.** `folio.msix` is an identity registered against the folder, and
-Windows keys a registration by the package's version. When the msix bytes change —
-they do every release, because `package.ps1:349-397` writes the version into the
-manifest — an existing registration still names the old version and the old
-manifest. **Re-registration is needed, and only when a registration exists.** On
-the next start, if `msix::registration()` answers a registration whose
-`EffectiveExternalPath` is this folder and whose version is not `version::VERSION`,
-re-register: `AddPackageByUriAsync` with `SetExternalLocationUri(folder)` replaces
-what is there rather than refusing (`crates/bt-platform/src/msix.rs:298-310`), so
-there is no remove-then-add window in which the machine has neither. It runs on
-`explorer_menu`'s own thread, never on W. A machine that never turned the first-page
-verb on has no registration and nothing happens.
-
-**A second Folio.** §7.59 makes one process per data directory, so a second Folio
-over the *same* `%APPDATA%` cannot exist. A second Folio over an isolated data
-directory but the *same* install folder can (that is how test windows are opened).
-It survives the swap: its image is already mapped, renaming the file underneath it
-does nothing, and it keeps running the old build until it exits. What it does break
-is the `.old` sweep, which will fail on a file still mapped — which is why the
-sweep is best-effort and retried at every start.
-
-### macOS
-
-1. `NSBundle.mainBundle().bundlePath`. If it does not end in `.app`, this is not an
-   installed bundle → §D, Development.
-2. `hdiutil attach -nobrowse -readonly -noverify -mountpoint <temp>/mnt <dmg>`.
-3. `spctl -a -vvv -t exec <mnt>/Folio.app` must answer `accepted` **and**
-   `source=Notarized Developer ID` — the same assertion `scripts/release/macos/notarize.sh:192-204`
-   makes before the tag is published, asked here on the reader's machine, by
-   Gatekeeper, about the bytes that just arrived. Then
-   `codesign --verify --strict --verbose=2 <mnt>/Folio.app`. Either refusal →
-   detach, `Failed`.
-4. `ditto <mnt>/Folio.app <parent>/Folio.app.new` — `ditto`, not `cp -R`, because
-   it carries extended attributes and leaves the signature intact.
-5. `codesign --verify --strict --verbose=2 <parent>/Folio.app.new` — the copy, not
-   the source, because the ticket's rule is that what gets installed is what was
-   checked.
-6. `rename(2)` `Folio.app` → `Folio.app.old`, then `rename(2)` `Folio.app.new` →
-   `Folio.app`. Two renames in the same directory, so each is atomic and the first
-   failing leaves nothing done. A failure of the second renames the first back.
-7. `open -n -a <parent>/Folio.app --args --await-exit <pid>`. Spawn before quit,
-   rollback on failure, as on Windows.
-8. `hdiutil detach <temp>/mnt`; delete `Folio.app.old` on the **next** start.
-
-### The relaunch handoff
-
-`open -n` and a detached `CreateProcess` both start a real second process, and both
-would then meet §7.59's handoff: a second Folio asks `persist::is_writer_of`, finds
-the data-directory claim held, calls `launch_wire::hand_over` down the well-known
-pipe, and exits through `leave_process` (`crates/bt-app/src/main.rs:118196-118201`).
-Its two-second `HANDOVER_BUDGET` (`crates/bt-platform/src/launch_pipe.rs:111`) is
-far shorter than a quit, so without a wait the new process would reliably be
-swallowed into the old one as a new tab, and the old build would keep running.
-**`--await-exit <pid>` is the one new thing.** It is parsed in
-`crates/bt-app/src/cli.rs` before anything else happens, and it means: wait for
-that process id to be gone, then start normally.
-**The pid is the fast path; the claim is the authority.** The wait ends when
-`bt_platform::instance::claim_data_directory` succeeds — that is the one fact that
-actually decides whether this process becomes the running Folio or hands itself off
-— and the pid is only what it polls between attempts, so the loop costs nothing
-while the old process is winding down. Windows: `OpenProcess(SYNCHRONIZE)` +
-`WaitForSingleObject`; a handle that cannot be opened means gone. macOS:
-`kill(pid, 0)` at 100 ms. Waiting on the claim rather than the pid alone is also
-what makes pid reuse harmless. The wait gives up after **30 s** and starts anyway —
-`instance.rs` already recovers a claim whose owner died holding it, so a wedged old
-process cannot make the new one unstartable. Placed before
-`diagnostics::enter_resident_run`, beside the single-instance fork §7.59 puts there.
-
-## D. Where it is installed, and what that means
-
-One function, `update::location()`, answering one enum. Every arm is a fact about
-the machine, asked of the machine; none is a version string or a guess.
-
-| Location | How it is told | Behaviour |
+| | Who | Runs from |
 |---|---|---|
-| **Portable folder** (Windows) | the rename probe in §C step 3 succeeds | the full swap |
-| **Unwritable folder** (Program Files, a share, a policy-locked directory) | the rename probe fails | card says where it is installed and offers **Open releases page**; nothing is downloaded a second time |
-| **Homebrew cask** (macOS) | `/opt/homebrew/Caskroom/folio` or `/usr/local/Caskroom/folio` exists — the cask's own receipt directory; the bundle may also be a symlink into it | card says to run `brew upgrade --cask folio` and offers **Copy command**; no download |
-| **winget** (Windows, when winget installs land) | the install folder has a `Microsoft\WinGet\Packages` ancestor | card says `winget upgrade lulu-loopp.Folio`, **Copy command**; no download. Must be re-verified against the real package when `docs/plans/release/winget.md` lands — a portable-archive package's layout is winget's fact, not ours |
-| **macOS bundle elsewhere** (`~/Applications`, a second volume) | `bundlePath` ends in `.app`, parent is writable | the full swap, into that parent — the running bundle's location, never a hard-coded `/Applications` |
-| **Development build** | `version::CHANNEL` is `Development` | the check still runs, the dot still lights, the row still names the version; **the card is never raised** |
+| **O** | the old, running Folio | the installed set |
+| **P** | the **applier** — the *staged* new executable, run with `--update-apply <journal>` | the staging directory, which is never part of the install set |
+| **N** | the new Folio after the flip | the installed set |
+| **R** | recovery — the first few milliseconds of *any* Folio start, plus a Windows logon hook | wherever it was started from |
 
-**`version::CHANNEL` is new and is the only honest way to tell a `dist/nextNN`
-candidate from a release.** It cannot be a path test — a candidate folder and an
-extracted release folder are the same nine files — and it cannot be the commit,
-because a build has no way to know offline which commit a tag points at. So it is a
-build-time fact, on `version::COMMIT`'s exact footing (`crates/bt-app/src/version.rs:24-40`):
-`build.rs` reads an environment variable that **only the release packaging step
-sets**, and `CHANNEL` is `Release` when it is present and `Development` otherwise,
-including for a source tarball where `COMMIT` is already `unknown`. A developer who
-wants the card has to set the variable, which is a thing they can only do on
-purpose.
+O never performs the destructive step. It cannot: the review's R-4 requires the
+cancelable quit to finish first, and after that O is a process on its way out. P is
+a real, separate, already-verified executable, and the flip cannot touch it.
+
+> **Invariant I1.** From the instant the first destructive call is made until
+> health is acknowledged, at least one **complete** copy of the install set exists
+> at a path the on-disk journal names, and the journal says which phases are
+> possible. Recovery never remembers anything; it looks at what is on disk.
+
+### C.1 The journal, the lock, and where they live
+
+`<install-root>/.folio-update/` — beside the installed files, on the destination
+volume, reachable without the data directory. `<install-root>` is the folder
+holding `folio.exe` on Windows and the bundle's parent on macOS. It holds
+`journal.json` (fsynced before every phase change, written through a temporary file
+and an atomic rename), `lock`, `staging/`, and `backup/`.
+
+```
+{ v:1, txn, install:{path, volume_id, file_id}, from_version, to_version, tag,
+  files:[…], phase: Prepared|Flipping|Flipped|RollingBack|RolledBack|Failed|Healthy,
+  health:{pid, version, at_ms}|null, attempts, last_error }
+```
+
+**The lock is installation-scoped, not data-directory-scoped** (R-7). Windows: an
+exclusive `CreateFileW` on `lock` with no sharing; Unix: `flock(LOCK_EX|LOCK_NB)`.
+The data-directory claim does not serialize this: two isolated `APPDATA`s, or two
+logon sessions, address the same binaries. Install identity is the canonical
+volume + file id of `<install-root>` recorded in the journal, so a folder moved
+between phases is detected and the transaction is failed rather than applied to a
+stranger. On macOS every path is derived from the **actual bundle basename**, so a
+`Folio Test.app` updates itself and not `/Applications/Folio.app`.
+
+### C.2 Prepare — nothing installed is touched (K, the worker thread)
+
+1. Take the installation lock. Held → the card says another copy of Folio is
+   already updating this installation; no download.
+2. Create `<install-root>/.folio-update/staging/<txn>/` with exclusive creation.
+   **This is on the destination volume by construction**, which is what makes the
+   flip a rename rather than a cross-volume copy (R-6). The *download cache* may
+   be under `persist::storage_dir()`; the staged tree may not.
+3. Reserve space for archive + expansion + a complete backup set; refuse with a
+   sentence naming the shortfall.
+4. Download the asset (§E) into the cache. Hash it against the release's checksum
+   document, fetched by the **same offer's tag**.
+5. Expand / attach, and verify **identity, not merely validity** (§E).
+6. Copy the verified tree into `staging/<txn>/`, flush every file and the
+   directory, then **re-verify the staged copy in place** — signature, version,
+   architecture — because what gets installed must be what was checked.
+7. Journal `Prepared`, fsync. Card → `Verified`.
+
+Every failure here deletes the transaction directory, releases the lock, and
+reports `Failed(… )` with *Nothing installed was changed.*, which is true.
+
+### C.3 The barrier — the ordinary quit runs to completion first
+
+On **Restart now**, O begins the ordinary quit (`crates/bt-app/src/quit.rs:147-174`,
+driven at `main.rs:110990-111085`) with a reason of `UpdateRestart`. Every
+cancelable step runs unchanged: `Ask` over dirty documents, `Save`/`Discard`,
+`Photograph`, `Write`.
+
+- `QuitStep::Abandon` — the reader chose Cancel, or `flush_judged` reported a
+  failed write — **abandons the update too**. Journal stays `Prepared`, card
+  returns to `Verified` naming the reason. This is the whole of R-4.
+- The session write is the store's own `flush_judged` on **W**, but W must not
+  block on it: W requests a named generation, keeps pumping events, and acts on the
+  receipt. `SessionWriter::wait_for` is an unbounded `recv`
+  (`crates/bt-app/src/persist.rs:365-385`), which is why the update path uses a
+  deadline and treats expiry as `Abandon`, never as success.
+- From `Photograph` onward no new session mutation is admitted and
+  `launch_wire` requests are refused, so the document that landed is the document
+  that comes back.
+- At `QuitStep::Exit`, and only after `written(true)`, O spawns P detached and then
+  exits by the ordinary path. A spawn failure there journals `Failed` and exits
+  anyway — nothing has moved, and the next start says so.
+
+### C.4 The flip
+
+P first waits for O to be gone: it holds the installation lock, polls O's process
+handle, and — the authoritative test — polls `bt_platform::instance::claim_data_directory`
+until it succeeds, then **immediately releases it** and proceeds, because P is not
+the writer and must not become one. If 60 s pass, P journals `Failed`, deletes
+staging, and exits without touching anything.
+
+**macOS is atomic and needs no repair.** One call:
+
+```
+renamex_np("<parent>/<Name>.app", "<staging>/<txn>/<Name>.app", RENAME_SWAP)
+```
+
+Both paths are on the same filesystem by construction (C.1), so the exchange is a
+single atomic operation: afterwards the launch path holds the new bundle and the
+staging path holds the old one, which *is* the backup. **There is no interrupted
+state.** The journal still moves `Flipping` → `Flipped` around the call so recovery
+can tell which side it died on; recovery decides by reading the installed bundle's
+version, not by trusting the phase.
+
+**Windows has no atomic multi-file exchange**, so it gets the journal, the applier,
+and a logon hook. P, before the first destructive call, writes
+`HKCU\…\CurrentVersion\RunOnce\FolioUpdateRecovery` = `"<staging>\<txn>\folio.exe"
+--update-recover "<journal>"` — a path outside the install set — and journals
+`Flipping`, fsync. Then:
+
+1. For each of the nine, in a fixed order: `MoveFileExW(<install>\<n>,
+   <backup>\<n>, MOVEFILE_WRITE_THROUGH)`.
+2. For each of the nine: `MoveFileExW(<staging>\<txn>\<n>, <install>\<n>,
+   MOVEFILE_WRITE_THROUGH)`.
+3. Journal `Flipped`, fsync.
+
+`ReplaceFileW` is not used: it needs an existing target, and step 1 has removed it.
+Retry policy is its own, stated rather than borrowed: a sharing violation or an
+access denial retries 10 times over 5 s — `persist.rs:32-47` is five *write*
+attempts on a 1.5 s debounce and is not this. A rename that still fails rolls the
+transaction back and journals `Failed`.
+
+**I1 holds through every instant of this.** Before step 1 the install set is
+complete; during step 1 `staging` is complete; during step 2 `backup` is complete;
+after step 2 the install set is complete again. Every one of those paths is named
+in the journal, and `staging\<txn>\folio.exe` is a verified executable that the
+RunOnce entry can run when the install set cannot.
+
+### C.5 Health, and only then deletion
+
+P launches `<install>\folio.exe --update-health <journal>` (macOS: `open -n -a
+<parent>/<Name>.app --args --update-health <journal>`) and waits **90 s**.
+
+Health is not a spawn and not `--version`. N must reach the point where it has
+**claimed the data directory** (C.7), read settings and session without a
+future-schema refusal (`crates/bt-persist/src/migrate.rs:836-842` already refuses a
+newer schema), and drawn its first pane text — the same `first_text_present`
+criterion `docs/plans/release/clean-vm.md:611` already uses. Then N writes
+`health {pid, version, at_ms}` into the journal, fsyncs, and signals P.
+
+Any Folio of `to_version` starting from this installation satisfies the criterion,
+including a launch the reader started by hand, so a race with a manual launch
+**completes** the transaction instead of failing it.
+
+- **Health arrives** → P deletes exactly the recorded backup set — never an
+  arbitrary `*.old` glob — removes the RunOnce entry, journals `Healthy`, removes
+  the journal, releases the lock.
+- **N exits, crashes, or the deadline passes** → P journals `RollingBack` and
+  reverses the flip from what is on disk (macOS: the same `RENAME_SWAP` back). It
+  then relaunches the restored old build with `--update-failed <journal>`, which
+  raises the card at `Failed` with *The previous version was put back.*
+- **Rollback itself fails** → journal `Failed` with `last_error`, backups kept, the
+  RunOnce entry kept. The card's sentence is then *Folio could not finish
+  replacing itself; see* the path. There is a third outcome and it is named, rather
+  than being reported as "nothing was changed".
+- A backup file another process holds open is **retained and reconciled**, not
+  deleted and not treated as success.
+
+### C.6 Recovery at start, idempotent by construction
+
+Every Folio start, before the single-instance fork at `main.rs:118196-118201`,
+off the window thread:
+
+1. Read `<install-root>/.folio-update/journal.json`. Absent → done.
+2. Take the installation lock, non-blocking. Held → an actor owns this
+   transaction; do nothing at all.
+3. Verify `install.volume_id`/`file_id` still name this folder. They do not → fail
+   the transaction and leave the files alone.
+4. Decide from **what is on disk**, never from a remembered index:
+
+| Phase found | Disk | Action |
+|---|---|---|
+| `Prepared` | — | delete staging + cache, remove journal |
+| `Flipping` | install set complete at `to_version` | continue as `Flipped` |
+| `Flipping` | install set complete at `from_version` | delete staging, remove journal |
+| `Flipping` | install set incomplete | roll **forward** if staging is complete, else roll **back** from backup; I1 guarantees one is |
+| `Flipped`, no health | this process is `to_version` | write health, delete the recorded backups, remove journal |
+| `Flipped`, no health | this process is `from_version` | roll back |
+| `RollingBack` | — | finish the rollback |
+| `Failed` / `RolledBack` | — | show the sentence once, then remove the journal |
+
+Every row is a re-evaluation, so recovery interrupted during recovery is simply
+recovery again. The Windows `RunOnce` entry is what makes this reachable when the
+install set has no runnable executable; on macOS nothing equivalent is needed
+because C.4 is atomic. **The RunOnce key is the one thing this feature writes
+outside the data directory**, it exists only between the flip and health, and it is
+removed by whichever actor finishes the transaction — the owner should be told
+this, on §7.56's measure.
+
+Staging under a transaction directory is created exclusively, never followed
+through a link out of its own root, and swept only when it is provably abandoned:
+a `Prepared` journal with no live lock holder, two launches old.
+
+### C.7 The claim, adopted without a gap
+
+`crates/bt-app/src/persist.rs:223-233` caches `Option<DataDirectoryClaim>` in a
+process-wide table with `or_insert_with`, so **a single failed attempt is
+remembered forever**. A child that acquired its own claim outside that table would
+then be told by `is_writer_of` that it is not the writer, and would hand itself off
+to nobody. Rev 1's `--await-exit` walked straight into this.
+
+Two changes, both in `persist.rs`:
+
+- `try_claim(dir) -> Option<Claim>` calls `bt_platform::instance::claim_data_directory`
+  **without caching a refusal**.
+- `adopt_claim(dir, claim)` inserts an already-acquired guard into the same table
+  under `instance::claim_name(dir)`, before any other code asks `is_writer_of`, so
+  the guard is never dropped and there is no window in which a third process can
+  take it.
+
+N, started with `--update-health`, retries `try_claim` for up to 30 s and adopts on
+success. **On timeout it does not start anyway and does not hand over** — it exits
+non-zero, P observes that, and P rolls back. Handing over would put a tab in some
+other window and call an unfinished update a success. Distinguish "the process is
+gone" from "the query was denied": on Windows an `OpenProcess` refusal is not
+death, and pid reuse is why the claim, not the pid, is the authority. The
+transaction id and the canonical data-directory path are carried across the
+relaunch on the command line so N cannot acknowledge the wrong journal.
+
+`launch_pipe.rs:111`'s 2 s `HANDOVER_BUDGET` is an IPC deadline and is never
+evidence that the old process has exited.
+
+## D. Where it is installed — ownership, not writability
+
+Classification is **read-only**. Nothing in §B's eligibility test may move a file;
+rev 1's "rename `folio.exe` to find out" both mutated before consent and confused a
+sharing violation with a policy refusal.
+
+| Class | How it is told (read-only) | Behaviour |
+|---|---|---|
+| **Ours** | `<install-root>` is writable by probe *file creation* in `.folio-update/`, no manager receipt claims it, identity resolves | the full transaction |
+| **Homebrew** | a cask receipt for `folio` names **this** bundle path (the tap is `lulu-loopp/homebrew-folio`, `docs/RELEASING.md:1003-1007`) | `brew upgrade --cask folio`, **Copy command** |
+| **winget** | a winget package receipt names **this** root; the identifier is `WeiyiShi.Folio` (`packaging/winget/…/WeiyiShi.Folio.installer.yaml:3`) | `winget upgrade --id WeiyiShi.Folio --exact`, **Copy command** |
+| **Not writable** | probe creation refused | releases page |
+| **Unknown** | any classification step failed, or receipts disagree | **releases page** — unknown fails safe |
+| **Not updater-capable** | the build says so | check, dot and row unchanged; no card |
+
+A bare directory *named* `Microsoft\WinGet\Packages`, or a leftover Caskroom
+directory for a Folio that is not this one, must not decide anything: a false
+positive costs a command that does nothing, a false negative mutates a
+manager-owned install and desynchronizes its receipts. So the test is "does a
+receipt name **this** canonical path", with symlinks and custom prefixes resolved,
+and anything short of an answer is **Unknown**.
+
+**Updater capability.** Rev 1 proposed `version::CHANNEL` set by the packaging
+step. That cannot work: `build.rs` embeds at compile time (`crates/bt-app/build.rs:36-37`)
+and packaging copies an already-built binary (`package.ps1:154`,
+`.github/workflows/release.yml`), so an environment variable set during packaging
+changes nothing in the bytes. The honest form is a compile-time capability set by
+the **release build invocation** — `rerun-if-env-changed`, exact-value parsing, set
+in `release.yml`'s cargo step and in `RELEASING.md`'s local instructions, verified
+by `smoke.ps1` — and it is a *capability*, not a provenance claim: copied bytes
+carry it, so it must never be described as "this is a released build". A candidate
+build simply does not set it. No binary-only signal can distinguish identical
+copied bytes, and the design does not pretend otherwise.
 
 ## E. Verification
 
-**The hash file is fetched by tag, never by `latest`.** Both addresses are
-`github.com/lulu-loopp/folio-terminal/releases/download/<tag>/<name>`, with the
-same `<tag>` the check returned, for one reason: `/releases/latest/download/` is
-resolved by GitHub at request time (`docs/RELEASING.md:29-42`), so a release
-published between the two requests would hand back an asset from one release and a
-hash from another, and both would verify. By tag, they cannot come apart.
+**Both requests use the offer's captured tag**, never `latest` and never a tag
+reconstructed from `VERSION`/`RELEASE_TAG`; the tag is validated and percent-encoded
+before it enters a URL. A mutable release can have its asset and its checksum
+document replaced together, in which case SHA-256 agrees and the binding is worth
+nothing on its own — rev 1's claim that mismatched pairs "would both verify" was
+simply wrong; they fail the hash. So the hash is the **integrity** check and
+**identity** is checked separately and is what actually decides:
 
-The fixed names exist precisely so an address can be assembled without a version in
-it: `package.ps1` writes `folio-windows-x64.zip` beside the long name and `dmg.sh`
-writes `Folio-macos-arm64.dmg` beside its own, one set of bytes copied by the
-packaging step and covered by the same checksum file (`docs/RELEASING.md:29-36`).
-`SHA256SUMS.txt` and `SHA256SUMS-macos.txt` carry **bare names** in `sha256sum -c`
-format — lowercase hex, two spaces, the file name, LF (`docs/RELEASING.md:157-173`,
-`scripts/release/package.ps1:555-568`) — so the updater looks up the exact bare name
-it asked for and refuses a file the checksum document does not name.
+- **Windows.** Full Authenticode trust on the new `folio.exe` *and* `folio.msix`:
+  chain validity, revocation, and an RFC 3161 timestamp. The signer's subject is
+  compared to the **running** executable's by `msix::distinguished_name` /
+  `publisher_matches_subject` (`crates/bt-platform/src/msix.rs:121-177`), which
+  parses RDNs and preserves value case — never a substring match, which is all
+  `smoke.ps1:351-361` does. The msix manifest's `Publisher` is compared to its own
+  verified signer. `conpty.dll` and `OpenConsole.exe` are Microsoft's and are
+  verified as `package.ps1:450-464` verifies them. The embedded `VERSIONINFO`
+  version and the machine architecture must match the offer. A certificate renewal
+  with the same subject passes; a changed subject requires an explicit migration
+  and is a refusal until then.
+- **macOS.** `codesign --verify --strict --deep` plus an explicit **requirement**
+  naming Folio's Team ID and bundle identifier, on the **mounted source and again
+  on the destination copy**. Gatekeeper acceptance is checked in addition, not
+  instead: `spctl` answers "some notarized Developer ID", which is not "Folio", and
+  on a machine with `spctl --master-disable` it answers nothing useful. The
+  destination is created fresh and exclusively; a pre-existing `.new` is never
+  written into. `CFBundleShortVersionString` and architecture must match the offer.
+- **Quarantine is preserved, never stripped.** Rev 1 asserted a downloaded file
+  carries no quarantine; that is an untested assumption. The design instead
+  preserves the attribute through download, mount, copy and launch, and reports an
+  assessment failure rather than deleting the attribute. Mount ownership is
+  recorded in the journal and detached on every success, failure and cancellation
+  path; a failed detach is cleanup debt, not a reason to undo a healthy install.
 
-**The new platform call.** `bt_platform::https_download` is a second function beside
-`https_get`, in both arms, and it keeps every discipline `http.rs` already states:
-one `GET`, `https` only, no caller headers, the platform's own proxy and certificate
-store (`WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY` on Windows, an ephemeral
-`NSURLSession` on macOS), no configuration of our own. What it adds is exactly
-four things: it writes to a file instead of a `String`; it reads
-`WINHTTP_QUERY_CONTENT_LENGTH` (Windows) / `NSURLResponse.expectedContentLength`
-(macOS) and **refuses before the first byte** if it exceeds `MAX_UPDATE_BYTES`
-(200 MB) — and refuses again mid-stream if the body outruns it, because a
-`Content-Length` is a claim; it calls a progress closure; and it polls a cancel
-flag. Its timeouts are its own: a 30 s idle phase timeout and a 10-minute whole-call
-budget, because `http.rs`'s 5 s / 15 s are sized for an 18 KB JSON document.
+**Redirects are expected and already safe.** WinHTTP follows up to ten hops and
+never HTTPS→HTTP (`crates/bt-platform/src/http.rs:39-51`); the macOS arm permits
+only HTTPS and at most ten (`macos_http.rs:311-329`). "One GET" means one logical
+fetch, and the whole-call deadline spans the redirect chain.
 
-**Windows Authenticode**: `WinVerifyTrust` with `WINTRUST_ACTION_GENERIC_VERIFY_V2`
-on the new `folio.exe` and the new `folio.msix`, plus a signer-subject comparison
-against the *running* executable's own certificate subject, by distinguished name
-(§C). The expected subject on a release today is
-`CN=Weiyi Shi, O=Weiyi Shi, L=Ann Arbor, S=mi, C=US`, and it is read rather than
-written down.
+**`https_download`** is a new function beside `https_get` in all three arms, keeping
+every discipline `http.rs` already states — one GET, HTTPS only, no caller headers,
+the platform's own proxy and trust store, no configuration of our own. What it adds:
+a fixed-size buffer and a bounded file sink rather than a growing `Vec`
+(`http.rs:226-260`, `macos_http.rs:391-402` both accumulate today); a checked byte
+counter enforced **before** each chunk is written, against a 200 MB cap; unknown
+length treated as `None` — macOS's negative `expectedContentLength` sentinel must
+never become a huge unsigned number — driving an indeterminate bar; verified EOF or
+exact known length before success; short writes, ENOSPC and flush/close failures
+all failing rather than reaching `Verified`; a monotonic end-to-end deadline that
+periodic bytes cannot defeat; and cancellation with a stated latency during DNS,
+headers, body, hashing and expansion, not merely between chunks. Progress carries
+**at most one pending wake**, so a stalled W cannot accumulate a backlog. Its
+timeouts are its own: 30 s idle, 10 min end-to-end.
 
-**macOS Gatekeeper**: `spctl -a -vvv -t exec` on the mounted bundle, requiring both
-`accepted` and `source=Notarized Developer ID`, and `codesign --verify --strict`
-on the copy. **The quarantine attribute is never removed.** A bundle we wrote
-ourselves carries no `com.apple.quarantine` — that attribute is applied by
-LaunchServices-aware downloaders, not by `write(2)` — and an updater that stripped
-it would be doing the one thing a malicious updater needs. If the attribute turns
-out to be present (§H), the answer is to find out why, not to delete it.
+**The archive's real layout.** `package.ps1:472-497` calls `CreateFromDirectory(…, $true)`,
+so the zip contains `folio-<version>/<name>` — a versioned root, spelled with the
+**manifest** version and no `v` or `-preview` — and `docs/RELEASING.md:682-685`
+documents it. The extractor accepts exactly one expected root and its nine regular
+children, strips the root, and refuses duplicates, case-collisions, absolute, drive
+or UNC paths, traversal, alternate data streams, links, reparse entries, extra
+roots, and any entry or total exceeding its expanded-size bound.
 
 ## F. Tests
 
-All CPU-only, all in-process, none touching the network, the registry, a real
-install folder or a real process.
+CPU-only, deterministic, over fake clocks, processes, transports, locks and a **durable** fake filesystem that can be cut at any operation and re-opened. The review's list at R-22 is adopted essentially whole; these are its groups, and every name is one gate.
 
-| Gate | Shape |
-|---|---|
-| `a_swap_plan_is_computed_from_a_listing_and_nothing_else` | `plan_swap(installed: &[FileName], staged: &[FileName]) -> Result<SwapPlan, SwapRefusal>`, a pure function over two listings. `SwapPlan` is an ordered `Vec<SwapStep>` of `RenameAside`/`MoveIn`, and its inverse is a second `Vec`. No filesystem is involved in computing either |
-| `a_rollback_undoes_exactly_the_steps_that_ran` | for every prefix length of a plan, applying the inverse of that prefix to a fake filesystem returns it to its start state |
-| `a_staged_set_missing_a_file_is_refused_before_anything_moves` | eight of nine, ten of nine, a name not on the list, a name with a separator in it |
-| `the_state_machine_never_replaces_without_both_checks` | drive `Idle → Relaunching` over a fake `Downloader` and a fake filesystem; every arm in which the hash or the signature answers no must reach `Failed` with the fake filesystem unmodified. The mutation is to let one check's `false` through |
-| `a_skipped_tag_is_not_offered_and_a_newer_one_is` | `should_offer(latest, running, skipped, channel)` over the same 14-tag ladder §7.52 ④ already uses |
-| `a_development_build_is_never_offered_the_card` | `channel = Development` answers `false` for every input |
-| `later_leaves_the_file_alone_and_skip_writes_two_fields` | over a temp `update-check.json` |
-| `an_update_check_file_written_by_v1_is_read_as_v2` | the first entry in `UPDATE_CHECK_MIGRATIONS`, which is empty today (`crates/bt-persist/src/migrate.rs:842`) |
-| `a_location_is_decided_by_what_the_machine_answers` | `detect_location` over an injected prober (probe result, Caskroom presence, ancestor names, channel) — the six rows of §D, one case each |
-| `a_body_longer_than_the_cap_is_refused_before_it_is_read` | the fake transport claims 300 MB; the fake transport then lies and claims 10 MB while delivering 300 MB |
+- **Recovery.** `every_crash_boundary_recovers_a_complete_launchable_install` — one case per row of §C.6 and per instant of §C.4 — `recovery_can_itself_be_interrupted`, `rollback_failure_preserves_journal_and_backups`, `a_moved_installation_fails_the_transaction_without_touching_files`.
+- **Health.** `spawn_without_health_never_commits`, `early_crash_or_health_timeout_restores_old_build`, `a_manual_launch_of_the_new_build_satisfies_health`, `unacknowledged_backups_are_never_swept`, `unknown_old_files_are_never_deleted`, `a_future_schema_refusal_fails_health`.
+- **Claim.** `acquired_claim_is_adopted_without_a_gap`, `transient_claim_refusal_is_not_cached`, `await_timeout_never_hands_over_or_starts_a_nonwriter`, `manual_launch_and_relaunch_have_one_writer`.
+- **Locking.** `two_data_directories_share_one_install_lock`, `locked_backup_blocks_reuse`, `staging_is_always_on_the_destination_volume`, `renamed_bundle_updates_only_itself`.
+- **Quit.** `quit_cancel_or_failed_save_prevents_swap`, `close_during_each_phase_preserves_recovery`, `stale_progress_cannot_revive_a_cancelled_job`, `session_receipt_matches_the_final_snapshot`.
+- **Archive.** `packaged_zip_root_is_accepted` over a fixture built to `package.ps1`'s real layout, `duplicate_case_alias_stream_link_and_traversal_entries_are_refused`, `expanded_size_limit_precedes_disk_exhaustion`.
+- **Identity.** `offered_tag_survives_latest_changes`, `mutated_asset_hash_pair_refuses_before_swap`, `validly_signed_wrong_product_or_version_is_refused`, `dn_values_preserve_case_and_order`, `timestamp_policy_accepts_the_packagers_format`.
+- **Transport.** `unknown_length_stream_is_bounded`, `https_redirects_work_and_http_redirects_refuse`, `redirect_loop_and_trickle_body_hit_deadlines`, `cancel_interrupts_idle_wait`, `short_write_disk_full_and_flush_failure_never_verify`, `progress_queue_has_one_pending_wake`.
+- **Offer.** `skip_racing_check_and_seen_keeps_all_fields`, `skip_failure_is_not_reported_as_persistent`, `cached_skipped_tag_stays_hidden_inside_daily_cadence`, `newer_tag_is_offered_after_skip` (by precedence, not inequality), `switch_off_suppresses_cached_and_inflight_offers`, `verified_later_has_a_resume_or_discard_path`, `manager_receipt_must_match_this_install`, `unknown_ownership_fails_to_the_page`, `every_card_state_has_a_handler_for_every_verb`.
 
-**`update-check.json` goes to schema v2**, gaining `skipped_tag: Option<String>`.
-It is the first entry `UPDATE_CHECK_MIGRATIONS` has ever carried, and the step is
-"add the key as `null`", because a file that has never skipped a version has not
-skipped one.
+**`update-check.json` goes to schema v2** with `skipped_tag`, the first entry `UPDATE_CHECK_MIGRATIONS` has ever carried (`crates/bt-persist/src/migrate.rs:836-842`). All four fields move through **one owner holding one lock across the whole read-modify-write**: `update.rs:479-482` re-reads before writing, but a Skip landing between that read and its write is still lost, and atomic file replacement does not make read-modify-write atomic.
 
-**The clean-machine plan.** `docs/plans/release/clean-vm.md` (1012 lines, the Gate 5
-runbook) gains a `### 4.4 更新器` checklist beside its existing per-machine tables
-at `:601-656`, and rows in its `## 8` known-gaps table at `:943`. The procedure,
-both platforms: install **0.4.1** by the ordinary route; serve a staged **0.4.2**
-from a draft release on the real repository (so that the tag, both asset names and
-both checksum documents are the real ones and no address is faked); launch, wait
-for the check, press **Update and restart**; assert the nine files' modification
-times moved, `--version` answers 0.4.2, `session.json`'s tabs came back, and the
-`.old` files are gone after the second start. Then the four refusals, each its own
-run: a folder made read-only; a checksum document edited by one character; an
-unsigned `folio.exe` substituted into the zip; the network cut mid-download. Each
-must leave `--version` answering 0.4.1. On Windows, one more run with the first-page
-context-menu verb turned on, asserting the verb still works after the swap (the
-re-registration in §C). On macOS, one run from a Homebrew-installed bundle,
-asserting the card offers the command and downloads nothing.
+**The clean-machine plan.** `docs/plans/release/clean-vm.md` gains a `### 4.4 更新器` checklist beside its per-machine tables at `:601-656` and rows in its `## 8` known-gaps table. It **cannot start from 0.4.1**: that build ships no updater and rejects the new flags (`crates/bt-app/src/cli.rs:406-407`), and an anonymous client cannot see a draft release (`update.rs:95-98`). So the baseline is a **signed, notarized, updater-capable release candidate** updating to a second one, both published accessibly; corrupt-checksum and wrong-signature cases use a test-only injected release source, never an edited public asset. The run covers: a usable restored multiwindow startup (`first_text_present`, not mtimes); immediate child death; a hung child; claim timeout; power loss forced at each boundary of §C.4; a locked rollback file; staging on a second volume; each manager-owned class; the quarantine path; a failed session save; and a cancelled quit. Deletion assertions are conditional on `Healthy`, never on "the second start". Identity is read from the installed bytes.
 
-## G. Stage 2 — three tickets
+## G. Stage 2 — one core, then two drivers, each behind its own gate
 
 | # | Ticket | Files | Size |
 |---|---|---|---|
-| 1 | **The machine and the card.** `UpdateState`, `should_offer`, `plan_swap`, `SwapPlan`, the `Downloader` trait, `version::CHANNEL`, `update-check.json` v2, the card's geometry and three verbs, the two renamed i18n strings, the `AppEvent` arms and their `station()` rows, `Station::UpdateSwap`, the forced session flush, `--await-exit` | `crates/bt-app/src/update.rs`, `update_card.rs`(new), `{main,cli,i18n,settings,persist,hang_watch,version}.rs`, `build.rs`, `crates/bt-persist/src/{update,migrate,lib}.rs`, `crates/bt-platform/src/{http,http_portable,macos_http,instance}.rs` | **L** |
-| 2 | **The Windows swap.** the rename probe, the nine-file swap and its rollback, `WinVerifyTrust`, the zip reader, the `.old` sweep, the msix re-registration, the winget arm of `detect_location` | `crates/bt-platform/src/{trust.rs(new),msix}.rs`, `crates/bt-app/src/update_swap_windows.rs`(new), `update.rs` | **M** |
-| 3 | **The macOS swap.** `bundlePath`, the `hdiutil`/`spctl`/`codesign`/`ditto` sequence, the two renames, `open -n`, the Caskroom arm | `crates/bt-platform/src/macos_app.rs`, `crates/bt-app/src/update_swap_macos.rs`(new), `update.rs` | **M** |
+| 0 | **Capability and claim groundwork.** the compile-time updater capability in the release build invocation and its verification; `try_claim`/`adopt_claim`; the installation lock; the journal type and its recovery decision table as a pure function | `crates/bt-app/build.rs`, `src/{persist,version}.rs`, `crates/bt-platform/src/instance.rs`, `.github/workflows/release.yml`, `scripts/release/{package,smoke}.ps1`, `docs/RELEASING.md` | **M** |
+| 1 | **The shared core.** offer/job, `should_offer`, the card and its states, `update-check.json` v2 under one lock, `https_download` in all three arms, the archive reader, the quit barrier, stations, `AppEvent` arms, the startup recovery pass | `crates/bt-app/src/{update,update_card,update_job}.rs`, `{main,cli,i18n,settings,persist,quit,hang_watch}.rs`, `crates/bt-persist/src/{update,migrate,lib}.rs`, `crates/bt-platform/src/{http,http_portable,macos_http}.rs` | **L** |
+| 2 | **Windows driver.** trust decision, flip, RunOnce hook, rollback, msix registration policy, winget receipt classification | `crates/bt-platform/src/{trust,msix}.rs`, `crates/bt-app/src/update_apply_windows.rs` | **L** |
+| 3 | **macOS driver.** `renamex_np` flip, mount lifecycle, `codesign` requirement, Caskroom receipt classification | `crates/bt-platform/src/macos_app.rs`, `crates/bt-app/src/update_apply_macos.rs` | **M** |
 
-**Order is 1 → 2 → 3.** Ticket 1 is the only one with a testable core, and it must
-land with a `SwapDriver` trait whose Windows and macOS implementations are a `todo!`
-that reports `Failed` — so the shipped state after ticket 1 is exactly today's
-behaviour plus a card that says "not on this platform yet", and never a half-swap.
-Tickets 2 and 3 are independent of each other.
+**No panic stub.** `todo!()` panics and cannot "report Failed". Ticket 1 ships with
+a typed `Unsupported` returned **before** any network, staging, flush, wait or
+mutation, and with automatic install offers **capability-gated off**, so what ships
+is today's behaviour exactly. A visible "Download and install" that then admits no
+driver exists is misleading even when it is harmless, so the verb is not shown
+until its platform's integration gate passes. Both drivers have injectable cores
+and their own CPU tests; ticket 1 is not the only testable one.
 
-**Strings for opus46 to write in Chinese** (English first, in ticket 1; the Chinese
-is a separate pass, per the standing rule that all Chinese copy is written by
-opus46 against the seven description rules):
-
-- `Text::RowUpdateCheck` — renamed from "Update check" to "Check for updates automatically"
-- `Text::DescUpdateCheck` — rewritten: two sentences, written declarative, the reader's view, ≤ two lines, and it must now say that Folio can install the new version and that it never does so without a press
-- `update_card_available_in(lang, version)` — the card's headline, composed on `update_row_available_in`'s footing (`i18n.rs:6013`)
-- `Text::UpdateVerbInstall` / `UpdateVerbLater` / `UpdateVerbSkip` / `UpdateVerbCancel` / `UpdateVerbRestartNow` — the five verbs
-- `Text::UpdateWarnTabsClose` — the one sentence about every tab's program closing and the layout coming back
-- `update_card_progress_in(lang, got, total)` — the progress line
-- the eleven failure sentences of §B, one `Text` each
-- `Text::UpdateUseBrew` / `Text::UpdateUseWinget` / `Text::UpdateFolderNotOurs` — the three §D sentences, and `Text::CopyCommand`
-
-Every one of them is a `Text` variant with a `pick(lang, english, chinese)` arm, and
-every one has to be added to the completeness array the crate's tests walk
-(`crates/bt-app/src/i18n.rs:5620` onward) — that array is what makes a string with
-no Chinese column a red build rather than an English word in a Chinese window. The
-English lands in ticket 1 with the Chinese column filled by a literal translation
-that is explicitly marked for replacement; opus46 replaces the column, and the
-`check-doc-words` / copy-guide vocabulary rules apply to both.
+**Chinese, by opus46, after the English lands**: `Text::RowUpdateCheck` (renamed),
+`Text::DescUpdateCheck` (rewritten — it must now say Folio can install a new
+version and never does so without a press), `update_card_available_in`,
+`update_card_progress_in`, the five verbs (`Download and install`, `Later`,
+`Skip this version`, `Cancel`, `Restart now`), `Text::UpdateWarnTabsClose`,
+`Text::UpdateRestartToFinish`, the failure sentences of §B including the three
+distinct outcomes of §C.5, and `Text::UpdateUseBrew` / `UpdateUseWinget` /
+`UpdateFolderNotOurs` / `UpdateOwnerUnknown` / `CopyCommand`. Each is a `Text`
+variant with a `pick(lang, en, zh)` arm and must be added to the completeness array
+the crate's tests walk (`crates/bt-app/src/i18n.rs:5620` onward).
 
 ## H. Risks, and the experiment that answers each
 
 | Risk | Experiment |
 |---|---|
-| **Renaming a running exe on a OneDrive-synced folder.** The rename-aside trick is a documented Windows fact, but a sync client's filter driver sits between it and the disk, and `persist.rs:272` already records OneDrive making a write take a second and a half. A placeholder file that is not hydrated may refuse the rename outright | put an extracted 0.4.1 in a OneDrive-synced folder on a clean VM, once hydrated and once as an online-only placeholder, and run the swap. Measure the rename latency and the failure code. If it refuses, the answer is §D's unwritable arm, not a workaround |
-| **The copied bundle carries `com.apple.quarantine`.** If any part of the path — `hdiutil attach`, `ditto`, the copy's provenance — applies it, the new Folio is refused on first launch with a dialog the reader has no context for | on a Mac, download a real dmg with `https_download`, run the full §C sequence, and `xattr -l` the dmg, the mounted bundle, the copy and the installed bundle at each step. If the attribute appears, find which step applies it |
-| **The relaunch races the single-instance claim.** The new process must not reach `launch_wire::hand_over` while the old one still holds the claim, or it becomes a tab in the build it was meant to replace — and the failure is silent and looks like "the update did nothing" | instrument a debug build to log the claim release, the last window's destruction and the process exit; run 50 swaps on each platform and assert the new process never took the handoff path. The claim-acquisition wait above is designed to make this unreachable; the experiment is what proves it |
-| **The msix re-registration fails on the new build** — a deployment refusal names neither string (`msix.rs:26-31`), so the reader would see a first-page verb quietly stop working | on the Win11 clean VM with the verb turned on, swap 0.4.1 → 0.4.2 and read `msix::registration()` before and after. The refusal path must put the row back to `Off` and say so, never fail silently |
-| **A 200 MB cap and a 10-minute budget are guesses.** The archive is ~40 MB today and the dmg is smaller, but a future release with a bundled runtime could approach the cap, and a slow connection could approach the budget | measure the real asset sizes at 0.4.2 and the download time on a throttled 1 Mbit link. Both numbers are constants with tests naming them; a release that outgrows the cap must fail the release gate, not the reader's machine |
-| **`spctl` on a machine with Gatekeeper disabled** answers `accepted` for anything, so the notarization check would pass on exactly the machines least able to afford it | on a Mac with `spctl --master-disable`, run the check against an ad-hoc-signed bundle. If it passes, the `codesign --verify` of step 5 plus a requirement on the signing identity — not `spctl` — must be the load-bearing check |
+| **`renamex_np(RENAME_SWAP)` on a bundle** — the atomicity claim C.4 rests on. Behaviour with a running process's image inside the swapped directory, and on a non-APFS volume, is not established here | swap a running bundle on APFS and on HFS+, with and without the process live; assert both paths afterwards and that the running process survives to exit |
+| **Renaming a running exe on a OneDrive-synced folder.** `persist.rs:272` already records OneDrive costing a second and a half on a write; an online-only placeholder may refuse the rename | run the flip in a synced folder, hydrated and as a placeholder; measure latency and the failure code. A refusal is §D's Unknown/not-writable arm, not a workaround |
+| **`RunOnce` survivability** — whether the key is honoured after a hard power cut mid-flip, and whether security software strips it | force power loss at each boundary of C.4 on the Win11 clean VM and observe the next logon |
+| **Quarantine through the whole path** | `xattr -l` at every step of C.2–C.5 for a real downloaded dmg; if it appears, find which step applies it |
+| **A manual launch racing health** | start Folio by hand during the 90 s window, repeatedly, and assert the transaction completes rather than rolling back a healthy install |
+| **200 MB / 10 min / 90 s / 60 s are estimates** | measure the real asset sizes at the candidate release and the download time on a throttled 1 Mbit link; a release that outgrows the cap must fail the release gate, not the reader's machine |
+| **MSIX registration after a version change** | on the Win11 VM with the first-page verb on, run a full transaction and read `msix::registered()` before and after. A repair failure must be visible, must not claim nothing changed, and must not leave a broken registration silently enabled |
+
+## I. Review ledger
+
+- **R-1 (blocker) — done.** §C is rebuilt around invariant I1, a fsynced journal, an applier that runs from outside the install set, a Windows `RunOnce` recovery entry that does not depend on the replaced executable, an atomic macOS flip that removes the failure mode entirely, and the idempotent decision table of §C.6. Every row of the review's boundary table is a §F fault-injection case.
+- **R-2 (blocker) — done.** §C.5: health is claim + schema + `first_text_present`, not spawn. Backups are transaction-named, deleted only at `Healthy`, never by glob, retained when locked. A failed rollback is a third, named outcome; §B's "Nothing installed was changed" is used only where it is true.
+- **R-3 (blocker) — done.** §C.7: `try_claim` + `adopt_claim` close the caching hole at `persist.rs:223-233`; timeout fails the update explicitly and never hands over; pid reuse and query-denial are distinguished; txn id and canonical directory travel on the command line. `--await-exit` is gone.
+- **R-4 (blocker) — done.** §C.3: the ordinary `quit::Quit` runs to completion first; `Abandon` and a failed `Write` abandon the update; the job is application-owned, so closing a window strands nothing; the spawn is at `Exit`.
+- **R-5 — done.** §E: one `folio-<manifest version>/` root, nine children, stripped; the full refusal list and expanded-size bounds; the fixture is built to `package.ps1`'s real layout.
+- **R-6 — done.** §C.1–C.2: staging is inside `<install-root>`, so same-volume by construction; space reserved for archive, expansion and rollback; §D's probe is read-only file creation, never a rename; rename retry policy stated as its own.
+- **R-7 — done.** §C.1: an installation-scoped lock keyed by canonical volume+file id; macOS paths derived from the real bundle basename; `.old`/`.new` ownership recorded.
+- **R-8 — done.** §B/§E: an immutable offer carries the tag; both requests use it; the tag is validated and encoded; the "both would verify" sentence is withdrawn and identity, not the hash, carries the product claim. Whether this repository enables immutable releases is **open and flagged for the owner**.
+- **R-9 — done.** §E: full chain + revocation + RFC 3161; parsed-DN comparison against the running executable; msix publisher against its own signer; both Microsoft sidecars verified; version and architecture checked; renewal policy stated.
+- **R-10 — done.** §E: an explicit requirement naming Team ID and bundle identifier, on source and on the fresh destination copy, independent of Gatekeeper. Not conditional on any experiment.
+- **R-11 — done.** §E: quarantine preserved, never stripped; mount ownership in the journal with detach on every path; failed detach is debt; tool exit status and bounded runtimes required.
+- **R-12 — done (note).** §E states the existing redirect rules, keeps them in both arms, defines "one GET" as one logical fetch, and §A rewrites the privacy claim to include redirected asset hosts and Gatekeeper's own network activity.
+- **R-13 — done.** §E: fixed buffers, bounded sink, cap checked before each write, unknown length as `None` with the macOS sentinel named, EOF/length completeness, short write and ENOSPC handling, monotonic deadline, cancellation latency per phase, one pending progress wake.
+- **R-14 — done.** §C.6: an off-thread startup recovery pass before any job; recovery data separated from disposable cache; unique exclusive transaction directories; no link-following out of root; sweep only provably abandoned work; failed deletion is retriable debt. The path is named once, relative to `<install-root>`, which also removes rev 1's ambiguous `<data>/Folio`.
+- **R-15 — done.** §D: renamed to a *capability*, set in the release **build** invocation with `rerun-if-env-changed` and exact-value parsing, verified by `smoke.ps1`, listed in ticket 0's files. The design states plainly that copied bytes carry it and that no binary-only signal distinguishes identical copies.
+- **R-16 — done.** §F: one owner, one lock across the whole read-modify-write, all fields retained, one coherent snapshot published and every window repainted; a failed Skip is surfaced; comparison is by **precedence**; a cached skipped tag stays hidden inside the daily cadence; one process-level offer.
+- **R-17 — done.** §B: the switch gates cached and in-flight offers; manager-owned classes get an informational card, not an installable one; the highlight line's source is bounded — the check stores only `tag_name` today, so the line is fetched with the offer or omitted, and it is **omitted by default** pending the owner's word; Escape/close mean Later; the once-per-launch gate is not consumed by a suppressed offer; `Verified → Later` has a named resume entry; the first verb is relabelled **Download and install**; Later does not relight an acknowledged dot.
+- **R-18 — done.** §C.3: W requests a named generation and keeps pumping, with a deadline that ends in `Abandon`; all disk, network, signature and swap work is on K or in P; distinct stations for offer/dispatch, progress, outcome, session barrier and quit transitions, restored on early returns; both new `AppEvent` arms get `station()` rows at `main.rs:588-609`; K has its own phase diagnostics and never stamps W's heartbeat.
+- **R-19 — done.** §D: `winget upgrade --id WeiyiShi.Folio --exact`; receipts must name **this** canonical root; symlinks and custom prefixes resolved; an explicit **Unknown** class that fails to the releases page; writability is never treated as ownership.
+- **R-20 — done.** §C/§H: the function is `msix::registered()`; since `PackageRegistration` carries no version (`msix.rs:242-250`), ticket 2 must expose the package version and compare it typed against the manifest's four-part number, not against three-part `version::VERSION`. Re-registration is deferred until `Healthy`, rollback restores the previous registration and refuses a downgrade, and a repair failure is visible and never reported as "nothing changed".
+- **R-21 — done.** §F: the baseline is a signed, notarized, updater-capable candidate, not 0.4.1; corrupt cases use an injected test source, never edited public assets; `first_text_present` replaces mtimes; deletion assertions are conditional on `Healthy`; the full interruption and ownership matrix is listed.
+- **R-22 — done.** §F adopts the list, grouped, plus `a_moved_installation_fails_the_transaction_without_touching_files`, `a_manual_launch_of_the_new_build_satisfies_health`, `unknown_ownership_fails_to_the_page` and `every_card_state_has_a_handler_for_every_verb`.
+- **R-23 — done.** §G: a new ticket 0 establishes capability, claim, lock and journal before any driver; ticket 1 returns a typed `Unsupported` before any network, staging, flush, wait or mutation, with offers capability-gated off and no `todo!()`; each driver has its own integration gate and its own injectable core; build and release scripts and `docs/RELEASING.md` are in ticket 0's file list.
+
+**Open for the owner**, both new in rev 2: whether GitHub's immutable-releases setting is enabled on this repository (R-8), and whether the highlight line is worth a second request per offer (R-17).
