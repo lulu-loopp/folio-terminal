@@ -147,19 +147,33 @@ pub(crate) fn state() -> State {
     let Some(path) = settings_path() else {
         return State::Absent;
     };
-    match std::fs::read_to_string(&path) {
-        Err(_) => State::Absent,
-        Ok(text) if text.trim().is_empty() => State::Absent,
-        Ok(text) => match serde_json::from_str::<Value>(&text) {
-            Ok(settings) if settings.is_object() => {
-                if declares_folio(&settings) {
-                    State::Installed
-                } else {
-                    State::Absent
-                }
+    state_at(&path)
+}
+
+/// The same question about a named file, so a test can ask it without a settings file on the
+/// machine it runs on.
+#[must_use]
+fn state_at(path: &Path) -> State {
+    let text = match standing(path) {
+        // Nothing there is the same answer to the only question being asked.
+        Standing::Nothing => return State::Absent,
+        // **Not `Absent`.** There is a file, and a row that said "not installed" about it would
+        // offer to write over one this build never read. See [`standing`].
+        Standing::Unreadable => return State::Unreadable,
+        Standing::Text(text) => text,
+    };
+    if text.trim().is_empty() {
+        return State::Absent;
+    }
+    match serde_json::from_str::<Value>(&text) {
+        Ok(settings) if settings.is_object() => {
+            if declares_folio(&settings) {
+                State::Installed
+            } else {
+                State::Absent
             }
-            _ => State::Unreadable,
-        },
+        }
+        _ => State::Unreadable,
     }
 }
 
@@ -438,7 +452,19 @@ pub(crate) fn apply(install: bool, exe: &Path) -> Outcome {
     let Some(path) = settings_path() else {
         return Outcome::Refused("no user configuration directory to write into");
     };
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    apply_to(&path, install, exe)
+}
+
+/// The same act on a named file — the seam the tests press, so that what they pin is this
+/// function and not a settings file belonging to whoever runs them.
+fn apply_to(path: &Path, install: bool, exe: &Path) -> Outcome {
+    let existing = match standing(path) {
+        Standing::Text(text) => text,
+        // Nothing there yet: the install creates the file, and there is nothing to keep beside it.
+        Standing::Nothing => String::new(),
+        // Refused rather than replaced, exactly as an unparseable file is — see [`standing`].
+        Standing::Unreadable => return Outcome::Refused(UNREADABLE),
+    };
     let mut settings = if existing.trim().is_empty() {
         Value::Object(Map::new())
     } else {
@@ -447,7 +473,7 @@ pub(crate) fn apply(install: bool, exe: &Path) -> Outcome {
             // Refused rather than replaced. A settings file this build cannot read is a settings
             // file somebody wrote, and overwriting it to add a convenience is not a trade anyone
             // agreed to.
-            _ => return Outcome::Refused("the settings file is not one this build can read"),
+            _ => return Outcome::Refused(UNREADABLE),
         }
     };
     let changed = if install {
@@ -462,7 +488,7 @@ pub(crate) fn apply(install: bool, exe: &Path) -> Outcome {
         Ok(text) => text,
         Err(_) => return Outcome::Refused("the settings could not be written back"),
     };
-    match land(&path, &existing, "json", format!("{text}\n").as_bytes()) {
+    match land(path, &existing, "json", format!("{text}\n").as_bytes()) {
         Landing::Landed => {}
         Landing::NoDirectory => {
             return Outcome::Refused("the user configuration directory could not be created");
@@ -485,6 +511,44 @@ pub(crate) fn apply(install: bool, exe: &Path) -> Outcome {
 /// beside it.** See [`land`].
 pub(crate) const NO_BACKUP: &str =
     "a copy of your own file could not be kept, so nothing was written";
+
+/// What this module says about a settings file it could not read, whichever half could not read it.
+///
+/// One sentence for the byte that is not UTF-8 and for the document that is not JSON, because to
+/// the reader they are one fact: there is a file there, and this build is not going to guess at it.
+const UNREADABLE: &str = "the settings file is not one this build can read";
+
+/// **What is standing at a configuration file's path**, as the answer to "is there one".
+///
+/// The distinction between these three is the whole of the read side of [`land`]'s contract.
+/// `std::fs::read_to_string` fails the same way for a file that is not there and for one this
+/// build was not allowed to read, and an installer that took both for "there was nothing there"
+/// writes a whole fresh file over somebody's own — with no copy kept beside it, because `land` is
+/// given nothing to copy. Release audit 2026-09-16 (C-3): one non-UTF-8 byte in `config.toml` or
+/// `settings.json` is enough, the file is perfectly writable, and the loss is certain rather than
+/// a race. So the error kind is asked about, and everything that is not "no such file" refuses.
+pub(crate) enum Standing {
+    /// There is no file at that path. A write there creates one and destroys nothing.
+    Nothing,
+    /// The file's own text, as it reads today.
+    Text(String),
+    /// There is something at that path and this build could not read it. **Never written over.**
+    Unreadable,
+}
+
+/// Read a configuration file the way all three installers have to read one.
+///
+/// Anything but [`std::io::ErrorKind::NotFound`] is [`Standing::Unreadable`]: a permission the
+/// user's own ACL withholds, a sharing lock somebody else's editor holds, a byte that is not
+/// UTF-8, a directory standing under the file's name. None of them is a file that is not there,
+/// and that is the only state in which writing a fresh one loses nothing.
+pub(crate) fn standing(path: &Path) -> Standing {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Standing::Text(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Standing::Nothing,
+        Err(_) => Standing::Unreadable,
+    }
+}
 
 /// How far [`land`] got.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1078,6 +1142,22 @@ mod tests {
         }
     }
 
+    /// Every name in a directory, sorted — what a reader who opened it would find.
+    fn names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("read the directory")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
     /// A scratch directory of this test's own. Never anywhere near a real `~/.claude`.
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -1192,20 +1272,6 @@ mod tests {
         let target = dir.join("settings.json");
         assert_eq!(land(&target, "", "json", b"first\n"), Landing::Landed);
         assert_eq!(std::fs::read_to_string(&target).expect("read"), "first\n");
-        let names = |dir: &Path| {
-            let mut names: Vec<String> = std::fs::read_dir(dir)
-                .expect("read the directory")
-                .map(|entry| {
-                    entry
-                        .expect("entry")
-                        .file_name()
-                        .to_string_lossy()
-                        .into_owned()
-                })
-                .collect();
-            names.sort();
-            names
-        };
         assert_eq!(
             names(&dir),
             vec!["settings.json".to_owned()],
@@ -1241,6 +1307,79 @@ mod tests {
             "the copy kept is of what was there before the first write of the day"
         );
         assert_eq!(names(&dir), vec!["settings.json".to_owned(), backup]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// RED — **a settings file that could not be read is left byte for byte.**
+    ///
+    /// Release audit 2026-09-16 (C-3, the verifier's second site):
+    /// `read_to_string(&path).unwrap_or_default()` took a file this build was not allowed to read —
+    /// or one holding a single byte that is not UTF-8 — for a file that was not there. The empty
+    /// string it fell back to reads as "no settings at all", so an install wrote a whole new
+    /// document over somebody's own, and [`land`] was handed nothing to keep a copy of.
+    ///
+    /// RED GATE: put the `unwrap_or_default` back and this file comes back as Folio's own.
+    #[test]
+    fn a_settings_file_that_could_not_be_read_is_never_written_over() {
+        let dir = scratch("unreadable");
+        let path = dir.join(SETTINGS_FILE);
+        // A Latin-1 byte inside a string: an ordinary file on an ordinary machine, and not UTF-8.
+        let theirs: &[u8] = b"{\"model\":\"caf\xe9\"}\n";
+        std::fs::write(&path, theirs).expect("the user's own file");
+
+        let installing = apply_to(&path, true, &exe());
+        assert_eq!(installing, Outcome::Refused(UNREADABLE));
+        assert_eq!(std::fs::read(&path).expect("still there"), theirs);
+        assert_eq!(
+            names(&dir),
+            vec![SETTINGS_FILE.to_owned()],
+            "nothing was written beside it either"
+        );
+        // And the row drawn from it says so, rather than offering to write over it.
+        assert_eq!(state_at(&path), State::Unreadable);
+        // Taking it back out is refused for the same reason: this build cannot tell whose it is.
+        let taking_it_out = apply_to(&path, false, &exe());
+        assert_eq!(taking_it_out, Outcome::Refused(UNREADABLE));
+        assert_eq!(std::fs::read(&path).expect("still there"), theirs);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A file that is not there is the one state in which writing a fresh one loses nothing.**
+    #[test]
+    fn a_settings_file_that_is_not_there_is_the_one_that_gets_created() {
+        let dir = scratch("absent");
+        let path = dir.join(SETTINGS_FILE);
+        assert_eq!(state_at(&path), State::Absent);
+
+        assert_eq!(apply_to(&path, true, &exe()), Outcome::Installed);
+        assert_eq!(state_at(&path), State::Installed);
+        assert_eq!(
+            names(&dir),
+            vec![SETTINGS_FILE.to_owned()],
+            "a first install leaves one file: no copy of nothing, no temporary"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A file that is there is copied before it is changed**, and the copy is what was there.
+    #[test]
+    fn a_settings_file_that_is_there_is_copied_before_it_is_changed() {
+        let dir = scratch("copied");
+        let path = dir.join(SETTINGS_FILE);
+        let theirs = "{\n  \"model\": \"opus\"\n}\n";
+        std::fs::write(&path, theirs).expect("the user's own file");
+
+        assert_eq!(apply_to(&path, true, &exe()), Outcome::Installed);
+        let written = std::fs::read_to_string(&path).expect("read back");
+        assert!(written.contains("\"model\""), "{written}");
+        assert!(written.contains(MARK), "{written}");
+        let backup = format!("{SETTINGS_FILE}.bak-{}", today());
+        assert_eq!(names(&dir), vec![SETTINGS_FILE.to_owned(), backup.clone()]);
+        assert_eq!(
+            std::fs::read_to_string(dir.join(&backup)).expect("the copy"),
+            theirs,
+            "the copy beside it is the file as it was"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

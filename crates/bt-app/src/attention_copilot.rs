@@ -103,6 +103,12 @@ const SETTINGS_FILE: &str = "settings.json";
 /// The user setting that turns every hook file off at once, ours included.
 const DISABLE_ALL_HOOKS: &str = "disableAllHooks";
 
+/// What this module says about a hook file it could not read, whichever half could not read it.
+///
+/// One sentence for the byte that is not UTF-8 and for the document that is not JSON, because to
+/// the reader they are one fact: there is a file there, and this build is not going to guess at it.
+const UNREADABLE: &str = "the copilot hook file is not one this build can read";
+
 /// The substring that marks a command as ours.
 ///
 /// [`attention_hooks::MARK`](crate::attention_hooks)'s rule, for its reason — a user who moves
@@ -278,25 +284,39 @@ pub(crate) fn state() -> State {
     let Some(path) = hooks_path() else {
         return State::Absent;
     };
-    match std::fs::read_to_string(&path) {
-        Err(_) => State::Absent,
-        Ok(text) if text.trim().is_empty() => State::Absent,
-        Ok(text) => match serde_json::from_str::<Value>(&text) {
-            Ok(document) if document.is_object() => {
-                // **The same predicate `apply` refuses on**, and it has to be: a state that said
-                // `Installed` about a file the press then refuses to touch would be a switch that
-                // shows On and cannot be turned Off.
-                if declares_folio(&document) && !holds_somebody_elses_entry(&document) {
-                    State::Installed
-                } else {
-                    // A file somebody else put at this name, or one they added to. `Absent` would
-                    // make the row offer to write over it; `Unreadable` is the state that means
-                    // "there is something here and it is not ours to touch".
-                    State::Unreadable
-                }
+    state_at(&path)
+}
+
+/// The same question about a named file, so a test can ask it without a copilot installation on the
+/// machine it runs on.
+#[must_use]
+fn state_at(path: &Path) -> State {
+    let text = match crate::attention_hooks::standing(path) {
+        // No file is the same answer to the only question being asked.
+        crate::attention_hooks::Standing::Nothing => return State::Absent,
+        // **Not `Absent`.** There is a file, and a row that said "not installed" about it would
+        // offer to write over one this build never read.
+        crate::attention_hooks::Standing::Unreadable => return State::Unreadable,
+        crate::attention_hooks::Standing::Text(text) => text,
+    };
+    if text.trim().is_empty() {
+        return State::Absent;
+    }
+    match serde_json::from_str::<Value>(&text) {
+        Ok(document) if document.is_object() => {
+            // **The same predicate `apply` refuses on**, and it has to be: a state that said
+            // `Installed` about a file the press then refuses to touch would be a switch that
+            // shows On and cannot be turned Off.
+            if declares_folio(&document) && !holds_somebody_elses_entry(&document) {
+                State::Installed
+            } else {
+                // A file somebody else put at this name, or one they added to. `Absent` would make
+                // the row offer to write over it; `Unreadable` is the state that means "there is
+                // something here and it is not ours to touch".
+                State::Unreadable
             }
-            _ => State::Unreadable,
-        },
+        }
+        _ => State::Unreadable,
     }
 }
 
@@ -568,16 +588,30 @@ pub(crate) fn apply(install: bool, exe: &Path) -> Outcome {
     let Some(path) = hooks_path() else {
         return Outcome::Refused("no copilot configuration directory to write into");
     };
-    let existing = std::fs::read_to_string(&path).ok();
-    let standing = match existing.as_deref() {
-        None => None,
-        Some(text) if text.trim().is_empty() => None,
-        Some(text) => match serde_json::from_str::<Value>(text) {
+    apply_to(&path, install, exe)
+}
+
+/// The same act on a named file — the seam the tests press, so that what they pin is this function
+/// and not a hook file belonging to whoever runs them.
+fn apply_to(path: &Path, install: bool, exe: &Path) -> Outcome {
+    let existing = match crate::attention_hooks::standing(path) {
+        crate::attention_hooks::Standing::Text(text) => text,
+        // Nothing there yet: the install creates the file, and there is nothing to keep beside it.
+        crate::attention_hooks::Standing::Nothing => String::new(),
+        // **A file that could not be read is never written over, and never removed either** — this
+        // build cannot tell whose it is. Release audit 2026-09-16 (C-3), the same conflation the
+        // other two installers held.
+        crate::attention_hooks::Standing::Unreadable => return Outcome::Refused(UNREADABLE),
+    };
+    let standing = if existing.trim().is_empty() {
+        None
+    } else {
+        match serde_json::from_str::<Value>(&existing) {
             Ok(document) if document.is_object() => Some(document),
             // Refused rather than replaced, for `attention_hooks`'s reason: a file this build
             // cannot read is a file somebody wrote.
-            _ => return Outcome::Refused("the copilot hook file is not one this build can read"),
-        },
+            _ => return Outcome::Refused(UNREADABLE),
+        }
     };
     if let Some(standing) = &standing
         && holds_somebody_elses_entry(standing)
@@ -603,12 +637,8 @@ pub(crate) fn apply(install: bool, exe: &Path) -> Outcome {
         // second copy of these hooks that upstream also runs — every event fired twice, for as long
         // as the file sat there. `folio.json.bak-<date>` is not a `*.json`, which is what the
         // `"json"` below produces.
-        match crate::attention_hooks::land(
-            &path,
-            existing.as_deref().unwrap_or_default(),
-            "json",
-            format!("{text}\n").as_bytes(),
-        ) {
+        match crate::attention_hooks::land(path, &existing, "json", format!("{text}\n").as_bytes())
+        {
             crate::attention_hooks::Landing::Landed => {}
             crate::attention_hooks::Landing::NoDirectory => {
                 return Outcome::Refused("the copilot hooks directory could not be created");
@@ -628,7 +658,7 @@ pub(crate) fn apply(install: bool, exe: &Path) -> Outcome {
         // **The whole file goes**, which is what "install then uninstall is the identity" means
         // when the file is one this build created: there was nothing there, and there is nothing
         // there again. The directory stays, because copilot's directory is not ours to remove.
-        if std::fs::remove_file(&path).is_err() {
+        if std::fs::remove_file(path).is_err() {
             return Outcome::Refused("the copilot hook file could not be removed");
         }
         Outcome::Removed
@@ -1090,6 +1120,41 @@ mod tests {
             "a hook file beside ours is one upstream also runs, and it is not ours to edit"
         );
         assert_eq!(std::fs::read_dir(&hooks).expect("the directory").count(), 1);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// RED — **a hook file that could not be read is left byte for byte.**
+    ///
+    /// Release audit 2026-09-16 (C-3), the third site of the same conflation:
+    /// `read_to_string(&path).ok()` answered `None` both for a file that is not there and for one
+    /// this build could not read, so an unreadable `folio.json` was written over on install — and
+    /// on uninstall was reported as "nothing to do" about a file nobody had read.
+    ///
+    /// RED GATE: drop the `Standing::Unreadable` arm from `apply_to` and the install replaces it.
+    #[test]
+    fn a_hook_file_that_could_not_be_read_is_never_written_over() {
+        let home = scratch("unreadable");
+        let hooks = home.join(HOOKS_DIRECTORY);
+        let path = hooks.join(HOOKS_FILE);
+        std::fs::create_dir_all(&hooks).expect("a scratch directory");
+        // A Latin-1 byte inside a string: an ordinary file on an ordinary machine, and not UTF-8.
+        let theirs: &[u8] = b"{\"version\":1,\"note\":\"caf\xe9\"}\n";
+        std::fs::write(&path, theirs).expect("the user's own file");
+
+        let installing = apply_to(&path, true, &exe());
+        assert_eq!(installing, Outcome::Refused(UNREADABLE));
+        assert_eq!(std::fs::read(&path).expect("still there"), theirs);
+        assert_eq!(
+            std::fs::read_dir(&hooks).expect("the directory").count(),
+            1,
+            "nothing was written beside it either"
+        );
+        // And the row drawn from it says so, rather than offering to write over it.
+        assert_eq!(state_at(&path), State::Unreadable);
+        // Nor is it removed: uninstalling a file this build never read deletes somebody's own.
+        let taking_it_out = apply_to(&path, false, &exe());
+        assert_eq!(taking_it_out, Outcome::Refused(UNREADABLE));
+        assert!(path.is_file(), "it is still there");
         let _ = std::fs::remove_dir_all(&home);
     }
 
