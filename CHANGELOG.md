@@ -20,6 +20,22 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **Closing Folio no longer waits for ever on a disk that has stopped
+  answering.** Folio writes your session to a file on the way out, and it waited
+  for that write to finish however long it took. On a folder that lives on a
+  network share or a cloud-sync drive that has gone quiet, that is for ever —
+  the windows are already leaving and there is nothing left to click. Folio now
+  gives the save three seconds, writes one line in its own log saying the save
+  did not finish and that the last completed one still stands, and closes. The
+  file itself was never at risk either way: a save replaces it whole or leaves
+  the previous one exactly where it was.
+- **Closing a pane whose reader is stuck no longer hangs the window.** When a
+  pane closes, Folio waits for the thread that was reading that shell's output
+  to come out of its last read. On one machine that wait held the window for
+  five seconds. It is now bounded: the reader gets two seconds, and past that it
+  is left to finish by itself while the window carries on. A shell that refuses
+  to be reaped no longer leaves the console and the reader standing behind it
+  either.
 - **On a Mac, a second Folio started from a terminal now hands over instead of
   becoming a second writer.** Which Folio is allowed to write your settings and
   your saved session was decided in a directory whose location came from
