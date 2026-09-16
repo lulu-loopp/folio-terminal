@@ -20,6 +20,27 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **A web preview no longer stays blank for the rest of the session after the
+  browser runtime updates itself.** When Microsoft's WebView2 runtime installs a
+  new build underneath a page you already have open, Folio closes the old
+  browser, waits for it to go, and builds the page again where it was. The step
+  that built it again could never be reached: the pane closed the browser and
+  started the wait over instead, every ten seconds, for as long as the window
+  stayed open — an empty rectangle with nothing on it to say why. It now
+  rebuilds once the old browser has gone, and a rebuild that does not bring the
+  engine back says so on the same card every other engine failure uses, with the
+  button that asks for the engine again.
+- **Pressing Restart on a page whose engine did not start now survives a late
+  reply from the attempt it replaced.** The engine answering for an attempt
+  nobody was waiting for any more took the retry's own time limit down and
+  cleared the card that explained it, which left a pane waiting for ever with
+  nothing on it. Every answer is now matched to the attempt that asked for it.
+- **A page still loading when its browser process died no longer keeps a spinner
+  turning.** The loading mark and the Stop control stayed as they were, aimed at
+  a browser that had gone; they now clear the moment it does. And Folio no
+  longer believes a page is on the glass when the engine refused to put it
+  there — it remembers only what the engine accepted, so the next frame asks
+  again.
 - **On a Mac, a second Folio started from a terminal now hands over instead of
   becoming a second writer.** Which Folio is allowed to write your settings and
   your saved session was decided in a directory whose location came from

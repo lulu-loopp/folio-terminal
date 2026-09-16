@@ -6040,6 +6040,10 @@ BT_WEB CreateCoreWebView2EnvironmentWithOptions failed: The system cannot find t
 
 **红门五道**(`webhost::engine_absence_tests`,全部无浏览器):钟到点出卡且只报一次、`next_deadline` 取两只钟里更早的那只、答话即撤钟(答成功不出卡、答失败出卡)、`the_engine_did_not_start` 把卡挂上座并把机器的原话交出去一次、以及一道源码门钉住 `open` 不再对 `start_environment` 用 `?`。**变异逐条实测**:①钟恒不响 → 第一道红(`saw []`,正是门 5 拍到的那张照片);②`next_deadline` 只报 browser wait → 第二道红;③`digest` 不撤钟 → 第三道红;④`the_engine_did_not_start` 不写 `fault` → 第四道红;⑤把 `?` 放回去 → 第五道红。
 
+#### ①″ A rebuild for a new browser build is two effects, not one (crash review C-2, 2026-09-16)
+
+**`WebEffect::AwaitBrowserExitBeforeRebuild` asks the old browser to go and `WebEffect::RebuildForNewVersion` is what the browser having gone produces** — the same pair `AwaitBrowserExitBeforeCleanup` makes with `ReleaseUserDataFolder`, and for the same reason: written as one effect that read the seat's own `waiting` field to tell its two halves apart, it could only ever see the half that closes the browser and re-arms the wait (both producers clear that field before they emit), so an Evergreen self-update left an open page closing a controller every `BROWSER_EXIT_DEADLINE` with no card over it for the rest of the session; a rebuild that has not brought the engine back after `REBUILDS_BEFORE_THE_CARD` tries now stops and draws this section's card instead.
+
 #### ② 一扇窗里所有的字,只除以一个分辨率
 
 **取证。** 同一台机器、同一次运行、`BT_CHROME_DUMP` 与截屏同时拿:版面说标签标题的框是 `[42, 6, 180, 40]`,**照片里那行字从 x=84 开始**,而且逐列复制地宽了一倍——2× 是横向,纵向只有 1.2×,两根轴不同倍,所以既不是字号变大也不是字体换了。把两根倍数除回去:960/2 = 480,600/1.2 = 500,**正是终端座的矩形**。而版面本身是对的:同一份 dump 里每一个方块、每一枚图标都画在它该在的地方,只有**字**错位。

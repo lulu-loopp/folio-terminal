@@ -93,7 +93,8 @@ pub(crate) enum WebEffect {
     /// deleting the thing it exists to keep. So what this effect names is the
     /// **moment**, not the removal: the folder is unheld, the teardown is
     /// finished, and a new environment may be created over it (which is the one
-    /// step [`WebEffect::RebuildForNewVersion`] cannot take before this).
+    /// step [`WebEffect::RebuildForNewVersion`] exists to take, and the reason
+    /// it waits behind [`WebEffect::AwaitBrowserExitBeforeRebuild`] first).
     ///
     /// Three doors lead here and the plan named only one of them.
     /// `BrowserProcessExited` is the door it named;
@@ -101,15 +102,37 @@ pub(crate) enum WebEffect {
     /// running out is the third — which on the graceful path is the *only* one
     /// that opens (`w0p-evidence.md` §4.2).
     ReleaseUserDataFolder,
-    /// Evergreen installed a new build under a running process. Nothing about
-    /// the window is wrong — only the browser binary is — so the seat comes
-    /// back on the same `HWND` and the same visual, at the last good URL.
+    /// **Evergreen installed a new build under a running process, so the old
+    /// browser has to be asked to go.**
     ///
-    /// What the caller owes this effect, in order: close every controller over
-    /// the old environment, wait for the browser to go by the same three doors
-    /// as `close`, **release the cached environment**, then create a new one. A
-    /// new environment made while the old browser still holds the folder does
-    /// not fail loudly — it simply never calls back.
+    /// Nothing about the window is wrong — only the browser binary is — so the
+    /// seat comes back on the same `HWND` and the same visual, at the last good
+    /// URL. What the caller owes *this* effect is the first half of that: close
+    /// every controller over the old environment and wait for the browser to go
+    /// by the same three doors as `close`. The second half — releasing the
+    /// cached environment and making a new one — is
+    /// [`Self::RebuildForNewVersion`], because **a new environment made while
+    /// the old browser still holds the folder does not fail loudly, it simply
+    /// never calls back** (`w0p-evidence.md` §3.4).
+    ///
+    /// # Why the rebuild is two effects and not one
+    ///
+    /// The pair this makes with [`Self::RebuildForNewVersion`] is the pair
+    /// [`Self::AwaitBrowserExitBeforeCleanup`] makes with
+    /// [`Self::ReleaseUserDataFolder`]: one effect starts a wait, another says
+    /// the wait is over, and neither arm has to guess which of the two it was
+    /// handed. Written as one effect that read the seat's own `waiting` field to
+    /// tell its halves apart, it wedged a pane for a whole session — **both
+    /// producers clear that field before they emit**, so the arm only ever saw
+    /// the half that closes the browser and re-arms the wait, and the half that
+    /// rebuilds was unreachable code.
+    AwaitBrowserExitBeforeRebuild,
+    /// **The old browser has gone**: release the cached environment and make a
+    /// new one, at the last good URL, on the same `HWND` and the same visual.
+    ///
+    /// The second half of [`Self::AwaitBrowserExitBeforeRebuild`], produced by
+    /// the two doors that say the browser went — its obituary arriving while the
+    /// rebuild wait is armed, and that wait running out — and by nothing else.
     RebuildForNewVersion,
 }
 
@@ -422,6 +445,12 @@ impl WebMachine {
     }
 
     /// A newer runtime is installed and the running one is now the old one.
+    ///
+    /// The answer is the *first* half of the rebuild — the browser under this
+    /// page is still alive and has to be asked to go before a new environment
+    /// can be made over its folder. The half that makes the environment is
+    /// [`WebEffect::RebuildForNewVersion`], and only the doors that say the
+    /// browser has actually gone produce it.
     pub(crate) fn on_new_browser_version_available(&mut self) -> WebEffect {
         if self.state == WebState::Closing {
             // The seat is going away; the version it goes away on is nobody's
@@ -435,7 +464,7 @@ impl WebMachine {
             .recoverable_url
             .clone()
             .or_else(|| self.desired_url.clone());
-        WebEffect::RebuildForNewVersion
+        WebEffect::AwaitBrowserExitBeforeRebuild
     }
 }
 
@@ -1423,6 +1452,21 @@ pub(crate) const BROWSER_EXIT_DEADLINE: Duration = Duration::from_secs(10);
 /// half is a fraction of that.
 const ENGINE_START_DEADLINE: Duration = Duration::from_secs(10);
 
+/// **How many times a seat rebuilds itself for a new browser build before it
+/// says out loud that the browser did not come back.**
+///
+/// The rebuild is a repair, and a repair that has been tried three times
+/// without the engine once coming up is not working. Bounding it here rather
+/// than leaving it to [`ENGINE_START_DEADLINE`] is what makes the close-and-wait
+/// cycle finite *by construction*: a deadline in another field bounds the wait
+/// for one environment, and what this bounds is how many environments the same
+/// runtime update is allowed to ask for.
+///
+/// Counted since the engine was last up and reset the moment a controller
+/// answers, so an Evergreen update that is repaired in one pass costs nothing,
+/// and three updates over a long session are three fresh budgets.
+const REBUILDS_BEFORE_THE_CARD: u32 = 3;
+
 /// How far apart two presses may land and still be one double click, in
 /// physical pixels.
 const DOUBLE_CLICK_SLOP: i32 = 6;
@@ -1669,6 +1713,15 @@ pub(crate) struct WebSeat {
     dialog_said: Option<Instant>,
     /// What is waiting on a browser, and until when.
     waiting: Option<(BrowserWait, Instant)>,
+    /// **How many environments this runtime update has already asked for**, and
+    /// therefore how much of [`REBUILDS_BEFORE_THE_CARD`] is left.
+    ///
+    /// Counted where the new environment is asked for and set back to zero the
+    /// moment a controller answers, which is the one event that means the
+    /// rebuild worked. A seat whose budget runs out stops rebuilding and wears
+    /// the card the rest of the engine's failures wear — see
+    /// [`WebSeat::may_rebuild_for_a_new_version`].
+    rebuilds_for_a_new_version: u32,
     /// When the engine this seat has asked for stops being allowed to say
     /// nothing — see [`ENGINE_START_DEADLINE`].
     ///
@@ -1959,6 +2012,7 @@ impl WebSeat {
             guards: bt_platform::WebGuards::none(),
             dialog_said: None,
             waiting: None,
+            rebuilds_for_a_new_version: 0,
             engine_owes_an_answer: None,
             wanted: WebPresence::Hidden,
             wanted_cover: Vec::new(),
@@ -2130,6 +2184,17 @@ impl WebSeat {
     fn digest(&mut self, event: &WebEvent, outcomes: &mut Vec<WebOutcome>) -> WebEffect {
         match event {
             WebEvent::Environment { generation, error } => {
+                // **A callback from a generation nobody is waiting for touches
+                // nothing on this seat.** The machine has always compared the
+                // number (`on_environment`); the seat did not, so a slow
+                // generation N answering after the reader pressed Restart took
+                // down generation N+1's clock and, with an error in it, drew
+                // N's card over N+1's — a retry with no deadline, no card and
+                // no way forward. The machine still hears it, because a stale
+                // *controller* is a live browser somebody has to close.
+                if *generation != self.machine.generation() {
+                    return self.machine.on_environment(*generation, error.is_none());
+                }
                 // The environment has spoken, so the clock the silence was
                 // hung on comes down whichever way it spoke.
                 self.engine_owes_an_answer = None;
@@ -2146,6 +2211,12 @@ impl WebSeat {
                 self.machine.on_environment(*generation, error.is_none())
             }
             WebEvent::Controller { generation, error } => {
+                // The same gate, for the same reason — and here the machine's
+                // answer for a stale generation is `CloseOrphanController`,
+                // which is exactly why the event is still handed to it.
+                if *generation != self.machine.generation() {
+                    return self.machine.on_controller(*generation, error.is_none());
+                }
                 self.engine_owes_an_answer = None;
                 match error {
                     // The environment came up and the controller did not: the
@@ -2177,6 +2248,12 @@ impl WebSeat {
                         ) {
                             self.fault = None;
                         }
+                        // **And a rebuild that reached a controller is a
+                        // rebuild that worked**, so the budget the next runtime
+                        // update spends starts full. The one event that says
+                        // the engine is up is the one that says the repair is
+                        // over — see [`REBUILDS_BEFORE_THE_CARD`].
+                        self.rebuilds_for_a_new_version = 0;
                     }
                 }
                 self.machine.on_controller(*generation, error.is_none())
@@ -2481,7 +2558,16 @@ impl WebSeat {
     /// saying it went is the end of that wait, not the news of a fresh crash,
     /// and feeding it to the state machine would start a second rebuild of the
     /// thing already being rebuilt.
+    ///
+    /// **And a page that was loading is not loading any more.** The renderer's
+    /// own arm has always said so; these two doors did not, so a browser that
+    /// died mid-load left a spinner turning for the rest of the session over a
+    /// Stop control aimed at a controller that no longer existed. The three
+    /// arms mean the same thing about the load and now say it in the same
+    /// words.
     fn browser_is_gone(&mut self, event: WebEvent) -> WebEffect {
+        self.page.loading = false;
+        self.page.loading_since = None;
         if matches!(self.waiting, Some((BrowserWait::Rebuild, _))) {
             self.waiting = None;
             return WebEffect::RebuildForNewVersion;
@@ -2648,17 +2734,16 @@ impl WebSeat {
                 self.start_environment(outcomes);
                 Ok(None)
             }
+            WebEffect::AwaitBrowserExitBeforeRebuild => {
+                self.ask_the_browser_to_go_before_a_rebuild();
+                Ok(None)
+            }
             WebEffect::RebuildForNewVersion => {
-                // Here the browser is alive and has to be asked. Only when it
-                // has gone may a new environment be made — see [`BrowserWait::Rebuild`].
-                if self.waiting.is_none() {
-                    self.host.close();
-                    self.the_controller_has_been_told_nothing();
-                    self.waiting =
-                        Some((BrowserWait::Rebuild, Instant::now() + BROWSER_EXIT_DEADLINE));
+                // The browser has gone — that is what this effect means — so
+                // the folder is free and a new environment may be made over it.
+                if !self.may_rebuild_for_a_new_version(outcomes) {
                     return Ok(None);
                 }
-                self.waiting = None;
                 bt_platform::forget_web_environment();
                 self.start_environment(outcomes);
                 Ok(None)
@@ -2767,6 +2852,53 @@ impl WebSeat {
             });
         }
         outcomes.push(WebOutcome::Refused(url));
+    }
+
+    /// **Ask the old browser to go, and start the clock that says it went** —
+    /// the first half of a rebuild for a new runtime build.
+    ///
+    /// Its own method rather than three lines inside an arm because the arm is
+    /// the one place in this file a compositor is needed and this half needs
+    /// none, so this is the half a test can walk through.
+    ///
+    /// **A second notice while the first browser is still being waited for
+    /// changes nothing.** Closing an already-closed controller is harmless, but
+    /// re-arming the wait is not: it pushes the deadline out by another
+    /// [`BROWSER_EXIT_DEADLINE`] every time Evergreen speaks, and the deadline
+    /// is the only backstop on the graceful path, where the obituary does not
+    /// come at all.
+    fn ask_the_browser_to_go_before_a_rebuild(&mut self) {
+        if matches!(self.waiting, Some((BrowserWait::Rebuild, _))) {
+            return;
+        }
+        self.host.close();
+        self.the_controller_has_been_told_nothing();
+        self.waiting = Some((BrowserWait::Rebuild, Instant::now() + BROWSER_EXIT_DEADLINE));
+    }
+
+    /// **Whether this seat may ask for one more environment for the same
+    /// runtime update** — and, when it may not, the card that says so.
+    ///
+    /// The bound is [`REBUILDS_BEFORE_THE_CARD`] and the budget is spent per
+    /// rebuild, not per seat: a controller answering puts it back (see
+    /// `digest`). A seat that has used it up stops asking and wears the card
+    /// every other "there is no engine on this seat" wears — one sentence, one
+    /// verb, and the verb is the one that asks for the engine again — because a
+    /// pane that has quietly given up is the shape this whole path exists to
+    /// end.
+    fn may_rebuild_for_a_new_version(&mut self, outcomes: &mut Vec<WebOutcome>) -> bool {
+        self.rebuilds_for_a_new_version += 1;
+        if self.rebuilds_for_a_new_version <= REBUILDS_BEFORE_THE_CARD {
+            return true;
+        }
+        self.the_engine_did_not_start(
+            format!(
+                "the browser runtime was updated under this page and the engine did not come \
+                 back after {REBUILDS_BEFORE_THE_CARD} attempts"
+            ),
+            outcomes,
+        );
+        false
     }
 
     /// **Ask for the engine, and start the clock that answers for it** — the
@@ -3097,12 +3229,18 @@ impl WebSeat {
         if self.presence == Some(self.wanted) {
             return Ok(());
         }
-        self.presence = Some(self.wanted);
         // Visibility only. **Where** the page is was settled by
         // [`Self::stand_on_the_floor`] before this was called, on every path,
         // so that a page is never made visible at a rectangle it has not been
         // given — and so that a page with no engine is still given one.
-        match self.wanted {
+        //
+        // **The cache is written after the engine took it, never before.** The
+        // guard above is what keeps this method quiet, so a value written for a
+        // call that then failed is a value never said again: one refused
+        // `SetIsVisible` and the seat believes the page is on the glass while
+        // the engine believes it is not, for the rest of the session. Recorded
+        // after the call, the next frame simply says it again.
+        let told = match self.wanted {
             WebPresence::Hidden => {
                 // **A photograph in flight when the page leaves the glass is a
                 // photograph that never arrives** (§7.8 ⑩). It is the same
@@ -3119,7 +3257,10 @@ impl WebSeat {
                 self.host.set_visible(false)
             }
             WebPresence::Shown(_) => self.host.set_visible(true),
-        }
+        };
+        told?;
+        self.presence = Some(self.wanted);
+        Ok(())
     }
 
     // ── Moving one seat to another window (F1a) ────────────────────────────
@@ -4058,7 +4199,7 @@ mod machine_tests {
         preview.on_navigation_completed(generation, "https://good.example/", true);
         assert_eq!(
             preview.on_new_browser_version_available(),
-            WebEffect::RebuildForNewVersion
+            WebEffect::AwaitBrowserExitBeforeRebuild
         );
         assert_ne!(preview.generation(), generation);
         let current = preview.generation();
@@ -4078,7 +4219,7 @@ mod machine_tests {
         preview.on_environment(stale, true);
         assert_eq!(
             preview.on_new_browser_version_available(),
-            WebEffect::RebuildForNewVersion
+            WebEffect::AwaitBrowserExitBeforeRebuild
         );
         assert_eq!(
             preview.on_controller(stale, true),
@@ -4669,6 +4810,7 @@ mod rehost_address_tests {
             guards: bt_platform::WebGuards::none(),
             dialog_said: None,
             waiting: None,
+            rebuilds_for_a_new_version: 0,
             engine_owes_an_answer: None,
             wanted: WebPresence::Hidden,
             wanted_cover: Vec::new(),
@@ -4986,7 +5128,7 @@ mod rehost_address_tests {
         seat.take_address(target);
         assert_eq!(
             seat.machine.on_rehost_lost(),
-            WebEffect::RebuildForNewVersion
+            WebEffect::AwaitBrowserExitBeforeRebuild
         );
         assert_eq!(seat.address(), target);
         assert_eq!(seat.machine.recoverable_url(), Some("https://example.com/"));
@@ -6210,6 +6352,341 @@ mod engine_absence_tests {
                 "_not_start(error,outcomes)"
             )),
             "and an ask that was refused where it stood draws the card"
+        );
+    }
+}
+
+/// **A runtime that updates itself under a live page is a repair with two
+/// halves, a bound, and a card at the end of it** (crash review C-2, C-10,
+/// C-16, C-17).
+///
+/// Every one of these is an arm nothing exercised. The machine's own tests stop
+/// at [`WebMachine`], and the arms that turn its effects into calls on a browser
+/// sit behind a `Compositor`, which needs a real window — so the rebuild path
+/// had a discriminator that was wrong in the only direction that matters and no
+/// test could say so. What is asked of the seat here is only what needs no
+/// window: the effects it answers with, the wait it arms, the budget it spends,
+/// and the fields a late callback may not touch.
+#[cfg(test)]
+mod rebuild_for_a_new_version_tests {
+    use super::rehost_address_tests::{detached, page, window};
+    use super::*;
+
+    fn seat() -> WebSeat {
+        detached(SeatAddress {
+            page: page(1, 1),
+            window: window(0x40),
+        })
+    }
+
+    /// A seat whose engine is up — the state an Evergreen update arrives in.
+    fn ready_seat() -> WebSeat {
+        let mut web = seat();
+        let _ = web.machine.request("https://example.com/");
+        let generation = web.machine.generation();
+        let _ = web.machine.on_environment(generation, true);
+        let _ = web.machine.on_controller(generation, true);
+        let _ = web.machine.on_events_installed(generation);
+        assert_eq!(web.machine.state(), WebState::Ready, "the seat is up");
+        web
+    }
+
+    fn is_an_engine_absence(fault: Option<&WebFault>) -> bool {
+        matches!(
+            fault,
+            Some(WebFault::RuntimeMissing { .. } | WebFault::EngineDidNotStart { .. })
+        )
+    }
+
+    /// RED — **the wait is armed once and the rebuild happens once.**
+    ///
+    /// The wedge this pins: the rebuild was one effect that asked the seat's own
+    /// `waiting` field which of its two halves it had been handed, and both
+    /// producers of that effect clear the field before they emit it. So the arm
+    /// always read "nothing is waiting", always closed the browser and always
+    /// armed the wait again — and the half that forgets the environment and
+    /// makes a new one was code nothing could reach. Every
+    /// [`BROWSER_EXIT_DEADLINE`] the pane closed a controller it had already
+    /// closed, for as long as the window lived, with no card over it: an open
+    /// web pane dead for the session on any runtime self-update.
+    ///
+    /// RED GATE: give the two halves one effect again and discriminate on
+    /// `self.waiting.is_none()` — the last two assertions fail, because the
+    /// browser's obituary re-arms the wait instead of ending it.
+    #[test]
+    fn an_evergreen_update_waits_for_the_browser_and_then_rebuilds_once() {
+        let mut web = ready_seat();
+        let mut outcomes = Vec::new();
+
+        let effect = web.digest(
+            &bt_platform::WebEvent::NewBrowserVersionAvailable,
+            &mut outcomes,
+        );
+        assert_eq!(
+            effect,
+            WebEffect::AwaitBrowserExitBeforeRebuild,
+            "the browser under this page is alive, so it is asked to go first"
+        );
+        web.ask_the_browser_to_go_before_a_rebuild();
+        assert!(
+            matches!(web.waiting, Some((BrowserWait::Rebuild, _))),
+            "and the seat is waiting for it to, on a clock, saw {:?}",
+            web.waiting.map(|(kind, _)| kind)
+        );
+
+        let effect = web.digest(
+            &bt_platform::WebEvent::BrowserProcessExited { kind: 0 },
+            &mut outcomes,
+        );
+        assert_eq!(
+            effect,
+            WebEffect::RebuildForNewVersion,
+            "the browser has gone, which is the half that builds the new environment"
+        );
+        assert_eq!(
+            web.waiting, None,
+            "and the wait it ends is not armed a second time"
+        );
+    }
+
+    /// RED — **the deadline is not pushed out by a second notice.**
+    ///
+    /// Evergreen may say the same thing twice while the browser it is talking
+    /// about is still on its way out. The wait's clock is the only backstop on
+    /// the graceful path — where the obituary measured late once in eight and
+    /// not at all once in eight — so a notice that re-armed it would move the
+    /// one door that has to open, every time it arrived.
+    ///
+    /// RED GATE: take the already-waiting guard out of
+    /// [`WebSeat::ask_the_browser_to_go_before_a_rebuild`] and the deadline
+    /// moves.
+    #[test]
+    fn a_second_notice_while_the_browser_is_still_going_changes_nothing() {
+        let mut web = ready_seat();
+        web.ask_the_browser_to_go_before_a_rebuild();
+        let armed = web.waiting.expect("the first notice armed the wait");
+        web.ask_the_browser_to_go_before_a_rebuild();
+        assert_eq!(
+            web.waiting,
+            Some(armed),
+            "the same wait, on the same clock, and no second close"
+        );
+    }
+
+    /// RED — **a rebuild that never brings the engine back ends on a card, not
+    /// on silence.**
+    ///
+    /// The bound and the sentence that goes with it. A repair asked for a fourth
+    /// time without the engine once coming up is not a repair, and the seat says
+    /// so with the card every other "there is no engine here" uses — one the
+    /// reader can act on, whose verb asks for the engine again.
+    ///
+    /// RED GATE: let [`WebSeat::may_rebuild_for_a_new_version`] always answer
+    /// `true` and the pane goes back to rebuilding in silence.
+    #[test]
+    fn a_rebuild_that_never_brings_the_engine_back_ends_on_a_card() {
+        let mut web = ready_seat();
+        let mut outcomes = Vec::new();
+        for attempt in 1..=REBUILDS_BEFORE_THE_CARD {
+            assert!(
+                web.may_rebuild_for_a_new_version(&mut outcomes),
+                "attempt {attempt} of {REBUILDS_BEFORE_THE_CARD} is inside the budget"
+            );
+            assert!(
+                web.fault().is_none(),
+                "and nothing is drawn over a repair that may still work"
+            );
+        }
+        assert!(
+            !web.may_rebuild_for_a_new_version(&mut outcomes),
+            "the budget is spent, so no further environment is asked for"
+        );
+        assert!(
+            is_an_engine_absence(web.fault()),
+            "and the seat wears the card that says so, saw {:?}",
+            web.fault()
+        );
+        assert_eq!(
+            web.machine.state(),
+            WebState::Failed,
+            "in the one state the card's verb can act from"
+        );
+        assert_eq!(
+            web.machine.restart(),
+            WebEffect::RebuildFromScratch,
+            "so pressing it asks for the engine again"
+        );
+    }
+
+    /// RED — **a controller that answered puts the budget back.**
+    ///
+    /// The bound is on rebuilds *since the engine was last up*, which is the
+    /// only reading of it that does not punish a machine whose runtime updates
+    /// itself three times over a long session, or a seat whose page came back
+    /// perfectly well each time.
+    #[test]
+    fn a_controller_that_answers_gives_the_next_update_a_full_budget() {
+        let mut web = ready_seat();
+        let mut outcomes = Vec::new();
+        assert!(web.may_rebuild_for_a_new_version(&mut outcomes));
+        assert!(web.may_rebuild_for_a_new_version(&mut outcomes));
+        assert_eq!(web.rebuilds_for_a_new_version, 2);
+
+        let generation = web.machine.generation();
+        web.digest(
+            &bt_platform::WebEvent::Controller {
+                generation,
+                error: None,
+            },
+            &mut outcomes,
+        );
+        assert_eq!(
+            web.rebuilds_for_a_new_version, 0,
+            "the engine is up, so the repair is over"
+        );
+    }
+
+    /// RED — **a callback from a generation nobody is waiting for touches
+    /// nothing.**
+    ///
+    /// The shape: a slow engine start, the deadline firing, the card going up,
+    /// the reader pressing Restart, and generation N's answer arriving after
+    /// generation N+1 had asked its own question. The seat cleared
+    /// `engine_owes_an_answer` and rewrote `fault` before anybody compared the
+    /// numbers, so the stale answer took down the retry's only deadline and
+    /// erased its only explanation — a pane in `ControllerPending` with no clock
+    /// over it and nothing on it, for the rest of the session.
+    ///
+    /// RED GATE: take the two generation comparisons off the top of `digest`'s
+    /// `Environment` and `Controller` arms and both halves fail.
+    #[test]
+    fn a_late_callback_from_an_abandoned_generation_leaves_the_retry_alone() {
+        let mut web = seat();
+        let mut outcomes = Vec::new();
+        let _ = web.machine.request("https://example.com/");
+        let stale = web.machine.generation();
+        web.the_engine_did_not_start(String::from("0x80070002"), &mut outcomes);
+        assert_eq!(web.machine.restart(), WebEffect::RebuildFromScratch);
+        let retry = web.machine.generation();
+        assert_ne!(retry, stale, "the retry is a new generation");
+
+        // The retry has asked its own question and is inside its own clock, with
+        // the card it is retrying from still standing over it.
+        let owed = Instant::now() + ENGINE_START_DEADLINE;
+        web.engine_owes_an_answer = Some(owed);
+
+        let effect = web.digest(
+            &bt_platform::WebEvent::Environment {
+                generation: stale,
+                error: Some(String::from("0x80070002")),
+            },
+            &mut outcomes,
+        );
+        assert_eq!(
+            effect,
+            WebEffect::Ignore,
+            "the machine has always ignored a generation nobody waits for"
+        );
+        assert_eq!(
+            web.engine_owes_an_answer,
+            Some(owed),
+            "and the retry keeps the only deadline it has"
+        );
+
+        let effect = web.digest(
+            &bt_platform::WebEvent::Controller {
+                generation: stale,
+                error: None,
+            },
+            &mut outcomes,
+        );
+        assert_eq!(
+            effect,
+            WebEffect::CloseOrphanController,
+            "a stale controller is a live browser somebody still has to close"
+        );
+        assert_eq!(
+            web.engine_owes_an_answer,
+            Some(owed),
+            "which is the whole reason the event is still handed to the machine"
+        );
+        assert!(
+            is_an_engine_absence(web.fault()),
+            "and the card the reader is looking at is still the retry's, saw {:?}",
+            web.fault()
+        );
+    }
+
+    /// RED — **a browser that dies under a loading page stops the spinner.**
+    ///
+    /// The renderer's own arm has always said so; the two browser-process doors
+    /// route through [`WebSeat::browser_is_gone`], which did not — so a page
+    /// caught mid-load kept a turning spinner and a Stop control aimed at a
+    /// controller that no longer existed, over a seat that was busy rebuilding
+    /// underneath it.
+    ///
+    /// RED GATE: take the two lines off the top of `browser_is_gone`.
+    #[test]
+    fn a_browser_that_dies_under_a_loading_page_stops_the_spinner() {
+        for event in [
+            bt_platform::WebEvent::BrowserProcessExited { kind: 0 },
+            bt_platform::WebEvent::ProcessFailed {
+                kind: 0,
+                description: String::new(),
+            },
+        ] {
+            let mut web = ready_seat();
+            let mut outcomes = Vec::new();
+            web.digest(
+                &bt_platform::WebEvent::NavigationStarting {
+                    uri: String::from("https://example.com/"),
+                    cancelled: false,
+                },
+                &mut outcomes,
+            );
+            assert!(web.page.loading, "the page is loading");
+            web.digest(&event, &mut outcomes);
+            assert!(
+                !web.page.loading,
+                "and the browser drawing it has gone, so it is not: {event:?}"
+            );
+            assert_eq!(
+                web.page.loading_since, None,
+                "the clock and the flag travel together"
+            );
+        }
+    }
+
+    /// RED — **presence is recorded after the engine took it, never before.**
+    ///
+    /// A source pin, because what it is about is a `SetIsVisible` that fails
+    /// while the controller survives, and this process cannot make a real
+    /// controller refuse one. `apply_presence` says nothing when what it wants
+    /// is what it last said, so a value written before a call that then failed
+    /// is a value never said again — the seat certain the page is on the glass
+    /// and the engine certain it is not, for the rest of the session.
+    ///
+    /// RED GATE: move the assignment back above the `match` and this says so.
+    #[test]
+    fn what_the_engine_refused_is_not_remembered_as_said() {
+        let source: String = include_str!("webhost.rs")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        let from = concat!("fnapply_", "presence(&mutself)");
+        let to = concat!("pub(crate)fn", "address(&self)");
+        let start = source.find(from).unwrap_or_else(|| panic!("{from}"));
+        let end = source[start..]
+            .find(to)
+            .unwrap_or_else(|| panic!("{to} follows {from}"));
+        let body = &source[start..start + end];
+        assert!(
+            body.contains(concat!("told?;self.", "presence=Some(self.wanted);Ok(())")),
+            "the cache is written after the call answered, not before it was made"
         );
     }
 }
