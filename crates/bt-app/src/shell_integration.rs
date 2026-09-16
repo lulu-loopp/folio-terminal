@@ -1657,11 +1657,11 @@ pub(crate) const fn script_source_zsh() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::profiles::{Origin, ProgramSource, index_of_id};
+    use crate::profiles::{Origin, ProgramSource};
 
     /// One shipped row, whole — what the spawn path is handed.
     fn row(id: &str) -> Profile {
-        profiles::row(index_of_id(id)).expect("a shipped id")
+        profiles::row_of(id).expect("a shipped id")
     }
 
     /// That row with an environment of its own.

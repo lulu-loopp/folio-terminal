@@ -135618,8 +135618,7 @@ mod tests {
     /// And the cancel: a chooser that comes back with nothing asks for nothing.
     #[test]
     fn a_tab_opened_in_a_chosen_folder_stands_there_and_not_where_the_pane_was() {
-        let pwsh = profiles::index_of_id("pwsh");
-        let wsl = profiles::index_of_id("wsl");
+        let (pwsh, wsl) = ("pwsh", "wsl");
         let chosen = PathBuf::from(r"D:\Developer\folio-terminal");
         let pane = PathBuf::from(r"C:\Users\dev\elsewhere");
 
@@ -158127,7 +158126,7 @@ mod tests {
             ),
             // And the door that profile is served through, which is the one the
             // spawn would have read for it.
-            integration: profiles::row(profiles::fallback_profile())
+            integration: profiles::row_of(profiles::fallback_profile_id())
                 .map_or(profiles::Integration::None, |row| profiles::served_by(&row)),
             // And no program either, which is the honest shape of the same
             // fact: nothing was started, so nothing can have announced itself.

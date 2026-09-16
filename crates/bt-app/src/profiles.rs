@@ -3445,27 +3445,24 @@ fn named_distribution(arguments: &[String]) -> Option<String> {
     None
 }
 
-/// One whole row, cloned — **what the spawn path is handed** (§7.1.6c-6c).
+/// One whole row, cloned, **asked for by the stable id its holder keeps** —
+/// what the spawn path is handed (§7.1.6c-6c, T-PROFILE-TABLE-MOVE).
 ///
 /// `shell_command` used to take an index and ask this module four separate
 /// questions about it; it takes the row itself now, which makes it a pure
 /// function of its arguments and therefore a thing a test can put any profile in
 /// front of. The clone is five short strings and a vector, once per tab.
-#[must_use]
-pub fn row(index: usize) -> Option<Profile> {
-    with_table(|table| table.get(index).cloned())
-}
-
-/// **The same row asked for by its stable id** — what a seat and a seed hold, and
-/// therefore what the spawn path resolves through (T-PROFILE-TABLE-MOVE).
 ///
-/// [`row`]'s twin and the reason the spawn no longer has an out-of-bounds case to
-/// assert about: a position stops naming a profile the moment Settings ▸ Profiles
-/// moves the table, and every window in this process shares that table, so a
-/// window holding a position was holding an answer another window could change.
-/// An id names the same row wherever it sits and `None` only when the row is
-/// genuinely gone, which is a fact the caller can degrade on rather than a
-/// disagreement between two authorities.
+/// **By id and not by position**, which is why the spawn no longer has an
+/// out-of-bounds case to assert about. A position stops naming a profile the
+/// moment Settings ▸ Profiles moves the table, and every window in this process
+/// shares that table, so a window holding a position was holding an answer
+/// another window could change — the twin of `row(index)` this replaces was read
+/// under a guard that had only consulted the window's own snapshot, and a
+/// shortened table met that read as a panic on the window thread. An id names
+/// the same row wherever it sits and `None` only when the row is genuinely gone,
+/// which is a fact the caller can degrade on rather than a disagreement between
+/// two authorities.
 #[must_use]
 pub fn row_of(id: &str) -> Option<Profile> {
     with_table(|table| {
@@ -15143,7 +15140,7 @@ mod tests {
             "the list the greyed-row sentence reads is the list of agents"
         );
         for id in AGENT_IDS {
-            let row = row(index_of_id(id)).expect("the agent is a row");
+            let row = row_of(id).expect("the agent is a row");
             assert_eq!(row.origin, Origin::Builtin, "{id}");
             assert!(
                 !row.hidden,
@@ -15356,7 +15353,7 @@ mod tests {
         const SIDE: f32 = 64.0;
         let mut rasters = crate::marks::ChromeMarkRasters::default();
         for id in AGENT_IDS {
-            let mark = row(index_of_id(id)).expect("the agent is a row").mark;
+            let mark = row_of(id).expect("the agent is a row").mark;
             let mut sprite =
                 crate::marks::ChromeSprite::new(mark, [0.0, 0.0, SIDE, SIDE], [0x7a, 0x99, 0xff]);
             sprite.opacity = UNAVAILABLE_MARK_OPACITY;
