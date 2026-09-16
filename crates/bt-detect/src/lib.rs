@@ -4,8 +4,8 @@ pub mod border;
 mod ledger;
 pub mod table;
 pub use border::{
-    LiveScreenRegion, ScreenRegion, find_border_columns, live_screen_regions, region_text,
-    screen_regions,
+    LiveScreenRegion, ScreenRegion, find_border_columns, live_region_text, live_screen_regions,
+    region_text, screen_regions,
 };
 pub use ledger::{
     ContainmentVerdict, LedgerEntry, LegitimateRejection, OrphanKind, OwnershipLedger,

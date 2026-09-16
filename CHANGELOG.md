@@ -31,7 +31,10 @@ All notable changes to Folio are recorded here. The format follows
   finds the columns a screen draws a vertical rule in and reads each side of the
   rule as its own body of text, beginning at its own first column. Nothing about
   what counts as a formula changed: every question that was asked of a line
-  before is asked of it now, of the pane's own line.
+  before is asked of it now, of the pane's own line. A formula is also laid out
+  to the pane it was printed in rather than to the whole window, and is drawn
+  and cropped at that pane's edge, so a wide one is sized down to the room it
+  has instead of being set across the text beside it.
 
 - **On a Mac, Shift+wheel now scrolls the rows a formula pushed out of view.**
   A typeset formula is taller than the line it was typed on, so it lifts the

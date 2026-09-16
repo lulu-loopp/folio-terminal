@@ -617,6 +617,15 @@ pub struct MathBlockPlacement {
     pub artifact: ProjectedMathArtifact,
     pub top_subpixels: i64,
     pub left_subpixels: i64,
+    /// **One past this block's own last cell column**, or `None` when the block's right edge is
+    /// the pane's own.
+    ///
+    /// A block is fitted to the band it stands in and the horizontal offset carries whatever the
+    /// readable floor would not shrink away, so a fitted block may still be wider than its band.
+    /// On an unframed screen that is harmless — the pane's edge is the block's. Inside a
+    /// multiplexer's split it is not: the columns past the rule are the next pane's text, and this
+    /// is the column the raster and its scissor stop at.
+    pub right_limit_columns: Option<u32>,
     /// Offset of rendered pixels within the owned row band. Live artifacts use this to distribute
     /// spare vertical space evenly without moving the band's clip or cleared terminal rows.
     pub content_offset_subpixels: i64,
@@ -3052,6 +3061,7 @@ impl ViewportProjection {
                                     .sum::<i64>(),
                             ),
                             left_subpixels: 0,
+                            right_limit_columns: None,
                             content_offset_subpixels: artifact.vertical_padding_subpixels,
                             clip_height_subpixels: artifact.height_subpixels,
                             display: MathBlockDisplay::Rendered,
@@ -3201,6 +3211,7 @@ impl ViewportProjection {
                                 artifact: artifact.clone(),
                                 top_subpixels: image_top,
                                 left_subpixels: 0,
+                                right_limit_columns: None,
                                 content_offset_subpixels: 0,
                                 clip_height_subpixels: artifact.height_subpixels,
                                 display: MathBlockDisplay::Rendered,
@@ -3437,6 +3448,9 @@ impl ViewportProjection {
                     artifact,
                     top_subpixels,
                     left_subpixels: 0,
+                    // The right edge of the region this band was proved in — the rule beside the
+                    // pane, when a multiplexer drew one — and the pane's own edge otherwise.
+                    right_limit_columns: live_math.column_end,
                     content_offset_subpixels,
                     // The shared live prefix map expands this owned band before all following
                     // logical rows. It never paints into a neighbour's fixed terminal row.

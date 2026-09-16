@@ -18,8 +18,9 @@ use bt_detect::{
     DetectionTask, InlineJoinedFragment, InlineMathRun, InlineMathSite, LiveDetectionInput,
     LiveDetectionSource, LiveDetectionTask, MAX_MATH_SOURCE_BYTES, MathCellSegment, MathSourceLine,
     MathSpan, PlaceholderArtifact, ScreenRegion, StaleArtifact, advance_detection_context,
-    detect_math_blocks_with_sites, frozen_resync_scan_with_options, live_screen_regions,
-    resolve_detection_task, resolve_live_detection_task, resolve_live_detection_tasks,
+    detect_math_blocks_with_sites, frozen_resync_scan_with_options, live_region_text,
+    live_screen_regions, resolve_detection_task, resolve_live_detection_task,
+    resolve_live_detection_tasks,
 };
 use bt_doc::{
     AnchorError, AnchorId, Bias, BlockKind, ContentAnchor, DecorationIntent, DecorationLifecycle,
@@ -2074,19 +2075,36 @@ impl DualPlaneSession {
             .max(1)
     }
 
-    /// Width of the grid in whole pixels — the band a math block is fitted into and scrolled
+    /// Width of the pane in whole pixels — the band a math block is fitted into and scrolled
     /// within. Both the projection and the scroll clamp measure against this same number.
     fn math_pane_width_px(&self) -> u32 {
-        self.cell_width_subpixels
-            .get()
-            .saturating_mul(i64::from(self.layout_key.width_cells.get()))
-            .div_euclid(SUBPIXELS_PER_PX)
-            .max(1) as u32
+        math_region_width_px(
+            ScreenRegion::WHOLE,
+            self.layout_key.width_cells.get(),
+            self.cell_width_subpixels.get(),
+        )
     }
 
     fn math_band(&self) -> MathBand {
+        self.math_band_for(ScreenRegion::WHOLE)
+    }
+
+    /// **The band a block proved inside one region of a framed screen is fitted into**: that
+    /// region's columns, never the whole pane's.
+    ///
+    /// A multiplexer's pane rule cuts the screen into regions (`bt_detect::border`), and a formula
+    /// printed in a fifty-column split has fifty columns to live in. Fitting it to a hundred would
+    /// lay it out across its neighbour's text. The rule it is fitted by does not change — shrink
+    /// toward the band, stop at the readable floor, leave the remainder to the horizontal offset —
+    /// only the band it is fitted to. [`ScreenRegion::WHOLE`] gives back the pane, which is what
+    /// every frozen block and every block on an unframed screen asks for.
+    fn math_band_for(&self, region: ScreenRegion) -> MathBand {
         MathBand {
-            pane_width_px: self.math_pane_width_px(),
+            pane_width_px: math_region_width_px(
+                region,
+                self.layout_key.width_cells.get(),
+                self.cell_width_subpixels.get(),
+            ),
             display_left_inset_subpixels: self.display_math_left_inset_subpixels(),
         }
     }
@@ -8192,6 +8210,10 @@ impl DualPlaneSession {
         });
         let pane_width_px = self.math_pane_width_px();
         let display_left_inset_subpixels = self.display_math_left_inset_subpixels();
+        // Held as plain numbers so the live arm can measure its own region's band while it holds
+        // the record mutably. A frozen block's band is the pane and always was.
+        let width_cells = self.layout_key.width_cells.get();
+        let cell_width_subpixels = self.cell_width_subpixels.get();
         match anchor {
             MathBlockAnchor::History { start, end, .. } => {
                 let Some(record) = self
@@ -8251,8 +8273,10 @@ impl DualPlaneSession {
                     return false;
                 };
                 let artifact_size = (artifact.width_px, artifact.height_px);
+                // The same band the projection drew this block into — its region's, not the
+                // pane's — or the offset would pan it past its own right edge into the next pane.
                 let available_width_px = math_block_available_width_px(
-                    pane_width_px,
+                    math_region_width_px(record.region, width_cells, cell_width_subpixels),
                     artifact.mode,
                     display_left_inset_subpixels,
                 );
@@ -8390,7 +8414,7 @@ impl DualPlaneSession {
                     projected_live_artifact(
                         record,
                         self.layout_key,
-                        self.math_band(),
+                        self.math_band_for(record.region),
                         self.math_vertical_padding_subpixels(),
                         self.cell_height_subpixels.get(),
                         self.live_block_box_limit_subpixels(record.screen),
@@ -8870,6 +8894,7 @@ impl DualPlaneSession {
                 artifact,
                 top_subpixels: first_mapped.top_subpixels,
                 left_subpixels: 0,
+                right_limit_columns: None,
                 content_offset_subpixels: 0,
                 clip_height_subpixels: last_mapped
                     .top_subpixels
@@ -8906,7 +8931,7 @@ impl DualPlaneSession {
             let Some(artifact) = projected_live_artifact(
                 record,
                 self.layout_key,
-                self.math_band(),
+                self.math_band_for(record.region),
                 self.math_vertical_padding_subpixels(),
                 self.cell_height_subpixels.get(),
                 self.live_block_box_limit_subpixels(record.screen),
@@ -8931,10 +8956,11 @@ impl DualPlaneSession {
             // The band's last row by index rather than by value, because the width below is a walk
             // of the rows between the two ends and a row nobody can name is a row nobody can
             // measure.
-            let source_width_cells = frame_rows_width_cells(
+            let source_width_cells = frame_rows_width_cells_in_region(
                 frame,
                 visible_row,
                 u32::try_from(last_row).unwrap_or(u32::MAX),
+                record.region,
             );
             let Some(first_mapped) = frame.row_map.get(visible_row as usize) else {
                 continue;
@@ -8962,6 +8988,7 @@ impl DualPlaneSession {
                 top_subpixels: first_mapped.top_subpixels,
                 left_subpixels: i64::from(record.region.column_start)
                     .saturating_mul(self.cell_width_subpixels.get()),
+                right_limit_columns: record.region.column_end,
                 content_offset_subpixels: 0,
                 clip_height_subpixels: band_height,
                 display: MathBlockDisplay::Source,
@@ -9064,6 +9091,7 @@ impl DualPlaneSession {
                     top_subpixels,
                     left_subpixels: i64::from(placement.left_column)
                         .saturating_mul(self.cell_width_subpixels.get()),
+                    right_limit_columns: None,
                     content_offset_subpixels: 0,
                     clip_height_subpixels: row_height_subpixels,
                     display: MathBlockDisplay::Rendered,
@@ -9096,7 +9124,7 @@ impl DualPlaneSession {
             let Some(artifact) = projected_live_artifact(
                 record,
                 self.layout_key,
-                self.math_band(),
+                self.math_band_for(record.region),
                 self.math_vertical_padding_subpixels(),
                 self.cell_height_subpixels.get(),
                 self.live_block_box_limit_subpixels(record.screen),
@@ -9107,7 +9135,15 @@ impl DualPlaneSession {
             let placements = inline_placement_geometry(
                 &record.span,
                 &rendered_runs,
-                |run| live_inline_run_cells(frame, &record.inputs, record.start.row, run),
+                |run| {
+                    live_inline_run_cells(
+                        frame,
+                        &record.inputs,
+                        record.start.row,
+                        record.region,
+                        run,
+                    )
+                },
                 artifact.width_px,
             );
             // The joined opening fragment on the row above, cleared under the same rule the frozen
@@ -9122,7 +9158,13 @@ impl DualPlaneSession {
                         .any(|placement| placement.runs.iter().any(|run| run.run == 0))
                 })
                 .and_then(|head| {
-                    live_joined_head_cells(frame, &record.inputs, record.start.row, head)
+                    live_joined_head_cells(
+                        frame,
+                        &record.inputs,
+                        record.start.row,
+                        record.region,
+                        head,
+                    )
                 });
             for index in joined_head_cells.into_iter().flatten() {
                 if let Some(cell) = frame.cells.get_mut(index) {
@@ -9164,6 +9206,7 @@ impl DualPlaneSession {
                     top_subpixels,
                     left_subpixels: i64::from(placement.left_column)
                         .saturating_mul(self.cell_width_subpixels.get()),
+                    right_limit_columns: record.region.column_end,
                     content_offset_subpixels: 0,
                     clip_height_subpixels: row_height_subpixels,
                     display: MathBlockDisplay::Rendered,
@@ -11639,13 +11682,15 @@ pub fn render_live_detection_task(
     // The **logical** line, not the row the run starts on: a run's byte offsets are offsets into
     // the string the detector proved it on, and the fold is free to have put the rest of it — or
     // all of it — on a later row (§4.6c).
-    let line = live_snapshot_logical_line_text(&task.inputs, task.start.row);
+    let line = live_snapshot_logical_line_text(&task.inputs, task.start.row, task.region);
     render_task_math(
         engine,
         &task.span,
         &line,
         InlineGridGeometry {
-            pane_columns: task.layout.width_cells.get(),
+            // The width the producer of this line had to work in — this block's own region's,
+            // which is the pane's on every screen no multiplexer has framed.
+            pane_columns: region_width_cells(task.region, task.layout.width_cells.get()),
             cell_width_subpixels: task.cell_width_subpixels,
             cell_height_subpixels: task.cell_height_subpixels,
             ascii_baseline_subpixels: task.ascii_baseline_subpixels,
@@ -13986,11 +14031,33 @@ fn drawable_frame_row_count(frame: &ViewportFrame) -> u32 {
 /// The width of a row is `bt_viewport::row_width_cells` and is that in both places, so the band the
 /// renderer draws and the band the projection measures for the *other* face cannot drift apart.
 fn frame_rows_width_cells(frame: &ViewportFrame, first: u32, last: u32) -> u32 {
+    frame_rows_width_cells_in_region(frame, first, last, ScreenRegion::WHOLE)
+}
+
+/// **The widest of these frame rows, counted inside one region's columns.**
+///
+/// A source face is drawn from its region's first column, so the width it is drawn at has to be
+/// measured from there too: on a screen a multiplexer has split, the whole row is two panes' text
+/// and a band as wide as the row would cover the pane across the rule.
+/// [`ScreenRegion::WHOLE`] measures the row, which is what every frozen block asks for.
+fn frame_rows_width_cells_in_region(
+    frame: &ViewportFrame,
+    first: u32,
+    last: u32,
+    region: ScreenRegion,
+) -> u32 {
     let columns = frame.columns.get() as usize;
+    let from = (region.column_start as usize).min(columns);
+    let to = region
+        .column_end
+        .map_or(columns, |end| end as usize)
+        .clamp(from, columns);
     (first..=last)
         .filter_map(|row| {
             let start = (row as usize).checked_mul(columns)?;
-            frame.cells.get(start..start.checked_add(columns)?)
+            frame
+                .cells
+                .get(start.checked_add(from)?..start.checked_add(to)?)
         })
         .map(bt_viewport::row_width_cells)
         .max()
@@ -14085,7 +14152,15 @@ fn frozen_fragment_cells(
 /// folds is the window's business and not the text's (§4.6a, §4.6c), so a fold landing inside a run —
 /// or before it, on a run that starts on the second row of a wrapped line — must not change what
 /// the run is or whether it is drawn.
-fn live_logical_line_rows(inputs: &[LiveDetectionInput], row: u32) -> Vec<(u32, usize)> {
+/// The physical rows of one logical line, each with the byte offset at which it joins the line.
+///
+/// Offsets are into the line **as `region` reads it**: that is the string an occurrence's bytes
+/// were measured against, so it is the string they have to be counted in.
+fn live_logical_line_rows(
+    inputs: &[LiveDetectionInput],
+    row: u32,
+    region: ScreenRegion,
+) -> Vec<(u32, usize)> {
     let mut first = row;
     while let Some(previous) = first.checked_sub(1) {
         if live_grid_input(inputs, previous).is_some_and(|input| input.continues) {
@@ -14099,7 +14174,7 @@ fn live_logical_line_rows(inputs: &[LiveDetectionInput], row: u32) -> Vec<(u32, 
     let mut cursor = first;
     while let Some(input) = live_grid_input(inputs, cursor) {
         rows.push((cursor, offset));
-        offset = offset.saturating_add(input.text.len());
+        offset = offset.saturating_add(live_region_text(input, region).len());
         if !input.continues {
             break;
         }
@@ -14113,11 +14188,15 @@ fn live_logical_line_rows(inputs: &[LiveDetectionInput], row: u32) -> Vec<(u32, 
 /// The snapshot's own rows and not the terminal's: a worker holds the grid as it stood when the
 /// task was built, which is the grid the run's offsets were measured against.
 /// [`DualPlaneSession::live_logical_line_text`] answers the same question of the live terminal.
-fn live_snapshot_logical_line_text(inputs: &[LiveDetectionInput], row: u32) -> String {
-    live_logical_line_rows(inputs, row)
+fn live_snapshot_logical_line_text(
+    inputs: &[LiveDetectionInput],
+    row: u32,
+    region: ScreenRegion,
+) -> String {
+    live_logical_line_rows(inputs, row, region)
         .into_iter()
         .filter_map(|(grid_row, _)| live_grid_input(inputs, grid_row))
-        .map(|input| input.text.as_str())
+        .map(|input| live_region_text(input, region))
         .collect()
 }
 
@@ -14135,12 +14214,14 @@ fn live_inline_run_cells(
     frame: &ViewportFrame,
     inputs: &[LiveDetectionInput],
     live_row: u32,
+    region: ScreenRegion,
     run: &InlineMathRun,
 ) -> Option<(u32, u32, Vec<usize>)> {
     live_fragment_cells(
         frame,
         inputs,
         live_row,
+        region,
         usize::try_from(run.byte_start).ok()?,
         usize::try_from(run.byte_end).ok()?,
     )
@@ -14153,6 +14234,7 @@ fn live_fragment_cells(
     frame: &ViewportFrame,
     inputs: &[LiveDetectionInput],
     live_row: u32,
+    region: ScreenRegion,
     run_start: usize,
     run_end: usize,
 ) -> Option<(u32, u32, Vec<usize>)> {
@@ -14160,11 +14242,14 @@ fn live_fragment_cells(
     if run_start >= run_end {
         return None;
     }
-    let rows = live_logical_line_rows(inputs, live_row);
+    // The cells are the frame's, and the frame is the whole screen: a region's first column is
+    // where its own column zero is drawn, so every column counted inside it is measured from there.
+    let origin_column = region.column_start as usize;
+    let rows = live_logical_line_rows(inputs, live_row, region);
     let mut origin = None;
     let mut cells = Vec::new();
     for (grid_row, byte_start) in rows {
-        let text = live_grid_input(inputs, grid_row)?.text.as_str();
+        let text = live_region_text(live_grid_input(inputs, grid_row)?, region);
         let byte_end = byte_start.saturating_add(text.len());
         let from = run_start.max(byte_start);
         let to = run_end.min(byte_end);
@@ -14175,7 +14260,8 @@ fn live_fragment_cells(
             .row_map
             .iter()
             .position(|mapped| mapped.live_grid_row == Some(grid_row))?;
-        let start_column = UnicodeWidthStr::width(text.get(..from - byte_start)?);
+        let start_column =
+            origin_column.saturating_add(UnicodeWidthStr::width(text.get(..from - byte_start)?));
         let end_column = start_column.saturating_add(UnicodeWidthStr::width(
             text.get(from - byte_start..to - byte_start)?,
         ));
@@ -14229,17 +14315,18 @@ fn live_joined_head_cells(
     frame: &ViewportFrame,
     inputs: &[LiveDetectionInput],
     live_row: u32,
+    region: ScreenRegion,
     head: &InlineJoinedFragment,
 ) -> Option<Vec<usize>> {
-    let (first_row, _) = *live_logical_line_rows(inputs, live_row).first()?;
+    let (first_row, _) = *live_logical_line_rows(inputs, live_row, region).first()?;
     let head_row = first_row.checked_sub(1)?;
-    let head_text = live_snapshot_logical_line_text(inputs, head_row);
+    let head_text = live_snapshot_logical_line_text(inputs, head_row, region);
     let begin = usize::try_from(head.byte_start).ok()?;
     let end = usize::try_from(head.byte_end).ok()?;
     if head_text.get(begin..end) != Some(head.text.as_str()) {
         return None;
     }
-    let (_, _, cells) = live_fragment_cells(frame, inputs, head_row, begin, end)?;
+    let (_, _, cells) = live_fragment_cells(frame, inputs, head_row, region, begin, end)?;
     Some(cells)
 }
 
@@ -14438,6 +14525,25 @@ fn scroll_offsets(
         *vertical_scroll_px = next;
     }
     changed
+}
+
+/// How many cells of a screen `width_cells` wide a region owns. At least one: a band is drawn in
+/// columns, and no columns is not a width a formula can be laid out against.
+fn region_width_cells(region: ScreenRegion, width_cells: u32) -> u32 {
+    region
+        .column_end
+        .unwrap_or(width_cells)
+        .min(width_cells)
+        .saturating_sub(region.column_start)
+        .max(1)
+}
+
+/// A region's own width in whole pixels — the band its blocks are fitted into and scrolled within.
+fn math_region_width_px(region: ScreenRegion, width_cells: u32, cell_width_subpixels: i64) -> u32 {
+    cell_width_subpixels
+        .saturating_mul(i64::from(region_width_cells(region, width_cells)))
+        .div_euclid(SUBPIXELS_PER_PX)
+        .max(1) as u32
 }
 
 /// The horizontal room a math block has to live in, carried as one value so the projection that
@@ -16138,6 +16244,191 @@ mod tests {
             assert!(
                 record.start.column >= 26,
                 "a block's cells are the pane's cells, not the sidebar's"
+            );
+        }
+
+        // The display pictures reach the frame in the pane's columns.
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let live = frame
+            .math_blocks
+            .iter()
+            .filter(|placement| matches!(placement.anchor, MathBlockAnchor::Live { .. }))
+            .collect::<Vec<_>>();
+        assert_eq!(live.len(), 2, "the two display bands");
+        let sidebar = i64::from(26u32).saturating_mul(session.cell_width_subpixels.get());
+        for placement in live {
+            assert!(
+                placement.left_subpixels >= sidebar,
+                "a picture drawn at {} is standing on the sidebar, left of column 26",
+                placement.left_subpixels
+            );
+        }
+
+        // An inline run's own cells are found by walking its bytes along the row it was proved on,
+        // and those bytes are the pane's. Measured against the whole screen row instead, the walk
+        // lands twenty-six columns short — on the sidebar, over somebody else's cells.
+        let inline = session
+            .live_decorations
+            .values()
+            .find(|record| record.span.mode == MathMode::Inline)
+            .expect("the inline formula");
+        let run = inline.span.inline_runs.first().expect("its run");
+        let (_, left, cells) =
+            live_inline_run_cells(&frame, &inline.inputs, inline.start.row, inline.region, run)
+                .expect("the run's cells");
+        assert!(left >= 26, "an inline picture stands at column {left}");
+        let columns = frame.columns.get() as usize;
+        assert!(
+            cells.iter().all(|index| index % columns >= 26),
+            "an inline run claimed a cell in the sidebar"
+        );
+    }
+
+    /// The thirteen lines the pane prints — the same ones `HERDR_SCREEN` carries, standing on
+    /// their own so a second framed screen can be built from them.
+    const PANE_LINES: [&str; 13] = [
+        "Inline: $e^{i\\pi}+1=0$ stays inline.",
+        "",
+        "$$",
+        "\\frac{1}{2}",
+        "$$",
+        "",
+        "$$",
+        "\\begin{pmatrix}",
+        "a & b \\\\",
+        "c & d \\\\",
+        "e & f",
+        "\\end{pmatrix}",
+        "$$",
+    ];
+
+    /// The right half of a vertical split: an ordinary shell session, `$` decoys included, none of
+    /// which is a formula.
+    const SPLIT_NEIGHBOUR: [&str; 13] = [
+        "the right pane is an ordinary shell",
+        "$ ls -l",
+        "total 24",
+        "-rw-r--r--  1 user  staff   120 notes.md",
+        "-rw-r--r--  1 user  staff  2048 report.md",
+        "$ echo \"costs $5 and $10\"",
+        "costs $5 and $10",
+        "$ git status",
+        "On branch main",
+        "nothing to commit, working tree clean",
+        "$ uname -a",
+        "Darwin 25.0.0 arm64",
+        "$",
+    ];
+
+    /// The column a vertical split's rule stands in, and therefore the width of the pane left of
+    /// it: forty-nine of this hundred-column screen.
+    const SPLIT_RULE_COLUMN: u32 = 49;
+
+    /// A `tmux` vertical split repainted the way a multiplexer repaints: every row addressed, the
+    /// left pane padded to its own width, the rule, then the right pane.
+    fn split_repaint() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for row in 1..=40usize {
+            let math = PANE_LINES.get(row - 1).copied().unwrap_or("");
+            let neighbour = SPLIT_NEIGHBOUR.get(row - 1).copied().unwrap_or("");
+            let width = SPLIT_RULE_COLUMN as usize;
+            let padding = width.saturating_sub(bt_unicode::text_width(math));
+            bytes.extend_from_slice(format!("\x1b[{row};1H{math}").as_bytes());
+            bytes.extend(std::iter::repeat_n(b' ', padding));
+            bytes.extend_from_slice("│".as_bytes());
+            bytes.extend_from_slice(format!("{neighbour}\x1b[K").as_bytes());
+        }
+        bytes
+    }
+
+    /// **A formula in one pane of a split is laid out in that pane's columns and drawn inside
+    /// them.** The band it is fitted to is its region's forty-nine columns, not the screen's
+    /// hundred — a raster the whole screen would have taken at full size is shrunk to the pane by
+    /// the rule that has always fitted an over-wide block — and the placement carries the rule's
+    /// column as its own right edge, so neither the raster nor its scissor reaches the text on the
+    /// other side of it.
+    #[test]
+    fn a_formula_in_a_split_is_fitted_to_its_pane_and_drawn_inside_it() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(100), nz(40));
+        session.feed_at(b"\x1b[?1049h\x1b[2J", start).unwrap();
+        session.feed_at(&split_repaint(), start).unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        // Wider than the pane's forty-nine columns of nine pixels, narrower than the screen's
+        // hundred: at the screen's width nothing would be shrunk at all.
+        const NATURAL_WIDTH_PX: u32 = 600;
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(NATURAL_WIDTH_PX, 18)),
+            3
+        );
+
+        let pane = ScreenRegion {
+            column_start: 0,
+            column_end: Some(SPLIT_RULE_COLUMN),
+        };
+        for record in session.live_decorations.values() {
+            assert_eq!(record.region, pane, "every block stands left of the rule");
+        }
+        let region_band = session.math_band_for(pane);
+        let screen_band = session.math_band();
+        assert_eq!(
+            region_band.pane_width_px,
+            SPLIT_RULE_COLUMN * 9,
+            "the band is the pane's columns"
+        );
+        assert_eq!(screen_band.pane_width_px, 100 * 9);
+
+        let display = session
+            .live_decorations
+            .values()
+            .find(|record| record.span.mode == MathMode::Display)
+            .expect("a display block");
+        let fitted = projected_live_artifact(
+            display,
+            session.layout_key(),
+            region_band,
+            session.math_vertical_padding_subpixels(),
+            session.cell_height_subpixels.get(),
+            session.live_block_box_limit_subpixels(display.screen),
+        )
+        .expect("a fitted artifact");
+        let unfitted = projected_live_artifact(
+            display,
+            session.layout_key(),
+            screen_band,
+            session.math_vertical_padding_subpixels(),
+            session.cell_height_subpixels.get(),
+            session.live_block_box_limit_subpixels(display.screen),
+        )
+        .expect("an artifact");
+        // Red gate: at the screen's width this raster is not over-wide at all, so a band taken
+        // from the screen rather than from the pane would have drawn it across the rule.
+        assert_eq!(unfitted.render_scale_milli, 1000);
+        let presented_px = u64::from(fitted.width_px) * u64::from(fitted.render_scale_milli) / 1000;
+        let available = u64::from(math_block_available_width_px(
+            region_band.pane_width_px,
+            MathMode::Display,
+            region_band.display_left_inset_subpixels,
+        ));
+        assert!(
+            presented_px <= available,
+            "the picture is {presented_px}px wide in a {available}px pane"
+        );
+
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let live = frame
+            .math_blocks
+            .iter()
+            .filter(|placement| matches!(placement.anchor, MathBlockAnchor::Live { .. }))
+            .collect::<Vec<_>>();
+        assert!(!live.is_empty(), "the pane's blocks reach the frame");
+        for placement in live {
+            assert_eq!(
+                placement.right_limit_columns,
+                Some(SPLIT_RULE_COLUMN),
+                "a block stops at the rule, not at the pane's far edge"
             );
         }
     }

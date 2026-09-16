@@ -325,23 +325,45 @@ pub fn live_screen_regions(inputs: &[LiveDetectionInput]) -> Option<Vec<LiveScre
     )
 }
 
-/// One screen row as its region reads it.
-fn region_input(input: &LiveDetectionInput, region: ScreenRegion) -> LiveDetectionInput {
+/// Byte range of one screen row that its region reads.
+///
+/// The region's own right-edge padding is padding, by exactly the rule the grid row itself is read
+/// by: a row that ends its logical line drops it, and a row the terminal soft-wrapped keeps it,
+/// because the wrap may have fallen on a space that is a character of the line.
+fn region_slice_bounds(input: &LiveDetectionInput, region: ScreenRegion) -> (usize, usize) {
+    if region.is_whole() {
+        return (0, input.text.len());
+    }
     let (start, end) = region_bytes(&input.text, &input.cell_boundaries, region);
     let slice = &input.text[start..end];
-    // The region's own right-edge padding is padding, by exactly the rule the grid row itself is
-    // read by: a row that ends its logical line drops it, and a row the terminal soft-wrapped
-    // keeps it, because the wrap may have fallen on a space that is a character of the line.
     let kept = if input.continues {
         slice.len()
     } else {
         slice.trim_end_matches([' ', '\t']).len()
     };
-    let limit = start.saturating_add(kept);
+    (start, start.saturating_add(kept))
+}
+
+/// **One screen row as its region reads it**, borrowed from the row itself.
+///
+/// This is the string a block proved in `region` has its byte offsets into, so every reader that
+/// pairs an occurrence's bytes with the row they were measured on — the cells one run occupies, the
+/// logical line the renderer folds it at — must take the row through here first. The whole row
+/// comes back untouched for [`ScreenRegion::WHOLE`].
+#[must_use]
+pub fn live_region_text(input: &LiveDetectionInput, region: ScreenRegion) -> &str {
+    let (start, limit) = region_slice_bounds(input, region);
+    &input.text[start..limit]
+}
+
+/// One screen row as its region reads it, owned: bytes rebased onto the slice, the screen's own
+/// cell columns kept.
+fn region_input(input: &LiveDetectionInput, region: ScreenRegion) -> LiveDetectionInput {
+    let (start, limit) = region_slice_bounds(input, region);
     let offset = u32::try_from(start).unwrap_or(u32::MAX);
     LiveDetectionInput {
         source: input.source,
-        text: slice[..kept].to_owned(),
+        text: input.text[start..limit].to_owned(),
         continues: input.continues,
         // The width the region's rows were cut at, which is the width this row's own producer had
         // to work in. A row that carried no capture geometry still carries none.

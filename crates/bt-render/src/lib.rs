@@ -562,8 +562,12 @@ fn math_block_geometry_px(
         return None;
     }
     let pane_left = metrics.padding_px;
-    let pane_right =
-        (pane_left + frame.columns.get() as f32 * metrics.cell_width_px).min(seat.width as f32);
+    let pane_right = math_block_right_px(
+        metrics,
+        seat.width,
+        frame.columns,
+        placement.right_limit_columns,
+    );
     let pane_top = metrics.padding_px;
     let pane_bottom = seat.height as f32;
     let band_top = pane_top + placement.top_subpixels as f32 / SUBPIXELS_PER_PX as f32;
@@ -608,6 +612,7 @@ fn math_block_geometry_px(
         metrics,
         seat.width,
         frame.columns,
+        placement.right_limit_columns,
         placement.left_subpixels,
         scaled_width,
         math_block_takes_the_left_indent(placement),
@@ -15695,17 +15700,43 @@ fn math_block_left_px(metrics: CellMetrics, left_subpixels: i64, takes_the_inden
     metrics.padding_px + indent + left_subpixels as f32 / SUBPIXELS_PER_PX as f32
 }
 
+/// `right_limit_columns` is [`MathBlockPlacement::right_limit_columns`]: the column this block's
+/// own right edge stands at when a multiplexer's rule stands nearer than the pane's edge, and
+/// `None` when the pane's edge is the block's. It can only bring the edge in, never push it out,
+/// so the seat remains what stops every band.
+/// **The right edge one block may reach**, in the pane body's own pixels.
+///
+/// The seat is what stops every band, and that does not change. What may stand nearer is a
+/// multiplexer's pane rule: a block proved in one region of a split screen
+/// (`bt_detect::border`) owns its region's columns and the columns past the rule are the next
+/// pane's text. One definition because two readers ask it — the ink bound below and the scissor in
+/// [`math_block_geometry_px`] — and a block whose raster reached past its own scissor would be
+/// drawn nowhere it could be seen.
+fn math_block_right_px(
+    metrics: CellMetrics,
+    surface_width: u32,
+    columns: NonZeroU32,
+    right_limit_columns: Option<u32>,
+) -> f32 {
+    let pane_left = metrics.padding_px;
+    let pane_right =
+        (pane_left + columns.get() as f32 * metrics.cell_width_px).min(surface_width as f32);
+    right_limit_columns.map_or(pane_right, |limit| {
+        (pane_left + limit as f32 * metrics.cell_width_px).min(pane_right)
+    })
+}
+
 fn math_horizontal_bounds(
     metrics: CellMetrics,
     surface_width: u32,
     columns: NonZeroU32,
+    right_limit_columns: Option<u32>,
     left_subpixels: i64,
     scaled_width: f32,
     takes_the_indent: bool,
 ) -> Option<(f32, f32)> {
     let pane_left = metrics.padding_px;
-    let pane_right =
-        (pane_left + columns.get() as f32 * metrics.cell_width_px).min(surface_width as f32);
+    let pane_right = math_block_right_px(metrics, surface_width, columns, right_limit_columns);
     let block_left = math_block_left_px(metrics, left_subpixels, takes_the_indent);
     let visible_left = block_left.max(pane_left);
     let visible_right = (block_left + scaled_width).min(pane_right);
@@ -16709,6 +16740,7 @@ mod tests {
             },
             top_subpixels,
             left_subpixels: 0,
+            right_limit_columns: None,
             content_offset_subpixels: 0,
             clip_height_subpixels,
             display: MathBlockDisplay::Rendered,
@@ -16860,6 +16892,7 @@ mod tests {
             metrics,
             200,
             NonZeroU32::new(10).unwrap(),
+            None,
             inset_subpixels,
             40.0,
             false,
@@ -16870,7 +16903,7 @@ mod tests {
 
         // A rendered block gets a small left indent so its tight-cropped ink lines up with text.
         let (rendered_left, _) =
-            math_horizontal_bounds(metrics, 200, NonZeroU32::new(10).unwrap(), 0, 40.0, true)
+            math_horizontal_bounds(metrics, 200, NonZeroU32::new(10).unwrap(), None, 0, 40.0, true)
                 .unwrap();
         assert!(rendered_left > metrics.padding_px + 1.0);
 
@@ -16905,7 +16938,7 @@ mod tests {
         // 60 columns is wider than this seat holds: padding + 60 * 18 = 1096.
         let columns = NonZeroU32::new(60).unwrap();
         let (left, right) = math_horizontal_bounds(
-            metrics, SEAT_WIDTH, columns, 0, 4000.0, // an image far wider than either extent
+            metrics, SEAT_WIDTH, columns, None, 0, 4000.0, // wider than either extent
             true,
         )
         .expect("a visible band");
@@ -16929,7 +16962,7 @@ mod tests {
         );
         // Red gate: the same call against the window extent does escape.
         let (_, window_right) =
-            math_horizontal_bounds(metrics, WINDOW_WIDTH, columns, 0, 4000.0, true).unwrap();
+            math_horizontal_bounds(metrics, WINDOW_WIDTH, columns, None, 0, 4000.0, true).unwrap();
         assert!(
             window_right > SEAT_WIDTH as f32,
             "the pin would pass even if a draw site read the window"

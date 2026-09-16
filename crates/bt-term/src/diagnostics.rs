@@ -377,6 +377,7 @@ mod tests {
             },
             top_subpixels: 0,
             left_subpixels: 0,
+            right_limit_columns: None,
             content_offset_subpixels: 0,
             clip_height_subpixels: 1,
             display: MathBlockDisplay::Rendered,
