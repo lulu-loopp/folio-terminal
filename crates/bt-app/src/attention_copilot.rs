@@ -637,12 +637,8 @@ fn apply_to(path: &Path, install: bool, exe: &Path) -> Outcome {
         // second copy of these hooks that upstream also runs — every event fired twice, for as long
         // as the file sat there. `folio.json.bak-<date>` is not a `*.json`, which is what the
         // `"json"` below produces.
-        match crate::attention_hooks::land(
-            path,
-            &existing,
-            "json",
-            format!("{text}\n").as_bytes(),
-        ) {
+        match crate::attention_hooks::land(path, &existing, "json", format!("{text}\n").as_bytes())
+        {
             crate::attention_hooks::Landing::Landed => {}
             crate::attention_hooks::Landing::NoDirectory => {
                 return Outcome::Refused("the copilot hooks directory could not be created");
