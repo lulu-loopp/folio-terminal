@@ -64786,7 +64786,9 @@ impl Runtime<'_> {
                         .saturating_sub(measurements_before),
                     leaf.projection.projected_line_count(),
                     leaf.projection.rebuilds().saturating_sub(rebuilds_before),
-                    leaf.projection.bands_moved().saturating_sub(bands_moved_before),
+                    leaf.projection
+                        .bands_moved()
+                        .saturating_sub(bands_moved_before),
                 );
             }
             let frame = leaf

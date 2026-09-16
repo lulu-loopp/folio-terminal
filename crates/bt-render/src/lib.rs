@@ -18906,7 +18906,11 @@ mod tests {
         // ④ On the band's midline, and inside it top and bottom.
         let midline = (geometry.block[1] + geometry.block[3]) / 2.0;
         for mark in [boxes.source, boxes.copy] {
-            assert_eq!((mark[1] + mark[3]) / 2.0, midline, "{mark:?} left the midline");
+            assert_eq!(
+                (mark[1] + mark[3]) / 2.0,
+                midline,
+                "{mark:?} left the midline"
+            );
             assert!(mark[1] >= geometry.block[1] && mark[3] <= geometry.block[3]);
             assert_eq!(mark[3] - mark[1], MATH_TOOL_BUTTON_LOGICAL_PX);
         }

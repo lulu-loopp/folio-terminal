@@ -1708,7 +1708,10 @@ mod tests {
         assert!(follow.follow(&landed, None, settled, Motion::Full));
         let arrived = settled + tooltip::TOOLTIP_FADE;
         let placed = follow.placed(arrived, Motion::Full);
-        assert_eq!(placed.block, landed.block, "a typeset rect outlived the change");
+        assert_eq!(
+            placed.block, landed.block,
+            "a typeset rect outlived the change"
+        );
         assert_eq!(placed.source, landed.source);
         assert_eq!(placed.copy, landed.copy);
         assert_eq!(placed.display, MathBlockDisplay::Source);
