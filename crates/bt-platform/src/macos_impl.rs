@@ -1072,6 +1072,32 @@ pub fn clear_surface_layers(window: NativeWindow) -> Result<usize, String> {
 /// region is the strip's empty part and nothing else, and it is asked for
 /// explicitly through [`press_title_bar`].
 ///
+/// **And `isMovable` is turned off beside it** (T-MAC-TAB-DRAG, owner report
+/// 2026-09-16). That flag was not enough on its own, because it governs the
+/// *background* — the surface below the header — and the title bar is a second
+/// drag region AppKit runs itself. On a window wearing `FullSizeContentView`
+/// that band is Folio's content, so AppKit decides whether a press in it moves
+/// the window by asking the view the press landed on
+/// (`mouseDownCanMoveWindow`); the view under this band is winit's, it is a
+/// plain `NSView`, it overrides nothing, and a plain `NSView` answers `YES`.
+/// So AppKit took over every drag that began anywhere in the header, on a tab
+/// as readily as beside one: the press arrived, Folio armed the tab, and the
+/// motion that would have carried it never came — the window walked off under
+/// the hand instead, which is exactly the report. Turning `movable` off takes
+/// the question back whole: **no move of this window is ever AppKit's own
+/// idea**, and every one of them is one Folio asked for inside a press it
+/// hit-tested as the band's empty part.
+///
+/// **It costs the drag nothing**, which is what makes this the one flag to
+/// turn off rather than a window move of this program's own invention:
+/// `performWindowDragWithEvent:` moves a window whose `movable` is `false`,
+/// so [`press_title_bar`] goes on handing the gesture to AppKit and the
+/// reader goes on getting AppKit's drag — its snapping, its spaces, its
+/// tiling — everywhere Folio says the header is empty. The double click is
+/// untouched for a plainer reason: that half of the door was never a drag at
+/// all but `zoom:` or `miniaturize:` read off `AppleActionOnDoubleClick`, and
+/// a window answers both of those whatever its `movable` says.
+///
 /// **What comes back is a measurement, not a platform name.** The inset is the
 /// right edge of the rightmost standard window button, in this module's own
 /// units (physical pixels at the window's backing scale), and it is what
@@ -1106,6 +1132,13 @@ pub fn adopt_window_chrome(
     // The window's `title` is left alone: Mission Control, the window menu and
     // the Dock still read it, and none of them draws it in this bar.
     ns_window.setMovableByWindowBackground(false);
+    // The second half of the same sentence, and the half the header needed: the
+    // background flag leaves AppKit's own title-bar drag standing, and that one
+    // is decided by a view of winit's that answers `YES` to every press in the
+    // band. See the note above — this is where the whole question comes back to
+    // Folio, which already knows pixel for pixel which part of its header is
+    // empty and says so through `press_title_bar`.
+    ns_window.setMovable(false);
     // **The pitch is read before anything moves, and the run is measured after
     // everything has** (owner ruling 2026-09-13, §13.48). Both halves of that
     // sentence are load-bearing and they pull in opposite directions: the

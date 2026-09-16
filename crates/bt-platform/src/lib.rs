@@ -12474,12 +12474,23 @@ mod macos_window_backend_tests {
     /// door still does the four things the take-over *is*, and the reading is
     /// still off the buttons AppKit drew rather than off a constant.
     ///
+    /// **The fifth call is `setMovable(false)`** (T-MAC-TAB-DRAG, owner report
+    /// 2026-09-16), and it is on this list for the same reason the background
+    /// flag is: it is a sentence of the ruling that this window's header is
+    /// Folio's to route. The background flag alone leaves AppKit's own
+    /// title-bar drag standing, and on a `FullSizeContentView` window AppKit
+    /// decides that one by asking the view under the press whether it may move
+    /// the window — a view of winit's, which answers `YES`. Every drag begun in
+    /// the header was AppKit's, so a tab could be neither reordered nor torn
+    /// out: the press armed the tab and the motion moved the window.
+    ///
     /// MUTATION: drop `FullSizeContentView` and Folio's first row of tabs is
     /// pushed below a title bar that is still reserving its own height; drop
     /// `titleVisibility` and the window shows two titles; turn
     /// `MovableByWindowBackground` on and every drag anywhere in the window
-    /// moves it; answer a constant instead of `standardWindowButton` and this
-    /// names it.
+    /// moves it; drop `setMovable(false)` and every drag in the header moves it,
+    /// the ones that began on a tab included; answer a constant instead of
+    /// `standardWindowButton` and this names it.
     #[test]
     fn the_macos_title_bar_is_kept_and_emptied_rather_than_taken_away() {
         let body_of = |needle: &str| {
@@ -12496,6 +12507,7 @@ mod macos_window_backend_tests {
             "setTitlebarAppearsTransparent(true)",
             "setTitleVisibility(NSWindowTitleVisibility::Hidden)",
             "setMovableByWindowBackground(false)",
+            "setMovable(false)",
             "measure_window_chrome(",
         ] {
             assert!(

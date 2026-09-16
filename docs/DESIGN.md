@@ -8495,6 +8495,8 @@ spike 量到的是「这个 workspace 今天已经有约 90% 能在 macOS 上编
 
 **④ 拖拽是 AppKit 的,双击是读者的——而这一句是量出来的,不是查出来的。** macOS 上没有 `WM_NCHITTEST` 可答:AppKit 把「这一按能不能移动窗口」问给一个 **view**(`mouseDownCanMoveWindow`),而这条 bar 底下的 view 是 winit 的,它自己实现了 `mouseDown:`,所以答 NO。于是应用在按下**里面**自己判定——它本来就逐像素知道自己那条 strip 哪里是空的——然后调 `press_title_bar`,也就是 `performWindowDragWithEvent:`。
 
+**T-MAC-TAB-DRAG (owner report 2026-09-16) corrects the sentence above:** that view answers `YES` and not `NO` — winit's is a plain `NSView` that overrides `mouseDownCanMoveWindow` nowhere, so AppKit was running its own title-bar drag across the whole header and a press that began on a tab moved the window instead of carrying the tab, which `adopt_window_chrome` now settles once by turning the window's `movable` off, leaving every move of this window one Folio asked for inside a press through `press_title_bar`.
+
 这张票第一版按「这扇门连双击一起带过来」写的,因为那正是这个选择器到处被描述的样子。**探针说不是**:一扇没有 Folio 参与的普通 `NSWindow`,它自己的 view 在 `mouseDown:` 里以 `clickCount == 2` 调这个选择器,窗口一动不动;同一次运行里,旁边那扇窗的 AppKit 自带标题栏被同样一对合成事件双击,缩放了。所以双击这一半是这扇门自己做的:`clickCount >= 2` 时读 `AppleActionOnDoubleClick`,`Maximize` → `zoom:`,`Minimize` → `miniaturize:`,`None` → 什么都不做,别的值拒绝而不是猜。
 
 **偏好从标准 user defaults 读,不从偏好文件读**,这是「读者选了什么」和「系统会做什么」的差别:一台没人动过这个键的机器上 `defaults read -g AppleActionOnDoubleClick` 说这个键不存在,而标准 defaults 在那里答 `Maximize`——因为那是 AppKit 自己注册的。问文件会把「默认」变成「什么也不发生」。

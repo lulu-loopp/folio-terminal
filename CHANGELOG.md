@@ -6,6 +6,11 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Fixed
+
+- **On a Mac, a tab can be dragged to reorder it or out into its own window
+  again; the window moves only when the empty part of the header is dragged.**
+
 ## 0.4.1-preview — 2026-09-16
 
 ### Added
