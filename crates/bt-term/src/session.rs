@@ -28489,6 +28489,135 @@ mod tests {
         );
     }
 
+    /// T-INLINE-MATH-SURVIVES-RESIZE: real command output, frozen before the window rewraps it.
+    #[test]
+    fn frozen_inline_math_survives_window_resize() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(100), nz(24));
+        seat_inline_metrics(&mut session);
+        session.set_layout_key(LayoutKey {
+            line_wrapping: true,
+            ..session.layout_key()
+        });
+        let document = concat!(
+            "\x1b]133;A\x07PS> \x1b]133;B\x07type math-test.md\x1b]133;C\x07\r\n",
+            r"The integral $\int_{-\infty}^{\infty} e^{-x^2}\,dx = \sqrt{\pi}$ shows up everywhere.",
+            "\r\n$$\r\n",
+            r"\int_{-\infty}^{\infty} e^{-x^2}\,dx = \sqrt{\pi}",
+            "\r\n$$\r\n",
+            r"Euler: $e^{i\pi} + 1 = 0$. Matrix:",
+            "\r\n$$\r\n",
+            r"\begin{pmatrix}1 & 2 \\ 3 & 4\end{pmatrix}",
+            "\r\n$$\r\n",
+            r"The series $\sum_{n=1}^{\infty} \frac{1}{n^2} = \frac{\pi^2}{6}$ converges.",
+            "\r\n\x1b]133;D;0\x07\x1b]133;A\x07PS> \x1b]133;B\x07",
+        );
+        session.feed_at(document.as_bytes(), started).unwrap();
+        session
+            .feed_at("\r\npad".repeat(28).as_bytes(), started)
+            .unwrap();
+        assert!(complete_frozen_math_for_real(&mut session) >= 5);
+        let occurrences = session
+            .decorations
+            .iter()
+            .filter_map(|(id, record)| {
+                let span = record.span.as_ref()?;
+                frozen_artifact_and_scale(record)?;
+                Some((*id, span.clone()))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            occurrences
+                .iter()
+                .filter(|(_, span)| span.mode == MathMode::Inline)
+                .count(),
+            3
+        );
+        assert_eq!(
+            occurrences
+                .iter()
+                .filter(|(_, span)| span.mode == MathMode::Display)
+                .count(),
+            2
+        );
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_to_top();
+        let before = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(rendered_inline_blocks(&before).len(), 3);
+
+        let assert_pictures = |session: &DualPlaneSession, frame: &ViewportFrame| {
+            for (id, span) in &occurrences {
+                let record = session
+                    .decoration(*id)
+                    .expect("rewrap retains the transcript occurrence");
+                assert_eq!(record.span.as_ref(), Some(span));
+                assert!(frozen_artifact_and_scale(record).is_some());
+                assert!(
+                    frame.math_blocks.iter().any(|block| {
+                        block.start == *id && block.display == MathBlockDisplay::Rendered
+                    }),
+                    "the same occurrence must still have a picture"
+                );
+            }
+            assert_eq!(rendered_inline_blocks(frame).len(), 3);
+            assert_eq!(
+                frame
+                    .math_blocks
+                    .iter()
+                    .filter(|block| block.artifact.mode == MathMode::Display)
+                    .count(),
+                2
+            );
+            assert!(
+                !frame.cells.iter().any(|cell| cell.text.contains('$')),
+                "no formula's delimiters return as source"
+            );
+        };
+        assert_pictures(&session, &before);
+        for (step, columns) in [60, 100, 60].into_iter().enumerate() {
+            let resized_at = started + Duration::from_secs(1 + step as u64 * 4);
+            session.resize_at(nz(columns), nz(24), resized_at).unwrap();
+            session.refresh_projection(&mut projection);
+            // Measure the new live/staging extent before positioning the review viewport.
+            session.viewport_frame(&mut projection).unwrap();
+            projection.scroll_to_top();
+            let after = session.viewport_frame(&mut projection).unwrap();
+            assert_eq!(
+                after.columns.get(),
+                columns,
+                "frame must use the resized width"
+            );
+            assert_pictures(&session, &after);
+            let integral_rows = after.cell_anchors.chunks(columns as usize).filter(|row| {
+                row.iter().any(|cell| matches!(cell.start, ContentAnchor::History { id, .. } if id == occurrences[0].0))
+            }).count();
+            assert_eq!(
+                integral_rows,
+                if columns == 60 { 2 } else { 1 },
+                "the frozen integral sentence must really rewrap: first={:?}, layout={:?}, rows={:?}",
+                occurrences[0],
+                session.layout_key(),
+                after
+                    .cell_anchors
+                    .chunks(columns as usize)
+                    .map(|row| &row[0].start)
+                    .collect::<Vec<_>>()
+            );
+            session.mark_pty_resize_requested_at(nz(columns), nz(24), resized_at);
+            assert!(
+                session
+                    .finish_resize_if_quiescent(resized_at + Duration::from_secs(2))
+                    .unwrap()
+            );
+            session.schedule_visible_artifacts(&after);
+            complete_frozen_math_for_real(&mut session);
+            session.refresh_projection(&mut projection);
+            let settled = session.viewport_frame(&mut projection).unwrap();
+            assert_pictures(&session, &settled);
+        }
+    }
+
     /// PIN (slice 3): one over-wide run falls back to source alone; its neighbour still renders.
     ///
     /// The width rule — render in place if it fits, source if it does not — was correct and
