@@ -6,6 +6,18 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Changed
+
+- **When Folio's window stops answering, its own log now says which kind of
+  event it was answering.** The line Folio writes about a window that held on
+  too long used to end at `window_event`, which is every key, every pointer
+  move, every redraw and every resize under one word; it now names the handler
+  the event went to — `keyboard_input`, `redraw`, `resized` and ten others — so
+  a report about a window that froze for a few seconds says where inside it the
+  time went. And a run started with `BT_PERF_TRACE` set now writes a full hang
+  report after two seconds of silence instead of five, which is where the stalls
+  people actually notice live; a run started without it is unchanged.
+
 ## 0.4.1-preview — 2026-09-16
 
 ### Added
