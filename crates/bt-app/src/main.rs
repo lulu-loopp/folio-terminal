@@ -102709,7 +102709,10 @@ mod hold_station_tests {
             ("Station::Pickers", "self.apply_math_context_menu_result();"),
             ("Station::PaneRows", "self.settle_pane_notices()?;"),
             ("Station::Clocks", "self.raise_first_run_if_due()?;"),
-            ("Station::SyncUpdate", "self.finish_synchronized_update_if_due(now)?;"),
+            (
+                "Station::SyncUpdate",
+                "self.finish_synchronized_update_if_due(now)?;",
+            ),
             ("Station::Deadlines", "let startup_deadline ="),
         ];
         let mut previous = 0;
