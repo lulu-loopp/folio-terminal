@@ -95550,7 +95550,14 @@ impl Runtime<'_> {
         }
         let paths = std::mem::take(&mut self.window.dropped_files);
         let leaving = hang_watch::enter(hang_watch::Station::FileDrop);
-        let seat = self.dropped_files_seat();
+        // **The cursor is asked for here and exactly once**, for the batch and
+        // not for the file: the query crosses into Win32 or AppKit, and a drop
+        // of forty files would otherwise cross forty times to be told the same
+        // point. It is also the only moment at which the question is worth
+        // asking — the hand is still where it let go, and the flush's own rule
+        // guarantees no event has moved it since the drop.
+        let point = self.dropped_files_point();
+        let seat = self.dropped_files_seat(point);
         let pasted = self.paste_paths_into(seat, paths);
         hang_watch::at(leaving);
         pasted
@@ -95575,20 +95582,19 @@ impl Runtime<'_> {
     /// about *views*, and a path appearing in a shell because a file was let go
     /// of over a file tree would be the text verb leaking back into it.
     ///
-    /// **Why the pointer is so often unknown here.** winit 0.30 reports a drop
-    /// as a path and nothing else: the Windows backend takes `POINTL` in
-    /// `IDropTarget::Drop` and discards it, and the macOS backend never reads
-    /// the dragging location out of `performDragOperation:`. Neither platform
-    /// sends a pointer event during a drag either, so a drag that began in
-    /// another application arrives at a window whose pointer left it —
-    /// `pointer_position` is `None`, and the keyboard's pane is the answer.
-    /// [`WindowRuntime::pointer_last_seen`] is deliberately **not** read: it
-    /// says where the hand was before the drag, which is not where this drop
-    /// landed, and a routing built on it would be a guess wearing a
-    /// measurement's clothes. Routing by the pointer becomes the common case the
-    /// day a drop carries its point.
-    fn dropped_files_seat(&mut self) -> SeatId {
-        let position = self.window.pointer_position;
+    /// **Where the point comes from, given that winit throws it away.** winit
+    /// 0.30 reports a drop as a path and nothing else: the Windows backend is
+    /// handed `POINTL` in `IDropTarget::Drop` and discards it, and the macOS
+    /// backend never reads the dragging location out of
+    /// `performDragOperation:`. Neither platform sends a pointer event while
+    /// another application's drag is over the window either, so a drag that
+    /// began in Explorer or the Finder arrives at a window whose pointer has
+    /// already left it and `pointer_position` is `None` — which is *most*
+    /// drops. [`Self::dropped_files_point`] is what closes that: the cursor is
+    /// asked of the platform, once, at the moment of the flush. The keyboard's
+    /// pane is what is left when even that answers nothing, which is a window
+    /// on a session with no desktop to read.
+    fn dropped_files_seat(&mut self, position: Option<PhysicalPosition<f64>>) -> SeatId {
         let covered = position.is_some_and(|position| {
             matches!(
                 self.pointer_target_at(position),
@@ -95596,6 +95602,46 @@ impl Runtime<'_> {
             ) || self.panel_covers(position)
         });
         dropped_files_seat_at(&self.seat_layout, position, covered, self.focused_leaf)
+    }
+
+    /// **Where the hand let go**, in this window's own pixels (GitHub issue #1
+    /// ②, owner's ruling 2026-09-16: a drop lands in the pane under the cursor).
+    ///
+    /// The live pointer where there is one — a drag that began *inside* this
+    /// window leaves it standing — and otherwise the platform's own cursor,
+    /// which is the only witness left once winit has dropped the point and the
+    /// pointer events have stopped.
+    ///
+    /// **The two are the same units and no conversion happens here**, which was
+    /// checked rather than assumed. `pointer_position` is
+    /// `WindowEvent::CursorMoved`'s `PhysicalPosition` stored raw
+    /// ([`Self::pointer_moved`]). On Windows that is `WM_MOUSEMOVE`'s `lParam`:
+    /// physical pixels from the client area's top-left, which is precisely what
+    /// `GetCursorPos` put through `ScreenToClient` answers. On macOS winit takes
+    /// its view's point and multiplies by the window's backing scale, which is
+    /// precisely what the AppKit arm does with `NSEvent.mouseLocation` after the
+    /// same two conversions. So the platform's answer is already in the window's
+    /// physical pixels and is used as it stands; scaling it again here would
+    /// square the factor on every Retina and every 150% display.
+    ///
+    /// [`WindowRuntime::pointer_last_seen`] is still deliberately not read: it
+    /// says where the hand was *before* the drag, which is not where this drop
+    /// landed, and a routing built on it would be a guess wearing a
+    /// measurement's clothes. The cursor query is the opposite of that — it is
+    /// the hand's position now, and now is when the file was let go of.
+    fn dropped_files_point(&self) -> Option<PhysicalPosition<f64>> {
+        let live = self.window.pointer_position;
+        let queried = match live {
+            // A window that already knows where its pointer is does not pay for
+            // the question. The query crosses into Win32 or AppKit, and this
+            // `match` is where "only when the batch has no pointer of its own"
+            // is actually enforced.
+            Some(_) => None,
+            None => native_window(&self.window.window)
+                .ok()
+                .and_then(bt_platform::pointer_position_in_window),
+        };
+        dropped_files_point_from(live, queried)
     }
 
     fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {
@@ -113079,6 +113125,25 @@ fn dropped_files_seat_at(
         // honestly mean.
         Some(_) | None => focused,
     }
+}
+
+/// **Which of the two witnesses a drop's point is**, with both already in hand
+/// (GitHub issue #1 ②).
+///
+/// `live` is `WindowEvent::CursorMoved`'s last word and `queried` is what the
+/// platform's own cursor answered, in the window's physical pixels. The live one
+/// wins because it is free and cannot be stale — no event that could have moved
+/// it has run since the drop — and the query is what a drag from another
+/// application leaves as the only witness.
+///
+/// A free function so the choice and the unit conversion can be read without a
+/// window: the call underneath it is native on both platforms and is the one
+/// thing a test cannot reach.
+fn dropped_files_point_from(
+    live: Option<PhysicalPosition<f64>>,
+    queried: Option<(i32, i32)>,
+) -> Option<PhysicalPosition<f64>> {
+    live.or_else(|| queried.map(|(x, y)| PhysicalPosition::new(f64::from(x), f64::from(y))))
 }
 
 /// **A dropped file's path is a copied file's path** (GitHub issue #1 ②).
@@ -159055,17 +159120,19 @@ mod tests {
     ///
     /// The routing half of the drop, read against a real solved three-pane
     /// layout: the same arithmetic a press is answered by, asked of the same
-    /// rectangles. The three fall-backs are the whole of the rest of the rule —
-    /// a point a float or an open rail has claimed, a point in no pane at all,
-    /// and a window whose pointer is not in it, which is what a drag that came
-    /// from another application actually arrives as.
+    /// rectangles. The rest of the rule is its fall-backs — a point a float or
+    /// an open rail has claimed, a point in no pane at all, and a drop with
+    /// neither a pointer of its own nor a cursor the platform would answer with,
+    /// which is the last resort and is now much narrower than it was: since the
+    /// owner's ruling of 2026-09-16 a drag that came from another application is
+    /// routed by the queried cursor, and the closing block reads that road all
+    /// the way through.
     ///
     /// MUTATION ①: ignore `covered` and a point a floating window has claimed
     /// answers with the pane it is standing on top of — the second assertion in
-    /// the loop goes red for all three. MUTATION ②: let the pointerless arm
-    /// answer whatever `pane_at` says about a position it does not have, and the
-    /// last assertion goes red, which is the arm every drag from another
-    /// application actually takes.
+    /// the loop goes red for all three. MUTATION ②: go back to routing a
+    /// pointerless drop to the keyboard's pane and the closing block goes red,
+    /// because that is the pane the cursor is deliberately *not* over.
     #[test]
     fn a_drop_lands_in_the_pane_under_it_and_otherwise_on_the_keyboards_pane() {
         let seats = cross_seats(3);
@@ -159114,8 +159181,71 @@ mod tests {
         assert_eq!(
             dropped_files_seat_at(&layout, None, false, focused),
             focused,
-            "and so is a drop onto a window the pointer had already left, which \
-             is every drag that began in another application"
+            "and so is a drop with no pointer of its own *and* no cursor the \
+             platform would answer with — the last resort and nothing less"
+        );
+
+        // **The road a drag from another application really takes** (owner's
+        // ruling 2026-09-16). The window's own pointer left when the hand went
+        // to Explorer, so the point comes from the cursor query; the query
+        // itself is native, and what is read here is the plumbing under it —
+        // the choice between the two witnesses, the physical pixels they are
+        // both in, and the pane that arithmetic then names.
+        let (elsewhere_seat, elsewhere_rect) = *rects
+            .iter()
+            .find(|(seat, _)| *seat != focused)
+            .expect("a three-pane tab has a pane that is not the keyboard's");
+        let cursor = (
+            ((elsewhere_rect[0] + elsewhere_rect[2]) / 2.0) as i32,
+            ((elsewhere_rect[1] + elsewhere_rect[3]) / 2.0) as i32,
+        );
+        let point = dropped_files_point_from(None, Some(cursor));
+        assert_eq!(
+            point,
+            Some(PhysicalPosition::new(
+                f64::from(cursor.0),
+                f64::from(cursor.1)
+            )),
+            "the platform's answer is already in the window's physical pixels \
+             and is not scaled a second time"
+        );
+        assert_eq!(
+            dropped_files_seat_at(&layout, point, false, focused),
+            elsewhere_seat,
+            "a drop whose point came from the cursor lands in the pane under it, \
+             not in the pane holding the keyboard"
+        );
+    }
+
+    /// **The live pointer first, the platform's cursor second, nothing third**
+    /// (GitHub issue #1 ②, owner's ruling 2026-09-16).
+    ///
+    /// The choice [`dropped_files_point_from`] is, read on its own. The first
+    /// row is a drag that began inside this window — there is a pointer, and
+    /// paying for a system call to be told what the window already knows would
+    /// be worse in both directions, cost and freshness. The second is every drag
+    /// that came from another application. The third is a machine that will not
+    /// say, which is the only road left to the keyboard's pane.
+    ///
+    /// MUTATION: put the query first and the first row goes red, which is a
+    /// window asking the system a question it has a better answer to.
+    #[test]
+    fn a_drops_point_is_the_live_pointer_or_the_platforms_cursor() {
+        let live = PhysicalPosition::new(640.0, 360.0);
+        assert_eq!(
+            dropped_files_point_from(Some(live), Some((1, 2))),
+            Some(live),
+            "a window that knows where its pointer is uses that and asks nothing"
+        );
+        assert_eq!(
+            dropped_files_point_from(None, Some((37, 41))),
+            Some(PhysicalPosition::new(37.0, 41.0)),
+            "and one that does not takes the cursor, in the pixels it arrives in"
+        );
+        assert_eq!(
+            dropped_files_point_from(None, None),
+            None,
+            "and answers nothing when neither witness can speak"
         );
     }
 
@@ -169161,6 +169291,14 @@ mod clipboard_path_tests {
             (
                 "self.paste_paths_into(seat, paths)",
                 "a dropped batch reaches a shell through one door",
+            ),
+            (
+                "self.dropped_files_point()",
+                "the cursor is asked for once per batch and not once per file",
+            ),
+            (
+                "bt_platform::pointer_position_in_window",
+                "and there is one door onto the platform's cursor in this window",
             ),
             (
                 "runtime.flush_dropped_files()",

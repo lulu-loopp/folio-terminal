@@ -622,6 +622,54 @@ pub fn pointer_position() -> Option<(i32, i32)> {
     ))
 }
 
+/// **Where the pointer is inside one window's content view**, in physical pixels
+/// measured from its top-left corner (GitHub issue #1 ②).
+///
+/// [`pointer_position`]'s reading put through two conversions AppKit owns —
+/// screen to window (`convertPointFromScreen:`), window to view
+/// (`convertPoint:fromView:` with `nil`) — so that the answer is stated in the
+/// same space every pointer event this window receives already is: winit's
+/// `CursorMoved` is its view's point scaled by the window's backing factor, and
+/// so is this. A caller with no pointer event to read may therefore use this
+/// where it would have used one.
+///
+/// **The flip is asked for rather than assumed.** An `NSView`'s own coordinate
+/// system has its origin at the bottom left *unless the view says otherwise*,
+/// and winit's does say otherwise — its `isFlipped` answers `true` so that its
+/// points are already measured from the top, which is why winit's own
+/// `mouse_motion` takes `convertPoint:fromView:`'s `y` untouched. Subtracting
+/// from the height as well would put the pointer at the far end of the window
+/// from the hand. So the question is put to the view, and a view of either kind
+/// is read correctly.
+///
+/// **Its one caller is a file drop.** `performDragOperation:` knows where the
+/// hand let go and winit does not pass it on, and AppKit sends no mouse-moved
+/// event while another application's drag is over the window — so a drop is the
+/// one gesture whose position this process must go and ask for.
+///
+/// `None` off the window thread, or for a view that is in no window.
+#[must_use]
+pub fn pointer_position_in_window(window: NativeWindow) -> Option<(i32, i32)> {
+    let mtm = window_thread("reading the pointer inside a window").ok()?;
+    let ns_window = window_of(window, mtm)?;
+    // SAFETY: `window_of`'s contract exactly — the handle is winit's live
+    // `ns_view` pointer and this is the window's own thread, which the marker
+    // above is the proof of.
+    let view: &NSView = unsafe { window.as_ns_view().as_ref() };
+    let in_window = ns_window.convertPointFromScreen(NSEvent::mouseLocation());
+    let in_view = view.convertPoint_fromView(in_window, None);
+    let from_top = if view.isFlipped() {
+        in_view.y
+    } else {
+        view.bounds().size.height - in_view.y
+    };
+    let scale = ns_window.backingScaleFactor();
+    Some((
+        (in_view.x * scale).round() as i32,
+        (from_top * scale).round() as i32,
+    ))
+}
+
 /// The backing scale of the display an AppKit point is on, and `1.0` for a point
 /// on none of them — which is the same direction [`dpi_at`] takes for a machine
 /// with nothing to read.
