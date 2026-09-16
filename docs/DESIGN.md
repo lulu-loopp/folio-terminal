@@ -347,6 +347,8 @@ target  ← CreateTargetForHwnd(hwnd, topmost = true)
 
 **谁 commit：我们，每帧一次。** wgpu 建/改 swapchain 时只对我们的 visual 调 `SetContent`，**不调 `Commit`**（`wgpu-hal-30.0.0/src/dx12/mod.rs:1619` 的 `SurfaceTarget::Visual` 分支，与它上面自建设备的 `VisualFromWndHandle` 分支正好相反）。持有 DComp device 的人负责 commit，漏掉不是掉帧而是**画面永远不动**，同时所有 trace 照常报告"帧已呈现"。所以 app 侧只留一个漏斗：`Runtime::present_seats_and_commit`（`crates/bt-app/src/main.rs`）是全程序**唯一**调用 `Renderer::present_seats` 的地方，commit 就是它的下一条语句；`redraw` 与 `present_retained_picture` 两条路都从这里过，resize 的呈现是 `redraw` 而不是第三条路。
 
+A visible window skips composition, presentation and compositor commit only when every seat picture and retained renderer input matches its last complete presented signature; resize, DPI, surface-generation and pending skirt changes always require a frame.
+
 **alpha 是断言不是偏好。** `bt_render::WindowTarget::{Hwnd, CompositionVisual}` 两扇门各自只有一个正确答案——HWND 是 `Opaque`（dx12 只给这一个），visual 是 `PreMultiplied`——由纯函数 `choose_alpha_mode` 判定，adapter 给不出就是 `RenderError::AlphaModeUnavailable { target, required, offered }`。**不允许替代**：一个被悄悄配成 `Opaque` 的 visual surface 今天的画面完全正确，而这一片存在的唯一理由已经被抹掉，且要等到预览块的洞画出来是黑的才会发现。清屏色**当时**仍是不透明（`a: 1.0`）——挖洞是下一片的事；**2026-08-17 §7.1.6c-4b 兑现了它**，清屏现在是 `premultiplied_clear(线性背景, 地面 alpha)`，而这一片建立的预乘语义正是它唯一能成立的前提。`BT_STARTUP_TRACE` 打印 offered 与 chosen 两行，与 spike 的输出格式一致。
 
 **没有退回 HWND swapchain 的路。** DirectComposition 在本产品支持的每一版 Windows 上都在；留一条"以防万一"的旧路等于永久背着两套 alpha 语义、两套 resize 行为、两份要拍照验收的表面，去防一个不存在的失败模式。建不出 visual surface 就是开窗失败并说明原因。

@@ -3029,6 +3029,17 @@ impl WebSeat {
         self.wanted
     }
 
+    /// A native page's controller can arrive underneath an unchanged GPU hole.
+    /// Its lifecycle and placement still owe the shared compositor a commit.
+    pub(crate) fn present_state(&self) -> (u64, WebState, bool, WebPresence) {
+        (
+            self.machine.generation(),
+            self.machine.state(),
+            self.host.has_controller(),
+            self.wanted,
+        )
+    }
+
     /// **The window this page stands in has moved** — see
     /// [`crate::Runtime::window_moved`], which is the one caller and carries the
     /// argument for why this is not the same fact as [`Self::place`].

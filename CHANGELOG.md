@@ -59,6 +59,12 @@ All notable changes to Folio are recorded here. The format follows
   read it". The second one leaves your file untouched, shows the row as
   something it will not write, and says so when the row is pressed. A file it
   can read is still copied beside itself before anything is changed, as it was.
+
+- **A picture that has not changed no longer asks the GPU to draw it again.**
+  Repeated redraws compare each pane and the window furniture around it with the last
+  complete picture. Caret blinks, hover marks and moving panes still redraw;
+  resizing and replacing a surface always get their own frame.
+
 - **On a Mac, a second Folio started from a terminal now hands over instead of
   becoming a second writer.** Which Folio is allowed to write your settings and
   your saved session was decided in a directory whose location came from

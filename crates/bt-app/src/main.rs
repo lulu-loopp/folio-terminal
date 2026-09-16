@@ -87,6 +87,7 @@ mod pdf;
 mod peek_strip;
 mod persist;
 mod pins;
+mod present_gate;
 mod preview;
 mod preview_edit;
 mod preview_live;
@@ -12299,6 +12300,7 @@ struct WindowRuntime {
     /// the newest thing anyone has composed" — the whole of the chrome-only
     /// path's licence.
     presented_picture_revision: u64,
+    present_gate: present_gate::PresentGate,
     /// A present that redraws only what the renderer already holds.
     ///
     /// Set by [`Runtime::publish_chrome_frame`] when an animation moved
@@ -13811,9 +13813,21 @@ struct WindowRuntime {
 /// because they leave it together: a frame that says nothing new to one of them
 /// usually says nothing new to the other, and a caller that had to remember two
 /// separate borrows would be a caller that could forget one.
+// The same boundary carries the no-op counter and the conditions under which
+// equality may pay the frame without producing a presentation receipt.
 struct FrameTraces<'a> {
+    gate: &'a mut present_gate::PresentGate,
+    trace_perf: bool,
+    slot_overwrites: u64,
+    conditions: present_gate::PresentConditions,
     preview: &'a mut preview_trace::FrameEcho,
     census: &'a mut glyph_trace::CensusEcho,
+}
+
+/// The trigger and candidate picture carried into the present gate together.
+struct PresentIntent {
+    trigger: FrameTrigger,
+    signature: present_gate::PresentSignature,
 }
 
 impl WindowRuntime {
@@ -36344,6 +36358,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         first_visible_present_dpi_checked: false,
         first_text_presented: false,
         last_presented_frame: None,
+        present_gate: present_gate::PresentGate::default(),
         terminal_content_revision: 0,
         presented_picture_revision: 0,
         chrome_present_pending: false,
@@ -64864,6 +64879,34 @@ impl Runtime<'_> {
     /// which is what the caller did unconditionally before.
     fn publish_chrome_frame(&mut self, now: Instant) -> Result<()> {
         if chrome_tick_reuses_picture(self.picture_on_glass()) {
+            let bodies = self.pane_draws(now);
+            let (seat_ids, seats) = Self::retained_seats(
+                &self.window.tabs[self.window.active_tab],
+                self.window
+                    .last_presented_frame
+                    .as_ref()
+                    .filter(|_| self.focused().is_some()),
+                &bodies,
+                self.focused_leaf,
+                self.window.renderer.seat_viewport(),
+                self.keyboard_owner_is_a_shell(),
+            );
+            let signature = self.present_signature(&seat_ids, &seats);
+            if self.app.gpu.device_loss().is_none()
+                && self
+                    .window
+                    .present_gate
+                    .unchanged(&signature, self.present_conditions(FrameSource::Expose))
+            {
+                trace_unchanged_present(
+                    self.app.trace_perf,
+                    &mut self.window.present_gate,
+                    FrameSource::Expose,
+                    self.window.last_presented_frame.as_ref(),
+                    self.window.pending_frames.overwrites(),
+                );
+                return Ok(());
+            }
             self.window.chrome_present_pending = true;
             self.window.window.request_redraw();
             return Ok(());
@@ -65120,11 +65163,13 @@ impl Runtime<'_> {
                 let alternate_screen = frame_is_alternate_screen(&composed.frame);
                 let digest_elapsed = digest_started.elapsed();
                 trace_sink::stderr_line(format!(
-                    "BT_PERF_TRACE skip=unchanged source={:?} content_fnv={:016x} alt={} digest_us={}",
+                    "BT_PERF_TRACE skip=unchanged source={:?} content_fnv={:016x} alt={} digest_us={} present_unchanged={} slot_overwrites={}",
                     trigger.source,
                     digest.content_fnv,
                     u8::from(alternate_screen),
                     digest_elapsed.as_micros(),
+                    self.window.present_gate.unchanged,
+                    self.window.pending_frames.overwrites(),
                 ));
             }
             return Ok(false);
@@ -100257,9 +100302,33 @@ impl Runtime<'_> {
         window: &Window,
         traces: FrameTraces<'_>,
         seat_frames: &[bt_render::SeatFrame<'_>],
-        trigger: FrameTrigger,
-    ) -> Result<PresentOutcome> {
-        let FrameTraces { preview, census } = traces;
+        intent: PresentIntent,
+    ) -> Result<Option<PresentOutcome>> {
+        let PresentIntent {
+            trigger,
+            mut signature,
+        } = intent;
+        let FrameTraces {
+            preview,
+            census,
+            gate,
+            trace_perf,
+            slot_overwrites,
+            conditions,
+        } = traces;
+        if gpu.device_loss().is_none() && gate.unchanged(&signature, conditions) {
+            trace_unchanged_present(
+                trace_perf,
+                gate,
+                trigger.source,
+                seat_frames.first().map(|seat| seat.frame),
+                slot_overwrites,
+            );
+            return Ok(None);
+        }
+        // Failure, textless presentation, or even a failed commit must not
+        // leave an old signature claiming that the surface is still complete.
+        gate.invalidate();
         // **What the frame is allowed to cost to measure**, decided at the one
         // funnel because that is the one place every frame passes. Counting a
         // frame's demand on the glyph atlas means rasterizing each distinct
@@ -100317,7 +100386,12 @@ impl Runtime<'_> {
                 window.request_redraw();
             }
         }
-        Ok(outcome)
+        if matches!(outcome, PresentOutcome::Presented(_)) {
+            // A successful resize may configure the surface inside this call.
+            signature.renderer = renderer.present_state();
+            gate.presented(signature);
+        }
+        Ok(Some(outcome))
     }
 
     /// **What one present cost, printed once for every present this window
@@ -100386,6 +100460,133 @@ impl Runtime<'_> {
         self.window.perf_trace_us = trace_started.elapsed().as_micros();
     }
 
+    fn present_conditions(&self, source: FrameSource) -> present_gate::PresentConditions {
+        present_gate::PresentConditions {
+            visible: self.window.window_shown
+                && self.window.window.is_visible() == Some(true)
+                && !self.window.window_hidden
+                && self.window.window_exposed,
+            resize_pending: self.pending_resize_present.is_some()
+                || matches!(source, FrameSource::Resize),
+            skirt_pending: self.window.compositor.skirt_covers_anything(),
+        }
+    }
+
+    /// The signature is gathered only after pane_draws sampled the transforms
+    /// and placed previews. Equality includes the complete terminal projection,
+    /// so selection, hover marks and both viewport origins advance a seat's
+    /// picture revision even when its terminal bytes did not change.
+    fn present_signature(
+        &self,
+        seat_ids: &[SeatId],
+        seats: &[bt_render::SeatFrame<'_>],
+    ) -> present_gate::PresentSignature {
+        debug_assert_eq!(seat_ids.len(), seats.len());
+        let tab = &self.window.tabs[self.window.active_tab];
+        let seats = seat_ids
+            .iter()
+            .zip(seats)
+            .map(|(id, seat)| {
+                let owner = (tab.id.0, id.0);
+                let same_picture = tab
+                    .sessions
+                    .get(id)
+                    .and_then(|leaf| leaf.last_presented_frame.as_ref())
+                    .is_some_and(|previous| present_gate::pictures_match(previous, seat.frame));
+                present_gate::SeatSignature {
+                    owner,
+                    picture_revision: self
+                        .window
+                        .present_gate
+                        .picture_revision(owner, same_picture),
+                    viewport: seat.seat,
+                    clip: seat.clip,
+                    focused: seat.focused,
+                }
+            })
+            .collect();
+        let size = self.window.window.inner_size();
+        present_gate::PresentSignature {
+            renderer: self.window.renderer.present_state(),
+            window_visible: self.window.window_shown
+                && self.window.window.is_visible() == Some(true),
+            seats,
+            native_pages: self
+                .window
+                .web
+                .iter()
+                .map(|(leaf, page)| present_gate::NativePageSignature {
+                    owner: (leaf.tab.0, leaf.seat.0),
+                    state: page.present_state(),
+                })
+                .collect(),
+            window_size: (size.width, size.height),
+            dpi: self.window.window.scale_factor().to_bits(),
+        }
+    }
+
+    fn retained_seats<'a>(
+        tab: &'a TabState,
+        focused_frame: Option<&'a ViewportFrame>,
+        bodies: &[PaneDraw],
+        focused_leaf: SeatId,
+        viewport: bt_render::SeatViewport,
+        focused: bool,
+    ) -> (Vec<SeatId>, Vec<bt_render::SeatFrame<'a>>) {
+        let mut seat_ids = Vec::with_capacity(bodies.len());
+        let mut seat_frames = Vec::with_capacity(bodies.len());
+        // **The focused seat frame is pushed only when there is a shell to push
+        // one for** (§7.1.6h). On a folder tab the retained window picture is
+        // the *previous* tab's, and the fallback rectangle below is the whole
+        // viewport — so pushing it would paint another tab's terminal across
+        // this one and leave the chrome to cover its own tracks. The list is
+        // then simply empty, and `present_frame` composes zero seats and the
+        // chrome over them, which is exactly what such a tab is made of.
+        if let Some(frame) = focused_frame {
+            let focused_body = bodies
+                .iter()
+                .find(|pane| pane.seat == focused_leaf)
+                .copied()
+                .unwrap_or(PaneDraw {
+                    seat: focused_leaf,
+                    viewport,
+                    clip: viewport,
+                });
+            seat_ids.push(focused_leaf);
+            seat_frames.push(bt_render::SeatFrame {
+                seat: focused_body.viewport,
+                clip: focused_body.clip,
+                frame,
+                focused,
+            });
+        }
+        // Each unfocused pane's own last picture, for the same reason the
+        // focused one's is reused: a pane that has not been given anything new
+        // to say is showing what it last said, and re-projecting it would be
+        // asking it to say the same thing at the price of a whole capture.
+        // A pane that has never presented is simply not drawn this present —
+        // it has nothing on the glass to keep.
+        for pane in bodies {
+            if pane.seat == focused_leaf {
+                continue;
+            }
+            let Some(leaf) = tab.sessions.get(&pane.seat) else {
+                continue;
+            };
+            let Some(projected) = leaf.last_presented_frame.as_ref() else {
+                continue;
+            };
+            seat_ids.push(pane.seat);
+            seat_frames.push(bt_render::SeatFrame {
+                seat: pane.viewport,
+                clip: pane.clip,
+                frame: projected,
+                focused: false,
+            });
+        }
+        (seat_ids, seat_frames)
+    }
+
     /// Put the picture that is already on the glass back on the glass, with
     /// whatever the renderer has been told since.
     ///
@@ -100423,65 +100624,19 @@ impl Runtime<'_> {
             ),
         );
         self.refresh_table_paints(&table_sources);
-        let active = self.window.active_tab;
-        let mut seat_frames = Vec::with_capacity(bodies.len());
-        // **The focused seat frame is pushed only when there is a shell to push
-        // one for** (§7.1.6h). On a folder tab the retained window picture is
-        // the *previous* tab's, and the fallback rectangle below is the whole
-        // viewport — so pushing it would paint another tab's terminal across
-        // this one and leave the chrome to cover its own tracks. The list is
-        // then simply empty, and `present_frame` composes zero seats and the
-        // chrome over them, which is exactly what such a tab is made of.
-        let keeps_a_terminal_picture =
-            self.focused().is_some() && self.window.last_presented_frame.is_some();
-        if keeps_a_terminal_picture {
-            let focused_body = bodies
-                .iter()
-                .find(|pane| pane.seat == focused_leaf)
-                .copied()
-                .unwrap_or_else(|| {
-                    let viewport = self.window.renderer.seat_viewport();
-                    PaneDraw {
-                        seat: focused_leaf,
-                        viewport,
-                        clip: viewport,
-                    }
-                });
-            let frame = self
-                .window
+        let (seat_ids, seat_frames) = Self::retained_seats(
+            &self.window.tabs[self.window.active_tab],
+            self.window
                 .last_presented_frame
                 .as_ref()
-                .expect("`keeps_a_terminal_picture` was true one statement ago");
-            seat_frames.push(bt_render::SeatFrame {
-                seat: focused_body.viewport,
-                clip: focused_body.clip,
-                frame,
-                focused: self.keyboard_owner_is_a_shell(),
-            });
-        }
-        // Each unfocused pane's own last picture, for the same reason the
-        // focused one's is reused: a pane that has not been given anything new
-        // to say is showing what it last said, and re-projecting it would be
-        // asking it to say the same thing at the price of a whole capture.
-        // A pane that has never presented is simply not drawn this present —
-        // it has nothing on the glass to keep.
-        for pane in &bodies {
-            if pane.seat == focused_leaf {
-                continue;
-            }
-            let Some(leaf) = self.window.tabs[active].sessions.get(&pane.seat) else {
-                continue;
-            };
-            let Some(projected) = leaf.last_presented_frame.as_ref() else {
-                continue;
-            };
-            seat_frames.push(bt_render::SeatFrame {
-                seat: pane.viewport,
-                clip: pane.clip,
-                frame: projected,
-                focused: false,
-            });
-        }
+                .filter(|_| self.focused().is_some()),
+            &bodies,
+            focused_leaf,
+            self.window.renderer.seat_viewport(),
+            self.keyboard_owner_is_a_shell(),
+        );
+        let signature = self.present_signature(&seat_ids, &seat_frames);
+        let conditions = self.present_conditions(FrameSource::Expose);
         let trigger = FrameTrigger {
             occurred_at: now,
             source: FrameSource::Expose,
@@ -100492,15 +100647,20 @@ impl Runtime<'_> {
             &self.window.compositor,
             &self.window.window,
             FrameTraces {
+                gate: &mut self.window.present_gate,
+                trace_perf: self.app.trace_perf,
+                slot_overwrites: self.window.pending_frames.overwrites(),
+                conditions,
                 preview: &mut self.window.preview_trace_echo,
                 census: &mut self.window.glyph_census_echo,
             },
             &seat_frames,
-            trigger,
+            PresentIntent { trigger, signature },
         )
         .context("re-present the retained terminal picture")?
         {
-            PresentOutcome::Presented(receipt) => {
+            None => Ok(()),
+            Some(PresentOutcome::Presented(receipt)) => {
                 self.window.textless_frames = 0;
                 // A picture on the glass is the only proof a device is real, and
                 // it is what closes a device-loss episode — see
@@ -100527,10 +100687,12 @@ impl Runtime<'_> {
             // them — the picture it owes is unchanged by being invisible — and
             // differs only in that `may_ask_again` will not ask for the turn
             // that pays it. See [`ask_again_after`].
-            outcome @ (PresentOutcome::PresentedWithoutText(_)
-            | PresentOutcome::Skipped
-            | PresentOutcome::SkippedNotVisible
-            | PresentOutcome::Reconfigure) => {
+            Some(
+                outcome @ (PresentOutcome::PresentedWithoutText(_)
+                | PresentOutcome::Skipped
+                | PresentOutcome::SkippedNotVisible
+                | PresentOutcome::Reconfigure),
+            ) => {
                 self.window.chrome_present_pending = true;
                 if self.window.may_ask_again(&outcome) {
                     self.window.window.request_redraw();
@@ -100690,21 +100852,34 @@ impl Runtime<'_> {
                 focused: false,
             });
         }
+        let seat_ids: Vec<_> = std::iter::once(focused_leaf)
+            .chain(unfocused_frames.iter().map(|(pane, _)| pane.seat))
+            .collect();
+        let signature = self.present_signature(&seat_ids, &seat_frames);
+        let conditions = self.present_conditions(trigger.source);
         match Self::present_seats_and_commit(
             &mut self.app.gpu,
             &mut self.window.renderer,
             &self.window.compositor,
             &self.window.window,
             FrameTraces {
+                gate: &mut self.window.present_gate,
+                trace_perf: self.app.trace_perf,
+                slot_overwrites: self.window.pending_frames.overwrites(),
+                conditions,
                 preview: &mut self.window.preview_trace_echo,
                 census: &mut self.window.glyph_census_echo,
             },
             &seat_frames,
-            trigger,
+            PresentIntent { trigger, signature },
         )
         .context("render terminal frame")?
         {
-            PresentOutcome::Presented(receipt) => {
+            outcome @ (Some(PresentOutcome::Presented(_)) | None) => {
+                let receipt = outcome.and_then(|outcome| match outcome {
+                    PresentOutcome::Presented(receipt) => Some(receipt),
+                    _ => unreachable!(),
+                });
                 // A whole frame ends whatever textless run was going, which is
                 // what makes the next refusal a new question rather than the
                 // continuation of an old one ([`WindowRuntime::may_ask_again`]).
@@ -100712,7 +100887,9 @@ impl Runtime<'_> {
                 // And it ends a device-loss episode for the same kind of reason:
                 // a device that has drawn is a device this process is willing to
                 // lose again ([`DeviceLossPilot::a_frame_reached_the_glass`]).
-                self.app.device_loss_pilot.a_frame_reached_the_glass();
+                if receipt.is_some() {
+                    self.app.device_loss_pilot.a_frame_reached_the_glass();
+                }
                 // The glass now holds the newest picture anyone composed. This
                 // is the equality [`chrome_tick_reuses_picture`] reads as its
                 // licence to answer the next animation tick from the screen.
@@ -100726,11 +100903,13 @@ impl Runtime<'_> {
                     self.window.first_visible_present_dpi_checked = true;
                     self.reconcile_authoritative_dpi("first-present")?;
                 }
-                let latency = receipt.latency();
-                self.trace_present(trigger.source, receipt, false);
+                let latency = receipt.map(|receipt| receipt.latency());
+                if let Some(receipt) = receipt {
+                    self.trace_present(trigger.source, receipt, false);
+                }
                 if self.app.trace_startup
                     && matches!(trigger.source, FrameSource::Resize)
-                    && let Ok(latency) = latency
+                    && let Some(Ok(latency)) = latency
                 {
                     trace_sink::stderr_line(format!(
                         "BT_RESIZE present={}us columns={} rows={}",
@@ -100795,10 +100974,12 @@ impl Runtime<'_> {
             // slot with the rest of them, and waits there: `may_ask_again` is
             // what declines to ask for the turn, not this arm. See
             // [`ask_again_after`].
-            outcome @ (PresentOutcome::PresentedWithoutText(_)
-            | PresentOutcome::Skipped
-            | PresentOutcome::SkippedNotVisible
-            | PresentOutcome::Reconfigure) => {
+            Some(
+                outcome @ (PresentOutcome::PresentedWithoutText(_)
+                | PresentOutcome::Skipped
+                | PresentOutcome::SkippedNotVisible
+                | PresentOutcome::Reconfigure),
+            ) => {
                 self.window
                     .pending_frames
                     .publish(frame, trigger)
@@ -116806,6 +116987,31 @@ fn nonzero_u32(value: u16) -> NonZeroU32 {
 fn frame_matches_grid(frame: &ViewportFrame, grid: GridSize) -> bool {
     frame.columns.get() == u32::from(grid.columns.get())
         && frame.grid_rows.get() == u32::from(grid.rows.get())
+}
+
+fn trace_unchanged_present(
+    enabled: bool,
+    gate: &mut present_gate::PresentGate,
+    source: FrameSource,
+    frame: Option<&ViewportFrame>,
+    slot_overwrites: u64,
+) {
+    gate.unchanged = gate.unchanged.saturating_add(1);
+    if !enabled {
+        return;
+    }
+    let started = Instant::now();
+    let content_fnv = frame.map_or(0, |frame| frame_content_digest(frame).content_fnv);
+    let alternate = frame.is_some_and(frame_is_alternate_screen);
+    eprintln!(
+        "BT_PERF_TRACE skip=unchanged source={:?} content_fnv={:016x} alt={} digest_us={} present_unchanged={} slot_overwrites={}",
+        source,
+        content_fnv,
+        u8::from(alternate),
+        started.elapsed().as_micros(),
+        gate.unchanged,
+        slot_overwrites,
+    );
 }
 
 fn presentation_equivalent(previous: &ViewportFrame, next: &ViewportFrame) -> bool {
