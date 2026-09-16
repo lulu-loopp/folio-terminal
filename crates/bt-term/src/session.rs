@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     error::Error,
     fmt::{self, Write as _},
     fs::OpenOptions,
@@ -187,21 +187,6 @@ impl Default for MathLayoutOptions {
             restore_stripped_environment_newlines: true,
             reject_claude_code_jump_chip_overlay: true,
             detect_image_paths: false,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct MathSourcePreferenceKey {
-    original_source: String,
-    mode: MathMode,
-}
-
-impl MathSourcePreferenceKey {
-    fn from_span(span: &MathSpan) -> Self {
-        Self {
-            original_source: span.original_source.clone(),
-            mode: span.mode,
         }
     }
 }
@@ -842,6 +827,10 @@ struct PendingLiveArtifactHandoff {
     candidate_staging: StagingId,
     candidate_start: Option<TranscriptId>,
     expected_frozen_lines: u64,
+    /// The face the live occurrence is wearing, re-read at every capture — the last capture is
+    /// the one that freezes its final row, so there is no frame on which the reader could turn the
+    /// block over after this was last refreshed.
+    show_source: bool,
     /// Proven source rows captured from the top of this still-live occurrence, in source order.
     /// These staging ids are populated before the terminal grid shifts; as they finalize, their
     /// transcript ids become the live record's frozen prefix so projection can bridge and suppress
@@ -1442,10 +1431,6 @@ pub struct DualPlaneSession {
     /// prevents an older equal-source formula elsewhere in history from spuriously releasing hold.
     primary_reprint_history_floor: Option<PrimaryReprintHistoryFloor>,
     alternate_content_end_row: Option<u32>,
-    /// User presentation choices are content state, not decoration-instance state. Entries are
-    /// created only by an explicit toggle and live for the session, so alternate-screen repaint,
-    /// redetection, grid-generation changes, and layout changes cannot reset the choice.
-    math_source_preferences: HashMap<MathSourcePreferenceKey, bool>,
     pending_live_handoffs: Vec<PendingLiveArtifactHandoff>,
     frozen_detection_context: DetectionContext,
     frozen_detection_contexts: BTreeMap<TranscriptId, DetectionContext>,
@@ -1774,7 +1759,6 @@ impl DualPlaneSession {
             primary_reprint_hold_occurrences: BTreeMap::new(),
             primary_reprint_history_floor: None,
             alternate_content_end_row: None,
-            math_source_preferences: HashMap::new(),
             pending_live_handoffs: Vec::new(),
             frozen_detection_context: DetectionContext::default(),
             frozen_detection_contexts: BTreeMap::new(),
@@ -7210,18 +7194,21 @@ impl DualPlaneSession {
             }
             return true;
         }
-        let preference_key = MathSourcePreferenceKey::from_span(&task.span);
-        let show_source = self
-            .math_source_preferences
-            .get(&preference_key)
-            .copied()
-            .unwrap_or(false);
+        // Instance state, carried across a re-detection of the block that is already standing on
+        // this row: the same rows, the same source, the same mode is the same occurrence, and the
+        // face it is wearing belongs to it exactly as its hover and its scroll offsets do. A block
+        // that does not find itself here is a new occurrence and starts typeset — looking at a
+        // formula's source is an action on one block, not a setting that follows the text.
         let remembered = self
             .live_decorations
             .get(&task.start.row)
-            .filter(|record| MathSourcePreferenceKey::from_span(&record.span) == preference_key)
+            .filter(|record| {
+                record.span.original_source == task.span.original_source
+                    && record.span.mode == task.span.mode
+            })
             .map(|record| {
                 (
+                    record.show_source,
                     record.hovered,
                     record.horizontal_scroll_px,
                     record.vertical_scroll_px,
@@ -7229,8 +7216,8 @@ impl DualPlaneSession {
             });
         self.live_decorations
             .retain(|_, record| record.end.row < task.start.row || record.start.row > task.end.row);
-        let (hovered, horizontal_scroll_px, vertical_scroll_px) =
-            remembered.unwrap_or((false, 0, 0));
+        let (show_source, hovered, horizontal_scroll_px, vertical_scroll_px) =
+            remembered.unwrap_or((false, false, 0, 0));
         let occurrence_id = LiveMathOccurrenceId(self.next_live_occurrence_id);
         let Some(identity) = proven_live_occurrence(&task, occurrence_id) else {
             return false;
@@ -7360,12 +7347,6 @@ impl DualPlaneSession {
             candidate.decoration = DecorationLifecycle::None;
             candidate.artifact = None;
         }
-        let preference_key = MathSourcePreferenceKey::from_span(&task.span);
-        let show_source = self
-            .math_source_preferences
-            .get(&preference_key)
-            .copied()
-            .unwrap_or(false);
         let Some(record) = self.decorations.get_mut(&task.transcript_id) else {
             return false;
         };
@@ -7403,9 +7384,6 @@ impl DualPlaneSession {
                 record.fail(&resolved_task, failure_reason)
             }
         };
-        if applied {
-            record.show_source = show_source;
-        }
         // A resolved multi-line block owns its interior rows as body. A structural delimiter inside
         // it (e.g. the `\begin{aligned}` of a `$$…\begin{aligned}…\end{aligned}…$$` block) is never a
         // sub-block; suppress any stale standalone render left on one — which the certified-frontier
@@ -8051,8 +8029,11 @@ impl DualPlaneSession {
         self.math_toggle.as_ref()
     }
 
+    /// **Turn one block over, and only that one** (owner's ruling 2026-09-16). Looking at a
+    /// formula's source is an action on the occurrence under the mark, not a setting the formula's
+    /// text carries: the same `$$…$$` printed again is a new block and arrives typeset.
     pub fn toggle_math_source(&mut self, anchor: &MathBlockAnchor) -> bool {
-        let preference = match anchor {
+        match anchor {
             MathBlockAnchor::History { start, end, .. } => {
                 let Some(record) = self
                     .decorations
@@ -8061,13 +8042,10 @@ impl DualPlaneSession {
                 else {
                     return false;
                 };
-                let Some(key) = record.span.as_ref().map(MathSourcePreferenceKey::from_span) else {
-                    return false;
-                };
-                if !record.toggle_source() {
+                if record.span.is_none() {
                     return false;
                 }
-                (key, record.show_source)
+                record.toggle_source()
             }
             MathBlockAnchor::Live {
                 screen,
@@ -8087,15 +8065,9 @@ impl DualPlaneSession {
                 record.show_source = !record.show_source;
                 record.horizontal_scroll_px = 0;
                 record.vertical_scroll_px = 0;
-                (
-                    MathSourcePreferenceKey::from_span(&record.span),
-                    record.show_source,
-                )
+                true
             }
-        };
-        self.math_source_preferences
-            .insert(preference.0, preference.1);
-        true
+        }
     }
 
     pub fn set_math_hover(&mut self, anchor: Option<&MathBlockAnchor>) -> bool {
@@ -10462,6 +10434,7 @@ impl DualPlaneSession {
                 .iter_mut()
                 .find(|pending| pending.occurrence_id == record.identity.occurrence_id)
             {
+                pending.show_source = record.show_source;
                 let next = pending.prefix_staging.len();
                 if first_index != next
                     || captured_source
@@ -10503,6 +10476,7 @@ impl DualPlaneSession {
                 candidate_start: None,
                 expected_frozen_lines: u64::try_from(record.identity.source_rows.len())
                     .unwrap_or(u64::MAX),
+                show_source: record.show_source,
                 prefix_staging: captured_source
                     .iter()
                     .map(|(_, staging)| *staging)
@@ -10674,6 +10648,11 @@ impl DualPlaneSession {
         record.stale_artifact = None;
         record.block_end = Some(block.end);
         record.span = Some(block.span.clone());
+        // A freeze is not a new block: these are the very rows the reader was looking at a moment
+        // ago, so the face the occurrence was wearing while it was live crosses with its raster.
+        // Nothing else carries it — a history record is born typeset — and the face is the
+        // occurrence's own, so it travels with the occurrence rather than with its text.
+        record.show_source = pending.show_source;
         self.document.set_decoration(
             block.start,
             DecorationIntent::Math {
@@ -19694,56 +19673,105 @@ mod tests {
         );
     }
 
+    /// **A face belongs to the occurrence, not to the text** (owner's ruling 2026-09-16). Turning
+    /// one block over is an action on the block under the mark; the next time the same `$$…$$` is
+    /// printed it is a different block, and it arrives typeset like any other.
     #[test]
-    fn alternate_show_source_preference_survives_redetection_in_both_directions() {
+    fn a_second_printing_of_the_same_formula_arrives_typeset() {
         let start = Instant::now();
         let mut session = DualPlaneSession::new(nz(40), nz(12));
-        session
-            .feed_at(b"\x1b[?1049h$$x^2$$\r\ninput", start)
-            .unwrap();
+        session.feed_at(b"$$x^2$$\r\nbarrier", start).unwrap();
+        hide_cursor(&mut session, start);
         session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
         assert_eq!(
-            complete_detected_live_tasks(&mut session, synthetic_raster(40, 20)),
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 18)),
             1
         );
         let mut projection = session.new_projection(session.layout_key());
         let rendered = session.viewport_frame(&mut projection).unwrap();
+        let first = rendered.math_blocks[0].anchor.clone();
+        assert!(session.toggle_math_source(&first));
+
+        let again = start + Duration::from_millis(210);
+        session.feed_at(b"\r\n$$x^2$$\r\ntail", again).unwrap();
+        hide_cursor(&mut session, again);
+        session.advance_live_stability(again + LIVE_MATH_STABLE_INTERVAL);
+        complete_detected_live_tasks(&mut session, synthetic_raster(40, 18));
+        let both = session.viewport_frame(&mut projection).unwrap();
+        let face_at = |row: u32| {
+            both.math_blocks
+                .iter()
+                .find(|block| match &block.anchor {
+                    MathBlockAnchor::Live { start, .. } => start.row == row,
+                    MathBlockAnchor::History { .. } => false,
+                })
+                .map(|block| block.display)
+        };
+        assert_eq!(
+            face_at(0),
+            Some(MathBlockDisplay::Source),
+            "the block the reader turned over keeps its source face"
+        );
+        assert_eq!(
+            face_at(2),
+            Some(MathBlockDisplay::Rendered),
+            "the same formula printed again is another block and arrives typeset"
+        );
+        // Mutation: keying the face on the formula's own text turns the second block over too.
+    }
+
+    /// **The freeze is not a new block.** The rows a live occurrence was turned over on are the
+    /// very rows that land in history, so its face crosses with its raster.
+    #[test]
+    fn a_live_block_turned_over_keeps_its_source_face_across_the_freeze() {
+        let start = Instant::now();
+        // Leave room above the eight-row visible-text floor for a block the reader can turn over.
+        let mut session = DualPlaneSession::new(nz(40), nz(12));
+        session.feed_at(b"$$x^2$$\r\nbarrier", start).unwrap();
+        hide_cursor(&mut session, start);
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 18)),
+            1
+        );
+        let live_raster = session
+            .live_decorations
+            .values()
+            .find_map(|record| record.artifact.as_ref())
+            .map(|artifact| Arc::clone(&artifact.rgba))
+            .expect("the live block renders before it is turned over");
+        let mut projection = session.new_projection(session.layout_key());
+        let rendered = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(rendered.math_blocks.len(), 1, "the live block is visible");
+        assert_eq!(rendered.math_blocks[0].display, MathBlockDisplay::Rendered);
         let anchor = rendered.math_blocks[0].anchor.clone();
         assert!(session.toggle_math_source(&anchor));
 
-        session.redetect(DetectionRevision(2));
-        assert_eq!(
-            session.advance_live_stability(start + Duration::from_millis(400)),
-            1
+        // Twelve lines scroll the formula's source row out of the grid, so the occurrence hands
+        // its raster to the history record it becomes.
+        for index in 0..12 {
+            session
+                .feed_at(
+                    format!("\r\nscroll-{index}").as_bytes(),
+                    start + Duration::from_millis(210 + index * 10),
+                )
+                .unwrap();
+        }
+        let frozen = session
+            .decorations
+            .values()
+            .find(|record| {
+                record
+                    .artifact
+                    .as_ref()
+                    .is_some_and(|artifact| Arc::ptr_eq(&artifact.rgba, &live_raster))
+            })
+            .expect("the history record receives the handed-off raster");
+        assert!(
+            frozen.show_source,
+            "the occurrence keeps the face the reader gave it across the freeze"
         );
-        assert_eq!(
-            complete_detected_live_tasks(&mut session, synthetic_raster(40, 20)),
-            1
-        );
-        let source = session.viewport_frame(&mut projection).unwrap();
-        let source_block = source
-            .math_blocks
-            .iter()
-            .find(|block| block.display == MathBlockDisplay::Source)
-            .expect("content preference restores source after redetection");
-        assert!(session.toggle_math_source(&source_block.anchor));
-
-        session.redetect(DetectionRevision(3));
-        assert_eq!(
-            session.advance_live_stability(start + Duration::from_millis(600)),
-            1
-        );
-        assert_eq!(
-            complete_detected_live_tasks(&mut session, synthetic_raster(40, 20)),
-            1
-        );
-        let rendered_again = session.viewport_frame(&mut projection).unwrap();
-        assert_eq!(rendered_again.math_blocks.len(), 1);
-        assert_eq!(
-            rendered_again.math_blocks[0].display,
-            MathBlockDisplay::Rendered
-        );
-        // Mutation: removing the content-preference lookup restores Rendered after revision 2.
+        // Mutation: dropping the face from the handoff shows the picture again as the rows freeze.
     }
 
     #[test]

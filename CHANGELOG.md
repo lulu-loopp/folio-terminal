@@ -42,6 +42,15 @@ All notable changes to Folio are recorded here. The format follows
   text no longer crashes the preview.** Such a line now stays readable, and
   the other tabs in the window stay open.
 
+- **Showing a formula's source now applies to that one formula on the screen.**
+  Turning a block over with the `‹›` mark used to be remembered against the
+  formula's own text for the rest of the session, so printing the same `$$…$$`
+  again showed that one as source too, and a formula you had once looked behind
+  never went back to its typeset form on its own. Looking at the source is an
+  action on the block in front of you: the next block arrives typeset, and the
+  block you turned over keeps its face, including while it scrolls off the
+  screen into the history above.
+
 ## 0.4.1-preview — 2026-09-16
 
 ### Added
