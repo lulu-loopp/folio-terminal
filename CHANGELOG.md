@@ -40,6 +40,12 @@ All notable changes to Folio are recorded here. The format follows
 - **On a Mac, a tab can be dragged to reorder it or out into its own window
   again; the window moves only when the empty part of the header is dragged.**
 
+### Fixed
+
+- **A Markdown line beginning with an angle bracket and carrying non-ASCII
+  text no longer crashes the preview.** Such a line now stays readable, and
+  the other tabs in the window stay open.
+
 ## 0.4.1-preview — 2026-09-16
 
 ### Added
