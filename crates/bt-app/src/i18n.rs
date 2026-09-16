@@ -9614,11 +9614,16 @@ mod tests {
             Text::WebFailGuardsSay.on(Lang::English, HostPlatform::OtherUnix),
             mac
         );
-        // And the Chinese slot really is the English one, which is what files it
-        // in `CHINESE_PENDING` rather than leaving it to be discovered.
-        assert_eq!(
-            Text::WebFailGuardsSay.on(Lang::Chinese, HostPlatform::MacOs),
-            mac
+        // Both platform columns now carry their own Chinese.
+        let chinese_mac =
+            Text::WebFailGuardsSay.on(Lang::Chinese, HostPlatform::MacOs);
+        assert_ne!(
+            chinese_mac, mac,
+            "the Mac column's Chinese was filled and is no longer the English placeholder"
+        );
+        assert!(
+            !chinese_mac.contains("版本"),
+            "a Mac's engine has no version to be behind, in either language: {chinese_mac}"
         );
         assert_ne!(
             Text::WebFailGuardsSay.on(Lang::Chinese, HostPlatform::Windows),
