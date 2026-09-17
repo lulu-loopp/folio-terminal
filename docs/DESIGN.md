@@ -427,31 +427,55 @@ recording of 2026-09-17: of its 116 cursor-hidden repaint brackets, not one had
 all of its interior read boundaries capped, so a terminal that framed on them
 would have been wrong 116 times out of 116.
 
-**The transfer unit is learned, because the obvious spelling is wrong where it
-matters.** `count == buffer.len()` is never true on macOS, where the pty caps at
-1,024 against our 16 KiB buffer. `bt_pty::CappedReads` therefore uses
-`min(buffer.len(), the largest count seen on this reader)`, and a maximum seen
-once proves nothing: `capped` first becomes true on the **second** read that
-returns the largest length so far. A read that fills our own buffer needs no
-corroboration. A later, larger read raises the maximum and starts it
+**A read that filled our own buffer is capped on every transport**, needs no
+inference, and is the whole of the rule on a pipe.
+
+**Everything beyond that is an inference about a line discipline, so it is drawn
+on one kind of transport only.** `count == buffer.len()` is never true on macOS,
+where the pty caps at 1,024 against our 16 KiB buffer, so the unit has to be
+learned — but a *learned* unit is a fact about a **pty master**, which has a line
+discipline behind it that hands over at most a fixed number of bytes per read. It
+is not a fact about a **pipe**, which is what a Windows pseudoconsole writes
+into: a pipe returns whatever happened to be in it, so two reads of the same
+length say nothing about a limit. `bt_pty::Transport` names which of the two this
+crate opened, and `CappedReads` learns
+`min(buffer.len(), the largest count seen on this reader)` only on the pty
+master. That is where the kernel cap exists, which is why it is the only place
+the inference is sound — and it is also, from mechanism rather than platform
+name, why Windows never showed the defect and needs no rule of its own: ordinary
+6–9 KiB ConPTY reads are published the moment they arrive, exactly as before.
+
+Two conditions keep an echo from being taken for a cap. The candidate must be at
+least `SMALLEST_CREDIBLE_TRANSFER_UNIT` — POSIX gives `_POSIX_MAX_INPUT` /
+`MAX_CANON` as 255 (IEEE Std 1003.1, `<limits.h>`), so no conforming line
+discipline caps a transfer below 256 and read lengths of `[1, 1]` are two
+keystrokes rather than a one-byte transport. And a maximum seen once proves
+nothing: `capped` first becomes true on the **second** read that returns the
+largest length so far. A later, larger read raises the maximum and starts it
 uncorroborated again; the chunks flagged under the old one are long consumed and
 all their flag bought was a bounded wait. On the owner's recording this flags 123
 reads, 122 of them genuine — every capped read but the first — with one false
-positive in seven minutes.
+positive in seven minutes: a 508-byte length that repeated before any 1,024-byte
+read raised the maximum. 508 is above the floor and so a legitimate candidate
+until something larger arrives; what the floor removes is the keystroke-sized
+repeat, which no recording of a shell is ever short of.
 
-This also says, from mechanism rather than platform name, why Windows never
-showed the defect and needs no `cfg`: ConPTY hands over 6–9 KiB of *whatever was
-there*, so a few-KiB repaint arrives in one read, equality with the running
-maximum is rare, and the deferral almost never arms.
+**Evidence of an interactive arrival is never overwritten.** A slice is capped
+only when *every* whole read in it was capped, and a slice that stopped inside a
+read is not capped at all. `or` in the safe direction, the same choice made
+across panes: a one-byte echo popped together with a capped read is still an echo
+and waits for nothing.
 
-**Two bounds, and they are what keep it a scheduling rule.** Never past 3 ms
-after the *first* unpublished byte — so a flood whose every read is capped
-publishes at `1/T` and cannot be starved, which is measured rather than argued:
-eight capped reads a millisecond apart publish three times. And never past the
-next display deadline; a `Fifo` surface does not say when that is, and 3 ms is
-shorter than one frame at any refresh rate up to 333 Hz, so the constant
-satisfies that bound today and the input stays for the day there is a frame
-pacer.
+**One bound, and it is what keeps this a scheduling rule.** Never past 3 ms after
+the *first* unpublished byte — so a flood whose every read is capped publishes at
+`1/T` and cannot be starved, which is measured rather than argued: eight capped
+reads a millisecond apart publish three times, and no byte waits longer than the
+window. A second bound at the next display deadline is *not* implemented:
+`coalesce::Arrival::next_display_deadline` is always `None`, because a `Fifo`
+surface does not say when the display will next take a frame and this window
+keeps no frame pacer. Three milliseconds is under a refresh period at every rate
+Folio runs at, which bounds the delay the rule adds; it does not mean a wait
+cannot cross a refresh, and nothing claims it does.
 
 **What it costs.** Nothing for interactive echo. A keystroke's echo is a short
 read — the kernel saying there is nothing more — so the deferral never arms and
@@ -464,9 +488,22 @@ charges every keystroke 3 ms, and on the recording up to 19 ms.
 the deferral never arms while a block is open — the parser is withholding the
 bytes and a frame composed now cannot differ — and a block that *commits* during
 a turn publishes at once: an ESU is the application naming its own frame's end,
-which is better information than any timer and must not wait behind one. The
-150 ms sync-update timeout (`vte`'s own, on the real clock) is untouched, and the
-two deadlines cannot be pending for one pane at the same time.
+which is better information than any timer and must not wait behind one. Both
+facts are asked of **every pane that was fed**, not of the one holding the
+keyboard, because the window composes one picture for all of them. And a commit
+is counted rather than sampled: `TerminalAdapter::synchronized_update_commits`
+rises however a block ends, so a `BSU … ESU` that opens *and* commits inside one
+1,024-byte read — which leaves the deadline `None` on both sides of the feed — is
+still seen. The 150 ms sync-update timeout (`vte`'s own, on the real clock) is
+untouched, and the two deadlines cannot be pending for one pane at the same time.
+
+**The caret is reset when output arrives, not when it is drawn.** The blink reset
+stands ahead of the publication decision. Behind it, a burst that was deferred
+and then settled by some other publication — a decoration result, an expose —
+left the caret dark until its old 550 ms deadline, because that publication knows
+nothing about a caret and the release then found nothing left to do. Output is
+the event the caret answers to, and three milliseconds of drawing is not worth a
+second field to carry the fact across.
 
 **The measured limit.** Coalescing removes the tearing the *transport* causes and
 not the tearing an *application* causes. Of the 392 read boundaries interior to a

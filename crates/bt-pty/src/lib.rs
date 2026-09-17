@@ -628,7 +628,7 @@ fn read_pty_output(
 /// Keep the normal reader loop free of dump branches, clocks, allocations, and file operations.
 fn read_pty_output_without_dump(reader: &mut dyn Read, output: &OutputRing, wake: &OutputWake) {
     let mut buffer = [0_u8; READER_CHUNK_BYTES];
-    let mut capped = CappedReads::new(buffer.len());
+    let mut capped = CappedReads::new(spawned_transport(), buffer.len());
     loop {
         let count = match reader.read(&mut buffer) {
             Ok(0) | Err(_) => break,
@@ -669,7 +669,7 @@ fn read_pty_output_with_dump(
     dump: Arc<Mutex<PtyDump>>,
 ) {
     let mut buffer = [0_u8; READER_CHUNK_BYTES];
-    let mut capped_reads = CappedReads::new(buffer.len());
+    let mut capped_reads = CappedReads::new(spawned_transport(), buffer.len());
     loop {
         let count = match reader.read(&mut buffer) {
             Ok(0) | Err(_) => break,
@@ -999,16 +999,22 @@ struct Chunk {
 
 /// What one [`OutputRing::try_pop_slice`] handed out.
 ///
-/// The bytes, and whether the last of them was the last byte of a `read(2)` the transport
-/// capped — the kernel's own way of saying "there was more". A window that has just fed a
-/// capped read and found the ring dry is a window one or two milliseconds ahead of the rest of
-/// a burst, and that is the only fact this type exists to carry.
+/// The bytes, and whether **every** `read(2)` in them was one the transport capped — the kernel's
+/// own way of saying "there was more". A window that has just fed such a slice and found the ring
+/// dry is a window one or two milliseconds ahead of the rest of a burst, and that is the only
+/// fact this type exists to carry.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct OutputSlice {
     pub bytes: Vec<u8>,
-    /// True only when a *whole* capped chunk ends this slice. A slice that stopped in the
-    /// middle of a chunk says nothing: the rest of that chunk is still in the ring, and the
-    /// caller is coming straight back for it.
+    /// **Every whole read in this slice was capped, and the slice ends on one of them.**
+    ///
+    /// An `and` and not "the last one", and the difference was a defect: a one-byte echo
+    /// followed in the same pop by a capped read reported capped, and the keystroke waited. A
+    /// short read anywhere in a batch is the kernel saying that batch had a quiet moment in it,
+    /// and evidence of an interactive arrival is never overwritten by what came after it.
+    ///
+    /// A slice that stopped in the middle of a chunk is not capped either: the rest of that read
+    /// is still in the ring and the caller is coming straight back for it.
     pub ends_capped: bool,
 }
 
@@ -1018,59 +1024,118 @@ impl OutputSlice {
     }
 }
 
+/// **What kind of thing this reader is reading**, which is what decides how much it may conclude
+/// from a read's length.
+///
+/// Not a platform: a platform is where a transport happens to be found, and the rule below is
+/// about the transport. This crate opens exactly one of two, and it knows at `spawn` which.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Transport {
+    /// **A Unix pty master.** A line discipline stands between the child and this reader and
+    /// hands over at most a fixed number of bytes per `read(2)` — 1024 on macOS — however large
+    /// the buffer offered to it. That fixed number is a real thing to learn, and it is the only
+    /// transport on which learning it means anything.
+    PtyMaster,
+    /// **A pipe**, which is what a Windows pseudoconsole writes its output into. A pipe has no
+    /// per-read limit of its own: a read returns what happens to be in the pipe, so two reads of
+    /// the same length say nothing whatever about a limit, and the only sound "there was more"
+    /// is a read that filled the buffer *we* supplied.
+    Pipe,
+}
+
+/// **The smallest number of bytes a conforming line discipline may hand over in one read.**
+///
+/// POSIX gives `_POSIX_MAX_INPUT` — the `MAX_CANON` floor a terminal's input queue must be able
+/// to hold — as 255 (IEEE Std 1003.1, `<limits.h>`), so no line discipline caps a transfer below
+/// that. A running maximum under this is therefore not a transfer unit, whatever else it is: it
+/// is a keystroke's echo, a prompt, a status line that happened to repeat its length.
+///
+/// The floor is named after what it is rather than set to any particular system's cap: hard-coding
+/// macOS's 1024 would be this rule guessing at a platform instead of reading a transport.
+const SMALLEST_CREDIBLE_TRANSFER_UNIT: usize = 256;
+
 /// **Which reads the transport capped, learned from the transport itself.**
 ///
-/// A `read(2)` that returned as much as this transport ever returns in one call is the kernel
+/// A `read(2)` that returned as much as this transport can return in one call is the kernel
 /// saying it had more than it could give; the next bytes of that burst are already written and
 /// are a millisecond or two away. A read that returned less is the kernel saying that is all
-/// there is. Nothing here inspects a byte: this is a property of the transfer, not of the
-/// stream.
+/// there is. Nothing here inspects a byte: this is a property of the transfer, not of the stream.
 ///
-/// The obvious spelling — `count == buffer.len()` — is **wrong on macOS**, where the pty caps a
-/// read at 1024 bytes however large the buffer is, so a 16 KiB buffer is never filled and the
-/// test never fires on the one platform that needs it. So the unit is learned:
-/// `min(buffer.len(), the largest count seen on this reader)`.
+/// **A read that filled our own buffer is capped on every transport**, and needs no corroboration
+/// and no inference: the buffer is ours, and a read that filled it provably had no room for more.
 ///
-/// **A maximum seen once is indistinguishable from a coincidence**, so a single sighting proves
-/// nothing and `capped` stays false. The maximum has to come back: `capped` first becomes true
-/// on the **second** read that returns the largest length seen so far. A read that fills our own
-/// buffer needs no corroboration — the buffer is ours, and a read that filled it provably had no
-/// room for more — so that one is capped the first time.
+/// **Everything else is an inference about a line discipline, so it is drawn only on a
+/// [`Transport::PtyMaster`]** — the one transport with a per-read limit of its own. That is where
+/// the kernel cap exists, which is why it is the only place this is sound. On a
+/// [`Transport::Pipe`] a read returns whatever was in the pipe, so repeated lengths are a
+/// coincidence and nothing is learned from them; ordinary 6-9 KiB ConPTY reads are published at
+/// once, exactly as they were before this rule existed.
 ///
-/// **A larger read later raises the maximum**, which retrospectively says the earlier
-/// corroborated maximum was not the transport's unit after all. That costs nothing: those chunks
-/// are long since consumed, and all their flag ever bought was a bounded wait for bytes that
-/// were not coming. The new maximum starts uncorroborated in its turn, so nothing is flagged
-/// again until it repeats.
+/// On a pty master the unit is `min(buffer.len(), the largest count seen on this reader)`, under
+/// two conditions that keep an echo from being mistaken for a cap:
+///
+/// * it is at least [`SMALLEST_CREDIBLE_TRANSFER_UNIT`] — read lengths of `[1, 1]` are two
+///   keystrokes and not a one-byte transport; and
+/// * **a maximum seen once is indistinguishable from a coincidence**, so it has to come back:
+///   `capped` first becomes true on the *second* read that returns the largest length so far.
+///
+/// **A larger read later raises the maximum**, which retrospectively says the earlier corroborated
+/// maximum was not the transport's unit after all. That costs nothing: those chunks are long
+/// since consumed, and all their flag ever bought was a bounded wait for bytes that were not
+/// coming. The new maximum starts uncorroborated in its turn.
 ///
 /// Measured against the owner's macOS recording of 2026-09-17 (350 reads, 123 of them the pty's
-/// 1024-byte cap): 123 reads flagged, 122 of them genuine — every capped read but the first,
-/// which had nothing to corroborate it — and exactly one false positive, a 508-byte read that
-/// repeated before any 1024-byte read had raised the maximum. One bounded wait, once, in seven
-/// minutes.
-struct CappedReads {
+/// 1024-byte cap): **123 reads flagged, 122 of them genuine** — every capped read but the first,
+/// which had nothing to corroborate it — and exactly one false positive, a 508-byte length that
+/// repeated before any 1024-byte read had raised the maximum. 508 is above the credible floor, so
+/// it is a legitimate candidate until something larger arrives; what the floor removes is the
+/// keystroke-sized repeat, which no recording of a shell is ever short of. One bounded wait, once,
+/// in seven minutes.
+pub struct CappedReads {
+    transport: Transport,
     buffer_len: usize,
     maximum: usize,
     sightings: u32,
 }
 
 impl CappedReads {
-    fn new(buffer_len: usize) -> Self {
+    pub fn new(transport: Transport, buffer_len: usize) -> Self {
         Self {
+            transport,
             buffer_len,
             maximum: 0,
             sightings: 0,
         }
     }
 
-    fn observe(&mut self, count: usize) -> bool {
+    pub fn observe(&mut self, count: usize) -> bool {
+        if count >= self.buffer_len {
+            return true;
+        }
+        if self.transport != Transport::PtyMaster {
+            return false;
+        }
         if count > self.maximum {
             self.maximum = count;
             self.sightings = 1;
         } else if count == self.maximum {
             self.sightings = self.sightings.saturating_add(1);
         }
-        count == self.buffer_len || (count == self.maximum && self.sightings >= 2)
+        count == self.maximum && count >= SMALLEST_CREDIBLE_TRANSFER_UNIT && self.sightings >= 2
+    }
+}
+
+/// **The transport this process's pseudoterminals are.**
+///
+/// A Windows pseudoconsole writes its output into an anonymous pipe; every other platform this
+/// builds for hands back a pty master with a line discipline behind it. The `cfg` names which of
+/// the two the backend opened — it is not the rule, which is written against the transport in
+/// [`CappedReads`].
+const fn spawned_transport() -> Transport {
+    if cfg!(windows) {
+        Transport::Pipe
+    } else {
+        Transport::PtyMaster
     }
 }
 
@@ -1122,7 +1187,7 @@ impl OutputRing {
         self.push_read(chunk, false)
     }
 
-    fn push_read(&self, chunk: Vec<u8>, capped: bool) -> Result<(), PtyError> {
+    pub fn push_read(&self, chunk: Vec<u8>, capped: bool) -> Result<(), PtyError> {
         if chunk.len() > self.capacity.get() {
             return Err(PtyError::Backend(format!(
                 "reader chunk {} exceeds ring capacity {}",
@@ -1162,7 +1227,12 @@ impl OutputRing {
     pub fn try_pop_slice(&self, quantum: NonZeroUsize) -> OutputSlice {
         let mut state = self.state();
         let mut output = Vec::with_capacity(quantum.get().min(state.bytes));
+        // **`and`, across every read in the slice**, and it starts true only once a read has
+        // actually been taken. A short read anywhere in the batch is a quiet moment inside it,
+        // and that evidence must not be overwritten by a capped read that follows: a one-byte
+        // echo popped together with a capped read is still an echo, and waits for nothing.
         let mut ends_capped = false;
+        let mut took_a_whole_read = false;
         while output.len() < quantum.get() {
             let Some(mut chunk) = state.chunks.pop_front() else {
                 break;
@@ -1170,13 +1240,15 @@ impl OutputRing {
             let remaining = quantum.get() - output.len();
             if chunk.bytes.len() <= remaining {
                 state.bytes -= chunk.bytes.len();
-                ends_capped = chunk.capped;
+                ends_capped = chunk.capped && (!took_a_whole_read || ends_capped);
+                took_a_whole_read = true;
                 output.extend(chunk.bytes);
             } else {
                 let tail = chunk.bytes.split_off(remaining);
                 state.bytes -= chunk.bytes.len();
                 output.extend(chunk.bytes);
-                // The read is not over, so its flag is not spent: it travels with the tail.
+                // The read is not over, so its flag is not spent: it travels with the tail, and
+                // this slice ends inside a read rather than on one.
                 ends_capped = false;
                 state.chunks.push_front(Chunk {
                     bytes: tail,
@@ -8010,8 +8082,8 @@ mod tests {
 
     /// A maximum seen once proves nothing; a maximum that comes back is the transport's unit.
     #[test]
-    fn a_capped_read_is_a_repeated_maximum_or_a_filled_buffer() {
-        let mut capped = CappedReads::new(16 * 1024);
+    fn a_capped_read_is_a_repeated_credible_maximum_or_a_filled_buffer() {
+        let mut capped = CappedReads::new(Transport::PtyMaster, 16 * 1024);
         // The macOS shape: a 16 KiB buffer the kernel never fills, capping at 1024.
         assert!(!capped.observe(118), "one sighting is a coincidence");
         assert!(!capped.observe(27));
@@ -8028,25 +8100,70 @@ mod tests {
         assert!(capped.observe(1024));
 
         // Our own buffer needs no corroboration: a read that filled it had no room for more.
-        let mut filled = CappedReads::new(64);
+        let mut filled = CappedReads::new(Transport::PtyMaster, 64);
         assert!(filled.observe(64));
+        let mut pipe = CappedReads::new(Transport::Pipe, 64);
+        assert!(
+            pipe.observe(64),
+            "a filled buffer is capped on every transport"
+        );
+    }
+
+    /// **A keystroke is not a transport.** Nothing below the POSIX line-discipline floor can be a
+    /// transfer unit, however often it repeats.
+    #[test]
+    fn a_repeated_length_below_the_credible_floor_is_never_a_cap() {
+        let mut capped = CappedReads::new(Transport::PtyMaster, 16 * 1024);
+        for _ in 0..8 {
+            assert!(
+                !capped.observe(1),
+                "a one-byte echo repeating is two keystrokes, not a one-byte transport"
+            );
+        }
+        assert!(!capped.observe(255), "255 is below the floor");
+        assert!(!capped.observe(255));
+        assert!(
+            !capped.observe(SMALLEST_CREDIBLE_TRANSFER_UNIT),
+            "the floor itself still needs corroborating"
+        );
+        assert!(
+            capped.observe(SMALLEST_CREDIBLE_TRANSFER_UNIT),
+            "and corroborated at the floor, it is credible"
+        );
+    }
+
+    /// **A pipe has no per-read limit, so nothing is inferred from one.** Ordinary ConPTY reads
+    /// of a repeated size are published at once, exactly as before this rule existed.
+    #[test]
+    fn a_pipe_transport_concludes_nothing_from_a_repeated_length() {
+        let mut pipe = CappedReads::new(Transport::Pipe, 16 * 1024);
+        for _ in 0..8 {
+            assert!(
+                !pipe.observe(8 * 1024),
+                "a pipe returns what was in it; twice the same is a coincidence"
+            );
+        }
+        // The same lengths on a pty master are a learned unit. The difference is the transport.
+        let mut pty = CappedReads::new(Transport::PtyMaster, 16 * 1024);
+        assert!(!pty.observe(8 * 1024));
+        assert!(pty.observe(8 * 1024));
     }
 
     /// A larger read later says the earlier maximum was not the unit. Nothing is owed for it.
     #[test]
     fn a_larger_read_raises_the_unit_and_the_new_one_starts_uncorroborated() {
-        let mut capped = CappedReads::new(16 * 1024);
-        assert!(!capped.observe(508));
+        let mut capped = CappedReads::new(Transport::PtyMaster, 16 * 1024);
+        assert!(!capped.observe(512));
         assert!(
-            capped.observe(508),
-            "508 looked like the unit, and was flagged"
+            capped.observe(512),
+            "512 looked like the unit, and was flagged"
         );
         assert!(
             !capped.observe(1024),
             "a larger read raises the maximum and starts its own count"
         );
         assert!(
-            !capped.observe(508),
+            !capped.observe(512),
             "the old maximum is no longer the maximum"
         );
         assert!(
@@ -8055,10 +8172,10 @@ mod tests {
         );
     }
 
-    /// The flag belongs to a whole read. A slice that stopped inside one says nothing, and the
-    /// rest of that read keeps the flag for the pop that finishes it.
+    /// **Evidence of a quiet moment is never overwritten.** A slice is capped only when every
+    /// whole read in it was, and a slice that stopped inside a read is not capped at all.
     #[test]
-    fn only_a_whole_capped_read_ends_a_slice_capped() {
+    fn a_slice_is_capped_only_when_every_read_in_it_was() {
         let ring = OutputRing::new(NonZeroUsize::new(64).unwrap());
         ring.push_read(vec![b'a'; 10], true).unwrap();
         let whole = ring.try_pop_slice(NonZeroUsize::new(32).unwrap());
@@ -8079,12 +8196,29 @@ mod tests {
             "the tail of a capped read is still capped"
         );
 
-        // An uncapped read ends a slice uncapped even when a capped one preceded it.
-        ring.push_read(vec![b'c'; 4], true).unwrap();
-        ring.push_read(vec![b'd'; 4], false).unwrap();
-        let both = ring.try_pop_slice(NonZeroUsize::new(32).unwrap());
-        assert_eq!(both.bytes.len(), 8);
-        assert!(!both.ends_capped);
+        // A capped read after an uncapped one does not erase it. This is the keystroke.
+        ring.push_read(vec![b'c'; 1], false).unwrap();
+        ring.push_read(vec![b'd'; 4], true).unwrap();
+        let echo_then_burst = ring.try_pop_slice(NonZeroUsize::new(32).unwrap());
+        assert_eq!(echo_then_burst.bytes.len(), 5);
+        assert!(
+            !echo_then_burst.ends_capped,
+            "a one-byte echo popped with a capped read is still an echo"
+        );
+
+        // And the other order, which the first spelling of this got right by accident.
+        ring.push_read(vec![b'e'; 4], true).unwrap();
+        ring.push_read(vec![b'f'; 4], false).unwrap();
+        let burst_then_echo = ring.try_pop_slice(NonZeroUsize::new(32).unwrap());
+        assert_eq!(burst_then_echo.bytes.len(), 8);
+        assert!(!burst_then_echo.ends_capped);
+
+        // Two capped reads together are still capped.
+        ring.push_read(vec![b'g'; 4], true).unwrap();
+        ring.push_read(vec![b'h'; 4], true).unwrap();
+        let both_capped = ring.try_pop_slice(NonZeroUsize::new(32).unwrap());
+        assert_eq!(both_capped.bytes.len(), 8);
+        assert!(both_capped.ends_capped);
 
         // An empty ring hands out nothing and claims nothing.
         assert_eq!(

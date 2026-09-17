@@ -355,6 +355,15 @@ pub struct TerminalAdapter {
     /// away and a resize seeding its parser mid-escape.
     parser_tail_open_start: usize,
     parser_sync_active: bool,
+    /// **How many synchronized updates this screen has committed**, counted however they ended:
+    /// the ESU, the deadline, the vendored parser's own overflow, a shell marker.
+    ///
+    /// A counter and not a flag, because the question it answers is asked *across* a feed rather
+    /// than at an instant: a block that opens and commits inside one `read(2)` leaves
+    /// [`Self::synchronized_update_deadline`] `None` on both sides of the feed, so a caller
+    /// comparing deadlines sees nothing happen and makes a completed frame wait. Comparing this
+    /// before and after is the same question asked in a way that cannot miss.
+    synchronized_update_commits: u64,
     parser_dcs_active: bool,
     parser_sequence_open: bool,
     cursor_row_positioned_explicitly: bool,
@@ -655,6 +664,7 @@ impl TerminalAdapter {
             parser_tail: Vec::new(),
             parser_tail_open_start: 0,
             parser_sync_active: false,
+            synchronized_update_commits: 0,
             parser_dcs_active: false,
             parser_sequence_open: false,
             cursor_row_positioned_explicitly: false,
@@ -1179,7 +1189,7 @@ impl TerminalAdapter {
             canonical.processor.stop_sync(&mut canonical.term);
             discard_listener_output(&canonical.listener);
         }
-        self.parser_sync_active = false;
+        self.end_synchronized_update_block();
         self.parser_sequence_open = false;
         self.parser_tail.clear();
         self.parser_tail.shrink_to_fit();
@@ -1662,7 +1672,7 @@ impl TerminalAdapter {
             // See [`PARSER_TAIL_MAX_BYTES`]: nothing is still legitimately uncommitted after
             // this much, so the update the tail was being kept for is treated as ended. The
             // next completed sequence clears the tail on the ordinary path below.
-            self.parser_sync_active = false;
+            self.end_synchronized_update_block();
         }
         let mut performer = BoundaryPerformer {
             execute_at_ground,
@@ -1700,7 +1710,7 @@ impl TerminalAdapter {
         if performer.sync_start {
             self.parser_sync_active = true;
         } else if performer.sync_end {
-            self.parser_sync_active = false;
+            self.end_synchronized_update_block();
             self.parser_tail.clear();
             tail_cleared = true;
         } else if performer.complete && !self.parser_sync_active {
@@ -1820,10 +1830,25 @@ impl TerminalAdapter {
         }
     }
 
+    /// **The one place an open synchronized update stops being open**, so that the count of
+    /// commits cannot drift from the flag it is counting. Doing nothing when none was open is
+    /// what makes it safe to call from every path that ends one.
+    fn end_synchronized_update_block(&mut self) {
+        if self.parser_sync_active {
+            self.parser_sync_active = false;
+            self.synchronized_update_commits = self.synchronized_update_commits.saturating_add(1);
+        }
+    }
+
+    /// **How many synchronized updates this screen has committed.** See the field.
+    pub fn synchronized_update_commits(&self) -> u64 {
+        self.synchronized_update_commits
+    }
+
     /// Stop retaining bytes for a synchronized update that is over, keeping the sequence that is
     /// still open at the end of the tail.
     fn release_synchronized_update_retention(&mut self) {
-        self.parser_sync_active = false;
+        self.end_synchronized_update_block();
         let open = self.parser_tail_open_start.min(self.parser_tail.len());
         self.parser_tail.drain(..open);
         self.parser_tail_open_start = 0;

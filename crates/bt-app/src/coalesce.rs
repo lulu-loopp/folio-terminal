@@ -20,10 +20,13 @@
 //! repaint brackets, **not one** had all of its interior read boundaries capped, so a terminal
 //! that framed on those brackets would have been wrong 116 times out of 116.
 //!
-//! The deferral is bounded twice, and both bounds are what keep this a scheduling rule rather
-//! than a bet: never past [`COALESCE_WINDOW`] after the **first** unpublished byte, so a flood
-//! whose every read is capped still publishes at `1/T` and cannot be starved; and never past the
-//! next display deadline, so the wait can only ever spend latency the display was going to spend.
+//! **The deferral is bounded by a timer, and that is the only bound in force.** Never past
+//! [`COALESCE_WINDOW`] after the **first** unpublished byte — so a flood whose every read is
+//! capped still publishes at `1/T` and cannot be starved, and no byte ever waits longer than the
+//! window. [`Arrival::next_display_deadline`] is the shape a second bound would take, and nothing
+//! supplies one today: a `Fifo` surface does not say when the display will next take a frame.
+//! Three milliseconds is under a refresh period at every rate Folio runs at, which bounds the
+//! delay it adds — it does not mean a wait cannot cross a refresh, and nothing here claims it.
 
 use std::time::{Duration, Instant};
 
@@ -109,8 +112,10 @@ pub(crate) struct Arrival {
     /// When the earliest byte this window has fed but not yet published arrived. `None` when the
     /// window owes nothing, which is the ordinary resting state.
     pub first_unpublished: Option<Instant>,
-    /// The next instant the display will take a frame, when the window knows of one. The wait is
-    /// never allowed past it.
+    /// The next instant the display will take a frame, when the window knows of one — and it
+    /// never does today, so this is always `None` in the product. It is kept because it is the
+    /// shape a frame pacer would hand in, and because the rule's behaviour with one is worth
+    /// having pinned before there is one; it is not a bound in force.
     pub next_display_deadline: Option<Instant>,
 }
 
@@ -143,6 +148,179 @@ pub(crate) fn decide(arrival: Arrival, now: Instant, window: Duration) -> Public
         return Publication::Now;
     }
     Publication::WaitUntil(deadline)
+}
+
+#[cfg(test)]
+mod transport_tests {
+    //! **Real read lengths, through the real detector and the real ring, into the rule.**
+    //!
+    //! The unit tests below hand [`decide`] its `ends_capped` by hand, which is exactly how the
+    //! first version of this shipped a three-millisecond delay on a keystroke: every one of them
+    //! passed while `bt_pty` was calling a repeated one-byte echo a transfer unit. What a read's
+    //! length means is decided in `bt_pty` and carried through a pop, so that is what is driven
+    //! here — nothing is asserted about a flag that was not produced by the same code the reader
+    //! runs.
+
+    use std::time::{Duration, Instant};
+
+    use bt_pty::{CappedReads, OutputRing, PTY_RING_BYTES, TERM_READ_SLICE, Transport};
+
+    use super::{Arrival, COALESCE_WINDOW, Publication, decide};
+
+    const READER_BUFFER: usize = 16 * 1024;
+
+    /// One turn of the loop, for one pane: the reader's reads go into the ring, the drain empties
+    /// it a slice at a time, and the rule is asked what to do with the turn's picture.
+    struct Pane {
+        detector: CappedReads,
+        ring: OutputRing,
+        first_unpublished: Option<Instant>,
+        armed: Option<Instant>,
+        publishes: usize,
+    }
+
+    impl Pane {
+        fn new() -> Self {
+            Self {
+                detector: CappedReads::new(Transport::PtyMaster, READER_BUFFER),
+                ring: OutputRing::new(PTY_RING_BYTES),
+                first_unpublished: None,
+                armed: None,
+                publishes: 0,
+            }
+        }
+
+        /// What the reader thread does with one `read(2)` of this length.
+        fn read(&mut self, length: usize) {
+            let capped = self.detector.observe(length);
+            self.ring
+                .push_read(vec![b'x'; length], capped)
+                .expect("the ring takes a read");
+        }
+
+        /// What one drain turn does with whatever is in the ring, at `at`.
+        fn turn(&mut self, at: Instant, window: Duration) -> Publication {
+            if let Some(deadline) = self.armed.take_if(|deadline| *deadline <= at) {
+                let _ = deadline;
+                self.publishes += 1;
+                self.first_unpublished = None;
+            }
+            let mut arrived = false;
+            let mut uncapped = false;
+            loop {
+                let slice = self.ring.try_pop_slice(TERM_READ_SLICE);
+                if slice.is_empty() {
+                    break;
+                }
+                arrived = true;
+                uncapped |= !slice.ends_capped;
+                self.first_unpublished.get_or_insert(at);
+            }
+            assert!(arrived, "a turn is only asked about bytes it actually took");
+            let decision = decide(
+                Arrival {
+                    ends_capped: !uncapped,
+                    ring_pending: false,
+                    sync_open: false,
+                    sync_closed: false,
+                    first_unpublished: self.first_unpublished,
+                    next_display_deadline: None,
+                },
+                at,
+                window,
+            );
+            self.armed = match decision {
+                Publication::Now => {
+                    self.publishes += 1;
+                    self.first_unpublished = None;
+                    None
+                }
+                Publication::WaitUntil(deadline) => Some(deadline),
+            };
+            decision
+        }
+    }
+
+    fn micros(count: u64) -> Duration {
+        Duration::from_micros(count)
+    }
+
+    /// **The keystroke, end to end.** One-byte echoes repeat for as long as somebody is typing,
+    /// and not one of them is ever a transfer unit or ever waits.
+    #[test]
+    fn one_byte_echoes_are_published_the_moment_they_arrive() {
+        let start = Instant::now();
+        let mut pane = Pane::new();
+        for step in 0..3_u64 {
+            pane.read(1);
+            assert_eq!(
+                pane.turn(start + micros(500 * step), COALESCE_WINDOW),
+                Publication::Now,
+                "a keystroke's echo is never deferred, however often it repeats"
+            );
+        }
+        assert_eq!(pane.publishes, 3);
+    }
+
+    /// **A repaint, end to end.** Once the pty's unit is corroborated, the capped reads of one
+    /// burst are held and the short read that ends it publishes them all together: four reads,
+    /// one picture.
+    #[test]
+    fn a_learned_cap_coalesces_a_burst_and_its_short_tail_publishes_it() {
+        let start = Instant::now();
+        let mut pane = Pane::new();
+        // The unit is learned on an earlier burst; nothing here depends on how.
+        pane.read(1024);
+        pane.turn(start, COALESCE_WINDOW);
+        pane.read(1024);
+        pane.turn(start + micros(500), COALESCE_WINDOW);
+        let publishes_before = pane.publishes;
+
+        let burst = start + micros(1_000);
+        for (step, length) in [1024_usize, 1024, 1024, 300].iter().enumerate() {
+            pane.read(*length);
+            let at = burst + micros(100 * step as u64);
+            let decision = pane.turn(at, COALESCE_WINDOW);
+            if *length == 300 {
+                assert_eq!(
+                    decision,
+                    Publication::Now,
+                    "the short read is the kernel saying the repaint is over"
+                );
+            } else {
+                assert!(
+                    matches!(decision, Publication::WaitUntil(_)),
+                    "a capped read waits for the rest of its burst"
+                );
+            }
+        }
+        assert_eq!(
+            pane.publishes - publishes_before,
+            1,
+            "four reads of one repaint reach the glass as one picture"
+        );
+    }
+
+    /// **The keystroke that arrives just before a burst.** Both land in one pop; the echo is
+    /// still an echo, and the turn publishes at once.
+    #[test]
+    fn an_echo_popped_with_a_capped_read_publishes_at_once() {
+        let start = Instant::now();
+        let mut pane = Pane::new();
+        pane.read(1024);
+        pane.turn(start, COALESCE_WINDOW);
+        pane.read(1024);
+        pane.turn(start + micros(500), COALESCE_WINDOW);
+
+        // Now both arrive before the window's next turn.
+        pane.read(1);
+        pane.read(1024);
+        assert_eq!(
+            pane.turn(start + micros(1_000), COALESCE_WINDOW),
+            Publication::Now,
+            "evidence of an interactive arrival is not overwritten by what came after it"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -221,30 +399,48 @@ mod session_tests {
             self.render_whatever_was_asked_for();
         }
 
-        /// One published frame, answered as the only question this test asks of it: is the
-        /// formula a picture, or is its source lying there in the cells?
-        fn published_frame_draws_the_formula(&mut self) -> bool {
+        /// One published frame, answered as the two questions this test asks of it.
+        fn publish(&mut self) -> Drawn {
             self.session.refresh_projection(&mut self.projection);
             let frame = self
                 .session
                 .viewport_frame(&mut self.projection)
                 .expect("a frame");
-            !observe_formula_frame(&frame).rendered_sources.is_empty()
+            let observation = observe_formula_frame(&frame);
+            Drawn {
+                picture: !observation.rendered_sources.is_empty(),
+                source_cells: observation.source_rows.clone(),
+            }
         }
     }
 
+    /// What one published frame put on the glass where the formula is.
+    #[derive(Clone, Debug)]
+    struct Drawn {
+        /// A raster stands over the block's rows.
+        picture: bool,
+        /// The visible rows carrying display-math delimiters — the source, in cells, being read
+        /// by a person. On a whole frame this is empty: the picture covers its own source.
+        source_cells: Vec<String>,
+    }
+
     /// A full-screen program's repaint: erase, then rewrite, in four pieces the transport capped.
+    ///
+    /// **The formula's own row is cut in half** between the third and fourth, which is the shape
+    /// the defect needs: half a `$$…$$` is not a formula, so the picture comes down and what a
+    /// person sees in those cells is the source, half written.
     fn repaint_pieces() -> Vec<Vec<u8>> {
+        let (head, tail) = FORMULA.split_at(FORMULA.len() / 2);
         vec![
             b"\x1b[H\x1b[2Jline one\r\n".to_vec(),
             b"line two\r\n".to_vec(),
-            format!("{FORMULA}\r\n").into_bytes(),
-            b"line four\r\n".to_vec(),
+            head.as_bytes().to_vec(),
+            format!("{tail}\r\nline four\r\n").into_bytes(),
         ]
     }
 
     /// Drive one split repaint under a given window and answer what each published frame drew.
-    fn frames_published_over_a_split_repaint(window: Duration) -> Vec<bool> {
+    fn frames_published_over_a_split_repaint(window: Duration) -> Vec<Drawn> {
         let start = Instant::now();
         let mut screen = Screen::new();
         screen.feed(
@@ -254,9 +450,11 @@ mod session_tests {
         );
         let settled = start + LIVE_MATH_STABLE_INTERVAL;
         screen.tick(settled);
+        let before = screen.publish();
         assert!(
-            screen.published_frame_draws_the_formula(),
-            "the block has to be a picture before a repaint can take it away"
+            before.picture && before.source_cells.is_empty(),
+            "the block has to be a picture, covering its own source, before a \
+             repaint can take it away: {before:?}"
         );
 
         let mut drawn = Vec::new();
@@ -268,7 +466,7 @@ mod session_tests {
             let at = settled + Duration::from_micros(500 * step as u64);
             if let Some(deadline) = armed.take_if(|deadline| *deadline <= at) {
                 screen.tick(deadline);
-                drawn.push(screen.published_frame_draws_the_formula());
+                drawn.push(screen.publish());
                 first_unpublished = None;
             }
             screen.feed(piece, at);
@@ -288,7 +486,7 @@ mod session_tests {
                 window,
             ) {
                 Publication::Now => {
-                    drawn.push(screen.published_frame_draws_the_formula());
+                    drawn.push(screen.publish());
                     first_unpublished = None;
                     None
                 }
@@ -297,32 +495,90 @@ mod session_tests {
         }
         if let Some(deadline) = armed {
             screen.tick(deadline);
-            drawn.push(screen.published_frame_draws_the_formula());
+            drawn.push(screen.publish());
         }
         assert!(!drawn.is_empty(), "a repaint publishes something");
         drawn
     }
 
     /// **The defect, stated.** With no window at all — the behaviour Folio had — a frame composed
-    /// between two pieces of one repaint reaches the glass with the picture gone and its source
-    /// lying in the cells. This is the red evidence the rule is for.
+    /// between two pieces of one repaint reaches the glass with the picture gone and half of a
+    /// `$$…$$` lying in the cells for a person to read. This is the red evidence the rule is for.
     #[test]
-    fn without_a_window_a_split_repaint_publishes_the_torn_frame() {
+    fn without_a_window_a_split_repaint_publishes_the_torn_source() {
         let drawn = frames_published_over_a_split_repaint(Duration::ZERO);
+        let torn = drawn
+            .iter()
+            .find(|frame| !frame.picture && !frame.source_cells.is_empty())
+            .unwrap_or_else(|| {
+                panic!("publishing after every read shows the repaint half-done: {drawn:?}")
+            });
         assert!(
-            drawn.iter().any(|shown| !shown),
-            "publishing after every read shows the repaint half-done: {drawn:?}"
+            torn.source_cells
+                .iter()
+                .any(|row| row.contains("$$") && !row.ends_with("$$")),
+            "and what it shows is the source, half written: {torn:?}"
         );
     }
 
     /// **The repair.** The same four pieces, the same instants, one bounded wait: every frame
-    /// that reaches the glass draws the formula, and none of them draws its source.
+    /// that reaches the glass draws the formula, and not one of them leaves a delimiter in a cell.
     #[test]
     fn a_bounded_window_publishes_only_whole_repaints() {
         let drawn = frames_published_over_a_split_repaint(COALESCE_WINDOW);
         assert!(
-            drawn.iter().all(|shown| *shown),
+            drawn
+                .iter()
+                .all(|frame| frame.picture && frame.source_cells.is_empty()),
             "no published frame may show a repaint half-done: {drawn:?}"
+        );
+    }
+
+    /// **A whole synchronized update inside one capped read publishes at once.**
+    ///
+    /// `BSU … ESU` in one `read(2)` leaves the deadline `None` on both sides of the feed, so a
+    /// drain comparing deadlines sees nothing happen and makes a completed frame wait three
+    /// milliseconds. The commit *counter* is the same question asked in a way that cannot fall
+    /// between two samples.
+    #[test]
+    fn a_synchronized_update_whole_inside_one_read_is_seen_and_published() {
+        let now = Instant::now();
+        let mut screen = Screen::new();
+        let before = screen.session.synchronized_update_commits();
+        assert!(screen.session.synchronized_update_deadline().is_none());
+        screen.feed(
+            b"[?2026hline one
+line two
+[?2026l",
+            now,
+        );
+        assert!(
+            screen.session.synchronized_update_deadline().is_none(),
+            "the block is over, so a deadline says nothing about it either side of the feed"
+        );
+        // The drain's own reading, through the function the drain calls.
+        let committed = crate::synchronized_update_committed(before, &screen.session);
+        assert!(
+            committed,
+            "the commit is seen however far inside one read it fell"
+        );
+
+        // And that is what the drain hands the rule, on a slice the transport capped.
+        assert_eq!(
+            decide(
+                Arrival {
+                    ends_capped: true,
+                    ring_pending: false,
+                    sync_open: false,
+                    sync_closed: committed,
+                    first_unpublished: Some(now),
+                    next_display_deadline: None,
+                },
+                now,
+                COALESCE_WINDOW,
+            ),
+            Publication::Now,
+            "a frame the program has already called finished waits for nothing"
         );
     }
 }
