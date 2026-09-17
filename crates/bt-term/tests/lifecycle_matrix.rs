@@ -2579,9 +2579,13 @@ fn assert_restored_blocks_are_pictures(session: &mut DualPlaneSession, count: us
 ///   1 block   2,984 allocations, 1,994,690 B a cycle
 ///   8 blocks  3,477 allocations, 2,204,756 B a cycle
 ///
-/// These are whole-cycle costs — two full-screen synchronized repaints, two closes and a restore —
-/// not the re-anchor in isolation; what the second arm adds over the first is what seven more
-/// records cost at this door.
+/// **These are whole-cycle costs and not the door's price**, and the difference between the arms is
+/// not the door's price either. A cycle is two synchronized repaints, two closes and a restore; the
+/// eight-block screen is also a taller screen with more bytes in it, and the same two screens
+/// written with no formulas on them at all differ by 19 allocations and 3,104 B a cycle on their
+/// own. So of the 493 allocations and 210,066 B the second arm adds, that much is repaint scaling
+/// before any record is re-anchored. What the pin is for is a whole-cycle ceiling on the path, which
+/// nothing measured before.
 ///
 /// The budgets carry the same ~12% of slack the neighbouring arms use.
 #[test]

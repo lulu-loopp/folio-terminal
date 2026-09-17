@@ -1381,10 +1381,103 @@ fn structural_line_step(
     StructuralStep::Read { abandon_opening }
 }
 
-/// Advance the compact frozen-history parser proof by one immutable logical line. The structural
-/// half is [`structural_line_step`], shared with the authoritative scanner; what is written out here
-/// is only the delimiter pairing, which deliberately records no body text, so retaining checkpoints
-/// is O(resident lines), not O(total source bytes squared).
+/// What one line does to the display delimiter a scan has open.
+///
+/// **The other half of the one state machine, and it drifted for the same reason the first did.**
+/// The walker used to ask "is this line a complete display block?" before anything else and stop
+/// there whatever the answer, while the scanner asks it only when the open delimiter is `$$` or
+/// there is none — so a one-line `\begin{align}…\end{align}` arriving under an unfinished
+/// `\begin{align}` closes that environment for the scanner and did not for the walker, and every
+/// line below was read in a state no scan was ever in.
+///
+/// Sharing the structural half taught the lesson: two machines that must agree will disagree one
+/// case at a time. So the whole per-line decision lives here, in the scanner's own precedence — a
+/// self-contained block, then a closer for what is open, then an opener — and the two callers differ
+/// only in what they *do* with it. The scanner emits blocks and feeds its ownership ledger; the
+/// walker keeps the delimiter and throws the rest away, which is what makes a checkpoint O(line)
+/// instead of a rescan of everything above it.
+///
+/// The scan-level recoveries are deliberately *not* here: the clip witness and the two phantom-opener
+/// resyncs read ahead over the whole line list and are gated on inputs a walker never has. They
+/// rescue an opener the window lost; they are not what a line means.
+enum PairingStep {
+    /// A complete display block on this line. `closes_opening` is the scanner's rule that a
+    /// self-contained `$$…$$` consumes an abandoned `$$` opener rather than pairing with it.
+    SelfContained {
+        delimiter: DelimiterKind,
+        open_start: usize,
+        body_start: usize,
+        body_end: usize,
+        close_end: usize,
+        closes_opening: bool,
+    },
+    /// This line closes what is open.
+    Closes { body_end: usize, close_end: usize },
+    /// This line opens a multi-line display block.
+    Opens {
+        delimiter: DelimiterKind,
+        body_start: usize,
+    },
+    /// This line would open one, but a `$$` under an ambiguous prefix may not be paired on a guess.
+    OpensSuppressed { delimiter: DelimiterKind },
+    /// Body, prose, or a delimiter that is not this level's: nothing to do.
+    Inert,
+}
+
+fn pairing_line_step(
+    text: &str,
+    opening: Option<&DisplayDelimiter>,
+    prefix: PrefixKnowledge,
+) -> PairingStep {
+    // A self-contained block is read only from a state that can hold one: nothing open, or a `$$`
+    // opener this block is about to orphan. Under any other opening the line is first of all a
+    // candidate closer for *that* opening, which is the precedence the whole scan runs on.
+    let self_contained_state = match opening {
+        None => true,
+        Some(DisplayDelimiter::Dollars) => true,
+        Some(_) => false,
+    };
+    if self_contained_state
+        && let Some((delimiter, open_start, body_start, body_end, close_end)) =
+            complete_display_on_line(text)
+        && (opening.is_none() || delimiter == DelimiterKind::Dollars)
+    {
+        return PairingStep::SelfContained {
+            delimiter,
+            open_start,
+            body_start,
+            body_end,
+            close_end,
+            closes_opening: opening.is_some(),
+        };
+    }
+    if let Some(active) = opening {
+        return match closing_delimiter(text, active) {
+            Some((body_end, close_end)) => PairingStep::Closes {
+                body_end,
+                close_end,
+            },
+            // Directional environments commonly nest inside an outer display block. Only the
+            // delimiter which matches the active opener is structural at this level.
+            None => PairingStep::Inert,
+        };
+    }
+    let Some((delimiter, body_start)) = opening_delimiter(text) else {
+        return PairingStep::Inert;
+    };
+    if delimiter == DisplayDelimiter::Dollars && prefix == PrefixKnowledge::Ambiguous {
+        return PairingStep::OpensSuppressed { delimiter };
+    }
+    PairingStep::Opens {
+        delimiter,
+        body_start,
+    }
+}
+
+/// Advance the compact frozen-history parser proof by one immutable logical line. Both halves of the
+/// step are [`structural_line_step`] and [`pairing_line_step`], shared with the authoritative
+/// scanner; what this adds is only that it records no body text, so retaining checkpoints is
+/// O(resident lines), not O(total source bytes squared).
 pub fn advance_detection_context(context: &mut DetectionContext, id: TranscriptId, text: &str) {
     {
         let DetectionContext { fence, opening, .. } = &mut *context;
@@ -1401,30 +1494,19 @@ pub fn advance_detection_context(context: &mut DetectionContext, id: TranscriptI
             }
         }
     }
-    if let Some((delimiter, ..)) = complete_display_on_line(text) {
-        if delimiter == DisplayDelimiter::Dollars
-            && context
-                .opening
-                .as_ref()
-                .is_some_and(|(_, active)| *active == DisplayDelimiter::Dollars)
-        {
-            context.opening = None;
+    match pairing_line_step(
+        text,
+        context.opening.as_ref().map(|(_, kind)| kind),
+        context.prefix,
+    ) {
+        PairingStep::SelfContained { closes_opening, .. } => {
+            if closes_opening {
+                context.opening = None;
+            }
         }
-        return;
-    }
-    if context
-        .opening
-        .as_ref()
-        .is_some_and(|(_, delimiter)| closing_delimiter(text, delimiter).is_some())
-    {
-        context.opening = None;
-        return;
-    }
-    if context.opening.is_none()
-        && let Some((delimiter, _)) = opening_delimiter(text)
-        && (delimiter != DisplayDelimiter::Dollars || context.prefix == PrefixKnowledge::Known)
-    {
-        context.opening = Some((id, delimiter));
+        PairingStep::Closes { .. } => context.opening = None,
+        PairingStep::Opens { delimiter, .. } => context.opening = Some((id, delimiter)),
+        PairingStep::OpensSuppressed { .. } | PairingStep::Inert => {}
     }
 }
 
@@ -1702,13 +1784,29 @@ fn scan_math_blocks_impl<'a>(
                 }
             }
         }
-        if opening
-            .as_ref()
-            .is_some_and(|active| active.delimiter == DisplayDelimiter::Dollars)
-            && let Some((delimiter, open_start, body_start, body_end, close_end)) =
-                complete_display_on_line(text)
-            && delimiter == DelimiterKind::Dollars
+        // The pairing half of this line, from the one place that decides it. Every arm below is the
+        // body it always had; only the question they are asked has moved.
+        let pairing = pairing_line_step(
+            text,
+            opening.as_ref().map(|active| &active.delimiter),
+            initial_context.prefix,
+        );
+        if let PairingStep::SelfContained {
+            delimiter,
+            open_start,
+            body_start,
+            body_end,
+            close_end,
+            closes_opening: true,
+        } = &pairing
         {
+            let (delimiter, open_start, body_start, body_end, close_end) = (
+                delimiter.clone(),
+                *open_start,
+                *body_start,
+                *body_end,
+                *close_end,
+            );
             // A self-contained dollars block cannot close a prior abandoned dollars opener: doing
             // so would swallow its own opening token into the render body.
             opening = None;
@@ -1755,10 +1853,22 @@ fn scan_math_blocks_impl<'a>(
             }
             continue;
         }
-        if opening.is_none()
-            && let Some((delimiter, open_start, body_start, body_end, close_end)) =
-                complete_display_on_line(text)
+        if let PairingStep::SelfContained {
+            delimiter,
+            open_start,
+            body_start,
+            body_end,
+            close_end,
+            closes_opening: false,
+        } = &pairing
         {
+            let (delimiter, open_start, body_start, body_end, close_end) = (
+                delimiter.clone(),
+                *open_start,
+                *body_start,
+                *body_end,
+                *close_end,
+            );
             let body = &text[body_start..body_end];
             let original = &text[open_start..close_end];
             let render = if matches!(delimiter, DisplayDelimiter::Environment(_)) {
@@ -1834,10 +1944,12 @@ fn scan_math_blocks_impl<'a>(
                 continue;
             }
         }
-        if let Some(active) = opening.as_ref()
-            && let Some((body_end, close_end)) = closing_delimiter(text, &active.delimiter)
+        if let PairingStep::Closes {
+            body_end,
+            close_end,
+        } = pairing
         {
-            let active = opening.take().expect("active opening was just observed");
+            let active = opening.take().expect("a closer implies an active opening");
             let closer_kind = structural_kind(&active.delimiter, false);
             let Some(start_index) = active.start_index else {
                 // The opener is before this bounded window. Its exact state proves that this is a
@@ -1907,41 +2019,40 @@ fn scan_math_blocks_impl<'a>(
             });
             continue;
         }
-        if opening.is_some() {
-            // Directional environments commonly nest inside an outer display block. Only the
-            // delimiter which matches the active opener is structural at this level.
-            continue;
-        }
-        let Some((delimiter, body_start)) = opening_delimiter(text) else {
-            continue;
-        };
         let open_byte = delimiter_start(text);
-        if delimiter == DisplayDelimiter::Dollars
-            && initial_context.prefix == PrefixKnowledge::Ambiguous
-        {
-            if let Some(rec) = recorder.as_deref_mut() {
-                rec.reject_single(
-                    index,
-                    open_byte,
-                    StructuralDelimiterKind::Dollars,
-                    LegitimateRejection::AmbiguousPrefixSuppressed,
-                );
+        match pairing {
+            PairingStep::OpensSuppressed { delimiter } => {
+                if let Some(rec) = recorder.as_deref_mut() {
+                    rec.reject_single(
+                        index,
+                        open_byte,
+                        StructuralDelimiterKind::Dollars,
+                        LegitimateRejection::AmbiguousPrefixSuppressed,
+                    );
+                }
+                result.ambiguous.push(AmbiguousMathBlock {
+                    start: lines[index].0,
+                    end: lines[index].0,
+                    delimiter_kind: delimiter,
+                });
             }
-            result.ambiguous.push(AmbiguousMathBlock {
-                start: lines[index].0,
-                end: lines[index].0,
-                delimiter_kind: delimiter,
-            });
-            continue;
+            PairingStep::Opens {
+                delimiter,
+                body_start,
+            } => {
+                if let Some(rec) = recorder.as_deref_mut() {
+                    rec.open(index, open_byte, structural_kind(&delimiter, true));
+                }
+                opening = Some(ActiveOpening {
+                    start_index: Some(index),
+                    delimiter,
+                    body_start,
+                });
+            }
+            // An opening this line is not the closer of, or no delimiter at all.
+            PairingStep::Inert | PairingStep::Closes { .. } | PairingStep::SelfContained { .. } => {
+            }
         }
-        if let Some(rec) = recorder.as_deref_mut() {
-            rec.open(index, open_byte, structural_kind(&delimiter, true));
-        }
-        opening = Some(ActiveOpening {
-            start_index: Some(index),
-            delimiter,
-            body_start,
-        });
     }
     // The resync-corrected parser phase after the last line. A caller certifying a repair frontier
     // (session frozen scheduling, review §B) treats `opening.is_none() && fence.is_none()` as a
@@ -3587,24 +3698,91 @@ mod tests {
         assert_eq!(spans[0].render_source, "x^2");
     }
 
+    /// Every kind of line that can move the carried parser state, and a few that must not.
+    const DRIFT_ALPHABET: &[&str] = &[
+        // Environment openers: one the scanner accepts as a standalone opener, one it does not.
+        r"\begin{align}",
+        r"\begin{pmatrix}",
+        // A complete environment on one line — the shape that closes an active environment for the
+        // scanner, and used not to for the walker.
+        r"\begin{align}x=y\end{align}",
+        r"\end{align}",
+        // Dollars and brackets: open, close, and self-contained.
+        "$$",
+        "$$x^2$$",
+        r"\[",
+        r"\]",
+        r"\[y\]",
+        // Fences: both markers, an info string, and one longer than the usual three.
+        "```",
+        "```rust",
+        "````",
+        "~~~",
+        // Code by indentation, in spaces and in tabs.
+        "    indented",
+        "\tindented",
+        // Prefixes the detector reads through.
+        "- $$a$$",
+        "> $$b$$",
+        "# $$c$$",
+        "# heading",
+        // Ordinary text, and two shapes a terminal leaves behind.
+        "prose line",
+        "",
+        "trailing blanks   ",
+        "carriage\r",
+    ];
+
+    /// Is the parser state this context carries settled — nothing open, no fence?
+    fn context_is_settled(context: &DetectionContext) -> bool {
+        context.opening.is_none() && context.fence.is_none()
+    }
+
+    /// The same question, asked of the authoritative scanner after it has read `lines`.
+    fn scan_is_settled(lines: &[(TranscriptId, &str)], initial_context: DetectionContext) -> bool {
+        let mut settled = false;
+        scan_math_blocks_impl(
+            lines.iter().copied(),
+            initial_context,
+            DetectionOptions::default(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some(&mut settled),
+        );
+        settled
+    }
+
     /// **The prefix walker and the scanner are one state machine, and this is what says so.**
     ///
-    /// `advance_detection_context` exists so a caller can ask "what parser state is this line in?"
-    /// without rescanning everything above it, and every answer it gives is worth exactly the
-    /// scanner's agreement. It was a second copy of the scanner's structural rules and it drifted:
-    /// it never learned the swallow-radius bound, so after an unfinished `\begin{align}` it went on
-    /// swallowing every line as environment body and never saw the code fence below — and a caller
-    /// that asked it for the state of a line inside that fence was told there was no fence.
+    /// `advance_detection_context` exists so a caller can ask what parser state a line is in without
+    /// rescanning everything above it, and every answer it gives is worth exactly the scanner's
+    /// agreement. It was a second copy of the scanner's rules and it drifted twice, one review
+    /// apart: first the structural half — it never learned to abandon an unfinished environment, so
+    /// it never saw the fence below one — and then the pairing half, where it stopped at every
+    /// complete one-line block, so a one-line `\begin{align}…\end{align}` did not close the
+    /// environment above it. Both were found one case at a time, which is the argument for not
+    /// testing them one case at a time.
     ///
-    /// The test is the equivalence itself rather than a list of cases: for every corpus, and every
-    /// point it could be split at, walking the prefix and then scanning the tail from the state the
-    /// walk arrived at must find exactly the blocks a single scan of the whole thing finds below
-    /// that split. One state machine, or this goes red.
+    /// So the test is the equivalence itself, over thousands of generated corpora and every point
+    /// each could be split at, in two halves that catch different things:
+    ///
+    /// * the blocks below the split must be the ones a single scan of the whole finds there, and
+    /// * the state left behind must be the state a whole walk arrives at — which is the half that
+    ///   reaches a split *inside* a multi-line block, where there are no blocks below to compare and
+    ///   a streaming `\begin{align}` seam lives.
+    ///
+    /// The corpora are generated from a fixed seed by a plain arithmetic recurrence: no dependency,
+    /// and the same corpora on every machine and every run, so a failure names a corpus that can be
+    /// read and pasted into `DIRECTED`.
     #[test]
     fn walking_a_prefix_leaves_the_scanner_where_scanning_it_would_have() {
-        const CORPORA: &[&[&str]] = &[
-            // The shape the review named: an environment nobody closed, a block that ends its
-            // swallow, and a fence that only a reader who noticed the abandon can see.
+        const DIRECTED: &[&[&str]] = &[
+            // Round 4: an environment nobody closed, a block that ends its swallow, and a fence
+            // that only a reader who noticed the abandon can see.
             &[
                 r"\begin{align}",
                 "$$z^2$$",
@@ -3614,6 +3792,28 @@ mod tests {
                 "```",
                 "tail",
             ],
+            // Round 5: the same, where what ends the swallow is a complete environment on one line.
+            &[
+                r"\begin{align}",
+                r"\begin{align}x=y\end{align}",
+                "```",
+                "code",
+                "$$x^2$$",
+                "```",
+                "tail",
+            ],
+            // The same with the fence left open.
+            &[
+                r"\begin{align}",
+                r"\begin{align}x=y\end{align}",
+                "```",
+                "code",
+                "$$x^2$$",
+                "more code",
+            ],
+            // The bracket forms of both.
+            &[r"\begin{align}", r"\[y\]", "```", "$$x^2$$", "```"],
+            &[r"\begin{align}", r"\[", "body", r"\]", "```", "$$x^2$$"],
             // A fence opened inside an unfinished environment, and never closed.
             &[r"\begin{align}", "$$z^2$$", "```", "code", "more code"],
             // Fence markers of both kinds, one inside the other's body.
@@ -3628,11 +3828,32 @@ mod tests {
                 "```",
                 "$$e$$",
             ],
+            // Abandon, and then the closer of the thing that was abandoned.
+            &[r"\begin{align}", "$$x^2$$", r"\end{align}", "$$y^2$$"],
             // Indented code under an unfinished environment, then a block.
             &[r"\begin{align}", "    indented", "$$f$$", "tail"],
         ];
+        const GENERATED: usize = 4_000;
+        const LINES: usize = 8;
 
-        for (corpus_index, corpus) in CORPORA.iter().enumerate() {
+        let mut corpora = DIRECTED
+            .iter()
+            .map(|corpus| corpus.to_vec())
+            .collect::<Vec<_>>();
+        let mut state = 0x2026_0917_u64;
+        for _ in 0..GENERATED {
+            let mut corpus = Vec::with_capacity(LINES);
+            for _ in 0..LINES {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                corpus.push(DRIFT_ALPHABET[(state >> 33) as usize % DRIFT_ALPHABET.len()]);
+            }
+            corpora.push(corpus);
+        }
+
+        let mut checks = 0usize;
+        for (corpus_index, corpus) in corpora.iter().enumerate() {
             let numbered = corpus
                 .iter()
                 .enumerate()
@@ -3642,16 +3863,20 @@ mod tests {
                 numbered.iter().copied(),
                 DetectionContext::default(),
             );
+            let mut walked = DetectionContext::default();
+            for (id, text) in &numbered {
+                advance_detection_context(&mut walked, *id, text);
+            }
             for split in 0..=corpus.len() {
                 let mut context = DetectionContext::default();
                 for (id, text) in &numbered[..split] {
                     advance_detection_context(&mut context, *id, text);
                 }
-                let found =
-                    detect_math_blocks_in_context(numbered[split..].iter().copied(), context)
-                        .iter()
-                        .map(|block| (block.start, block.end))
-                        .collect::<Vec<_>>();
+                let tail = &numbered[split..];
+                let found = detect_math_blocks_in_context(tail.iter().copied(), context.clone())
+                    .iter()
+                    .map(|block| (block.start, block.end))
+                    .collect::<Vec<_>>();
                 let expected = whole
                     .iter()
                     .filter(|block| block.start.0 > split as u64)
@@ -3659,11 +3884,19 @@ mod tests {
                     .collect::<Vec<_>>();
                 assert_eq!(
                     found, expected,
-                    "corpus {corpus_index} split at {split}: the walked prefix does not leave the \
-                     scanner where scanning it would have"
+                    "corpus {corpus_index} {corpus:?} split at {split}: the blocks below the split \
+                     are not the ones a whole scan finds there"
                 );
+                assert_eq!(
+                    scan_is_settled(tail, context),
+                    context_is_settled(&walked),
+                    "corpus {corpus_index} {corpus:?} split at {split}: the state left behind is \
+                     not the state a whole walk arrives at"
+                );
+                checks += 1;
             }
         }
+        assert!(checks > 30_000, "only {checks} split checks ran");
     }
 
     #[test]

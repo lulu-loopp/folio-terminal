@@ -1403,56 +1403,57 @@ fn the_re_anchor_keeps_every_line_the_detector_reads_as_a_block() {
 /// on the fenced row, with `held_unbacked_records` naming it.
 #[test]
 fn a_block_inside_a_fence_below_an_unfinished_environment_is_not_re_anchored() {
-    let start = std::time::Instant::now();
-    let mut session = session_with_one_off_band_source(r"$$x^2$$", start);
+    // Row 1 is what ends the unfinished environment's swallow, and there are two ways it can: a
+    // display block of its own, and a complete environment on one line. The scanner has always read
+    // both; the walker learned them one review apart, and each time the line below went unseen.
+    for ender in ["$$z^2$$", r"\begin{align}x=y\end{align}"] {
+        // And the fence below may be closed or still open when the screen is read.
+        for closer in ["```", "more code"] {
+            let start = std::time::Instant::now();
+            let mut session = session_with_one_off_band_source(r"$$x^2$$", start);
 
-    let back = start + Duration::from_millis(600);
-    session
-        .feed_at(
-            &synchronized_repaint(&[
-                r"\begin{align}",
-                "$$z^2$$",
-                "```",
-                "code",
+            let back = start + Duration::from_millis(600);
+            session
+                .feed_at(
+                    &synchronized_repaint(&[
+                        r"\begin{align}",
+                        ender,
+                        "```",
+                        "code",
+                        "$$x^2$$",
+                        closer,
+                        "tail",
+                        "prompt> ",
+                    ]),
+                    back,
+                )
+                .unwrap();
+            assert!(
+                session.held_unbacked_records().is_empty(),
+                "a raster was seated inside a code fence ({ender:?}, {closer:?}): {:?}",
+                session.held_unbacked_records()
+            );
+            let mut projection = session.new_projection(session.layout_key());
+            session.refresh_projection(&mut projection);
+            let frame = session.viewport_frame(&mut projection).unwrap();
+            assert_eq!(
+                frame_row_text(&frame, 4).trim(),
                 "$$x^2$$",
-                "```",
-                "tail",
-                "prompt> ",
-            ]),
-            back,
-        )
-        .unwrap();
-    assert!(
-        session.held_unbacked_records().is_empty(),
-        "a raster was seated inside a code fence: {:?}",
-        session.held_unbacked_records()
-    );
-    let mut projection = session.new_projection(session.layout_key());
-    session.refresh_projection(&mut projection);
-    let frame = session.viewport_frame(&mut projection).unwrap();
-    assert_eq!(
-        frame_row_text(&frame, 4).trim(),
-        "$$x^2$$",
-        "the fenced row must keep its text: {:?}",
-        (0..8)
-            .map(|row| frame_row_text(&frame, row))
-            .collect::<Vec<_>>()
-    );
+                "the fenced row must keep its text ({ender:?}, {closer:?}): {:?}",
+                (0..8)
+                    .map(|row| frame_row_text(&frame, row))
+                    .collect::<Vec<_>>()
+            );
 
-    // The block that is not in a fence is typeset, so this is refusal by context and not by refusing
-    // everything.
-    session.advance_live_stability(back + LIVE_MATH_STABLE_INTERVAL);
-    complete_live_math(&mut session);
-    session.refresh_projection(&mut projection);
-    let settled = session.viewport_frame(&mut projection).unwrap();
-    assert!(
-        frame_row_text(&settled, 1).trim().is_empty(),
-        "the block outside the fence was never typeset: {:?}",
-        (0..8)
-            .map(|row| frame_row_text(&settled, row))
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(frame_row_text(&settled, 4).trim(), "$$x^2$$");
+            // And it stays text once the screen settles: the picture is not put back a pass later.
+            session.advance_live_stability(back + LIVE_MATH_STABLE_INTERVAL);
+            complete_live_math(&mut session);
+            session.refresh_projection(&mut projection);
+            let settled = session.viewport_frame(&mut projection).unwrap();
+            assert_eq!(frame_row_text(&settled, 4).trim(), "$$x^2$$");
+            assert!(session.held_unbacked_records().is_empty());
+        }
+    }
 }
 
 /// The other side of the same rule: a line the detector refuses must not be re-anchored onto either,
