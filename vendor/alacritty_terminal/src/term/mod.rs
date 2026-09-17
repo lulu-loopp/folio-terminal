@@ -1675,6 +1675,21 @@ impl<T> Term<T> {
         Some((lead, wrap_placeholder))
     }
 
+    /// Leave on `point` only the claim that *both* the text that was already in the cell and the
+    /// write that has just rewritten it can make.
+    ///
+    /// **A cell's claim is the conjunction over every piece of text in it**, so text that was
+    /// already on the grid keeps whatever it could claim before, however it is moved or re-cut.
+    /// `write_at_cursor` stamps the current writer on everything it puts down, which is the whole
+    /// truth only when everything it puts down is new; a cluster that is taken off the grid and
+    /// written again to change its width is not new, and intersecting here is what stops the
+    /// appender's provenance from being granted to the base character somebody else wrote.
+    fn carry_claim(&mut self, point: Point, carried: Flags) {
+        if !carried.contains(Flags::COMMAND_OUTPUT_WRITE) {
+            self.grid[point].flags.remove(Flags::COMMAND_OUTPUT_WRITE);
+        }
+    }
+
     /// Hang a zero-width mark on a cell, and let that say who the cell's text now belongs to.
     ///
     /// **A mark makes the cell's text partly the writer's.** So a mark added while this is not a
@@ -1883,6 +1898,11 @@ impl<T> Term<T> {
         // occupied, and a cleared cell claims nothing — the same rule `Cell::reset` follows. The
         // glyph that replaces it is printed through `write_at_cursor`, which does stamp.
         let template = self.grid.cursor.template.clone();
+        // What the cluster could claim *before* this width change. The two branches below take the
+        // whole cluster off the grid and write it again through the printing path, which would
+        // otherwise stamp the appender on a base character the appender never wrote — the prompt's
+        // glyph at the right margin, widened by a command's `U+FE0F`. See `carry_claim`.
+        let carried = self.grid[state.lead].flags & Flags::COMMAND_OUTPUT_WRITE;
 
         if let Some(placeholder) = state.wrap_placeholder.take() {
             let spacer = Point::new(state.lead.line, state.lead.column + 1);
@@ -1896,6 +1916,7 @@ impl<T> Term<T> {
                     .expect("one-cell grapheme must fit at a valid cursor");
                 state.lead = lead;
                 state.wrap_placeholder = wrap_placeholder;
+                self.carry_claim(lead, carried);
                 self.mark_fully_damaged();
                 return true;
             }
@@ -1915,6 +1936,7 @@ impl<T> Term<T> {
             };
             state.lead = lead;
             state.wrap_placeholder = wrap_placeholder;
+            self.carry_claim(lead, carried);
             self.mark_fully_damaged();
             return true;
         }
@@ -2326,10 +2348,19 @@ impl<T: EventListener> Handler for Term<T> {
             // cell's character exactly where it was — so over an occupied cell it is not a write at
             // all, and must not restate who wrote what is already there. Stamping it regardless let
             // a tab walked along a prompt's own line hand that line to a command.
+            //
+            // A blank cell can still be carrying somebody's zero-width marks, and the tab replaces
+            // the base character underneath them without touching them. The claim is the
+            // conjunction over everything in the cell, so where that text survives the answer is
+            // intersected with what the cell could claim before — the old claim is the strongest
+            // thing those marks can say for themselves, and a prompt's accent on a command's
+            // trailing space therefore keeps the cell out of the command's line.
             if cell.c == ' ' {
+                let keeps_earlier_text = cell.zerowidth().is_some_and(|marks| !marks.is_empty());
+                let claimed = provenance.contains(Flags::COMMAND_OUTPUT_WRITE)
+                    && (!keeps_earlier_text || cell.flags.contains(Flags::COMMAND_OUTPUT_WRITE));
                 cell.c = c;
-                cell.flags.remove(Flags::COMMAND_OUTPUT_WRITE);
-                cell.flags.insert(provenance);
+                cell.flags.set(Flags::COMMAND_OUTPUT_WRITE, claimed);
             }
 
             loop {

@@ -29350,6 +29350,146 @@ mod tests {
         }
     }
 
+    /// The same drive, carried on until every row of it has scrolled into history: how many frozen
+    /// lines carrying the formula's text a lone `$` may be read on, and how many pictures the
+    /// frozen scan resolved. The freeze folds the very cells the live plane reads, so a claim that
+    /// is wrong on one plane is wrong on both, and a fixture proven on only one proves half.
+    fn frozen_laundering_attempt(stream: &str) -> (usize, usize) {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut session);
+        session.feed_at(stream.as_bytes(), started).unwrap();
+        // The carriage return first: a fixture may leave the cursor in the middle of the row it
+        // is about to be asked about, and padding printed onto that row would answer for it.
+        session
+            .feed_at(
+                b"\r\npad\r\npad\r\npad\r\npad\r\npad\r\npad\r\npad\r\npad\r\npad\r\npad\r\n\
+                  pad\r\npad\r\n",
+                started,
+            )
+            .unwrap();
+        let frozen = session
+            .document
+            .entries()
+            .values()
+            .filter(|entry| entry.line.text.contains("nergy"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            frozen.len(),
+            1,
+            "the fixture must freeze the formula's line exactly once, or the site read below \
+             proves nothing: {:?}",
+            session
+                .document
+                .entries()
+                .values()
+                .map(|entry| entry.line.text.clone())
+                .collect::<Vec<_>>()
+        );
+        let eligible = usize::from(frozen[0].inline_site.permits_inline());
+        complete_frozen_math_for_real(&mut session);
+        let drawn = session
+            .decorations
+            .values()
+            .filter(|record| {
+                record
+                    .span
+                    .as_ref()
+                    .is_some_and(|span| span.mode == MathMode::Inline)
+            })
+            .count();
+        (eligible, drawn)
+    }
+
+    /// **A cell's claim is the conjunction over every piece of text in it, and moving that text
+    /// does not re-date it** (review 2026-09-17, F1).
+    ///
+    /// Two writes keep text somebody else put on the grid while putting something of their own
+    /// beside it, and both used to stamp the whole cell with the current writer:
+    ///
+    /// * a grapheme that **changes width** is taken off the grid and written again through the
+    ///   printing path. At the right margin a one-cell base is relocated to the next row to make
+    ///   room for the second half, so a `U+FE0F` a command prints after a prompt's `↔` rebuilt the
+    ///   prompt's own glyph as the command's. The zero-width rule cannot see it: nothing is
+    ///   appended, the cluster is reconstructed.
+    /// * a **tab over a blank cell** replaces the base character and leaves the cell's zero-width
+    ///   marks where they are. A prompt's combining accent on a command's trailing space therefore
+    ///   survived as `"\t\u{301}"` with the command's claim on it — text that is half the prompt's,
+    ///   on a cell that says a command wrote all of it.
+    ///
+    /// Each fixture is driven on both planes, and each has a control differing only in *who* writes
+    /// the glyph, because an assertion that nothing is typeset is satisfied by a fixture that never
+    /// reaches a formula at all.
+    #[test]
+    fn re_cutting_and_partial_writes_carry_the_claim_of_the_text_they_keep() {
+        // 59 columns of output put the cursor on the last column of a 60-column pane, which is the
+        // one column where widening a glyph has to relocate it. Printable padding rather than
+        // spaces: a logical line that opens with a screenful of blanks is indented code to the
+        // scanner, and would refuse the control fixture for a reason that has nothing to do with
+        // provenance.
+        let margin = "o".repeat(59);
+        let relocated = |glyph_is_the_prompts: bool| {
+            let (leave, back) = if glyph_is_the_prompts {
+                (format!("{OUTPUT_D}{PROMPT_A}"), OUTPUT_C.to_string())
+            } else {
+                (String::new(), String::new())
+            };
+            format!(
+                "{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\n{margin}{leave}\u{2194}{back}\
+                 \u{fe0f}energy $x^2$ here\r\n{OUTPUT_D}"
+            )
+        };
+        // `energy $E = mc^2$ here` is 22 columns, so its trailing space is column 23 (one-based),
+        // which is the cell the prompt's accent lands on and the cell the tab then rewrites.
+        let tabbed = |accent: &str| {
+            format!(
+                "{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\n{ENERGY} {OUTPUT_D}{PROMPT_A}{accent}\
+                 {OUTPUT_C}\x1b[2;23H\t{OUTPUT_D}"
+            )
+        };
+
+        for (name, stream) in [
+            (
+                "a prompt's glyph widened by the command that follows it",
+                relocated(true),
+            ),
+            (
+                "a tab over a blank cell the prompt hung an accent on",
+                tabbed("\u{301}"),
+            ),
+        ] {
+            assert_eq!(
+                laundering_attempt(&stream),
+                (0, 0),
+                "{name}: the cell holds text the prompt put there, so its line is the prompt's"
+            );
+            assert_eq!(
+                frozen_laundering_attempt(&stream),
+                (0, 0),
+                "{name}: and the freeze folds the same cells"
+            );
+        }
+
+        for (name, stream) in [
+            (
+                "the same widening, with the command writing the glyph too",
+                relocated(false),
+            ),
+            ("the same tab, over a cell nothing else wrote", tabbed("")),
+        ] {
+            assert_eq!(
+                laundering_attempt(&stream),
+                (1, 1),
+                "{name} is still typeset"
+            );
+            assert_eq!(
+                frozen_laundering_attempt(&stream),
+                (1, 1),
+                "{name} is still typeset once it is frozen"
+            );
+        }
+    }
+
     /// R1 — **a prompt that reprints a command's line byte for byte must not be typeset.**
     ///
     /// The reviewed sequence, through ordinary `feed_at` with nothing reached into: a command's

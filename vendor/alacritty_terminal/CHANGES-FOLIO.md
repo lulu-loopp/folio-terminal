@@ -56,7 +56,7 @@ file produces the vendored file byte for byte. Upstream formats with its own
 | `src/index.rs` | Formatting only. |
 | `src/selection.rs` | Formatting only. |
 | `src/sync.rs` | Formatting only. |
-| `src/term/cell.rs` | **Code.** A ceiling on the zerowidth marks one cell stores (`push_zerowidth`), from `bt_unicode::MAX_GRAPHEME_CLUSTER_CHARS`, and one added flag, `Flags::NON_OUTPUT_WRITE`, in the one bit of the `u16` upstream leaves free. Otherwise formatting only. |
+| `src/term/cell.rs` | **Code.** A ceiling on the zerowidth marks one cell stores (`push_zerowidth`), from `bt_unicode::MAX_GRAPHEME_CLUSTER_CHARS`, and one added flag, `Flags::COMMAND_OUTPUT_WRITE`, in the one bit of the `u16` upstream leaves free. Otherwise formatting only. |
 | `src/term/search.rs` | Formatting only. |
 | `src/thread.rs` | Formatting only. |
 | `src/tty/mod.rs` | Formatting only. |
@@ -133,15 +133,26 @@ file produces the vendored file byte for byte. Upstream formats with its own
   eviction into a scrollback all carry it without anybody having to keep a
   parallel record in step. The terminal never reads it back.
 
-  Three rules go with it, and they are what make the flag mean what it says. A
-  write that replaces a cell's text sets or clears it from the current
-  provenance. A write that does *not* replace the text leaves it alone — which
-  is `put_tab` over an occupied cell, whose whole job is to leave that cell's
-  character where it was. And a zero-width mark appended under a non-output
-  provenance clears it on the cell it lands on, because that cell's text is now
-  partly the appender's; appended under an output provenance it neither grants a
-  claim nor removes one. `Cell::reset` takes the default flags, so an erase
-  clears it too.
+  One rule governs all of it: **a cell's claim is the conjunction over every
+  piece of text in the cell** — it holds when a command's output put *all* of
+  that text there. The rest follow from it. A write that replaces the whole of a
+  cell's text sets or clears the claim from the current provenance. A write that
+  does *not* replace the text leaves it alone — which is `put_tab` over an
+  occupied cell, whose whole job is to leave that cell's character where it was.
+  A zero-width mark appended under a non-output provenance clears the claim on
+  the cell it lands on, because that cell's text is now partly the appender's;
+  appended under an output provenance it neither grants a claim nor removes one.
+  `Cell::reset` takes the default flags, so an erase clears it too.
+
+  Two writes keep somebody else's text while putting text of their own into the
+  same cell, and both intersect rather than stamp. `rewrite_grapheme_width`
+  re-cuts a cluster whose width changed, and at the right margin it relocates
+  the whole cluster to the next row through the printing path — so it carries
+  the claim the cluster had (`Term::carry_claim`) instead of letting
+  `write_at_cursor` date the base character by the mark that widened it. And
+  `put_tab` over a blank cell replaces the base character while leaving that
+  cell's zero-width marks in place, so where such marks survive it intersects
+  with what the cell could claim before.
 
   The field starts empty and the flag is the *claim* rather than its denial, so
   a caller that never speaks — upstream's own test suite — writes exactly the
