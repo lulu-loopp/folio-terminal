@@ -1696,3 +1696,194 @@ fn a_band_rewritten_with_the_bytes_it_already_had_keeps_its_picture() {
         );
     }
 }
+
+/// The screen the two mid-window retirement fixtures stand on: one display block at rows 1-3, a
+/// unique row above it and a row below that a repaint can rewrite without touching the block.
+const RETIRED_RECORD_SCREEN: &[&str] = &["header", "$$", "x^2", "$$", "tail", "spin-0", "prompt> "];
+
+/// **A record retired while a repaint window is open does not come back when the window closes.**
+///
+/// The window's snapshot is a clone of the resident records, and its close projects that clone onto
+/// the settled grid. So a removal that reaches only `live_decorations` is undone a few reads later,
+/// and it is undone in exactly the case that matters: these removals are verdicts about rows whose
+/// *text* did not change, so projection's exact-row proof passes and the raster goes back where it
+/// was just ruled off.
+///
+/// Here the shell says so. One drain, two reads: a reprint opens the window, and the prompt cycle
+/// that follows declares the rows the block stands on to be its command line — which §6.1.1 says no
+/// picture may be injected into. The record is retired for that reason, and the close used to hand
+/// it straight back, putting a formula's raster over the line the user types on.
+#[test]
+fn a_record_the_shell_claimed_as_its_command_line_does_not_survive_the_window() {
+    let start = std::time::Instant::now();
+    let mut session = DualPlaneSession::new(nz(48), nz(16));
+    session
+        .feed_at(RETIRED_RECORD_SCREEN.join("\r\n").as_bytes(), start)
+        .unwrap();
+    session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+    complete_live_math(&mut session);
+    assert_band_is_a_picture(&mut session, "the fixture never rendered its block");
+
+    let at = start + Duration::from_millis(300);
+    session.begin_feed_turn();
+    // The producer reprints its transcript: every row is written again, only the spinner changes,
+    // and the block's own rows come back byte for byte. That opens the primary reprint window.
+    let mut reprinted = RETIRED_RECORD_SCREEN.to_vec();
+    reprinted[5] = "spin-1";
+    session
+        .feed_at(&unsynchronized_repaint(&reprinted), at)
+        .unwrap();
+    // The shell then reports a prompt cycle whose input line spans the block's rows.
+    session
+        .feed_at(
+            b"\x1b[2;1H\x1b]133;A\x07\x1b]133;B\x07\x1b[5;1H\x1b]133;C\x07",
+            at,
+        )
+        .unwrap();
+    session.end_feed_turn();
+
+    let mut projection = session.new_projection(session.layout_key());
+    session.refresh_projection(&mut projection);
+    let frame = session.viewport_frame(&mut projection).unwrap();
+    assert_eq!(
+        (1usize..=3)
+            .map(|row| frame_row_text(&frame, row).trim().to_owned())
+            .collect::<Vec<_>>(),
+        vec!["$$".to_owned(), "x^2".to_owned(), "$$".to_owned()],
+        "the window's close gave the command line its picture back: {:?}",
+        (0..7)
+            .map(|row| frame_row_text(&frame, row))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Prove one single-line block on the alternate screen, under a unique row a later read can turn
+/// into a code fence without writing one byte of the block's own row.
+fn alternate_session_with_one_proven_line(start: std::time::Instant) -> DualPlaneSession {
+    let mut session = DualPlaneSession::new(nz(48), nz(12));
+    let mut first = b"\x1b[?1049h".to_vec();
+    first.extend_from_slice(&synchronized_repaint(&[
+        "header", r"$$x^2$$", "", "tail", "prompt> ",
+    ]));
+    session.feed_at(&first, start).unwrap();
+    session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+    complete_live_math(&mut session);
+    let mut projection = session.new_projection(session.layout_key());
+    session.refresh_projection(&mut projection);
+    let frame = session.viewport_frame(&mut projection).unwrap();
+    assert!(
+        frame_row_text(&frame, 1).trim().is_empty(),
+        "the fixture never rendered its block: {:?}",
+        (0..5)
+            .map(|row| frame_row_text(&frame, row))
+            .collect::<Vec<_>>()
+    );
+    session
+}
+
+/// The other door into the same defect, on the other screen: **a block the detector has just
+/// refused does not come back when the repaint window closes either.**
+///
+/// A code fence opens above the block. The block's own row is never written, so nothing invalidates
+/// its record — but everything under the fence is code now, and the scan that the changed context
+/// arms says so. That refusal retires the record while an alternate repaint window is open over it,
+/// and the close used to project the window's own clone straight back: a raster over a row the
+/// detector disowns, which `held_unbacked_records` is the name for.
+#[test]
+fn a_block_the_detector_refused_mid_window_does_not_survive_the_window() {
+    let start = std::time::Instant::now();
+    let mut session = alternate_session_with_one_proven_line(start);
+
+    let fenced = start + Duration::from_millis(300);
+    session.feed_at(b"\x1b[1;1H\x1b[K```", fenced).unwrap();
+
+    // The repaint window opens over the record, and the scan lands while it is open.
+    let opened = fenced + Duration::from_millis(10);
+    session
+        .feed_at(b"\x1b[?2026h\x1b[?25l\x1b[H", opened)
+        .unwrap();
+    session.advance_live_stability(opened + LIVE_MATH_STABLE_INTERVAL);
+    complete_live_math(&mut session);
+    assert!(
+        session.held_unbacked_records().is_empty(),
+        "the refused block was still holding its raster inside the window: {:?}",
+        session.held_unbacked_records()
+    );
+
+    // The repaint ends. What the window was holding must not undo the refusal.
+    session
+        .feed_at(
+            b"\x1b[?25h\x1b[?2026l",
+            opened + LIVE_MATH_STABLE_INTERVAL + Duration::from_millis(2),
+        )
+        .unwrap();
+    assert!(
+        session.held_unbacked_records().is_empty(),
+        "the window's close put the refused block's raster back: {:?}",
+        session.held_unbacked_records()
+    );
+    let mut projection = session.new_projection(session.layout_key());
+    session.refresh_projection(&mut projection);
+    let frame = session.viewport_frame(&mut projection).unwrap();
+    assert_eq!(
+        frame_row_text(&frame, 1).trim(),
+        r"$$x^2$$",
+        "the fenced row must keep its text: {:?}",
+        (0..5)
+            .map(|row| frame_row_text(&frame, row))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// The other half of the same rule, and the half that says what a retirement may *not* cost: **a
+/// block retired and then proven again inside one window keeps the newer picture.**
+///
+/// Two scans of one row are in flight at once here, which the queue permits and the code's own
+/// comment in `complete_live_worker_result` describes: the first went out while a fence stood above
+/// the block, the fence went away, a second went out, and the loser arrives last. The loser's
+/// refusal retires the record; the winner proves it again inside the same window. A retirement
+/// written as a tombstone on the occurrence would take the winner down with the loser at the close.
+#[test]
+fn a_block_refused_and_proven_again_inside_one_window_keeps_the_newer_picture() {
+    let start = std::time::Instant::now();
+    let mut session = alternate_session_with_one_proven_line(start);
+
+    let fenced = start + Duration::from_millis(300);
+    session.feed_at(b"\x1b[1;1H\x1b[K```", fenced).unwrap();
+    session.advance_live_stability(fenced + LIVE_MATH_STABLE_INTERVAL);
+    let Some(SessionMathTask::Live(mut under_the_fence)) = session.take_math_worker_task() else {
+        panic!("the fence never armed the block's row");
+    };
+
+    // The fence goes away again before that scan comes back, and a second scan goes out.
+    let cleared = fenced + LIVE_MATH_STABLE_INTERVAL + Duration::from_millis(5);
+    session.feed_at(b"\x1b[1;1H\x1b[Kheader", cleared).unwrap();
+    session.advance_live_stability(cleared + LIVE_MATH_STABLE_INTERVAL);
+
+    // The window opens, and both scans land inside it.
+    let opened = cleared + LIVE_MATH_STABLE_INTERVAL + Duration::from_millis(5);
+    session
+        .feed_at(b"\x1b[?2026h\x1b[?25l\x1b[H", opened)
+        .unwrap();
+    assert!(
+        !bt_detect::resolve_live_detection_task(&mut under_the_fence),
+        "the scan taken under the fence was expected to refuse the block"
+    );
+    session.complete_live_worker_result(under_the_fence, Err(MathRenderError::NotDetected));
+    complete_live_math(&mut session);
+
+    session
+        .feed_at(b"\x1b[?25h\x1b[?2026l", opened + Duration::from_millis(2))
+        .unwrap();
+    let mut projection = session.new_projection(session.layout_key());
+    session.refresh_projection(&mut projection);
+    let frame = session.viewport_frame(&mut projection).unwrap();
+    assert!(
+        frame_row_text(&frame, 1).trim().is_empty(),
+        "the block proven again inside the window lost its picture at the close: {:?}",
+        (0..5)
+            .map(|row| frame_row_text(&frame, row))
+            .collect::<Vec<_>>()
+    );
+    assert!(session.held_unbacked_records().is_empty());
+}

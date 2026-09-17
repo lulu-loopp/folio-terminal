@@ -8,6 +8,16 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **A picture Folio has just taken down does not come back a moment later.**
+  While a full-screen program or a reprinting one is redrawing, Folio holds the
+  formulas already on the screen steady. If something ruled one of them out
+  during that redraw — the shell saying those lines are the command line you
+  type on, or Folio reading them again and deciding they are no longer a
+  formula, for instance because a code fence opened above them — the picture
+  went, and then the end of the redraw put it straight back, over lines it had
+  just been ruled off. A formula ruled out while a redraw is in progress now
+  stays out; one that is worked out again in the same redraw keeps its new
+  picture.
 - **After dragging a window's edge back to where it started, formulas in that
   pane are typeset again — they used to stop for good.** If a drag, a divider,
   a zoom or a move between monitors ended on the same size it began on, the

@@ -5949,10 +5949,8 @@ impl DualPlaneSession {
                 self.semantic_input_overlaps_live(record.screen, record.start, record.end)
                     .then_some(*row)
             })
-            .collect::<Vec<_>>();
-        for row in retired_live {
-            self.live_decorations.remove(&row);
-        }
+            .collect::<BTreeSet<_>>();
+        self.retire_live_decorations(|row, _| retired_live.contains(&row));
         let suppressed_frozen = self
             .decorations
             .keys()
@@ -7198,6 +7196,60 @@ impl DualPlaneSession {
         }
     }
 
+    /// **A record retired for cause is retired from every copy of the census this session is
+    /// holding, and an open repaint window is holding one.**
+    ///
+    /// A window's snapshot is a clone of `live_decorations` taken when the window opened, and its
+    /// close projects that clone back onto the settled grid. So a removal that only reaches
+    /// `live_decorations` is undone a few reads later: the record is not among the carried, the
+    /// carried-first de-duplication has nothing to match it against, and projection's exact-row
+    /// proof *passes* — the whole point of these removals is that the rows are unchanged and the
+    /// verdict about them is not. The shell said those rows are the command line, or the detector
+    /// read them again and refused the block, or a frozen rendering superseded it; and at the
+    /// window's close the raster went back over them anyway. That is the one thing a window may
+    /// never do.
+    ///
+    /// Every removal that is a *verdict* comes through here, and the verdict is applied to the
+    /// window's floor as well as to the resident census. Damage-driven invalidation deliberately
+    /// does not: tearing a record down because its rows were rewritten is exactly what suppression
+    /// exists to defer, and `finish_*_repaint` re-judges those records against the settled grid.
+    ///
+    /// The off-band queue is struck by the same id for the same reason — a retired occurrence must
+    /// not come back through the re-anchor either — and both snapshot lists are struck, because a
+    /// record that was off-band when the window opened was cloned into `dormant_decorations` and
+    /// may since have been re-anchored into `live_decorations`.
+    ///
+    /// No allocation unless something is actually retired: `Vec::new` does not allocate, and these
+    /// doors say "nothing to retire" on almost every call.
+    fn retire_live_decorations(
+        &mut self,
+        mut doomed: impl FnMut(u32, &LiveDecorationRecord) -> bool,
+    ) {
+        let mut retired = Vec::new();
+        self.live_decorations.retain(|row, record| {
+            if doomed(*row, record) {
+                retired.push(record.identity.occurrence_id);
+                false
+            } else {
+                true
+            }
+        });
+        if retired.is_empty() {
+            return;
+        }
+        let struck =
+            |record: &LiveDecorationRecord| !retired.contains(&record.identity.occurrence_id);
+        for snapshot in self
+            .primary_repaint_snapshot
+            .iter_mut()
+            .chain(self.alternate_repaint_snapshot.iter_mut())
+        {
+            snapshot.decorations.retain(struck);
+            snapshot.dormant_decorations.retain(struck);
+        }
+        self.offscreen_decorations.retain(struck);
+    }
+
     fn invalidate_all_live_decorations(&mut self) {
         if self.primary_resize_preservation_active() {
             // During a primary resize transaction a wipe (reflow, reflow-capture into history, or a
@@ -7668,22 +7720,21 @@ impl DualPlaneSession {
             // block above it down and made the block's survival a question of which completion
             // landed last. A row whose *bytes* changed is a different matter and is torn down where
             // that is known, in `invalidate_live_row`.
-            self.live_decorations
-                .retain(|_, record| record.end.row != task.candidate_row);
-            // The live half of `retire_refused_table`, and for its reason: a table drawn from rows
-            // that were on the grid before this one arrived stands above the candidate rather than
-            // over it, so the retain above never reaches it.
-            for row in &task.refused_table_rows {
-                self.live_decorations.remove(row);
-            }
+            //
+            // The second clause is the live half of `retire_refused_table`, and for its reason: a
+            // table drawn from rows that were on the grid before this one arrived stands above the
+            // candidate rather than over it, so the first clause never reaches it.
+            self.retire_live_decorations(|row, record| {
+                record.end.row == task.candidate_row || task.refused_table_rows.contains(&row)
+            });
             return None;
         }
         if self.semantic_input_overlaps_live(task.screen, task.start, task.end) {
-            self.live_decorations.remove(&task.start.row);
+            self.retire_live_decorations(|row, _| row == task.start.row);
             return None;
         }
         if artifact.is_none() && failure_reason.is_none() {
-            self.live_decorations.remove(&task.start.row);
+            self.retire_live_decorations(|row, _| row == task.start.row);
             return None;
         }
         if self.new_live_decoration_is_cursor_suppressed(&task) {
@@ -7715,8 +7766,9 @@ impl DualPlaneSession {
                     record.vertical_scroll_px,
                 )
             });
-        self.live_decorations
-            .retain(|_, record| record.end.row < task.start.row || record.start.row > task.end.row);
+        self.retire_live_decorations(|_, record| {
+            record.end.row >= task.start.row && record.start.row <= task.end.row
+        });
         let (show_source, hovered, horizontal_scroll_px, vertical_scroll_px) =
             remembered.unwrap_or((false, false, 0, 0));
         let occurrence_id = LiveMathOccurrenceId(self.next_live_occurrence_id);
@@ -11442,10 +11494,8 @@ impl DualPlaneSession {
                 })
             })
             .map(|(start, _)| *start)
-            .collect::<Vec<_>>();
-        for start in superseded {
-            self.live_decorations.remove(&start);
-        }
+            .collect::<BTreeSet<_>>();
+        self.retire_live_decorations(|row, _| superseded.contains(&row));
         let document = &self.document;
         let snapshots = self
             .primary_repaint_snapshot
