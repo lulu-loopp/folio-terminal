@@ -5994,11 +5994,25 @@ impl DualPlaneSession {
         let mut unresolved = Vec::new();
         self.offscreen_decorations.clear();
 
-        for record in snapshot
-            .decorations
-            .into_iter()
+        // **The snapshot is a floor, not the census.** It is taken when the repaint window opens and
+        // the window can stay open for several reads — for the whole of a DEC 2026 block, or for a
+        // repaint the operating system split — and detection goes on running inside it. Every block
+        // proven during the window is resident by the time the window closes and is in no snapshot,
+        // so rebuilding `live_decorations` from the snapshot alone destroyed exactly those: on the
+        // owner's recording of 2026-09-17 each repaint's close wiped every formula the repaint
+        // before it had proven, and the screen went back to LaTeX until the detector and the
+        // rasteriser had done the whole job again. They are projected here beside the snapshot's
+        // own, and they come first, because where they say they are is the newer answer.
+        let carried = std::mem::take(&mut self.live_decorations);
+        let mut seen = BTreeSet::new();
+        let sources = carried
+            .into_values()
+            .chain(snapshot.decorations)
             .chain(snapshot.dormant_decorations)
-        {
+            .filter(|record| seen.insert(record.identity.occurrence_id))
+            .collect::<Vec<_>>();
+
+        for record in sources {
             if row_mappings.is_empty() {
                 unresolved.push(record);
                 continue;

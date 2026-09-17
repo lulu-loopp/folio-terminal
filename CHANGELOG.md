@@ -6,6 +6,16 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Fixed
+
+- **A formula typeset while a full-screen program was redrawing no longer
+  disappears the moment that redraw finishes.** Folio holds its formulas steady
+  across a redraw by remembering them when one starts — but a formula Folio
+  worked out *during* the redraw was not in that memory, and finishing the redraw
+  threw it away, so it went back to LaTeX and had to be worked out and drawn all
+  over again. Replaying the owner's own recording, that happened at every one of
+  its 117 redraws.
+
 ## 0.4.2-preview — 2026-09-17
 
 ### Added

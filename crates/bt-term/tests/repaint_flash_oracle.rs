@@ -494,3 +494,103 @@ fn rendered_formula_stays_rendered_across_grid_resize_and_fresh_raster_swap() {
     );
     assert!(!oracle.flash_detected(), "sequence={:?}", oracle.frames());
 }
+
+/// **A formula proven while a repaint window is open must survive the window's close.**
+///
+/// The window opens at the repaint's boundary and can stay open for several reads — for the whole of
+/// a DEC 2026 block, or for a repaint the operating system split across reads — and detection keeps
+/// running inside it. The snapshot taken when the window opened knows nothing about a block proven
+/// after it, so rebuilding the live decorations from that snapshot alone threw exactly those away:
+/// the picture vanished at the close and only came back once the detector and the rasteriser had
+/// done the whole job again, which on a real screen is several frames of LaTeX. On the owner's
+/// recording of 2026-09-17 that happened at every one of the 117 repaints.
+///
+/// The off-band record is not decoration: a window only opens for a pane that has something to
+/// preserve, and in the recording that something was six formulas which had long since scrolled away
+/// (`resident=0 dormant=6` at the read that lost the picture). Without one, no window opens and this
+/// fixture would prove nothing.
+///
+/// Mutation: rebuilding `live_decorations` from `snapshot.decorations` alone, without the records
+/// carried from the moment the window closes, turns the last assertions red.
+#[test]
+fn a_formula_proven_inside_an_open_repaint_window_survives_its_close() {
+    let start = std::time::Instant::now();
+    let mut session = DualPlaneSession::new(nz(48), nz(10));
+    let mut projection = session.new_projection(session.layout_key());
+    let mut oracle = FormulaFlashOracle::default();
+
+    // One formula, proven, and then scrolled off the screen — it stays off-band, which is what gives
+    // a later repaint a window to open at all.
+    let mut first = b"\x1b[?1049h".to_vec();
+    first.extend_from_slice(&synchronized_repaint(&[
+        "header",
+        "$$",
+        r"\oint \mathbf{B} \cdot d\ell = \mu_0 I",
+        "$$",
+        "tail",
+        "prompt> ",
+    ]));
+    session.feed_at(&first, start).unwrap();
+    session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+    complete_live_math(&mut session);
+    assert_eq!(
+        observe_frame(&mut session, &mut projection, &mut oracle),
+        FormulaFrameState::Rendered
+    );
+    let gone = start + Duration::from_millis(300);
+    session
+        .feed_at(
+            &synchronized_repaint(&["gone 0", "gone 1", "gone 2", "gone 3", "gone 4", "prompt> "]),
+            gone,
+        )
+        .unwrap();
+    observe_frame(&mut session, &mut projection, &mut oracle);
+
+    // A new screen's text arrives, and a repaint begins before anything on it has been proven: the
+    // window opens on the off-band record and its snapshot holds no live decoration at all.
+    let at = start + Duration::from_millis(400);
+    session
+        .feed_at(
+            &synchronized_repaint(&[
+                "header",
+                "$$",
+                r"\nabla \cdot \mathbf{E} = \frac{\rho}{\varepsilon_0}",
+                "$$",
+                "tail",
+                "prompt> ",
+            ]),
+            at,
+        )
+        .unwrap();
+    session.feed_at(b"\x1b[?2026h\x1b[?25l\x1b[H", at).unwrap();
+
+    // The block is proven and rastered while that window is open.
+    session.advance_live_stability(at + LIVE_MATH_STABLE_INTERVAL);
+    complete_live_math(&mut session);
+    assert_eq!(
+        observe_frame(&mut session, &mut projection, &mut oracle),
+        FormulaFrameState::Rendered,
+        "the fixture never rendered its formula inside the window"
+    );
+    let detections = session.live_detection_count();
+
+    // The repaint finishes. Its window closes, and what it was holding must not take the formula
+    // that was proven under it down with it.
+    session
+        .feed_at(
+            b"\x1b[?25h\x1b[?2026l",
+            at + LIVE_MATH_STABLE_INTERVAL + Duration::from_millis(2),
+        )
+        .unwrap();
+    assert_eq!(
+        observe_frame(&mut session, &mut projection, &mut oracle),
+        FormulaFrameState::Rendered,
+        "the repaint window's close threw away a formula proven while it was open"
+    );
+    assert_eq!(
+        session.live_detection_count(),
+        detections,
+        "the formula must survive, not be detected all over again"
+    );
+    assert!(!oracle.flash_detected(), "sequence={:?}", oracle.frames());
+}
