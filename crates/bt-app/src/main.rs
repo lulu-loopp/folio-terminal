@@ -1663,11 +1663,11 @@ impl MathWorker {
         )
         .context("spawn image resampling worker")?;
         // **This thread says how much stack it wants** (`bt_math::MATH_WORKER_STACK_BYTES`). One
-        // formula's render descends through a LaTeX parser and then Typst's parser, layout and SVG
-        // writer, all over text a program printed into a terminal; a stack overflow is not a panic
-        // and would take the window with it, so the depth that is refused and the stack it is
-        // refused against are chosen together, in `bt-math`, and this is where the second half of
-        // that pair is spent.
+        // formula's render descends through a LaTeX parser, then a LaTeX-to-Typst converter, then
+        // Typst's parser, math layout and SVG writer, all over text a program printed into a
+        // terminal; a stack overflow is not a panic and would take the window with it, so the depth
+        // that is refused and the stack it is refused against are chosen together, in `bt-math`, and
+        // this is where the second half of that pair is spent.
         bt_platform::spawn_at_priority_with_stack(
             "bt-math-worker",
             bt_platform::ThreadPriority::BelowNormal,
@@ -120859,6 +120859,13 @@ mod tests {
             (r"\newcommand{\a}{#}", MathRenderError::ConversionPanic),
             (r"\newcommand{\a}{\a}\a", MathRenderError::MacroCycle),
             (exponential.as_str(), MathRenderError::MacroExpansionLimit),
+            // **Typst code in a formula, through the worker the window uses.** The body is
+            // deliberately a harmless `1` rather than the loop this refusal exists for: a guard
+            // that regressed would draw a "1" and fail this line, where a loop would hang the
+            // harness and report nothing. The loops themselves are refused at the conversion
+            // boundary, before a compiler is handed anything — `bt_math`'s
+            // `a_formula_that_carries_typst_code_is_refused_before_it_is_compiled`.
+            (r"x\iftypst #1 \fi", MathRenderError::RawTypstCode),
         ] {
             // Start at Markdown delimiters, then submit the resulting source to
             // the very same PreviewMath branch the UI uses.

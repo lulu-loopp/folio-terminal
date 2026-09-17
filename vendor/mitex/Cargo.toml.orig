@@ -1,0 +1,29 @@
+[package]
+name = "mitex"
+description = "MiTeX is a TeX2Typst converter."
+authors.workspace = true
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[[bench]]
+name = "convert_large_projects"
+harness = false
+
+[dependencies]
+
+mitex-parser.workspace = true
+mitex-spec-gen.workspace = true
+rowan.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+divan.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# todo: add lints in when we resolves all the warnings
+# [lints]
+# workspace = true

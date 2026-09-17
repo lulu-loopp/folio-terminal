@@ -20,6 +20,8 @@ members = [
     "crates/bt-winres",
     "crates/bt-app",
     "vendor/alacritty_terminal",
+    "vendor/mitex",
+    "vendor/mitex-parser",
 ]
 
 [workspace.package]
@@ -125,7 +127,13 @@ image = { version = "=0.25.10", default-features = false, features = [
 # `Send`, and `crates/bt-app/src/animation.rs` needs a decoder that can be moved
 # to a worker and back to stream a long file a ring at a time.
 gif = { version = "=0.14.2", default-features = false, features = ["std", "color_quant"] }
+# Exact for the same reason as the two lines above, and vendored for a reason of
+# its own: `mitex` and `mitex-parser` are where a formula's recursion is
+# *enforced* (`vendor/mitex-parser/src/depth.rs`). A 0.2.x out-resolving the
+# local patch would take that enforcement out of the build and put a stack
+# overflow — which no `catch_unwind` contains — back behind `cat evil.md`.
 mitex = "=0.2.4"
+mitex-parser = "=0.2.4"
 mitex-spec-gen = "=0.2.4"
 pollster = "0.4"
 # Exact because a newer crates.io 0.9.x would otherwise out-resolve the local
@@ -269,4 +277,6 @@ debug = "line-tables-only"
 
 [patch.crates-io]
 alacritty_terminal = { path = "vendor/alacritty_terminal" }
+mitex = { path = "vendor/mitex" }
+mitex-parser = { path = "vendor/mitex-parser" }
 portable-pty = { path = "vendor/conpty/portable-pty" }

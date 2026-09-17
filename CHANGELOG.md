@@ -45,12 +45,39 @@ All notable changes to Folio are recorded here. The format follows
 
 - **A formula nested past what Folio can draw is refused, rather than ending
   the program.** Some shapes of mathematics nest as deeply as they are long —
-  a stack of superscripts, or a short definition repeated — and following one
-  down far enough used to end Folio outright, from text a program had only
-  printed. Folio now works out how deep a formula goes before it starts, and
-  leaves anything past its limit as the text you printed, the way it leaves
-  anything else it cannot draw. The limit is far beyond any formula written to
-  be read.
+  a stack of superscripts, a fraction inside a fraction inside a fraction, or a
+  short definition repeated — and following one down far enough used to end
+  Folio outright, from text a program had only printed. Folio now stops at its
+  limit as it reads, rather than trying to guess beforehand how far a formula
+  would take it, and leaves anything past that limit as the text you printed,
+  the way it leaves anything else it cannot draw. The limit is far beyond any
+  formula written to be read: thirty fractions inside one another, a dozen roots
+  inside one another, and every ordinary matrix and alignment are drawn as
+  before. An earlier attempt at the same fix guessed the depth in advance, and
+  guessed it wrong in both directions — it let several shapes of deep nesting
+  through, and refused a long row of perfectly flat fractions.
+
+- **A table of mathematics that would be too big to draw is refused before it is
+  drawn, not after.** A row of column markers and a column of row markers is a
+  handful of characters, and it asks for a grid as wide and as tall as both —
+  eight thousand characters could have asked for seven million cells, which is
+  minutes of work and more memory than Folio has. It now works that out from the
+  formula itself and leaves anything past its limit as the text you printed. It
+  works it out from what the formula becomes rather than from how it was written,
+  so putting the markers in a group, or behind an abbreviation, or in no table at
+  all, makes no difference. The limit is a sixty-four by sixty-four grid; an
+  ordinary matrix, a long alignment, a definition with thirty cases and a
+  multi-line derivation are all nowhere near it.
+
+- **A formula cannot run a program.** Mathematics written for TeX has a corner
+  of its notation that says "and here is some Typst" — Folio passed that through
+  and ran it, so a line of text a program printed into a pane could ask Folio to
+  loop forever, or to build something so large that it ran out of memory. The
+  first would have left every later formula on screen as plain text, with nothing
+  to show it was waiting; the second would have ended Folio. Folio now leaves
+  such a formula as the text you printed, the way it leaves anything else it
+  cannot draw, and the spacing commands that used to be worked out by running
+  them are read instead. Nothing that was ever a formula changes.
 
 - **One formula that cannot be drawn no longer takes the whole window with
   it.** A fault while typesetting was caught in one stage of the work and not in

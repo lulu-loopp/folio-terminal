@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 use mitex_lexer::{BraceKind, CommandName, Lexer, Token};
 use mitex_spec_gen::DEFAULT_SPEC;
 
-use crate::{MathRenderError, nesting};
+use crate::MathRenderError;
 
 const MAX_WORK: usize = 32 * 1024;
 const MAX_DEFINITIONS: usize = 128;
@@ -43,10 +43,6 @@ struct Definition<'a> {
     /// How many `#` tokens its body carries: an upper bound on the times an
     /// argument is copied into one expansion.
     uses: usize,
-    /// The definition's own tokens, kept so the nesting a call to it presents can be folded over
-    /// the same graph the work cap is folded over. A body is bounded by the work cap, and the
-    /// number of definitions by `MAX_DEFINITIONS`, so this is bounded too.
-    body: Vec<Tok<'a>>,
 }
 
 fn command(token: Tok<'_>) -> Option<&str> {
@@ -167,7 +163,6 @@ pub(super) fn validate(source: &str) -> Result<(), MathRenderError> {
         let body_bytes = tokens[at - 1].1.as_ptr() as usize - body_start;
         definition.bytes = definition.bytes.saturating_add(body_bytes + 1);
         definition.params = definition.params.max(params);
-        definition.body.extend(body.iter().copied());
         for token in body {
             if token.0 == Token::Hash {
                 definition.uses += 1;
@@ -218,33 +213,16 @@ pub(super) fn validate(source: &str) -> Result<(), MathRenderError> {
         }
     }
 
-    // **The nesting, folded over the same acyclic graph and refused before anything walks the
-    // source.** A definition's depth is what its body presents once its own calls are expanded, so
-    // a call adds that depth to the depth it stands at — which is why a body of a hundred `\sqrt`
-    // invoked forty-eight times is refused here rather than presenting four thousand eight hundred
-    // levels to a recursive-descent parser. The order is `costs`': a definition is folded only once
-    // every definition it names has been.
-    let mut depths = BTreeMap::<&str, nesting::Depth>::new();
-    while depths.len() < definitions.len() {
-        let before = depths.len();
-        for (&name, definition) in &definitions {
-            if depths.contains_key(name) {
-                continue;
-            }
-            let children = definition
-                .references
-                .iter()
-                .filter(|name| definitions.contains_key(**name));
-            if children.clone().all(|name| depths.contains_key(*name)) {
-                let depth = nesting::scan(&definition.body, &depths);
-                depths.insert(name, depth);
-            }
-        }
-        if depths.len() == before {
-            return Err(MathRenderError::MacroCycle);
-        }
-    }
-    nesting::bound(nesting::scan(&tokens, &depths))?;
+    // **The nesting a macro expands to is not counted here, and deliberately so.** It was, and the
+    // count was wrong: two scalars per definition cannot represent a parser state, and the
+    // arithmetic missed every command that *wraps* what stands to its left. What bounds the
+    // expansion's depth now is the parser itself — `mitex-parser` sees expanded tokens, because
+    // MiTeX's macro engine sits under its lexer and pushes what a call expands to back into the
+    // token stream (`mitex_lexer::MacroEngine::trapped_by_macro`), iteratively. So a body of a
+    // hundred `\sqrt` invoked forty-eight times arrives at the parser as four thousand eight
+    // hundred commands, and is refused at the four-hundred-and-something'th, by the guard that is
+    // standing where the level would be created. What this file still owes is the *work*: how many
+    // tokens that expansion may produce at all.
     let mut work = tokens
         .iter()
         .filter_map(|token| command(*token))
