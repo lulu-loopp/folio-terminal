@@ -432,17 +432,17 @@ pub struct Term<T> {
     /// Streaming UAX #29 state for DEC private mode 2027.
     grapheme: GraphemeState,
 
-    /// What a print records about itself on every cell it writes.
+    /// What a print records about itself on every cell whose text it replaces.
     ///
-    /// Either empty or exactly [`Flags::NON_OUTPUT_WRITE`], set by
-    /// [`Self::set_write_provenance`] and OR-ed into the flags of every cell this terminal prints.
-    /// The emulator never reads it back: it is carried so that an owner outside the emulator can
-    /// ask, of any cell on the grid or of any cell that has since been moved, scrolled, reflowed or
-    /// evicted, whether the write that put it there was a command's output.
+    /// Either empty or exactly [`Flags::COMMAND_OUTPUT_WRITE`], set by
+    /// [`Self::set_write_provenance`] and written into the flags of every cell this terminal
+    /// prints. The emulator never reads it back: it is carried so that an owner outside the
+    /// emulator can ask, of any cell on the grid or of any cell that has since been moved,
+    /// scrolled, reflowed or evicted, whether a command's output put its text there.
     ///
-    /// It starts empty, so a caller that never speaks writes exactly the cells upstream writes.
-    /// The direction that is safe for a caller which *does* use it is the other one, so the owner
-    /// states it once at construction and again before every segment it feeds.
+    /// It starts empty and stays empty for a caller that never speaks, so upstream writes exactly
+    /// the cells it always wrote — and, because the flag is the *claim* rather than its denial,
+    /// that silence reads as "claimed by nobody" rather than as "claimed by a command".
     write_provenance: Flags,
 
     /// A pending-wrap cursor position just returned by CPR.
@@ -597,9 +597,9 @@ impl<T> Term<T> {
     /// that leaves a cell unclaimed is the safe one to hold by default.
     pub fn set_write_provenance(&mut self, is_command_output: bool) {
         self.write_provenance = if is_command_output {
-            Flags::empty()
+            Flags::COMMAND_OUTPUT_WRITE
         } else {
-            Flags::NON_OUTPUT_WRITE
+            Flags::empty()
         };
     }
 
@@ -1533,9 +1533,12 @@ impl<T> Term<T> {
         let c = self.grid.cursor.charsets[self.active_charset].map(c);
         let fg = self.grid.cursor.template.fg;
         let bg = self.grid.cursor.template.bg;
-        // The SGR template cannot carry the provenance: `SGR 0` sets `template.flags` to empty,
-        // and a shell writes one before nearly every line it prints.
-        let flags = self.grid.cursor.template.flags | self.write_provenance;
+        // This write replaces the cell's text, so it sets *or clears* the claim: an output write
+        // claims the cell and a prompt's write un-claims whatever used to be there. The SGR
+        // template cannot carry it — `SGR 0` empties `template.flags`, and a shell writes one
+        // before nearly every line it prints — so it is masked out and re-stated here.
+        let flags =
+            (self.grid.cursor.template.flags - Flags::COMMAND_OUTPUT_WRITE) | self.write_provenance;
         let extra = self.grid.cursor.template.extra.clone();
 
         let mut cursor_cell = self.grid.cursor_cell();
@@ -1656,7 +1659,7 @@ impl<T> Term<T> {
         self.write_at_cursor(first);
         self.grid.cursor.template.flags.remove(Flags::WIDE_CHAR);
         for character in characters {
-            self.grid[lead].push_zerowidth(character);
+            self.append_zerowidth(lead, character);
         }
 
         if width == 2 {
@@ -1670,6 +1673,20 @@ impl<T> Term<T> {
             self.grid.cursor.input_needs_wrap = true;
         }
         Some((lead, wrap_placeholder))
+    }
+
+    /// Hang a zero-width mark on a cell, and let that say who the cell's text now belongs to.
+    ///
+    /// **A mark makes the cell's text partly the writer's.** So a mark added while this is not a
+    /// command's output takes the claim off the cell it lands on — the text there is no longer the
+    /// command's alone — while a mark added by the command itself neither grants a claim the cell
+    /// never had nor removes the one it has. Without this a prompt could append a single accent to
+    /// a line a command printed and leave it reading as that command's.
+    fn append_zerowidth(&mut self, point: Point, character: char) {
+        self.grid[point].push_zerowidth(character);
+        if self.write_provenance.is_empty() {
+            self.grid[point].flags.remove(Flags::COMMAND_OUTPUT_WRITE);
+        }
     }
 
     /// The cell a zero-width mark belongs to: the one the cursor last wrote, stepping back over a
@@ -1691,7 +1708,7 @@ impl<T> Term<T> {
 
     fn attach_to_previous_cell(&mut self, character: char) {
         let point = self.previous_cell_point();
-        self.grid[point].push_zerowidth(character);
+        self.append_zerowidth(point, character);
     }
 
     /// Widen the cell U+FE0F just landed on when the emoji-presentation sequence it completes is
@@ -1848,7 +1865,7 @@ impl<T> Term<T> {
         state.cluster.push(character);
         let new_width = cluster_width(&state.cluster);
         if new_width == state.width {
-            self.grid[state.lead].push_zerowidth(character);
+            self.append_zerowidth(state.lead, character);
         } else if self.rewrite_grapheme_width(&mut state, new_width) {
             state.width = new_width;
         }
@@ -1892,7 +1909,7 @@ impl<T> Term<T> {
             else {
                 // With DECAWM disabled the cluster cannot grow past the right margin. Keep the
                 // displayed width narrow, but preserve the complete cluster and pending-wrap state.
-                self.grid[state.lead].push_zerowidth(character_tail(&state.cluster));
+                self.append_zerowidth(state.lead, character_tail(&state.cluster));
                 self.mark_fully_damaged();
                 return false;
             };
@@ -1905,7 +1922,7 @@ impl<T> Term<T> {
         let spacer = Point::new(state.lead.line, state.lead.column + 1);
         if state.width == 1 && new_width == 2 {
             self.grid[state.lead].flags.insert(Flags::WIDE_CHAR);
-            self.grid[state.lead].push_zerowidth(character_tail(&state.cluster));
+            self.append_zerowidth(state.lead, character_tail(&state.cluster));
             if self.mode.contains(TermMode::INSERT) && spacer.column < self.last_column() {
                 let columns = self.columns();
                 let row = &mut self.grid[spacer.line][..];
@@ -1923,7 +1940,7 @@ impl<T> Term<T> {
             }
         } else {
             self.grid[state.lead].flags.remove(Flags::WIDE_CHAR);
-            self.grid[state.lead].push_zerowidth(character_tail(&state.cluster));
+            self.append_zerowidth(state.lead, character_tail(&state.cluster));
             if self.mode.contains(TermMode::INSERT) && spacer.column < self.last_column() {
                 let last_column = self.last_column();
                 let row = &mut self.grid[spacer.line][..];
@@ -2304,13 +2321,16 @@ impl<T: EventListener> Handler for Term<T> {
             let c = self.grid.cursor.charsets[self.active_charset].map('\t');
             let provenance = self.write_provenance;
             let cell = self.grid.cursor_cell();
+            // **A tab claims a cell only where it puts text in one.** It is the one print that does
+            // not go through `write_at_cursor`, and it writes over an occupied cell by leaving that
+            // cell's character exactly where it was — so over an occupied cell it is not a write at
+            // all, and must not restate who wrote what is already there. Stamping it regardless let
+            // a tab walked along a prompt's own line hand that line to a command.
             if cell.c == ' ' {
                 cell.c = c;
+                cell.flags.remove(Flags::COMMAND_OUTPUT_WRITE);
+                cell.flags.insert(provenance);
             }
-            // A tab writes this cell as surely as a printable character does, and it is the one
-            // print that does not go through `write_at_cursor`.
-            cell.flags.remove(Flags::NON_OUTPUT_WRITE);
-            cell.flags.insert(provenance);
 
             loop {
                 if (self.grid.cursor.point.column + 1) == self.columns() {

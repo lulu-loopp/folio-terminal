@@ -20,15 +20,19 @@ All notable changes to Folio are recorded here. The format follows
   happens to be ready. Displayed `$$` blocks were never affected: they carry
   their own proof.
 
-- **Your prompt is never typeset as mathematics, whatever it says and wherever
-  it moves.** Folio decides what a command printed by remembering it at the
+- **Your prompt is never typeset as mathematics, whatever it says, wherever it
+  moves, and whatever a command does to the line afterwards.** Folio decides what a command printed by remembering it at the
   moment it arrives, rather than by working it out afterwards from where things
   sit — so a shell that redraws its prompt with the very text a command had just
   printed gets a prompt, not a formula, and so does one that clears the screen
   first, or reprints after a reset, or writes a shorter prompt over an older
   line. The same holds when the screen moves underneath: inserting, deleting,
   scrolling or shrinking rows carries each line's own history with it instead of
-  handing it whatever used to stand in that place.
+  handing it whatever used to stand in that place. And a command that writes
+  over part of your prompt's line — with a tab, an accent, or by filling the
+  screen first — does not thereby take the rest of it: Folio asks that every
+  character on a line be one a command printed, so text that arrives by a route
+  nobody has taught it about is left alone rather than taken for output.
 
 - **A formula is no longer taken down by its neighbour's result.** Folio looks
   at every line that could be the start of something, and inside a block of
