@@ -84,6 +84,10 @@ All notable changes to Folio are recorded here. The format follows
   left: the file is never half written, so whichever of the two it is, it is
   whole. Folio also keeps the marker that says this run did not see its save
   finish, so the next start offers to restore rather than assuming all was well.
+  did not finish and that the last completed one still stands, and closes. The
+  file itself is never left half written: a save replaces it in one move. A save
+  that has already begun can still finish after Folio has gone, so what you open
+  next time is the last save that completed.
 - **Closing a pane whose reader is stuck no longer hangs the window.** When a
   pane closes, Folio waits for the thread that was reading that shell's output
   to come out of its last read. On one machine that wait held the window for
@@ -222,9 +226,16 @@ All notable changes to Folio are recorded here. The format follows
   used to stop dead for seconds at a time, mid-keystroke, whenever the shell
   collecting the trace stopped reading it: the window was waiting for the
   recording to be taken, so the very thing being measured was what made it slow.
-  The lines now go to a thread of their own, and a run that produces them faster
-  than they can be written drops some and says how many rather than holding the
-  window.
+  The trace's lines now go to a thread of their own, and a run that produces them
+  faster than they can be written drops some and says how many rather than
+  holding the window. What Folio writes about itself no longer goes near that
+  recording either: the watchdog that reports a window which has stopped
+  answering writes the report and the line naming it into `diagnostics.log`
+  through a handle of its own, so it stays at work whatever the shell reading the
+  trace is doing, and so do the notes about a copied picture that could not be
+  saved and a session that could not be written on the way out. The other
+  messages Folio can print on that console — each of them about something that
+  has already gone wrong — still go to it directly and can still wait for it.
 
 ## 0.4.1-preview — 2026-09-16
 

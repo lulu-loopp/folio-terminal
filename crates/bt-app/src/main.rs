@@ -98260,7 +98260,12 @@ impl Runtime<'_> {
         let path = match landed.result {
             Ok(path) => path,
             Err(reason) => {
-                eprintln!("clipboard picture could not be saved; paste ignored: {reason}");
+                // `diagnostics::note` and not `eprintln!` (X-7): this is the
+                // window thread, and a resident diagnostic it writes must not be
+                // able to wait behind whoever is reading a trace.
+                diagnostics::note(&format!(
+                    "clipboard picture could not be saved; paste ignored: {reason}"
+                ));
                 return self.toast(
                     toast::ToastKind::Error,
                     toast::ToastAnchor::Window,
@@ -112279,7 +112284,10 @@ impl FolioApp {
                         Ok(()) => quit::WriteVerdict::Landed,
                         Err(refusal) if refusal.quit_may_proceed() => quit::WriteVerdict::TimedOut,
                         Err(refusal) => {
-                            eprintln!("{APP_NAME} did not quit: {}", refusal.message());
+                            // On the window thread and on the way out, so it goes to
+                            // the log by its own road (X-7) rather than queueing
+                            // behind a stalled console.
+                            diagnostics::note(&format!("{APP_NAME} did not quit: {}", refusal.message()));
                             // Said on every window, because the failure is the
                             // process's and the reader is looking at one of them.
                             self.for_each_window(|runtime| {

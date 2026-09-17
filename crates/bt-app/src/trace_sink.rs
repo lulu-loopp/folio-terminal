@@ -10,9 +10,18 @@
 //! one-second deadline, because a writer stalled in the kernel cannot be joined
 //! indefinitely. Tests without a sink retain synchronous output.
 //!
-//! Ordinary diagnostics and the hold logger are outside this queue. The exit
-//! footer shares it when active so stderr contention cannot prevent shutdown
-//! from reaching the bounded flush.
+//! Ordinary diagnostics and the hold logger are outside this queue: they go to
+//! `diagnostics.log` by a path of their own — see [`crate::diagnostics::note`] —
+//! so that neither the watchdog nor a resident UI diagnostic ever waits for
+//! whoever is reading a trace. The exit footer shares the queue when active so
+//! stderr contention cannot prevent shutdown from reaching the bounded flush.
+//!
+//! **Nothing but the writer thread ever waits on this sink** (X-7). Producers
+//! `try_lock` and `try_send`, and the writer puts its batch on this process's
+//! standard error *without* Rust's shared `Stderr` lock
+//! ([`bt_platform::write_std_error`]): a thread stuck for seconds inside one
+//! `WriteFile` must not also be holding the mutex every `eprintln!` in the
+//! workspace goes through, which would reinstate the very hang one layer out.
 
 use std::fmt::Write as _;
 use std::io::Write as _;
@@ -91,7 +100,11 @@ impl Queue {
     /// `try_send` and not `send`: the sender is bounded, and `send` on a full
     /// bounded channel blocks until the writer takes one — which is the fault
     /// this module was written to remove, reintroduced one layer up.
-    fn offer(&self, line: Line) {
+    ///
+    /// Answers whether the line was taken, for the one caller that has somewhere
+    /// else to put it — [`offer_stderr_line`]. Every other caller has already
+    /// said everything it can say about a dropped line by dropping it.
+    fn offer(&self, line: Line) -> bool {
         let queued = match self.lines.try_lock() {
             Ok(lines) => lines
                 .as_ref()
@@ -105,6 +118,7 @@ impl Queue {
         if !queued {
             self.dropped.fetch_add(1, Ordering::Relaxed);
         }
+        queued
     }
 
     /// Let the sender go, which is what ends the writer's `recv` once the queue
@@ -168,6 +182,28 @@ pub fn start() -> Shutdown {
 /// One line for `stderr`, queued or written here.
 pub fn stderr_line(text: String) {
     write_line(Destination::Stderr, text);
+}
+
+/// **One line for `stderr` if this run has a queue, and nothing at all if it
+/// does not** (X-7).
+///
+/// [`stderr_line`]'s pair for the callers that must never write here: a run
+/// without a sink writes the line on the calling thread, which is right for the
+/// traces that road serves and wrong for [`crate::diagnostics::note`], whose
+/// entire reason for existing is that the calling thread must not touch a
+/// console. So this one queues or gives up, and never writes.
+///
+/// Answers whether the line was taken. `false` is a run with no sink, a full
+/// queue or a contended sender — all of which mean the same thing to the
+/// caller, which has already written the line where it really belongs.
+pub fn offer_stderr_line(text: String) -> bool {
+    let Some(sink) = sink() else {
+        return false;
+    };
+    sink.queue.offer(Line {
+        destination: Destination::Stderr,
+        text,
+    })
 }
 
 /// One line for a named trace's file, queued or written here.
@@ -283,7 +319,36 @@ fn open() -> Option<Sink> {
 /// a merge on their first column, and that merge is only sound while the order
 /// the lines were *offered* in is the order they come out in.
 fn run(lines: &Receiver<Line>, dropped: &AtomicU64) {
-    run_to(lines, dropped, &mut std::io::stderr());
+    run_to(lines, dropped, &mut ProcessStderr);
+}
+
+/// **This run's standard error, written without the lock every other writer of
+/// it shares** (X-7).
+///
+/// [`std::io::Stderr`] is one process-wide mutex, taken for the length of the
+/// write. This writer is the one that can be inside a write for seconds — a
+/// console whose reader stopped reading is the fault this whole module answers
+/// — so holding that mutex here would make every `eprintln!` in the process
+/// wait for the same stalled console, which is the hang moved rather than
+/// removed. The slot is re-read on each write, so the destination
+/// [`crate::diagnostics`] chose is still the destination.
+///
+/// Unbuffered, so [`std::io::Write::flush`] has nothing to do: the batching
+/// this module wants is [`run_to`]'s `String`, which is bounded on purpose.
+struct ProcessStderr;
+
+impl std::io::Write for ProcessStderr {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bt_platform::write_std_error(bytes) {
+            Ok(bytes.len())
+        } else {
+            Err(std::io::Error::other("standard error refused the batch"))
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 fn run_to(lines: &Receiver<Line>, dropped: &AtomicU64, stderr: &mut impl std::io::Write) {
@@ -363,6 +428,114 @@ fn a_trace_was_asked_for<I: IntoIterator<Item = std::ffi::OsString>>(names: I) -
         let name = name.to_string_lossy().to_ascii_uppercase();
         name.starts_with("BT_") && (name.contains("TRACE") || name == "BT_FOCUS_THUMB_DUMP")
     })
+}
+
+/// **A sink whose writer is parked inside its write**, for the tests — here and
+/// in [`crate::hang_watch`] — that have to show that nothing else in the process
+/// waits for one (X-7).
+///
+/// The real fault in one object: a trace destination whose reader has stopped
+/// reading, so the writer thread is inside `write` and stays there. Everything
+/// offered to it afterwards meets a full queue, which is the state every
+/// producer's promise is about.
+#[cfg(test)]
+pub(crate) struct StalledWriter {
+    queue: Queue,
+    /// Dropping this is what lets the writer out of its write.
+    release: Option<SyncSender<()>>,
+    writer: Option<JoinHandle<()>>,
+}
+
+#[cfg(test)]
+impl StalledWriter {
+    /// Start one, and answer only once the writer is actually inside a write.
+    ///
+    /// The wait is the whole value of the helper: a test that began offering
+    /// before the stall would be timing a working sink for its first lines.
+    pub(crate) fn start() -> Self {
+        let (lines, waiting) = sync_channel(QUEUE_DEPTH);
+        let (release, held) = sync_channel::<()>(0);
+        let (entered, arrived) = sync_channel::<()>(1);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let counted = Arc::clone(&dropped);
+        let writer = std::thread::spawn(move || {
+            run_to(&waiting, &counted, &mut BlockedStderr { entered, held });
+        });
+        let queue = Queue::new(lines, dropped);
+        queue.offer(Line {
+            destination: Destination::Stderr,
+            text: "the line that parks the writer".to_owned(),
+        });
+        arrived
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the writer reached its write");
+        Self {
+            queue,
+            release: Some(release),
+            writer: Some(writer),
+        }
+    }
+
+    /// Offer one line to the stalled sink. Answers whether it was taken.
+    pub(crate) fn offer(&self, text: &str) -> bool {
+        self.queue.offer(Line {
+            destination: Destination::Stderr,
+            text: text.to_owned(),
+        })
+    }
+
+    /// How many lines this sink has lost.
+    pub(crate) fn dropped(&self) -> u64 {
+        self.queue.dropped.load(Ordering::Relaxed)
+    }
+
+    /// Fill the queue, so that the next offer meets a full one.
+    pub(crate) fn fill(&self) {
+        for index in 0..QUEUE_DEPTH {
+            self.offer(&format!("filler={index}"));
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for StalledWriter {
+    fn drop(&mut self) {
+        // Released first and closed second: a queue closed while the writer is
+        // still in its write would leave this thread waiting for a `join` on a
+        // thread that cannot return, which is the hang the tests are about.
+        drop(self.release.take());
+        while !self.queue.close() {
+            std::thread::yield_now();
+        }
+        if let Some(writer) = self.writer.take() {
+            let _ = writer.join();
+        }
+    }
+}
+
+/// [`StalledWriter`]'s destination: a write that does not return until the
+/// helper is dropped.
+#[cfg(test)]
+struct BlockedStderr {
+    entered: SyncSender<()>,
+    held: Receiver<()>,
+}
+
+#[cfg(test)]
+impl std::io::Write for BlockedStderr {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        // `try_send` because only the first arrival is being waited for, and a
+        // second write must not wait for a reader of this channel.
+        let _ = self.entered.try_send(());
+        // `Err` — the sender dropped — is the release, and every write after it
+        // returns at once.
+        let _ = self.held.recv();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// A mutex this module never poisons on purpose, unwrapped without a panic path.
@@ -477,6 +650,88 @@ mod tests {
             "nothing was dropped: five hundred lines fit in a queue of {QUEUE_DEPTH}"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// **The fault itself: a writer stuck in a write nobody is reading.**
+    ///
+    /// Not a full queue arranged by hand but the real reason a queue fills —
+    /// and what is asserted is the promise the whole module is for: the thread
+    /// that offers a line gets on with its frame, and the recording says how
+    /// much of itself is missing.
+    ///
+    /// MUTATION: give `Queue::offer` a `send` in place of its `try_send`; the
+    /// producer never returns and the timeout fails the test.
+    #[test]
+    fn a_stalled_writer_never_delays_a_producer_and_the_count_grows() {
+        let sink = StalledWriter::start();
+        sink.fill();
+        let dropped_before = sink.dropped();
+        let started = Instant::now();
+        for index in 0..1000 {
+            sink.offer(&format!("frame={index}"));
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "a thousand offers to a stalled sink took {elapsed:?}"
+        );
+        assert_eq!(
+            sink.dropped(),
+            dropped_before + 1000,
+            "every line offered to a full queue should have been counted"
+        );
+        assert!(
+            sink.dropped() > 0,
+            "a stalled sink that lost nothing did not stall"
+        );
+    }
+
+    /// **And the trace's own writer does not wait for the lock every other
+    /// writer of `stderr` shares** (X-7).
+    ///
+    /// The production body — [`run`], with the real [`ProcessStderr`] in its
+    /// hand — against the state that lock is in whenever somebody else is
+    /// mid-`eprintln!`. Held from **another** thread, because
+    /// [`std::io::Stderr`]'s lock is reentrant and taking it on this one would
+    /// say nothing about a second. What is asserted is that the writer reached
+    /// the end of its body while the lock was still held; the one line it puts
+    /// on the real `stderr` on its way there says why it is in the output.
+    ///
+    /// MUTATION: put `std::io::stderr()` back in `run`'s hand; the writer waits
+    /// for the holder and the body does not finish inside the deadline.
+    #[test]
+    fn the_writer_does_not_wait_for_the_process_stderr_lock() {
+        let (release, released) = sync_channel::<()>(0);
+        let (locked, holding) = sync_channel::<()>(1);
+        let holder = std::thread::spawn(move || {
+            let _guard = std::io::stderr().lock();
+            let _ = locked.send(());
+            let _ = released.recv();
+        });
+        holding
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the holder took the process lock");
+        let (lines, waiting) = sync_channel(QUEUE_DEPTH);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let counted = Arc::clone(&dropped);
+        let (done, finished) = sync_channel::<()>(1);
+        let writer = std::thread::spawn(move || {
+            run(&waiting, &counted);
+            let _ = done.send(());
+        });
+        let queue = Queue::new(lines, dropped);
+        queue.offer(stderr_line(
+            "bt-app trace_sink test: one line written past a held stderr lock, on purpose",
+        ));
+        assert!(queue.close());
+        let ended = finished.recv_timeout(Duration::from_secs(5));
+        drop(release);
+        holder.join().unwrap();
+        writer.join().unwrap();
+        assert!(
+            ended.is_ok(),
+            "the writer waited for a lock another thread was holding"
+        );
     }
 
     #[test]
