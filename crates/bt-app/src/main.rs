@@ -18328,16 +18328,26 @@ enum Composing {
     ///
     /// **The boundary is the next event, not a clock and not a turn**, and the
     /// backends are what make that exact. Every one of the three places pinned
-    /// winit 0.30.13 emits `Ime::Commit` emits `Ime::Preedit("")` on the line
-    /// immediately above it, with nothing in between — Windows
-    /// `platform_impl/windows/event_loop.rs:1553-1557` (`WM_IME_COMPOSITION`
-    /// with `GCS_RESULTSTR`) and `:1595-1599` (`WM_IME_ENDCOMPOSITION`), macOS
-    /// `platform_impl/macos/view.rs:412-413` (`insertText:`). So "an empty
-    /// pre-edit and then a commit" is one composition finishing with a result,
-    /// and an empty pre-edit followed by anything else is one finishing without
-    /// one — `unmarkText` queues exactly that lone empty pre-edit
-    /// (`view.rs:344`), as does `WM_IME_COMPOSITION` with an `lparam` of zero
+    /// winit 0.30.13 emits `Ime::Commit` sends `Ime::Preedit("")` immediately
+    /// before it — **adjacent send calls, not adjacent source lines** — with no
+    /// event in between: Windows
+    /// `platform_impl/windows/event_loop.rs:1550-1557` (`WM_IME_COMPOSITION`
+    /// with `GCS_RESULTSTR`; the empty pre-edit at `:1552`, the commit at
+    /// `:1556`) and `:1592-1599` (`WM_IME_ENDCOMPOSITION`; `:1594` and `:1598`,
+    /// both before `Ime::Disabled` at `:1603-1607`), macOS
+    /// `platform_impl/macos/view.rs:412-413` (`insertText:`, gated on
+    /// `hasMarkedText` at `:411`). So "an empty pre-edit and then a commit" is
+    /// one composition finishing with a result, and an empty pre-edit followed
+    /// by anything else is one finishing without one — `unmarkText` clears the
+    /// marked text at `:340` and queues exactly that lone empty pre-edit at
+    /// `:345`, as does `WM_IME_COMPOSITION` with an `lparam` of zero
     /// (`event_loop.rs:1537-1542`).
+    ///
+    /// **What that adjacency proves, and what it does not.** It proves no event
+    /// can come between an ending's clear and its result, so a result cannot be
+    /// mistaken for the reader's own typing. It does **not** prove that a clear
+    /// this window has already seen was the only one — see bound ③ on
+    /// [`composition_ruling`].
     Retiring(CompositionOrigin),
 }
 
@@ -18426,14 +18436,17 @@ struct CompositionRuling {
 ///   it finished without one, and the composition retires with no verdict owed.
 ///
 /// **That next-event boundary is exact rather than approximate**, and pinned
-/// winit is what makes it so: every `Ime::Commit` it emits is preceded on the
-/// line above by `Ime::Preedit("")`, at all three sites, with no event in
-/// between (see [`Composing::Retiring`] for the file and line of each). So a
-/// finishing commit cannot arrive anywhere but immediately, and an honoured
-/// cancel — whose empty pre-edit comes alone — cannot be mistaken for one. No
-/// clock and no turn boundary is involved.
+/// winit is what makes it so: every `Ime::Commit` it emits is sent immediately
+/// after an `Ime::Preedit("")` — adjacent send calls, not adjacent source lines
+/// — at all three sites, with no event in between (see [`Composing::Retiring`]
+/// for the file and line of each). So a finishing commit cannot arrive anywhere
+/// but immediately after its own clear, and an honoured cancel — whose empty
+/// pre-edit comes alone — is not mistaken for one. No clock and no turn boundary
+/// is involved. **The adjacency proves there is no event between a clear and its
+/// result; it does not prove that the clear this window is looking at was the
+/// first one** (bound ③).
 ///
-/// **Two bounds, stated rather than hidden.**
+/// **Three bounds, stated rather than hidden.**
 ///
 /// ① A method that answers a refused cancel with a *non-empty* pre-edit is
 /// indistinguishable from a reader beginning to type, so it re-homes. Those
@@ -18450,6 +18463,26 @@ struct CompositionRuling {
 /// never insert into a field the text did not begin in. Neither pinned backend
 /// produces it — an ending always emits its result or its empty pre-edit — so
 /// the order that would pay for it is one that has to be invented.
+///
+/// ③ **A double clear followed by the old result is delivered**, and this is the
+/// bound the next-event boundary buys the other two with. `In(A)` → the
+/// cancel-time empty pre-edit arrives at B → `Retiring(A)` → a *second* empty
+/// pre-edit arrives at B → `Idle`, because an empty pre-edit with no commit
+/// behind it is exactly what an honoured cancel looks like → `Commit(old text)`
+/// is then judged against `Idle` and **reaches B**. It is not a hole that could
+/// be closed by looking harder: those two states are the same states an honoured
+/// cancel followed by the reader's own punctuation passes through, which is the
+/// case ② above pays for, and the two orders are identical event for event.
+/// Refusing here would put the honoured cancel's cost back.
+///
+/// Windows can *represent* it — a zero `lparam` clears the composition string
+/// without disabling composition (`event_loop.rs:1537-1542`), so a later
+/// `GCS_RESULTSTR` on the same context can still send the pair — and macOS
+/// cannot, because `unmarkText` removes the marked text that `insertText:`
+/// requires before it will commit at all (`view.rs:340`, `:411`). No supported
+/// input method is shown to clear its composition string and then commit the old
+/// text, so this is a shape the platform admits rather than a sequence anything
+/// is known to produce.
 fn composition_ruling(
     state: &Composing,
     here: &CompositionOrigin,
