@@ -2879,7 +2879,17 @@ impl ViewportProjection {
         // and it never engages for a user-initiated clear because no resize transaction is open.
         self.review_hold =
             primary && self.resize_reflow_active && self.displaced_review_subpixels.is_some();
-        let bottom_identity = matches!(self.scroll_state, ViewportScrollState::Bottom);
+        // **The picture is chosen by the offset, not by the state.** They said the same thing while
+        // a clamped anchor was demoted to `Bottom`; now that the anchor is kept, a view standing on
+        // the ceiling can be `Anchored` with nothing to travel, and the two readings part company
+        // exactly where the resting identity below matters most. A live band that has *contracted*
+        // — a raster shorter than the source rows it spans, which free height allows in both
+        // directions — makes the document shorter than history plus a paneful, so the ceiling lies
+        // *before* the live plane, in the last row of history: the normalisation below does not
+        // apply, and the same offset of zero drew the live plane from its own top under one reading
+        // and one row lower under the other, so typing (which restores `Bottom`) took that row away
+        // again. Rest is a place, and a view standing in it is drawn the way rest is drawn.
+        let bottom_identity = self.scroll_offset_subpixels == 0;
         let live_plane_top_subpixels = history_height.saturating_add(staging_height);
         let (mut window_start, mut first_row_top_subpixels) = if bottom_identity {
             // Replays never scroll. Preserve their Phase-A row-model identity exactly: fractional
@@ -10551,51 +10561,55 @@ mod tests {
                 .remove(0);
             document.finalize_transaction(line);
         }
-        let mut projection = ViewportProjection::new(
-            key(width),
-            DetectionRevision(1),
-            nz32(live_rows),
-            cell_height(),
-            store.source_generation(),
-            GridGeneration(1),
-        );
-        projection.project(&document);
-        // A display block on the live plane, three rows carrying a 96-pixel raster: the live plane
-        // stands 42 pixels taller than the pane it is drawn in.
-        projection.sync_live_math_artifacts(
-            ScreenId::Primary,
-            [ProjectedLiveMathArtifact {
-                occurrence_id: LiveMathOccurrenceId(3),
-                screen: ScreenId::Primary,
-                start: GridPoint { row: 4, column: 0 },
-                end: GridPoint { row: 6, column: 2 },
-                band_start_row: 4,
-                band_end_row: 6,
-                clipped_top_rows: 0,
-                clipped_bottom_rows: 0,
-                occluded_source_rows: 0,
-                occluded_visible_rows: Vec::new(),
-                transition_stale: false,
-                frozen_prefix: Vec::new(),
-                staging_prefix: Vec::new(),
-                generation: GridGeneration(1),
-                artifact: ProjectedMathArtifact {
-                    inline_runs: Vec::new(),
-                    key: "display".to_owned(),
-                    end: TranscriptId(0),
-                    rgba: Arc::from(vec![255; 96 * 4]),
-                    width_px: 1,
-                    height_px: 96,
-                    height_subpixels: 96 * SUBPIXELS_PER_PX,
-                    baseline_subpixels: 0,
-                    mode: MathMode::Display,
-                    kind: RgbaArtifactKind::Math,
-                    vertical_padding_subpixels: 0,
-                    render_scale_milli: 1000,
-                    source: r"\frac{1}{2}".to_owned(),
-                },
-            }],
-        );
+        // A display block on the live plane over three rows. At 96 pixels the live plane stands 42
+        // pixels taller than the pane it is drawn in; at 36 it stands 18 pixels SHORTER, because a
+        // primary all-live band keeps free height in both directions.
+        let projection_with_band = |raster_px: u32| {
+            let mut projection = ViewportProjection::new(
+                key(width),
+                DetectionRevision(1),
+                nz32(live_rows),
+                cell_height(),
+                store.source_generation(),
+                GridGeneration(1),
+            );
+            projection.project(&document);
+            projection.sync_live_math_artifacts(
+                ScreenId::Primary,
+                [ProjectedLiveMathArtifact {
+                    occurrence_id: LiveMathOccurrenceId(3),
+                    screen: ScreenId::Primary,
+                    start: GridPoint { row: 4, column: 0 },
+                    end: GridPoint { row: 6, column: 2 },
+                    band_start_row: 4,
+                    band_end_row: 6,
+                    clipped_top_rows: 0,
+                    clipped_bottom_rows: 0,
+                    occluded_source_rows: 0,
+                    occluded_visible_rows: Vec::new(),
+                    transition_stale: false,
+                    frozen_prefix: Vec::new(),
+                    staging_prefix: Vec::new(),
+                    generation: GridGeneration(1),
+                    artifact: ProjectedMathArtifact {
+                        inline_runs: Vec::new(),
+                        key: "display".to_owned(),
+                        end: TranscriptId(0),
+                        rgba: Arc::from(vec![255; raster_px as usize * 4]),
+                        width_px: 1,
+                        height_px: raster_px,
+                        height_subpixels: i64::from(raster_px) * SUBPIXELS_PER_PX,
+                        baseline_subpixels: 0,
+                        mode: MathMode::Display,
+                        kind: RgbaArtifactKind::Math,
+                        vertical_padding_subpixels: 0,
+                        render_scale_milli: 1000,
+                        source: r"\frac{1}{2}".to_owned(),
+                    },
+                }],
+            );
+            projection
+        };
 
         let line = |text: &str| fixture_row(&format!("{text:<32}"), false);
         let blank = || fixture_row(&" ".repeat(width as usize), false);
@@ -10640,32 +10654,45 @@ mod tests {
                 .unwrap()
         };
 
-        // At rest, with the blank tail: the relief spends the whole of the band's extra height, so
-        // the ceiling stands at the top of the live plane and the mark on live row 1 is past it.
-        let rest = frame(&mut projection, &resting_rows, 6);
-        assert_eq!(projection.scroll_offset_subpixels(), 0);
-        let ceiling = projection.scroll_extent_subpixels();
+        // ③ One offset, one picture — in **both** directions of band height. At rest the whole
+        //    live plane is shown from its own top; a landing clamped to the ceiling must be that
+        //    same frame to the subpixel, so nothing is traded for keeping the anchor. An expanded
+        //    band puts the ceiling inside the live plane and a contracted one puts it *before* the
+        //    plane, in the last row of history, which is the direction that told the two states
+        //    apart until the picture stopped being chosen by the state.
+        for raster_px in [36, 96] {
+            let mut projection = projection_with_band(raster_px);
+            let rest = frame(&mut projection, &resting_rows, 6);
+            assert_eq!(projection.scroll_offset_subpixels(), 0);
+            projection.set_scroll_anchor(Some(mark.clone()));
+            let pressed = frame(&mut projection, &resting_rows, 6);
+            assert_eq!(
+                projection.scroll_offset_subpixels(),
+                0,
+                "a {raster_px} px band clamps this mark to the ceiling"
+            );
+            assert_eq!(
+                pressed.row_map, rest.row_map,
+                "a landing clamped to the ceiling must be the resting picture ({raster_px} px band)"
+            );
+            assert_eq!(
+                pressed.status_text, rest.status_text,
+                "and it must count the same rows above and below it ({raster_px} px band)"
+            );
+        }
 
-        // The rail is pressed. The jump is clamped — there is no document below the mark to
-        // scroll — and the picture is the resting one.
+        // The rest of the sequence with the expanded band: the relief spends the whole of its extra
+        // height, so the ceiling stands at the top of the live plane and the mark is past it.
+        let mut projection = projection_with_band(96);
+        frame(&mut projection, &resting_rows, 6);
+        let ceiling = projection.scroll_extent_subpixels();
         projection.set_scroll_anchor(Some(mark.clone()));
-        let pressed = frame(&mut projection, &resting_rows, 6);
-        assert_eq!(projection.scroll_offset_subpixels(), 0);
+        frame(&mut projection, &resting_rows, 6);
         assert_eq!(projection.scroll_extent_subpixels(), ceiling);
-        // ③ One scroll top, one picture: a landing clamped to the ceiling is the resting frame to
-        //    the subpixel, so nothing is traded for keeping the anchor.
-        assert_eq!(
-            pressed.row_map, rest.row_map,
-            "a landing clamped to the ceiling must be the resting picture"
-        );
-        assert_eq!(
-            pressed.status_text, rest.status_text,
-            "and it must count the same rows above and below it"
-        );
 
         // The shell goes on printing and fills the blank tail. The relief it was spending is gone,
         // the ceiling moves down the document, and the jump now has room to land.
-        let landed = frame(&mut projection, &filled_rows, (live_rows - 1) as u32);
+        let landed = frame(&mut projection, &filled_rows, live_rows - 1);
         assert!(
             projection.scroll_extent_subpixels() > ceiling,
             "filling the blank tail spends no relief and lifts the ceiling"
@@ -10685,7 +10712,7 @@ mod tests {
 
         // Pressing the same tick again lands in the same place.
         projection.set_scroll_anchor(Some(mark.clone()));
-        let again = frame(&mut projection, &filled_rows, (live_rows - 1) as u32);
+        let again = frame(&mut projection, &filled_rows, live_rows - 1);
         // ② Two presses, one place.
         assert_eq!(
             projection.scroll_offset_subpixels(),
