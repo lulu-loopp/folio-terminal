@@ -2448,6 +2448,14 @@ impl ViewportProjection {
             .max(0)
     }
 
+    /// **How much of the last frame's scroll ceiling the blank tail under the prompt was
+    /// spending** — the relief term inside [`Self::scroll_extent_subpixels`], named so a trace can
+    /// print the two beside each other. Zero is the classic flush-bottom pane: nothing on the live
+    /// plane is standing taller than the pane it is drawn in, or there is no blank tail to spend.
+    pub fn bottom_relief_subpixels(&self) -> i64 {
+        self.last_bottom_relief_subpixels
+    }
+
     /// Track the authoritative cell height. A zoom / DPI change remeasures the font, which changes
     /// the pixel height of every row while leaving row and scroll-offset semantics untouched. The
     /// projection caches subpixel geometry (`live_row_prefix`, math band tops) keyed on this height,
@@ -2864,11 +2872,21 @@ impl ViewportProjection {
                 window_top_subpixels = anchor_y
                     .saturating_add(anchor.local_offset)
                     .clamp(0, bottom_top_subpixels);
-                if window_top_subpixels < bottom_top_subpixels {
-                    self.scroll_state = ViewportScrollState::Anchored(anchor);
-                } else {
-                    self.scroll_state = ViewportScrollState::Bottom;
-                }
+                // **An anchor that resolved stays the answer, whatever the clamp had to do to it.**
+                // The clamp itself is honest — a mark inside the last paneful cannot stand at the
+                // top of the pane, because there is no document below it to scroll — but the view
+                // had been answering it by throwing the anchor away and calling itself Bottom. That
+                // is a state change with no picture behind it: `scroll_offset_subpixels` is zero
+                // either way and the frame is the resting one to the subpixel (the ceiling here is
+                // the one `scroll_extent_subpixels` hands every other reader, relief included, so
+                // the anchored placement at that ceiling *is* the resting cut). What it cost was
+                // the jump: the pane went back to following the output, so the next frame that gave
+                // the jump room to land — the shell filling the blank tail the relief was being
+                // spent on — left the reader at the bottom, and only a second press on the same
+                // mark took them to the command. Rest is `scroll_offset_subpixels == 0` and nothing
+                // else; whether this view is *following* is the anchor's business, and a reader who
+                // wants to follow again says so (`scroll_to_bottom`, a wheel notch down to zero).
+                self.scroll_state = ViewportScrollState::Anchored(anchor);
             } else {
                 // The anchored content vanished under the reader — a Codex-style reflow clears
                 // scrollback before reprinting equivalent content. Preserve the displacement so
@@ -10281,6 +10299,190 @@ mod tests {
             }),
             "and it is still the command's own line that is being named"
         );
+    }
+
+    /// **A jump is a position, not an act** — and the projection used to throw the position away
+    /// at exactly one place: when the anchor it had just resolved landed at or past the scroll
+    /// ceiling, the landing answered "go to the live bottom" and replaced `Anchored` with `Bottom`.
+    ///
+    /// A formula standing on the live plane is what puts an ordinary jump there. The ceiling is
+    /// `total − pane − relief`, and the relief is the blank tail under the prompt spent against the
+    /// height the band added: with the tail blank the ceiling sits at the top of the live plane, so
+    /// a mark on a live row is past it and the jump is clamped. The click therefore looked like it
+    /// did nothing, the anchor was gone, and the pane went back to following the output — so the
+    /// **next** frame that gave the jump room to land (the shell filling the blank tail, which
+    /// spends the relief) left the view at the bottom, and only a *second* press on the same tick
+    /// took the reader to the command. Two presses, two different places.
+    ///
+    /// The clamp itself is right: a mark inside the last paneful cannot stand at the top of the
+    /// pane, because there is no document below it to scroll. What is wrong is answering a
+    /// resolvable anchor with `Bottom`. The viewport stays anchored and `scroll_offset_subpixels`
+    /// alone says whether it is at rest, so the clamped landing is the resting picture to the
+    /// subpixel (asserted below) and the jump is still standing when the room arrives.
+    ///
+    /// MUTATIONS:
+    /// ① demote to `Bottom` on the clamp again: ① and ② go red, ③ stays green — which is the whole
+    ///    shape of the defect, a state change with no picture behind it;
+    /// ② take the relief out of `scroll_extent_subpixels` so the anchored ceiling stops being the
+    ///    resting one: ③ goes red (the clamped landing stops being the resting picture), and three
+    ///    `bt-term` gates for the 2026-09-07 report go red with it.
+    #[test]
+    fn jumping_twice_to_the_same_command_lands_twice_in_the_same_place_with_a_formula_on_the_live_plane()
+     {
+        let width = 32;
+        let live_rows = 16;
+        let mut store = TranscriptStore::new(NonZeroUsize::new(64).unwrap());
+        let mut document = HistoryDocument::default();
+        // History taller than the pane, so the pane genuinely scrolls.
+        for index in 0..20 {
+            let line = store
+                .capture(fixture_row(&format!("history {index:02}"), false))
+                .finalized
+                .remove(0);
+            document.finalize_transaction(line);
+        }
+        let mut projection = ViewportProjection::new(
+            key(width),
+            DetectionRevision(1),
+            nz32(live_rows),
+            cell_height(),
+            store.source_generation(),
+            GridGeneration(1),
+        );
+        projection.project(&document);
+        // A display block on the live plane, three rows carrying a 96-pixel raster: the live plane
+        // stands 42 pixels taller than the pane it is drawn in.
+        projection.sync_live_math_artifacts(
+            ScreenId::Primary,
+            [ProjectedLiveMathArtifact {
+                occurrence_id: LiveMathOccurrenceId(3),
+                screen: ScreenId::Primary,
+                start: GridPoint { row: 4, column: 0 },
+                end: GridPoint { row: 6, column: 2 },
+                band_start_row: 4,
+                band_end_row: 6,
+                clipped_top_rows: 0,
+                clipped_bottom_rows: 0,
+                occluded_source_rows: 0,
+                occluded_visible_rows: Vec::new(),
+                transition_stale: false,
+                frozen_prefix: Vec::new(),
+                staging_prefix: Vec::new(),
+                generation: GridGeneration(1),
+                artifact: ProjectedMathArtifact {
+                    inline_runs: Vec::new(),
+                    key: "display".to_owned(),
+                    end: TranscriptId(0),
+                    rgba: Arc::from(vec![255; 96 * 4]),
+                    width_px: 1,
+                    height_px: 96,
+                    height_subpixels: 96 * SUBPIXELS_PER_PX,
+                    baseline_subpixels: 0,
+                    mode: MathMode::Display,
+                    kind: RgbaArtifactKind::Math,
+                    vertical_padding_subpixels: 0,
+                    render_scale_milli: 1000,
+                    source: r"\frac{1}{2}".to_owned(),
+                },
+            }],
+        );
+
+        let line = |text: &str| fixture_row(&format!("{text:<32}"), false);
+        let blank = || fixture_row(&" ".repeat(width as usize), false);
+        // The command's own prompt row is live row 1; the shell's output and the block follow it,
+        // and the rows under the prompt are still blank.
+        let mut resting_rows = vec![
+            line("$ cat notes.md"),
+            line("$ ./gauss.ps1"),
+            line("the integral is"),
+            line("$$"),
+            line("e^{-x^2}"),
+            line("x"),
+            line("$$"),
+        ];
+        resting_rows.extend(vec![blank(); live_rows as usize - 7]);
+        let mut filled_rows = resting_rows.clone();
+        for row in filled_rows.iter_mut().skip(7) {
+            *row = line("more output");
+        }
+        let mark = ScrollAnchor {
+            source: ContentAnchor::Live {
+                screen: ScreenId::Primary,
+                point: GridPoint { row: 1, column: 0 },
+                bias: Bias::Before,
+                generation: GridGeneration(1),
+            },
+            local_offset: -8 * SUBPIXELS_PER_PX,
+        };
+        let frame = |projection: &mut ViewportProjection, rows: &[CapturedRow], cursor_row: u32| {
+            projection
+                .continuous_frame(
+                    &document,
+                    &[],
+                    rows.to_vec(),
+                    GridCursor {
+                        row: cursor_row,
+                        column: 0,
+                        visible: true,
+                    },
+                    ScreenId::Primary,
+                )
+                .unwrap()
+        };
+
+        // At rest, with the blank tail: the relief spends the whole of the band's extra height, so
+        // the ceiling stands at the top of the live plane and the mark on live row 1 is past it.
+        let rest = frame(&mut projection, &resting_rows, 6);
+        assert_eq!(projection.scroll_offset_subpixels(), 0);
+        let ceiling = projection.scroll_extent_subpixels();
+
+        // The rail is pressed. The jump is clamped — there is no document below the mark to
+        // scroll — and the picture is the resting one.
+        projection.set_scroll_anchor(Some(mark.clone()));
+        let pressed = frame(&mut projection, &resting_rows, 6);
+        assert_eq!(projection.scroll_offset_subpixels(), 0);
+        assert_eq!(projection.scroll_extent_subpixels(), ceiling);
+        // ③ One scroll top, one picture: a landing clamped to the ceiling is the resting frame to
+        //    the subpixel, so nothing is traded for keeping the anchor.
+        assert_eq!(
+            pressed.row_map, rest.row_map,
+            "a landing clamped to the ceiling must be the resting picture"
+        );
+        assert_eq!(
+            pressed.status_text, rest.status_text,
+            "and it must count the same rows above and below it"
+        );
+
+        // The shell goes on printing and fills the blank tail. The relief it was spending is gone,
+        // the ceiling moves down the document, and the jump now has room to land.
+        let landed = frame(&mut projection, &filled_rows, (live_rows - 1) as u32);
+        assert!(
+            projection.scroll_extent_subpixels() > ceiling,
+            "filling the blank tail spends no relief and lifts the ceiling"
+        );
+        // ① The first press is still standing: the view moved to the command it was sent to,
+        //    instead of following the output because the anchor had been thrown away.
+        let first = projection.scroll_offset_subpixels();
+        assert!(
+            first > 0,
+            "the jump must still name its command once there is room to stand on it"
+        );
+        assert_eq!(
+            projection.scroll_anchor().map(|anchor| &anchor.source),
+            Some(&mark.source),
+            "and it must still be that command's own row being named"
+        );
+
+        // Pressing the same tick again lands in the same place.
+        projection.set_scroll_anchor(Some(mark.clone()));
+        let again = frame(&mut projection, &filled_rows, (live_rows - 1) as u32);
+        // ② Two presses, one place.
+        assert_eq!(
+            projection.scroll_offset_subpixels(),
+            first,
+            "a second press on the same tick must land where the first one did"
+        );
+        assert_eq!(again.row_map, landed.row_map);
     }
 
     #[test]

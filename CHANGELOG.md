@@ -20,6 +20,18 @@ All notable changes to Folio are recorded here. The format follows
   it stands, and a block shorter than its own lines is placed exactly as
   before.
 
+- **Clicking a command's mark beside the scroll bar goes to that command every
+  time, also when a formula is on screen.** A mark for one of the newest
+  commands — one whose own line is still on the live screen — could not always
+  be brought to the top of the pane, because there is nothing below it to
+  scroll to, and Folio answered that by forgetting the jump altogether: the
+  pane went back to following the output, and the moment there *was* room to
+  stand on the command you were left at the bottom instead. It took a second
+  click on the same mark to get there, so the same click did two different
+  things. A jump is now kept as the place you asked for until you say
+  otherwise, and a pane resting at the bottom still follows new output exactly
+  as it did.
+
 ## 0.4.2-preview — 2026-09-17
 
 ### Added
