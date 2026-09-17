@@ -915,6 +915,15 @@ pub struct FrozenLine {
     pub fragments: Vec<PhysicalFragment>,
     pub shell_marks: Vec<(u32, String)>,
     pub wrap_split: bool,
+    /// At least one cell of at least one of this line's rows was written outside a shell's OSC 133
+    /// `C..D` command-output region — see [`CapturedCell::non_output_write`], which this folds.
+    ///
+    /// **The frozen half of the same fact the live grid reads off the cells directly.** A line does
+    /// not change who wrote it by scrolling, and this is the last moment its cells are in hand, so
+    /// it is folded here rather than worked out afterwards from where the line's coordinates fell.
+    /// Any row claimed by a non-output write claims the whole logical line, which is the reading the
+    /// live plane's own fold takes.
+    pub non_output_write: bool,
 }
 
 impl FrozenLine {
@@ -1449,6 +1458,7 @@ fn normalize(
     let mut fragments = Vec::new();
     let mut shell_marks = Vec::new();
     let mut mappings = Vec::new();
+    let mut non_output_write = false;
 
     for staged in rows {
         let fragment_start = text.len() as u32;
@@ -1467,6 +1477,9 @@ fn normalize(
         if let Some(mark) = shell_mark {
             shell_marks.push((fragment_start, mark));
         }
+        // Over every cell the row arrived with, before the padding trim below, so that this asks
+        // exactly what the live plane asks of the same row.
+        non_output_write |= cells.iter().any(|cell| cell.non_output_write);
 
         // A WRAPLINE fragment owns every cell through its wrap boundary.  In particular a space
         // in the final column is source text, not padding; trimming it turns "find path" into
@@ -1525,6 +1538,7 @@ fn normalize(
             fragments,
             shell_marks,
             wrap_split,
+            non_output_write,
         },
         mappings,
     )

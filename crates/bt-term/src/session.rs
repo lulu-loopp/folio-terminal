@@ -4944,33 +4944,6 @@ impl DualPlaneSession {
             })
     }
 
-    /// The same question asked of a frozen line: is the whole line inside a command-output region?
-    ///
-    /// A transcript line already is the WRAPLINE merge, so there is nothing to widen — the extent
-    /// is the line, from its first grapheme to one past its last.
-    ///
-    /// Asked once per line, in [`Self::schedule_detection`], while the region that answers it is
-    /// still standing. Every reader afterwards takes the recorded answer from the line itself —
-    /// see [`Self::history_inline_site`].
-    fn command_output_covers_history(&self, id: TranscriptId) -> bool {
-        if !self.shell_integration_is_authoritative(ScreenId::Primary) {
-            return false;
-        }
-        let Some(line) = self.document.entries().get(&id).map(|entry| &entry.line) else {
-            return false;
-        };
-        let anchor = |offset| ContentAnchor::History {
-            id,
-            offset,
-            bias: Bias::Before,
-            generation: line.source_generation,
-        };
-        let end = GraphemeOffset(
-            u32::try_from(line.grapheme_boundaries.len().saturating_sub(1)).unwrap_or(u32::MAX),
-        );
-        self.command_output_covers(&anchor(GraphemeOffset(0)), &anchor(end))
-    }
-
     /// The inline site of a frozen line, as it was recorded when the line froze.
     ///
     /// This reads [`bt_doc::HistoryEntry::inline_site`]; it does not ask the OSC 133 bookkeeping again.
@@ -4993,43 +4966,6 @@ impl DualPlaneSession {
             .entries()
             .get(&id)
             .map_or(InlineMathSite::Ineligible, |entry| entry.inline_site)
-    }
-
-    fn command_output_covers(&self, start: &ContentAnchor, end: &ContentAnchor) -> bool {
-        self.semantic_output_regions
-            .iter()
-            .any(|(&region_index, region)| {
-                let Ok(region_start) = self.document.anchor(region.start) else {
-                    return false;
-                };
-                let region_end = if !region.closed
-                    && region.screen == self.live_screen
-                    && self.shell_phases.get(&region.screen)
-                        == Some(&ShellIntegrationPhase::Output(region_index))
-                {
-                    // An open region's frontier is the cursor, exactly as an open input region's
-                    // is: the cell the cursor stands on has not been printed yet, so the span stays
-                    // half-open there too.
-                    ContentAnchor::Live {
-                        screen: region.screen,
-                        point: {
-                            let cursor = self.terminal.cursor();
-                            GridPoint {
-                                row: cursor.row,
-                                column: cursor.column,
-                            }
-                        },
-                        bias: Bias::Before,
-                        generation: self.grid_generation,
-                    }
-                } else {
-                    let Ok(end) = self.document.anchor(region.end) else {
-                        return false;
-                    };
-                    end.clone()
-                };
-                selection_covers(start, end, region_start, &region_end)
-            })
     }
 
     /// The visible text a semantic region currently covers, or `None` when the region cannot be
@@ -10833,7 +10769,19 @@ impl DualPlaneSession {
         // and its anchors still resolve. Every later reader — the re-arm after a resize, the
         // frozen worker's inputs, a re-seat that was declined — takes the record instead of asking
         // the bookkeeping again. See [`bt_doc::HistoryEntry::inline_site`].
-        let site = inline_math_site(ScreenId::Primary, self.command_output_covers_history(id));
+        let Some(entry) = self.document.entries().get(&id) else {
+            return;
+        };
+        // Read off the line's own cells, which is where the writes that made them recorded it —
+        // the same fold the live grid takes of the same rows, so a line cannot change who wrote it
+        // by scrolling. Asking the OSC 133 bookkeeping where the line's coordinates fell is the
+        // thing this replaces: a closed region goes on covering the coordinates it closed over, so
+        // a prompt printed inside them was refused on the grid and accepted the moment it froze.
+        let site = inline_math_site(
+            ScreenId::Primary,
+            self.shell_integration_is_authoritative(ScreenId::Primary)
+                && !entry.line.non_output_write,
+        );
         self.document.set_inline_site(id, site);
         let Some(entry) = self.document.entries().get(&id) else {
             return;
@@ -14748,24 +14696,6 @@ fn selection_overlaps(
         .is_some_and(|order| order == std::cmp::Ordering::Less)
         && compare_selection_anchors(item_end, selection_start)
             .is_some_and(|order| order == std::cmp::Ordering::Greater)
-}
-
-/// Does `[selection_start, selection_end]` contain the *whole* of `[item_start, item_end]`?
-///
-/// The strict counterpart to [`selection_overlaps`], for the questions where partial contact is not
-/// enough. An incomparable pair — the alternate screen against the primary document namespace —
-/// answers `false`, so a span can no more be covered across a plane boundary than it can overlap
-/// one.
-fn selection_covers(
-    item_start: &ContentAnchor,
-    item_end: &ContentAnchor,
-    selection_start: &ContentAnchor,
-    selection_end: &ContentAnchor,
-) -> bool {
-    compare_selection_anchors(selection_start, item_start)
-        .is_some_and(|order| order != std::cmp::Ordering::Greater)
-        && compare_selection_anchors(item_end, selection_end)
-            .is_some_and(|order| order != std::cmp::Ordering::Greater)
 }
 
 fn trim_copy_line_end(text: &mut String) {
@@ -28950,6 +28880,75 @@ mod tests {
         let (start, end, band_start, band_end) = restored_band(&session);
         assert_eq!((band_start, band_end), (start.row, end.row));
         assert!(sentinel_row(&session) > band_end);
+    }
+
+    /// **A line freezes with the site its cells say, so the two planes cannot disagree about it.**
+    ///
+    /// The live plane reads provenance off the cells the write stamped. The frozen plane used to
+    /// ask the OSC 133 bookkeeping where the line's coordinates fell, and a closed region goes on
+    /// covering the coordinates it closed over — so a prompt that reprints a command's line byte for
+    /// byte was refused on the grid and then accepted the moment it scrolled into history, which is
+    /// the same defect crossing a plane boundary. One fact, read once, at the one moment the rows
+    /// are still in hand.
+    ///
+    /// The two lines here spell the same thing and differ only in who wrote them, which is the whole
+    /// point: nothing about the text can tell them apart, and nothing about where they sit can
+    /// either once the region has closed over both.
+    #[test]
+    fn a_line_freezes_with_the_site_its_own_cells_carry() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(6));
+        session
+            .feed_at(
+                format!(
+                    "{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\na\r\n{ENERGY}\r\nb\r\n{OUTPUT_D}"
+                )
+                .as_bytes(),
+                started,
+            )
+            .unwrap();
+        // The next prompt prints the same line the command just printed, and prints it *inside* the
+        // rows the closed region covers — so a rule that asks where a line sits calls this output,
+        // and a rule that asks who wrote it does not.
+        session
+            .feed_at(
+                format!("\x1b[4;1H{PROMPT_A}{ENERGY}{PROMPT_B}").as_bytes(),
+                started,
+            )
+            .unwrap();
+        // Both scroll into history.
+        session
+            .feed_at(b"\r\np\r\np\r\np\r\np\r\np\r\np\r\np\r\n", started)
+            .unwrap();
+
+        let frozen = session
+            .document
+            .entries()
+            .iter()
+            .filter(|(_, entry)| entry.line.text.contains("energy"))
+            .map(|(id, entry)| (*id, entry.inline_site))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            frozen.len(),
+            2,
+            "the fixture must freeze both lines: {:?}",
+            session
+                .document
+                .entries()
+                .values()
+                .map(|entry| entry.line.text.clone())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            frozen[0].1,
+            InlineMathSite::CommandOutput,
+            "the line the command printed keeps its site into history"
+        );
+        assert_eq!(
+            frozen[1].1,
+            InlineMathSite::Ineligible,
+            "and the prompt that spells the same thing does not acquire one"
+        );
     }
 
     /// The site of one grid row, as the live scan sees it.

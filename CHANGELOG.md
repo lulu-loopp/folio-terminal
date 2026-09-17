@@ -8,6 +8,13 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **A prompt that scrolls up the screen still is not typeset.** Folio decides
+  what a command printed from the text itself as it arrives, and it now keeps
+  that decision when the line scrolls off into the history rather than working
+  it out again from where the line used to sit — so a prompt that spelled the
+  same thing a command had printed stayed a prompt on its way past, instead of
+  becoming a formula the moment it left the screen.
+
 - **Dragging a window edge no longer lets a formula swallow the line under
   it.** A formula kept while you resize is put back where its source now sits,
   but it went on claiming as many rows as it used to occupy — so widening the

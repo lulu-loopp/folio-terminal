@@ -6682,6 +6682,7 @@ mod tests {
             fragments: Vec::new(),
             shell_marks: Vec::new(),
             wrap_split: false,
+            non_output_write: false,
         };
         let rows = layout_frozen_line(&line, 8, &infer_links_for(&line, None), None);
         let linked_text = rows
@@ -6714,6 +6715,7 @@ mod tests {
             fragments: Vec::new(),
             shell_marks: Vec::new(),
             wrap_split: false,
+            non_output_write: false,
         };
 
         let cells = layout_frozen_line(&line, 80, &infer_links_for(&line, None), None)
@@ -7170,6 +7172,7 @@ mod tests {
             styles: Vec::new(),
             shell_marks: Vec::new(),
             wrap_split: false,
+            non_output_write: false,
         }
     }
 
@@ -12333,6 +12336,7 @@ mod tests {
                 fragments: Vec::new(),
                 shell_marks: Vec::new(),
                 wrap_split: false,
+                non_output_write: false,
             },
             mappings: Vec::new(),
         });
