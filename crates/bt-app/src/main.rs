@@ -107737,12 +107737,16 @@ mod quit_transaction_tests {
             "the quit's write is the judged one"
         );
         assert!(
-            settle.contains("quit.written(landed.is_ok())"),
+            settle.contains("quit.written(verdict)"),
             "and the answer is what the transaction is told"
         );
         assert!(
+            settle.contains("refusal.quit_may_proceed()"),
+            "and a save that ran out of its budget is not read as one that was refused"
+        );
+        assert!(
             settle.contains("i18n::Text::QuitSessionNotWritten"),
-            "a write that did not land is said out loud on every window"
+            "a write that was refused is said out loud on every window"
         );
     }
 
@@ -111960,20 +111964,31 @@ impl FolioApp {
                         Some(app) => app.session_store.flush_judged(),
                         None => return Ok(()),
                     };
-                    if let Err(error) = &landed {
-                        eprintln!("{APP_NAME} did not quit: {error}");
-                        // Said on every window, because the failure is the
-                        // process's and the reader is looking at one of them.
-                        self.for_each_window(|runtime| {
-                            runtime.toast(
-                                toast::ToastKind::Error,
-                                toast::ToastAnchor::Window,
-                                None,
-                                i18n::Text::QuitSessionNotWritten.text(),
-                            )
-                        })?;
-                    }
-                    self.report_to_quit(|quit| quit.written(landed.is_ok()));
+                    // **A save that ran out of its budget leaves anyway**
+                    // (release review X-8). The reader asked to go, the disk
+                    // holds the last completed save, and the store has already
+                    // said so in the log and kept `session.lock` standing. A card
+                    // here would be a card on a window that is about to be
+                    // hidden, which is nobody's answer to anything.
+                    let verdict = match &landed {
+                        Ok(()) => quit::WriteVerdict::Landed,
+                        Err(refusal) if refusal.quit_may_proceed() => quit::WriteVerdict::TimedOut,
+                        Err(refusal) => {
+                            eprintln!("{APP_NAME} did not quit: {}", refusal.message());
+                            // Said on every window, because the failure is the
+                            // process's and the reader is looking at one of them.
+                            self.for_each_window(|runtime| {
+                                runtime.toast(
+                                    toast::ToastKind::Error,
+                                    toast::ToastAnchor::Window,
+                                    None,
+                                    i18n::Text::QuitSessionNotWritten.text(),
+                                )
+                            })?;
+                            quit::WriteVerdict::Refused
+                        }
+                    };
+                    self.report_to_quit(|quit| quit.written(verdict));
                 }
                 quit::QuitStep::Retire => {
                     // **Not `for_each_window`**, and this is the one place in the
