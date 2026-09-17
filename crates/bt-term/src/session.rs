@@ -3760,9 +3760,18 @@ impl DualPlaneSession {
             }
             !suppressed
         });
-        let scheduled = new_tasks.len();
+        let mut scheduled = 0usize;
         for task in new_tasks {
-            self.enqueue_live_task(task);
+            let candidate_row = task.candidate_row;
+            if self.enqueue_live_task(task) == EnqueueOutcome::Queued {
+                scheduled += 1;
+                continue;
+            }
+            // Refused for want of room. The signature says "a task for this row is out", and none
+            // is, so it comes off and the next pass arms this row again.
+            if let Some(state) = self.live_rows.get_mut(candidate_row as usize) {
+                state.candidate_signature = None;
+            }
         }
         self.live_detection_count = self.live_detection_count.saturating_add(scheduled as u64);
         if scheduled != 0 && switched_on("BT_PERF_TRACE") {
@@ -7054,7 +7063,27 @@ impl DualPlaneSession {
         }
     }
 
-    fn enqueue_live_task(&mut self, task: LiveDetectionTask) {
+    /// Queue one live scan, or refuse it because the queue is full.
+    ///
+    /// **A full queue refuses the newcomer; it never drops what it is already holding.** Dropping
+    /// the oldest entry was silent in a way the caller could not see: a row is skipped while its
+    /// `candidate_signature` says a task for it is out, and the dropped task took no signature with
+    /// it, so the row was never armed again. One PTY write of dense formula output arms every row in
+    /// a single pass, so a burst past the cap left its first rows at source indefinitely.
+    ///
+    /// Refusing is also what makes the retry fair. Candidates are armed in ascending row order, so a
+    /// refused row is one the queue has not reached yet; the pass that follows arms exactly the rows
+    /// that were refused, because every row it did service now carries a signature. Progress is
+    /// monotone and a burst of any size drains in `ceil(n / cap)` passes. Dropping the incumbent
+    /// instead would evict work that was already proven current, which is the one thing a queue
+    /// holding it has reason not to do.
+    ///
+    /// The live plane needs no `retry_on_idle` ledger of its own — the frozen queue keeps one
+    /// because a frozen candidate is visited only when something arms it, while
+    /// [`Self::schedule_live_artifacts`] recomputes every candidate from the grid on each pass. The
+    /// absent signature *is* the ledger, and it is one that survives a scroll, because it is keyed
+    /// to the row's content rather than to a row number.
+    fn enqueue_live_task(&mut self, task: LiveDetectionTask) -> EnqueueOutcome {
         if let Some(index) = self
             .live_tasks
             .iter()
@@ -7063,9 +7092,10 @@ impl DualPlaneSession {
             self.live_tasks.remove(index);
         }
         if self.live_tasks.len() == WORKER_QUEUE_CAP {
-            self.live_tasks.pop_front();
+            return EnqueueOutcome::RetryOnIdle;
         }
         self.live_tasks.push_back(task);
+        EnqueueOutcome::Queued
     }
 
     pub fn run_workers(&mut self) {
@@ -15715,6 +15745,66 @@ mod tests {
         assert!(session.document().entries().iter().all(|(id, _)| {
             session.decoration(*id).unwrap().decoration == DecorationLifecycle::Ready
         }));
+    }
+
+    /// A burst wider than the worker queue must not leave rows unscheduled forever.
+    ///
+    /// The frozen queue refuses the newcomer and remembers it (`retry_on_idle`); the live queue
+    /// dropped the oldest entry and said nothing — and the row it dropped kept the
+    /// `candidate_signature` that says "a task for this row is already out", so no later pass ever
+    /// armed it again. One PTY write of dense formula output arms every row in one pass, which is
+    /// how a report or a log of mathematics arrives, so the rows it drops stay as `$…$` for as long
+    /// as nothing else touches them.
+    ///
+    /// The invariant, which is what this asserts rather than any particular queue discipline: a row
+    /// is skipped only while a task for it is actually queued or in flight. Two sizes, because one
+    /// overflow could be absorbed by luck and two passes' worth cannot.
+    #[test]
+    fn every_candidate_of_a_burst_wider_than_the_worker_queue_is_serviced() {
+        for count in [65u32, 130] {
+            let started = Instant::now();
+            let mut stream = String::new();
+            for index in 0..count {
+                stream.push_str(&format!("$$x_{{{index}}}$$\r\n"));
+            }
+            stream.push_str("barrier");
+            let mut session = DualPlaneSession::new(nz(40), nz(count + 4));
+            session.feed_at(stream.as_bytes(), started).unwrap();
+
+            let raster = synthetic_raster(40, 40);
+            let mut serviced = BTreeSet::new();
+            let mut at = started + LIVE_MATH_STABLE_INTERVAL;
+            for pass in 0..=count {
+                let scheduled = session.advance_live_stability(at);
+                assert!(
+                    session.live_tasks.len() <= crate::WORKER_QUEUE_CAP,
+                    "the queue stays bounded"
+                );
+                let mut drained = 0;
+                while let Some(mut task) = session.take_live_worker_task() {
+                    serviced.insert(task.candidate_row);
+                    drained += 1;
+                    if resolve_live_detection_task(&mut task) {
+                        session.complete_live_worker_result(task, Ok(raster.clone()));
+                    } else {
+                        session
+                            .complete_live_worker_result(task, Err(MathRenderError::NotDetected));
+                    }
+                }
+                if scheduled == 0 && drained == 0 {
+                    break;
+                }
+                assert!(pass < count, "scheduling must reach quiescence");
+                at += Duration::from_millis(1);
+            }
+
+            assert_eq!(
+                serviced.len() as u32,
+                count,
+                "every formula row must be handed to the worker; {} of {count} never were",
+                count - serviced.len() as u32
+            );
+        }
     }
 
     #[test]

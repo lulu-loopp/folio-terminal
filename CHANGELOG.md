@@ -8,6 +8,13 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **A screenful of formulas all at once no longer leaves the first few as raw
+  text.** Printing a dense page of mathematics — a report, a log, anything that
+  arrives in one go — gave Folio more formulas to draw than it queues at a time,
+  and the ones it could not take right away were forgotten rather than picked up
+  on the next pass. They stayed as `$…$` until something else disturbed the
+  line. Folio now comes back for them, in the order they were printed.
+
 - **An inline formula in a command's output is typeset even when its picture is
   ready only after the prompt has come back.** Printing a file of mathematics
   hands Folio the whole file and the shell's "the command is done" mark in one
