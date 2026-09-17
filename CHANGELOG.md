@@ -6,7 +6,18 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
-Nothing yet.
+### Fixed
+
+- **A dropped file now lands in the terminal you dropped it on even when Folio
+  is busy, or when you were last hovering somewhere else.** Where the file was
+  let go of was worked out after the fact — when Folio got round to typing the
+  path — and it preferred the last place it had seen your pointer, which during
+  a drag from another program is wherever your hand happened to be the previous
+  time it was over the window. On a split, either reading could name the wrong
+  terminal: the one you had been hovering before you went to fetch the file, or
+  whichever one your hand had moved on to while Folio was catching up with a
+  busy pane. The position is now read at the instant the file is released, and
+  nothing later can change it.
 
 ## 0.4.2-preview — 2026-09-17
 
