@@ -1575,6 +1575,7 @@ fn a_body_streaming_into_a_block_does_not_schedule_a_scan_a_frame() {
         }
     }
     let during = session.live_detection_count() - settled;
+    eprintln!("G1_STREAMING_BODY frames={FRAMES} scans={during} budget={SCANS_DURING_THE_STREAM}");
     assert!(
         during <= SCANS_DURING_THE_STREAM,
         "a streaming body scheduled {during} scans over {FRAMES} frames, budget \

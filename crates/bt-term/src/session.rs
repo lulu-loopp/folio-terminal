@@ -7578,7 +7578,7 @@ impl DualPlaneSession {
                     .values()
                     .any(|record| record.band_start_row <= first && last <= record.band_end_row);
                 if !answered {
-                    rearm_live_row_band(&mut self.live_rows, first, last);
+                    rearm_live_row_band_after_refusal(&mut self.live_rows, first, last);
                 }
             }
             // A refused completion used to leave nothing behind but a counter nobody prints, so a
@@ -14169,34 +14169,50 @@ impl std::fmt::Display for LiveCompletionRefusal {
     }
 }
 
-/// Ask again about `first ..= last`, and **give every row of the band the newest damage time in
-/// it**.
-///
-/// The second half is what bounds the asking. A band is one answer read from several rows, and the
-/// stability interval is the rule that an answer is only worth asking for once its source has stopped
-/// moving — but it was applied to the row detection is armed on, and that row is a delimiter, which
-/// sits still while an agent streams the body between them in. So the opener read as stable while
-/// the thing its answer depends on was still arriving: the scan went out, came back describing a
-/// body that had moved on, was refused, re-armed the opener, and went out again — every frame, for
-/// as long as the stream lasted (measured 48 scans over 60 frames of a growing body).
-///
-/// The rows of a band share one clock because they are one answer. Nothing else changes: the stream
-/// stops, the band goes quiet for its interval like any other source, and the block is read once.
+/// Ask again about `first ..= last`.
 fn rearm_live_row_band(rows: &mut [LiveRowStability], first: u32, last: u32) {
-    let newest = (first..=last)
-        .filter_map(|row| {
-            rows.get(row as usize)
-                .and_then(|state| state.last_damage_at)
-        })
-        .max();
     for row in first..=last {
         let Some(state) = rows.get_mut(row as usize) else {
             continue;
         };
         state.candidate_signature = None;
         state.settled_revision = None;
-        if newest.is_some() {
-            state.last_damage_at = newest;
+    }
+}
+
+/// Ask again about `first ..= last`, and **give every row of the band the newest damage time in
+/// it**, because this ask is a *retry*.
+///
+/// A band is one answer read from several rows, and the stability interval is the rule that an
+/// answer is only worth asking for once its source has stopped moving. Applied to the row detection
+/// is armed on, it says nothing: that row is a delimiter, and a delimiter sits still while an agent
+/// streams the body between them in. So the opener read as stable while the thing its answer depends
+/// on was still arriving — the scan went out, came back describing a body that had moved on, was
+/// refused, re-armed the opener, and went out again, every frame for as long as the stream lasted.
+/// Measured 58 scans over 60 frames of a body changing every 16 ms, against 8 now, which is both
+/// `$$` rows looking once per interval.
+///
+/// **Only the retry, and the difference is the whole of it.** The re-arm `observe_live_damage` makes
+/// is not one: it is the first ask after a change, gated already by the changed row's own stability,
+/// and it happens once because the record is torn down in the same breath. Carrying the clock there
+/// as well made an ordinary unsynchronized repaint — which rewrites a band over several reads — wait
+/// a further interval after its last row landed, and one frame inside that wait published the
+/// complete source of a block with no picture on it. On the owner's unwrapped recording that was
+/// exactly one frame, and one is the number that matters. The clock is carried where the loop is,
+/// and nowhere else.
+fn rearm_live_row_band_after_refusal(rows: &mut [LiveRowStability], first: u32, last: u32) {
+    let newest = (first..=last)
+        .filter_map(|row| {
+            rows.get(row as usize)
+                .and_then(|state| state.last_damage_at)
+        })
+        .max();
+    rearm_live_row_band(rows, first, last);
+    if newest.is_some() {
+        for row in first..=last {
+            if let Some(state) = rows.get_mut(row as usize) {
+                state.last_damage_at = newest;
+            }
         }
     }
 }
