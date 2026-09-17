@@ -65,7 +65,8 @@ All notable changes to Folio are recorded here. The format follows
   arrives in one go — gave Folio more formulas to draw than it queues at a time,
   and the ones it could not take right away were forgotten rather than picked up
   on the next pass. They stayed as `$…$` until something else disturbed the
-  line. Folio now comes back for them, in the order they were printed.
+  line. Folio now comes back for them without letting a continually repainted
+  line hold up the rest.
 
 - **An inline formula in a command's output is typeset even when its picture is
   ready only after the prompt has come back.** Printing a file of mathematics

@@ -1304,6 +1304,8 @@ pub struct DualPlaneSession {
     alternate_detection_context: DetectionContext,
     live_rows: Vec<LiveRowStability>,
     live_tasks: VecDeque<LiveDetectionTask>,
+    /// Admission resumes at the first refused row, independently of detection signatures.
+    live_admission_row: u32,
     /// This session's copy of the `INLINE_IMAGE_BANDS` policy bit. A field rather than a bare
     /// `const` read for one reason: a policy that switches a whole code path off must stay
     /// *exercisable*, or the path rots between the ruling and its reversal. Every band mechanism
@@ -1735,6 +1737,7 @@ impl DualPlaneSession {
             alternate_detection_context: DetectionContext::default(),
             live_rows: vec![LiveRowStability::default(); rows.get() as usize],
             live_tasks: VecDeque::new(),
+            live_admission_row: 0,
             inline_image_bands: INLINE_IMAGE_BANDS,
             // Formulas render unless the user says otherwise; the app pushes the persisted
             // setting in right after construction.
@@ -3768,6 +3771,11 @@ impl DualPlaneSession {
             }
             !suppressed
         });
+        // Detection consumes context in document order; only admission rotates. Retain the first
+        // refusal across signature changes so a repaint cannot put serviced rows ahead of it.
+        let split = new_tasks.partition_point(|task| task.candidate_row < self.live_admission_row);
+        new_tasks.rotate_left(split);
+        let mut first_refused = None;
         let mut scheduled = 0usize;
         for task in new_tasks {
             let candidate_row = task.candidate_row;
@@ -3775,11 +3783,15 @@ impl DualPlaneSession {
                 scheduled += 1;
                 continue;
             }
+            first_refused.get_or_insert(candidate_row);
             // Refused for want of room. The signature says "a task for this row is out", and none
             // is, so it comes off and the next pass arms this row again.
             if let Some(state) = self.live_rows.get_mut(candidate_row as usize) {
                 state.candidate_signature = None;
             }
+        }
+        if let Some(row) = first_refused {
+            self.live_admission_row = row;
         }
         self.live_detection_count = self.live_detection_count.saturating_add(scheduled as u64);
         if scheduled != 0 && switched_on("BT_PERF_TRACE") {
@@ -6799,18 +6811,9 @@ impl DualPlaneSession {
     /// it, so the row was never armed again. One PTY write of dense formula output arms every row in
     /// a single pass, so a burst past the cap left its first rows at source indefinitely.
     ///
-    /// Refusing is also what makes the retry fair. Candidates are armed in ascending row order, so a
-    /// refused row is one the queue has not reached yet; the pass that follows arms exactly the rows
-    /// that were refused, because every row it did service now carries a signature. Progress is
-    /// monotone and a burst of any size drains in `ceil(n / cap)` passes. Dropping the incumbent
-    /// instead would evict work that was already proven current, which is the one thing a queue
-    /// holding it has reason not to do.
-    ///
-    /// The live plane needs no `retry_on_idle` ledger of its own — the frozen queue keeps one
-    /// because a frozen candidate is visited only when something arms it, while
-    /// [`Self::schedule_live_artifacts`] recomputes every candidate from the grid on each pass. The
-    /// absent signature *is* the ledger, and it is one that survives a scroll, because it is keyed
-    /// to the row's content rather than to a row number.
+    /// The caller clears refused signatures and resumes admission at the first refusal on the
+    /// next pass. This bounded round-robin cursor survives context-signature changes, so repeatedly
+    /// rearmed rows cannot overtake waiting rows, and admission also returns to a changing head.
     fn enqueue_live_task(&mut self, task: LiveDetectionTask) -> EnqueueOutcome {
         if let Some(index) = self
             .live_tasks
@@ -15580,6 +15583,105 @@ mod tests {
         assert!(session.document().entries().iter().all(|(id, _)| {
             session.decoration(*id).unwrap().decoration == DecorationLifecycle::Ready
         }));
+    }
+
+    /// Continuing repaint must not reset a refused candidate's admission priority.
+    #[test]
+    fn live_queue_services_65_candidates_during_repaint() {
+        assert_live_queue_repaint_fairness(65);
+    }
+
+    #[test]
+    fn live_queue_services_130_candidates_during_repaint() {
+        assert_live_queue_repaint_fairness(130);
+    }
+
+    fn assert_live_queue_repaint_fairness(count: u32) {
+        let mut at = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(count + 2));
+        session.set_inline_math_bands(true);
+        let mut stream = String::from("\x1b]133;A\x07\x1b]133;B\x07\x1b]133;C\x07");
+        for row in 0..count {
+            stream.push_str(&format!("formula $x_{{{row}}}^2$ here\r\n"));
+        }
+        stream.push_str("\x1b]133;D;0\x07");
+        // Arm one row through ordinary output before the rest of the burst arrives.
+        let first_line_end = stream.find("\r\n").unwrap() + 2;
+        session
+            .feed_at(&stream.as_bytes()[..first_line_end], at)
+            .unwrap();
+        at += LIVE_MATH_STABLE_INTERVAL;
+        assert_eq!(session.advance_live_stability(at), 1);
+        assert_eq!(
+            session.live_tasks.len(),
+            1,
+            "the burst enters a partly-full queue"
+        );
+        session
+            .feed_at(&stream.as_bytes()[first_line_end..], at)
+            .unwrap();
+        assert_eq!(session.live_screen, ScreenId::Primary);
+        let inputs = session.live_detection_context();
+        for row in 0..count {
+            assert_eq!(
+                live_grid_input(&inputs, row).unwrap().site,
+                InlineMathSite::CommandOutput
+            );
+        }
+        let mut serviced = BTreeSet::new();
+        let mut latest = String::new();
+        for pass in 0..=8 {
+            if pass != 0 {
+                at += LIVE_MATH_STABLE_INTERVAL;
+                session.feed_at(
+                    format!("\x1b[1;1H\x1b]133;C\x07\x1b[2Kformula $y_{{{pass}}}^2$ here\x1b[{};1H\x1b]133;D;0\x07", count + 1).as_bytes(),
+                    at,
+                ).unwrap();
+            }
+            at += LIVE_MATH_STABLE_INTERVAL;
+            session.advance_live_stability(at);
+            assert_eq!(session.live_tasks.len(), crate::WORKER_QUEUE_CAP);
+            while let Some(mut task) = session.take_live_worker_task() {
+                assert!(
+                    resolve_live_detection_task(&mut task),
+                    "row {} must be an eligible inline formula",
+                    task.candidate_row
+                );
+                serviced.insert(task.candidate_row);
+                if task.candidate_row == 0 {
+                    latest = task.span.original_source.clone();
+                }
+                // Observe the scheduler handoff without growing display bands or changing the grid.
+                session.complete_live_worker_result(task, Err(MathRenderError::NotDetected));
+            }
+            if pass + 1 >= count.div_ceil(crate::WORKER_QUEUE_CAP as u32) {
+                assert_eq!(
+                    serviced.len(),
+                    count as usize,
+                    "every row must be serviced within one sweep, including during repaint"
+                );
+            }
+        }
+        assert_eq!(
+            serviced.len(),
+            count as usize,
+            "a changing head must not starve the tail"
+        );
+        // Once the last repaint stops, the latest head must also reach the worker within one sweep.
+        for _ in 0..count.div_ceil(crate::WORKER_QUEUE_CAP as u32) {
+            session.advance_live_stability(at);
+            while let Some(mut task) = session.take_live_worker_task() {
+                assert!(resolve_live_detection_task(&mut task));
+                if task.candidate_row == 0 {
+                    latest = task.span.original_source.clone();
+                }
+                session.complete_live_worker_result(task, Err(MathRenderError::NotDetected));
+            }
+        }
+        assert!(
+            latest.contains("y_{8}"),
+            "latest head was not serviced: {latest}"
+        );
     }
 
     /// A burst wider than the worker queue must not leave rows unscheduled forever.
