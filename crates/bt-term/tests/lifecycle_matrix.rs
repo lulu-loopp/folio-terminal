@@ -2472,6 +2472,126 @@ fn a_repaint_carrying_proven_formulas_stays_within_its_close_budget() {
     );
 }
 
+/// The cycles in one measured burst of a program redrawing the screen it is already showing.
+const IDENTICAL_REPAINT_CYCLES: usize = 128;
+
+/// The arm the off-band gate is for: `IDENTICAL_REPAINT_CYCLES` DEC 2026 repaints of the screen
+/// that is already on the glass, with one off-band record whose proven source is nowhere on it.
+///
+/// It is the shape of a full-screen agent under a keystroke: every row written, not one cell
+/// changed, and a dormant record underneath. The sibling arm below scrolls on every cycle, so its
+/// content moves and its off-band question is a new one each time; this one asks the same question
+/// of the same grid a hundred and twenty-eight times, and that is the only arm where the answer
+/// being remembered can show.
+///
+/// The screen and the seed are built before the meter starts. A `format!` per cycle is this test's
+/// own bookkeeping, and charging the session for it would be measuring the fixture.
+fn identical_repaint_arm(columns: u32, rows: u32) -> (u64, u64) {
+    let start = Instant::now();
+    let mut session = DualPlaneSession::new(nz32(columns), nz32(rows));
+
+    let mut seed = b"\x1b[?1049h".to_vec();
+    seed.extend_from_slice(&synchronized_screen(&[
+        "seed head",
+        "$$",
+        r"\oint \mathbf{B} \cdot d\ell = \mu_0 I",
+        "$$",
+        "seed tail",
+        "prompt> ",
+    ]));
+    session.feed_at(&seed, start).unwrap();
+    session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+    complete_live_math(&mut session);
+
+    let screen = synchronized_screen(&carried_formula_screen(false));
+    let settled = start + Duration::from_millis(400);
+    session.feed_at(&screen, settled).unwrap();
+    session.advance_live_stability(settled + LIVE_MATH_STABLE_INTERVAL);
+    complete_live_math(&mut session);
+    // One repaint before the meter starts. The three blocks are proven at the pass above, which
+    // moves the rows the re-anchor reads, so the first repaint after it is asked a question this
+    // session genuinely has not been asked yet. The burst measures the steady state.
+    session
+        .feed_at(&screen, settled + Duration::from_millis(450))
+        .unwrap();
+    assert_three_blocks_are_pictures(&mut session, false, "before the burst");
+    let proven = session.live_detection_count();
+    let passes = session.offscreen_restore_pass_count();
+
+    let bytes_before = HEAP_BYTES.with(std::cell::Cell::get);
+    let allocations_before = HEAP_ALLOCATIONS.with(std::cell::Cell::get);
+    let started = Instant::now();
+    for cycle in 0..IDENTICAL_REPAINT_CYCLES {
+        session
+            .feed_at(&screen, settled + Duration::from_millis(500 + cycle as u64))
+            .unwrap();
+    }
+    let elapsed = started.elapsed();
+    let cycles = IDENTICAL_REPAINT_CYCLES as u64;
+    let heap_bytes = (HEAP_BYTES.with(std::cell::Cell::get) - bytes_before) / cycles;
+    let heap_allocations =
+        (HEAP_ALLOCATIONS.with(std::cell::Cell::get) - allocations_before) / cycles;
+    eprintln!(
+        "G1_IDENTICAL_REPAINT {columns}x{rows} cycles={IDENTICAL_REPAINT_CYCLES} \
+         elapsed={elapsed:?} per_cycle_allocations={heap_allocations} per_cycle_bytes={heap_bytes}"
+    );
+
+    assert_eq!(
+        session.live_detection_count(),
+        proven,
+        "a screen that did not change must not be detected again"
+    );
+    assert_eq!(
+        session.offscreen_restore_pass_count(),
+        passes,
+        "a screen that did not change must not be re-asked about its off-band record"
+    );
+    assert_three_blocks_are_pictures(&mut session, false, "after the burst");
+    (heap_allocations, heap_bytes)
+}
+
+/// PIN - **a program redrawing the screen it is already showing pays for the redraw and nothing
+/// else, whatever is dormant underneath it.**
+///
+/// The carried-formula arm below scrolls on every cycle, so its off-band record faces a new grid
+/// each time and its 373-allocation re-ask is honest work. This arm is the case that is not: a
+/// full-screen agent repainting per keystroke over an unchanged screen, where the re-anchor was
+/// asked the same question of the same grid on every read — the whole grid into a fresh detection
+/// context, a parser walk over it, a substring search and a detector re-run — and could only ever
+/// reach the answer it reached before. The owner's recording sat with six such records.
+///
+/// Measured 2026-09-17 on a 120x16 alternate screen holding three proven blocks with one
+/// unresolvable off-band record under them:
+///
+///   before the answer was remembered  883 allocations, 578,102 B a cycle
+///   after                             636 allocations, 398,730 B a cycle
+///
+/// The 247 allocations and 179,372 B that went are the whole of the re-anchor pass: the detection
+/// context, the parser prefix walk, the substring search and the detector's verdict on what it
+/// found, none of which could reach a different answer than the read before. What is left is the
+/// repaint window's own close, which reseats three records against a grid it has to read to reseat
+/// them against; that is a different question and this pin does not claim it.
+///
+/// The budget carries the same ~12% of slack the neighbouring arms use.
+#[test]
+fn a_repaint_of_an_unchanged_screen_stays_within_its_dormant_record_budget() {
+    /// Measured 636; it was 883 before the off-band question was remembered.
+    const CYCLE_HEAP_ALLOCATIONS: u64 = 712;
+    /// Measured 398,730 B; it was 578,102 B before.
+    const CYCLE_HEAP_BYTES: u64 = 436 * 1024;
+
+    let (allocations, bytes) = identical_repaint_arm(120, 16);
+    assert!(
+        allocations <= CYCLE_HEAP_ALLOCATIONS,
+        "one repaint of an unchanged screen made {allocations} allocations, budget \
+         {CYCLE_HEAP_ALLOCATIONS}"
+    );
+    assert!(
+        bytes <= CYCLE_HEAP_BYTES,
+        "one repaint of an unchanged screen asked for {bytes} B, budget {CYCLE_HEAP_BYTES} B"
+    );
+}
+
 /// The cycles in one measured burst of off-band records going away and coming back.
 const RESTORED_FORMULA_CYCLES: usize = 64;
 

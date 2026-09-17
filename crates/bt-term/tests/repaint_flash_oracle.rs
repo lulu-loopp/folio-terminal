@@ -1887,3 +1887,95 @@ fn a_block_refused_and_proven_again_inside_one_window_keeps_the_newer_picture() 
     );
     assert!(session.held_unbacked_records().is_empty());
 }
+
+/// The reads the two off-band gate fixtures spend on a screen that does not change: a program
+/// redrawing the screen it is already showing, which is what a full-screen agent does on every
+/// keystroke.
+const IDENTICAL_REPAINTS: u64 = 16;
+
+/// **Whether a record can be re-anchored on a grid is a question about that grid, so it is asked
+/// once per grid and not once per read.**
+///
+/// The off-band re-anchor runs from every feed turn and its only early-out was an empty queue, so a
+/// record whose proven source is nowhere on the screen was re-asked on every read: the whole grid
+/// read into a fresh detection context, a parser walk over it, a substring search and the
+/// detector's own verdict, all to reach the same answer as the read before. Under a program that
+/// repaints its screen per keystroke that is paid per keystroke, and the owner's recording sat with
+/// six such records at once.
+///
+/// Sixteen repaints of the screen that is already on the glass. Every one of them writes every row,
+/// and not one of them changes a cell, so the question is the same sixteen times over.
+#[test]
+fn an_unplaceable_off_band_record_is_asked_about_once_per_screen_and_not_once_per_read() {
+    let start = std::time::Instant::now();
+    let mut session = session_with_one_off_band_block(start);
+    let settled = start + Duration::from_millis(400);
+    session
+        .feed_at(&synchronized_repaint(&scrolled_away_screen()), settled)
+        .unwrap();
+    let passes = session.offscreen_restore_pass_count();
+    assert!(
+        passes > 0,
+        "the fixture never ran the re-anchor at all, so it measures nothing"
+    );
+
+    for repaint in 0..IDENTICAL_REPAINTS {
+        session
+            .feed_at(
+                &synchronized_repaint(&scrolled_away_screen()),
+                settled + Duration::from_millis(10 + repaint),
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        session.offscreen_restore_pass_count(),
+        passes,
+        "{IDENTICAL_REPAINTS} repaints of an unchanged screen re-asked a question whose answer \
+         cannot have changed"
+    );
+}
+
+/// The other side of that rule, and the one that says what remembering the answer may not cost:
+/// **the record comes back in the very read that brings its source back.**
+///
+/// This is why the gate is the question and not a retry count or a clock: a record whose source
+/// scrolls back into view has to be found then and there, however many reads it spent waiting. The
+/// sixteen repaints above leave the memo standing, and the read after them — the one that puts the
+/// block back on a row of its own — must typeset it in the frame it publishes, with no pass of
+/// latency and nothing detected again.
+#[test]
+fn an_off_band_record_comes_back_in_the_read_that_brings_its_source_back() {
+    let start = std::time::Instant::now();
+    let mut session = session_with_one_off_band_block(start);
+    let settled = start + Duration::from_millis(400);
+    for repaint in 0..IDENTICAL_REPAINTS {
+        session
+            .feed_at(
+                &synchronized_repaint(&scrolled_away_screen()),
+                settled + Duration::from_millis(repaint),
+            )
+            .unwrap();
+    }
+    let detections = session.live_detection_count();
+
+    let back = settled + Duration::from_millis(100);
+    session
+        .feed_at(&synchronized_repaint(&bottom_edge_screen(false)), back)
+        .unwrap();
+    let mut projection = session.new_projection(session.layout_key());
+    session.refresh_projection(&mut projection);
+    let frame = session.viewport_frame(&mut projection).unwrap();
+    assert!(
+        frame_row_text(&frame, 4).trim().is_empty(),
+        "the block was not re-anchored in the read that brought its source back: {:?}",
+        (0..8)
+            .map(|row| frame_row_text(&frame, row))
+            .collect::<Vec<_>>()
+    );
+    assert!(session.held_unbacked_records().is_empty());
+    assert_eq!(
+        session.live_detection_count(),
+        detections,
+        "an exact re-anchor must not schedule detection again"
+    );
+}

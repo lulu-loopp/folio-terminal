@@ -8,6 +8,17 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **Folio no longer looks for a formula it has already failed to find, over and
+  over, on a screen that has not changed.** When a formula scrolls out of view,
+  Folio keeps its picture aside so that it can be given straight back the moment
+  the same text comes into view again. Looking for it means reading the whole
+  screen and working out what is on it, and that was being done afresh on every
+  read from the program — so a full-screen program that redraws its whole screen
+  each time you press a key made Folio do all of it on every keystroke, for each
+  formula it was holding aside, to reach the answer it had reached the moment
+  before. It is now asked once and asked again the instant anything it depends
+  on moves, so a formula scrolling back into view is still typeset in the very
+  frame that brings it back.
 - **A picture Folio has just taken down does not come back a moment later.**
   While a full-screen program or a reprinting one is redrawing, Folio holds the
   formulas already on the screen steady. If something ruled one of them out
