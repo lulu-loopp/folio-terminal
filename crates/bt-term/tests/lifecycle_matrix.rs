@@ -5,8 +5,8 @@ use std::{
 
 use bt_detect::resolve_detection_task;
 use bt_doc::{ContentAnchor, DecorationIntent, DecorationLifecycle};
-use bt_math::MathRaster;
-use bt_term::DualPlaneSession;
+use bt_math::{MathRaster, MathRenderError};
+use bt_term::{DualPlaneSession, LIVE_MATH_STABLE_INTERVAL, SessionMathTask};
 use bt_transcript::{CellFlags, TerminalColor};
 use bt_viewport::{FrameViewportOrigin, ViewportFrame};
 use proptest::prelude::*;
@@ -2111,6 +2111,229 @@ fn g1_primary_tui_explicit_scroll_repaint_is_fast_and_never_becomes_transcript()
         tall_bytes <= short_bytes + BYTES_PER_EXTRA_ROW * EXTRA_ROWS,
         "twice the rows took {tall_bytes} B a cycle against {short_bytes} B, which is more than \
          {BYTES_PER_EXTRA_ROW} B a row for {EXTRA_ROWS} rows that did not move"
+    );
+}
+
+/// The cycles in one measured burst of alternate-screen repaint over proven formulas.
+const CARRIED_FORMULA_REPAINT_CYCLES: usize = 128;
+
+/// One screen of the carried-formula arm: three `$$` blocks with a unique prose row above each, at
+/// row 0 or — with the banner — one row further down. Both spellings rewrite the same rows, so the
+/// row the banner pushes off the bottom is written blank rather than left holding the other
+/// screen's last line, and a cycle is a clean one-row scroll in either direction.
+fn carried_formula_screen(banner: bool) -> Vec<String> {
+    let mut rows = Vec::new();
+    if banner {
+        rows.push("banner".to_owned());
+    }
+    for (prose, body) in [
+        ("alpha zero", "a^2 + b^2"),
+        ("beta one", "c^2 + d^2"),
+        ("gamma two", "e^2 + f^2"),
+    ] {
+        rows.push(prose.to_owned());
+        rows.push("$$".to_owned());
+        rows.push(body.to_owned());
+        rows.push("$$".to_owned());
+    }
+    rows.push("delta three".to_owned());
+    rows.push("prompt> ".to_owned());
+    if !banner {
+        rows.push(String::new());
+    }
+    rows
+}
+
+fn synchronized_screen<T: AsRef<str>>(rows: &[T]) -> Vec<u8> {
+    let mut bytes = b"\x1b[?2026h\x1b[?25l\x1b[H".to_vec();
+    bytes.extend_from_slice(&repaint_rows(rows));
+    bytes.extend_from_slice(b"\x1b[?25h\x1b[?2026l");
+    bytes
+}
+
+fn complete_live_math(session: &mut DualPlaneSession) {
+    while let Some(task) = session.take_math_worker_task() {
+        let SessionMathTask::Live(mut task) = task else {
+            panic!("the alternate-screen arm unexpectedly scheduled frozen math");
+        };
+        if bt_detect::resolve_live_detection_task(&mut task) {
+            assert!(session.complete_live_worker_result(
+                task,
+                Ok(MathRaster {
+                    rgba: vec![0xff; 40 * 40 * 4],
+                    width_px: 40,
+                    height_px: 40,
+                    content_height_px: 40,
+                    ascent_px: 36.0,
+                    descent_px: 4.0,
+                    baseline_px: 36.0,
+                    render_time: Duration::from_millis(1),
+                    inline_runs: Vec::new(),
+                })
+            ));
+        } else {
+            assert!(session.complete_live_worker_result(task, Err(MathRenderError::NotDetected)));
+        }
+    }
+}
+
+/// Every one of the three blocks is a picture: its proven source rows carry no text of their own.
+fn assert_three_blocks_are_pictures(session: &mut DualPlaneSession, banner: bool, after: &str) {
+    let mut projection = session.new_projection(session.layout_key());
+    session.refresh_projection(&mut projection);
+    let frame = session.viewport_frame(&mut projection).unwrap();
+    let offset = usize::from(banner);
+    for block in 0..3usize {
+        for row in 0..3usize {
+            let row = 1 + block * 4 + row + offset;
+            assert!(
+                frame_row_text(&frame, row).trim().is_empty(),
+                "row {row} shows its LaTeX {after}: {:?}",
+                (0..14)
+                    .map(|row| frame_row_text(&frame, row))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
+/// The formula arm of the repaint pin: `CARRIED_FORMULA_REPAINT_CYCLES` DEC 2026 one-row scroll
+/// repaints on an alternate screen holding three proven blocks, with or without an off-band record
+/// underneath them. Returns what one cycle drew from the heap, in allocations and in bytes, and
+/// proves along the way that every cycle carried its three records rather than detecting them again.
+///
+/// The off-band record is the second arm rather than decoration on the first. The owner's recording
+/// had six of them under the read that lost the picture (`resident=0 dormant=6`), and one whose
+/// proven source is nowhere on the new screen is *unresolved* at every close — which is what arms
+/// the bounded re-detection, a complete synchronous detection pass over the whole grid. Measuring
+/// the two apart is the only way to say which of the two numbers is the close's own work.
+///
+/// Both screens and the seed are built before the meter starts. A `format!` per cycle is this
+/// test's own bookkeeping, and charging the session for it would be measuring the fixture.
+fn carried_formula_repaint_arm(columns: u32, rows: u32, off_band: bool) -> (u64, u64) {
+    let start = Instant::now();
+    let mut session = DualPlaneSession::new(nz32(columns), nz32(rows));
+
+    let mut seed = b"\x1b[?1049h".to_vec();
+    if off_band {
+        seed.extend_from_slice(&synchronized_screen(&[
+            "seed head",
+            "$$",
+            r"\oint \mathbf{B} \cdot d\ell = \mu_0 I",
+            "$$",
+            "seed tail",
+            "prompt> ",
+        ]));
+    }
+    session.feed_at(&seed, start).unwrap();
+    session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+    complete_live_math(&mut session);
+
+    let screens = [
+        synchronized_screen(&carried_formula_screen(false)),
+        synchronized_screen(&carried_formula_screen(true)),
+    ];
+    let settled = start + Duration::from_millis(400);
+    session.feed_at(&screens[0], settled).unwrap();
+    session.advance_live_stability(settled + LIVE_MATH_STABLE_INTERVAL);
+    complete_live_math(&mut session);
+    assert_three_blocks_are_pictures(&mut session, false, "before the burst");
+    let proven = session.live_detection_count();
+
+    let bytes_before = HEAP_BYTES.with(std::cell::Cell::get);
+    let allocations_before = HEAP_ALLOCATIONS.with(std::cell::Cell::get);
+    let started = Instant::now();
+    for cycle in 0..CARRIED_FORMULA_REPAINT_CYCLES {
+        session
+            .feed_at(
+                &screens[(cycle + 1) % 2],
+                settled + Duration::from_millis(500 + cycle as u64),
+            )
+            .unwrap();
+    }
+    let elapsed = started.elapsed();
+    let cycles = CARRIED_FORMULA_REPAINT_CYCLES as u64;
+    let heap_bytes = (HEAP_BYTES.with(std::cell::Cell::get) - bytes_before) / cycles;
+    let heap_allocations =
+        (HEAP_ALLOCATIONS.with(std::cell::Cell::get) - allocations_before) / cycles;
+    eprintln!(
+        "G1_CARRIED_REPAINT {columns}x{rows} off_band={off_band} \
+         cycles={CARRIED_FORMULA_REPAINT_CYCLES} elapsed={elapsed:?} \
+         per_cycle_allocations={heap_allocations} per_cycle_bytes={heap_bytes}"
+    );
+
+    assert_eq!(
+        session.live_detection_count(),
+        proven,
+        "a carried record must be reseated, not detected all over again"
+    );
+    // The burst starts on the banner screen and alternates, so the last cycle wears the banner
+    // exactly when the cycle count is odd.
+    assert_three_blocks_are_pictures(
+        &mut session,
+        !CARRIED_FORMULA_REPAINT_CYCLES.is_multiple_of(2),
+        "after the burst",
+    );
+    (heap_allocations, heap_bytes)
+}
+
+/// PIN - **what a repaint costs once there are formulas under it to carry.**
+///
+/// The sibling pin above drives `CSI S` on the primary screen with no formulas on it: it never opens
+/// an alternate repaint window, never carries a record, and never runs the close this one measures,
+/// so its unchanged budget said nothing about either. Here every cycle is a DEC 2026 one-row scroll
+/// over an alternate screen whose window opens, holds its records through the repaint, and at the
+/// close rebuilds the off-band queue and reseats each record by the segmented mapping.
+///
+/// Measured 2026-09-17 on a 120x16 screen, identical alone and inside the 43-test suite, and
+/// identical at `04cedbf6` — this pin's own commits moved neither number:
+///
+///   the same repaint with no formulas at all       27 allocations,    42,384 B a cycle
+///   three proven blocks carried through the close  644 allocations,  566,946 B a cycle
+///   and one off-band record underneath them      1,017 allocations,  761,621 B a cycle
+///
+/// Two things are worth reading off that. The close is nearly all of the cost, and its shape is the
+/// grid and not the records: it reads the whole grid into a fresh detection context, one `String`
+/// and one boundary table a row, several times over. And **one off-band record whose proven source
+/// is nowhere on the new screen costs a further 373 allocations and 194,675 B at every close** — it
+/// is unresolved by projection, which arms the bounded re-detection, which is a complete synchronous
+/// detection pass. The owner's recording ran with six of them. Neither is this commit's doing and
+/// neither is charged to it; they are written down because nothing measured them before.
+///
+/// The budgets carry the same ~12% of slack the neighbouring arms use: room for the same work
+/// written differently, not room for a second structure per cycle.
+#[test]
+fn a_repaint_carrying_proven_formulas_stays_within_its_close_budget() {
+    /// Measured 644.
+    const CYCLE_HEAP_ALLOCATIONS: u64 = 720;
+    /// Measured 566,946 B.
+    const CYCLE_HEAP_BYTES: u64 = 620 * 1024;
+    /// Measured 1,017.
+    const OFF_BAND_CYCLE_HEAP_ALLOCATIONS: u64 = 1140;
+    /// Measured 761,621 B.
+    const OFF_BAND_CYCLE_HEAP_BYTES: u64 = 832 * 1024;
+
+    let (allocations, bytes) = carried_formula_repaint_arm(120, 16, false);
+    assert!(
+        allocations <= CYCLE_HEAP_ALLOCATIONS,
+        "one carried-formula repaint cycle made {allocations} allocations, budget \
+         {CYCLE_HEAP_ALLOCATIONS}"
+    );
+    assert!(
+        bytes <= CYCLE_HEAP_BYTES,
+        "one carried-formula repaint cycle asked for {bytes} B, budget {CYCLE_HEAP_BYTES} B"
+    );
+
+    let (allocations, bytes) = carried_formula_repaint_arm(120, 16, true);
+    assert!(
+        allocations <= OFF_BAND_CYCLE_HEAP_ALLOCATIONS,
+        "the same cycle under one off-band record made {allocations} allocations, budget \
+         {OFF_BAND_CYCLE_HEAP_ALLOCATIONS}"
+    );
+    assert!(
+        bytes <= OFF_BAND_CYCLE_HEAP_BYTES,
+        "the same cycle under one off-band record asked for {bytes} B, budget \
+         {OFF_BAND_CYCLE_HEAP_BYTES} B"
     );
 }
 

@@ -6021,7 +6021,7 @@ impl DualPlaneSession {
         })
     }
 
-    fn finish_alternate_repaint(&mut self, snapshot: AlternateRepaintSnapshot) {
+    fn finish_alternate_repaint(&mut self, mut snapshot: AlternateRepaintSnapshot) {
         if self.live_screen != ScreenId::Alternate || !self.terminal.modes().alternate_screen {
             return;
         }
@@ -6060,16 +6060,32 @@ impl DualPlaneSession {
         // before it had proven, and the screen went back to LaTeX until the detector and the
         // rasteriser had done the whole job again. They are projected here beside the snapshot's
         // own, and they come first, because where they say they are is the newer answer.
+        //
+        // The snapshot's own copy of an occurrence that is still held is dropped where it lies,
+        // rather than skipped by a set built for the purpose: a `BTreeSet` and the `Vec` that had to
+        // be collected behind it are two structures per close whose only job is to answer a question
+        // about a handful of records, and `Vec::retain` answers it in place. Both lists are bounded
+        // by what fits on a screen and by `MAX_OFFSCREEN_RECORDS`, so the walk is a few dozen `u64`
+        // comparisons and never an allocation.
         let carried = std::mem::take(&mut self.live_decorations);
-        let mut seen = BTreeSet::new();
-        let sources = carried
+        let held = |record: &LiveDecorationRecord,
+                    carried: &BTreeMap<u32, LiveDecorationRecord>| {
+            carried
+                .values()
+                .any(|held| held.identity.occurrence_id == record.identity.occurrence_id)
+        };
+        snapshot
+            .decorations
+            .retain(|record| !held(record, &carried));
+        snapshot
+            .dormant_decorations
+            .retain(|record| !held(record, &carried));
+
+        for record in carried
             .into_values()
             .chain(snapshot.decorations)
             .chain(snapshot.dormant_decorations)
-            .filter(|record| seen.insert(record.identity.occurrence_id))
-            .collect::<Vec<_>>();
-
-        for record in sources {
+        {
             if row_mappings.is_empty() {
                 unresolved.push(record);
                 continue;
