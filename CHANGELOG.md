@@ -8,6 +8,14 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **One formula that cannot be drawn no longer takes the whole window with
+  it.** A fault while typesetting was caught in one stage of the work and not in
+  the others, so a fault in any of the rest ended Folio — every pane, every
+  shell, over one line of mathematics. A formula that goes wrong now stays as
+  the text you printed and nothing else is disturbed. Folio also refuses a
+  formula nested past its stated limit when the nesting is written without
+  braces, which it used to count only one way and let through the other.
+
 - **A screenful of formulas all at once no longer leaves the first few as raw
   text.** Printing a dense page of mathematics — a report, a log, anything that
   arrives in one go — gave Folio more formulas to draw than it queues at a time,

@@ -119948,9 +119948,11 @@ fn install_panic_log_hook_at(path: PathBuf, fatal: impl Fn(&Path) + Send + Sync 
         if let Err(error) = append_panic_report(&path, &report) {
             eprintln!("failed to write panic report {}: {error}", path.display());
         }
-        // A pure MiTeX conversion has its own unwind boundary. Its diagnostic
-        // belongs in the log above, never in a fatal dialog or process exit.
-        if bt_math::conversion_panic_is_contained() {
+        // One formula's render has its own unwind boundary, from the MiTeX
+        // conversion through the Typst compile and the rasterizer. Its
+        // diagnostic belongs in the log above, never in a fatal dialog or a
+        // process exit: the formula fails to source and the window lives.
+        if bt_math::render_panic_is_contained() {
             return;
         }
         previous(info);
@@ -120601,7 +120603,7 @@ mod tests {
         ));
         assert!(std::fs::read_to_string(log).unwrap().contains("unwrap"));
         assert_eq!(fatal_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
-        assert!(!bt_math::conversion_panic_is_contained());
+        assert!(!bt_math::render_panic_is_contained());
         drop(tasks);
         worker.join().unwrap();
         assert!(panic::catch_unwind(|| panic!("ordinary panic hook regression probe")).is_err());

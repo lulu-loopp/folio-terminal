@@ -16,14 +16,83 @@ use typst_library::{
 
 mod macro_budget;
 
+/// **Test-only: make one stage of a render panic on purpose.**
+///
+/// The containment this exists to pin has no reachable input — no formula is known that panics
+/// inside the Typst compile or the rasterizer, and a review that waits for one to be found is a
+/// review that never tests the boundary. So the fault is injected at exactly the two stages that
+/// used to run outside an unwind boundary, and the test asserts the same thing a real fault would:
+/// this formula fails, the next one renders, and the process lives.
+#[cfg(test)]
+pub(crate) mod panic_injection {
+    use std::cell::Cell;
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(crate) enum PanicStage {
+        Compile,
+        Rasterize,
+    }
+
+    thread_local! {
+        static ARMED: Cell<Option<PanicStage>> = const { Cell::new(None) };
+    }
+
+    pub(crate) fn arm(stage: PanicStage) {
+        ARMED.set(Some(stage));
+    }
+
+    /// Panic if this stage is the armed one, disarming first so the retry after it renders.
+    pub(crate) fn trip(stage: PanicStage) {
+        if ARMED.get() == Some(stage) {
+            ARMED.set(None);
+            panic!("injected {stage:?} fault");
+        }
+    }
+}
+
 thread_local! {
-    static CONVERTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static CONTAINED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run one formula's render inside an unwind boundary.
+///
+/// **A render is one unit of work over owned inputs, so a fault inside it is that formula's
+/// failure and not the program's.** Only the MiTeX conversion used to stand inside a boundary; the
+/// Typst compile, the SVG writer and the rasterizer did not, and the process panic hook escalates
+/// anything it is not told is contained — so one formula would have taken the window down and every
+/// shell in every pane with it.
+///
+/// `AssertUnwindSafe` is answerable here rather than convenient. The closure captures `&MathEngine`,
+/// whose one field is a `TypstEngine`, and a compile builds a fresh world per call out of that
+/// engine's immutable parts (`typst_as_lib::TypstEngine::do_compile`): the template, the font book,
+/// the library and the file resolvers are read and never written, so an unwind cannot leave half of
+/// one behind. The only mutable state a compile touches is `comemo`'s process-wide memo cache,
+/// which is a cache of pure functions and gains an entry only after a call has returned. So there
+/// is nothing to rebuild after an unwind, and the engine is used again — which the test asserts
+/// rather than assumes.
+fn contained<T>(render: impl FnOnce() -> Result<T, MathRenderError>) -> Result<T, MathRenderError> {
+    struct Guard(bool);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            CONTAINED.set(self.0);
+        }
+    }
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _guard = Guard(CONTAINED.replace(true));
+        render()
+    }))
+    .unwrap_or(Err(MathRenderError::Aborted))
 }
 
 /// The app's panic hook must log these panics, then return to the unwind boundary
 /// instead of showing its fatal-error dialog or exiting the process.
-pub fn conversion_panic_is_contained() -> bool {
-    CONVERTING.get()
+///
+/// True for the whole of one formula's render, not only for its MiTeX conversion: a render is one
+/// unit of work over owned inputs and a world built fresh from immutable engine state, so a fault
+/// anywhere inside it is that formula's failure. The hook keeps the diagnostic and lets the unwind
+/// reach [`MathEngine::render`]'s boundary.
+pub fn render_panic_is_contained() -> bool {
+    CONTAINED.get()
 }
 
 /// Normalize named delimiters at the MiTeX/Typst boundary, leaving literals intact.
@@ -75,7 +144,7 @@ fn convert_math(source: &str) -> Result<String, MathRenderError> {
     struct ConversionGuard(bool);
     impl Drop for ConversionGuard {
         fn drop(&mut self) {
-            CONVERTING.set(self.0);
+            CONTAINED.set(self.0);
         }
     }
     let source = source.to_owned();
@@ -84,7 +153,7 @@ fn convert_math(source: &str) -> Result<String, MathRenderError> {
     // all partial conversion state, so AssertUnwindSafe cannot hide a poisoned
     // shared invariant. The process hook retains the diagnostic in its log.
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        let _guard = ConversionGuard(CONVERTING.replace(true));
+        let _guard = ConversionGuard(CONTAINED.replace(true));
         mitex::convert_math(&source, Some(DEFAULT_SPEC.clone()))
     }))
     .map_err(|_| MathRenderError::ConversionPanic)?
@@ -239,6 +308,13 @@ pub enum MathRenderError {
     UnboundedMacro,
     #[error("math conversion could not complete")]
     ConversionPanic,
+    /// A panic anywhere else in the render — the Typst compile, the SVG, the rasterizer.
+    ///
+    /// One formula's render is one unit of work over owned inputs, so a fault inside it is that
+    /// formula's failure and not the program's. Without this the process panic hook reached its
+    /// fatal path and took every pane down with the formula.
+    #[error("math rendering could not complete")]
+    Aborted,
     #[error("MiTeX conversion failed: {0}")]
     Convert(String),
     #[error("Typst compilation failed: {0}")]
@@ -281,9 +357,11 @@ impl MathRenderError {
             | Self::MacroExpansionLimit
             | Self::UnboundedMacro => Some(MathFailureStage::Validate),
             Self::Convert(_) | Self::ConversionPanic => Some(MathFailureStage::Convert),
-            Self::Compile(_) | Self::NoPage | Self::Svg(_) | Self::InvalidDimensions => {
-                Some(MathFailureStage::Compile)
-            }
+            Self::Compile(_)
+            | Self::NoPage
+            | Self::Svg(_)
+            | Self::InvalidDimensions
+            | Self::Aborted => Some(MathFailureStage::Compile),
             Self::NotDetected
             | Self::InlineGeometry
             | Self::MissingCjkGlyph
@@ -328,6 +406,14 @@ impl MathEngine {
     }
 
     pub fn render(&self, source: &str, key: MathRenderKey) -> Result<MathRaster, MathRenderError> {
+        contained(|| self.render_inner(source, key))
+    }
+
+    fn render_inner(
+        &self,
+        source: &str,
+        key: MathRenderKey,
+    ) -> Result<MathRaster, MathRenderError> {
         let started = std::time::Instant::now();
         let document = self.typeset(source, key)?;
         let page = document.pages().first().ok_or(MathRenderError::NoPage)?;
@@ -345,6 +431,8 @@ impl MathEngine {
         let metrics = find_math_metrics(&page.frame)
             .or_else(|| fallback_math_metrics(&page.frame, margin_pt))
             .ok_or(MathRenderError::InvalidDimensions)?;
+        #[cfg(test)]
+        panic_injection::trip(panic_injection::PanicStage::Rasterize);
         rasterize_svg(&svg, key, metrics, started.elapsed())
     }
 
@@ -359,6 +447,7 @@ impl MathEngine {
     fn typeset(&self, source: &str, key: MathRenderKey) -> Result<PagedDocument, MathRenderError> {
         validate_source(source)?;
         let converted = convert_math(source)?;
+        bound_converted_nesting(&converted)?;
         let mut inputs = Dict::new();
         inputs.insert(
             "fallback_fonts".into(),
@@ -376,6 +465,8 @@ impl MathEngine {
             "display".into(),
             matches!(key.mode, MathMode::Display).into_value(),
         );
+        #[cfg(test)]
+        panic_injection::trip(panic_injection::PanicStage::Compile);
         self.engine
             .compile_with_input::<_, PagedDocument>(inputs)
             .output
@@ -618,20 +709,56 @@ fn validate_source(source: &str) -> Result<(), MathRenderError> {
     {
         return Err(MathRenderError::UnsafeCommand);
     }
+    bound_nesting(source, |byte| match byte {
+        b'{' => Some(true),
+        b'}' => Some(false),
+        _ => None,
+    })?;
+    macro_budget::validate(source)
+}
+
+/// How deep a formula may nest before it is refused.
+const MAX_NESTING_DEPTH: u16 = 256;
+
+/// Walk a source once and refuse it past [`MAX_NESTING_DEPTH`] levels of whatever `opens` calls a
+/// level. `Some(true)` opens one, `Some(false)` closes one, `None` is neither.
+fn bound_nesting(source: &str, opens: impl Fn(u8) -> Option<bool>) -> Result<(), MathRenderError> {
     let mut depth = 0_u16;
     for byte in source.bytes() {
-        match byte {
-            b'{' => {
+        match opens(byte) {
+            Some(true) => {
                 depth = depth.saturating_add(1);
-                if depth > 256 {
+                if depth > MAX_NESTING_DEPTH {
                     return Err(MathRenderError::NestingTooDeep);
                 }
             }
-            b'}' => depth = depth.saturating_sub(1),
-            _ => {}
+            Some(false) => depth = depth.saturating_sub(1),
+            None => {}
         }
     }
-    macro_budget::validate(source)
+    Ok(())
+}
+
+/// The same ceiling, asked of the Typst the conversion produced.
+///
+/// **The recursion that has to be bounded is over the converted source, not over the LaTeX.** The
+/// compile, the SVG writer and the rasterizer each walk the tree of what MiTeX emitted, and
+/// [`validate_source`]'s brace count cannot see that tree: `\sqrt\sqrt\sqrt…` nests as deeply as
+/// it is long without ever writing a brace — six bytes a level, well over a thousand levels inside
+/// the 8 KiB budget — and comes out as `sqrt(sqrt(sqrt(…)))`, where the same nesting is spelled in
+/// brackets and can be counted.
+///
+/// What is *not* bounded here is the conversion's own recursion, which runs before this text
+/// exists. That one is bounded by the source budget and by arithmetic rather than by a check: a
+/// level of it consumes at least one token, the shortest token a recursive LaTeX command can be
+/// written with is two bytes (``), and [`MAX_SOURCE_BYTES`] is 8 KiB — so no accepted source can
+/// drive it past 4,096 levels.
+fn bound_converted_nesting(converted: &str) -> Result<(), MathRenderError> {
+    bound_nesting(converted, |byte| match byte {
+        b'(' | b'[' | b'{' => Some(true),
+        b')' | b']' | b'}' => Some(false),
+        _ => None,
+    })
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1128,7 +1255,7 @@ mod tests {
             convert_math(r"\newcommand{\a}{#}"),
             Err(MathRenderError::ConversionPanic)
         );
-        assert!(!conversion_panic_is_contained());
+        assert!(!render_panic_is_contained());
         assert_eq!(
             MathRenderError::ConversionPanic.failure_stage(),
             Some(MathFailureStage::Convert)
@@ -1139,6 +1266,63 @@ mod tests {
                 .contains("unwrap")
         );
         assert!(convert_math("x+1").is_ok());
+    }
+
+    /// A fault outside the MiTeX conversion is that formula's failure, not the program's.
+    ///
+    /// Only `mitex::convert_math` stood inside an unwind boundary; the Typst compile, the SVG and
+    /// the rasterizer did not, and the process panic hook escalates any panic it does not recognise
+    /// as contained into the fatal path — so one formula would have taken the window down and every
+    /// shell in every pane with it.
+    #[test]
+    fn a_fault_anywhere_in_a_render_fails_that_formula_and_leaves_the_engine_usable() {
+        use panic_injection::PanicStage;
+        let engine = MathEngine::with_system_fonts(false);
+        for stage in [PanicStage::Compile, PanicStage::Rasterize] {
+            panic_injection::arm(stage);
+            assert_eq!(
+                engine.render("x^2", key()),
+                Err(MathRenderError::Aborted),
+                "{stage:?} must come back as this formula's refusal"
+            );
+            assert!(
+                !render_panic_is_contained(),
+                "{stage:?} must release the guard it took"
+            );
+            assert_eq!(
+                MathRenderError::Aborted.failure_stage(),
+                Some(MathFailureStage::Compile)
+            );
+        }
+        assert!(
+            engine.render("x^2", key()).is_ok(),
+            "the engine is reusable: a render builds its world from immutable state"
+        );
+    }
+
+    /// Nesting a formula can reach without a single brace.
+    ///
+    /// `validate_source` counts `{` only, so `\sqrt\sqrt\sqrt…` — six bytes a level, thousands of
+    /// levels inside the 8 KiB budget — passed it untouched. The recursion that matters is not over
+    /// the LaTeX: it is over the *converted* Typst, which is what the compile, the SVG writer and
+    /// the rasterizer each walk, and where the same nesting is spelled in brackets.
+    #[test]
+    fn brace_free_recursion_is_bounded_by_the_nesting_it_converts_to() {
+        let engine = MathEngine::with_system_fonts(false);
+        let deep = r"\sqrt".repeat(300) + " x";
+        assert!(
+            deep.len() < MAX_SOURCE_BYTES,
+            "the budget must not be what refuses it"
+        );
+        assert_eq!(
+            engine.render(&deep, key()),
+            Err(MathRenderError::NestingTooDeep)
+        );
+        let shallow = r"\sqrt".repeat(8) + " x";
+        assert!(
+            engine.render(&shallow, key()).is_ok(),
+            "an ordinary nested formula is untouched"
+        );
     }
 
     fn key() -> MathRenderKey {
