@@ -5756,10 +5756,14 @@ impl DualPlaneSession {
                 // text the logical line holds — a continuation keeps the space the wrap fell on.
                 let (text, cell_boundaries) = captured_row_logical_text_and_boundaries(&captured);
                 let row = row as u32;
-                // The site is read off the cells, which is where the write that made them recorded
-                // it. Nothing is derived here and nothing is remembered: a cell carries its own
-                // provenance through every scroll, insertion, deletion and reflow that moves it, so
-                // this answer is as current as the grid is and needs no bookkeeping to stay so.
+                // The site is read off the cells, which is where the writes that made them
+                // recorded it. Nothing is derived here and nothing is remembered: a cell carries
+                // its own provenance through every scroll, insertion, deletion and reflow that
+                // moves it, so this answer is as current as the grid is.
+                //
+                // **Every cell of text must say a command wrote it**, rather than no cell saying
+                // one did not. Read the other way round, text that reached a cell by a road nobody
+                // stamped would pass — and the roads into a cell are the whole vendored terminal.
                 LiveDetectionInput {
                     source: LiveDetectionSource::Grid {
                         row,
@@ -5770,7 +5774,11 @@ impl DualPlaneSession {
                     captured_columns: captured.captured_columns,
                     site: inline_math_site(
                         self.live_screen,
-                        command_output && !captured.cells.iter().any(|cell| cell.non_output_write),
+                        command_output
+                            && !captured
+                                .cells
+                                .iter()
+                                .any(bt_transcript::CapturedCell::carries_unclaimed_text),
                     ),
                     cell_boundaries,
                 }
@@ -10780,7 +10788,7 @@ impl DualPlaneSession {
         let site = inline_math_site(
             ScreenId::Primary,
             self.shell_integration_is_authoritative(ScreenId::Primary)
-                && !entry.line.non_output_write,
+                && entry.line.command_output_write,
         );
         self.document.set_inline_site(id, site);
         let Some(entry) = self.document.entries().get(&id) else {
@@ -28882,6 +28890,63 @@ mod tests {
         assert!(sentinel_row(&session) > band_end);
     }
 
+    /// The other direction of the same agreement: a command's line does not *lose* its site at the
+    /// freeze either.
+    ///
+    /// Its region is evicted along with the prompt line it started on while the rows it printed are
+    /// still on the grid — ordinary retirement — so a rule that asks the bookkeeping has nothing
+    /// left to ask and answers `Ineligible`. The cells answer what they answered a moment earlier.
+    #[test]
+    fn a_retired_commands_line_does_not_lose_its_site_at_the_freeze() {
+        let started = Instant::now();
+        let one = NonZeroUsize::new(1).unwrap();
+        let mut session = DualPlaneSession::with_quotas(nz(60), nz(8), one, one);
+        session
+            .feed_at(
+                format!(
+                    "{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\nt1\r\nt2\r\nt3\r\nt4\r\n\
+                     t5\r\nt6\r\nt7\r\n{ENERGY}{OUTPUT_D}"
+                )
+                .as_bytes(),
+                started,
+            )
+            .unwrap();
+        let inputs = session.live_detection_context();
+        let energy_row = (0..session.live_rows.len() as u32)
+            .find(|row| live_grid_input(&inputs, *row).is_some_and(|input| input.text == ENERGY))
+            .expect("the command's line is on the grid");
+        assert_eq!(
+            grid_site_at(&session, energy_row),
+            InlineMathSite::CommandOutput
+        );
+
+        // Scroll until the command's own line is the newest thing in the history, which with a
+        // quota of one line is the only moment it is there at all. The prompt line the region
+        // started on leaves long before that, which is the retirement this is about.
+        let mut frozen_site = None;
+        for _ in 0..16 {
+            session.feed_at(b"\r\n", started).unwrap();
+            if let Some(entry) = session
+                .document
+                .entries()
+                .values()
+                .find(|entry| entry.line.text == ENERGY)
+            {
+                assert!(
+                    session.semantic_output_regions.is_empty(),
+                    "the fixture must really have retired the region by now"
+                );
+                frozen_site = Some(entry.inline_site);
+                break;
+            }
+        }
+        assert_eq!(
+            frozen_site.expect("the command's line froze"),
+            InlineMathSite::CommandOutput,
+            "a line the command printed keeps its site when it scrolls, region or no region"
+        );
+    }
+
     /// **A line freezes with the site its cells say, so the two planes cannot disagree about it.**
     ///
     /// The live plane reads provenance off the cells the write stamped. The frozen plane used to
@@ -28974,6 +29039,125 @@ mod tests {
     const OUTPUT_C: &str = "\x1b]133;C\x07";
     const OUTPUT_D: &str = "\x1b]133;D;0\x07";
     const ENERGY: &str = "energy $E = mc^2$ here";
+
+    /// Drive one sequence into a fresh pane and count two things: how many of the rows carrying the
+    /// formula's text a lone `$` may be read on, and how many pictures actually reached the glass.
+    fn laundering_attempt(stream: &str) -> (usize, usize) {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut session);
+        session.feed_at(stream.as_bytes(), started).unwrap();
+        let inputs = session.live_detection_context();
+        let eligible = (0..session.live_rows.len() as u32)
+            .filter(|row| {
+                live_grid_input(&inputs, *row).is_some_and(|input| {
+                    input.text.contains("nergy") && input.site.permits_inline()
+                })
+            })
+            .count();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        complete_live_math_for_real(&mut session);
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        (eligible, rendered_inline_blocks(&frame).len())
+    }
+
+    /// **No road into a cell hands a prompt's text to a command.**
+    ///
+    /// The flag says a command's output put a cell's text there, and a line is a command's only
+    /// when *every* cell of text on it says so. That polarity is the whole defence, because the
+    /// roads into a cell are the whole of a terminal: this asks about the ones that were found by
+    /// attacking the first design, where the flag marked non-output writes and eligibility was its
+    /// absence — so anything unstamped passed. `DECALN`, a reset and the cells a shift creates put
+    /// text down without going near the stamp, and they all used to launder a prompt.
+    ///
+    /// A tab is the sharp one: it writes a cell by *leaving its character alone* when the cell is
+    /// occupied, so a tab walked along a prompt's own line is not a write and must not restate who
+    /// wrote what is already there. A combining mark is the other: it makes a cell's text partly
+    /// the writer's, so a prompt's accent takes a command's claim off the cell it lands on.
+    #[test]
+    fn no_road_into_a_cell_launders_a_prompt_into_a_command() {
+        let tabs = {
+            let mut tabs = format!("{PROMPT_A}{ENERGY}{OUTPUT_C}");
+            for column in 1..=ENERGY.len() {
+                tabs.push_str(&format!("\x1b[1;{column}H\t"));
+            }
+            tabs.push_str(&format!("\x1b[2;1H{OUTPUT_D}"));
+            tabs
+        };
+        let cases = [
+            ("a tab walked along every column of the prompt's line", tabs),
+            (
+                "a combining mark appended by the prompt",
+                format!("{OUTPUT_C}{ENERGY}{OUTPUT_D}{PROMPT_A}\u{301}"),
+            ),
+            (
+                "a combining mark appended by the prompt, clustered",
+                format!("\x1b[?2027h{OUTPUT_C}{ENERGY}{OUTPUT_D}{PROMPT_A}\u{301}"),
+            ),
+            (
+                "output overwriting part of a screen the prompt aligned",
+                format!(
+                    "{PROMPT_A}\x1b#8{OUTPUT_C}\x1b[1;1Henergy $\x1b[1;10H = mc^2$ here\x1b[K\r\n\
+                     {OUTPUT_D}"
+                ),
+            ),
+            (
+                "a screen the prompt aligned, with nothing else written",
+                format!("{OUTPUT_C}{ENERGY}{OUTPUT_D}{PROMPT_A}\x1b#8"),
+            ),
+            (
+                "a repeat of the prompt's own last character",
+                format!("{PROMPT_A}energy $E = mc^2$ her{OUTPUT_C}\x1b[1b{OUTPUT_D}"),
+            ),
+            (
+                "an insert that shifts the prompt's cells sideways",
+                format!(
+                    "{PROMPT_A}energy $E = mc^2$ here{OUTPUT_C}\x1b[1;1H\x1b[4h \x1b[4l{OUTPUT_D}"
+                ),
+            ),
+            (
+                "an insert-character that shifts the prompt's cells sideways",
+                format!("{PROMPT_A}{ENERGY}{OUTPUT_C}\x1b[1;1H\x1b[1@{OUTPUT_D}"),
+            ),
+            (
+                "a delete-character that pulls the prompt's cells back",
+                format!("{PROMPT_A}x{ENERGY}{OUTPUT_C}\x1b[1;1H\x1b[1P{OUTPUT_D}"),
+            ),
+            (
+                "output overwriting only the spacer half of the prompt's wide character",
+                format!("{PROMPT_A}\u{4e2d}nergy $E = mc^2$ here{OUTPUT_C}\x1b[1;2He{OUTPUT_D}"),
+            ),
+        ];
+        for (name, stream) in cases {
+            assert_eq!(
+                laundering_attempt(&stream),
+                (0, 0),
+                "{name}: a prompt's line must stay the prompt's"
+            );
+        }
+
+        // And the controls, without which every assertion above could be satisfied by refusing
+        // everything. A reset is among them rather than among the attacks: it blanks the cells it
+        // clears, so it leaves no text behind to launder, and what a command prints afterwards is
+        // the command's exactly as it would be on a screen nobody had written on.
+        for (name, stream) in [
+            (
+                "a command's own line",
+                format!("{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\n{ENERGY}\r\n{OUTPUT_D}"),
+            ),
+            (
+                "a command's own line after a reset",
+                format!("{PROMPT_A}{ENERGY}\x1bc{OUTPUT_C}\x1b[1;1H{ENERGY}\r\n{OUTPUT_D}"),
+            ),
+        ] {
+            assert_eq!(
+                laundering_attempt(&stream),
+                (1, 1),
+                "{name} is still typeset"
+            );
+        }
+    }
 
     /// R1 — **a prompt that reprints a command's line byte for byte must not be typeset.**
     ///

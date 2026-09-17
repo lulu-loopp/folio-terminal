@@ -65,7 +65,7 @@ pub(crate) fn captured_row_fingerprint(
         // that reprints a line byte for byte changes no glyph, which is exactly the sequence that
         // used to leave a retired command's eligibility on the row it overwrote.
         cell.flags
-            .contains(Flags::NON_OUTPUT_WRITE)
+            .contains(Flags::COMMAND_OUTPUT_WRITE)
             .hash(&mut hasher);
     }
     let continues = term.columns() != 0
@@ -195,7 +195,7 @@ pub(crate) fn to_captured_row(row: &[Cell]) -> CapturedRow {
                 wide_spacer: cell
                     .flags
                     .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER),
-                non_output_write: cell.flags.contains(Flags::NON_OUTPUT_WRITE),
+                command_output_write: cell.flags.contains(Flags::COMMAND_OUTPUT_WRITE),
             }
         })
         .collect();

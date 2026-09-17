@@ -125,17 +125,30 @@ file produces the vendored file byte for byte. Upstream formats with its own
   received printable input since the last drain — distinct from render damage,
   which is about what must be repainted.
 - **Write provenance.** `set_write_provenance` says whether the bytes fed from
-  here on are a shell command's output, and every cell the terminal prints from
-  then on carries the answer as `Flags::NON_OUTPUT_WRITE` (see that flag's own
-  documentation, and note that `Cell::reset` clears it, so an erase leaves a cell
-  claiming nothing). The terminal never reads it back. It is there because the
-  answer is a fact about a *write* and the cell is the thing that moves: a
-  scroll, a scroll region, `IL`/`DL`, `RI`, `CSI S`/`T`, a resize reflow that
-  re-cuts a row and an eviction into a scrollback all carry it without anybody
-  having to keep a parallel record in step. The field starts empty, so a caller
-  that never speaks — upstream's own test suite — writes exactly the cells
-  upstream writes; the owner states it at construction and before every segment
-  it feeds.
+  here on are a shell command's output, and every cell whose text the terminal
+  *replaces* from then on carries the answer as `Flags::COMMAND_OUTPUT_WRITE`
+  (see that flag's own documentation). It is there because the answer is a fact
+  about a *write* and the cell is the thing that moves: a scroll, a scroll
+  region, `IL`/`DL`, `RI`, `CSI S`/`T`, a resize reflow that re-cuts a row and an
+  eviction into a scrollback all carry it without anybody having to keep a
+  parallel record in step. The terminal never reads it back.
+
+  Three rules go with it, and they are what make the flag mean what it says. A
+  write that replaces a cell's text sets or clears it from the current
+  provenance. A write that does *not* replace the text leaves it alone — which
+  is `put_tab` over an occupied cell, whose whole job is to leave that cell's
+  character where it was. And a zero-width mark appended under a non-output
+  provenance clears it on the cell it lands on, because that cell's text is now
+  partly the appender's; appended under an output provenance it neither grants a
+  claim nor removes one. `Cell::reset` takes the default flags, so an erase
+  clears it too.
+
+  The field starts empty and the flag is the *claim* rather than its denial, so
+  a caller that never speaks — upstream's own test suite — writes exactly the
+  cells upstream writes, and that silence reads as claimed by nobody rather than
+  as claimed by a command. Text that reaches a cell by a road nobody stamped
+  (`DECALN`, a reset, a cell a shift creates) therefore claims nothing, which is
+  the direction a terminal with this many roads into a cell has to fail in.
 - **`primary_grid` is public.** The accessor itself is Folio's and already
   existed for the resize transaction; only its visibility changed. `resize`
   reflows the inactive grid as well as the active one, so a resize taken while a
