@@ -45,12 +45,17 @@ All notable changes to Folio are recorded here. The format follows
 
 - **A formula nested past what Folio can draw is refused, rather than ending
   the program.** Some shapes of mathematics nest as deeply as they are long —
-  a stack of superscripts, or a short definition repeated — and following one
-  down far enough used to end Folio outright, from text a program had only
-  printed. Folio now works out how deep a formula goes before it starts, and
-  leaves anything past its limit as the text you printed, the way it leaves
-  anything else it cannot draw. The limit is far beyond any formula written to
-  be read.
+  a stack of superscripts, a fraction inside a fraction inside a fraction, or a
+  short definition repeated — and following one down far enough used to end
+  Folio outright, from text a program had only printed. Folio now stops at its
+  limit as it reads, rather than trying to guess beforehand how far a formula
+  would take it, and leaves anything past that limit as the text you printed,
+  the way it leaves anything else it cannot draw. The limit is far beyond any
+  formula written to be read: thirty fractions inside one another, a dozen roots
+  inside one another, and every ordinary matrix and alignment are drawn as
+  before. An earlier attempt at the same fix guessed the depth in advance, and
+  guessed it wrong in both directions — it let several shapes of deep nesting
+  through, and refused a long row of perfectly flat fractions.
 
 - **One formula that cannot be drawn no longer takes the whole window with
   it.** A fault while typesetting was caught in one stage of the work and not in
