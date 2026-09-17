@@ -76,7 +76,35 @@ pub struct Converter {
     /// `Word`, whose own lexer class excludes every one of those characters. So refusing these
     /// three is what makes "the converted source is math content" true rather than hopeful.
     math_content_only: bool,
+    /// Folio: how many more grid cells this conversion may ask a layout engine to build.
+    ///
+    /// **A row of separators is not the size of what it asks for.** An environment with rows is
+    /// laid out as a *rectangle*: MiTeX's `array` pads every row out to the widest one
+    /// (`assets/mitex-specs/latex/standard.typ`) and Typst's `mat` does the same, so a source that
+    /// writes one wide row and a column of empty ones asks for their product. `\begin{array}{l}x`
+    /// followed by N `&` and N `\\` is 3N+29 bytes and (N+1)² cells — at the 8 KiB source budget
+    /// that is more than seven million of them, from a line a program printed. Bytes and depth are
+    /// both satisfied by it, which is why this is a third budget and not a corollary of either: the
+    /// bytes are few, the nesting is constant, and only the *product* is large.
+    ///
+    /// Charged before the environment's children are converted, and global rather than per
+    /// environment, so several of them in one formula add up and cannot each spend the whole
+    /// budget. See [`MAX_LAYOUT_CELLS`] for the number and how it was measured.
+    cells_left: usize,
 }
+
+/// Folio: the grid cells one formula may ask a layout engine to build.
+///
+/// Measured 2026-09-17 on the math worker's own thread, rendering a sparse `array` and a dense
+/// `pmatrix` of the same cell count: the cost is linear in cells, about 60µs each under
+/// `cargo test`'s `opt-level = 1` — 81 cells in 13ms, 1089 in 55ms, 2401 in 121ms, 4225 in 254ms.
+/// So this bounds the time as well as the memory, and it bounds it for the whole formula rather
+/// than for one environment.
+///
+/// Four thousand and ninety-six is a 64x64 matrix, which is far past anything written to be read —
+/// a twelve-by-twelve matrix is 144, a forty-row `aligned` with three alignment points is 160, a
+/// thirty-case `cases` is 60.
+pub const MAX_LAYOUT_CELLS: usize = 4096;
 
 impl Converter {
     fn new(mode: LaTeXMode, math_content_only: bool) -> Self {
@@ -88,7 +116,43 @@ impl Converter {
             skip_next_space: true,
             depth: 0,
             math_content_only,
+            cells_left: if math_content_only {
+                MAX_LAYOUT_CELLS
+            } else {
+                usize::MAX
+            },
         }
+    }
+
+    /// Folio: charge this environment's rectangle against the formula's budget, before a single
+    /// one of its cells is written.
+    ///
+    /// The rectangle is rows by the widest row, counted off the separators this converter is about
+    /// to emit — `&` opens a column and `\\` opens a row — at this environment's own level. A `&`
+    /// inside a group or an inner environment belongs to that scope and is counted there, by the
+    /// same rule, against the same budget.
+    fn charge_cells(&mut self, env: &LatexSyntaxElem) -> Result<(), ConvertError> {
+        let (mut rows, mut columns, mut widest) = (1usize, 1usize, 1usize);
+        for child in env.as_node().unwrap().children_with_tokens() {
+            match child.kind() {
+                LatexSyntaxKind::TokenAmpersand => {
+                    columns += 1;
+                    widest = widest.max(columns);
+                }
+                LatexSyntaxKind::ItemNewLine => {
+                    rows += 1;
+                    widest = widest.max(columns);
+                    columns = 1;
+                }
+                _ => {}
+            }
+        }
+        let cells = rows.saturating_mul(widest);
+        if cells > self.cells_left {
+            return Err(ConvertError::TooManyCells);
+        }
+        self.cells_left -= cells;
+        Ok(())
     }
 
     /// Folio: refuse a site that would copy source text into the output as code.
@@ -144,6 +208,8 @@ enum ConvertError {
     NestingTooDeep,
     /// Folio: the source asked for Typst code rather than mathematics.
     RawTypstCode,
+    /// Folio: the source asked a layout engine to build more cells than a formula may.
+    TooManyCells,
 }
 
 impl fmt::Display for ConvertError {
@@ -153,6 +219,7 @@ impl fmt::Display for ConvertError {
             Self::Str(e) => write!(f, "error: {}", e),
             Self::NestingTooDeep => write!(f, "error: nesting too deep"),
             Self::RawTypstCode => write!(f, "error: raw Typst code in a formula"),
+            Self::TooManyCells => write!(f, "error: too many cells in a formula"),
         }
     }
 }
@@ -181,6 +248,8 @@ pub enum BoundedConvertError {
     NestingTooDeep,
     /// The formula asked for Typst code rather than mathematics.
     RawTypstCode,
+    /// The formula asked for more than `MAX_LAYOUT_CELLS` grid cells.
+    TooManyCells,
     /// Everything else MiTeX says about a formula it cannot convert.
     Convert(String),
 }
@@ -190,6 +259,7 @@ impl fmt::Display for BoundedConvertError {
         match self {
             Self::NestingTooDeep => NestingTooDeep.fmt(f),
             Self::RawTypstCode => f.write_str("raw Typst code in a formula"),
+            Self::TooManyCells => f.write_str("too many cells in a formula"),
             Self::Convert(message) => f.write_str(message),
         }
     }
@@ -835,6 +905,15 @@ impl Converter {
             ContextFeature::IsEnumerate => LaTeXEnv::Enumerate,
         };
 
+        // Folio: every environment whose `&` and `\\` become a laid-out rectangle is charged for
+        // the rectangle, before any of it is written. `is-matrix` pads its rows out to the widest
+        // one and `is-math` and `is-cases` lay their rows out as a block; none of them costs a
+        // reader anything real, and all of them are cheap to count here because the separators are
+        // the tokens this function is already walking.
+        if matches!(env_kind, LaTeXEnv::Matrix | LaTeXEnv::Math | LaTeXEnv::Cases) {
+            self.charge_cells(&elem)?;
+        }
+
         // hack for itemize and enumerate
         if matches!(env_kind, LaTeXEnv::Itemize | LaTeXEnv::Enumerate) {
             let prev = self.enter_env(env_kind);
@@ -1179,6 +1258,8 @@ struct TypstRepr {
     nesting_too_deep: Rc<Cell<bool>>,
     /// Folio: a refusal for raw Typst code, likewise.
     raw_typst_code: Rc<Cell<bool>>,
+    /// Folio: a refusal for the size of the layout the formula asked for, likewise.
+    too_many_cells: Rc<Cell<bool>>,
 }
 
 impl fmt::Display for TypstRepr {
@@ -1188,6 +1269,7 @@ impl fmt::Display for TypstRepr {
             match e {
                 ConvertError::NestingTooDeep => self.nesting_too_deep.set(true),
                 ConvertError::RawTypstCode => self.raw_typst_code.set(true),
+                ConvertError::TooManyCells => self.too_many_cells.set(true),
                 _ => {}
             }
             self.error.borrow_mut().push_str(&e.to_string());
@@ -1234,6 +1316,7 @@ fn convert_node(
     let err = Rc::new(RefCell::new(err));
     let too_deep = Rc::new(Cell::new(false));
     let raw_code = Rc::new(Cell::new(false));
+    let too_many_cells = Rc::new(Cell::new(false));
     let repr = TypstRepr {
         elem: LatexSyntaxElem::Node(node),
         mode,
@@ -1242,12 +1325,15 @@ fn convert_node(
         math_content_only,
         nesting_too_deep: too_deep.clone(),
         raw_typst_code: raw_code.clone(),
+        too_many_cells: too_many_cells.clone(),
     };
     core::fmt::write(&mut output, format_args!("{}", repr)).map_err(|_| {
         if too_deep.get() {
             BoundedConvertError::NestingTooDeep
         } else if raw_code.get() {
             BoundedConvertError::RawTypstCode
+        } else if too_many_cells.get() {
+            BoundedConvertError::TooManyCells
         } else {
             BoundedConvertError::Convert(err.borrow().to_owned())
         }

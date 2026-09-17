@@ -15,7 +15,7 @@ use mitex_parser::parse_without_macro_bounded;
 pub use mitex_parser::spec::*;
 pub use mitex_parser::{MAX_TREE_DEPTH, NestingTooDeep, tree_depth};
 
-pub use converter::BoundedConvertError;
+pub use converter::{BoundedConvertError, MAX_LAYOUT_CELLS};
 use converter::LaTeXMode;
 use converter::convert_inner;
 use converter::convert_inner_bounded;

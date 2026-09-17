@@ -73,6 +73,31 @@ conversion tests still pass unmodified, `\iftypst` snapshots included.
 out under a name for the same reason the depth refusal is: the reader is owed the
 source text, not a diagnostic about their own formula.
 
+## `src/converter.rs` — a budget on the rectangle an environment asks for
+
+An environment with rows is laid out as a *rectangle*: MiTeX's own `array` pads
+every row out to the widest one, and Typst's `mat` does the same. So a source
+that writes one wide row and a column of empty ones asks for their product.
+`\begin{array}{l}x` followed by N `&` and N `\\` is `3N+29` bytes at constant
+nesting and `(N+1)²` cells — at Folio's 8 KiB source budget, more than seven
+million of them. Neither the byte budget nor the depth bound sees it: the bytes
+are few and the nesting is constant.
+
+`charge_cells` counts the rectangle off the separators `convert_env` is already
+walking — `&` opens a column, `\\` opens a row, at that environment's own level —
+and charges it against `MAX_LAYOUT_CELLS` before a single cell is written. The
+budget belongs to the conversion rather than to one environment, so several of
+them in a formula add up, and a matrix inside a matrix is charged for each
+rectangle. It is charged for every environment kind whose rows become a laid-out
+block: `is-matrix` (`matrix`, `pmatrix`, `bmatrix`, `Bmatrix`, `vmatrix`,
+`Vmatrix`, `smallmatrix`, `array`, `subarray`), `is-math` (`aligned`, `align`,
+`gather`, `gathered`, `split`, `equation`, `alignedat`) and `is-cases` (`cases`,
+`rcases`). Only the first family actually pads, but the other two are free to
+count and the rule is then one rule.
+
+Like the refusal above it is a mode, so upstream is unchanged, and
+`ConvertError`/`BoundedConvertError` gain a `TooManyCells` variant.
+
 ## The manifest
 
 The `divan` benchmark target is dropped (`[[bench]]` removed, `autobenches =
