@@ -54862,6 +54862,73 @@ impl Runtime<'_> {
         self.settle_focus_on(seat)
     }
 
+    /// **A path that landed in a terminal takes the keyboard with it**
+    /// (owner's ruling 2026-09-17, `T-FOCUS-FOLLOWS-DROPPED-PATH`).
+    ///
+    /// The ruling's own reason, met on the machine: what a reader types after
+    /// dropping a file is `Enter`, or the rest of the argument. With the
+    /// keyboard left where it was, that keystroke goes into a different shell —
+    /// which is the wrong-pane hazard the drop's three review rounds closed for
+    /// the path, reopened for the key after it.
+    ///
+    /// **[`Self::focus_seat`] with one line in front of it**, and the line is
+    /// [`Self::insert_path_into_terminal`]'s own (K144): the column very likely
+    /// holds the keyboard, because the press that picked the row up is
+    /// [`Self::focus_pane_at`]'s files arm, and a path that arrives in a shell
+    /// the arrow keys do not reach is a path you cannot edit. The external drop
+    /// road takes the same line for the same reason — the column may have been
+    /// clicked at any point before the hand went to another application.
+    ///
+    /// [`FilesFocusArrival::Pointer`] because a drop is a pointer gesture: it
+    /// said where it was going, so nothing is lit.
+    ///
+    /// **Called only after bytes have actually been written**, never on a
+    /// refusal. See [`Self::paste_paths_into`], which answers that question, and
+    /// [`Self::paste_offer_kept`], which is not consulted here at all — where
+    /// the bytes go is settled before this runs and this cannot reach it.
+    fn focus_the_pane_a_path_landed_in(&mut self, seat: SeatId) -> Result<()> {
+        if self.set_files_keyboard(None, FilesFocusArrival::Pointer) {
+            self.refresh_chrome();
+        }
+        self.focus_seat(seat)
+    }
+
+    /// **Bring this window to the front, because a drop is the reader pointing
+    /// at it** (owner's ruling 2026-09-17).
+    ///
+    /// The two steps [`FolioApp::raise_for_a_launch`] makes for a second start,
+    /// from the window's own side and for the same reason: un-minimise first,
+    /// because a foreground call on an iconified window brings it forward on
+    /// some configurations without restoring it, and then the one platform door
+    /// that actually takes the keyboard.
+    ///
+    /// **This is not focus stealing, and the gesture is why.** A file let go of
+    /// over this window is the reader saying "this one, here" with their hand;
+    /// answering it by typing a path into a window that stays behind the one
+    /// they dragged from is the drop half-honoured. It happens on no other road:
+    /// a clipboard paste is made *in* this window and an internal drag never
+    /// left it.
+    ///
+    /// `bt_platform::hotkey::give_foreground_to` and not winit's
+    /// `focus_window()`, because only one of the two is enough on macOS:
+    /// `makeKeyAndOrderFront:` raises a window inside its own application, and
+    /// the call there pairs it with `-[NSApplication activate]` so the
+    /// application itself becomes the frontmost one. On Windows it is the
+    /// foreground-lock dance with the answer read back. **Failure is silent to
+    /// the reader and one line in the log**, which is that door's own rule:
+    /// there is nothing a person can do about a foreground lock, and the path is
+    /// on the command line either way.
+    fn bring_this_window_forward(&mut self) {
+        if self.window.window.is_minimized() == Some(true) {
+            self.window.window.set_minimized(false);
+        }
+        if let Ok(native) = native_window(&self.window.window)
+            && !bt_platform::hotkey::give_foreground_to(native)
+        {
+            eprintln!("BT_DROP the window a file was dropped on could not take the keyboard");
+        }
+    }
+
     /// The keyboard half: typing goes here now.
     ///
     /// Guarded on there being a session at the seat, because a files column has
@@ -90584,7 +90651,18 @@ impl Runtime<'_> {
                         return Ok(false);
                     };
                     let path = payload.path.clone();
-                    self.paste_paths_into(target, vec![path], "write dragged path to PTY")?;
+                    // **And the keyboard follows the path, strictly afterwards**
+                    // (owner's ruling 2026-09-17). Behind the write's own
+                    // answer, so a release that reached no shell — a stale
+                    // target, a name the shell cannot spell — moves nothing:
+                    // the reader is left exactly where they were, which is what
+                    // every other refusal on this road already does. And it is
+                    // the seat of the `PasteTarget` the two readings agreed on
+                    // — never the hover-time seat, and never whichever pane
+                    // happens to be holding the keyboard.
+                    if self.paste_paths_into(target, vec![path], "write dragged path to PTY")? {
+                        self.focus_the_pane_a_path_landed_in(target.seat)?;
+                    }
                     return Ok(true);
                 }
                 RowVerb::Split => {}
@@ -96530,9 +96608,20 @@ impl Runtime<'_> {
         // have changed by now (X-1). A batch aimed at nothing is spent on
         // nobody.
         let pasted = match batch.target {
-            Some(target) => {
-                self.paste_paths_into(target, batch.paths, "write dropped paths to PTY")
-            }
+            Some(target) => self
+                .paste_paths_into(target, batch.paths, "write dropped paths to PTY")
+                .and_then(|written| {
+                    // **The keyboard follows the path, and the window comes to
+                    // the front with it** (owner's ruling 2026-09-17) — once for
+                    // the whole batch, because a batch is one drop however many
+                    // files it carried. Behind the write's own answer: a drop
+                    // that reached no shell raises nothing and focuses nothing.
+                    if written {
+                        self.focus_the_pane_a_path_landed_in(target.seat)?;
+                        self.bring_this_window_forward();
+                    }
+                    Ok(())
+                }),
             // A drop aimed at chrome, at a files column, or at a pane with no
             // shell behind it: nothing is typed, which is the answer
             // `paste_paths_into` gave for those before the address existed. The
@@ -98438,6 +98527,10 @@ impl Runtime<'_> {
         // refusal notice still leaves by the one door every paste's notices leave by
         // — and the line below is then an ordinary paste with nothing in it.
         let offered = std::mem::take(&mut prepared.picture);
+        // Whether it reached a shell is not asked here: a clipboard paste goes
+        // to the pane that already holds the keyboard, so there is no focus for
+        // it to move (owner's ruling 2026-09-17 changed the two *drop* roads and
+        // left this one alone).
         self.deliver_paste(target, prepared, "write clipboard paste to PTY")?;
         if offered.is_empty() {
             return Ok(());
@@ -98457,9 +98550,24 @@ impl Runtime<'_> {
     /// key, the joining of several files into one command line and the refusal
     /// notices one implementation rather than two that drift.
     ///
-    /// **Focus does not move**, on [`Self::paste_from_clipboard_into`]'s own
-    /// rule: a drop is a pointer gesture, and a pointer gesture does not take
-    /// the keyboard away from the pane the reader was typing in.
+    /// **Focus is not moved here**, and the caller is what moves it (owner's
+    /// ruling 2026-09-17). The rule used to be that a drop leaves the keyboard
+    /// alone, on the footing that a pointer gesture does not take it away from
+    /// the pane the reader was typing in; the owner met the other half of that
+    /// on the machine — the keystroke *after* a drop is `Enter` or the rest of
+    /// the argument, and with the keyboard left behind it goes into a different
+    /// shell, which is the wrong-pane hazard this road spent three review rounds
+    /// closing for the path itself. So the two drop roads move it and the
+    /// clipboard road does not, because a clipboard paste already went to the
+    /// pane holding the keyboard. That decision belongs to each caller, not
+    /// here: this function is the one door all three share.
+    ///
+    /// **Answers whether a shell actually received bytes**, which is what a
+    /// caller that moves focus has to know. `false` for a target that is no
+    /// longer live, for a path no shell could spell (the refusal card has been
+    /// raised by then) and for a seat whose session has gone — three different
+    /// reasons and one meaning: nothing was written, so nothing is focused and
+    /// nothing is raised.
     ///
     /// **Two roads arrive here and not one** (§7.61). The second is the file
     /// Folio writes for a picture on the clipboard, which by the time it has a
@@ -98473,9 +98581,9 @@ impl Runtime<'_> {
         target: PasteTarget,
         paths: Vec<PathBuf>,
         context: &'static str,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let Some(index) = self.live_paste_target(target) else {
-            return Ok(());
+            return Ok(false);
         };
         let leaf = &self.window.tabs[index].sessions[&target.seat];
         let recipient = leaf.paste_recipient.clone();
@@ -98538,13 +98646,13 @@ impl Runtime<'_> {
         target: PasteTarget,
         prepared: PreparedClipboardPaste,
         context: &'static str,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         // **The address is checked before anything is said**, which is why this
         // stands above the notice rather than beside the write (review X-1): a
         // card about a path that could not be spelled for a shell that is no
         // longer there is a card about nothing.
         let Some(active) = self.live_paste_target(target) else {
-            return Ok(());
+            return Ok(false);
         };
         let seat = target.seat;
         if let Some(notice) = prepared.notice {
@@ -98556,7 +98664,7 @@ impl Runtime<'_> {
             )?;
         }
         let Some(text) = prepared.text else {
-            return Ok(());
+            return Ok(false);
         };
         let Some(LeafSession {
             pty,
@@ -98565,7 +98673,7 @@ impl Runtime<'_> {
             ..
         }) = self.window.tabs[active].sessions.get_mut(&seat)
         else {
-            return Ok(());
+            return Ok(false);
         };
         paste_text(session, projection, &text, |bytes| {
             write_pty_input(pty.as_ref(), bytes, context)
@@ -98584,13 +98692,15 @@ impl Runtime<'_> {
         // own pane is judged by. The other pane still has to reach the glass,
         // which is exactly what `repaint_pane_change` is for.
         if seat != self.focused_leaf {
-            return self.repaint_pane_change(seat);
+            self.repaint_pane_change(seat)?;
+            return Ok(true);
         }
         self.pending_keyboard_at = Some(Instant::now());
         self.publish_frame(FrameTrigger {
             occurred_at: self.pending_keyboard_at.unwrap_or_else(Instant::now),
             source: FrameSource::Keyboard,
-        })
+        })?;
+        Ok(true)
     }
 
     /// **Start the worker that turns a clipboard picture into a file**
@@ -98715,11 +98825,15 @@ impl Runtime<'_> {
                 );
             }
         };
+        // The same as the clipboard's own road above, for the same reason: the
+        // picture was pasted into the pane that had the keyboard, and it still
+        // has it.
         self.paste_paths_into(
             landed.target,
             vec![path],
             "write clipboard picture path to PTY",
         )
+        .map(drop)
     }
 
     /// A composition event, routed by [`ime_owner`].
@@ -171388,8 +171502,12 @@ mod clipboard_path_tests {
                 "the batch has one reader, and it takes the whole of it",
             ),
             (
-                "self.paste_paths_into(target, batch.paths,",
-                "a dropped batch reaches a shell through one door",
+                ".paste_paths_into(target, batch.paths, \"write dropped paths to PTY\")",
+                "a dropped batch reaches a shell through one door, and takes the                  whole batch with it — which is what makes the focus and the                  raise behind its answer happen once per drop and not once per                  file",
+            ),
+            (
+                "self.bring_this_window_forward();",
+                "and a drop brings this window to the front, from the one place                  that spends a whole batch (owner's ruling 2026-09-17)",
             ),
             (
                 "self.paste_target(seat)",
@@ -171453,6 +171571,24 @@ mod clipboard_path_tests {
              so the point is taken later than the release:\n{collecting}"
         );
         let flushing = method_text(before_this_fixture, "    fn flush_dropped_files(");
+        // **The focus and the raise are behind the write's own answer, and both
+        // are inside the one function that spends a whole batch** (owner's
+        // ruling 2026-09-17). Three files let go of together are one drop, so
+        // they are one line, one focus and one raise; and a drop that reached no
+        // shell — chrome, a files column, a pane with no session, a name the
+        // shell cannot spell — moves nothing and raises nothing.
+        assert!(
+            flushing.contains("if written {")
+                && flushing.contains("self.focus_the_pane_a_path_landed_in(target.seat)?;")
+                && flushing.contains("self.bring_this_window_forward();"),
+            "a drop no longer takes the keyboard and the window with it, or does              so without asking whether anything was written:
+{flushing}"
+        );
+        assert!(
+            flushing.find("paste_paths_into") < flushing.find("focus_the_pane_a_path_landed_in"),
+            "the focus moved before the write, so where the bytes went could              depend on it:
+{flushing}"
+        );
         for forbidden in ["platform_pointer_now", "pointer_position"] {
             assert!(
                 !flushing.contains(forbidden),
@@ -171566,8 +171702,16 @@ mod clipboard_path_tests {
                 "a preview's centre opens the file as that pane",
             ),
             (
-                "self.paste_paths_into(target, vec![path], \"write dragged path to PTY\")?;",
-                "a terminal's centre pastes through the external drop's own door",
+                "if self.paste_paths_into(target, vec![path], \"write dragged path to PTY\")? {",
+                "a terminal's centre pastes through the external drop's own door, \
+                 and asks that door whether anything was actually written",
+            ),
+            (
+                "self.focus_the_pane_a_path_landed_in(target.seat)?;",
+                "and the keyboard follows the path into the shell that received it \
+                 — addressed by the delivered `PasteTarget`'s seat, never the \
+                 hover-time seat and never `focused_leaf` (owner's ruling \
+                 2026-09-17)",
             ),
             (
                 "RowVerb::PastePath(_) => {",
@@ -171584,13 +171728,46 @@ mod clipboard_path_tests {
                 "`{once}` — {what}:\n{commit}"
             );
         }
-        for forbidden in ["focused_leaf", "shell_literal::", "set_focus"] {
+        for forbidden in ["focused_leaf", "shell_literal::"] {
             assert!(
                 !commit.contains(forbidden),
-                "`{forbidden}` in the commit — a drop is a pointer gesture, and it \
-                 neither takes the keyboard nor spells a path a second way:\n{commit}"
+                "`{forbidden}` in the commit — the pane a drop is about is the one \
+                 the hand was over, never the one holding the keyboard, and the \
+                 path is not spelled a second way here:\n{commit}"
             );
         }
+        // **The focus move is strictly after the write, and cannot reach where
+        // the bytes went** (owner's ruling 2026-09-17, and the three review
+        // rounds it must not undo). The order is the assertion: `paste_offer_kept`
+        // settles the address, `paste_paths_into` spends it and says whether a
+        // shell received anything, and only then does anything about the keyboard
+        // happen. A focus call above either of those would be a fourth reading of
+        // "which pane" taken before the write rather than after it.
+        let arm = commit
+            .split_once("RowVerb::PastePath(_) => {")
+            .expect("the commit answers a text verb")
+            .1;
+        let (kept, wrote, focused) = (
+            arm.find("self.paste_offer_kept(drag, &plan)"),
+            arm.find("self.paste_paths_into(target,"),
+            arm.find("self.focus_the_pane_a_path_landed_in(target.seat)"),
+        );
+        assert!(
+            kept.is_some() && kept < wrote && wrote < focused,
+            "the text verb's three steps are out of order — the address, then the \
+             write, then the keyboard:\n{arm}"
+        );
+        // **And every refusal returns above all three.** This is the other half
+        // of `a_stale_aim_is_refused_however_it_went_stale`: each of its rows is
+        // a `None` out of `paste_offer_kept`, and what that means for the reader
+        // is that the keyboard does not move either — they are left in the pane
+        // they were typing in, with nothing written anywhere.
+        let refused = arm.find("return Ok(false);");
+        assert!(
+            refused.is_some() && kept < refused && refused < wrote,
+            "a refused release no longer leaves above the write and the focus, so \
+             a stale aim can still move the keyboard:\n{arm}"
+        );
         // **The second reading is a reading, and it is of the platform and of
         // the live tree** (review 2026-09-17 P1-a). A `Runtime` is not
         // constructible here, so which calls stand in this function is what says
@@ -171662,6 +171839,13 @@ mod clipboard_path_tests {
     /// ([`a_rows_centre_verbs_leave_by_three_doors`] pins that it does), so the
     /// sequences differ from each other only in *which fact* comes back
     /// different — and that is what is set out here.
+    ///
+    /// **Every row here is also a row about the keyboard** (owner's ruling
+    /// 2026-09-17). A refusal is a `None` out of `Runtime::paste_offer_kept`,
+    /// and the commit leaves on it above both the write and the focus move — so
+    /// a stale aim writes nothing *and* leaves the reader in the pane they were
+    /// typing in. `a_rows_centre_verbs_leave_by_three_doors` is what pins that
+    /// ordering; this is what enumerates the refusals it protects.
     ///
     /// MUTATION: compare only the landings and the active-tab closure passes —
     /// the nastiest of them, because the seat numbers agree. MUTATION: compare

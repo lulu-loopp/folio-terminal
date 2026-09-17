@@ -24,7 +24,10 @@ All notable changes to Folio are recorded here. The format follows
   their middles still mean what they meant — and `Esc` still calls the whole
   thing off. If anything moves between the moment the pane lights up and the
   moment you let go — your hand to another pane, a pane closing, a tab closing
-  under it — nothing is written at all, rather than written somewhere else.
+  under it — nothing is written at all, rather than written somewhere else. The
+  terminal that receives the path also takes the keyboard, so the next thing you
+  type — `Enter`, or the rest of the command — goes to the shell you dropped
+  onto; a drop that writes nothing leaves the keyboard where it was.
 
 - **Dropping a file onto Folio now puts its path on the command line.** Drag a
   file out of File Explorer or the Finder and let go of it over a split, and its
@@ -34,7 +37,10 @@ All notable changes to Folio are recorded here. The format follows
   the rest each get the spelling they read. Several files let go of together
   arrive on one line, one argument each, and a name the shell has no way to
   spell is reported instead of being mangled. Folio runs no command of its own:
-  the path is put in front of the cursor for you to finish the line.
+  the path is put in front of the cursor for you to finish the line. The terminal
+  that receives the path also takes the keyboard, and Folio comes to the front —
+  you dropped the file here, so here is where you can carry on typing. A drop
+  that writes nothing changes neither.
 
 - **A picture on the clipboard now pastes as the path of a file Folio writes
   for it.** A screenshot taken with `Win`+`Shift`+`S`, or with
