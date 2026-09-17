@@ -6,8 +6,8 @@ use objc2_app_kit::{
 };
 
 use crate::clipboard::{
-    Candidate, ClipboardPayload, ClipboardPort, ClipboardTypes, PictureBytes, PictureEncoding,
-    read_payload,
+    Candidate, ClipboardPayload, ClipboardPort, ClipboardTypes, MAX_PICTURE_BYTES, PictureBytes,
+    PictureEncoding, read_payload,
 };
 
 struct MacClipboard {
@@ -78,6 +78,12 @@ impl ClipboardPort for MacClipboard {
             let Some(data) = self.pasteboard.dataForType(kind) else {
                 continue;
             };
+            // Asked before it is copied (review X-4): `length` is the
+            // representation's own size and reading it costs nothing, where
+            // `to_vec` is the allocation this ceiling exists to refuse.
+            if data.is_empty() || data.len() > MAX_PICTURE_BYTES {
+                continue;
+            }
             let bytes = data.to_vec();
             if !bytes.is_empty() {
                 found.push(PictureBytes { encoding, bytes });
