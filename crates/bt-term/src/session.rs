@@ -31888,6 +31888,127 @@ mod tests {
         }
     }
 
+    /// **A synchronized update parks bytes, and a marker read over the top of them is read against
+    /// a screen that has not received them** (review 2026-09-17 second pass, F3 P1).
+    ///
+    /// DEC 2026 asks the terminal to hold a block of writes back and apply them all at once, and
+    /// the vendored parser does exactly that: the bytes sit in its buffer and are parsed at the
+    /// terminator, against whatever the terminal's state is *then*. The adapter meanwhile pauses
+    /// at every shell-integration marker, so a segment carries one phase — but the block's bytes
+    /// arrived under an earlier one, and were being written under a later one.
+    ///
+    /// Both directions are wrong and the second is the one ordinary use meets: a prompt drawn
+    /// inside a block that commits after `C` was typeset as output, and a command's own output
+    /// printed inside a block that commits after `D` and the next `A` — a program killed inside a
+    /// block it never closed, a prompt theme that wraps its drawing — was left as source. The
+    /// block is now committed where the order matters, at the marker.
+    #[test]
+    fn a_synchronized_update_is_written_before_the_marker_that_follows_it() {
+        let prompt_side =
+            format!("{PROMPT_A}\x1b[?2026h{ENERGY}\r\n{PROMPT_B}{OUTPUT_C}\x1b[?2026l{OUTPUT_D}");
+        let output_side = format!(
+            "{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\n\x1b[?2026h{ENERGY}\r\n{OUTPUT_D}{PROMPT_A}\
+             \x1b[?2026l"
+        );
+
+        for split in 0..=prompt_side.len() {
+            let started = Instant::now();
+            let mut session = DualPlaneSession::new(nz(60), nz(8));
+            seat_inline_metrics(&mut session);
+            session
+                .feed_at(&prompt_side.as_bytes()[..split], started)
+                .unwrap();
+            session
+                .feed_at(&prompt_side.as_bytes()[split..], started)
+                .unwrap();
+            assert_eq!(
+                grid_site_of(&session, "energy"),
+                InlineMathSite::Ineligible,
+                "split={split}: this text arrived while the shell was drawing its prompt, and a \
+                 block that commits after `C` does not make it the command's"
+            );
+        }
+        assert_eq!(
+            laundering_attempt(&prompt_side),
+            (0, 0),
+            "and none of it is typeset"
+        );
+        assert_eq!(
+            frozen_laundering_attempt(&prompt_side),
+            (0, 0),
+            "on either plane"
+        );
+
+        for split in 0..=output_side.len() {
+            let started = Instant::now();
+            let mut session = DualPlaneSession::new(nz(60), nz(8));
+            seat_inline_metrics(&mut session);
+            session
+                .feed_at(&output_side.as_bytes()[..split], started)
+                .unwrap();
+            session
+                .feed_at(&output_side.as_bytes()[split..], started)
+                .unwrap();
+            assert_eq!(
+                grid_site_of(&session, "energy"),
+                InlineMathSite::CommandOutput,
+                "split={split}: the command printed this before it ended, and a block that \
+                 commits after the next prompt does not take that away from it"
+            );
+        }
+        assert_eq!(
+            laundering_attempt(&output_side),
+            (1, 1),
+            "and it is typeset, which is the false refusal this closes"
+        );
+        assert_eq!(
+            frozen_laundering_attempt(&output_side),
+            (1, 1),
+            "on either plane"
+        );
+    }
+
+    /// A screen swap parked in the same block: the marker after it must name the screen the swap
+    /// left the terminal on, not the one the parser had not reached yet.
+    #[test]
+    fn a_marker_after_a_parked_screen_swap_names_the_screen_the_swap_left() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut session);
+        // Stopped before the terminator, which is the whole point: the block is still open, and
+        // the prompt marker inside it has already been handed to the session.
+        session
+            .feed_at(
+                format!(
+                    "{PROMPT_A}PS> {PROMPT_B}pager{OUTPUT_C}\r\n\x1b[?1049h\x1b[?2026h\
+                     \x1b[?1049lafter $z^2$ here\r\n{PROMPT_A}"
+                )
+                .as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert!(
+            !session.terminal.modes().alternate_screen,
+            "the parked swap back is applied before the marker after it is read"
+        );
+        assert_eq!(
+            session.shell_phases.get(&ScreenId::Primary),
+            Some(&ShellIntegrationPhase::Prompt),
+            "so the prompt the shell printed is the primary screen's prompt"
+        );
+        assert_eq!(
+            session.shell_phases.get(&ScreenId::Alternate),
+            None,
+            "and the canvas the pager gave back is told nothing about it"
+        );
+        session.feed_at(b"\x1b[?2026l", started).unwrap();
+        assert_eq!(
+            grid_site_of(&session, "after"),
+            InlineMathSite::CommandOutput,
+            "the command printed it on the screen it had just been handed back, inside a block"
+        );
+    }
+
     /// The same command, stopped while the program still owns the screen: its canvas is eligible by
     /// the alternate-screen policy and by nothing else, and the claim is not on those cells.
     #[test]

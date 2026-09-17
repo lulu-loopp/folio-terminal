@@ -799,6 +799,26 @@ impl TerminalAdapter {
                     });
                 }
                 InlineImageStreamAction::ShellIntegration(marker) => {
+                    // **A marker is a statement about the grid, so the grid has to have caught
+                    // up with the bytes before it.** DEC 2026 is the one thing that puts writes
+                    // out of order with this stream: the vendored parser holds a block's bytes
+                    // and applies them all at the terminator, while this scanner has already
+                    // handed their markers out. So a `B` read the cursor from before the prompt
+                    // the block was drawing, a marker after a buffered `?1049l` named the screen
+                    // the block had already left, and the provenance the session states for the
+                    // next segment was stamped on text that arrived under the last one — a
+                    // prompt's `$…$` typeset as output, and a command's left as source when it
+                    // printed inside a block that ended after the prompt came back.
+                    //
+                    // Committing the block here is the commit its own deadline already makes,
+                    // taken at the one other point where the order is load-bearing. It costs a
+                    // block that contains a marker its atomicity, which is a block that spans a
+                    // prompt/command boundary — an atomic screen update of two different
+                    // moments. A block that draws a prompt and says so (`A`, `B`) crosses no
+                    // boundary and is committed whole, because those markers do not move the
+                    // provenance; what it loses is only the right to be told about the grid
+                    // late.
+                    events.extend(self.commit_synchronized_update_before_marker());
                     let cursor = self.cursor();
                     let screen = if self.modes().alternate_screen {
                         RemovalScreen::Alternate
@@ -839,6 +859,22 @@ impl TerminalAdapter {
                 break;
             }
         }
+        events
+    }
+
+    /// Write out a DEC 2026 block that is still holding bytes back, so that the marker about to be
+    /// reported is read against a grid those bytes have reached.
+    ///
+    /// The same commit [`Self::finish_synchronized_update`] makes when the block's own deadline
+    /// passes, and it reports the same events — with this one's grid writes as well, because the
+    /// session records which rows a command line was typed on and those rows are written here.
+    /// Silent, and free, when no block is open.
+    fn commit_synchronized_update_before_marker(&mut self) -> Vec<AdapterEvent> {
+        if self.synchronized_update_deadline().is_none() {
+            return Vec::new();
+        }
+        let mut events = self.finish_synchronized_update();
+        events.extend(self.drain_grid_write_events());
         events
     }
 
