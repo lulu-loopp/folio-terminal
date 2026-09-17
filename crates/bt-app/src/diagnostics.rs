@@ -226,6 +226,16 @@ pub fn run_footer(now: &str, code: i32) -> String {
 /// Answers which channel the rest of the run has, which is worth one line in a
 /// startup trace and nothing else.
 pub fn enter_resident_run(storage: &Path) -> Channel {
+    // **Before the channel is chosen**, because [`note`]'s destination is a
+    // property of the storage directory and not of which channel won: a run
+    // that kept its console writes its watchdog lines to this file and nothing
+    // else to it. The directory is the one `%APPDATA%\Folio\` everything else
+    // in this product already writes into, and creating it here — rather than
+    // in the log branch below, where it used to be — costs one call on a path
+    // that almost always exists and is what makes a console run's first
+    // [`note`] land somewhere.
+    let _ = std::fs::create_dir_all(storage);
+    let _ = RESIDENT_LOG.set(log_path(storage));
     let channel = choose_resident_channel(storage);
     // Remembered, and this is not bookkeeping: after this call `stdout` is very
     // often *this product's own log file*, and a later caller who asks "is
@@ -234,6 +244,73 @@ pub fn enter_resident_run(storage: &Path) -> Channel {
     let _ = RESIDENT_CHANNEL.set(channel);
     channel
 }
+
+/// **One resident diagnostic, written where nothing can be waiting for a
+/// console** (X-7).
+///
+/// # Why there is a second road to the same file
+///
+/// The channel this module installs is `SetStdHandle` and `dup2` precisely so
+/// that no call site has to know where diagnostics go, and for the two hundred
+/// and forty `eprintln!` in this workspace that is still the answer. But a run
+/// that kept its console (a trace run — [`console_was_asked_for`]) writes those
+/// lines into a pipe **somebody else is supposed to be reading**, and a reader
+/// that stops reading stops the writer inside the kernel. Every thread that
+/// then says anything queues behind it, because `eprintln!` is one
+/// process-wide lock in front of one handle.
+///
+/// The two callers that must never queue there are the hang watchdog — whose
+/// whole job is to be the thread still working when the window thread is not —
+/// and the resident UI diagnostics the window thread itself writes. They come
+/// here instead: **a handle of this function's own, opened for this line and
+/// closed after it**, so there is no lock between two callers either, and a
+/// `diagnostics.log` that is a file on the disk rather than somebody's screen.
+///
+/// # And the console still gets the line when somebody asked for one
+///
+/// Through the trace sink's bounded queue, which drops rather than waits — see
+/// [`crate::trace_sink::offer_stderr_line`]. A developer watching a trace goes
+/// on seeing the watchdog's lines; a developer whose shell has stopped reading
+/// loses some of them and holds nobody up, which is the bargain every line in
+/// that module is written under.
+///
+/// Before [`enter_resident_run`] there is no resident log and this says nothing:
+/// the front door's output is [`eprintln!`]'s business and always was.
+pub fn note(text: &str) {
+    if let Some(log) = RESIDENT_LOG.get() {
+        append_note(log, text);
+    }
+    if resident_channel() == Some(Channel::Console) {
+        crate::trace_sink::offer_stderr_line(text.to_owned());
+    }
+}
+
+/// [`note`]'s file half, taking the path so a test can drive it.
+///
+/// Opened, appended to and closed per line. That is more calls than a kept
+/// handle would make and it is the point: a kept handle is a lock, and a lock
+/// is a thread waiting for another thread's stalled write, which is the thing
+/// this road exists to have none of. One `write_all` per line, to a handle the
+/// platform opened in append mode, so two writers of this file interleave whole
+/// lines rather than halves.
+///
+/// Answers whether the line reached the file.
+pub fn append_note(log: &Path, text: &str) -> bool {
+    let mut line = String::with_capacity(text.len() + 1);
+    line.push_str(text);
+    line.push('\n');
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, line.as_bytes()))
+        .is_ok()
+}
+
+/// **This run's `diagnostics.log`**, remembered for [`note`] whichever channel
+/// the run took — including a console run, where the streams never went near it
+/// and the watchdog's lines are the only thing in it.
+static RESIDENT_LOG: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
 /// **Where the rest of this run's diagnostics can be found**, or `None` while
 /// the front door is still open.
@@ -256,10 +333,6 @@ fn choose_resident_channel(storage: &Path) -> Channel {
         return Channel::Console;
     }
     let log = log_path(storage);
-    // The directory is the one `%APPDATA%\Folio\` that everything else in this
-    // product already writes into; creating it here costs one call on a path
-    // that almost always exists.
-    let _ = std::fs::create_dir_all(storage);
     // **Read before anything of this run's touches the file**, and that order is
     // the whole of what makes it mean something: it is the moment the *previous*
     // run last said anything, which is what [`report_the_previous_runs_crash`]
@@ -460,12 +533,36 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        Channel, LOG_ROTATE_AT, console_was_asked_for, named_file, names_a_crash_report,
-        newest_crash_report, rotate_if_oversized, switched_on,
+        Channel, LOG_ROTATE_AT, append_note, console_was_asked_for, named_file,
+        names_a_crash_report, newest_crash_report, rotate_if_oversized, switched_on,
     };
 
     fn names(list: &[&str]) -> Vec<OsString> {
         list.iter().map(|name| OsString::from(*name)).collect()
+    }
+
+    /// PIN — **the road that owes nobody a lock takes whole lines and makes its
+    /// own file** (X-7).
+    ///
+    /// Two writers of one log, which is what a run with a `Log` channel actually
+    /// has — the streams on one handle and this on another — and the thing that
+    /// must survive it is a reader's ability to read a line. Appending, so a
+    /// second note does not stand on the first.
+    #[test]
+    fn a_note_appends_a_whole_line_to_a_log_of_its_own() {
+        let directory = a_reports_directory("notes");
+        let log = directory.join(super::LOG_FILENAME);
+        assert!(append_note(&log, "the window thread has not answered"));
+        assert!(append_note(&log, "and then it did"));
+        assert_eq!(
+            std::fs::read_to_string(&log).expect("the log was made"),
+            "the window thread has not answered\nand then it did\n"
+        );
+        assert!(
+            !append_note(&directory, "a directory is not a log"),
+            "a note that could not be written says so"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     // ── M4-11: the system's own crash reports ──────────────────────────────

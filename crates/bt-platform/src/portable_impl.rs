@@ -1429,6 +1429,70 @@ pub fn redirect_std_streams_to_file(path: &Path) -> bool {
     false
 }
 
+/// **Put these bytes on this process's standard error without taking Rust's
+/// shared `Stderr` lock** (X-7).
+///
+/// For the one writer that can be stuck in this call for seconds: the trace
+/// sink's thread, writing a batch to a terminal whose reader has stopped
+/// reading. `eprintln!` reaches the same descriptor through one process-wide
+/// lock, so a writer parked inside `write` while holding it parks every other
+/// thread that says anything — the window thread included, which is the fault
+/// the sink was built to remove, moved one layer out. Writing the descriptor
+/// directly leaves those threads to wait on the *device* they chose and never
+/// on this one's turn at a mutex.
+///
+/// `EINTR` is retried because a signal is not an answer about the bytes. A
+/// short write is continued from where the kernel stopped; a `write` that
+/// reports nothing written without an error is a descriptor that will never
+/// take them, and looping on it would be the wait this refuses.
+///
+/// Answers whether every byte reached the descriptor.
+#[cfg(unix)]
+pub fn write_std_error(bytes: &[u8]) -> bool {
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        // SAFETY: the pointer and length name this call's own slice, which
+        // outlives the synchronous call; the descriptor is the platform's
+        // constant and is not owned, borrowed or closed here.
+        let written = unsafe {
+            libc::write(
+                libc::STDERR_FILENO,
+                rest.as_ptr().cast::<libc::c_void>(),
+                rest.len(),
+            )
+        };
+        if written < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return false;
+        }
+        let Ok(written) = usize::try_from(written) else {
+            return false;
+        };
+        let Some(remaining) = rest.get(written..) else {
+            return false;
+        };
+        if remaining.len() == rest.len() {
+            return false;
+        }
+        rest = remaining;
+    }
+    true
+}
+
+/// **The same door where there is no descriptor to write to.**
+///
+/// The pair to [`redirect_std_streams_to_file`]'s `not(unix)` arm, and the same
+/// honesty: no such target is built from this workspace today, and a build for
+/// one is better told that nothing was written than given a lock this function
+/// exists to avoid.
+#[cfg(not(unix))]
+pub fn write_std_error(bytes: &[u8]) -> bool {
+    let _ = bytes;
+    false
+}
+
 /// **Send `stdout` and `stderr` nowhere at all** (M3-7).
 ///
 /// The floor under [`redirect_std_streams_to_file`], and the Unix spelling of
