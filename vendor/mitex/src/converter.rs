@@ -1,10 +1,20 @@
+// MODIFIED BY THE FOLIO CONTRIBUTORS — not the upstream
+// mitex 0.2.4 converter.
+// Change: `Converter::convert` counts its own recursion and refuses past
+// `mitex_parser::MAX_TREE_DEPTH`, and the bounded conversion entry point
+// carries a parse refused for depth out as one.
+// Index: vendor/mitex/CHANGES-FOLIO.md
+// Notice given under section 4(b) of the Apache License, Version 2.0.
+
 use core::fmt;
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::fmt::Write;
 use std::rc::Rc;
 
 pub use mitex_parser::spec::*;
 
+use mitex_parser::NestingTooDeep;
 use mitex_parser::syntax::CmdItem;
 use mitex_parser::syntax::EnvItem;
 use mitex_parser::syntax::FormulaItem;
@@ -45,6 +55,14 @@ pub struct Converter {
     label: Option<String>,
     // skip the space at the beginning of the line
     skip_next_space: bool,
+    /// Folio: how many levels of the syntax tree this conversion is standing inside.
+    ///
+    /// **Belt to `mitex-parser`'s braces.** `convert` walks the tree by recursing on children, so
+    /// its stack depth is the tree's depth, and a stack overflow is not something a caller can
+    /// catch. The parser already refuses to build a tree deeper than `MAX_TREE_DEPTH`, so this
+    /// counter cannot fire on a tree that came from it — which is the point of keeping it: it
+    /// answers for a tree that arrived some other way, and it costs one add per node.
+    depth: usize,
 }
 
 impl Converter {
@@ -55,6 +73,7 @@ impl Converter {
             indent: 0,
             label: None,
             skip_next_space: true,
+            depth: 0,
         }
     }
 
@@ -99,6 +118,8 @@ use mitex_parser::syntax::SyntaxKind as LatexSyntaxKind;
 enum ConvertError {
     Fmt(fmt::Error),
     Str(String),
+    /// Folio: the tree handed to the converter is deeper than it will descend.
+    NestingTooDeep,
 }
 
 impl fmt::Display for ConvertError {
@@ -106,6 +127,7 @@ impl fmt::Display for ConvertError {
         match self {
             Self::Fmt(e) => write!(f, "fmt: {}", e),
             Self::Str(e) => write!(f, "error: {}", e),
+            Self::NestingTooDeep => write!(f, "error: nesting too deep"),
         }
     }
 }
@@ -122,8 +144,48 @@ impl From<String> for ConvertError {
     }
 }
 
+/// Folio: why a bounded conversion could not answer.
+///
+/// The depth refusal is a variant of its own rather than a message, because it is the one failure a
+/// caller has to be able to act on: it is what stands between a printed line of mathematics and a
+/// recursion nobody can catch, and a reader is owed the source text rather than a diagnostic about
+/// their own formula.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoundedConvertError {
+    /// The formula nests deeper than `mitex_parser::MAX_TREE_DEPTH`.
+    NestingTooDeep,
+    /// Everything else MiTeX says about a formula it cannot convert.
+    Convert(String),
+}
+
+impl fmt::Display for BoundedConvertError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NestingTooDeep => NestingTooDeep.fmt(f),
+            Self::Convert(message) => f.write_str(message),
+        }
+    }
+}
+
 impl Converter {
+    /// Folio: the one door into the recursive walk, so the depth is counted once and before the
+    /// descent rather than after it.
     fn convert(
+        &mut self,
+        f: &mut fmt::Formatter<'_>,
+        elem: LatexSyntaxElem,
+        spec: &CommandSpec,
+    ) -> Result<(), ConvertError> {
+        if self.depth >= mitex_parser::MAX_TREE_DEPTH {
+            return Err(ConvertError::NestingTooDeep);
+        }
+        self.depth += 1;
+        let converted = self.convert_element(f, elem, spec);
+        self.depth -= 1;
+        converted
+    }
+
+    fn convert_element(
         &mut self,
         f: &mut fmt::Formatter<'_>,
         elem: LatexSyntaxElem,
@@ -1068,12 +1130,17 @@ struct TypstRepr {
     mode: LaTeXMode,
     spec: CommandSpec,
     error: Rc<RefCell<String>>,
+    /// Folio: a refusal for depth, kept apart from the message so a caller can act on it.
+    nesting_too_deep: Rc<Cell<bool>>,
 }
 
 impl fmt::Display for TypstRepr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut ctx = Converter::new(self.mode);
         if let Err(e) = ctx.convert(f, self.elem.clone(), &self.spec) {
+            if matches!(e, ConvertError::NestingTooDeep) {
+                self.nesting_too_deep.set(true);
+            }
             self.error.borrow_mut().push_str(&e.to_string());
             return Err(fmt::Error);
         }
@@ -1089,17 +1156,45 @@ pub fn convert_inner(
     do_parse: fn(input: &str, spec: CommandSpec) -> SyntaxNode,
 ) -> Result<String, String> {
     let node = do_parse(input, spec.unwrap_or_else(|| DEFAULT_SPEC.clone()));
+    convert_node(node, mode).map_err(|error| match error {
+        BoundedConvertError::NestingTooDeep => NestingTooDeep.to_string(),
+        BoundedConvertError::Convert(message) => message,
+    })
+}
+
+/// Folio: [`convert_inner`] over a parse that may itself have been refused for depth.
+#[inline(always)]
+pub fn convert_inner_bounded(
+    input: &str,
+    mode: LaTeXMode,
+    spec: Option<CommandSpec>,
+    do_parse: fn(input: &str, spec: CommandSpec) -> Result<SyntaxNode, NestingTooDeep>,
+) -> Result<String, BoundedConvertError> {
+    let node = do_parse(input, spec.unwrap_or_else(|| DEFAULT_SPEC.clone()))
+        .map_err(|NestingTooDeep| BoundedConvertError::NestingTooDeep)?;
+    convert_node(node, mode)
+}
+
+fn convert_node(node: SyntaxNode, mode: LaTeXMode) -> Result<String, BoundedConvertError> {
     // println!("{:#?}", node);
     // println!("{:#?}", node.text());
     let mut output = String::new();
     let err = String::new();
     let err = Rc::new(RefCell::new(err));
+    let too_deep = Rc::new(Cell::new(false));
     let repr = TypstRepr {
         elem: LatexSyntaxElem::Node(node),
         mode,
         spec: DEFAULT_SPEC.clone(),
         error: err.clone(),
+        nesting_too_deep: too_deep.clone(),
     };
-    core::fmt::write(&mut output, format_args!("{}", repr)).map_err(|_| err.borrow().to_owned())?;
+    core::fmt::write(&mut output, format_args!("{}", repr)).map_err(|_| {
+        if too_deep.get() {
+            BoundedConvertError::NestingTooDeep
+        } else {
+            BoundedConvertError::Convert(err.borrow().to_owned())
+        }
+    })?;
     Ok(output)
 }

@@ -1,6 +1,14 @@
-use rowan::{Checkpoint, GreenNode, GreenNodeBuilder};
+// MODIFIED BY THE FOLIO CONTRIBUTORS — not the upstream
+// mitex-parser 0.2.4 parser.
+// Change: the syntax tree builder is bounded, and `content` stops descending
+// and wrapping at the bound (`src/depth.rs`).
+// Index: vendor/mitex-parser/CHANGES-FOLIO.md
+// Notice given under section 4(b) of the Apache License, Version 2.0.
+
+use rowan::GreenNode;
 
 use crate::arg_match::{ArgMatcher, ArgMatcherBuilder};
+use crate::depth::{BoundedBuilder, Checkpoint};
 use crate::spec::argument_kind::*;
 use crate::syntax::SyntaxKind::{self, *};
 use crate::{ArgPattern, ArgShape, CommandSpec};
@@ -28,7 +36,7 @@ enum ParseScope {
 }
 
 mod list_state {
-    use rowan::Checkpoint;
+    use super::Checkpoint;
 
     use super::ParseScope;
 
@@ -110,7 +118,7 @@ pub struct Parser<'a, S: TokenStream<'a> = ()> {
     /// Lexer level structure
     lexer: Lexer<'a, S>,
     /// Helper for building syntax tree
-    builder: GreenNodeBuilder<'static>,
+    builder: BoundedBuilder,
 
     /// Command specification
     spec: CommandSpec,
@@ -130,7 +138,7 @@ impl<'a> Parser<'a> {
     pub fn new(text: &'a str, spec: CommandSpec) -> Self {
         Self {
             lexer: Lexer::new(text, spec.clone()),
-            builder: GreenNodeBuilder::new(),
+            builder: BoundedBuilder::new(),
             spec,
             arg_matchers: ArgMatcherBuilder::default(),
             list_state: Default::default(),
@@ -143,7 +151,7 @@ impl<'a> Parser<'a> {
         let lexer = Lexer::new_with_bumper(text, spec.clone(), MacroEngine::new(spec.clone()));
         Parser::<'a, MacroEngine<'a>> {
             lexer,
-            builder: GreenNodeBuilder::new(),
+            builder: BoundedBuilder::new(),
             spec,
             arg_matchers: ArgMatcherBuilder::default(),
             list_state: Default::default(),
@@ -256,11 +264,15 @@ impl<'a, S: TokenStream<'a>> Parser<'a, S> {
 
     /// Entry point
     /// The main entry point of the parser
-    pub fn parse(mut self) -> GreenNode {
+    ///
+    /// Folio: the second half of the answer is whether anything was refused for depth. A tree that
+    /// hit the bound is truncated rather than wrong-shaped, and no caller should convert one.
+    pub fn parse(mut self) -> (GreenNode, bool) {
         self.builder.start_node(ScopeRoot.into());
         self.item_list(ParseScope::Root);
         self.builder.finish_node();
-        self.builder.finish()
+        let overflowed = self.builder.overflowed();
+        (self.builder.finish(), overflowed)
     }
 
     /// Parsing Helper
@@ -367,10 +379,23 @@ impl<'a, S: TokenStream<'a>> Parser<'a, S> {
     /// the item as a single character if possible
     ///
     /// Returns whether the item is attachable
+    ///
+    /// Folio: **this is the one gate the whole parser needs.** Every cycle in this file's call
+    /// graph runs through here — `item_group`/`item_list`, `command`/`match_arguments_`,
+    /// `environment`, `item_lr` and `attach_component` all reach `content` again — and every one of
+    /// them opens a syntax node before it does, so refusing to descend once the builder is at its
+    /// bound bounds the recursion as well as the tree. Wrapping is refused by the same gate:
+    /// `\limits`, `'` and the infix operators deepen the tree from `command`/`attach_component`,
+    /// which are reached only from here. The token is still consumed, so the loops above still
+    /// terminate, and `overflowed` has already been set by then, so the parse is refused whole.
     fn content(&mut self, not_prefer_single_char: bool) -> bool {
         let Some(c) = self.peek() else {
             return true;
         };
+        if self.builder.at_limit() {
+            self.eat();
+            return false;
+        }
         match c {
             Token::Ampersand
             | Token::NewLine
