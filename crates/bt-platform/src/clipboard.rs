@@ -17,6 +17,22 @@ pub enum UnsupportedKind {
     Promise,
 }
 
+/// **How many bytes of one picture encoding are worth copying at all**
+/// (review X-4).
+///
+/// The acquisition copies what a source offers before anything has looked at
+/// it, and what a source offers is the source's choice: a clipboard provider
+/// that advertises a 4 GiB `CF_DIB` gets one `GlobalLock` and one `to_vec` and
+/// this process is out of memory before any decoder has had an opinion. The
+/// ceiling belongs here, at the copy, because here is where the bytes first
+/// exist.
+///
+/// 256 MiB is far above any screenshot — a 4K screen in 32-bit colour is 33 MB —
+/// and far below the point at which refusing is worse than dying. It is the same
+/// number `bt_app::clipboard_picture::MAX_ENCODED_BYTES` refuses at, one door
+/// further in.
+pub const MAX_PICTURE_BYTES: usize = 256 * 1024 * 1024;
+
 /// The shapes a picture is offered in, **best first**: the order of this enum is
 /// the order [`ClipboardPort::picture`] is asked to list its answers in, and a
 /// reader takes the first one it can turn into a file.

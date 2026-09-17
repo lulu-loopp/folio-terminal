@@ -18,8 +18,8 @@ use windows::{
 };
 
 use crate::clipboard::{
-    Candidate, ClipboardPayload, ClipboardPort, ClipboardTypes, PictureBytes, PictureEncoding,
-    read_payload,
+    Candidate, ClipboardPayload, ClipboardPort, ClipboardTypes, MAX_PICTURE_BYTES, PictureBytes,
+    PictureEncoding, read_payload,
 };
 
 /// WinUser.h standard format identifiers.
@@ -178,7 +178,11 @@ fn global_bytes(format: u32) -> Option<Vec<u8>> {
         let handle = GetClipboardData(format).ok()?;
         let global = HGLOBAL(handle.0);
         let size = GlobalSize(global);
-        if size == 0 {
+        // Nothing, and far too much, are both refused before the copy is made
+        // (review X-4): a zero-byte global is a format that was advertised and
+        // not rendered, and one past the ceiling is a source this paste will not
+        // carry into memory to find out about.
+        if size == 0 || size > MAX_PICTURE_BYTES {
             return None;
         }
         let pointer = GlobalLock(global).cast::<u8>();
