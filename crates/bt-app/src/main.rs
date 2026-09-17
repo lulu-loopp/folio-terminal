@@ -18016,6 +18016,31 @@ struct KeyboardOwner {
     palette: bool,
 }
 
+impl KeyboardOwner {
+    /// **The owners a drop is refused under, as against the ones it takes the
+    /// keyboard back from** (review 2026-09-17 P1-b).
+    ///
+    /// Every rung of this struct takes the keyboard away from the shell, and
+    /// until this line they were all one kind of thing. A dropped path splits
+    /// them in two, and the split is what the reader would say:
+    ///
+    /// * a files column, a preview (edited or browsed), the graph's search field
+    ///   and the in-pane capsule are **borrowing** it — they sit inside the
+    ///   layout, the panes behind them are visible, and a gesture aimed at a
+    ///   pane may simply ask for the keyboard back;
+    /// * a menu, any of the four modals, the palette, a git prompt and the
+    ///   tab-name box are **being answered**. The window is waiting for a reply
+    ///   and the reply is a keystroke, so a path written underneath one would be
+    ///   followed by an `Enter` that answers the card instead of running the
+    ///   command.
+    ///
+    /// Only the second list is here. [`Runtime::a_modal_holds_the_window`] is
+    /// its one reader.
+    const fn is_modal(self) -> bool {
+        self.menu_or_dialog || self.rename || self.git_prompt || self.palette
+    }
+}
+
 /// Where a **composition** goes — [`KeyboardOwner`] resolved to a destination.
 ///
 /// # The bug this exists to close (user report, 2026-08-12)
@@ -18616,16 +18641,63 @@ fn take_psreadline_resize_reanchor_input(
 /// A leaf with no child at all (`BT_PROBE_INPUT`, a restored pane whose shell is gone) is not a
 /// refusal and not an error: there is nowhere for the bytes to go and never was.
 fn write_pty_input(pty: Option<&PtySession>, bytes: &[u8], what: &'static str) -> Result<()> {
+    offer_pty_input(pty, bytes, what).map(drop)
+}
+
+/// **What became of the bytes** — the same door, for the callers that have to
+/// know (review 2026-09-17 P2-a).
+///
+/// [`write_pty_input`] swallows a refusal on purpose and always will: a shell
+/// sitting on a megabyte of unread input is a fact about that shell, not an
+/// error for the window to die of. But "swallowed" and "delivered" are two
+/// different things to a caller that is about to **move the keyboard** on the
+/// strength of it, and the drop roads are exactly that caller: a path the ring
+/// turned away, or a pane with no child behind it, must not take the reader's
+/// keyboard to a shell that received nothing and must not bring the window
+/// forward for it.
+///
+/// **[`PtyInput::Queued`] means queued, and no more than that.** The bytes are
+/// on `bt_pty::InputRing` and the writer thread will hand them to the child;
+/// whether the program on the other end reads them, and what it makes of them,
+/// is its own business and nothing this process can report. A drop's focus move
+/// is answering "did this window send it", which is the question this answers.
+fn offer_pty_input(pty: Option<&PtySession>, bytes: &[u8], what: &'static str) -> Result<PtyInput> {
     let Some(pty) = pty else {
-        return Ok(());
+        return Ok(PtyInput::NoChild);
     };
     match pty.write(bytes) {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(PtyInput::Queued),
         Err(refused @ PtyError::InputRefused { .. }) => {
             eprintln!("{what}: {refused}");
-            Ok(())
+            Ok(PtyInput::Refused)
         }
         Err(error) => Err(anyhow::Error::new(error).context(what)),
+    }
+}
+
+/// What [`offer_pty_input`] found at the other end.
+///
+/// Three answers and not a `bool`, because the two that are not `Queued` are
+/// different facts and a reader of the log needs to be able to tell them apart:
+/// a ring that turned a paste away is a shell that has stopped reading, and a
+/// leaf with no child never had anywhere to put anything.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PtyInput {
+    /// On the ring. The writer thread has it.
+    Queued,
+    /// `PtyError::InputRefused` — the ring is full because the child stopped
+    /// draining it. Said to the log by the door above.
+    Refused,
+    /// No ConPTY behind this leaf at all: `BT_PROBE_INPUT`, or a restored pane
+    /// whose shell is gone. Not a refusal and not an error — there is nowhere
+    /// for the bytes to go and never was.
+    NoChild,
+}
+
+impl PtyInput {
+    /// Whether this window actually sent the bytes.
+    const fn queued(self) -> bool {
+        matches!(self, Self::Queued)
     }
 }
 
@@ -29588,8 +29660,16 @@ const fn glass_allows_a_text_write(glass: GlassHere) -> bool {
 /// **Every condition a dragged path must clear before a byte is written**, in
 /// one place and as a function of four plain facts.
 ///
+/// **`modal` is the fifth** (review 2026-09-17 P1-b), and it is here rather than
+/// only on the external road because the two roads must answer one question the
+/// same way. A press cannot *start* a row drag under a modal — `chrome_mouse_input`
+/// swallows every press for the quit card, the dirty gate and the first-run card
+/// and returns above the drag routing — but a card that came up *during* a drag
+/// leaves a gesture in flight over a window that is now waiting for a keystroke,
+/// and the keystroke after a drop is `Enter`.
+///
 /// Written as one function so that the answer can be read, and tested, without
-/// a window — and so that no caller can satisfy three of the four and reach the
+/// a window — and so that no caller can satisfy four of the five and reach the
 /// write. [`Runtime::paste_offer_kept`] is what gathers the facts; this is what
 /// they mean, and it hands back the **address** rather than a `bool` so that a
 /// caller cannot take the verdict from here and the destination from somewhere
@@ -29599,10 +29679,12 @@ fn paste_offer_is_kept(
     promised: Option<PasteOffer>,
     at_release: Option<PasteOffer>,
     plan_fits: bool,
+    modal: bool,
 ) -> Option<PasteTarget> {
     let at_release = at_release?;
     (glass_allows_a_text_write(glass)
         && plan_fits
+        && !modal
         && paste_offer_survives(promised, Some(at_release)))
     .then_some(at_release.target)
 }
@@ -54791,7 +54873,7 @@ impl Runtime<'_> {
         };
         // Keyboard first, and independently of whether layout focus moved: the
         // two can already disagree when a pane was focused by other means.
-        self.take_keyboard_into(seat);
+        self.take_keyboard_into(seat)?;
         // **D40's rule, now that there is a second kind of thing to focus.**
         // Pressing a pane is how you say "type here", and a files column is
         // somewhere you can type — arrows and Enter are its whole vocabulary. So
@@ -54858,7 +54940,7 @@ impl Runtime<'_> {
     /// queue jumping to a seat.
     fn focus_seat(&mut self, seat: SeatId) -> Result<()> {
         self.leave_hovered_math(Instant::now())?;
-        self.take_keyboard_into(seat);
+        self.take_keyboard_into(seat)?;
         self.settle_focus_on(seat)
     }
 
@@ -54887,10 +54969,71 @@ impl Runtime<'_> {
     /// [`Self::paste_offer_kept`], which is not consulted here at all — where
     /// the bytes go is settled before this runs and this cannot reach it.
     fn focus_the_pane_a_path_landed_in(&mut self, seat: SeatId) -> Result<()> {
+        // **Every surface that could be holding the keyboard instead has to
+        // give it up, not just the column** (review 2026-09-17 P1-a). Moving
+        // the tree's focus resolves exactly one of the four rungs
+        // ([`Self::keyboard_owner`]) — the *focused preview seat*, which stops
+        // being a preview the moment a terminal is focused. The other three
+        // survive it, and each is a measured way for the next `Enter` to go
+        // somewhere other than the shell the path just landed in:
+        //
+        // * a **torn-off preview float** the reader clicked into, which
+        //   `focused_preview_float` goes on finding;
+        // * a **live preview editor**, which `preview_edit_focus` goes on
+        //   naming even after the pane behind it loses the layout's focus;
+        // * the **search capsule's field**, which owns the keys while the caret
+        //   is in it.
+        //
+        // Each is released through the door the pointer road already uses —
+        // `float.blur()` from [`Self::focus_pane_at`], `leave_preview_page` from
+        // the click-away roads, `search.blur()` from the button router — because
+        // a second spelling of "give the keyboard back" is a second place for
+        // one of these to be forgotten, which is how this one was missed.
+        //
+        // The modal owners are **not** on this list and must never be: a quit
+        // card, a settings page, a gate, a menu, the palette and the rename box
+        // are answered rather than dismissed, and a drop does not reach this
+        // function while one of them is up — [`Self::a_modal_holds_the_window`]
+        // refuses the whole gesture before anything is written.
         if self.set_files_keyboard(None, FilesFocusArrival::Pointer) {
             self.refresh_chrome();
         }
+        if let Some(surface) = self.preview_edit_focus() {
+            self.leave_preview_page(surface);
+        }
+        if self.window.search.is_focused() {
+            self.window.search.blur();
+            self.after_search_change()?;
+        }
+        if self.window.float.blur() && self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
         self.focus_seat(seat)
+    }
+
+    /// **Whether something is standing in front of this window that a drop must
+    /// not go under** (review 2026-09-17 P1-b).
+    ///
+    /// The line this draws is the one [`Self::focus_the_pane_a_path_landed_in`]
+    /// is the other side of. A files column, a preview and the search capsule
+    /// borrow the keyboard and can simply be asked for it back, so a drop takes
+    /// it. A quit card, a settings page, the dirty gate, the first-run card, the
+    /// PSReadLine invitation, any open menu or popup, the command palette and
+    /// the tab-name box are **answered**: they own the keyboard because the
+    /// window is waiting for a reply, and the reply is `Enter`.
+    ///
+    /// So a file let go of over one of them is refused outright rather than
+    /// written into whatever terminal happens to be behind it. Three things
+    /// would otherwise all be wrong at once: a path typed into a pane the reader
+    /// cannot see, a window brought to the front over the card it is asking
+    /// about, and — worst — the next `Enter` answering the card instead of
+    /// running the command they just built.
+    ///
+    /// Read off [`Self::keyboard_owner`] rather than from a list of surfaces of
+    /// its own, so that a modal added to this window is covered by this the day
+    /// it takes the keyboard.
+    fn a_modal_holds_the_window(&self) -> bool {
+        self.keyboard_owner().is_modal()
     }
 
     /// **Bring this window to the front, because a drop is the reader pointing
@@ -54934,13 +55077,42 @@ impl Runtime<'_> {
     /// Guarded on there being a session at the seat, because a files column has
     /// nothing to type into and a folder tab has no shell at all — the guard
     /// every focus move in this window carries, written once.
-    fn take_keyboard_into(&mut self, seat: SeatId) {
-        if self.sessions.contains_key(&seat) && self.focused_leaf != seat {
-            self.focused_leaf = seat;
-            // The frame slot holds the pane that *was* focused. Leaving it would
-            // let the next present assert a stale grid against the new pane.
-            self.window.last_presented_frame = None;
+    ///
+    /// **And a composition does not come with it** (review 2026-09-17 P2-b).
+    /// §7.1.5a″'s ruling is that a composition belongs to the field it started
+    /// in and is cancelled when that field goes away — never committed into
+    /// whatever is holding the keyboard next. [`settle_composition_owner`] keeps
+    /// that promise at the tail of every pass, but it asks it of
+    /// [`composition_outlived_its_field`], which compares **kinds** of owner:
+    /// one shell and another shell are both [`ImeOwner::Shell`], so a
+    /// composition begun at pane A's prompt survives the keyboard moving to pane
+    /// B and the next commit arrives at B. A pane is a field, so that is the
+    /// same report said about two terminals.
+    ///
+    /// **Closed here, at the door, and therefore for every road at once.** This
+    /// is the one place `focused_leaf` moves — the pointer's
+    /// ([`Self::focus_pane_at`]) and the named one's ([`Self::focus_seat`], which
+    /// the palette, the attention queue and a dropped path all come through) —
+    /// and the pointer road had the identical hole, so fixing it anywhere else
+    /// would have closed one of the two. The branch this sits in is exactly
+    /// "the shell holding the keyboard is changing", which is exactly when the
+    /// old field goes away.
+    ///
+    /// **Cancelled and not committed**, through the window's one door
+    /// ([`Self::cancel_composition`]), because that is the ruling: half-typed
+    /// letters meant for A's prompt must not be handed to B's.
+    fn take_keyboard_into(&mut self, seat: SeatId) -> Result<()> {
+        if !(self.sessions.contains_key(&seat) && self.focused_leaf != seat) {
+            return Ok(());
         }
+        if self.window.composing == Some(ImeOwner::Shell) {
+            self.cancel_composition(ImeOwner::Shell)?;
+        }
+        self.focused_leaf = seat;
+        // The frame slot holds the pane that *was* focused. Leaving it would
+        // let the next present assert a stale grid against the new pane.
+        self.window.last_presented_frame = None;
+        Ok(())
     }
 
     /// The layout half: the tree's own focus, and everything that hangs off it.
@@ -90578,6 +90750,7 @@ impl Runtime<'_> {
             drag.paste_offer,
             self.paste_offer_at(at_release),
             plan.fits(),
+            self.a_modal_holds_the_window(),
         )
     }
 
@@ -96607,7 +96780,17 @@ impl Runtime<'_> {
         // shell, because the tab on top and the program in that seat can both
         // have changed by now (X-1). A batch aimed at nothing is spent on
         // nobody.
-        let pasted = match batch.target {
+        // **Admission is asked again here** (review 2026-09-17 P1-b). The
+        // address travelled with the batch precisely because the world moves
+        // between the release and the turn that spends it — and what can move is
+        // not only the tab and the shell. A quit card, a gate or a settings page
+        // that came up in between is a window now waiting for a keystroke, and a
+        // path written under it would be followed by an `Enter` that answers the
+        // card. Refused the same way an unaimed drop is: nothing typed, nothing
+        // focused, nothing raised, and the point said out loud for the report
+        // somebody will make.
+        let target = batch.target.filter(|_| !self.a_modal_holds_the_window());
+        let pasted = match target {
             Some(target) => self
                 .paste_paths_into(target, batch.paths, "write dropped paths to PTY")
                 .and_then(|written| {
@@ -96671,10 +96854,18 @@ impl Runtime<'_> {
         // belongs to, are what the hand was aimed at — facts about this instant
         // and not about the turn that spends them. Only on the opening file, so
         // that a drop of forty does not re-aim thirty-nine times.
+        // **And a drop is refused outright while the window is asking something**
+        // (review 2026-09-17 P1-b). Asked here, on the file that opens the
+        // batch, because this runs inside the platform's delivery of the release
+        // — the card the file was let go of over is the card that was on screen
+        // when it was let go of. Asked *again* at the flush, because a gate can
+        // open between the two. See [`Self::a_modal_holds_the_window`].
         let target = opening
             .then(|| {
-                let seat = self.dropped_files_seat(point);
-                self.paste_target(seat)
+                (!self.a_modal_holds_the_window())
+                    .then(|| self.dropped_files_seat(point))
+                    .flatten()
+                    .and_then(|seat| self.paste_target(seat))
             })
             .flatten();
         DropBatch::collect(&mut self.window.dropped_files, path, point, target);
@@ -96720,14 +96911,14 @@ impl Runtime<'_> {
     /// 0.4.2 X-10), and travels here inside the batch. The keyboard's pane is
     /// what is left when even that answers nothing, which is a window on a
     /// session with no desktop to read.
-    fn dropped_files_seat(&mut self, position: Option<PhysicalPosition<f64>>) -> SeatId {
+    fn dropped_files_seat(&mut self, position: Option<PhysicalPosition<f64>>) -> Option<SeatId> {
         let covered = position.is_some_and(|position| {
             matches!(
                 self.pointer_target_at(position),
                 Some(PointerTarget::Float(..))
             ) || self.panel_covers(position)
         });
-        dropped_files_seat_at(&self.seat_layout, position, covered, self.focused_leaf)
+        dropped_files_seat_at(&self.seat_layout, position, covered)
     }
 
     /// **Where the cursor is, this instant, in this window's own pixels**
@@ -98675,8 +98866,14 @@ impl Runtime<'_> {
         else {
             return Ok(false);
         };
-        paste_text(session, projection, &text, |bytes| {
-            write_pty_input(pty.as_ref(), bytes, context)
+        // **The answer travels back out of the paste** (review 2026-09-17 P2-a):
+        // `write_pty_input` swallows a refusal, which is right for a keystroke
+        // and wrong for a caller that is about to move the reader's keyboard on
+        // the strength of it. Everything below this line is unchanged — the
+        // bookkeeping a paste owes is owed for the gesture rather than for the
+        // ring's mood — and only what this function *answers* now depends on it.
+        let landed = paste_text(session, projection, &text, |bytes| {
+            offer_pty_input(pty.as_ref(), bytes, context)
         })?;
         // A paste is one gesture landing in one named pane, so it answers whatever that pane was
         // asking — and it is the pane the clipboard went into, not the one holding the keyboard
@@ -98693,14 +98890,14 @@ impl Runtime<'_> {
         // which is exactly what `repaint_pane_change` is for.
         if seat != self.focused_leaf {
             self.repaint_pane_change(seat)?;
-            return Ok(true);
+            return Ok(landed.queued());
         }
         self.pending_keyboard_at = Some(Instant::now());
         self.publish_frame(FrameTrigger {
             occurred_at: self.pending_keyboard_at.unwrap_or_else(Instant::now),
             source: FrameSource::Keyboard,
         })?;
-        Ok(true)
+        Ok(landed.queued())
     }
 
     /// **Start the worker that turns a clipboard picture into a file**
@@ -109345,21 +109542,36 @@ mod pty_drain_budget_tests {
     /// `?`s a refusal out of a key handler reaches `App::fail` and takes every other pane in the
     /// window down with it.
     ///
+    /// **The door is a pair since the review of 2026-09-17, and it is still one door.**
+    /// `offer_pty_input` is where the pipe is touched and where a refusal is understood;
+    /// `write_pty_input` is the same call with the answer thrown away, which is what every
+    /// caller that has nothing to do with the answer goes on using. The two drop roads are
+    /// the callers that do: they move the reader's keyboard and bring the window forward on
+    /// the strength of a write, and "swallowed" must not look like "delivered" to them.
+    ///
     /// Mutation: call `PtySession::write` from anywhere else in the product and the count moves.
+    /// Mutation: give `write_pty_input` a second body of its own and the delegation assertion
+    /// goes red, which is the moment there are two doors again.
     #[test]
     fn the_window_thread_sends_a_child_bytes_through_exactly_one_door() {
-        let door = ["write_pty_", "input"].concat();
+        let door = ["offer_pty_", "input"].concat();
         let body = free_fn_body(&door);
         let refusal = body
             .find("PtyError::InputRefused")
             .expect("the door is the place that knows what a refusal is");
         let answer = body[refusal..]
-            .find("Ok(())")
+            .find("Ok(PtyInput::Refused)")
             .expect("and it answers a refusal with the window carrying on");
         assert!(
             !body[refusal..refusal + answer].contains("return Err"),
             "a refusal turned back into an `Err` reaches `App::fail` and ends the process over \
              one wedged shell"
+        );
+        assert!(
+            free_fn_body(&["write_pty_", "input"].concat())
+                .contains(&[&door, "(pty, bytes, what).map(drop)"].concat()),
+            "the forgiving spelling has grown a body of its own, so there are two places that \
+             know what a refusal is"
         );
         // Every other `.write(` in this file is a test's, a clipboard's, or a `writeln!`; what
         // this counts is the product's calls onto a `PtySession`.
@@ -114702,20 +114914,35 @@ fn prepare_clipboard_paste(
 /// function so the routing can be read against a real solved layout without a
 /// window: which pane a point falls in is arithmetic, and arithmetic is the half
 /// of this that can go wrong silently.
+///
+/// **`None` is a refusal, and the fallback that used to stand here is gone**
+/// (review 2026-09-17 P1-b). It answered the *focused* pane for a point that
+/// named no pane — no cursor at all, a point a float or an open rail had
+/// claimed, a point on a divider or on chrome — and that was an untruthful aim
+/// twice over: the comment one surface up already said such a drop reaches no
+/// shell, and the owner's rule for this whole gesture is that **the target
+/// decides**. A path is not a keystroke; "I could not tell where you let go, so
+/// I typed it where you were last typing" is the one answer a drop must not
+/// give, and since 2026-09-17 it would also have taken the keyboard there and
+/// brought the window forward for it.
+///
+/// **No platform is kept on the old road**, which was checked rather than
+/// assumed: `bt_platform::pointer_position_in_window` is implemented on both
+/// systems this product ships on — `GetCursorPos` through `ScreenToClient` on
+/// Windows, `NSEvent.mouseLocation` through the view on macOS — so `None` here
+/// is a window on a session with no desktop to read, and a refusal is the honest
+/// answer for it too.
 fn dropped_files_seat_at(
     layout: &SeatLayout,
     position: Option<PhysicalPosition<f64>>,
     covered: bool,
-    focused: SeatId,
-) -> SeatId {
+) -> Option<SeatId> {
     match position {
-        Some(position) if !covered => {
-            seats::pane_at(layout, position.x, position.y).unwrap_or(focused)
-        }
-        // No pointer, or a point that belongs to something standing over the
-        // panes: the keyboard's pane is the only command line this window can
-        // honestly mean.
-        Some(_) | None => focused,
+        Some(position) if !covered => seats::pane_at(layout, position.x, position.y),
+        // No cursor, or a point that belongs to something standing over the
+        // panes: this window does not know where the file was let go of, and an
+        // unknown target is a refusal.
+        Some(_) | None => None,
     }
 }
 
@@ -114770,12 +114997,12 @@ fn prepare_dropped_paste(
 /// *between* them, and `bt_pty::InputRing` only promises a whole write, never a partial one. As
 /// one write it either reaches the shell entire or is refused entire, which is the only pair of
 /// outcomes a pasted command line can survive.
-fn paste_text(
+fn paste_text<T>(
     session: &mut DualPlaneSession,
     projection: &mut ViewportProjection,
     text: &str,
-    write: impl FnOnce(&[u8]) -> Result<()>,
-) -> Result<()> {
+    write: impl FnOnce(&[u8]) -> Result<T>,
+) -> Result<T> {
     let bytes = input::paste_bytes(text, session.bracketed_paste_mode());
     session.set_view_selection(None);
     projection.set_selection(None);
@@ -160929,27 +161156,29 @@ mod tests {
         );
     }
 
-    /// **A dropped file's path goes into the pane it was let go of over**
-    /// (GitHub issue #1 ②), and into the keyboard's pane when the drop belongs
-    /// to nothing the layout can name.
+    /// **A dropped file's path goes into the pane it was let go of over, and
+    /// nowhere at all otherwise** (GitHub issue #1 ②; review 2026-09-17 P1-b).
     ///
     /// The routing half of the drop, read against a real solved three-pane
     /// layout: the same arithmetic a press is answered by, asked of the same
-    /// rectangles. The rest of the rule is its fall-backs — a point a float or
+    /// rectangles. The rest of the rule is its **refusals** — a point a float or
     /// an open rail has claimed, a point in no pane at all, and a drop with
-    /// neither a pointer of its own nor a cursor the platform would answer with,
-    /// which is the last resort and is now much narrower than it was: since the
-    /// owner's ruling of 2026-09-16 a drag that came from another application is
-    /// routed by the queried cursor, and the closing block reads that road all
-    /// the way through.
+    /// neither a pointer of its own nor a cursor the platform would answer with.
+    ///
+    /// **Those three used to answer with the pane holding the keyboard, and the
+    /// owner's rule is that the target decides.** "I could not tell where you
+    /// let go, so I typed it where you were last typing" is the one answer a
+    /// drop must not give — and since the keyboard and the window's own
+    /// foreground now follow a path in, it would have moved the reader there
+    /// too. Every one of them is `None`, which `flush_dropped_files` spends on
+    /// nobody.
     ///
     /// MUTATION ①: ignore `covered` and a point a floating window has claimed
     /// answers with the pane it is standing on top of — the second assertion in
-    /// the loop goes red for all three. MUTATION ②: go back to routing a
-    /// pointerless drop to the keyboard's pane and the closing block goes red,
-    /// because that is the pane the cursor is deliberately *not* over.
+    /// the loop goes red for all three. MUTATION ②: bring back the fall-back to
+    /// the keyboard's pane and the three refusals go red together.
     #[test]
-    fn a_drop_lands_in_the_pane_under_it_and_otherwise_on_the_keyboards_pane() {
+    fn a_drop_lands_in_the_pane_under_it_and_otherwise_nowhere() {
         let seats = cross_seats(3);
         let (layout, _) = cross_solve(&seats);
         let rects = pane_rects_of(&layout);
@@ -160967,15 +161196,15 @@ mod tests {
                 f64::from((rect[1] + rect[3]) / 2.0),
             );
             assert_eq!(
-                dropped_files_seat_at(&layout, Some(middle), false, focused),
-                *seat,
+                dropped_files_seat_at(&layout, Some(middle), false),
+                Some(*seat),
                 "a drop in the middle of {seat:?} is that pane's"
             );
             assert_eq!(
-                dropped_files_seat_at(&layout, Some(middle), true, focused),
-                focused,
+                dropped_files_seat_at(&layout, Some(middle), true),
+                None,
                 "a float or an open rail standing over {seat:?} keeps the drop \
-                 off the pane it is covering"
+                 off the pane it is covering, and gives it to nobody else"
             );
             if *seat != focused {
                 elsewhere += 1;
@@ -160984,20 +161213,22 @@ mod tests {
         assert_eq!(
             elsewhere, 2,
             "two of the three panes are not the keyboard's, so the assertions \
-             above are about the routing and not about the fall-back"
+             above are about the routing and not about a pane that happens to be \
+             the focused one"
         );
 
         let off_every_pane = PhysicalPosition::new(-1.0, -1.0);
         assert_eq!(
-            dropped_files_seat_at(&layout, Some(off_every_pane), false, focused),
-            focused,
-            "a drop on the chrome is the keyboard's pane's"
+            dropped_files_seat_at(&layout, Some(off_every_pane), false),
+            None,
+            "a drop on the chrome names no pane, so it is refused rather than \
+             typed into the one holding the keyboard"
         );
         assert_eq!(
-            dropped_files_seat_at(&layout, None, false, focused),
-            focused,
-            "and so is a drop the platform would give no cursor for — the last \
-             resort and nothing less"
+            dropped_files_seat_at(&layout, None, false),
+            None,
+            "and so is a drop the platform would give no cursor for: an unknown \
+             target is a refusal"
         );
 
         // **The road a drag from another application really takes** (owner's
@@ -161024,8 +161255,8 @@ mod tests {
              and is not scaled a second time"
         );
         assert_eq!(
-            dropped_files_seat_at(&layout, point, false, focused),
-            elsewhere_seat,
+            dropped_files_seat_at(&layout, point, false),
+            Some(elsewhere_seat),
             "a drop whose point came from the cursor lands in the pane under it, \
              not in the pane holding the keyboard"
         );
@@ -171871,7 +172102,8 @@ mod clipboard_path_tests {
         let promised = offer(centre(B), 1, B, 7);
         // The three facts that are *not* the subject of a row, so that each row
         // below changes exactly one thing.
-        let kept = |glass, at_release| paste_offer_is_kept(glass, promised, at_release, true);
+        let kept =
+            |glass, at_release| paste_offer_is_kept(glass, promised, at_release, true, false);
 
         assert_eq!(
             kept(GlassHere::Ours, promised),
@@ -171944,18 +172176,260 @@ mod clipboard_path_tests {
         // ⑥ P1-b: the box was a refusal — the window is below what its own tree
         //    needs — so there was never anything to keep.
         assert_eq!(
-            paste_offer_is_kept(GlassHere::Ours, promised, promised, false),
+            paste_offer_is_kept(GlassHere::Ours, promised, promised, false, false),
             None,
             "a path was written behind the dashed outline"
+        );
+        // ⑦ **Round 4: a card came up while the hand was still down.** Nothing
+        //    about the offer changed and the glass is ours; what changed is that
+        //    the window is now waiting for a keystroke, and the keystroke after a
+        //    drop is `Enter`. A press cannot start a drag under a modal, so this
+        //    is only reachable by a card raised mid-gesture — and it is refused
+        //    there too, rather than writing a path the next `Enter` will not run.
+        assert_eq!(
+            paste_offer_is_kept(GlassHere::Ours, promised, promised, true, true),
+            None,
+            "a path was written under a card the window was waiting on"
         );
         // And a release with no promise behind it — a box that never said
         // `Paste path` — writes nothing either.
         assert_eq!(
-            paste_offer_is_kept(GlassHere::Ours, None, promised, true),
+            paste_offer_is_kept(GlassHere::Ours, None, promised, true, false),
             None,
             "a release wrote a path the box never promised"
         );
     }
+    /// **A dropped path takes the keyboard from every surface that was holding
+    /// it, and is refused under every surface that must be answered** (review
+    /// 2026-09-17 P1-a and P1-b).
+    ///
+    /// Two lists and one line between them, and the line is what a reader would
+    /// draw. A files column, a preview — torn off into a float, edited in place,
+    /// or merely browsed — and the search capsule's field all *borrow* the
+    /// keyboard: they sit inside the layout, the panes behind them are visible,
+    /// and a gesture aimed at a pane may simply ask for it back. A menu, the
+    /// four modals, the palette, a git prompt and the tab-name box are being
+    /// *answered*: the window is waiting for a keystroke, and the keystroke
+    /// after a drop is `Enter`.
+    ///
+    /// **Why this is a routing test and not a list of calls.** What the owner's
+    /// ruling promises is about the *next key*, and where the next key goes is
+    /// `keyboard_owner` — so that is what is asked here, over the owners one at
+    /// a time. `ime_owner` is the same reading one rung out and is asserted
+    /// beside it, because a composition and a keystroke must not disagree about
+    /// which surface is being typed into.
+    ///
+    /// MUTATION: drop the float blur from `focus_the_pane_a_path_landed_in` and
+    /// the float row goes red — the path reaches the terminal and the `Enter`
+    /// after it reaches the preview. MUTATION: drop the editor's or the
+    /// capsule's line and its row goes red the same way. MUTATION: put a modal
+    /// on the borrowing list and `is_modal` stops refusing it, so a drop writes
+    /// under a card and the `Enter` answers the card.
+    #[test]
+    fn a_dropped_path_takes_the_keyboard_and_is_refused_under_a_card() {
+        let holding = |set: fn(&mut KeyboardOwner)| {
+            let mut owner = KeyboardOwner::default();
+            set(&mut owner);
+            owner
+        };
+        // The shell's turn, which is what every borrower below is released
+        // *into* — asserted once so the rows can be about the release alone.
+        assert!(keyboard_owner_is_a_shell(KeyboardOwner::default()));
+        assert_eq!(ime_owner(KeyboardOwner::default()), ImeOwner::Shell);
+        // A drop onto the pane that already holds the keyboard is this same
+        // state before and after, which is why it needs no branch anywhere.
+        assert!(!KeyboardOwner::default().is_modal());
+
+        // (i)-(iii) **The borrowers.** Each is a surface the next `Enter` would
+        // have gone to, and each is released by a line of
+        // `focus_the_pane_a_path_landed_in`.
+        let borrowers: [(&str, fn(&mut KeyboardOwner)); 4] = [
+            ("a files column", |o| o.files_tree = true),
+            ("a preview float or a live editor", |o| o.preview = true),
+            ("the graph's search field", |o| o.graph_search = true),
+            ("the in-pane search capsule", |o| o.search = true),
+        ];
+        for (what, set) in borrowers {
+            let owner = holding(set);
+            assert!(
+                !keyboard_owner_is_a_shell(owner),
+                "{what} has to be holding the keyboard for this row to be about \
+                 anything at all"
+            );
+            assert_ne!(
+                ime_owner(owner),
+                ImeOwner::Shell,
+                "{what} takes the composition with the keystroke, so both have to \
+                 come back"
+            );
+            assert!(
+                !owner.is_modal(),
+                "{what} borrows the keyboard, so a drop asks for it back rather \
+                 than being refused"
+            );
+        }
+
+        // (iv) **The answered.** None of these is released by anything; the drop
+        // itself is refused instead, on both roads.
+        let answered: [(&str, fn(&mut KeyboardOwner)); 4] = [
+            ("a menu or a modal", |o| o.menu_or_dialog = true),
+            ("the tab-name box", |o| o.rename = true),
+            ("a git prompt", |o| o.git_prompt = true),
+            ("the command palette", |o| o.palette = true),
+        ];
+        for (what, set) in answered {
+            assert!(
+                holding(set).is_modal(),
+                "{what} is answered with a keystroke, so a path written \
+                 underneath it would be followed by an `Enter` that answers it"
+            );
+        }
+
+        // And the door that releases the borrowers, by the one thing a test
+        // without a window can read: which call stands where. Each line is one
+        // row of the first list, and the files column's was there already.
+        let source = include_str!("main.rs");
+        let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
+        let door = method_text(
+            before_this_fixture,
+            "    fn focus_the_pane_a_path_landed_in(",
+        );
+        for (call, what) in [
+            (
+                "self.set_files_keyboard(None, FilesFocusArrival::Pointer)",
+                "the column gives the keyboard back",
+            ),
+            (
+                "self.leave_preview_page(surface)",
+                "and so does a live preview editor, through the click-away road's \
+                 own door",
+            ),
+            (
+                "self.window.search.blur()",
+                "and the search capsule, through the button router's",
+            ),
+            (
+                "self.window.float.blur()",
+                "and every torn-off float, through `focus_pane_at`'s",
+            ),
+        ] {
+            assert!(
+                door.contains(call),
+                "`{call}` — {what}; without it the path lands in the shell and \
+                 the next key does not:\n{door}"
+            );
+        }
+        assert!(
+            door.find("focus_seat") > door.find("self.window.float.blur()"),
+            "the keyboard is handed to the shell before the surfaces holding it \
+             have given it up:\n{door}"
+        );
+    }
+
+    /// **The keyboard only follows a path a shell actually received** (review
+    /// 2026-09-17 P2-a).
+    ///
+    /// `write_pty_input` swallows a refused write on purpose — a shell sitting
+    /// on a megabyte of unread input is a fact about that shell, not an error
+    /// for the window to die of — and that is right for a keystroke and wrong
+    /// for a caller about to move the reader's keyboard and bring the window
+    /// forward on the strength of it. So the drop roads go through
+    /// [`offer_pty_input`], which says what became of the bytes, and only
+    /// [`PtyInput::Queued`] counts.
+    ///
+    /// **Queued and not consumed**, which is the honest limit: the bytes are on
+    /// the ring and the writer thread has them. What the program does with them
+    /// is its own business and nothing this process can report.
+    ///
+    /// MUTATION: make `queued` answer true for `Refused` and a path the ring
+    /// turned away still takes the keyboard to a shell that received nothing.
+    #[test]
+    fn only_a_queued_write_moves_the_keyboard() {
+        assert!(PtyInput::Queued.queued());
+        assert!(
+            !PtyInput::Refused.queued(),
+            "a ring that turned the path away is a shell that has stopped \
+             reading, and the reader must not be sent to it"
+        );
+        assert!(
+            !PtyInput::NoChild.queued(),
+            "a leaf with no ConPTY behind it never had anywhere to put the path"
+        );
+        // And the paste carries that answer out rather than reporting the
+        // swallowing wrapper's success.
+        let source = include_str!("main.rs");
+        let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
+        let deliver = method_text(before_this_fixture, "    fn deliver_paste(");
+        assert!(
+            deliver.contains("offer_pty_input(pty.as_ref(), bytes, context)")
+                && deliver.contains("Ok(landed.queued())"),
+            "the paste reports the wrapper's success rather than what the ring \
+             did with the bytes:\n{deliver}"
+        );
+        // The three callers that must not change: a keystroke, the row menu and
+        // the clipboard all go on through the swallowing door.
+        assert!(
+            method_text(before_this_fixture, "    fn insert_path_into_terminal(")
+                .contains("write_pty_input("),
+            "K144 has been moved onto the answering door, which is a behaviour \
+             change nobody asked for"
+        );
+    }
+
+    /// **A composition does not follow the keyboard from one shell to another**
+    /// (review 2026-09-17 P2-b; §7.1.5a″'s ruling, applied to two terminals).
+    ///
+    /// The ruling is that a composition belongs to the field it started in and
+    /// is cancelled when that field goes away — never committed into whatever
+    /// holds the keyboard next. [`Runtime::settle_composition_owner`] keeps it
+    /// at the tail of every pass through [`composition_outlived_its_field`],
+    /// which compares **kinds**: two shells are both [`ImeOwner::Shell`], so
+    /// half-typed letters begun at pane A's prompt survived the keyboard moving
+    /// to pane B and the next commit arrived at B. A pane is a field, so that is
+    /// the same report said about two terminals.
+    ///
+    /// Closed at [`Runtime::take_keyboard_into`] — the one place `focused_leaf`
+    /// moves — so the pointer's road and the named road are shut together. The
+    /// pointer road had the identical hole.
+    ///
+    /// MUTATION: take the cancel out of that door and the source pin below goes
+    /// red; leave the category comparison as the only guard and the first two
+    /// assertions say why that is not enough.
+    #[test]
+    fn a_shell_to_shell_move_settles_the_composition_it_leaves_behind() {
+        assert!(
+            !composition_outlived_its_field(Some(ImeOwner::Shell), ImeOwner::Shell),
+            "two shells are one kind of owner, so the pass-tail settlement \
+             cannot be what closes this"
+        );
+        assert!(
+            composition_outlived_its_field(Some(ImeOwner::Shell), ImeOwner::Preview),
+            "the control: it does still close every move between two kinds"
+        );
+        let source = include_str!("main.rs");
+        let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
+        let door = method_text(before_this_fixture, "    fn take_keyboard_into(");
+        assert!(
+            door.contains("self.cancel_composition(ImeOwner::Shell)?;"),
+            "the keyboard moves between two shells without ending the \
+             composition the old one was holding, so the next commit lands in \
+             the new pane:\n{door}"
+        );
+        assert!(
+            door.find("cancel_composition") < door.find("self.focused_leaf = seat;"),
+            "the composition is settled after the keyboard has already moved, \
+             which is the same defect one line later:\n{door}"
+        );
+        for road in ["    fn focus_pane_at(", "    fn focus_seat("] {
+            let text = method_text(before_this_fixture, road);
+            assert!(
+                text.contains("self.take_keyboard_into(seat)?;"),
+                "`{road}` no longer moves the keyboard through the door the \
+                 composition is settled at:\n{text}"
+            );
+        }
+    }
+
     /// The body of one method, from its signature to the brace that closes it at
     /// the `impl`'s own indentation — `layer_shape_tests::fn_body`'s reader,
     /// borrowed for one pin. The doc comment above the signature is deliberately

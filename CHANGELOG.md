@@ -40,7 +40,10 @@ All notable changes to Folio are recorded here. The format follows
   the path is put in front of the cursor for you to finish the line. The terminal
   that receives the path also takes the keyboard, and Folio comes to the front —
   you dropped the file here, so here is where you can carry on typing. A drop
-  that writes nothing changes neither.
+  that writes nothing changes neither, and a file let go of anywhere that is not
+  a terminal — over a card Folio is asking you something on, over a floating
+  window, on the tabs or in the gap between panes — is not typed anywhere at
+  all, rather than going to whichever pane you were last typing in.
 
 - **A picture on the clipboard now pastes as the path of a file Folio writes
   for it.** A screenshot taken with `Win`+`Shift`+`S`, or with
