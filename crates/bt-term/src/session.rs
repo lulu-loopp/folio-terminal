@@ -3397,7 +3397,42 @@ impl DualPlaneSession {
                 self.retire_marks_with_stale_anchors();
             }
         }
+        self.rebase_open_repaint_windows();
         Ok(())
+    }
+
+    /// **A reflow ends the grid an open repaint window snapshotted, exactly as a commit does.**
+    ///
+    /// A window is a promise about one particular grid, and it keeps that promise by comparing the
+    /// records it holds against the cells the snapshot describes. A resize replaces those cells
+    /// without a byte arriving: it takes a snapshot of its own, reflows, and reprojects every record
+    /// onto the new grid itself — so by the time this is called the records are already correctly
+    /// seated, in the *new* grid's coordinates. A window left open over that, still holding the
+    /// snapshot of the grid the reflow replaced, then ran the old grid's delta over them a second
+    /// time at its close. With two byte-identical blocks on screen the first lands on the second's
+    /// rows and the second is lost, on a screen whose text never changed between the reflow and the
+    /// close.
+    ///
+    /// Moving `live_content_revision` here would not be enough, and this is why: the comparison
+    /// would notice, but the snapshot the close then projected from would still be the old grid's.
+    /// The window is rebased instead — re-taken over the grid the reflow has just settled, keeping
+    /// the boundary it was opened with so its close still re-detects what it was going to. A window
+    /// with nothing left to preserve simply does not come back.
+    ///
+    /// Called after the reflow's own projection and off-band restore, never before: what this
+    /// snapshots has to be the answer that reflow arrived at.
+    fn rebase_open_repaint_windows(&mut self) {
+        if let Some(boundary) = self
+            .alternate_repaint_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.snapshot_boundary)
+        {
+            self.alternate_repaint_snapshot = self.snapshot_alternate_repaint(boundary);
+            self.alternate_repaint_in_progress = self.alternate_repaint_snapshot.is_some();
+        }
+        if self.primary_repaint_snapshot.is_some() {
+            self.primary_repaint_snapshot = self.snapshot_primary_repaint();
+        }
     }
 
     pub fn set_layout_key(&mut self, layout_key: LayoutKey) {
@@ -3562,6 +3597,9 @@ impl DualPlaneSession {
             self.stage_resize_history();
             self.reseat_anchors_after_reflow(reflow);
             self.retire_marks_with_stale_anchors();
+            // The console host's reconcile is the second reflow of a resize transaction, and it ends
+            // the grid an open window snapshotted for exactly the reason the first one does.
+            self.rebase_open_repaint_windows();
         }
         reconciled
     }

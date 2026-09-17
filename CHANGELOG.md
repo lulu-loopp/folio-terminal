@@ -37,6 +37,10 @@ All notable changes to Folio are recorded here. The format follows
   moment later it took the picture off again, and drew it for real only once the
   formula had scrolled onto a line of its own. Replaying the owner's own scrolling
   session, that was the last of its flicker.
+- **Resizing the window while a program is drawing no longer loses a formula.** A
+  redraw that was still in progress when the window changed size went on measuring
+  against the old shape of the screen, so a formula could be drawn over the wrong
+  lines and another one lost — on a screen whose text had not changed at all.
 
 ## 0.4.2-preview — 2026-09-17
 

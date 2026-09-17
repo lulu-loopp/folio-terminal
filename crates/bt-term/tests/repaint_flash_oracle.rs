@@ -813,6 +813,77 @@ fn an_atomic_scroll_inside_one_block_carries_both_formulas_through_its_close() {
     assert!(!oracle.flash_detected(), "sequence={:?}", oracle.frames());
 }
 
+/// **A resize ends the grid a window snapshotted, exactly as a commit does.**
+///
+/// The window here is opened by a block that goes on buffering across the resize, so the read that
+/// closes it arrives after the reflow. `resize_at` takes its own snapshot, reflows, and reprojects
+/// every record onto the new grid itself — correctly: both blocks land at rows 1 and 5. But the
+/// window that was already open was left holding the snapshot of a grid the reflow had just
+/// replaced, and its close then ran that old grid's delta over records already in the new grid's
+/// coordinates. The two blocks are byte-identical, so the second shift seats the first on the
+/// second's rows and the second is lost: two pictures become one, on a screen whose text did not
+/// change between the resize and the close.
+///
+/// Mutation: leaving `alternate_repaint_snapshot` alone across the reflow, instead of rebasing it
+/// onto the grid the resize settled, renders one block instead of two.
+#[test]
+fn a_resize_under_an_open_window_does_not_project_its_records_twice() {
+    let start = std::time::Instant::now();
+    let mut session = DualPlaneSession::new(nz(48), nz(14));
+    let mut projection = session.new_projection(session.layout_key());
+    let mut oracle = FormulaFlashOracle::default();
+    seed_one_off_band_record(
+        &mut session,
+        &mut projection,
+        &mut oracle,
+        start,
+        TWO_BLOCKS_AFTER,
+    );
+    let at = start + Duration::from_millis(400) + LIVE_MATH_STABLE_INTERVAL;
+    session.advance_live_stability(at);
+    complete_live_math(&mut session);
+    assert_eq!(
+        observe_frame(&mut session, &mut projection, &mut oracle),
+        FormulaFrameState::Rendered,
+        "the fixture never rendered its two blocks"
+    );
+    let detections = session.live_detection_count();
+
+    // The producer opens its next frame's block; everything in it is withheld.
+    session.feed_at(b"\x1b[?2026h\x1b[?25l\x1b[H", at).unwrap();
+
+    // The reader drags the window shorter while that block is still buffering. The cursor is on the
+    // last row, so the four rows that go come off the top and both blocks move up by four.
+    session
+        .resize_at(nz(48), nz(10), at + Duration::from_millis(20))
+        .unwrap();
+    projection = session.new_projection(session.layout_key());
+    complete_live_math(&mut session);
+    observe_frame(&mut session, &mut projection, &mut oracle);
+
+    // The block ends without touching a cell. Nothing may move.
+    session
+        .feed_at(b"\x1b[?25h\x1b[?2026l", at + Duration::from_millis(40))
+        .unwrap();
+    observe_frame(&mut session, &mut projection, &mut oracle);
+    session.refresh_projection(&mut projection);
+    let settled = session.viewport_frame(&mut projection).unwrap();
+    for row in [1usize, 2, 3, 5, 6, 7] {
+        assert!(
+            frame_row_text(&settled, row).trim().is_empty(),
+            "row {row} shows its LaTeX after a resize under an open window: {:?}",
+            (0..8)
+                .map(|row| frame_row_text(&settled, row))
+                .collect::<Vec<_>>()
+        );
+    }
+    assert_eq!(
+        session.live_detection_count(),
+        detections,
+        "both blocks must survive the reflow, not be detected all over again"
+    );
+}
+
 /// **No raster is ever held over text it does not match, not even for the one read between a
 /// commit and the next block's terminator.**
 ///
