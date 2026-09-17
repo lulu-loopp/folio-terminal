@@ -2406,6 +2406,14 @@ impl ViewportProjection {
             .max(0)
     }
 
+    /// **How much of the last frame's scroll ceiling the blank tail under the prompt was
+    /// spending** — the relief term inside [`Self::scroll_extent_subpixels`], named so a trace can
+    /// print the two beside each other. Zero is the classic flush-bottom pane: nothing on the live
+    /// plane is standing taller than the pane it is drawn in, or there is no blank tail to spend.
+    pub fn bottom_relief_subpixels(&self) -> i64 {
+        self.last_bottom_relief_subpixels
+    }
+
     /// Track the authoritative cell height. A zoom / DPI change remeasures the font, which changes
     /// the pixel height of every row while leaving row and scroll-offset semantics untouched. The
     /// projection caches subpixel geometry (`live_row_prefix`, math band tops) keyed on this height,
@@ -2822,11 +2830,21 @@ impl ViewportProjection {
                 window_top_subpixels = anchor_y
                     .saturating_add(anchor.local_offset)
                     .clamp(0, bottom_top_subpixels);
-                if window_top_subpixels < bottom_top_subpixels {
-                    self.scroll_state = ViewportScrollState::Anchored(anchor);
-                } else {
-                    self.scroll_state = ViewportScrollState::Bottom;
-                }
+                // **An anchor that resolved stays the answer, whatever the clamp had to do to it.**
+                // The clamp itself is honest — a mark inside the last paneful cannot stand at the
+                // top of the pane, because there is no document below it to scroll — but the view
+                // had been answering it by throwing the anchor away and calling itself Bottom. That
+                // is a state change with no picture behind it: `scroll_offset_subpixels` is zero
+                // either way and the frame is the resting one to the subpixel (the ceiling here is
+                // the one `scroll_extent_subpixels` hands every other reader, relief included, so
+                // the anchored placement at that ceiling *is* the resting cut). What it cost was
+                // the jump: the pane went back to following the output, so the next frame that gave
+                // the jump room to land — the shell filling the blank tail the relief was being
+                // spent on — left the reader at the bottom, and only a second press on the same
+                // mark took them to the command. Rest is `scroll_offset_subpixels == 0` and nothing
+                // else; whether this view is *following* is the anchor's business, and a reader who
+                // wants to follow again says so (`scroll_to_bottom`, a wheel notch down to zero).
+                self.scroll_state = ViewportScrollState::Anchored(anchor);
             } else {
                 // The anchored content vanished under the reader — a Codex-style reflow clears
                 // scrollback before reprinting equivalent content. Preserve the displacement so
@@ -2861,7 +2879,17 @@ impl ViewportProjection {
         // and it never engages for a user-initiated clear because no resize transaction is open.
         self.review_hold =
             primary && self.resize_reflow_active && self.displaced_review_subpixels.is_some();
-        let bottom_identity = matches!(self.scroll_state, ViewportScrollState::Bottom);
+        // **The picture is chosen by the offset, not by the state.** They said the same thing while
+        // a clamped anchor was demoted to `Bottom`; now that the anchor is kept, a view standing on
+        // the ceiling can be `Anchored` with nothing to travel, and the two readings part company
+        // exactly where the resting identity below matters most. A live band that has *contracted*
+        // — a raster shorter than the source rows it spans, which free height allows in both
+        // directions — makes the document shorter than history plus a paneful, so the ceiling lies
+        // *before* the live plane, in the last row of history: the normalisation below does not
+        // apply, and the same offset of zero drew the live plane from its own top under one reading
+        // and one row lower under the other, so typing (which restores `Bottom`) took that row away
+        // again. Rest is a place, and a view standing in it is drawn the way rest is drawn.
+        let bottom_identity = self.scroll_offset_subpixels == 0;
         let live_plane_top_subpixels = history_height.saturating_add(staging_height);
         let (mut window_start, mut first_row_top_subpixels) = if bottom_identity {
             // Replays never scroll. Preserve their Phase-A row-model identity exactly: fractional
@@ -2948,7 +2976,6 @@ impl ViewportProjection {
         let mut bridge_geometry: HashMap<LiveMathOccurrenceId, (usize, u32)> = HashMap::new();
         let mut frozen_prefix_geometry: HashMap<LiveMathOccurrenceId, usize> = HashMap::new();
         if primary {
-            let ordered = self.ordered_ids.len();
             for live_math in &self.live_math_artifacts {
                 if (live_math.frozen_prefix.is_empty() && live_math.staging_prefix.is_empty())
                     || live_math.screen != screen
@@ -2957,30 +2984,17 @@ impl ViewportProjection {
                 {
                     continue;
                 }
-                let abs_top = if live_math.frozen_prefix.is_empty() {
-                    history_rows
-                } else {
-                    let prefix = live_math.frozen_prefix.len();
-                    if prefix > ordered
-                        || self.ordered_ids[ordered - prefix..] != live_math.frozen_prefix[..]
-                    {
-                        continue;
-                    }
-                    // A finalized prefix must be plain source. A rendered history artifact means
-                    // frozen and live detection paired differently and cannot share one band.
-                    if live_math
-                        .frozen_prefix
-                        .iter()
-                        .any(|id| self.math_artifacts.contains_key(id))
-                    {
-                        continue;
-                    }
-                    let first_index = ordered - prefix;
-                    let abs_top = usize::try_from(self.visual_row_heights.prefix_sum(first_index))
-                        .unwrap_or(0);
-                    frozen_prefix_geometry.insert(live_math.occurrence_id, abs_top);
-                    abs_top
+                // The rows above the grid, measured by the one function the live prefix map sized
+                // this block's band with. Asking it again here rather than counting the ids a
+                // second way is what keeps the band's height and the picture's top two readings of
+                // one number: a wrapped or decorated prefix answers `None` in both places.
+                let Some(frozen_rows) = self.bridge_frozen_prefix_rows(live_math) else {
+                    continue;
                 };
+                let abs_top = history_rows.saturating_sub(frozen_rows as usize);
+                if !live_math.frozen_prefix.is_empty() {
+                    frozen_prefix_geometry.insert(live_math.occurrence_id, abs_top);
+                }
                 // Staging may hold an unrelated in-progress logical line. It is not part of this
                 // occurrence and must neither be swallowed nor prevent the exact frozen prefix
                 // above it from being occluded. Only make one geometrically continuous bridge when
@@ -4143,6 +4157,100 @@ impl ViewportProjection {
         self.inline_path_artifacts = next;
     }
 
+    /// **The plain source rows a boundary-split block owns above the live grid** — measured, never
+    /// counted from its ids.
+    ///
+    /// A finalized prefix element is a transcript id, and a transcript line is not a row: it wraps
+    /// into several of them when the pane narrows, and it can carry a picture of its own appended
+    /// under it. Charging the live band `ids × cell_height` is therefore a guess, and it is wrong
+    /// in both directions — it overcharges a wrapped prefix (the band grows into whitespace and
+    /// pushes the text below it down) and it can put a block over the visible-text floor that its
+    /// real share fits inside (a ready bridge falls back to source).
+    ///
+    /// So the prefix is measured, and only when this projection can prove it is a prefix a bridge
+    /// may stand on: the ids are the contiguous tail of the projected document, so the heights read
+    /// here are theirs; none of them wears a picture, so the rows can be swallowed by the one the
+    /// bridge paints across them; and every line stands at exactly its own row count times the cell,
+    /// which is what makes the bridge's upward extrapolation at cell pitch exact and "the rows above
+    /// cannot grow" a fact rather than an assumption.
+    ///
+    /// `None` means one thing at every caller: this is not a bridge this layer can place. The block
+    /// is refused and renders as source, like every other block whose geometry cannot be proven,
+    /// rather than being placed against a prefix height nobody measured.
+    fn bridge_frozen_prefix_rows(&self, live_math: &ProjectedLiveMathArtifact) -> Option<u32> {
+        let prefix = live_math.frozen_prefix.len();
+        let ordered = self.ordered_ids.len();
+        if prefix > ordered || self.ordered_ids[ordered - prefix..] != live_math.frozen_prefix[..] {
+            return None;
+        }
+        let cell = self.cell_height_subpixels.get();
+        let first_index = ordered - prefix;
+        let mut rows = 0_u32;
+        for (offset, id) in live_math.frozen_prefix.iter().enumerate() {
+            let index = first_index + offset;
+            if self.math_artifacts.contains_key(id) || self.inline_path_artifacts.contains_key(id) {
+                return None;
+            }
+            let line_rows = u32::try_from(*self.visual_rows.get(index)?).ok()?;
+            if self.heights.get(index)? != i64::from(line_rows).saturating_mul(cell) {
+                return None;
+            }
+            rows = rows.checked_add(line_rows)?;
+        }
+        Some(rows)
+    }
+
+    /// The same count with the staged rows above the band added to it. The staging plane is one
+    /// cell per row by construction — `continuous_frame` measures it as `rows × cell_height` — so
+    /// there its own length *is* its height.
+    fn bridge_prefix_rows(&self, live_math: &ProjectedLiveMathArtifact) -> Option<u32> {
+        let staged = u32::try_from(live_math.staging_prefix.len()).ok()?;
+        self.bridge_frozen_prefix_rows(live_math)?
+            .checked_add(staged)
+    }
+
+    /// **How much of one live block's raster its own live band has to carry.**
+    ///
+    /// Every plane sizes a block by its raster: an all-live band takes free height from the live
+    /// prefix map, a finalized block sets its history line's height to the image. A boundary-split
+    /// bridge is the same rule read across a seam. The rows above its band are frozen at plain cell
+    /// height and can never grow — that is what being frozen means — so what is left of the picture
+    /// is the live band's to carry. Sizing that band by its source rows instead (which is what
+    /// excluding bridges from the prefix map amounted to) clips a tall bridge to its own source
+    /// height and leaves the line underneath standing on the part that was cut off.
+    ///
+    /// Floored at the plain band, so a raster **shorter** than the rows it spans changes nothing:
+    /// the bridge keeps its source rows and centres inside them, and no live terminal row is ever
+    /// squeezed below cell height by a small picture.
+    ///
+    /// The alternate screen has neither history nor staging, so nothing above the band carries any
+    /// of the raster there and the band owes all of it; `project` builds a bridge on the primary
+    /// screen only, and alternate stays expand-only exactly as it is everywhere else in this file.
+    ///
+    /// `None` is [`Self::bridge_prefix_rows`]'s unplaceable prefix, and it is the one answer that
+    /// admission, row allocation and the bridge's own geometry all read from this single place.
+    fn live_band_share(
+        &self,
+        live_math: &ProjectedLiveMathArtifact,
+        screen: ScreenId,
+        source_band_height_subpixels: i64,
+    ) -> Option<i64> {
+        let raster = live_math.artifact.height_subpixels;
+        if screen == ScreenId::Alternate {
+            return Some(raster.max(source_band_height_subpixels));
+        }
+        if live_math.frozen_prefix.is_empty() && live_math.staging_prefix.is_empty() {
+            return Some(raster);
+        }
+        let prefix_height = i64::from(self.bridge_prefix_rows(live_math)?)
+            .saturating_mul(self.cell_height_subpixels.get());
+        Some(
+            raster
+                .saturating_sub(prefix_height)
+                .max(source_band_height_subpixels),
+        )
+    }
+
     pub fn sync_live_math_artifacts(
         &mut self,
         screen: ScreenId,
@@ -4180,20 +4288,36 @@ impl ViewportProjection {
                 ) {
                     return true;
                 }
-                // A boundary-split block occupies only its live band on the grid; the bulk of its
-                // height is carried by the frozen scrollback rows it already owns above. It is
-                // measured by its live-band height (never the full image).
-                let box_height = if artifact.frozen_prefix.is_empty() {
-                    artifact.artifact.height_subpixels.max(1)
-                } else {
+                // A boundary-split block occupies only its live band on the grid; the part of its
+                // height that the frozen and staged rows above already carry is not asked of the
+                // live grid at all. It is measured by the share of the raster its live band owes —
+                // the same number the prefix map below hands that band, so the floor and the
+                // geometry cannot disagree about how much grid this block wants.
+                let share = self.live_band_share(
+                    artifact,
+                    screen,
                     i64::from(
                         artifact
                             .band_end_row
                             .saturating_sub(artifact.band_start_row)
                             .saturating_add(1),
                     )
-                    .saturating_mul(self.cell_height_subpixels.get())
-                    .max(1)
+                    .saturating_mul(self.cell_height_subpixels.get()),
+                );
+                // A prefix this projection cannot measure is not a bridge it can place. Refusing
+                // admission is what sends the block back to its source rows — the same answer every
+                // unproven block gets — and it is refused *here*, so that nothing downstream ever
+                // sees a bridge whose rows above the grid were guessed at.
+                let Some(box_height) = share.map(|share| share.max(1)) else {
+                    if std::env::var_os("BT_PERF_TRACE").is_some_and(|value| !value.is_empty()) {
+                        crate::trace::line(format!(
+                            "BT_PERF_TRACE live_math_event=source-fallback row={} frozen_prefix={} staging_prefix={} reason=bridge-prefix-not-measurable",
+                            artifact.start.row,
+                            artifact.frozen_prefix.len(),
+                            artifact.staging_prefix.len(),
+                        ));
+                    }
+                    return false;
                 };
                 // A scaled stale raster (render_scale_milli != readable) is a proven block whose
                 // layout changed under a zoom; it stays pinned (scaled to approximate the new size)
@@ -4228,12 +4352,6 @@ impl ViewportProjection {
                 }
                 continue;
             }
-            // A boundary-split block never expands its live rows: its rendered image spans the
-            // frozen scrollback rows above plus its live band, and projection sizes that bridged
-            // span directly. Its live band keeps natural row heights here.
-            if !artifact.frozen_prefix.is_empty() {
-                continue;
-            }
             let visible_rows = artifact
                 .band_end_row
                 .saturating_sub(artifact.band_start_row)
@@ -4250,10 +4368,9 @@ impl ViewportProjection {
             // sizes the band from the visible rows alone, flooring it to the artifact height exactly
             // as the alternate screen already does. Whenever a genuine edge clip (M1.9v top reveal,
             // bottom-edge run-off) or a fresh artifact's occlusion is present the reduced band is
-            // legitimate and the HEAD sizing is kept to the subpixel; boundary-split bridges never
-            // reach this loop. A transition-stale primary raster is the exception: its occluded rows
-            // are the still-exact remainder of the old layout, so the preview must retain them until
-            // the replacement artifact arrives.
+            // legitimate and the HEAD sizing is kept to the subpixel. A transition-stale primary
+            // raster is the exception: its occluded rows are the still-exact remainder of the old
+            // layout, so the preview must retain them until the replacement artifact arrives.
             let last_live_row = self.live_rows.get().saturating_sub(1);
             let full_clipped_rows = artifact
                 .clipped_top_rows
@@ -4276,8 +4393,9 @@ impl ViewportProjection {
                 // pinned to live row zero does not prove the occurrence extends above it: a primary
                 // block reaching this loop owns every source row inside the live grid, because
                 // genuine upward extension into scrollback is projected as a boundary-split bridge
-                // (skipped above) and a top hidden behind fixed chrome surfaces as occlusion (kept
-                // below). So a reported clipped-top on such a block is never a genuine top reveal —
+                // (whose rows above the grid are counted by `live_band_share`, not as a clip) and a
+                // top hidden behind fixed chrome surfaces as occlusion (kept below). So a reported
+                // clipped-top on such a block is never a genuine top reveal —
                 // it is a reprojection transient during a reprint/reflow/zoom whose stale identity
                 // out-counts the reflowed occurrence's rows. Spreading the artifact across those
                 // phantom top rows and taking the middle slice is exactly what clipped the integral
@@ -4295,14 +4413,19 @@ impl ViewportProjection {
             };
             let source_band_height =
                 i64::from(rows).saturating_mul(self.cell_height_subpixels.get());
-            let presentation_height = if screen == ScreenId::Alternate {
-                artifact.artifact.height_subpixels.max(source_band_height)
-            } else {
-                artifact.artifact.height_subpixels
+            // The same share the floor above admitted this block on: a prefix that could not be
+            // measured was refused there, so a block standing here has one.
+            let Some(presentation_height) =
+                self.live_band_share(artifact, screen, source_band_height)
+            else {
+                continue;
             };
             let heights = distributed_row_heights(presentation_height, rows.max(1) as usize);
             // Primary retains free height. Alternate is expand-only: a short formula keeps the
             // complete source-row band and centers inside it; a tall formula expands above it.
+            // A boundary-split bridge takes free height for the share of the raster its own live
+            // rows owe — the frozen and staged rows above it cannot grow, so the remainder is the
+            // band's, and `project` reads that band back out of this very map.
             for offset in 0..visible_rows {
                 if let Some(height) =
                     per_row_height.get_mut(artifact.band_start_row.saturating_add(offset) as usize)
@@ -9269,6 +9392,11 @@ mod tests {
             GridGeneration(1),
         );
         projection.relayout(key(width), &document);
+        // The session projects the document and then syncs the live plane immediately
+        // before composing a frame (`Session::viewport_frame`), so the live prefix map is
+        // always measured against the history it is about to be drawn beside. The fixture
+        // drives the two in that order for the same reason.
+        projection.project(&document);
         projection.sync_live_math_artifacts(
             ScreenId::Primary,
             [ProjectedLiveMathArtifact {
@@ -9303,7 +9431,6 @@ mod tests {
                 },
             }],
         );
-        projection.project(&document);
         projection.scroll_to_top();
 
         let closer = format!("{:<width$}", "$$", width = width as usize);
@@ -9417,6 +9544,307 @@ mod tests {
                 .collect::<String>()
                 .contains("$$")),
             "an unrelated staged row must not stop the exact frozen source prefix from being swallowed"
+        );
+    }
+
+    /// The same bridge, with a raster **taller** than the source rows it spans: three source rows
+    /// (finalized opener, staged body, live closer) of eighteen pixels each carrying a 96-pixel
+    /// image.
+    ///
+    /// A block is sized by its raster on both of the other two planes — all-live takes free height
+    /// from the live prefix map, all-frozen sets the history line's own height — and a bridge was
+    /// the one shape that was sized by its *source rows* instead, because the live prefix map
+    /// skipped every block with a frozen prefix. The rows above the live band are frozen at plain
+    /// cell height and can never grow, so the live band must carry the remainder of the raster; the
+    /// bridge was clipped to 54 pixels of a 96-pixel picture and the next line stood on top of what
+    /// was cut. This is the display block cut off at the bottom from the second `cat` onwards
+    /// (2026-09-17 recording).
+    ///
+    /// MUTATIONS:
+    /// ① clamp the bridge's `combined_height` up to the artifact height in `project` instead of
+    ///    distributing the residual over the live band: ① and ② pass, ③ goes red — the picture
+    ///    would be painted over the line below it;
+    /// ② drop the floor on the live share: the shorter raster of the test above collapses its own
+    ///    closer row, and `boundary_split_block_renders_as_one_bridge_across_frozen_and_live` goes
+    ///    red.
+    #[test]
+    fn a_bridged_block_taller_than_its_source_rows_keeps_its_whole_raster() {
+        let width = 32;
+        let mut store = TranscriptStore::new(NonZeroUsize::new(64).unwrap());
+        let opener = store.capture(fixture_row("$$", false)).finalized.remove(0);
+        let mut document = HistoryDocument::default();
+        document.finalize_transaction(opener);
+        let frozen_prefix = document.entries().keys().copied().collect::<Vec<_>>();
+        let staging_id = StagingId(77);
+        let staged_body = format!("{:<width$}", "A=", width = width as usize);
+        let staged = [StagedRow {
+            id: staging_id,
+            row: fixture_row(&staged_body, true),
+        }];
+
+        let mut projection = ViewportProjection::new(
+            key(width),
+            DetectionRevision(1),
+            nz32(12),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        projection.relayout(key(width), &document);
+        // The session projects the document and then syncs the live plane immediately
+        // before composing a frame (`Session::viewport_frame`), so the live prefix map is
+        // always measured against the history it is about to be drawn beside. The fixture
+        // drives the two in that order for the same reason.
+        projection.project(&document);
+        // Three source rows of eighteen pixels; the raster is ninety-six.
+        let artifact_height = 96 * SUBPIXELS_PER_PX;
+        projection.sync_live_math_artifacts(
+            ScreenId::Primary,
+            [ProjectedLiveMathArtifact {
+                occurrence_id: LiveMathOccurrenceId(9),
+                screen: ScreenId::Primary,
+                start: GridPoint { row: 0, column: 0 },
+                end: GridPoint { row: 0, column: 2 },
+                band_start_row: 0,
+                band_end_row: 0,
+                clipped_top_rows: 0,
+                clipped_bottom_rows: 0,
+                occluded_source_rows: 0,
+                occluded_visible_rows: Vec::new(),
+                transition_stale: false,
+                frozen_prefix: frozen_prefix.clone(),
+                staging_prefix: vec![staging_id],
+                generation: GridGeneration(1),
+                artifact: ProjectedMathArtifact {
+                    inline_runs: Vec::new(),
+                    key: "gaussian".to_owned(),
+                    end: TranscriptId(0),
+                    rgba: Arc::from(vec![255; 96 * 4]),
+                    width_px: 1,
+                    height_px: 96,
+                    height_subpixels: artifact_height,
+                    baseline_subpixels: 0,
+                    mode: MathMode::Display,
+                    kind: RgbaArtifactKind::Math,
+                    vertical_padding_subpixels: 0,
+                    render_scale_milli: 1000,
+                    source: r"\int_{-\infty}^{\infty}e^{-x^2}dx=\sqrt{\pi}".to_owned(),
+                },
+            }],
+        );
+        projection.scroll_to_top();
+
+        let closer = format!("{:<width$}", "$$", width = width as usize);
+        let next_line = format!("{:<width$}", "done", width = width as usize);
+        let blank = " ".repeat(width as usize);
+        let mut live_rows = vec![fixture_row(&closer, false), fixture_row(&next_line, false)];
+        live_rows.extend(vec![fixture_row(&blank, false); 10]);
+        let frame = projection
+            .continuous_frame(
+                &document,
+                &staged,
+                live_rows,
+                GridCursor {
+                    row: 1,
+                    column: 0,
+                    visible: true,
+                },
+                ScreenId::Primary,
+            )
+            .unwrap();
+        frame.validate_shape().unwrap();
+
+        let bridge = frame
+            .math_blocks
+            .iter()
+            .find(|block| block.display == MathBlockDisplay::Rendered)
+            .expect("boundary-split block renders");
+        assert_eq!(bridge.live_occurrence_id, Some(LiveMathOccurrenceId(9)));
+        // ① The band the bridge is clipped to is at least its own raster.
+        assert!(
+            bridge.clip_height_subpixels >= bridge.artifact.height_subpixels,
+            "bridge band {} must hold the whole raster {}",
+            bridge.clip_height_subpixels,
+            bridge.artifact.height_subpixels
+        );
+        // ② And the raster stands inside that band rather than running out of its bottom.
+        assert!(
+            bridge
+                .content_offset_subpixels
+                .saturating_add(bridge.artifact.height_subpixels)
+                <= bridge.clip_height_subpixels,
+            "raster at offset {} plus height {} must fit the band {}",
+            bridge.content_offset_subpixels,
+            bridge.artifact.height_subpixels,
+            bridge.clip_height_subpixels
+        );
+        // ③ And the line after the band stands below it: the band really grew, it was not clamped
+        //    into the row underneath it.
+        let next_row = frame
+            .row_map
+            .iter()
+            .find(|row| row.live_grid_row == Some(1))
+            .expect("the line after the bridge is on the grid");
+        assert!(
+            next_row.top_subpixels
+                >= bridge
+                    .top_subpixels
+                    .saturating_add(bridge.clip_height_subpixels),
+            "the row after the band starts at {} and the band ends at {}",
+            next_row.top_subpixels,
+            bridge
+                .top_subpixels
+                .saturating_add(bridge.clip_height_subpixels)
+        );
+    }
+
+    /// The same bridge with a **wrapped** line in its finalized prefix: an opener, a 48-character
+    /// body line that takes two rows at this pane's width, one staged row and the live closer —
+    /// four rows above the live band, not three ids' worth.
+    fn wrapped_prefix_bridge_frame(raster_px: u32) -> ViewportFrame {
+        let width = 32_u32;
+        let mut store = TranscriptStore::new(NonZeroUsize::new(64).unwrap());
+        let mut document = HistoryDocument::default();
+        for text in ["$$", &"a".repeat(48)] {
+            let line = store.capture(fixture_row(text, false)).finalized.remove(0);
+            document.finalize_transaction(line);
+        }
+        let frozen_prefix = document.entries().keys().copied().collect::<Vec<_>>();
+        assert_eq!(frozen_prefix.len(), 2);
+        let staging_id = StagingId(77);
+        let staged = [StagedRow {
+            id: staging_id,
+            row: fixture_row(&format!("{:<32}", "b="), true),
+        }];
+
+        let mut projection = ViewportProjection::new(
+            key(width),
+            DetectionRevision(1),
+            nz32(12),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        projection.project(&document);
+        assert_eq!(
+            projection.visual_rows,
+            vec![1, 2],
+            "the second finalized line must wrap, or this fixture is not testing anything"
+        );
+        projection.sync_live_math_artifacts(
+            ScreenId::Primary,
+            [ProjectedLiveMathArtifact {
+                occurrence_id: LiveMathOccurrenceId(11),
+                screen: ScreenId::Primary,
+                start: GridPoint { row: 0, column: 0 },
+                end: GridPoint { row: 0, column: 2 },
+                band_start_row: 0,
+                band_end_row: 0,
+                clipped_top_rows: 0,
+                clipped_bottom_rows: 0,
+                occluded_source_rows: 0,
+                occluded_visible_rows: Vec::new(),
+                transition_stale: false,
+                frozen_prefix,
+                staging_prefix: vec![staging_id],
+                generation: GridGeneration(1),
+                artifact: ProjectedMathArtifact {
+                    inline_runs: Vec::new(),
+                    key: "wrapped".to_owned(),
+                    end: TranscriptId(0),
+                    rgba: Arc::from(vec![255; raster_px as usize * 4]),
+                    width_px: 1,
+                    height_px: raster_px,
+                    height_subpixels: i64::from(raster_px) * SUBPIXELS_PER_PX,
+                    baseline_subpixels: 0,
+                    mode: MathMode::Display,
+                    kind: RgbaArtifactKind::Math,
+                    vertical_padding_subpixels: 0,
+                    render_scale_milli: 1000,
+                    source: r"\sum a_k".to_owned(),
+                },
+            }],
+        );
+        projection.scroll_to_top();
+
+        let mut live_rows = vec![
+            fixture_row(&format!("{:<32}", "$$"), false),
+            fixture_row(&format!("{:<32}", "done"), false),
+        ];
+        live_rows.extend(vec![fixture_row(&" ".repeat(32), false); 10]);
+        let frame = projection
+            .continuous_frame(
+                &document,
+                &staged,
+                live_rows,
+                GridCursor {
+                    row: 1,
+                    column: 0,
+                    visible: true,
+                },
+                ScreenId::Primary,
+            )
+            .unwrap();
+        frame.validate_shape().unwrap();
+        frame
+    }
+
+    /// **A prefix element is a transcript line, and a line is not a row.** It wraps when the pane
+    /// narrows, so charging the live band `ids × cell_height` is a guess — and a guess in the
+    /// expensive direction: the band is handed height the rows above are already carrying, grows
+    /// into whitespace and pushes the text under it down. Four rows of prefix (opener, a wrapped
+    /// body, one staged row) charged as three left an 18-pixel surplus on a 96-pixel picture.
+    ///
+    /// MUTATION: count `frozen_prefix.len()` instead of the rows those lines were measured at —
+    /// the bridge is 114 pixels tall again for a 96-pixel raster.
+    #[test]
+    fn a_bridge_is_charged_the_rows_its_frozen_prefix_really_stands_on() {
+        let frame = wrapped_prefix_bridge_frame(96);
+        let bridge = frame
+            .math_blocks
+            .iter()
+            .find(|block| block.display == MathBlockDisplay::Rendered)
+            .expect("boundary-split block renders");
+        assert_eq!(
+            bridge.frozen_prefix_rows, 4,
+            "one opener row, two wrapped body rows and one staged row stand above the band"
+        );
+        assert_eq!(
+            bridge.clip_height_subpixels, bridge.artifact.height_subpixels,
+            "a bridge taller than its source rows is exactly its raster, with no surplus"
+        );
+        let next_row = frame
+            .row_map
+            .iter()
+            .find(|row| row.live_grid_row == Some(1))
+            .expect("the line after the bridge is on the grid");
+        assert_eq!(
+            next_row.top_subpixels,
+            bridge
+                .top_subpixels
+                .saturating_add(bridge.clip_height_subpixels),
+            "and the line after it stands exactly under it"
+        );
+    }
+
+    /// The other end of the same guess: it also refuses blocks that fit. The visible-text floor
+    /// keeps a live block from eating the pane — with twelve rows it may ask for four of them, 72
+    /// pixels. This block's live band really asks for 68 (140 less the 72 its four prefix rows
+    /// carry), but the band was measured as 86 and a ready bridge fell back to source.
+    ///
+    /// MUTATION: count ids again — the block renders as source and `expect` below fails.
+    #[test]
+    fn a_bridge_whose_live_share_fits_the_visible_text_floor_is_not_refused() {
+        let frame = wrapped_prefix_bridge_frame(140);
+        let bridge = frame
+            .math_blocks
+            .iter()
+            .find(|block| block.display == MathBlockDisplay::Rendered)
+            .expect("a bridge whose live share fits the floor must be admitted");
+        assert_eq!(
+            bridge.clip_height_subpixels,
+            140 * SUBPIXELS_PER_PX,
+            "and it stands at its whole raster"
         );
     }
 
@@ -10091,6 +10519,207 @@ mod tests {
             }),
             "and it is still the command's own line that is being named"
         );
+    }
+
+    /// **A jump is a position, not an act** — and the projection used to throw the position away
+    /// at exactly one place: when the anchor it had just resolved landed at or past the scroll
+    /// ceiling, the landing answered "go to the live bottom" and replaced `Anchored` with `Bottom`.
+    ///
+    /// A formula standing on the live plane is what puts an ordinary jump there. The ceiling is
+    /// `total − pane − relief`, and the relief is the blank tail under the prompt spent against the
+    /// height the band added: with the tail blank the ceiling sits at the top of the live plane, so
+    /// a mark on a live row is past it and the jump is clamped. The click therefore looked like it
+    /// did nothing, the anchor was gone, and the pane went back to following the output — so the
+    /// **next** frame that gave the jump room to land (the shell filling the blank tail, which
+    /// spends the relief) left the view at the bottom, and only a *second* press on the same tick
+    /// took the reader to the command. Two presses, two different places.
+    ///
+    /// The clamp itself is right: a mark inside the last paneful cannot stand at the top of the
+    /// pane, because there is no document below it to scroll. What is wrong is answering a
+    /// resolvable anchor with `Bottom`. The viewport stays anchored and `scroll_offset_subpixels`
+    /// alone says whether it is at rest, so the clamped landing is the resting picture to the
+    /// subpixel (asserted below) and the jump is still standing when the room arrives.
+    ///
+    /// MUTATIONS:
+    /// ① demote to `Bottom` on the clamp again: ① and ② go red, ③ stays green — which is the whole
+    ///    shape of the defect, a state change with no picture behind it;
+    /// ② take the relief out of `scroll_extent_subpixels` so the anchored ceiling stops being the
+    ///    resting one: ③ goes red (the clamped landing stops being the resting picture), and three
+    ///    `bt-term` gates for the 2026-09-07 report go red with it.
+    #[test]
+    fn jumping_twice_to_the_same_command_lands_twice_in_the_same_place_with_a_formula_on_the_live_plane()
+     {
+        let width = 32;
+        let live_rows = 16;
+        let mut store = TranscriptStore::new(NonZeroUsize::new(64).unwrap());
+        let mut document = HistoryDocument::default();
+        // History taller than the pane, so the pane genuinely scrolls.
+        for index in 0..20 {
+            let line = store
+                .capture(fixture_row(&format!("history {index:02}"), false))
+                .finalized
+                .remove(0);
+            document.finalize_transaction(line);
+        }
+        // A display block on the live plane over three rows. At 96 pixels the live plane stands 42
+        // pixels taller than the pane it is drawn in; at 36 it stands 18 pixels SHORTER, because a
+        // primary all-live band keeps free height in both directions.
+        let projection_with_band = |raster_px: u32| {
+            let mut projection = ViewportProjection::new(
+                key(width),
+                DetectionRevision(1),
+                nz32(live_rows),
+                cell_height(),
+                store.source_generation(),
+                GridGeneration(1),
+            );
+            projection.project(&document);
+            projection.sync_live_math_artifacts(
+                ScreenId::Primary,
+                [ProjectedLiveMathArtifact {
+                    occurrence_id: LiveMathOccurrenceId(3),
+                    screen: ScreenId::Primary,
+                    start: GridPoint { row: 4, column: 0 },
+                    end: GridPoint { row: 6, column: 2 },
+                    band_start_row: 4,
+                    band_end_row: 6,
+                    clipped_top_rows: 0,
+                    clipped_bottom_rows: 0,
+                    occluded_source_rows: 0,
+                    occluded_visible_rows: Vec::new(),
+                    transition_stale: false,
+                    frozen_prefix: Vec::new(),
+                    staging_prefix: Vec::new(),
+                    generation: GridGeneration(1),
+                    artifact: ProjectedMathArtifact {
+                        inline_runs: Vec::new(),
+                        key: "display".to_owned(),
+                        end: TranscriptId(0),
+                        rgba: Arc::from(vec![255; raster_px as usize * 4]),
+                        width_px: 1,
+                        height_px: raster_px,
+                        height_subpixels: i64::from(raster_px) * SUBPIXELS_PER_PX,
+                        baseline_subpixels: 0,
+                        mode: MathMode::Display,
+                        kind: RgbaArtifactKind::Math,
+                        vertical_padding_subpixels: 0,
+                        render_scale_milli: 1000,
+                        source: r"\frac{1}{2}".to_owned(),
+                    },
+                }],
+            );
+            projection
+        };
+
+        let line = |text: &str| fixture_row(&format!("{text:<32}"), false);
+        let blank = || fixture_row(&" ".repeat(width as usize), false);
+        // The command's own prompt row is live row 1; the shell's output and the block follow it,
+        // and the rows under the prompt are still blank.
+        let mut resting_rows = vec![
+            line("$ cat notes.md"),
+            line("$ ./gauss.ps1"),
+            line("the integral is"),
+            line("$$"),
+            line("e^{-x^2}"),
+            line("x"),
+            line("$$"),
+        ];
+        resting_rows.extend(vec![blank(); live_rows as usize - 7]);
+        let mut filled_rows = resting_rows.clone();
+        for row in filled_rows.iter_mut().skip(7) {
+            *row = line("more output");
+        }
+        let mark = ScrollAnchor {
+            source: ContentAnchor::Live {
+                screen: ScreenId::Primary,
+                point: GridPoint { row: 1, column: 0 },
+                bias: Bias::Before,
+                generation: GridGeneration(1),
+            },
+            local_offset: -8 * SUBPIXELS_PER_PX,
+        };
+        let frame = |projection: &mut ViewportProjection, rows: &[CapturedRow], cursor_row: u32| {
+            projection
+                .continuous_frame(
+                    &document,
+                    &[],
+                    rows.to_vec(),
+                    GridCursor {
+                        row: cursor_row,
+                        column: 0,
+                        visible: true,
+                    },
+                    ScreenId::Primary,
+                )
+                .unwrap()
+        };
+
+        // ③ One offset, one picture — in **both** directions of band height. At rest the whole
+        //    live plane is shown from its own top; a landing clamped to the ceiling must be that
+        //    same frame to the subpixel, so nothing is traded for keeping the anchor. An expanded
+        //    band puts the ceiling inside the live plane and a contracted one puts it *before* the
+        //    plane, in the last row of history, which is the direction that told the two states
+        //    apart until the picture stopped being chosen by the state.
+        for raster_px in [36, 96] {
+            let mut projection = projection_with_band(raster_px);
+            let rest = frame(&mut projection, &resting_rows, 6);
+            assert_eq!(projection.scroll_offset_subpixels(), 0);
+            projection.set_scroll_anchor(Some(mark.clone()));
+            let pressed = frame(&mut projection, &resting_rows, 6);
+            assert_eq!(
+                projection.scroll_offset_subpixels(),
+                0,
+                "a {raster_px} px band clamps this mark to the ceiling"
+            );
+            assert_eq!(
+                pressed.row_map, rest.row_map,
+                "a landing clamped to the ceiling must be the resting picture ({raster_px} px band)"
+            );
+            assert_eq!(
+                pressed.status_text, rest.status_text,
+                "and it must count the same rows above and below it ({raster_px} px band)"
+            );
+        }
+
+        // The rest of the sequence with the expanded band: the relief spends the whole of its extra
+        // height, so the ceiling stands at the top of the live plane and the mark is past it.
+        let mut projection = projection_with_band(96);
+        frame(&mut projection, &resting_rows, 6);
+        let ceiling = projection.scroll_extent_subpixels();
+        projection.set_scroll_anchor(Some(mark.clone()));
+        frame(&mut projection, &resting_rows, 6);
+        assert_eq!(projection.scroll_extent_subpixels(), ceiling);
+
+        // The shell goes on printing and fills the blank tail. The relief it was spending is gone,
+        // the ceiling moves down the document, and the jump now has room to land.
+        let landed = frame(&mut projection, &filled_rows, live_rows - 1);
+        assert!(
+            projection.scroll_extent_subpixels() > ceiling,
+            "filling the blank tail spends no relief and lifts the ceiling"
+        );
+        // ① The first press is still standing: the view moved to the command it was sent to,
+        //    instead of following the output because the anchor had been thrown away.
+        let first = projection.scroll_offset_subpixels();
+        assert!(
+            first > 0,
+            "the jump must still name its command once there is room to stand on it"
+        );
+        assert_eq!(
+            projection.scroll_anchor().map(|anchor| &anchor.source),
+            Some(&mark.source),
+            "and it must still be that command's own row being named"
+        );
+
+        // Pressing the same tick again lands in the same place.
+        projection.set_scroll_anchor(Some(mark.clone()));
+        let again = frame(&mut projection, &filled_rows, live_rows - 1);
+        // ② Two presses, one place.
+        assert_eq!(
+            projection.scroll_offset_subpixels(),
+            first,
+            "a second press on the same tick must land where the first one did"
+        );
+        assert_eq!(again.row_map, landed.row_map);
     }
 
     #[test]

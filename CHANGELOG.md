@@ -79,6 +79,30 @@ All notable changes to Folio are recorded here. The format follows
   come back only when something else made Folio look again. An answer about one
   line is now an answer about that line.
 
+- **A formula block that had partly scrolled into the history is no longer cut
+  off at the bottom by the line after it.** Print the same file twice and the
+  second printing pushed the first one's `$$` block up until its opening line
+  had already settled into the history while its closing line was still on the
+  live screen. A block standing across that join was drawn at the height of the
+  three lines it was written on rather than at the height of the picture it had
+  become, so a tall formula — an integral, a fraction, anything with something
+  above and below the line — lost its bottom edge under the next line of
+  output. The lines the block spans now make room for the whole of it wherever
+  it stands, and a block shorter than its own lines is placed exactly as
+  before.
+
+- **Clicking a command's mark beside the scroll bar goes to that command every
+  time, also when a formula is on screen.** A mark for one of the newest
+  commands — one whose own line is still on the live screen — could not always
+  be brought to the top of the pane, because there is nothing below it to
+  scroll to, and Folio answered that by forgetting the jump altogether: the
+  pane went back to following the output, and the moment there *was* room to
+  stand on the command you were left at the bottom instead. It took a second
+  click on the same mark to get there, so the same click did two different
+  things. A jump is now kept as the place you asked for until you say
+  otherwise, and a pane resting at the bottom still follows new output exactly
+  as it did.
+
 ## 0.4.2-preview — 2026-09-17
 
 ### Added

@@ -19945,6 +19945,25 @@ enum FlashBand {
     Pane,
 }
 
+/// **What a jump from the command rail was computed from**, for the rail's own
+/// `BT_MOUSE_TRACE` line.
+///
+/// `window_top` is the clamp the landing applies, and a `window_top` equal to
+/// `extent` is a jump standing on the ceiling: the mark is inside the last
+/// paneful, so there is no document below it to scroll and the view can go no
+/// further — which is a different sentence from "the rail missed". `relief` is
+/// the part of that ceiling the blank rows under the prompt are spending on a
+/// live plane standing taller than the pane it is drawn in, and it is what moves
+/// the ceiling between one press and the next.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RailJumpLanding {
+    anchor_y_subpixels: Option<i64>,
+    local_offset_subpixels: i64,
+    window_top_subpixels: Option<i64>,
+    extent_subpixels: i64,
+    relief_subpixels: i64,
+}
+
 /// What a search scan was of, so the next one can skip everything that has not moved.
 ///
 /// # The incremental rule, and why it is drawn here rather than inside the engine
@@ -42730,7 +42749,40 @@ impl Runtime<'_> {
             return Ok(false);
         };
         match target {
-            cmdrail::Target::Command(mark) => self.jump_to_command_mark(seat, mark)?,
+            cmdrail::Target::Command(mark) => {
+                let landing = self.jump_to_command_mark(seat, mark)?;
+                // **The rail's own station** (`BT_MOUSE_TRACE`). Everything about
+                // a press on a tick used to be silent: which tick was hit, which
+                // mark it names, and — the question a report of "it jumped to the
+                // wrong place" turns on — where the jump could actually land.
+                // `window_top == extent` is a jump answered at the ceiling: the
+                // mark is inside the last paneful and there is no document below
+                // it to scroll, which is not the same sentence as "the rail
+                // missed". `relief` is how much of that ceiling the blank rows
+                // under the prompt are spending on a formula standing taller than
+                // the pane, and it is what moves the ceiling between one press and
+                // the next.
+                self.mouse_trace(|| {
+                    let number = |value: Option<i64>| {
+                        value.map_or_else(|| "unresolved".to_owned(), |value| value.to_string())
+                    };
+                    match landing {
+                        Some(landing) => format!(
+                            "rail-jump seat={seat:?} tick={index} mark={mark:?} anchor_y={} local_offset={} window_top={} extent={} relief={}",
+                            number(landing.anchor_y_subpixels),
+                            landing.local_offset_subpixels,
+                            number(landing.window_top_subpixels),
+                            landing.extent_subpixels,
+                            landing.relief_subpixels,
+                        ),
+                        None => {
+                            format!(
+                                "rail-jump seat={seat:?} tick={index} mark={mark:?} leave=nothing-to-jump-to"
+                            )
+                        }
+                    }
+                });
+            }
             cmdrail::Target::Match(hit) => self.select_search_hit(hit)?,
         }
         Ok(true)
@@ -42752,10 +42804,17 @@ impl Runtime<'_> {
     /// path being tolerated — it is the honest answer to "jump to a command whose
     /// output was deleted", and the alternative (scroll somewhere near where it
     /// used to be) is the class of guess this whole block refuses.
-    fn jump_to_command_mark(&mut self, seat: SeatId, mark: bt_term::CommandMarkId) -> Result<()> {
+    ///
+    /// Answers with the numbers the jump was computed from when there was an
+    /// anchor to jump to, for the rail's own trace line one method up.
+    fn jump_to_command_mark(
+        &mut self,
+        seat: SeatId,
+        mark: bt_term::CommandMarkId,
+    ) -> Result<Option<RailJumpLanding>> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let Some(leaf) = self.sessions.get_mut(&seat) else {
-            return Ok(());
+            return Ok(None);
         };
         let Some(anchor) = leaf
             .session
@@ -42763,7 +42822,7 @@ impl Runtime<'_> {
             .and_then(|mark| leaf.session.command_mark_anchor(mark.start))
             .cloned()
         else {
-            return Ok(());
+            return Ok(None);
         };
         // `scroll_y = anchor_y(source) + local_offset`, so a negative offset lifts
         // the viewport's top *above* the anchor and the row lands that far down the
@@ -42776,6 +42835,26 @@ impl Runtime<'_> {
                 source: anchor.clone(),
                 local_offset,
             }));
+        // Read off the frame that is on the glass, because the frame this jump
+        // lands on has not been composed yet (the same reason the flash band
+        // waits, below). So this is the landing the projection will compute
+        // unless the document moves under it first — and it is computed by the
+        // clamp the landing itself uses rather than a second opinion about it.
+        let landing = mouse_trace::is_on().then(|| {
+            let extent_subpixels = leaf.projection.scroll_extent_subpixels();
+            let unclamped = leaf
+                .projection
+                .scroll_y(leaf.session.document())
+                .ok()
+                .flatten();
+            RailJumpLanding {
+                anchor_y_subpixels: unclamped.map(|top| top.saturating_sub(local_offset)),
+                local_offset_subpixels: local_offset,
+                window_top_subpixels: unclamped.map(|top| top.clamp(0, extent_subpixels)),
+                extent_subpixels,
+                relief_subpixels: leaf.projection.bottom_relief_subpixels(),
+            }
+        });
         self.window.command_flash = Some(CommandFlash {
             seat,
             band: FlashBand::Row(anchor),
@@ -42792,7 +42871,8 @@ impl Runtime<'_> {
         // would light the row the anchor was in *before* the scroll, for one
         // frame. [`Self::command_flash_deadline`] has already asked for the next
         // one, by which time the redraw this line requests has run.
-        self.repaint_pane_change(seat)
+        self.repaint_pane_change(seat)?;
+        Ok(landing)
     }
 
     /// **Light the whole pane instead of a row in it** (DESIGN.md §7.55 ⑨).
@@ -42862,7 +42942,9 @@ impl Runtime<'_> {
         else {
             return Ok(());
         };
-        self.jump_to_command_mark(seat, target)
+        // The walk is not the rail, so it writes no rail line: what the jump was
+        // computed from is the rail's own forensics.
+        self.jump_to_command_mark(seat, target).map(|_| ())
     }
 
     // ────────────────────────── in-pane search (§7.1.5d) ──────────────────────────
@@ -65794,11 +65876,23 @@ impl Runtime<'_> {
             let leaf = self.window.tabs[active].shell_mut();
             let projection_started_at = trace_perf.then(Instant::now);
             leaf.session.refresh_projection(&mut leaf.projection);
-            if let Some(started_at) = projection_started_at {
+            let refresh_us =
+                projection_started_at.map(|started_at| started_at.elapsed().as_micros());
+            let frame = leaf
+                .session
+                .viewport_frame(&mut leaf.projection)
+                .context("project terminal grid into viewport frame")?;
+            // **Written after the frame, not before it.** The three scroll numbers
+            // are what this frame decided — where the window stands, how far it
+            // could stand, and how much of that the blank tail under the prompt is
+            // spending — and a line printed before `viewport_frame` would report
+            // the frame before this one, which is the answer to a different
+            // question than the one the reader is holding the log for. The timing
+            // is still the refresh's own, taken above.
+            if let Some(refresh_us) = refresh_us {
                 trace_sink::stderr_line(format!(
-                    "BT_PERF_TRACE projection source={:?} refresh_us={} lines_measured={} projected_lines={} rebuilt={} band_moved={}",
+                    "BT_PERF_TRACE projection source={:?} refresh_us={refresh_us} lines_measured={} projected_lines={} rebuilt={} band_moved={} scroll_offset_subpixels={} scroll_extent_subpixels={} bottom_relief_subpixels={}",
                     trigger.source,
-                    started_at.elapsed().as_micros(),
                     leaf.projection
                         .line_text_measurements()
                         .saturating_sub(measurements_before),
@@ -65807,12 +65901,11 @@ impl Runtime<'_> {
                     leaf.projection
                         .bands_moved()
                         .saturating_sub(bands_moved_before),
+                    leaf.projection.scroll_offset_subpixels(),
+                    leaf.projection.scroll_extent_subpixels(),
+                    leaf.projection.bottom_relief_subpixels(),
                 ));
             }
-            let frame = leaf
-                .session
-                .viewport_frame(&mut leaf.projection)
-                .context("project terminal grid into viewport frame")?;
             // The frame that drew the names is the frame that discovered which of them nobody has
             // answered for (§7.1.5j). Taken here, one step after the projection wrote them down,
             // because the projection is what walks every line and the session is what owns a
@@ -95463,7 +95556,8 @@ impl Runtime<'_> {
                     .is_none_or(bt_term::CommandMark::is_running);
                 let alternate_screen = leaf.session.terminal_modes().alternate_screen;
                 match recall_flash(running, alternate_screen) {
-                    RecallFlash::Row => self.jump_to_command_mark(seat, mark),
+                    // The palette is not the rail, so it writes no rail line.
+                    RecallFlash::Row => self.jump_to_command_mark(seat, mark).map(|_| ()),
                     RecallFlash::Pane => self.flash_pane(seat),
                 }
             }
