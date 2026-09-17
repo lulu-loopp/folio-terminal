@@ -15,6 +15,7 @@ use typst_library::{
 };
 
 mod macro_budget;
+mod nesting;
 
 /// **Test-only: make one stage of a render panic on purpose.**
 ///
@@ -162,6 +163,20 @@ fn convert_math(source: &str) -> Result<String, MathRenderError> {
 }
 
 pub const MAX_SOURCE_BYTES: usize = 8 * 1024;
+/// The stack the math worker is given, and the number the nesting limit is chosen against.
+///
+/// **Rust's 2 MiB default is not a number anybody chose for this work.** One formula's render
+/// descends through `mitex-parser`, then Typst's parser, layout and SVG writer, each recursing on
+/// the same nesting; and a stack overflow is not a panic, so no `catch_unwind` can keep one from
+/// taking the process. The thread that does that work therefore says how much stack it wants, here,
+/// where the limit that depends on it is also written.
+///
+/// Sixteen mebibytes against [`nesting::MAX_NESTING_DEPTH`] levels is 64 KiB of headroom per level
+/// — one to two orders of magnitude more than a recursive-descent frame costs. The claim the pair
+/// actually has to make good is narrower and is measured rather than argued:
+/// `a_formula_nested_to_the_limit_still_renders` draws the deepest formula the limit accepts on a
+/// thread given exactly this stack.
+pub const MATH_WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
 pub const VERTICAL_PADDING_LOGICAL_PX: u32 = 8;
 /// CPU raster budget. Wide display math is tiled to the GPU's per-axis texture limit later, so
 /// rejecting it at an arbitrary 16K width would violate UI-UX §7.5's horizontal overflow rule.
@@ -741,6 +756,10 @@ fn bound_nesting(source: &str, opens: impl Fn(u8) -> Option<bool>) -> Result<(),
 
 /// The same ceiling, asked of the Typst the conversion produced.
 ///
+/// A second line of defence rather than the first one: [`nesting`] refuses the depth before the
+/// conversion runs, which is the only place a stack overflow can still be prevented. This catches a
+/// conversion that manages to *deepen* what it was given.
+///
 /// **The recursion that has to be bounded is over the converted source, not over the LaTeX.** The
 /// compile, the SVG writer and the rasterizer each walk the tree of what MiTeX emitted, and
 /// [`validate_source`]'s brace count cannot see that tree: `\sqrt\sqrt\sqrt…` nests as deeply as
@@ -748,11 +767,12 @@ fn bound_nesting(source: &str, opens: impl Fn(u8) -> Option<bool>) -> Result<(),
 /// the 8 KiB budget — and comes out as `sqrt(sqrt(sqrt(…)))`, where the same nesting is spelled in
 /// brackets and can be counted.
 ///
-/// What is *not* bounded here is the conversion's own recursion, which runs before this text
-/// exists. That one is bounded by the source budget and by arithmetic rather than by a check: a
-/// level of it consumes at least one token, the shortest token a recursive LaTeX command can be
-/// written with is two bytes (``), and [`MAX_SOURCE_BYTES`] is 8 KiB — so no accepted source can
-/// drive it past 4,096 levels.
+/// The conversion's own recursion is bounded by [`nesting`], which counts the structure the parser
+/// will descend through — including what macros expand to — and refuses it before the parser is
+/// called. An earlier version of this comment argued the same bound from source bytes instead, and
+/// that argument was wrong twice over: `^` and `_` are one byte each and chain right-associatively,
+/// and a macro's expansion is charged against a 32 KiB work cap rather than the 8 KiB source
+/// budget. Neither would have been a stack-capacity proof even if the arithmetic had held.
 fn bound_converted_nesting(converted: &str) -> Result<(), MathRenderError> {
     bound_nesting(converted, |byte| match byte {
         b'(' | b'[' | b'{' => Some(true),
@@ -1323,6 +1343,116 @@ mod tests {
             engine.render(&shallow, key()).is_ok(),
             "an ordinary nested formula is untouched"
         );
+    }
+
+    /// **The nesting is refused before anything walks the source.**
+    ///
+    /// A stack overflow is not a panic: `catch_unwind` cannot contain one and the process dies,
+    /// from text a program merely printed. So the guard cannot live after the conversion, and it
+    /// cannot be an argument about source bytes either — both of these pass an 8 KiB budget and
+    /// present thousands of levels to a recursive-descent parser. Every case here is asserted
+    /// through `validate_source`, which runs before `convert_math`, so a refusal here is a refusal
+    /// that happened before any recursive walk rather than one that happened to come back.
+    #[test]
+    fn deep_nesting_is_refused_before_the_conversion_runs() {
+        for (name, source) in [
+            // `^` is one byte and `attach_component` recurses into `content` for its argument, so
+            // the scripts chain right-associatively: eight thousand carets are eight thousand
+            // levels, inside the 8 KiB the source budget allows.
+            ("chained scripts", "^".repeat(8_191) + "x"),
+            // A macro's body is expanded where it is called, and the macro work cap is 32 KiB, so
+            // the source's own length bounds nothing: a hundred `\sqrt` in a body, invoked
+            // forty-eight times, is four thousand eight hundred levels.
+            (
+                "a macro body invoked many times",
+                format!(
+                    "\\newcommand{{\\deep}}{{{}}}{}x",
+                    "\\sqrt".repeat(100),
+                    "\\deep".repeat(48)
+                ),
+            ),
+            ("brace-free commands", "\\sqrt".repeat(300) + " x"),
+            ("groups", "{".repeat(300) + "x" + &"}".repeat(300)),
+            (
+                "arguments nested in arguments",
+                format!("{}x{}", "\\frac{".repeat(300), "}{y}".repeat(300)),
+            ),
+        ] {
+            assert!(
+                source.len() <= MAX_SOURCE_BYTES,
+                "{name}: the byte budget must not be what refuses it ({} bytes)",
+                source.len()
+            );
+            assert_eq!(
+                validate_source(&source),
+                Err(MathRenderError::NestingTooDeep),
+                "{name}"
+            );
+        }
+    }
+
+    /// And the other side of the line: a formula nested to the limit is accepted and drawn.
+    ///
+    /// **This is the measurement the limit rests on.** There is no safe way to ask how many bytes
+    /// of stack one level of `mitex-parser` plus Typst's parser and layout costs — the way to find
+    /// out is to overflow, and an overflow takes the process. What the limit actually has to be
+    /// true of is narrower and can be measured without risking anything: that the deepest formula
+    /// it *accepts* completes on the stack the math worker runs with. So this renders at exactly
+    /// [`MAX_NESTING_DEPTH`], on a thread given exactly [`MATH_WORKER_STACK_BYTES`], and the run is
+    /// the proof. It also bounds the per-level cost from above, at
+    /// `MATH_WORKER_STACK_BYTES / MAX_NESTING_DEPTH`.
+    #[test]
+    fn a_formula_nested_to_the_limit_still_renders() {
+        // `\frac` nests two levels at a time — its own argument slot and the braces around it — so
+        // the deepest stack of them the limit accepts is found rather than assumed, and then drawn.
+        let nested = |count: usize| format!("{}x{}", "\\frac{".repeat(count), "}{y}".repeat(count));
+        let deepest = (1..=256)
+            .take_while(|count| validate_source(&nested(*count)).is_ok())
+            .last()
+            .expect("some depth is accepted");
+        assert!(
+            deepest >= 64,
+            "the limit must admit a formula deep enough to be worth measuring, not {deepest}"
+        );
+        assert_eq!(
+            validate_source(&nested(deepest + 1)),
+            Err(MathRenderError::NestingTooDeep),
+            "and one more is refused, so this really is the edge"
+        );
+        let source = nested(deepest);
+        assert!(source.len() <= MAX_SOURCE_BYTES);
+
+        let rendered = std::thread::Builder::new()
+            .stack_size(MATH_WORKER_STACK_BYTES)
+            .spawn(move || {
+                MathEngine::with_system_fonts(false)
+                    .render(&source, key())
+                    .is_ok()
+            })
+            .expect("spawn a thread with the worker's stack")
+            .join()
+            .expect("the deepest accepted formula must not take the thread with it");
+        assert!(rendered, "and it must actually draw");
+    }
+
+    /// The scan counts what the grammar recurses on, and nothing else.
+    ///
+    /// A thousand commands that take no argument are flat, so a long ordinary formula is never
+    /// refused for its length; `\limits` and the infix operators take what is to their left, which
+    /// has already been counted where it stood.
+    #[test]
+    fn the_nesting_scan_counts_only_what_the_parser_descends_into() {
+        for (name, source) in [
+            (
+                "commands with no argument",
+                "\\alpha\\beta\\gamma".repeat(400),
+            ),
+            ("one long flat row", "x + ".repeat(1_000) + "y"),
+            ("a left-associating command", "\\sum\\limits".repeat(400)),
+        ] {
+            assert!(source.len() <= MAX_SOURCE_BYTES, "{name}");
+            assert_eq!(validate_source(&source), Ok(()), "{name}");
+        }
     }
 
     fn key() -> MathRenderKey {

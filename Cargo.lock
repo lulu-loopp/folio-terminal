@@ -335,6 +335,7 @@ dependencies = [
  "bt-doc",
  "mitex",
  "mitex-lexer",
+ "mitex-spec",
  "mitex-spec-gen",
  "resvg",
  "serde",

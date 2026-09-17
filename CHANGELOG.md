@@ -41,6 +41,15 @@ All notable changes to Folio are recorded here. The format follows
   instead. All three of a formula's actions — copy, show source, and the source
   toggle's animation — now act on the pane the formula is in.
 
+- **A formula nested past what Folio can draw is refused, rather than ending
+  the program.** Some shapes of mathematics nest as deeply as they are long —
+  a stack of superscripts, or a short definition repeated — and following one
+  down far enough used to end Folio outright, from text a program had only
+  printed. Folio now works out how deep a formula goes before it starts, and
+  leaves anything past its limit as the text you printed, the way it leaves
+  anything else it cannot draw. The limit is far beyond any formula written to
+  be read.
+
 - **One formula that cannot be drawn no longer takes the whole window with
   it.** A fault while typesetting was caught in one stage of the work and not in
   the others, so a fault in any of the rest ended Folio — every pane, every

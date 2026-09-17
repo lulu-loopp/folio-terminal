@@ -1661,9 +1661,16 @@ impl MathWorker {
             },
         )
         .context("spawn image resampling worker")?;
-        bt_platform::spawn_at_priority(
+        // **This thread says how much stack it wants** (`bt_math::MATH_WORKER_STACK_BYTES`). One
+        // formula's render descends through a LaTeX parser and then Typst's parser, layout and SVG
+        // writer, all over text a program printed into a terminal; a stack overflow is not a panic
+        // and would take the window with it, so the depth that is refused and the stack it is
+        // refused against are chosen together, in `bt-math`, and this is where the second half of
+        // that pair is spent.
+        bt_platform::spawn_at_priority_with_stack(
             "bt-math-worker",
             bt_platform::ThreadPriority::BelowNormal,
+            Some(bt_math::MATH_WORKER_STACK_BYTES),
             move || {
                 run_decoration_worker(task_rx, result_tx, || {
                     let _ = proxy.send_event(AppEvent::MathReady);

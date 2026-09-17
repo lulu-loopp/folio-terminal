@@ -9680,12 +9680,29 @@ mod windows_impl {
         priority: ThreadPriority,
         body: impl FnOnce() -> T + Send + 'static,
     ) -> std::io::Result<std::thread::JoinHandle<T>> {
-        std::thread::Builder::new()
-            .name(name.to_owned())
-            .spawn(move || {
-                set_current_thread_priority(priority);
-                body()
-            })
+        spawn_at_priority_with_stack(name, priority, None, body)
+    }
+
+    /// The same, for a thread that has a reason to say how much stack it needs.
+    ///
+    /// Rust's default is two mebibytes, which is nobody's measurement of any particular work. A
+    /// caller that recurses over input it did not write — the math worker descends through a LaTeX
+    /// parser and then Typst's parser and layout — states its own, because a stack overflow is not
+    /// a panic and cannot be contained by the thread that suffers it.
+    pub fn spawn_at_priority_with_stack<T: Send + 'static>(
+        name: &str,
+        priority: ThreadPriority,
+        stack_bytes: Option<usize>,
+        body: impl FnOnce() -> T + Send + 'static,
+    ) -> std::io::Result<std::thread::JoinHandle<T>> {
+        let mut builder = std::thread::Builder::new().name(name.to_owned());
+        if let Some(bytes) = stack_bytes {
+            builder = builder.stack_size(bytes);
+        }
+        builder.spawn(move || {
+            set_current_thread_priority(priority);
+            body()
+        })
     }
 
     /// Put one block of text where the person who started this process will see
@@ -10384,11 +10401,11 @@ pub use windows_impl::{
     pointer_position_in_window, read_context_menu, recycle, redirect_std_streams_to_file,
     register_clipboard_owner, remove_context_menu, request_window_close, set_clipboard_text,
     set_current_thread_priority, set_system_backdrop, set_window_dark_mode, set_window_outer_rect,
-    set_window_topmost, silence_std_streams, spawn_at_priority, stand_window_at,
-    std_error_is_console, system_backdrop_available, system_uses_light_apps, take_keyboard_focus,
-    taskbar_auto_hidden_from_state, taskbar_is_auto_hidden, thread_mouse_capture,
-    top_level_window_at, virtual_key_for_character, virtual_screen_rect, wheel_scroll_amount,
-    window_is_exposed, work_area_at, write_std_error, write_to_console,
+    set_window_topmost, silence_std_streams, spawn_at_priority, spawn_at_priority_with_stack,
+    stand_window_at, std_error_is_console, system_backdrop_available, system_uses_light_apps,
+    take_keyboard_focus, taskbar_auto_hidden_from_state, taskbar_is_auto_hidden,
+    thread_mouse_capture, top_level_window_at, virtual_key_for_character, virtual_screen_rect,
+    wheel_scroll_amount, window_is_exposed, work_area_at, write_std_error, write_to_console,
 };
 
 /// **The same doors, on a machine with no Win32** (M1-1).
@@ -11295,18 +11312,36 @@ mod portable_priority {
         priority: ThreadPriority,
         body: impl FnOnce() -> T + Send + 'static,
     ) -> std::io::Result<std::thread::JoinHandle<T>> {
-        std::thread::Builder::new()
-            .name(name.to_owned())
-            .spawn(move || {
-                set_current_thread_priority(priority);
-                body()
-            })
+        spawn_at_priority_with_stack(name, priority, None, body)
+    }
+
+    /// The same, for a thread that has a reason to say how much stack it needs.
+    ///
+    /// Rust's default is two mebibytes, which is nobody's measurement of any particular work. A
+    /// caller that recurses over input it did not write — the math worker descends through a LaTeX
+    /// parser and then Typst's parser and layout — states its own, because a stack overflow is not
+    /// a panic and cannot be contained by the thread that suffers it.
+    pub fn spawn_at_priority_with_stack<T: Send + 'static>(
+        name: &str,
+        priority: ThreadPriority,
+        stack_bytes: Option<usize>,
+        body: impl FnOnce() -> T + Send + 'static,
+    ) -> std::io::Result<std::thread::JoinHandle<T>> {
+        let mut builder = std::thread::Builder::new().name(name.to_owned());
+        if let Some(bytes) = stack_bytes {
+            builder = builder.stack_size(bytes);
+        }
+        builder.spawn(move || {
+            set_current_thread_priority(priority);
+            body()
+        })
     }
 }
 
 #[cfg(not(windows))]
 pub use portable_priority::{
     current_thread_priority, set_current_thread_priority, spawn_at_priority,
+    spawn_at_priority_with_stack,
 };
 
 /// **Ending a composition on macOS: the input context's, and the view's**
