@@ -8,6 +8,17 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **Losing the graphics device no longer closes Folio.** A power cut that
+  switches a laptop to battery, a graphics driver that updates itself, a machine
+  that changes which GPU it draws on: each of these takes the device away
+  underneath whatever is on screen at that instant. Folio already knew how to
+  ask the machine for another one and carry on, but a picture that was halfway
+  prepared when the device went reached a call that could only end the run —
+  the window closed, and every shell open in it closed with it. Nothing on
+  that path can end the run any more: the half-prepared picture is dropped, the
+  device is asked for again, and the window draws everything it was saying on
+  the new one.
+
 - **A dropped file now lands in the terminal you dropped it on even when Folio
   is busy, or when you were last hovering somewhere else.** Where the file was
   let go of was worked out after the fact — when Folio got round to typing the
