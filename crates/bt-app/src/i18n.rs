@@ -4204,10 +4204,7 @@ impl Text {
             Self::DragRootTreeHere => {
                 pick(lang, "Root the files column here", "把这棵树的根设到这里")
             }
-            // CHINESE_PENDING: both columns, written 2026-09-16. The English is
-            // two words on a small box and the Chinese owed is the same verb the
-            // row menu's `Insert path into terminal` already says.
-            Self::DragPastePath => pick(lang, "Paste path", "Paste path"),
+            Self::DragPastePath => pick(lang, "Paste path", "粘贴路径"),
 
             // ── the Terminal page's Scrollback row ─────────────────────────
             //
@@ -5823,13 +5820,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 5] = [
-        // zh: pending opus46 — the caption a file row earns over a terminal's
-        // middle (§7.1.1, user ruling 2026-09-16). Both columns, because the
-        // gesture says nothing about the machine: the same two words over the
-        // same box on either platform.
-        (Self::DragPastePath, HostPlatform::Windows),
-        (Self::DragPastePath, HostPlatform::MacOs),
+    const CHINESE_PENDING: [(Self, HostPlatform); 3] = [
         // zh: pending opus46 — the card raised when a picture on the clipboard
         // could not be written to a file (§7.61). Both columns, because the
         // sentence says nothing about the machine: the same file, the same
