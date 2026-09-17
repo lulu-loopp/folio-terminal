@@ -51,6 +51,18 @@ Nothing yet.
 
 ### Fixed
 
+- **Closing a pane or a tab no longer pauses the window while the program
+  inside it winds down.** Shutting a shell down is several steps, and one of
+  them waits for the console host to let go of everything running under it —
+  which for a pane that had an agent or a Node program in it can take seconds.
+  All of it used to happen between your click and the next frame, so closing a
+  tab could leave the window sitting still for as long as the program took to
+  go. The pane now leaves the window the moment you close it and is taken apart
+  on its own; if something in there takes an unusual amount of time, Folio notes
+  it in its own log instead of making you watch. Quitting still waits for those
+  to finish, briefly and with a limit, so nothing is left running behind a
+  window that has gone.
+
 - **On a Mac, Shift+wheel now scrolls the rows a formula pushed out of view.**
   A typeset formula is taller than the line it was typed on, so it lifts the
   rows above it off the top of the pane; the chip under a full-screen program
