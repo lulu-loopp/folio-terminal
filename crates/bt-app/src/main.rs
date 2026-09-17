@@ -12713,20 +12713,21 @@ struct WindowRuntime {
     /// [`Runtime::settle_composition_owner`] at the tail of every pass, which is
     /// the one place that notices the keyboard has moved.
     composing: Option<ImeOwner>,
-    /// **Which shell a live composition belongs to** (§7.1.5a″; review
-    /// 2026-09-17 P2) — `None` when no shell has one.
+    /// **Which field a live composition belongs to** (§7.1.5a″; review
+    /// 2026-09-17 P2) — `None` when there is no composition.
     ///
     /// Beside [`Self::composing`] and set in the same breath, because the two
     /// are one fact read at two grains: that one says *what kind* of surface the
     /// letters were typed into, which is all the pass-tail settlement needs, and
-    /// this one says *which shell*, which is what two terminals need to be told
-    /// apart. Kept as a [`PasteTarget`] so the answer survives a tab moving and
-    /// a shell restarting in the same seat.
+    /// this one says *which* surface, which is what two terminals, or two
+    /// previews, need to be told apart.
     ///
-    /// **It outlives [`Runtime::cancel_composition`] on purpose.** That call is
-    /// a request an input method may refuse, and this is what makes the refusal
-    /// safe: see [`shell_ime_ruling`].
-    shell_composing: Option<PasteTarget>,
+    /// **It outlives [`Runtime::cancel_composition`], `Ime::Enabled`,
+    /// `Ime::Disabled` and every window focus change, on purpose.** A cancel is
+    /// a request an input method may refuse, and the lifecycle notices around it
+    /// are not the composition ending — a barrier a notice can take down is not
+    /// a barrier. See [`composition_ruling`] for the whole rule.
+    composing_in: Option<CompositionOrigin>,
     ime_active: bool,
     ime_cursor_throttle: ImeCursorThrottle,
     /// The tab-rename caret's line box in window pixels, as the strip last drew
@@ -18254,89 +18255,150 @@ fn composition_outlived_its_field(
     composing.is_some_and(|started_in| started_in != holds_the_keyboard)
 }
 
-/// **What a composition event arriving for a shell is**, as far as the ruling
-/// below needs to know (§7.1.5a″; review 2026-09-17 P2).
+/// **The field a composition began in, named exactly enough to tell it from the
+/// next one** (§7.1.5a″; review 2026-09-17 P2, rounds 2 and 3).
+///
+/// [`ImeOwner`] says what *kind* of surface the letters are going to, which is
+/// what routes them. It is not enough to say whether a composition is still the
+/// one it started as: two terminals are both `Shell`, two preview surfaces are
+/// both `Preview`, and a composition that crosses from one to the other has
+/// outlived its field exactly as much as one that crossed from a palette to a
+/// page. So each rung carries whatever this window already uses to tell its own
+/// instances apart, and nothing more:
+///
+/// * a shell by [`PasteTarget`] — tab, seat and incarnation, so a shell
+///   restarted in the same hole is a different field;
+/// * a preview and the graph's field by [`PreviewSurface`], the id every
+///   preview map in this window is keyed by;
+/// * a files column and the search capsule by the seat they stand on;
+/// * the name box by its [`RenameSubject`], which is what it is editing;
+/// * the palette, a git prompt and a popup by themselves — this window has one
+///   of each at a time.
+///
+/// The `Option`s inside are not uncertainty to be resolved: a surface that
+/// cannot be named right now is one no text can be inserted into either, so two
+/// of them comparing equal costs nothing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum CompositionOrigin {
+    Shell(Option<PasteTarget>),
+    Preview(Option<PreviewSurface>),
+    GraphSearch(Option<PreviewSurface>),
+    Search(Option<SeatId>),
+    FilesTree(Option<SeatId>),
+    Rename(Option<RenameSubject>),
+    GitPrompt,
+    Palette,
+    Modal,
+}
+
+/// **What a composition event is**, as far as [`composition_ruling`] needs to
+/// know (§7.1.5a″).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ShellIme {
+enum ComposingEvent {
     /// A pre-edit with letters in it. This is somebody composing **now**, so it
-    /// belongs to whatever shell holds the keyboard at this instant — which is
+    /// belongs to whatever field holds the keyboard at this instant — which is
     /// what "the first pre-edit after the keyboard moved starts a new
     /// composition" means.
     Opens,
-    /// An empty pre-edit: the letters that were on the glass are taken off. It
-    /// ends nothing and claims nothing — an input method whose cancel *was*
-    /// honoured says this, and so does one that is about to commit anyway.
+    /// An empty pre-edit: the letters that were on the glass are taken off.
     Clears,
-    /// A commit. The letters are about to be written to a child.
+    /// A commit. The letters are about to be inserted somewhere.
     Commits,
 }
 
-/// What [`shell_ime_ruling`] decided: whether these letters reach a shell, and
-/// which shell the window should consider the composition to belong to
-/// afterwards.
+/// What the window should remember about the composition once this event has
+/// been answered.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ShellImeRuling {
-    /// Whether the event is answered at all. `false` is a **discard**: nothing
-    /// is written, to this pane or to any other.
-    deliver: bool,
-    /// The shell the composition belongs to from here on.
-    belongs_to: Option<PasteTarget>,
+enum OriginAfter {
+    /// Leave it exactly as it is.
+    Keep,
+    /// There is no composition any more.
+    Forget,
+    /// This event begins one, here.
+    Adopt,
 }
 
-/// **A composition belongs to the shell it began in, and a cancel that was not
-/// honoured does not change that** (§7.1.5a″; review 2026-09-17 P2).
+/// [`composition_ruling`]'s answer: whether these letters are answered at all,
+/// and what becomes of the recorded origin.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompositionRuling {
+    /// `false` is a **discard**: nothing is inserted, into this field or any
+    /// other, by any rung of the ladder.
+    deliver: bool,
+    origin: OriginAfter,
+}
+
+/// **A composition belongs to the field it began in, and a cancel is a request**
+/// (§7.1.5a″; review 2026-09-17 P2).
 ///
-/// [`Runtime::cancel_composition`] is a *request*: `ImmNotifyIME` answers a
-/// bool, and §7.1.5a″ already records an input method that does not honour it.
-/// So the keyboard moves from pane A to pane B — a dropped path, a click, a
-/// pane chord — the window clears everything it was drawing, and the method
-/// then sends the commit anyway. Every rung above resolves the owner *now*, so
-/// the letters A was half-way through typing would be written into B's shell.
-/// The ruling §7.1.5a″ makes is that this must never happen, and a request
-/// cannot be what enforces it.
+/// [`Runtime::cancel_composition`] asks an input method to stop; `ImmNotifyIME`
+/// answers a bool and §7.1.5a″ already names a method that says no. So the
+/// keyboard moves — a dropped path, a click, a pane chord, a palette closing —
+/// the window stops drawing the letters, and the method sends the commit anyway.
+/// Every rung of `ime_input` resolves the owner *now*, so those letters would be
+/// inserted into whatever field the keyboard has arrived in. The ruling is that
+/// this must never happen, and a request cannot be what enforces it.
 ///
-/// So the composition carries its destination. `belongs_to` is the shell a live
-/// composition began in — tab, seat and incarnation ([`PasteTarget`], which is
-/// this window's one way of naming a shell, so a restarted shell in the same
-/// hole is a different one here too) — and it is deliberately **not** cleared by
-/// the cancel. `holding` is the shell the keyboard is in at the instant the
-/// event arrives. The three events then decide themselves:
+/// **The rule, in full.** A composition's **origin** is the identity of the
+/// keyboard owner it began under ([`CompositionOrigin`]). It is set by the first
+/// non-empty pre-edit and it is ended by exactly two things: that composition's
+/// own commit, and a non-empty pre-edit that re-homes it. It is **not** cleared
+/// by `cancel_composition`, by `Ime::Enabled` or `Ime::Disabled`, or by the
+/// window losing and regaining focus — those are lifecycle notices, and a
+/// barrier a notice can take down is not a barrier. A commit is delivered only
+/// when its origin is `None` or equal to the field that would receive it now;
+/// otherwise it is discarded, everywhere.
 ///
-/// * [`ShellIme::Opens`] re-homes and delivers. Somebody is composing now, so
-///   the letters are for the shell they are looking at, and a fresh composition
-///   in B after the handoff works exactly as it always did.
-/// * [`ShellIme::Clears`] delivers — taking letters *off* the glass is safe
-///   wherever it came from — and changes nothing about whose composition it is,
-///   so a `Preedit("")` followed by a stale commit does not launder it.
-/// * [`ShellIme::Commits`] is the one that can write, and it is delivered only
-///   when the composition is the current shell's. A commit with **no** live
-///   composition behind it is delivered: input methods commit single characters
-///   with no pre-edit at all, and refusing those would swallow ordinary typing.
+/// **The one thing an empty pre-edit decides, and why it is not a third
+/// exception.** Pressing `Esc` mid-composition is an empty pre-edit with no
+/// commit behind it, and it happens *in the field being typed in*. A refused
+/// cancel's clearing is the same event arriving *after* the keyboard has already
+/// moved. The window can tell those apart without a clock, because it is the
+/// same comparison the commit makes: an empty pre-edit whose origin **is** the
+/// current field ends that composition (`Forget`), and one whose origin is some
+/// other field is the refused cancel tidying up and leaves the origin standing
+/// (`Keep`), so the commit behind it is still judged by it. Without this, an
+/// abandoned composition would leave its origin set for ever and the reader's
+/// next single-character commit somewhere else would be swallowed.
 ///
-/// **The bound this does not close**, stated rather than hidden: an input
-/// method that answers a refused cancel by re-sending a *non-empty* pre-edit is
-/// indistinguishable from a reader starting a new composition in B, so it
-/// re-homes. The letters are drawn at B's caret before any commit, which is the
-/// difference between a picture the reader can see and refuse and bytes on a
-/// command line — and the alternative is refusing the first real composition
-/// after every focus change.
-fn shell_ime_ruling(
-    belongs_to: Option<PasteTarget>,
-    holding: Option<PasteTarget>,
-    event: ShellIme,
-) -> ShellImeRuling {
+/// **Two bounds, both stated rather than hidden.**
+///
+/// ① A method that answers a refused cancel with a *non-empty* pre-edit is
+/// indistinguishable from a reader beginning to type, so it re-homes. Those
+/// letters are drawn at the new caret before any commit — a picture the reader
+/// can see and refuse, not bytes on a command line — and the alternative is
+/// refusing the first real composition after every focus change.
+///
+/// ② A composition abandoned with **neither** a commit nor an empty pre-edit
+/// would leave its origin standing, and a later bare single-character commit in
+/// another field would be discarded. Those two cannot be told apart by event
+/// order, and §7.1.5a″ chooses the conservative side: never write into a field
+/// the text did not begin in. The cost is bounded by both backends actually
+/// ending compositions — winit's Windows arm emits the result string before
+/// `Disabled` (`event_loop.rs`), and its macOS arm queues an empty pre-edit when
+/// marked text is cleared (`view.rs`) — so the order that would pay it is one
+/// neither of them produces.
+fn composition_ruling(
+    origin: Option<&CompositionOrigin>,
+    here: &CompositionOrigin,
+    event: ComposingEvent,
+) -> CompositionRuling {
     match event {
-        ShellIme::Opens => ShellImeRuling {
+        ComposingEvent::Opens => CompositionRuling {
             deliver: true,
-            belongs_to: holding,
+            origin: OriginAfter::Adopt,
         },
-        ShellIme::Clears => ShellImeRuling {
+        ComposingEvent::Clears => CompositionRuling {
             deliver: true,
-            belongs_to,
+            origin: if origin == Some(here) {
+                OriginAfter::Forget
+            } else {
+                OriginAfter::Keep
+            },
         },
-        ShellIme::Commits => ShellImeRuling {
-            deliver: belongs_to.is_none() || belongs_to == holding,
-            belongs_to: None,
+        ComposingEvent::Commits => CompositionRuling {
+            deliver: origin.is_none_or(|origin| origin == here),
+            origin: OriginAfter::Forget,
         },
     }
 }
@@ -18344,13 +18406,13 @@ fn shell_ime_ruling(
 /// Which of the three a winit composition event is, or `None` for the two that
 /// are the window's own bookkeeping.
 ///
-/// Written beside [`shell_ime_ruling`] rather than inside it so that the ruling
-/// can be read — and tested — without constructing winit's event.
-const fn shell_ime_of(event: &Ime) -> Option<ShellIme> {
+/// Written beside [`composition_ruling`] rather than inside it so that the
+/// ruling can be read — and tested — without constructing winit's event.
+const fn composing_event_of(event: &Ime) -> Option<ComposingEvent> {
     match event {
-        Ime::Preedit(text, _) if !text.is_empty() => Some(ShellIme::Opens),
-        Ime::Preedit(..) => Some(ShellIme::Clears),
-        Ime::Commit(_) => Some(ShellIme::Commits),
+        Ime::Preedit(text, _) if !text.is_empty() => Some(ComposingEvent::Opens),
+        Ime::Preedit(..) => Some(ComposingEvent::Clears),
+        Ime::Commit(_) => Some(ComposingEvent::Commits),
         Ime::Enabled | Ime::Disabled => None,
     }
 }
@@ -37251,7 +37313,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         cards: focus_thumb::CardClock::default(),
         preedit: None,
         composing: None,
-        shell_composing: None,
+        composing_in: None,
         ime_active: false,
         ime_cursor_throttle: ImeCursorThrottle::default(),
         rename_caret_line: None,
@@ -60896,6 +60958,40 @@ impl Runtime<'_> {
             // The search capsule, and only while the caret is in it.
             search: self.window.search.is_focused(),
             palette: self.window.palette.is_some(),
+        }
+    }
+
+    /// **Which field the keyboard is in, named down to the instance**
+    /// (§7.1.5a″; review 2026-09-17 P2).
+    ///
+    /// [`Self::keyboard_owner`] read one grain finer. The ladder it goes through
+    /// is `ime_owner`'s own, unchanged and not copied — this only attaches the
+    /// id that tells one instance of a rung from the next, because "the field
+    /// this composition began in" is a question two terminals and two preview
+    /// surfaces can answer differently while `ImeOwner` cannot.
+    ///
+    /// Asked twice per composition event, and that is deliberate: once to record
+    /// where a composition begins, and once, later, to ask whether the letters
+    /// are still that field's. Both readings are of this same function, so they
+    /// cannot disagree for a reason that is not about the window.
+    fn composition_origin_now(&self) -> CompositionOrigin {
+        match ime_owner(self.keyboard_owner()) {
+            ImeOwner::Rename => CompositionOrigin::Rename(
+                self.window
+                    .rename
+                    .as_ref()
+                    .map(|editor| editor.subject.clone()),
+            ),
+            ImeOwner::GraphSearch => {
+                CompositionOrigin::GraphSearch(self.preview_keyboard_surface())
+            }
+            ImeOwner::GitPrompt => CompositionOrigin::GitPrompt,
+            ImeOwner::Palette => CompositionOrigin::Palette,
+            ImeOwner::Modal => CompositionOrigin::Modal,
+            ImeOwner::FilesTree => CompositionOrigin::FilesTree(self.files_keyboard_seat()),
+            ImeOwner::Preview => CompositionOrigin::Preview(self.preview_keyboard_surface()),
+            ImeOwner::Search => CompositionOrigin::Search(self.window.search.seat()),
+            ImeOwner::Shell => CompositionOrigin::Shell(self.paste_target(self.focused_leaf)),
         }
     }
 
@@ -99177,6 +99273,26 @@ impl Runtime<'_> {
                 Ime::Preedit(text, _) if !text.is_empty() => Some(ime_owner(self.keyboard_owner())),
                 _ => None,
             };
+            // **§7.1.5a″ — and the letters have to belong to *this* field**
+            // (review 2026-09-17 P2). Above the ladder and not inside one of its
+            // arms, because the ladder is *routing*: it answers where text goes
+            // now, which is exactly the question a composition that has outlived
+            // its field must not be allowed to ask. Every crossing is the same
+            // crossing — one terminal to another, a terminal to a page, a page
+            // to a terminal, a palette to anything — so one rule stands in front
+            // of all of them. See [`composition_ruling`].
+            let here = self.composition_origin_now();
+            if let Some(what) = composing_event_of(&event) {
+                let ruling = composition_ruling(self.window.composing_in.as_ref(), &here, what);
+                match ruling.origin {
+                    OriginAfter::Keep => {}
+                    OriginAfter::Forget => self.window.composing_in = None,
+                    OriginAfter::Adopt => self.window.composing_in = Some(here),
+                }
+                if !ruling.deliver {
+                    return Ok(());
+                }
+            }
             match ime_owner(self.keyboard_owner()) {
                 // The name editor, through the same two doors every other field
                 // in this window uses: a pre-edit is **drawn at its caret and is
@@ -99250,38 +99366,19 @@ impl Runtime<'_> {
                 }
                 ImeOwner::Shell => {}
             }
-            // **§7.1.5a″ — and the letters have to belong to *this* shell**
-            // (review 2026-09-17 P2). Every rung above resolves the owner as it
-            // stands now, which is right for "which kind of surface" and blind
-            // to the one case two terminals make: a composition begun at pane
-            // A's prompt, the keyboard moved to B by a dropped path or a click,
-            // and an input method that did not honour the cancel sending the
-            // commit anyway. `cancel_composition` is a request — `ImmNotifyIME`
-            // answers a bool and §7.1.5a″ names a method that says no — so the
-            // barrier is here: the composition carries the shell it began in,
-            // and a commit that is not that shell's is **discarded**, written
-            // neither to the pane it was typed in nor to the one holding the
-            // keyboard now. See [`shell_ime_ruling`].
-            if let Some(what) = shell_ime_of(&event) {
-                let ruling = shell_ime_ruling(
-                    self.window.shell_composing,
-                    self.paste_target(self.focused_leaf),
-                    what,
-                );
-                self.window.shell_composing = ruling.belongs_to;
-                if !ruling.deliver {
-                    return Ok(());
-                }
-            }
             self.reset_cursor_blink(Instant::now());
         }
         match event {
             Ime::Enabled => {
                 self.window.ime_active = true;
-                // A composition context opening is a clean slate: whatever a
-                // previous one was owed, it is not owed through this (review
-                // 2026-09-17 P2, and the same sentence `Disabled` makes below).
-                self.window.shell_composing = None;
+                // **`composing_in` is deliberately untouched** (review
+                // 2026-09-17 P2, round 3). A composition context opening is a
+                // notice, not a composition ending — and the order that makes
+                // that load-bearing is a real one: a refused cancel, then
+                // `Disabled`, then `Enabled` (winit re-enables results on
+                // `WM_IME_STARTCOMPOSITION`), then the method's own clearing
+                // pre-edit, then its commit. Clearing here would hand that
+                // commit to whichever field the keyboard had moved to.
                 self.window.ime_cursor_throttle.reset();
                 self.publish_frame(FrameTrigger {
                     occurred_at: Instant::now(),
@@ -99329,7 +99426,10 @@ impl Runtime<'_> {
                     self.window.preedit.is_some() && self.preview_edit_focus().is_some();
                 self.window.preedit = None;
                 self.window.composing = None;
-                self.window.shell_composing = None;
+                // And `composing_in` is not cleared here either, for the reason
+                // `Enabled` gives one arm up: this is the method telling us it
+                // has ended a composition, which is precisely what a method that
+                // refused the cancel says before sending the commit anyway.
                 self.window.ime_active = false;
                 self.window.ime_cursor_throttle.reset();
                 self.window.ime_system_caret.destroy();
@@ -99394,14 +99494,14 @@ impl Runtime<'_> {
     /// move and is not: that re-associates the input context for the whole
     /// window and drops the method's state with it.
     fn cancel_composition(&mut self, started_in: ImeOwner) -> Result<()> {
-        // **The answer is not read, and `shell_composing` is not cleared, and
+        // **The answer is not read, and `composing_in` is not cleared, and
         // those two are the same decision** (review 2026-09-17 P2).
         // `ImmNotifyIME` answers a bool this window has no honest use for: a
         // `false` is not a state to recover from, it is an input method that
         // will send the commit anyway — §7.1.5a″ names one. So this stays a
         // request, and what makes a refused request *safe* is one field further
-        // down: the composition goes on naming the shell it began in, and
-        // [`shell_ime_ruling`] discards a commit that is not that shell's.
+        // down: the composition goes on naming the field it began in, and
+        // [`composition_ruling`] discards a commit that is not that field's.
         // Clearing it here would take the barrier down at exactly the moment it
         // is needed.
         bt_platform::cancel_composition();
@@ -172608,149 +172708,321 @@ mod clipboard_path_tests {
         }
     }
 
-    /// **A composition that was left behind never reaches the shell the keyboard
-    /// moved to — whichever way the input method answers the cancel** (§7.1.5a″;
-    /// review 2026-09-17 P2).
+    /// **A composition that was left behind never reaches the field the keyboard
+    /// moved to — whichever way the input method answers the cancel, and
+    /// whichever two fields they are** (§7.1.5a″; review 2026-09-17 P2).
     ///
     /// `cancel_composition` asks; `ImmNotifyIME` answers a bool, and §7.1.5a″
     /// records a method that says no. So the window stops *drawing* the letters
     /// and the method sends them anyway, and every rung of `ime_input` resolves
     /// the owner as it stands now — which after a dropped path, a click or a
-    /// pane chord is the **other** shell. This drives the rule that stops it,
-    /// over the three orders winit can deliver a refused cancel in.
+    /// pane chord is some other field. This drives the rule that stops it.
     ///
     /// **The orders.** On Windows a refused `CPS_CANCEL` leaves the composition
     /// running, so `WM_IME_COMPOSITION` with `GCS_RESULTSTR` arrives as a
-    /// `Commit` — either on its own (①) or behind the empty pre-edit that clears
-    /// the composition string (②). On macOS the same shape comes out of
-    /// `NSTextInputClient`: `unmarkText` may be ignored and `insertText:` still
-    /// arrive, with or without a `setMarkedText:` of nothing first. And a method
-    /// that *did* honour the cancel sends neither (③), which must leave the next
-    /// real composition alone.
+    /// `Commit` — on its own, or behind the empty pre-edit that clears the
+    /// composition string. On macOS winit's `unmarkText` road clears marked text
+    /// and queues an empty pre-edit, and it will not emit a `Commit` without
+    /// marked text in hand — so the shape that can arrive there is the queued
+    /// commit of a composition that was still marked, judged by the same rule.
+    /// And a method that honoured the cancel sends neither, which must leave the
+    /// next real composition alone.
     ///
-    /// MUTATION: deliver a commit whose composition names another shell and ①
-    /// and ② both go red — the half-typed letters land in the pane the reader
-    /// was dropped into. MUTATION: let an empty pre-edit clear `belongs_to` and
-    /// ② alone goes red, which is the order the first attempt at this would
-    /// have missed. MUTATION: refuse a commit with no composition behind it and
-    /// the direct-commit row goes red, taking ordinary typing with it.
+    /// MUTATION: deliver a commit whose origin names another field and every
+    /// "stale" row goes red. MUTATION: let an empty pre-edit forget the origin
+    /// unconditionally and the `Preedit("")` rows go red, which is the order the
+    /// first attempt at this missed. MUTATION: refuse a commit with no origin
+    /// behind it and the direct-commit row goes red, taking ordinary typing with
+    /// it.
     #[test]
-    fn a_composition_left_behind_is_discarded_however_the_method_answers() {
-        let shell = |tab: u64, seat: u64, incarnation: u64| {
-            Some(PasteTarget {
-                tab: TabId(tab),
-                seat: bt_layout::SeatId(seat),
-                incarnation,
-            })
-        };
-        // Pane A, where the reader was composing, and pane B, where the dropped
-        // path went and where the keyboard now is.
-        let (a, b) = (shell(1, 2, 7), shell(1, 5, 9));
+    fn a_left_behind_ime_composition_is_discarded_however_the_method_answers() {
+        let (a, b) = (shell_origin(1, 2, 7), shell_origin(1, 5, 9));
 
         // The composition opens in A and is A's from then on.
-        let opened = shell_ime_ruling(None, a, ShellIme::Opens);
+        let opened = composition_ruling(None, &a, ComposingEvent::Opens);
         assert!(opened.deliver);
         assert_eq!(
-            opened.belongs_to, a,
-            "a pre-edit belongs to the shell the keyboard is in while it is typed"
+            opened.origin,
+            OriginAfter::Adopt,
+            "a pre-edit belongs to the field the keyboard is in while it is typed"
         );
 
         // ① **Commit alone.** The keyboard is B's; the composition is A's.
-        let stale = shell_ime_ruling(a, b, ShellIme::Commits);
+        let stale = composition_ruling(Some(&a), &b, ComposingEvent::Commits);
         assert!(
             !stale.deliver,
             "the letters A was half-way through typing were written into B"
         );
         assert_eq!(
-            stale.belongs_to, None,
+            stale.origin,
+            OriginAfter::Forget,
             "and the composition is over either way, so nothing is left to poison \
              the next one"
         );
 
         // ② **Empty pre-edit, then commit.** The clear is answered — taking
         //    letters off the glass is safe wherever it came from — but it must
-        //    not launder the commit behind it.
-        let cleared = shell_ime_ruling(a, b, ShellIme::Clears);
+        //    not launder the commit behind it, because it arrived *after* the
+        //    keyboard had already moved.
+        let cleared = composition_ruling(Some(&a), &b, ComposingEvent::Clears);
         assert!(cleared.deliver);
         assert_eq!(
-            cleared.belongs_to, a,
-            "an empty pre-edit ends nothing and claims nothing, so the commit \
-             behind it is still A's"
+            cleared.origin,
+            OriginAfter::Keep,
+            "an empty pre-edit that reaches a different field is the refused \
+             cancel tidying up, and claims nothing"
         );
         assert!(
-            !shell_ime_ruling(cleared.belongs_to, b, ShellIme::Commits).deliver,
+            !composition_ruling(Some(&a), &b, ComposingEvent::Commits).deliver,
             "a `Preedit(\"\")` in front of it made the stale commit deliverable"
         );
 
         // ③ **Nothing at all**, and then the reader starts composing in B. The
         //    first pre-edit after the move is a new composition and is B's.
-        let fresh = shell_ime_ruling(a, b, ShellIme::Opens);
+        let fresh = composition_ruling(Some(&a), &b, ComposingEvent::Opens);
         assert!(fresh.deliver, "a fresh composition in B is drawn in B");
-        assert_eq!(fresh.belongs_to, b);
+        assert_eq!(fresh.origin, OriginAfter::Adopt);
         assert!(
-            shell_ime_ruling(fresh.belongs_to, b, ShellIme::Commits).deliver,
+            composition_ruling(Some(&b), &b, ComposingEvent::Commits).deliver,
             "and it commits into B, which is the half the barrier must not break"
         );
 
         // **Ordinary typing is untouched.** Input methods commit single
         // characters with no pre-edit at all; refusing those would swallow them.
         assert!(
-            shell_ime_ruling(None, b, ShellIme::Commits).deliver,
+            composition_ruling(None, &b, ComposingEvent::Commits).deliver,
             "a commit with no composition behind it is ordinary typing"
         );
-        // And a composition that never left its own shell commits there.
+        // And a composition that never left its own field commits there.
         assert!(
-            shell_ime_ruling(b, b, ShellIme::Commits).deliver,
+            composition_ruling(Some(&b), &b, ComposingEvent::Commits).deliver,
             "a reader who composed and committed without moving got nothing"
         );
-        // **A shell restarted in the same hole is a different shell**, which is
-        // the whole reason the destination is a `PasteTarget` and not a seat.
+        // **A shell restarted in the same hole is a different field**, which is
+        // the whole reason the origin is a `PasteTarget` and not a seat.
         assert!(
-            !shell_ime_ruling(a, shell(1, 2, 8), ShellIme::Commits).deliver,
+            !composition_ruling(Some(&a), &shell_origin(1, 2, 8), ComposingEvent::Commits).deliver,
             "the pane's shell was restarted under the composition and the letters \
              went to its replacement"
         );
-        // A tab that moved does not make the shell a different one.
         assert!(
-            shell_ime_ruling(a, a, ShellIme::Commits).deliver,
-            "tab, seat and incarnation name the shell, and none of them moved"
-        );
-        // **And a commit that reaches a window with no shell at all writes
-        // nothing**, rather than being delivered against `None`.
-        assert!(
-            !shell_ime_ruling(a, None, ShellIme::Commits).deliver,
-            "the keyboard is in no shell, so A's letters have nowhere honest to go"
+            composition_ruling(Some(&a), &a, ComposingEvent::Commits).deliver,
+            "tab, seat and incarnation name the field, and none of them moved"
         );
 
-        // The winit events these three rulings are read off, so that the mapping
-        // is part of the same test rather than a source pin somewhere else.
+        // The winit events these rulings are read off, so that the mapping is
+        // part of the same test rather than a source pin somewhere else.
         assert_eq!(
-            shell_ime_of(&Ime::Preedit("ni".to_owned(), None)),
-            Some(ShellIme::Opens)
+            composing_event_of(&Ime::Preedit("ni".to_owned(), None)),
+            Some(ComposingEvent::Opens)
         );
         assert_eq!(
-            shell_ime_of(&Ime::Preedit(String::new(), None)),
-            Some(ShellIme::Clears)
+            composing_event_of(&Ime::Preedit(String::new(), None)),
+            Some(ComposingEvent::Clears)
         );
         assert_eq!(
-            shell_ime_of(&Ime::Commit("\u{4f60}".to_owned())),
-            Some(ShellIme::Commits)
+            composing_event_of(&Ime::Commit("\u{4f60}".to_owned())),
+            Some(ComposingEvent::Commits)
         );
         for bookkeeping in [Ime::Enabled, Ime::Disabled] {
             assert_eq!(
-                shell_ime_of(&bookkeeping),
+                composing_event_of(&bookkeeping),
                 None,
                 "{bookkeeping:?} is the window's own bookkeeping and claims no \
-                 composition; its arm clears the destination outright"
+                 composition"
             );
         }
     }
 
-    /// **A move that is not a move between two shells settles nothing** (review
-    /// 2026-09-17 P2, keeping what round 2 confirmed).
+    /// **The lifecycle notices around a refused cancel do not take the barrier
+    /// down** (review 2026-09-17 P2, round 3).
     ///
-    /// The barrier above is armed by the keyboard leaving one shell for another,
-    /// and the two gestures that look like that and are not must go on being
+    /// The sequence, exactly as it was traced: a pre-edit in pane A; a dropped
+    /// path moves the keyboard to B; the cancel is refused; `Ime::Disabled`;
+    /// `Ime::Enabled`; the method's own empty pre-edit; the commit. Every one of
+    /// those middle events is winit telling this window what the *input method*
+    /// is doing — pinned winit 0.30.13 emits the result string before `Disabled`
+    /// and re-enables results on `WM_IME_STARTCOMPOSITION`, which is what makes
+    /// the `Enabled` in the middle reachable — and none of them is the
+    /// composition ending. A barrier a notice can take down is not a barrier.
+    ///
+    /// MUTATION: clear the origin on `Enabled` or on `Disabled` — as both arms
+    /// did before this round — and the last assertion goes red: the commit is
+    /// admitted and the half-typed letters are written into the pane the path
+    /// was dropped on.
+    #[test]
+    fn ime_lifecycle_notices_do_not_erase_a_compositions_origin() {
+        let (a, b) = (shell_origin(1, 2, 7), shell_origin(1, 5, 9));
+        // `Enabled` and `Disabled` are not composition events at all, so the
+        // ruling is never asked about them and the origin cannot move.
+        for notice in [Ime::Enabled, Ime::Disabled] {
+            assert_eq!(
+                composing_event_of(&notice),
+                None,
+                "{notice:?} reached the ruling, which is one way to lose the origin"
+            );
+        }
+        // And the arms that answer them do not clear it by hand either.
+        let source = include_str!("main.rs");
+        let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
+        let door = method_text(before_this_fixture, "    fn ime_input(");
+        assert_eq!(
+            door.matches("self.window.composing_in = None").count(),
+            1,
+            "the origin is forgotten somewhere other than the one ruling that is \
+             allowed to forget it:\n{door}"
+        );
+        assert!(
+            !method_text(before_this_fixture, "    fn cancel_composition(")
+                .contains("composing_in = "),
+            "the cancel clears the origin, which is the barrier taking itself \
+             down at the moment it is needed"
+        );
+        // The whole sequence, run through the rule that survives it.
+        let after_clear = composition_ruling(Some(&a), &b, ComposingEvent::Clears);
+        assert_eq!(after_clear.origin, OriginAfter::Keep);
+        assert!(
+            !composition_ruling(Some(&a), &b, ComposingEvent::Commits).deliver,
+            "the commit behind a disable/enable pair was written into B"
+        );
+    }
+
+    /// **Every crossing is the same crossing** (review 2026-09-17 P2, round 3).
+    ///
+    /// The owner ladder is *routing*: it answers where text goes now, which is
+    /// exactly the question a composition that has outlived its field must not
+    /// be allowed to ask. Before this round the barrier stood inside the shell's
+    /// arm, so a composition begun at a prompt and finished after the keyboard
+    /// had moved to a preview or the search capsule was inserted there — and, in
+    /// the other direction, a composition begun in a preview or the capsule had
+    /// no shell origin at all, so a dropped path into a terminal took its commit.
+    ///
+    /// Six crossings, each with the refused cancel's two orders, plus the fresh
+    /// composition that has to keep working after each of them.
+    ///
+    /// MUTATION: put the ruling back inside the shell's arm and every row whose
+    /// destination is not a shell goes red at once.
+    #[test]
+    fn an_ime_composition_carries_its_origin_across_every_kind_of_field() {
+        let shell_a = shell_origin(1, 2, 7);
+        let shell_b = shell_origin(1, 5, 9);
+        let preview = CompositionOrigin::Preview(Some(PreviewSurface::Peek));
+        let search = CompositionOrigin::Search(Some(bt_layout::SeatId(2)));
+        let palette = CompositionOrigin::Palette;
+        for (from, to, what) in [
+            (&shell_a, &shell_b, "one prompt to another"),
+            (&shell_a, &preview, "a prompt to a page"),
+            (&shell_a, &search, "a prompt to the search capsule"),
+            (
+                &preview,
+                &shell_b,
+                "a page to the prompt a path was dropped on",
+            ),
+            (
+                &search,
+                &shell_b,
+                "the capsule to the prompt a path was dropped on",
+            ),
+            (&palette, &shell_b, "the palette to a prompt"),
+        ] {
+            assert!(
+                !composition_ruling(Some(from), to, ComposingEvent::Commits).deliver,
+                "letters begun in one field were inserted after crossing {what}"
+            );
+            // And the same with the refused cancel's clearing pre-edit in front
+            // of the commit, which must not launder it.
+            let cleared = composition_ruling(Some(from), to, ComposingEvent::Clears);
+            assert_eq!(
+                cleared.origin,
+                OriginAfter::Keep,
+                "the clearing pre-edit gave up the origin crossing {what}"
+            );
+            assert!(
+                !composition_ruling(Some(from), to, ComposingEvent::Commits).deliver,
+                "a `Preedit(\"\")` laundered the commit crossing {what}"
+            );
+            // A fresh composition after the move is the destination's and
+            // commits there, which is the half the barrier must not break.
+            assert_eq!(
+                composition_ruling(Some(from), to, ComposingEvent::Opens).origin,
+                OriginAfter::Adopt,
+                "a fresh composition after {what} was refused"
+            );
+            assert!(
+                composition_ruling(Some(to), to, ComposingEvent::Commits).deliver,
+                "and it could not commit after {what}"
+            );
+            // A single character committed with no composition behind it is
+            // ordinary typing wherever the keyboard is.
+            assert!(composition_ruling(None, to, ComposingEvent::Commits).deliver);
+        }
+        // **And the rule stands in front of the ladder, not inside one of its
+        // arms**, which is the placement every row above depends on: the ladder
+        // answers where text goes *now*, and that is exactly the question a
+        // composition which has outlived its field must not be allowed to ask.
+        let source = include_str!("main.rs");
+        let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
+        let door = method_text(before_this_fixture, "    fn ime_input(");
+        let (ruled, routed) = (
+            door.find("composition_ruling(self.window.composing_in.as_ref()"),
+            door.find("match ime_owner(self.keyboard_owner())"),
+        );
+        assert!(
+            ruled.is_some() && ruled < routed,
+            "the ruling has moved below the owner ladder, so every rung but one              routes a composition that has outlived its field:
+{door}"
+        );
+        // Two instances of the *same* rung are two fields, which is the half a
+        // category comparison cannot see — the defect this whole rule replaces.
+        assert!(
+            !composition_ruling(
+                Some(&CompositionOrigin::Preview(Some(PreviewSurface::Peek))),
+                &CompositionOrigin::Preview(None),
+                ComposingEvent::Commits
+            )
+            .deliver,
+            "two preview surfaces are one kind of owner and two fields"
+        );
+    }
+
+    /// **`Esc` in the field you are typing in ends the composition, so the next
+    /// single character is not swallowed** (review 2026-09-17 P2, round 3).
+    ///
+    /// An empty pre-edit with no commit behind it is the ordinary way a reader
+    /// abandons a composition, and it happens *where they are*. The refused
+    /// cancel's clearing is the same event arriving *after* the keyboard has
+    /// moved. They are told apart by the comparison the commit already makes,
+    /// with no clock anywhere: an empty pre-edit whose origin is the current
+    /// field ends that composition; one whose origin is elsewhere leaves it
+    /// standing. Without this the origin would sit there for ever and the
+    /// reader's next bare commit somewhere else would vanish.
+    ///
+    /// MUTATION: make `Clears` always keep the origin and the last assertion
+    /// goes red — a reader who pressed `Esc`, went to another pane and typed a
+    /// character with an input method that commits directly loses it.
+    #[test]
+    fn an_abandoned_ime_composition_stops_being_owed_where_it_was_abandoned() {
+        let (a, b) = (shell_origin(1, 2, 7), shell_origin(1, 5, 9));
+        let escaped = composition_ruling(Some(&a), &a, ComposingEvent::Clears);
+        assert!(escaped.deliver);
+        assert_eq!(
+            escaped.origin,
+            OriginAfter::Forget,
+            "a composition abandoned in its own field is over, and goes on being \
+             owed to nobody"
+        );
+        assert!(
+            composition_ruling(None, &b, ComposingEvent::Commits).deliver,
+            "the reader pressed `Esc`, moved to another pane and typed one \
+             character, and it was swallowed"
+        );
+    }
+
+    /// **A move that is not a move between two fields settles nothing** (review
+    /// 2026-09-17, keeping what round 2 confirmed).
+    ///
+    /// The barrier is armed by the keyboard leaving one field for another, and
+    /// the two gestures that look like that and are not must go on being
     /// nothing: clicking the pane that already has the keyboard, and moving a
     /// caret inside a preview. Neither cancels a composition today and neither
     /// may start doing so — a reader composing at a prompt who clicks their own
@@ -172759,7 +173031,7 @@ mod clipboard_path_tests {
     /// MUTATION: drop the `self.focused_leaf != seat` half of the guard in
     /// `take_keyboard_into` and the first assertion goes red.
     #[test]
-    fn a_click_on_the_pane_that_already_has_the_keyboard_settles_nothing() {
+    fn a_click_on_the_pane_that_already_has_the_keyboard_settles_no_ime_state() {
         let source = include_str!("main.rs");
         let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
         let door = method_text(before_this_fixture, "    fn take_keyboard_into(");
@@ -172768,20 +173040,17 @@ mod clipboard_path_tests {
             "the door no longer asks whether the keyboard is actually moving, so \
              a click on your own prompt ends the word you were typing:\n{door}"
         );
-        // And the ruling itself says the same thing about a composition that has
-        // not left its shell, which is what a same-pane click leaves behind.
-        let here = Some(PasteTarget {
-            tab: TabId(1),
-            seat: bt_layout::SeatId(2),
-            incarnation: 7,
-        });
-        assert!(shell_ime_ruling(here, here, ShellIme::Commits).deliver);
-        assert_eq!(
-            shell_ime_ruling(here, here, ShellIme::Clears).belongs_to,
-            here,
-            "and a caret move that clears the glass leaves the composition where \
-             it was"
-        );
+        let here = shell_origin(1, 2, 7);
+        assert!(composition_ruling(Some(&here), &here, ComposingEvent::Commits).deliver);
+    }
+
+    /// A shell field, by the three facts that name one.
+    fn shell_origin(tab: u64, seat: u64, incarnation: u64) -> CompositionOrigin {
+        CompositionOrigin::Shell(Some(PasteTarget {
+            tab: TabId(tab),
+            seat: bt_layout::SeatId(seat),
+            incarnation,
+        }))
     }
 
     /// The body of one method, from its signature to the brace that closes it at
