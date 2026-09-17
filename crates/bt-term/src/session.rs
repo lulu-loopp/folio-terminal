@@ -4565,13 +4565,22 @@ impl DualPlaneSession {
         }
     }
 
-    /// Drop the regions that described the alternate screen once that screen is gone.
+    /// Drop what described the alternate screen once that screen is gone.
     ///
     /// The alternate screen keeps no history, so an alternate region can never be retired by a
     /// line leaving the transcript - there is no line. Leaving one behind means a full-screen
     /// program that speaks OSC 133 adds regions to this session on every run of itself and none of
     /// them ever go.
+    ///
+    /// **The phase and the authority go with the regions, because they describe the same canvas.**
+    /// A canvas is discarded when the primary screen comes back, and the next `?1049h` resets it,
+    /// so a program that re-enters starts on a surface nothing has been said about. Keeping a
+    /// phase of `Output` past that left the claim standing on a canvas whose region had been
+    /// deleted, and an unmarked program's first screenful of drawing wore the last program's
+    /// command (review 2026-09-17 second pass, F3 P2).
     fn retire_alternate_semantic_regions(&mut self) {
+        self.shell_phases.remove(&ScreenId::Alternate);
+        self.shell_region_screens.remove(&ScreenId::Alternate);
         let input = self
             .semantic_input_regions
             .iter()
@@ -29280,6 +29289,11 @@ mod tests {
     const OUTPUT_C: &str = "\x1b]133;C\x07";
     const OUTPUT_D: &str = "\x1b]133;D;0\x07";
     const ENERGY: &str = "energy $E = mc^2$ here";
+    /// A whole prompt cycle and the newline that starts the command's first line of output, for
+    /// fixtures whose attack begins on a line a command has printed. A bare `C` would be refused
+    /// before any of it — see `a_command_start_that_stands_in_no_prompt_cycle_is_refused` — and a
+    /// negative fixture that never has a claim to launder proves nothing about laundering.
+    const CYCLE: &str = "\x1b]133;A\x07PS> \x1b]133;B\x07run\x1b]133;C\x07\r\n";
 
     /// Drive one sequence into a fresh pane and count two things: how many of the rows carrying the
     /// formula's text a lone `$` may be read on, and how many pictures actually reached the glass.
@@ -29330,11 +29344,11 @@ mod tests {
             ("a tab walked along every column of the prompt's line", tabs),
             (
                 "a combining mark appended by the prompt",
-                format!("{OUTPUT_C}{ENERGY}{OUTPUT_D}{PROMPT_A}\u{301}"),
+                format!("{CYCLE}{ENERGY}{OUTPUT_D}{PROMPT_A}\u{301}"),
             ),
             (
                 "a combining mark appended by the prompt, clustered",
-                format!("\x1b[?2027h{OUTPUT_C}{ENERGY}{OUTPUT_D}{PROMPT_A}\u{301}"),
+                format!("\x1b[?2027h{CYCLE}{ENERGY}{OUTPUT_D}{PROMPT_A}\u{301}"),
             ),
             (
                 "output overwriting part of a screen the prompt aligned",
@@ -29345,7 +29359,7 @@ mod tests {
             ),
             (
                 "a screen the prompt aligned, with nothing else written",
-                format!("{OUTPUT_C}{ENERGY}{OUTPUT_D}{PROMPT_A}\x1b#8"),
+                format!("{CYCLE}{ENERGY}{OUTPUT_D}{PROMPT_A}\x1b#8"),
             ),
             (
                 "a repeat of the prompt's own last character",
@@ -29390,6 +29404,18 @@ mod tests {
             (
                 "a command's own line after a reset",
                 format!("{PROMPT_A}{ENERGY}\x1bc{OUTPUT_C}\x1b[1;1H{ENERGY}\r\n{OUTPUT_D}"),
+            ),
+            // The two combining-mark arms, with the mark put there by the command that printed the
+            // line. Without these the arms above are satisfied by a fixture that never had a claim
+            // to lose: what they must show is that the *appender* is what decides, and that takes
+            // the same sequence twice with only the appender changed.
+            (
+                "a combining mark appended by the command itself",
+                format!("{CYCLE}{ENERGY}\u{301}{OUTPUT_D}"),
+            ),
+            (
+                "a combining mark appended by the command itself, clustered",
+                format!("\x1b[?2027h{CYCLE}{ENERGY}\u{301}{OUTPUT_D}"),
             ),
         ] {
             assert_eq!(
@@ -32033,6 +32059,56 @@ mod tests {
             row_carries_unclaimed_text(&session, "during"),
             "and it is eligible *without* the claim: this session knows nothing about who printed \
              on a canvas it was told nothing about"
+        );
+    }
+
+    /// **A canvas carries the claims of a cycle it was told about, and only while it is that
+    /// canvas** (review 2026-09-17 second pass, F3 P2).
+    ///
+    /// The per-screen answer is not "the alternate screen claims nothing". A full-screen program
+    /// that speaks OSC 133 on its own canvas opens a cycle there, and what it prints between its
+    /// own `C` and `D` is that cycle's output as much as a shell's is on the primary screen — the
+    /// claim is about the marker state that was accepted for a screen, not about which screen it
+    /// is. What the canvas cannot do is borrow the primary screen's command, which is the arm
+    /// above this one.
+    ///
+    /// The half that was wrong is what survives leaving. A canvas is discarded when the primary
+    /// screen comes back and reset by the next `?1049h`, and the regions that described it are
+    /// retired with it — but its phase and its authority stayed, so a second program, speaking no
+    /// protocol at all, had its first screenful drawn onto cells wearing the first program's
+    /// command. Inline eligibility on that surface is the alternate-screen policy's answer and
+    /// never asks the claim, so what this fixes is the claim itself, where every other reader of
+    /// it finds it.
+    #[test]
+    fn a_canvas_carries_only_the_claims_of_a_cycle_it_was_told_about() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut session);
+        session
+            .feed_at(
+                format!(
+                    "{PROMPT_A}PS> {PROMPT_B}tui{OUTPUT_C}\r\n\x1b[?1049h\
+                     {PROMPT_A}{PROMPT_B}{OUTPUT_C}zeta $z^2$ here\r\n"
+                )
+                .as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert!(
+            !row_carries_unclaimed_text(&session, "zeta"),
+            "the program ran its own cycle on its own canvas, and this is that cycle's output"
+        );
+
+        session
+            .feed_at(
+                b"\x1b[?1049l\x1b[?1049hqux $q^2$ here\r\n".as_slice(),
+                started,
+            )
+            .unwrap();
+        assert!(
+            row_carries_unclaimed_text(&session, "qux"),
+            "the canvas that cycle was drawn on is gone, so the program that gets the next one \
+             starts from nothing"
         );
     }
 

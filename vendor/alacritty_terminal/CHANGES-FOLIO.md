@@ -139,7 +139,9 @@ file produces the vendored file byte for byte. Upstream formats with its own
   here on are a shell command's output — once for each screen, because a screen
   swap happens mid-stream and is itself a change of answer: `swap_alt` and a
   reset exchange the two along with the grids they belong to, and every print
-  reads the one belonging to the screen that is showing. Every cell whose text
+  reads the one belonging to the screen that is showing. Leaving the alternate
+  screen also empties the answer left waiting for it, because the canvas it was
+  stated about is discarded there and the next entry resets that grid. Every cell whose text
   the terminal *replaces* from then on carries that answer as
   `Flags::COMMAND_OUTPUT_WRITE`
   (see that flag's own documentation). It is there because the answer is a fact

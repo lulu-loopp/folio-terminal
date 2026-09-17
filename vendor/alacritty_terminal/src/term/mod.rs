@@ -1208,6 +1208,14 @@ impl<T> Term<T> {
             &mut self.write_provenance,
             &mut self.inactive_write_provenance,
         );
+        if !entering {
+            // **The canvas is discarded here, and the answer stated for it goes with it.** What a
+            // caller said about the alternate screen was said about the screenful that is being
+            // thrown away — the next entry resets that grid — so a program that comes back and
+            // draws before anything is said about it draws on cells claiming nothing, rather than
+            // on cells wearing the last program's command.
+            self.inactive_write_provenance = Flags::empty();
+        }
         self.mode ^= TermMode::ALT_SCREEN;
         if let Some(hook) = &self.transcript_hook {
             hook(if entering {
@@ -2914,11 +2922,13 @@ impl<T: EventListener> Handler for Term<T> {
         if self.mode.contains(TermMode::ALT_SCREEN) {
             mem::swap(&mut self.grid, &mut self.inactive_grid);
             // RIS puts the primary screen back, so the answer for the primary screen comes back
-            // with it — the same exchange `swap_alt` makes, for the same reason.
+            // with it — the same exchange `swap_alt` makes, for the same reason, and the canvas
+            // this leaves behind drops its answer the same way.
             mem::swap(
                 &mut self.write_provenance,
                 &mut self.inactive_write_provenance,
             );
+            self.inactive_write_provenance = Flags::empty();
         }
         self.active_charset = Default::default();
         self.cursor_style = None;
