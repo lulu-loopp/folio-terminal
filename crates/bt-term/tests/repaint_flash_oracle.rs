@@ -871,3 +871,165 @@ fn a_body_rewritten_at_a_commit_never_keeps_the_picture_of_what_it_replaced() {
         "the committed body must be the text the frame carries"
     );
 }
+
+/// The screen both in-place body fixtures start from: `$$` / `x^2` / `$$` at rows 1-3 with a unique
+/// row above and below, proven and rendered, on whichever screen the caller asks for.
+fn session_with_one_proven_block(alternate: bool, start: std::time::Instant) -> DualPlaneSession {
+    // Tall enough that a display block's box clears the primary screen's visible-text floor; the
+    // alternate screen has no such rule, and the fixture wants the same screen on both sides.
+    let mut session = DualPlaneSession::new(nz(48), nz(16));
+    let mut first = Vec::new();
+    if alternate {
+        first.extend_from_slice(b"\x1b[?1049h");
+        first.extend_from_slice(&synchronized_repaint(&[
+            "header", "$$", "x^2", "$$", "tail", "prompt> ",
+        ]));
+    } else {
+        first.extend_from_slice(b"header\r\n$$\r\nx^2\r\n$$\r\ntail\r\nprompt> ");
+    }
+    session.feed_at(&first, start).unwrap();
+    session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+    complete_live_math(&mut session);
+    session
+}
+
+fn assert_band_is_a_picture(session: &mut DualPlaneSession, why: &str) {
+    let mut projection = session.new_projection(session.layout_key());
+    session.refresh_projection(&mut projection);
+    let frame = session.viewport_frame(&mut projection).unwrap();
+    for row in 1usize..=3 {
+        assert!(
+            frame_row_text(&frame, row).trim().is_empty(),
+            "{why}: row {row} shows its LaTeX; frame={:?}",
+            (0..6)
+                .map(|row| frame_row_text(&frame, row))
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+/// **A block whose body is rewritten where it stands is typeset again.**
+///
+/// The producer writes one row — `CUP`, erase-to-EOL, a new body — and leaves the two `$$` rows
+/// holding the bytes they already had. The old picture must go, because it is a picture of text
+/// that is no longer there; and the formula that replaced it must be proven and drawn, because from
+/// the reader's side nothing happened except that a formula changed.
+///
+/// Two things stood between the second half and the reader. Detection arms on a block's *opener*,
+/// and `observe_live_damage` clears the candidate signature only of the rows that were written — so
+/// the opener went on saying "a task for this row is already out" about an answer that had been
+/// thrown away, and `invalidate_live_row` re-armed nothing when it threw it. And the signature the
+/// opener carries hashes the delimiter rows, not the body, so even a re-armed opener would have
+/// recognised the changed block as the one it had already answered.
+#[test]
+fn a_formula_body_rewritten_in_place_is_typeset_again_on_the_alternate_screen() {
+    let start = std::time::Instant::now();
+    let mut session = session_with_one_proven_block(true, start);
+    assert_band_is_a_picture(&mut session, "the fixture never rendered its block");
+
+    let rewritten = start + Duration::from_millis(300);
+    session
+        .feed_at(b"\x1b[3;1H\x1b[Ky^2\x1b[6;9H", rewritten)
+        .unwrap();
+    assert!(
+        session.held_unbacked_records().is_empty(),
+        "the picture of the body that was replaced is still being painted: {:?}",
+        session.held_unbacked_records()
+    );
+
+    session.advance_live_stability(rewritten + LIVE_MATH_STABLE_INTERVAL);
+    complete_live_math(&mut session);
+    assert_band_is_a_picture(&mut session, "the replacement formula was never typeset");
+    assert!(session.held_unbacked_records().is_empty());
+}
+
+/// The primary-screen half of the fixture above: the same one-row rewrite of a block standing in
+/// the live grid under a transcript, where a removed record is dropped outright rather than held
+/// off-band.
+#[test]
+fn a_formula_body_rewritten_in_place_is_typeset_again_on_the_primary_screen() {
+    let start = std::time::Instant::now();
+    let mut session = session_with_one_proven_block(false, start);
+    assert_band_is_a_picture(&mut session, "the fixture never rendered its block");
+
+    let rewritten = start + Duration::from_millis(300);
+    session
+        .feed_at(b"\x1b[3;1H\x1b[Ky^2\x1b[6;9H", rewritten)
+        .unwrap();
+    assert!(
+        session.held_unbacked_records().is_empty(),
+        "the picture of the body that was replaced is still being painted: {:?}",
+        session.held_unbacked_records()
+    );
+
+    session.advance_live_stability(rewritten + LIVE_MATH_STABLE_INTERVAL);
+    complete_live_math(&mut session);
+    assert_band_is_a_picture(&mut session, "the replacement formula was never typeset");
+    assert!(session.held_unbacked_records().is_empty());
+}
+
+/// The same rewrite arriving as a repaint, which is the other door into the same defect: the window
+/// suppresses the record's teardown, so `invalidate_live_row` never sees the changed row at all, and
+/// the close drops the record without re-arming anything. The replacement must still be typeset once
+/// the screen goes quiet.
+#[test]
+fn a_formula_body_rewritten_by_a_repaint_is_typeset_again() {
+    for alternate in [true, false] {
+        let start = std::time::Instant::now();
+        let mut session = session_with_one_proven_block(alternate, start);
+        assert_band_is_a_picture(&mut session, "the fixture never rendered its block");
+
+        let rewritten = start + Duration::from_millis(300);
+        session
+            .feed_at(
+                &synchronized_repaint(&["header", "$$", "y^2", "$$", "tail", "prompt> "]),
+                rewritten,
+            )
+            .unwrap();
+        assert!(
+            session.held_unbacked_records().is_empty(),
+            "the picture of the body the repaint replaced is still being painted: {:?}",
+            session.held_unbacked_records()
+        );
+
+        session.advance_live_stability(rewritten + LIVE_MATH_STABLE_INTERVAL);
+        complete_live_math(&mut session);
+        assert_band_is_a_picture(
+            &mut session,
+            "the formula the repaint wrote was never typeset",
+        );
+    }
+}
+
+/// The control the two fixtures above are measured against: **a row rewritten with the bytes it
+/// already had did not change, whoever is looking at it.**
+///
+/// Every row of the proven band is written again, byte for byte. The picture stays, and nothing is
+/// detected a second time — the re-arming that the changed body needs must key on the content of a
+/// row and not on the fact that someone wrote to it, or a full-screen program that repaints at
+/// sixty frames a second would re-detect its whole screen sixty times a second.
+#[test]
+fn a_band_rewritten_with_the_bytes_it_already_had_keeps_its_picture() {
+    for alternate in [true, false] {
+        let start = std::time::Instant::now();
+        let mut session = session_with_one_proven_block(alternate, start);
+        assert_band_is_a_picture(&mut session, "the fixture never rendered its block");
+        let detections = session.live_detection_count();
+
+        let rewritten = start + Duration::from_millis(300);
+        session
+            .feed_at(
+                b"\x1b[2;1H\x1b[K$$\x1b[3;1H\x1b[Kx^2\x1b[4;1H\x1b[K$$\x1b[6;9H",
+                rewritten,
+            )
+            .unwrap();
+        session.advance_live_stability(rewritten + LIVE_MATH_STABLE_INTERVAL);
+        complete_live_math(&mut session);
+        assert_band_is_a_picture(&mut session, "an unchanged band lost its picture");
+        assert_eq!(
+            session.live_detection_count(),
+            detections,
+            "an unchanged band was detected again (alternate={alternate})"
+        );
+    }
+}

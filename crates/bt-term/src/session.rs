@@ -6872,6 +6872,7 @@ impl DualPlaneSession {
             // and not about what this session decided to do with it: a repaint window that skips
             // the invalidation is exactly the case that has to know the cells moved.
             self.live_content_revision = self.live_content_revision.wrapping_add(1);
+            self.rearm_live_bands_containing(row);
             // Suppression: inside a repaint window the proven raster keeps rendering over the rows
             // being rewritten instead of the record being torn down (and its source flashing
             // through). Alternate suppresses across a boundary repaint; primary suppresses across an
@@ -6890,6 +6891,43 @@ impl DualPlaneSession {
                 continue;
             }
             self.invalidate_live_row(row);
+        }
+    }
+
+    /// **A row that changed voids every answer that was derived from it.**
+    ///
+    /// Detection arms on a block's *opener* and marks that row with a signature meaning "a task for
+    /// this row is already out". `observe_live_damage` clears the signature of the row it is
+    /// looking at, which is the whole story when a block's opener is what changed — and none of it
+    /// when a producer rewrites a formula's body where it stands, leaving the two `$$` rows holding
+    /// the bytes they already had. Nothing then cleared the opener, so the replacement formula was
+    /// never asked about: the old picture went (correctly, its source is gone) and no new one ever
+    /// came. The signature cannot catch this on its own either, because the context it hashes is the
+    /// rows that may contain math and a plain body row is not one of them.
+    ///
+    /// A record's band is exactly the set of rows its answer was read from, so it is exactly the set
+    /// to re-arm. Said here, above the suppression a repaint window applies, because suppression is
+    /// about not tearing the *record* down while the screen is half-painted — it was never about
+    /// pretending the row did not change. A record that survives the window has its signature put
+    /// back by `finish_alternate_repaint` / `finish_primary_repaint`, which is that close's way of
+    /// saying the answer is still good; a record that does not survive leaves its rows armed, and
+    /// whatever is there now gets asked about.
+    ///
+    /// No allocation: the resident records are walked in place, and there are as many of them as
+    /// there are blocks on one screen.
+    fn rearm_live_bands_containing(&mut self, row: u32) {
+        let live_rows = &mut self.live_rows;
+        for record in self
+            .live_decorations
+            .values()
+            .filter(|record| record.band_start_row <= row && row <= record.band_end_row)
+        {
+            for band_row in record.band_start_row..=record.band_end_row {
+                if let Some(state) = live_rows.get_mut(band_row as usize) {
+                    state.candidate_signature = None;
+                    state.settled_revision = None;
+                }
+            }
         }
     }
 

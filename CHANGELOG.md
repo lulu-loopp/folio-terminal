@@ -23,6 +23,13 @@ All notable changes to Folio are recorded here. The format follows
   program that replaced a formula's body in the middle of redrawing could leave
   Folio showing the old picture over the new text until the redraw after it. Every
   picture is now checked against the lines underneath it the moment they change.
+- **A formula edited in place is typeset again.** When a program rewrote only the
+  middle of a formula and left its `$$` lines untouched, the old picture went — it
+  was a picture of text that was no longer there — and nothing replaced it: Folio
+  had already answered the question on that formula's first line, and nothing on
+  that line had changed to make it ask again. A line that changes now reopens every
+  formula it belonged to, and a formula whose lines come back unchanged is still
+  never read twice.
 
 ## 0.4.2-preview — 2026-09-17
 
