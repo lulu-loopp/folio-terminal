@@ -1321,26 +1321,85 @@ fn is_cjk_prose_char(character: char) -> bool {
 
 type DisplayDelimiter = DelimiterKind;
 
-/// Advance the compact frozen-history parser proof by one immutable logical line. This mirrors the
-/// structural state transitions in `detect_math_blocks_in_context`; it deliberately records no
-/// body text, so retaining checkpoints is O(resident lines), not O(total source bytes squared).
-pub fn advance_detection_context(context: &mut DetectionContext, id: TranscriptId, text: &str) {
-    if context.opening.is_none() && commonmark_indented_code(text) {
-        return;
+/// What one line does to the structural state a scan carries from line to line — the code fence it
+/// is inside, and the display delimiter it has open.
+///
+/// **There is one of these, and both readers of that state call it.** The authoritative scanner
+/// keeps far more per line (body text, the index a block opened at, an ownership ledger, the
+/// look-ahead witnesses that rescue a lost opener), but the part that decides *whether a line is
+/// read as structure at all* is this, and it used to exist twice: once in `scan_math_blocks_impl`
+/// and once, written out again, in `advance_detection_context`. The copy drifted — it never learned
+/// the swallow-radius bound below — and a copy that drifts is a caller being told the parser is in a
+/// state it is not in, which is how a picture ends up on a line the scanner disowns.
+enum StructuralStep {
+    /// Four columns of indentation with nothing open: CommonMark code, and no structure at all.
+    IndentedCode,
+    /// A fence marker. `fence` has been updated; the caller abandons whatever it had open.
+    FenceMarker,
+    /// A line inside an open fence.
+    InsideFence,
+    /// Ordinary structure — read the line. `abandon_opening` is the swallow-radius bound: an
+    /// unfinished environment has met a display opener, and must be given up first.
+    Read { abandon_opening: bool },
+}
+
+fn structural_line_step(
+    text: &str,
+    fence: &mut Option<(char, usize)>,
+    opening: Option<&DisplayDelimiter>,
+) -> StructuralStep {
+    if opening.is_none() && commonmark_indented_code(text) {
+        return StructuralStep::IndentedCode;
     }
-    if context.opening.is_none()
+    if opening.is_none()
         && let Some(marker) = commonmark_fence_marker(text)
     {
-        match context.fence {
-            Some(active) if commonmark_fence_closes(text, active) => context.fence = None,
-            None => context.fence = Some(marker),
+        match *fence {
+            Some(active) if commonmark_fence_closes(text, active) => *fence = None,
+            None => *fence = Some(marker),
             _ => {}
         }
-        context.opening = None;
-        return;
+        return StructuralStep::FenceMarker;
     }
-    if context.fence.is_some() {
-        return;
+    if fence.is_some() {
+        return StructuralStep::InsideFence;
+    }
+    // Swallow-radius bound. A math *environment* body can never legally contain a `$$`/`\[` display
+    // opener — those switch display mode and are a syntax error inside `\begin{env}…\end{env}`. So
+    // when one appears while an environment opening is still unclosed, that environment's closer was
+    // lost (mangled by a reflow, scrolled out of this window, or malformed), and continuing to
+    // swallow would consume every following display block as phantom environment body (the
+    // `\end{pmatrix},`-poisoning failure mode). The environment opening is given up, and the line is
+    // then read by the ordinary opening-is-none paths under every existing guard — prose body,
+    // escapes, CommonMark code, ambiguous-prefix pairing. This never fires for an active `$$`/`\[`
+    // opening: inner `\begin`/`\end` directional environments are not display openers, so a
+    // genuinely nested environment is still swallowed as body.
+    let abandon_opening = matches!(opening, Some(DisplayDelimiter::Environment(_)))
+        && opening_delimiter(text).is_some_and(|(kind, _)| {
+            matches!(kind, DelimiterKind::Dollars | DelimiterKind::Brackets)
+        });
+    StructuralStep::Read { abandon_opening }
+}
+
+/// Advance the compact frozen-history parser proof by one immutable logical line. The structural
+/// half is [`structural_line_step`], shared with the authoritative scanner; what is written out here
+/// is only the delimiter pairing, which deliberately records no body text, so retaining checkpoints
+/// is O(resident lines), not O(total source bytes squared).
+pub fn advance_detection_context(context: &mut DetectionContext, id: TranscriptId, text: &str) {
+    {
+        let DetectionContext { fence, opening, .. } = &mut *context;
+        match structural_line_step(text, fence, opening.as_ref().map(|(_, kind)| kind)) {
+            StructuralStep::IndentedCode | StructuralStep::InsideFence => return,
+            StructuralStep::FenceMarker => {
+                *opening = None;
+                return;
+            }
+            StructuralStep::Read { abandon_opening } => {
+                if abandon_opening {
+                    *opening = None;
+                }
+            }
+        }
     }
     if let Some((delimiter, ..)) = complete_display_on_line(text) {
         if delimiter == DisplayDelimiter::Dollars
@@ -1541,26 +1600,28 @@ fn scan_math_blocks_impl<'a>(
     let mut inline_carry: Option<usize> = None;
     for (index, (_, text)) in lines.iter().enumerate() {
         let inline_predecessor = inline_carry.take();
-        if opening.is_none() && commonmark_indented_code(text) {
-            continue;
-        }
-        if opening.is_none()
-            && let Some(marker) = commonmark_fence_marker(text)
-        {
-            match fence {
-                Some(active) if commonmark_fence_closes(text, active) => fence = None,
-                None => fence = Some(marker),
-                _ => {}
+        // The structural half of this line, from the one place that decides it. The swallow-radius
+        // verdict is taken here with the rest and applied at its own place below, so that the clip
+        // resync still gets the first word and the ownership ledger still records the abandon
+        // exactly where it always did.
+        let abandon_environment = match structural_line_step(
+            text,
+            &mut fence,
+            opening.as_ref().map(|active| &active.delimiter),
+        ) {
+            StructuralStep::IndentedCode => continue,
+            StructuralStep::FenceMarker => {
+                opening = None;
+                continue;
             }
-            opening = None;
-            continue;
-        }
-        if fence.is_some() {
-            if let Some(rec) = recorder.as_deref_mut() {
-                record_code_context_delimiter(rec, index, text);
+            StructuralStep::InsideFence => {
+                if let Some(rec) = recorder.as_deref_mut() {
+                    record_code_context_delimiter(rec, index, text);
+                }
+                continue;
             }
-            continue;
-        }
+            StructuralStep::Read { abandon_opening } => abandon_opening,
+        };
         // Row-0 clip resync (④ / evidence-driven ②). `clipped_open_index` is the decidable evidence
         // that the live grid's row 0 is inside a display block whose opener scrolled above grid row 0
         // (Codex's in-place scroll-region compression) and that the parser reached the frozen→live
@@ -1588,25 +1649,11 @@ fn scan_math_blocks_impl<'a>(
             opening = None;
             continue;
         }
-        // Swallow-radius bound. A math *environment* body can never legally contain a `$$`/`\[`
-        // display opener — those switch display mode and are a syntax error inside
-        // `\begin{env}…\end{env}`. So when one appears while an environment opening is still
-        // unclosed, that environment's closer was lost (mangled by a reflow, scrolled out of this
-        // window, or malformed), and continuing to swallow would consume every following display
-        // block as phantom environment body (the `\end{pmatrix},`-poisoning failure mode). Abandon
-        // the stale environment opening here; the line is then handled by the normal
-        // opening-is-none paths below (single-line complete block, or a fresh multi-line opener)
-        // under every existing guard — prose body, escapes, CommonMark code, ambiguous-prefix
-        // pairing. This never fires for an active `$$`/`\[` opening: inner `\begin`/`\end`
-        // directional environments are not display openers, so a genuinely nested environment is
-        // still swallowed as body by the catch-all further down.
-        if opening
-            .as_ref()
-            .is_some_and(|active| matches!(active.delimiter, DisplayDelimiter::Environment(_)))
-            && opening_delimiter(text).is_some_and(|(kind, _)| {
-                matches!(kind, DelimiterKind::Dollars | DelimiterKind::Brackets)
-            })
-        {
+        // The swallow-radius bound, decided by `structural_line_step` above and applied here, where
+        // it has always been applied: the line is then handled by the normal opening-is-none paths
+        // below (single-line complete block, or a fresh multi-line opener) under every existing
+        // guard — prose body, escapes, CommonMark code, ambiguous-prefix pairing.
+        if abandon_environment {
             opening = None;
             if let Some(rec) = recorder.as_deref_mut() {
                 rec.abandon_pending(LegitimateRejection::EnvironmentSwallowAbandoned);
@@ -3538,6 +3585,85 @@ mod tests {
         let spans = detect_block_math("  $$x^2$$  ");
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].render_source, "x^2");
+    }
+
+    /// **The prefix walker and the scanner are one state machine, and this is what says so.**
+    ///
+    /// `advance_detection_context` exists so a caller can ask "what parser state is this line in?"
+    /// without rescanning everything above it, and every answer it gives is worth exactly the
+    /// scanner's agreement. It was a second copy of the scanner's structural rules and it drifted:
+    /// it never learned the swallow-radius bound, so after an unfinished `\begin{align}` it went on
+    /// swallowing every line as environment body and never saw the code fence below — and a caller
+    /// that asked it for the state of a line inside that fence was told there was no fence.
+    ///
+    /// The test is the equivalence itself rather than a list of cases: for every corpus, and every
+    /// point it could be split at, walking the prefix and then scanning the tail from the state the
+    /// walk arrived at must find exactly the blocks a single scan of the whole thing finds below
+    /// that split. One state machine, or this goes red.
+    #[test]
+    fn walking_a_prefix_leaves_the_scanner_where_scanning_it_would_have() {
+        const CORPORA: &[&[&str]] = &[
+            // The shape the review named: an environment nobody closed, a block that ends its
+            // swallow, and a fence that only a reader who noticed the abandon can see.
+            &[
+                r"\begin{align}",
+                "$$z^2$$",
+                "```",
+                "code",
+                "$$x^2$$",
+                "```",
+                "tail",
+            ],
+            // A fence opened inside an unfinished environment, and never closed.
+            &[r"\begin{align}", "$$z^2$$", "```", "code", "more code"],
+            // Fence markers of both kinds, one inside the other's body.
+            &["~~~", "```", "$$a$$", "~~~", "$$b$$", "```", "$$c$$"],
+            // The environment does close, later: nothing may be abandoned.
+            &[
+                r"\begin{align}",
+                "x &= y",
+                r"\end{align}",
+                "```",
+                "$$d$$",
+                "```",
+                "$$e$$",
+            ],
+            // Indented code under an unfinished environment, then a block.
+            &[r"\begin{align}", "    indented", "$$f$$", "tail"],
+        ];
+
+        for (corpus_index, corpus) in CORPORA.iter().enumerate() {
+            let numbered = corpus
+                .iter()
+                .enumerate()
+                .map(|(index, text)| (TranscriptId(index as u64 + 1), *text))
+                .collect::<Vec<_>>();
+            let whole = detect_math_blocks_in_context(
+                numbered.iter().copied(),
+                DetectionContext::default(),
+            );
+            for split in 0..=corpus.len() {
+                let mut context = DetectionContext::default();
+                for (id, text) in &numbered[..split] {
+                    advance_detection_context(&mut context, *id, text);
+                }
+                let found =
+                    detect_math_blocks_in_context(numbered[split..].iter().copied(), context)
+                        .iter()
+                        .map(|block| (block.start, block.end))
+                        .collect::<Vec<_>>();
+                let expected = whole
+                    .iter()
+                    .filter(|block| block.start.0 > split as u64)
+                    .map(|block| (block.start, block.end))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    found, expected,
+                    "corpus {corpus_index} split at {split}: the walked prefix does not leave the \
+                     scanner where scanning it would have"
+                );
+            }
+        }
     }
 
     #[test]

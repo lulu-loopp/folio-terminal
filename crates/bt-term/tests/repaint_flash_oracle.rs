@@ -1388,6 +1388,73 @@ fn the_re_anchor_keeps_every_line_the_detector_reads_as_a_block() {
     );
 }
 
+/// **And the context the detector is given is the context the detector would have been in.**
+///
+/// Asking the detector about the rows a match found only answers honestly if it is started from the
+/// parser state those rows really sit in, and that state comes from a walker that reads the lines
+/// above them. The walker was a second copy of the scanner's structural rules and it had drifted: it
+/// did not know that an unfinished `\begin{align}` is abandoned when a display block appears, so it
+/// went on swallowing every line below as environment body and never saw the code fence three lines
+/// down. Asked about a line inside that fence, it said there was no fence — and a block that the
+/// detector reading the whole screen disowns was typeset anyway, then taken off again by the next
+/// pass over an unchanged grid.
+///
+/// Mutation: dropping the swallow-radius bound from the shared structural step puts the picture back
+/// on the fenced row, with `held_unbacked_records` naming it.
+#[test]
+fn a_block_inside_a_fence_below_an_unfinished_environment_is_not_re_anchored() {
+    let start = std::time::Instant::now();
+    let mut session = session_with_one_off_band_source(r"$$x^2$$", start);
+
+    let back = start + Duration::from_millis(600);
+    session
+        .feed_at(
+            &synchronized_repaint(&[
+                r"\begin{align}",
+                "$$z^2$$",
+                "```",
+                "code",
+                "$$x^2$$",
+                "```",
+                "tail",
+                "prompt> ",
+            ]),
+            back,
+        )
+        .unwrap();
+    assert!(
+        session.held_unbacked_records().is_empty(),
+        "a raster was seated inside a code fence: {:?}",
+        session.held_unbacked_records()
+    );
+    let mut projection = session.new_projection(session.layout_key());
+    session.refresh_projection(&mut projection);
+    let frame = session.viewport_frame(&mut projection).unwrap();
+    assert_eq!(
+        frame_row_text(&frame, 4).trim(),
+        "$$x^2$$",
+        "the fenced row must keep its text: {:?}",
+        (0..8)
+            .map(|row| frame_row_text(&frame, row))
+            .collect::<Vec<_>>()
+    );
+
+    // The block that is not in a fence is typeset, so this is refusal by context and not by refusing
+    // everything.
+    session.advance_live_stability(back + LIVE_MATH_STABLE_INTERVAL);
+    complete_live_math(&mut session);
+    session.refresh_projection(&mut projection);
+    let settled = session.viewport_frame(&mut projection).unwrap();
+    assert!(
+        frame_row_text(&settled, 1).trim().is_empty(),
+        "the block outside the fence was never typeset: {:?}",
+        (0..8)
+            .map(|row| frame_row_text(&settled, row))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(frame_row_text(&settled, 4).trim(), "$$x^2$$");
+}
+
 /// The other side of the same rule: a line the detector refuses must not be re-anchored onto either,
 /// and four columns of indentation is CommonMark's own way of saying "this is code, not prose".
 #[test]
