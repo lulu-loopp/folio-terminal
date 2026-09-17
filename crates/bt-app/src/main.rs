@@ -208,6 +208,18 @@ const INITIAL_HEIGHT: f64 = 600.0;
 /// a crate name is a thing other Rust code says and this is a thing people say.
 pub(crate) const APP_NAME: &str = "Folio";
 
+/// **How long a quit waits for the panes it has told to go**
+/// (T-PANE-CLOSE-OFF-THREAD).
+///
+/// Closing a pane hands its whole teardown to a thread of its own and comes straight back, so
+/// the window thread never waits for one. The process may not simply walk out past them, though:
+/// a shell still being reaped when this process ends is a child that outlived the window that
+/// owned it. So the quit waits once, after every window has let go and while every window is
+/// already hidden — four seconds, which is what one teardown's own two bounded waits add up to
+/// (`bt_pty`'s child-exit and reader-exit budgets). What is still going past it is left to the
+/// job objects, which close with the process and take their children with them.
+const PANE_RETIREMENT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(4);
+
 #[cfg(test)]
 const WINDOW_TITLE: &str = "Folio M0-beta";
 const WIN32_DEFAULT_DPI: f64 = 96.0;
@@ -31218,17 +31230,19 @@ impl TabState {
     /// a process with nothing to draw it and nothing to read it fills its pipe,
     /// and the child then blocks forever on a write nobody will ever drain.
     ///
-    /// The first failure stops the walk rather than being collected, because
-    /// there is nothing sensible to do with a second error while reporting the
-    /// first, and a shell that would not close is a fact about the window rather
-    /// than about the tab.
-    fn shutdown_all_shells(&mut self) -> Result<()> {
+    /// **And none of it happens here** (T-PANE-CLOSE-OFF-THREAD). Each session is *taken* out
+    /// of its leaf and handed to [`bt_pty::retire_session`], which takes it apart on a thread of
+    /// its own; this walk costs one `spawn` per shell and comes back. The take is the half that
+    /// makes that safe — a leaf whose `pty` is `None` is a leaf nothing on this thread can read,
+    /// resize or shut a second time — and it is why there is no longer a failure to collect: a
+    /// child that will not go is a fact the teardown thread says out loud, at a moment when
+    /// nobody is being kept waiting for it.
+    fn retire_all_shells(&mut self) {
         for (_, leaf) in self.leaves_mut() {
-            if let Some(pty) = leaf.pty.as_mut() {
-                pty.shutdown().context("shut down a closing tab's shell")?;
+            if let Some(pty) = leaf.pty.take() {
+                bt_pty::retire_session(pty);
             }
         }
-        Ok(())
     }
 
     /// Advance this tab's ring toward whatever its session is now reporting,
@@ -39594,7 +39608,7 @@ impl Runtime<'_> {
             // A placeholder holds one shell today and always has; asking for all
             // of them costs nothing and stops this being the copy that is still
             // wrong the day it holds two.
-            removed.shutdown_all_shells()?;
+            removed.retire_all_shells();
         }
         self.apply_window_min_inner_size()?;
         let landing = first_revived.saturating_sub(usize::from(placeholder.is_some()));
@@ -39613,7 +39627,7 @@ impl Runtime<'_> {
         }
         // Item 6, asked on the way *in* rather than on the way out. There is no
         // tab left afterwards to ask, and the fact worth catching is that the tab
-        // being taken apart was whole when it got here — `shutdown_all_shells`
+        // being taken apart was whole when it got here — `retire_all_shells`
         // walks `sessions`, so a shell that had come adrift from the tree would
         // be a ConPTY closed for a pane nobody could see, or one left running.
         debug_assert!(
@@ -39692,9 +39706,10 @@ impl Runtime<'_> {
                 }
                 // Every leaf's shell, not the focused one's. Reaching for
                 // `removed.pty` went through the deref and closed exactly one of
-                // them — see [`TabState::shutdown_all_shells`] for the ConPTY a
-                // two-pane tab used to leak on the way out.
-                removed.shutdown_all_shells()?;
+                // them — see [`TabState::retire_all_shells`] for the ConPTY a
+                // two-pane tab used to leak on the way out, and for why closing
+                // this tab does not wait for any of them to die.
+                removed.retire_all_shells();
                 self.window.active_tab = active_tab;
                 self.apply_window_min_inner_size()?;
                 if was_active {
@@ -54079,8 +54094,14 @@ impl Runtime<'_> {
                 &mut self.window.attention_next_place,
                 Instant::now(),
             );
-            if let Some(pty) = leaf.pty.as_mut() {
-                pty.shutdown().context("shut down closed pane's shell")?;
+            // **Taken, and taken apart somewhere else** (T-PANE-CLOSE-OFF-THREAD).
+            // The leaf is already out of `sessions`; the session comes out of the
+            // leaf, and what happens to it next happens on a thread nobody is
+            // waiting for. A click that closes a pane may not be answered with a
+            // `ClosePseudoConsole` that returns when the program inside has
+            // finished winding down.
+            if let Some(pty) = leaf.pty.take() {
+                bt_pty::retire_session(pty);
             }
             // Keyboard focus cannot stay on a seat that no longer exists. The
             // rule is [`TabState::refocus_after_losing`]'s, shared with the two
@@ -98260,7 +98281,12 @@ impl Runtime<'_> {
         let path = match landed.result {
             Ok(path) => path,
             Err(reason) => {
-                eprintln!("clipboard picture could not be saved; paste ignored: {reason}");
+                // `diagnostics::note` and not `eprintln!` (X-7): this is the
+                // window thread, and a resident diagnostic it writes must not be
+                // able to wait behind whoever is reading a trace.
+                diagnostics::note(&format!(
+                    "clipboard picture could not be saved; paste ignored: {reason}"
+                ));
                 return self.toast(
                     toast::ToastKind::Error,
                     toast::ToastAnchor::Window,
@@ -102496,7 +102522,7 @@ impl Runtime<'_> {
     /// **The shells are still told, and there are none to tell.** Since the
     /// 2026-08-27 report the receiving door opens its stand-in on a
     /// [`bt_layout::SeatKind::Placeholder`] rather than a terminal, precisely so
-    /// that this retirement costs nothing: `shutdown_all_shells` used to spend
+    /// that this retirement costs nothing: `retire_all_shells`'s ancestor spent
     /// **2.9 seconds** here killing a shell that was two hundred milliseconds
     /// old and had never been looked at. The call stays because the rule it
     /// enforces is about *any* tab being removed — a tab removed with its child
@@ -102523,7 +102549,7 @@ impl Runtime<'_> {
             .window
             .active_tab
             .min(self.window.tabs.len().saturating_sub(1));
-        removed.shutdown_all_shells()?;
+        removed.retire_all_shells();
         if self.window.placeholder_tab == Some(stand_in) {
             self.window.placeholder_tab = None;
         }
@@ -102545,24 +102571,18 @@ impl Runtime<'_> {
     /// *source* of a move leaves by, rather than a second one written for this
     /// door.
     ///
-    /// **Every shell is told, whatever the one before it answered**, and the
-    /// first refusal is what comes back — [`Self::let_go_of_this_window`]'s own
-    /// discipline, for its own reason.
+    /// **Every shell is told**, and none of them is waited for
+    /// (T-PANE-CLOSE-OFF-THREAD): each goes to its own teardown thread, which is
+    /// where a child that will not die is now said out loud. The tabs are taken
+    /// off the window first, as they always were, so nothing here is reaching
+    /// into a window that is still holding them.
     fn abandon_a_window_nothing_arrived_in(&mut self) -> Result<()> {
-        let mut refused = None;
         for mut tab in std::mem::take(&mut self.window.tabs) {
-            if let Err(error) = tab.shutdown_all_shells()
-                && refused.is_none()
-            {
-                refused = Some(error);
-            }
+            tab.retire_all_shells();
         }
         self.window.active_tab = 0;
         self.window.placeholder_tab = None;
-        match refused {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
+        Ok(())
     }
 
     /// **Everything this window is holding on to, let go** — the shut's second
@@ -102615,21 +102635,18 @@ impl Runtime<'_> {
         for web in self.window.web.values_mut() {
             let _ = web.close(&self.window.compositor);
         }
-        let mut refused = None;
+        // **Every child is told and none of them is waited for**
+        // (T-PANE-CLOSE-OFF-THREAD). Each session comes out of its leaf, so
+        // nothing left in this window can reach one that is being taken apart,
+        // and each goes to its own teardown thread — which is where a child that
+        // will not go is now said out loud, rather than as an error carried back
+        // to a window that has already gone. The quit does not walk out in front
+        // of them: its `Retire` step waits on
+        // [`bt_pty::wait_for_retirements`] once every window has let go.
         for tab in &mut self.window.tabs {
-            for (_, leaf) in tab.leaves_mut() {
-                if let Some(pty) = leaf.pty.as_mut()
-                    && let Err(error) = pty.shutdown().context("shut down child process")
-                    && refused.is_none()
-                {
-                    refused = Some(error);
-                }
-            }
+            tab.retire_all_shells();
         }
-        match refused {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
+        Ok(())
     }
 
     /// **Put this window in the vault as one row** (multiwindow slice D, ruling
@@ -108021,6 +108038,45 @@ mod quit_transaction_tests {
         );
     }
 
+    /// PIN (T-PANE-CLOSE-OFF-THREAD) — **no door that closes a pane, a tab or a
+    /// window takes a shell apart on the window thread.**
+    ///
+    /// The reader's report was a tab close that held the window for ten seconds
+    /// with an idle Claude Code pane in it, and the teardown is the same sequence
+    /// wherever it is spent — `kill`, a reap, `ClosePseudoConsole`, the ring, the
+    /// master, the reader's join. Bounding each step made "for ever" into "two
+    /// seconds"; taking every step off this thread is what makes the click
+    /// answer at once. There is one road now and it is
+    /// `bt_pty::retire_session`, so this checks that `PtySession::shutdown` is
+    /// not called from this file at all outside its own tests.
+    ///
+    /// Red gate: put a synchronous shutdown back into any of the three doors and
+    /// the count names it.
+    #[test]
+    fn a_pane_that_closes_is_taken_apart_somewhere_else() {
+        let on_this_thread = ["pty.shut", "down()"].concat();
+        assert_eq!(
+            SOURCE.matches(on_this_thread.as_str()).count(),
+            1,
+            "the only synchronous shutdown left in this file is the one its own test drives"
+        );
+        for door in [
+            "    fn retire_all_shells(&mut self) {",
+            "    fn let_go_of_this_",
+        ] {
+            let text = body(&[door]);
+            assert!(
+                !text.contains(&on_this_thread),
+                "`{door}` hands the session over rather than taking it apart here"
+            );
+        }
+        let handed = ["bt_pty::retire_", "session("].concat();
+        assert!(
+            body(&["    fn retire_all_shells(&mut self) {"]).contains(handed.as_str()),
+            "and the hand-over is what it does instead"
+        );
+    }
+
     /// PIN (方案 ③) — **the quit judges the write, and the ordinary paths do
     /// not have to.**
     ///
@@ -112279,7 +112335,10 @@ impl FolioApp {
                         Ok(()) => quit::WriteVerdict::Landed,
                         Err(refusal) if refusal.quit_may_proceed() => quit::WriteVerdict::TimedOut,
                         Err(refusal) => {
-                            eprintln!("{APP_NAME} did not quit: {}", refusal.message());
+                            // On the window thread and on the way out, so it goes to
+                            // the log by its own road (X-7) rather than queueing
+                            // behind a stalled console.
+                            diagnostics::note(&format!("{APP_NAME} did not quit: {}", refusal.message()));
                             // Said on every window, because the failure is the
                             // process's and the reader is looking at one of them.
                             self.for_each_window(|runtime| {
@@ -112308,6 +112367,22 @@ impl FolioApp {
                         {
                             eprintln!("{APP_NAME} quit, and a child did not go: {error:#}");
                         }
+                    }
+                    // **And the process does not walk out in front of them**
+                    // (T-PANE-CLOSE-OFF-THREAD). Every window has let go, and
+                    // each of their shells is being taken apart on a thread of
+                    // its own — including any pane the reader closed a moment
+                    // before asking to quit. The window thread never waits for
+                    // one of those; this is the one place that does, because a
+                    // shell still being reaped when the process ends is a child
+                    // outliving the window that owned it. Bounded like every
+                    // other wait on this path: what is still going past it goes
+                    // when the job objects close with the process.
+                    let still_going = bt_pty::wait_for_retirements(PANE_RETIREMENT_DEADLINE);
+                    if still_going > 0 {
+                        eprintln!(
+                            "{APP_NAME} quit with {still_going} pane(s) still being taken apart"
+                        );
                     }
                     let now = Instant::now();
                     self.report_to_quit(|quit| quit.retired(now));

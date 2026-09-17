@@ -1961,7 +1961,7 @@ pub fn start(reports: PathBuf, trace_perf: bool) {
         bt_platform::ThreadPriority::BelowNormal,
         move || watch_forever(reports, ui_thread_id, threshold),
     ) {
-        eprintln!("Folio could not start its hang watchdog: {error}");
+        crate::diagnostics::note(&format!("Folio could not start its hang watchdog: {error}"));
     }
 }
 
@@ -2032,18 +2032,19 @@ fn watch_forever(reports: PathBuf, ui_thread_id: u32, threshold: Duration) {
     loop {
         std::thread::sleep(WATCH_INTERVAL);
         let heart = heartbeat();
-        // **The other instrument, drained first**: a hold that ran long and
-        // then healed is exactly what the poll below is about to call `Quiet`,
-        // and printing it before that verdict is what puts the two facts in the
-        // log in the order they happened. Formatting and writing happen here,
-        // on this thread, for the same reason a report does.
+        // **The other instrument, drained first and said last** (X-7): a hold
+        // that ran long and then healed is exactly what the poll below is about
+        // to call `Quiet`, so the holds are read before the verdict and land in
+        // the log ahead of it, in the order the two facts happened. What moved
+        // is the *writing*: nothing at all is written until the arithmetic has
+        // run and, if it found a stall, the report file is on the disk. A
+        // watchdog that printed first could be parked in that print — behind a
+        // console nobody is reading — at the moment it was supposed to be
+        // taking the stack of a window that had stopped.
         let (slow, dropped) = heart.take_slow_holds();
-        for hold in slow {
-            eprintln!("{}", hold.line());
-        }
-        if dropped > 0 {
-            eprintln!("Folio: {dropped} more slow turns went unrecorded");
-        }
+        // What the report attempt below left to say, kept until it has said
+        // everything the file can hold.
+        let mut reported: Option<String> = None;
         // Four atomic loads and a clock read. This is the entire steady-state
         // cost of the facility.
         match watch.poll(heart.now_ms(), heart.sample(), &mut ask) {
@@ -2069,7 +2070,7 @@ fn watch_forever(reports: PathBuf, ui_thread_id: u32, threshold: Duration) {
                 turn,
             } => {
                 WINDOW_THREAD_HUNG.store(true, Ordering::Relaxed);
-                open_report = write_report(
+                let report = write_report(
                     &reports,
                     ui_thread_id,
                     Stall {
@@ -2082,6 +2083,8 @@ fn watch_forever(reports: PathBuf, ui_thread_id: u32, threshold: Duration) {
                     },
                     heart.now_ms(),
                 );
+                open_report = report.path;
+                reported = Some(report.said);
             }
             Verdict::Healed { hung_ms, station } => {
                 WINDOW_THREAD_HUNG.store(false, Ordering::Relaxed);
@@ -2089,6 +2092,19 @@ fn watch_forever(reports: PathBuf, ui_thread_id: u32, threshold: Duration) {
                     append_healed(&path, hung_ms, station);
                 }
             }
+        }
+        // **Everything this turn has to say, now that the disk has it.**
+        // `diagnostics::note` and not `eprintln!`: a log file of this process's
+        // own, reached by a handle of its own, so that a console somebody
+        // stopped reading cannot hold the one thread that is still working.
+        for hold in slow {
+            crate::diagnostics::note(&hold.line());
+        }
+        if dropped > 0 {
+            crate::diagnostics::note(&format!("Folio: {dropped} more slow turns went unrecorded"));
+        }
+        if let Some(said) = reported {
+            crate::diagnostics::note(&said);
         }
     }
 }
@@ -2108,13 +2124,21 @@ struct Stall {
     turn: u64,
 }
 
-/// Take the sample and put it on the disk. Answers where it landed.
-fn write_report(
-    reports: &Path,
-    ui_thread_id: u32,
-    stall: Stall,
-    uptime_ms: u64,
-) -> Option<PathBuf> {
+/// **What one report attempt left behind**: the file, for the healing line that
+/// belongs in it, and the one sentence the log is owed about it.
+///
+/// The sentence is **answered and not printed** (X-7). Writing it here would put
+/// the watchdog's only output inside the function that takes a stopped thread's
+/// stack, on a channel that may be a console nobody is reading — so the caller
+/// says it, after this has returned and the evidence is already on the disk.
+struct Reported {
+    path: Option<PathBuf>,
+    said: String,
+}
+
+/// Take the sample and put it on the disk. Answers where it landed and what to
+/// say about it.
+fn write_report(reports: &Path, ui_thread_id: u32, stall: Stall, uptime_ms: u64) -> Reported {
     let Stall {
         silent_ms,
         threshold_ms,
@@ -2144,28 +2168,31 @@ fn write_report(
     let body = render_report(&facts);
     // Created lazily: a run that never hangs never makes this directory.
     if let Err(error) = fs::create_dir_all(reports) {
-        eprintln!(
-            "Folio saw its window thread stop for {} at {station} but could not create {}: {error}",
-            seconds(silent_ms),
-            reports.display()
-        );
-        return None;
+        return Reported {
+            path: None,
+            said: format!(
+                "Folio saw its window thread stop for {} at {station} but could not create {}: \
+                 {error}",
+                seconds(silent_ms),
+                reports.display()
+            ),
+        };
     }
     let _ = prune_reports(reports, REPORTS_KEPT.saturating_sub(1));
     let path = reports.join(report_filename(&timestamp));
     match File::create(&path).and_then(|mut file| file.write_all(body.as_bytes())) {
-        Ok(()) => {
-            eprintln!(
+        Ok(()) => Reported {
+            said: format!(
                 "Folio's window thread has not answered for {}; last station {station}. Report: {}",
                 seconds(silent_ms),
                 path.display()
-            );
-            Some(path)
-        }
-        Err(error) => {
-            eprintln!("Folio could not write {}: {error}", path.display());
-            None
-        }
+            ),
+            path: Some(path),
+        },
+        Err(error) => Reported {
+            said: format!("Folio could not write {}: {error}", path.display()),
+            path: None,
+        },
     }
 }
 
@@ -2242,12 +2269,13 @@ pub fn run_selftest_if_due() {}
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::path::PathBuf;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use super::{
         Answer, Footprint, HangWatch, Heartbeat, Paging, Park, Pulse, ReportFacts, STATION_COUNT,
-        SlowHold, Station, Verdict, can_come_round, prune_reports, render_healed, render_report,
-        report_filename, slow_hold_threshold_ms, utc_timestamp,
+        SlowHold, Stall, Station, Verdict, can_come_round, prune_reports, render_healed,
+        render_report, report_filename, slow_hold_threshold_ms, utc_timestamp, write_report,
     };
 
     /// A heartbeat on a platform that counts nothing, which is what every test
@@ -3205,6 +3233,102 @@ mod tests {
             utc_timestamp(SystemTime::UNIX_EPOCH - Duration::from_secs(10)),
             "1970-01-01T00:00:00.000Z"
         );
+    }
+
+    /// PIN — **the watchdog writes its report, and says so, while the trace
+    /// sink is stalled and the process's `stderr` lock is held** (X-7).
+    ///
+    /// The two ways the console reaches back into this thread, both arranged at
+    /// once: a sink whose writer is inside a write that will not return, and the
+    /// lock every `eprintln!` in the workspace goes through, held by somebody
+    /// else. The one thread whose entire job is to still be working when the
+    /// window thread is not must come through both without waiting — so the
+    /// report file appears, and the line about it reaches `diagnostics.log` by
+    /// the road that owns no lock.
+    ///
+    /// The work runs on a second thread only so that this one can put a deadline
+    /// on it: a regression here does not fail an assertion, it stops.
+    ///
+    /// MUTATION: put the `eprintln!` back in `write_report`; the report is never
+    /// written and the deadline expires.
+    #[test]
+    fn a_report_and_its_line_do_not_wait_for_the_console() {
+        let private = std::env::temp_dir().join(format!(
+            "folio-hang-stalled-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&private);
+        std::fs::create_dir_all(&private).expect("a private directory for this test");
+        let reports = private.join("hang-reports");
+        let log = private.join(crate::diagnostics::LOG_FILENAME);
+
+        let sink = crate::trace_sink::StalledWriter::start();
+        sink.fill();
+        assert!(
+            !sink.offer("one more"),
+            "the sink under test is supposed to be full"
+        );
+        let (release, released) = std::sync::mpsc::sync_channel::<()>(0);
+        let (locked, holding) = std::sync::mpsc::sync_channel::<()>(1);
+        let holder = std::thread::spawn(move || {
+            let _guard = std::io::stderr().lock();
+            let _ = locked.send(());
+            let _ = released.recv();
+        });
+        holding
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the holder took the process lock");
+
+        let (done, finished) = std::sync::mpsc::sync_channel::<bool>(1);
+        let worker = {
+            let reports = reports.clone();
+            let log = log.clone();
+            std::thread::spawn(move || {
+                let reported = write_report(
+                    &reports,
+                    // The watchdog's own id: `capture_thread_stack` refuses to
+                    // sample the thread that asked, so this exercises the
+                    // report's every other step without suspending anything.
+                    bt_platform::hang::current_thread_id(),
+                    Stall {
+                        silent_ms: 2_400,
+                        threshold_ms: 2_000,
+                        overdue_ms: None,
+                        answer: Answer::Silent,
+                        station: Station::Present,
+                        turn: 91,
+                    },
+                    12_000,
+                );
+                let noted = crate::diagnostics::append_note(&log, &reported.said);
+                let _ = done.send(reported.path.is_some() && noted);
+            })
+        };
+        let completed = finished.recv_timeout(Duration::from_secs(10));
+        drop(release);
+        holder.join().unwrap();
+        worker.join().unwrap();
+        drop(sink);
+
+        assert_eq!(
+            completed,
+            Ok(true),
+            "the report path waited for a console it must not touch"
+        );
+        let written: Vec<PathBuf> = std::fs::read_dir(&reports)
+            .expect("the reports directory was created")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect();
+        assert_eq!(written.len(), 1, "one stall, one report: {written:?}");
+        let said = std::fs::read_to_string(&log).expect("the log took the line");
+        assert!(
+            said.contains("has not answered for 2.400s"),
+            "the log says what happened and names the report, {said}"
+        );
+        assert!(said.ends_with('\n'), "one whole line, {said}");
+        let _ = std::fs::remove_dir_all(&private);
     }
 
     /// PIN — **the cap holds and it only ever deletes our own files.** A pruner

@@ -8,7 +8,7 @@ use std::{
     num::{NonZeroU16, NonZeroUsize},
     path::{Path, PathBuf},
     sync::{
-        Arc, Condvar, Mutex, MutexGuard,
+        Arc, Condvar, Mutex, MutexGuard, OnceLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread::JoinHandle,
@@ -442,6 +442,152 @@ fn join_within(budget: Duration, reader: JoinHandle<()>) -> ReaderExit {
         }
         std::thread::sleep(READER_EXIT_POLL);
     }
+}
+
+/// **What a whole pane teardown is expected to cost** (T-PANE-CLOSE-OFF-THREAD).
+///
+/// Its two bounded waits, one after the other: [`CHILD_EXIT_BUDGET`] for a child that will not
+/// answer a `TerminateProcess`, then [`READER_EXIT_BUDGET`] for a reader that will not come out
+/// of its read. Nothing here bounds the `ClosePseudoConsole` between them — that call returns
+/// when the host has let go of its clients, which is the node process the reader was talking to
+/// winding down — so this is what a teardown is *expected* to fit in rather than a promise that
+/// it does. Exceeding it is one line in the log and nothing else: the thread it is spent on is
+/// not one anybody is waiting for.
+const RETIREMENT_BUDGET: Duration = Duration::from_secs(4);
+
+/// Every pane teardown this process has started and not finished.
+///
+/// Process-wide because the question is: a quit asks "is any pane still being taken apart" about
+/// the process, not about a window — the windows are already hidden by the time it asks, and a
+/// pane closed in one of them a moment before the quit is exactly the teardown it must not walk
+/// out in front of.
+static RETIREMENTS: OnceLock<Retirements> = OnceLock::new();
+
+fn retirements() -> &'static Retirements {
+    RETIREMENTS.get_or_init(|| Retirements {
+        outstanding: Mutex::new(0),
+        finished: Condvar::new(),
+    })
+}
+
+/// The count, and the way to wait on it reaching zero.
+struct Retirements {
+    outstanding: Mutex<usize>,
+    finished: Condvar,
+}
+
+impl Retirements {
+    fn begin(&self) {
+        if let Ok(mut outstanding) = self.outstanding.lock() {
+            *outstanding += 1;
+        }
+    }
+
+    fn end(&self) {
+        if let Ok(mut outstanding) = self.outstanding.lock() {
+            *outstanding = outstanding.saturating_sub(1);
+        }
+        self.finished.notify_all();
+    }
+
+    fn outstanding(&self) -> usize {
+        self.outstanding
+            .lock()
+            .map_or(0, |outstanding| *outstanding)
+    }
+
+    fn wait_within(&self, budget: Duration) -> usize {
+        let Ok(mut outstanding) = self.outstanding.lock() else {
+            return 0;
+        };
+        let deadline = Instant::now() + budget;
+        while *outstanding > 0 {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return *outstanding;
+            }
+            let Ok((held, _)) = self.finished.wait_timeout(outstanding, left) else {
+                return 0;
+            };
+            outstanding = held;
+        }
+        0
+    }
+}
+
+/// **Take one pane apart on a thread of its own, and come straight back**
+/// (T-PANE-CLOSE-OFF-THREAD).
+///
+/// Closing a pane or a tab is a click, and a click may not be answered with a teardown: the
+/// steps are `kill`, a bounded reap, `ClosePseudoConsole` — which does not return until the
+/// host's clients have gone, and a Claude Code pane's node process takes its time about that —
+/// the ring's close, the master's drop and the reader's join. Every one of those used to run on
+/// the window thread, between the press and the next frame. Measured on the reader's machine
+/// 2026-09-17: closing a tab holding one idle Claude Code pane held the window for **ten
+/// seconds**, of which the trace's only hold that turn was `mouse_input 2005 ms` — the reader
+/// join sitting on its whole bound. The bound was the fix for "for ever"; it was never the fix
+/// for "at all".
+///
+/// So the session is handed over whole and this returns in the time of one `spawn`. The seat is
+/// already out of its window's map by then — that is the caller's half of this, and it is what
+/// makes the hand-over safe: nothing on the window thread can reach a session that is being
+/// taken apart, because nothing on the window thread still has it.
+pub fn retire_session(session: PtySession) {
+    retire_within(RETIREMENT_BUDGET, move || {
+        let mut session = session;
+        if let Err(error) = session.shutdown() {
+            eprintln!("a closing pane's child did not go quietly: {error}");
+        }
+    });
+}
+
+/// The hand-over itself, as a function of what to run rather than of a session, so that "the
+/// window thread does not wait for this" can be tested with an ordinary closure and no PTY.
+///
+/// A thread that will not start is the one case this cannot honour, and the teardown then runs
+/// here: `spawn` drops the closure it could not take, which drops the session inside it, and
+/// [`PtySession`]'s `Drop` *is* `shutdown`. So the close costs what it used to cost rather than
+/// leaking a child nobody can see — which [`PtySession::shutdown`]'s own callers already call
+/// the one outcome worse than a slow close.
+fn retire_within(budget: Duration, teardown: impl FnOnce() + Send + 'static) {
+    let outstanding = retirements();
+    outstanding.begin();
+    let handed = std::thread::Builder::new()
+        .name("pty-retirement".to_string())
+        .spawn(move || {
+            let started = Instant::now();
+            teardown();
+            let spent = started.elapsed();
+            if spent > budget {
+                eprintln!(
+                    "a pane took {} ms to close, on a thread of its own rather than the window's",
+                    spent.as_millis()
+                );
+            }
+            retirements().end();
+        });
+    if handed.is_err() {
+        outstanding.end();
+    }
+}
+
+/// How many panes are still being taken apart.
+#[must_use]
+pub fn sessions_retiring() -> usize {
+    retirements().outstanding()
+}
+
+/// **Wait for every outstanding teardown, and stop waiting after `budget`.** Answers how many
+/// were still going.
+///
+/// The quit's half of the hand-over: the window thread never waits for a pane it closed, but the
+/// *process* may not walk out while a child it killed is still being reaped — a shell left alive
+/// behind a window that has gone is the outcome the teardown exists to prevent. Bounded for the
+/// same reason every other wait on this path is, and what is still going past the bound is left
+/// to the job objects that close with the process.
+#[must_use]
+pub fn wait_for_retirements(budget: Duration) -> usize {
+    retirements().wait_within(budget)
 }
 
 /// **Ask `reaped` until it answers, and stop asking after `budget`.**
@@ -3642,6 +3788,66 @@ mod tests {
             join_within(Duration::from_secs(30), reader),
             ReaderExit::Ended,
             "a reader that does end is joined the moment it does"
+        );
+    }
+
+    /// RED (T-PANE-CLOSE-OFF-THREAD) — **closing a pane does not cost the window thread the
+    /// teardown, and two closes do not queue behind each other on it.**
+    ///
+    /// The teardown is stood where a real one stands when the host will not let go: inside a
+    /// call that ends when this test says so. What is asserted is the window thread's side of
+    /// it — that `retire_within` comes back in the time of a `spawn` whatever the teardown is
+    /// doing, that a second close comes back the same way with the first still going, and that
+    /// both are counted so a quit can wait for them where nobody is watching.
+    ///
+    /// MUTATION: run the teardown on the caller's thread — which is what `pty.shutdown()` at
+    /// the close sites used to be — and the first assertion fails by two whole seconds, which
+    /// is the reader's ten-second tab close in miniature.
+    #[test]
+    fn a_pane_is_taken_apart_on_a_thread_of_its_own() {
+        let before = sessions_retiring();
+        let (release_first, first) = mpsc::channel::<()>();
+        let (release_second, second) = mpsc::channel::<()>();
+
+        let started = Instant::now();
+        retire_within(Duration::from_secs(30), move || {
+            let _ = first.recv();
+        });
+        retire_within(Duration::from_secs(30), move || {
+            let _ = second.recv();
+        });
+        let spent = started.elapsed();
+        assert!(
+            spent < Duration::from_millis(500),
+            "the window thread handed both over and came back, in {spent:?}"
+        );
+
+        // Both are standing at once, which is what "they do not queue behind each other" looks
+        // like from here, and both are on the books.
+        let waiting_since = Instant::now();
+        while sessions_retiring() < before + 2 {
+            assert!(
+                waiting_since.elapsed() < Duration::from_secs(30),
+                "two teardowns were handed over and fewer than two are outstanding"
+            );
+            std::thread::yield_now();
+        }
+
+        // A quit's wait ends on its own budget while they are still going...
+        let started = Instant::now();
+        let still = wait_for_retirements(Duration::from_millis(60));
+        assert!(
+            still >= 2 && started.elapsed() >= Duration::from_millis(60),
+            "the quit waited its budget and then said how many were still going, not {still}"
+        );
+
+        // ...and answers nothing outstanding once they finish.
+        drop(release_first);
+        drop(release_second);
+        assert_eq!(
+            wait_for_retirements(Duration::from_secs(30)),
+            0,
+            "every teardown that was handed over finished on its own thread"
         );
     }
 
