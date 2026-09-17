@@ -826,7 +826,12 @@ struct PendingLiveArtifactHandoff {
     detection_revision: DetectionRevision,
     candidate_staging: StagingId,
     candidate_start: Option<TranscriptId>,
-    expected_frozen_lines: u64,
+    /// How many **grid rows** the live detector proved this occurrence on. It is not a count of the
+    /// transcript lines they freeze into and must never be used as one: a source row too long for
+    /// the pane spends two grid rows and still freezes as a single line. It says when every proven
+    /// row has been captured, and — because a line takes at least one row — how far ahead of the
+    /// first frozen line the last one could conceivably be.
+    expected_source_rows: usize,
     /// The face the live occurrence is wearing, re-read at every capture — the last capture is
     /// the one that freezes its final row, so there is no frame on which the reader could turn the
     /// block over after this was last refreshed.
@@ -10701,8 +10706,7 @@ impl DualPlaneSession {
                 detection_revision: record.detection_revision,
                 candidate_staging,
                 candidate_start: None,
-                expected_frozen_lines: u64::try_from(record.identity.source_rows.len())
-                    .unwrap_or(u64::MAX),
+                expected_source_rows: record.identity.source_rows.len(),
                 show_source: record.show_source,
                 prefix_staging: captured_source
                     .iter()
@@ -10815,20 +10819,31 @@ impl DualPlaneSession {
                     return None;
                 }
                 let start = pending.candidate_start?;
-                let expected_end = start
-                    .0
-                    .checked_add(pending.expected_frozen_lines.saturating_sub(1))?;
-                (expected_end <= closing_id.0).then_some((index, start, expected_end))
+                // The occurrence is ready to cross when every row it was proven on has been
+                // captured and every captured row has frozen. Where it ends in history is then the
+                // line the last of those rows landed in — read off the lines that actually closed,
+                // never counted forward from the first, because rows and lines are not the same
+                // unit and a wrapped source row makes them differ.
+                if pending.prefix_staging.len() != pending.expected_source_rows
+                    || pending.finalized_prefix_staging != pending.prefix_staging.len()
+                {
+                    return None;
+                }
+                Some((index, start, pending.frozen_prefix.last()?.0))
             })
             .next();
         let Some((pending_index, candidate_start, expected_end)) = matured else {
+            self.expire_unreachable_live_handoffs(closing_id);
             return;
         };
 
-        // The live detector already proved that this artifact begins at candidate_start and spans
-        // exactly expected_frozen_lines detector inputs. Re-run the authoritative detector only
-        // over that closed candidate, never over unrelated frozen history. A mismatch expires the
-        // handoff; the normal frozen worker remains the source of truth.
+        // The live detector already proved that this artifact begins at candidate_start and that
+        // every row it was proven on has now frozen into the lines up to expected_end. Re-run the
+        // authoritative detector only over that closed candidate, never over unrelated frozen
+        // history. A mismatch expires the handoff; the normal frozen worker remains the source of
+        // truth. The equality below is not redundant: a candidate that completed while the layout
+        // or the detection revision had moved on is only looked at again once they match, and by
+        // then its last line is behind the one closing now.
         let block = (expected_end == closing_id.0)
             .then(|| {
                 detect_math_blocks_with_sites(
@@ -10908,6 +10923,25 @@ impl DualPlaneSession {
         }
         self.scheduler.remove_sources(&BTreeSet::from([closing_id]));
         self.retire_offscreen_records_replaced_by_frozen();
+    }
+
+    /// **A candidate that did not finish freezing where it still could is not this occurrence.**
+    /// Its rows stopped arriving, or the text under them changed, and a pending kept past that point
+    /// would let some much later line that happens to read the same way prove a block it never was.
+    /// The bound is the occurrence's own proven row count, because a line occupies at least one grid
+    /// row: an occurrence proven on N rows cannot end more than N-1 lines after the one it starts
+    /// in. It is only ever a bound — [`Self::try_handoff_live_artifact`] takes the end from the
+    /// lines that actually closed.
+    fn expire_unreachable_live_handoffs(&mut self, closing_id: TranscriptId) {
+        self.pending_live_handoffs.retain(|pending| {
+            let Some(start) = pending.candidate_start else {
+                return true;
+            };
+            let furthest = start.0.saturating_add(
+                u64::try_from(pending.expected_source_rows.saturating_sub(1)).unwrap_or(u64::MAX),
+            );
+            closing_id.0 <= furthest
+        });
     }
 
     fn schedule_detection(&mut self, id: TranscriptId) {
@@ -20956,6 +20990,129 @@ mod tests {
         assert_eq!(session.live_detection_count, detections);
         assert_eq!(session.frozen_detection_count, frozen_detections);
         assert_eq!(session.live_invalidation_count, invalidations);
+    }
+
+    /// What a whole occurrence scrolled into history left behind: the raster it held while it was
+    /// live, the one its frozen record carries now, and the detection counter either side of
+    /// running every task the scheduler still holds for those lines.
+    struct ScrolledIntoHistory {
+        live: Arc<[u8]>,
+        frozen: Option<Arc<[u8]>>,
+        detections_before: u64,
+        detections_after: u64,
+    }
+
+    /// Scroll a whole occurrence into history and report what it left behind. `rows_after` is how
+    /// many lines of ordinary output are printed to push every source row off the top of the grid.
+    fn hand_off_by_scrolling(
+        columns: u32,
+        rows: u32,
+        printed: &str,
+        rows_after: usize,
+    ) -> ScrolledIntoHistory {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(columns), nz(rows));
+        session.feed_at(printed.as_bytes(), start).unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 54)),
+            1,
+            "the fixture must typeset its block live before anything scrolls"
+        );
+        let live_artifact = session
+            .live_decorations
+            .values()
+            .find_map(|record| record.artifact.clone())
+            .expect("the live occurrence holds its own raster");
+
+        let mut tail = String::new();
+        for line in 0..rows_after {
+            tail.push_str(&format!("\r\nmore-{line}"));
+        }
+        session
+            .feed_at(tail.as_bytes(), start + Duration::from_millis(210))
+            .unwrap();
+        assert!(
+            session.live_decorations.is_empty(),
+            "the fixture must push every source row off the live grid"
+        );
+
+        // Whatever the scheduler still holds for these lines runs now, so a raster that only
+        // survived because nothing else had a chance to land is not mistaken for a handoff.
+        let frozen_detections = session.frozen_detection_count;
+        session.run_workers();
+        let frozen_artifact = session.decorations.values().find_map(|record| {
+            record
+                .artifact
+                .as_ref()
+                .map(|artifact| artifact.rgba.clone())
+        });
+        ScrolledIntoHistory {
+            live: live_artifact.rgba,
+            frozen: frozen_artifact,
+            detections_before: frozen_detections,
+            detections_after: session.frozen_detection_count,
+        }
+    }
+
+    /// **A wrapped source row costs the occurrence its handoff (owner's replay 2026-09-17).** The
+    /// live detector proves an occurrence on *grid rows*; history is made of *transcript lines*, and
+    /// a line too long for the pane spends two grid rows and freezes as one line. The handoff waited
+    /// for a closing id counted in rows, which for a wrapped occurrence names a line past the end of
+    /// the block, so the proof re-ran the detector over one line too many, found no block ending
+    /// there, and threw the raster away. Nothing is visible when it happens — a block's last row
+    /// leaves the viewport in the same event it leaves the live grid — but the picture is then
+    /// detected and rasterised a second time for no reason.
+    #[test]
+    fn a_block_whose_body_row_wraps_still_hands_its_raster_to_history() {
+        // Twelve columns, a sixteen-cell body: four proven grid rows, three transcript lines.
+        let scrolled = hand_off_by_scrolling(12, 8, "$$\r\ne^{i\\pi} + 1 = 0\r\n$$\r\ntail", 9);
+        let frozen = scrolled
+            .frozen
+            .expect("the frozen block must be born typeset");
+        assert!(
+            Arc::ptr_eq(&frozen, &scrolled.live),
+            "the frozen record must take over the live raster, not a fresh one"
+        );
+        assert_eq!(
+            scrolled.detections_after, scrolled.detections_before,
+            "a handed-off block owes history no detection of its own"
+        );
+    }
+
+    /// The control the wrapped case is measured against: the same block, the same scroll, at a width
+    /// that fits it. This one has always passed, and it is here so that a change which breaks the
+    /// handoff outright cannot be read as the wrapping fix working.
+    #[test]
+    fn a_block_that_fits_the_pane_hands_its_raster_to_history() {
+        let scrolled = hand_off_by_scrolling(40, 8, "$$\r\ne^{i\\pi} + 1 = 0\r\n$$\r\ntail", 9);
+        let frozen = scrolled
+            .frozen
+            .expect("the frozen block must be born typeset");
+        assert!(Arc::ptr_eq(&frozen, &scrolled.live));
+        assert_eq!(scrolled.detections_after, scrolled.detections_before);
+    }
+
+    /// Every wrapped line is one line, however many rows it took: a block with two long body lines
+    /// is off by two, not by one, so the arithmetic has to count what froze rather than subtract a
+    /// constant.
+    #[test]
+    fn a_block_whose_every_body_line_wraps_still_hands_its_raster_to_history() {
+        // Six proven grid rows, four transcript lines.
+        let scrolled = hand_off_by_scrolling(
+            12,
+            10,
+            "$$\r\ne^{i\\pi} + 1 = 0\r\n\\quad e^{i\\pi} + 1 = 0\r\n$$\r\ntail",
+            11,
+        );
+        let frozen = scrolled
+            .frozen
+            .expect("the frozen block must be born typeset");
+        assert!(
+            Arc::ptr_eq(&frozen, &scrolled.live),
+            "two wrapped body lines must not push the proof two lines past the block"
+        );
+        assert_eq!(scrolled.detections_after, scrolled.detections_before);
     }
 
     #[test]
