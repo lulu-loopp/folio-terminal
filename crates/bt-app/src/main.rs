@@ -120859,6 +120859,13 @@ mod tests {
             (r"\newcommand{\a}{#}", MathRenderError::ConversionPanic),
             (r"\newcommand{\a}{\a}\a", MathRenderError::MacroCycle),
             (exponential.as_str(), MathRenderError::MacroExpansionLimit),
+            // **Typst code in a formula, through the worker the window uses.** The body is
+            // deliberately a harmless `1` rather than the loop this refusal exists for: a guard
+            // that regressed would draw a "1" and fail this line, where a loop would hang the
+            // harness and report nothing. The loops themselves are refused at the conversion
+            // boundary, before a compiler is handed anything — `bt_math`'s
+            // `a_formula_that_carries_typst_code_is_refused_before_it_is_compiled`.
+            (r"x\iftypst #1 \fi", MathRenderError::RawTypstCode),
         ] {
             // Start at Markdown delimiters, then submit the resulting source to
             // the very same PreviewMath branch the UI uses.

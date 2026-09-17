@@ -57,6 +57,16 @@ All notable changes to Folio are recorded here. The format follows
   guessed it wrong in both directions — it let several shapes of deep nesting
   through, and refused a long row of perfectly flat fractions.
 
+- **A formula cannot run a program.** Mathematics written for TeX has a corner
+  of its notation that says "and here is some Typst" — Folio passed that through
+  and ran it, so a line of text a program printed into a pane could ask Folio to
+  loop forever, or to build something so large that it ran out of memory. The
+  first would have left every later formula on screen as plain text, with nothing
+  to show it was waiting; the second would have ended Folio. Folio now leaves
+  such a formula as the text you printed, the way it leaves anything else it
+  cannot draw, and the spacing commands that used to be worked out by running
+  them are read instead. Nothing that was ever a formula changes.
+
 - **One formula that cannot be drawn no longer takes the whole window with
   it.** A fault while typesetting was caught in one stage of the work and not in
   the others, so a fault in any of the rest ended Folio — every pane, every

@@ -171,6 +171,7 @@ fn convert_math(source: &str) -> Result<String, MathRenderError> {
     .map_err(|_| MathRenderError::ConversionPanic)?
     .map_err(|error| match error {
         mitex::BoundedConvertError::NestingTooDeep => MathRenderError::NestingTooDeep,
+        mitex::BoundedConvertError::RawTypstCode => MathRenderError::RawTypstCode,
         mitex::BoundedConvertError::Convert(message) => MathRenderError::Convert(message),
     })
     .map(|converted| normalize_delimiter_symbols(&converted))
@@ -330,6 +331,17 @@ pub enum MathRenderError {
     UnsafeCommand,
     #[error("math source nesting exceeds {MAX_NESTING_DEPTH}")]
     NestingTooDeep,
+    /// The formula asked to have Typst *code* run, rather than mathematics drawn.
+    ///
+    /// **A formula is not a program, and this is the sentence that makes that true.** MiTeX has
+    /// three ways to copy source text into its output without mapping it — `\iftypst … \fi`'s body
+    /// goes through whole, `\includegraphics`'s path lands inside a Typst string literal, and
+    /// `\label`'s name lands in markup after a `<` — and Typst reads code at every one of them. A
+    /// line of text a program printed could therefore have carried a loop that never ends (the
+    /// math worker is one thread and cannot be interrupted), or one that builds content nested
+    /// past what anything downstream will survive. The formula stays as the text that was printed.
+    #[error("math source carries Typst code rather than mathematics")]
+    RawTypstCode,
     #[error("math macro definitions contain a cycle")]
     MacroCycle,
     #[error("math macro expansion exceeds the work limit")]
@@ -386,7 +398,9 @@ impl MathRenderError {
             | Self::MacroCycle
             | Self::MacroExpansionLimit
             | Self::UnboundedMacro => Some(MathFailureStage::Validate),
-            Self::Convert(_) | Self::ConversionPanic => Some(MathFailureStage::Convert),
+            Self::Convert(_) | Self::ConversionPanic | Self::RawTypstCode => {
+                Some(MathFailureStage::Convert)
+            }
             Self::Compile(_)
             | Self::NoPage
             | Self::Svg(_)
@@ -409,6 +423,14 @@ impl MathEngine {
         Self::with_system_fonts(true)
     }
 
+    /// **The engine has no door onto this machine, and that is a property of how it is built.**
+    ///
+    /// The only file resolver it is given is `with_static_source_file_resolver`, over exactly the
+    /// three MiTeX specification files compiled into the executable. There is no filesystem
+    /// resolver and no package resolver, so a Typst `read`, `image`, `include` or `import` of
+    /// anything else has nowhere to resolve and fails the compile — which is why the refusals in
+    /// [`convert_math`] are about *computation* rather than about reading files. A formula still
+    /// may not carry code, because a loop nobody can interrupt is its own kind of harm.
     fn with_system_fonts(include_system_fonts: bool) -> Self {
         let engine = TypstEngine::builder()
             .main_file(TYPST_TEMPLATE)
@@ -787,8 +809,11 @@ fn bound_nesting(source: &str, opens: impl Fn(u8) -> Option<bool>) -> Result<(),
 /// neither does `typst-svg`'s frame walk (`typst-svg-0.15.0/src/lib.rs:313` and `:362`); they are
 /// safe because everything that reaches them came through that parser. Which it does: what this
 /// engine hands Typst is text, and the one shape that escapes the parser's cap — content
-/// accumulated in a Typst loop — is not a shape MiTeX emits. Downstream of all of it, `usvg` refuses
-/// an SVG nested past 1024 (`usvg-0.47.0/src/parser/svgtree/parse.rs:182`).
+/// accumulated in a Typst loop — is one that only *code* can write, and a formula cannot carry code
+/// (see [`MathRenderError::RawTypstCode`], and
+/// `every_formula_that_converts_calls_only_names_mitex_itself_wrote` for the invariant).
+/// Downstream of all of it, `usvg` refuses an SVG nested past 1024
+/// (`usvg-0.47.0/src/parser/svgtree/parse.rs:182`).
 ///
 /// So this is not the guard that saves the process, and neither is the brace count in
 /// [`validate_source`]: the recursion that has no owner but Folio is the conversion's own, it runs
@@ -1693,6 +1718,273 @@ mod tests {
         ] {
             assert_eq!(validate_source(&source), Ok(()), "{name}");
             assert!(engine.render(&source, key()).is_ok(), "{name}");
+        }
+    }
+
+    /// **A formula is mathematics, not a program**, and this is the road that said otherwise.
+    ///
+    /// `\iftypst … \fi` is collected by MiTeX's parser without its structure being read and emitted
+    /// verbatim, so a line a program printed into a terminal could carry Typst code: a loop that
+    /// never returns (the math worker is one thread and nothing can interrupt it, so every later
+    /// formula in every pane would stay as source), a loop that builds content nested past what
+    /// Typst's unguarded math layout survives, or one that simply allocates until the process dies.
+    /// Every case here is refused at the conversion boundary, which is before a Typst compiler is
+    /// ever handed the text — so the loop is never run in order to find out.
+    #[test]
+    fn a_formula_that_carries_typst_code_is_refused_before_it_is_compiled() {
+        let engine = MathEngine::with_system_fonts(false);
+        for (name, source) in [
+            ("a bare Typst block", r"\iftypst #1 + 1 \fi"),
+            ("a loop that never ends", r"x \iftypst #while true {} \fi"),
+            (
+                "content built past any depth",
+                r"\iftypst #{ let c = $x$; for _ in range(20000) { c = $sqrt(c)$ }; c } \fi",
+            ),
+            (
+                "an allocation that never ends",
+                r"\iftypst #range(0, 100000000) \fi",
+            ),
+            (
+                "the same, hidden in a macro body",
+                r"\newcommand{\q}{\iftypst #while true {} \fi}x\q",
+            ),
+            (
+                "the same, reached through two macros",
+                r"\newcommand{\q}{\iftypst #while true {} \fi}\newcommand{\r}{\q}x\r",
+            ),
+            ("an else branch", r"\iftypst #1 \else #2 \fi"),
+        ] {
+            assert_eq!(
+                convert_math(source),
+                Err(MathRenderError::RawTypstCode),
+                "{name}"
+            );
+            assert_eq!(
+                engine.render(source, key()),
+                Err(MathRenderError::RawTypstCode),
+                "{name}: and a render answers the same"
+            );
+            assert_eq!(
+                MathRenderError::RawTypstCode.failure_stage(),
+                Some(MathFailureStage::Convert)
+            );
+        }
+        // The rest of the `\if…` family is the same lexer feature and none of it copies source
+        // text: `\iffalse` drops its body, `\iftrue` passes the body on as ordinary LaTeX, which
+        // the token map escapes like anything else, and the conditionals MiTeX does not implement
+        // are commands it has no rule for.
+        assert_eq!(
+            convert_math(r"x\iffalse #while true {} \fi"),
+            Ok("x ".into())
+        );
+        let passed_through = convert_math(r"x\iftrue #while true {} \fi").expect("ordinary LaTeX");
+        assert!(
+            passed_through.contains(r"\#") && !passed_through.contains(" #"),
+            "a body passed through is escaped, not copied: {passed_through:?}"
+        );
+        assert!(matches!(
+            convert_math(r"x\ifnum 1=1 y\fi"),
+            Err(MathRenderError::Convert(_))
+        ));
+    }
+
+    /// The other two sites that copy source text into the output without mapping it.
+    ///
+    /// `\includegraphics` writes `#image("…")` with the path taken from the formula, quote marks
+    /// and all, so a `"` in it closes the string and the rest is code; `\label` writes `<…>` into
+    /// Typst markup, which ends at the first `>`. Both are refused by the conversion. The first is
+    /// refused twice over — [`validate_source`] has always named it a file command — and this
+    /// asserts the conversion refuses it on its own, because a blocklist of spellings is not a
+    /// reason to believe anything.
+    #[test]
+    fn the_other_verbatim_roads_into_the_typst_source_are_refused() {
+        assert_eq!(
+            convert_math(r#"\includegraphics{a"); while true {}; #("}"#),
+            Err(MathRenderError::RawTypstCode)
+        );
+        assert_eq!(
+            validate_source(r#"\includegraphics{x}"#),
+            Err(MathRenderError::UnsafeCommand)
+        );
+        // `\label` writes nothing in math mode, which is every formula's mode, so it is untouched;
+        // the text mode it *would* write in is reached through a command whose Typst name is a
+        // function call, and there it is refused.
+        assert_eq!(convert_math(r"x\label{a}"), Ok("x ".into()));
+        assert_eq!(
+            convert_math(r"\text{\label{a>#while true {}}}"),
+            Err(MathRenderError::RawTypstCode)
+        );
+    }
+
+    /// **No source character can open Typst code, because the lexer's own word class excludes
+    /// every character that would.**
+    ///
+    /// This is the reason the conversion is confined to math content rather than a hope about it.
+    /// A source character reaches the converted output in exactly two ways: as its own token, which
+    /// the converter maps to a fixed escape or drops, or inside a `Word`. So the question is what a
+    /// `Word` may contain, and the answer is asked of the lexer rather than read off its regex.
+    #[test]
+    fn a_word_token_cannot_carry_a_character_that_opens_typst_code() {
+        use mitex_lexer::{Lexer, Token};
+        for forbidden in [
+            '#', '$', '"', '\\', '{', '}', '[', ']', '(', ')', '%', '^', '_',
+        ] {
+            let source = format!("a{forbidden}b");
+            let mut lexer = Lexer::<()>::new(&source, DEFAULT_SPEC.clone());
+            let words: String = std::iter::from_fn(|| lexer.eat())
+                .filter(|(token, _)| *token == Token::Word)
+                .map(|(_, text)| text)
+                .collect();
+            assert!(
+                !words.contains(forbidden),
+                "{forbidden:?} reached a Word token, as {words:?}"
+            );
+        }
+    }
+
+    /// Every name MiTeX may call in the Typst it writes: the specification's own, and the three
+    /// the converter spells out for itself.
+    fn typst_vocabulary() -> BTreeSet<String> {
+        let mut names = BTreeSet::new();
+        for (name, item) in DEFAULT_SPEC.items() {
+            let alias = match item {
+                mitex::CommandSpecItem::Cmd(shape) => shape.alias.clone(),
+                mitex::CommandSpecItem::Env(shape) => shape.alias.clone(),
+            };
+            // An alias may be a whole call — `\section` is `#heading(level: 1)` — and what is
+            // being collected is the name it calls.
+            let name = alias.unwrap_or_else(|| name.to_owned());
+            names.insert(
+                name.trim_start_matches('#')
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+                    .collect(),
+            );
+        }
+        // `convert_formula`, and `convert_normal_command`'s two text-mode hacks.
+        names.insert("math.equation".to_owned());
+        names.insert("strong".to_owned());
+        names.insert("emph".to_owned());
+        names
+    }
+
+    /// Every `#` in `converted` that Typst would read as the start of code, with its name.
+    fn code_introducers(converted: &str) -> Vec<String> {
+        let characters: Vec<char> = converted.chars().collect();
+        characters
+            .iter()
+            .enumerate()
+            .filter(|(at, character)| {
+                // `\#` is the escape the converter writes for a source `#`; Typst draws it.
+                **character == '#' && (*at == 0 || characters[at - 1] != '\\')
+            })
+            .map(|(at, _)| {
+                characters[at + 1..]
+                    .iter()
+                    .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// **The invariant: the Typst a formula converts to is math content, and every function it
+    /// calls is one MiTeX itself named.**
+    ///
+    /// Stated exactly: in the converted source, every `#` is either escaped — `\#`, which Typst
+    /// draws as a hash — or the first character of a name from
+    /// [`typst_vocabulary`]. Nothing a formula contains can add a name to that set, because the
+    /// three sites that copied source text through unmapped are refused
+    /// (`the_other_verbatim_roads_into_the_typst_source_are_refused`,
+    /// `a_formula_that_carries_typst_code_is_refused_before_it_is_compiled`) and because no `Word`
+    /// can carry a `#` (`a_word_token_cannot_carry_a_character_that_opens_typst_code`).
+    ///
+    /// The corpus is the whole specification rather than a list somebody thought of: every command
+    /// and environment MiTeX knows, invoked five ways, two of them hostile.
+    #[test]
+    fn every_formula_that_converts_calls_only_names_mitex_itself_wrote() {
+        let vocabulary = typst_vocabulary();
+        let mut converted_count = 0usize;
+        let hostile = r#"{"); #while true {}; ("}"#;
+        let mut check = |source: &str| {
+            let Ok(converted) = convert_math(source) else {
+                return;
+            };
+            converted_count += 1;
+            for name in code_introducers(&converted) {
+                assert!(
+                    vocabulary.contains(&name),
+                    "{source:?} converted to {converted:?}, which calls #{name}"
+                );
+            }
+        };
+        for (name, item) in DEFAULT_SPEC.items() {
+            let environment = matches!(item, mitex::CommandSpecItem::Env(_));
+            for argument in ["", "{a}", "{a}{b}", "[1]{a}", hostile] {
+                if environment {
+                    check(&format!("\\begin{{{name}}}{argument}a\\end{{{name}}}"));
+                } else {
+                    check(&format!("\\{name}{argument}"));
+                }
+            }
+        }
+        for source in [
+            r"\text{a #b $c$ \# d}",
+            r#"\text{a " b}"#,
+            r"\text{<a>#while true {}</a>}",
+            r"\begin{tabular}{lc}a&b\\c&d\end{tabular}",
+            r"\begin{array}{c|c}a&b\end{array}",
+            r"\newcommand{\q}[1]{\text{#1}}\q{x}",
+            r"\color{red}\text{x}",
+            r"\frac{1}{2}+\sqrt[3]{x}\substack{a\\b}",
+        ] {
+            check(source);
+        }
+        assert!(
+            converted_count > 500,
+            "the corpus must actually convert something: {converted_count}"
+        );
+    }
+
+    /// **A length is read, not run.**
+    ///
+    /// `\hspace`, `\vspace` and `\raisebox` used to read their argument back out of the typeset
+    /// content and hand the string to Typst's `eval` — which is an arbitrary Typst expression
+    /// assembled from a line a program printed. Measured on 2026-09-17, before the fix:
+    /// `x\hspace{4pt*10}x` drew 96 pixels wide, exactly as `x\hspace{40pt}x` does, and
+    /// `x\hspace{(2pt+2pt)*10}x` drew the same again — so digits, letters, parentheses and
+    /// operators all reached `eval`, and `range(0, 100000000)` is spelled with the same characters.
+    /// `assets/mitex-specs/latex/standard.typ` parses the length instead; the arithmetic fails the
+    /// compile and the formula stays as the text the terminal printed.
+    #[test]
+    fn a_length_is_parsed_and_never_evaluated() {
+        let engine = MathEngine::with_system_fonts(false);
+        let plain = engine.render("xx", key()).expect("a formula").width_px;
+        let spaced = engine
+            .render(r"x\hspace{40pt}x", key())
+            .expect("a length still makes space")
+            .width_px;
+        assert!(spaced > plain, "{spaced} must be wider than {plain}");
+        for unit in ["pt", "mm", "cm", "in", "em"] {
+            assert!(
+                engine
+                    .render(&format!(r"x\hspace{{2{unit}}}x"), key())
+                    .is_ok(),
+                "{unit} is a length"
+            );
+        }
+        for arithmetic in [
+            r"x\hspace{4pt*10}x",
+            r"x\hspace{(2pt+2pt)*10}x",
+            r"x\vspace{4pt*10}x",
+            r"x\raisebox{4pt*2}{y}x",
+        ] {
+            assert!(
+                matches!(
+                    engine.render(arithmetic, key()),
+                    Err(MathRenderError::Compile(_))
+                ),
+                "{arithmetic} must not be evaluated"
+            );
         }
     }
 
