@@ -1550,6 +1550,21 @@ pub struct DualPlaneSession {
 /// and `history_tail` because the primary screen's inputs begin with the transcript's last lines,
 /// which freezing appends to and eviction takes from; and the two checkpoints because they are the
 /// state the scan starts in, which a boundary resets and a scroll advances without touching a cell.
+///
+/// **`command_output` is the one input to a row's `site` that is not on the row.** Each row's site
+/// is read off its own cells — the per-cell provenance flag, which the row fingerprint hashes, so a
+/// cell whose claim changed moves `content_revision` — but only *after* this session has decided
+/// that a shell speaks for this screen at all (`shell_integration_is_authoritative`, asked once for
+/// the whole grid in `live_detection_context`). That decision flips when an OSC 133 marker is
+/// heard, and a marker writes no cell, so nothing else here moves with it while every row on the
+/// screen changes what it is eligible to be. It is kept as the fact itself rather than as a counter
+/// bumped beside it, because a bool that is read where it is written cannot fall out of step.
+///
+/// **The three cell metrics are here for the value, not for the answer.** No part of the scan's
+/// verdict reads them; they are copied into every task it returns, and a memo hands those tasks
+/// back whole. `set_cell_width_subpixels` and its two siblings are public and do not touch
+/// `layout_key`, so without them a task could be handed out carrying metrics from before a font
+/// change. Nothing reads them there today, which is exactly the reason to close it now.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct LiveGridAnswer {
     screen: ScreenId,
@@ -1562,6 +1577,10 @@ struct LiveGridAnswer {
     history_tail: Option<TranscriptId>,
     frozen_context: DetectionContext,
     alternate_context: DetectionContext,
+    command_output: bool,
+    cell_width_subpixels: NonZeroI64,
+    cell_height_subpixels: NonZeroI64,
+    ascii_baseline_subpixels: Option<NonZeroI64>,
 }
 
 /// The question the last fruitless off-band re-anchor pass was asked.
@@ -6463,6 +6482,10 @@ impl DualPlaneSession {
             history_tail: entries.keys().next_back().copied(),
             frozen_context: self.frozen_detection_context.clone(),
             alternate_context: self.alternate_detection_context.clone(),
+            command_output: self.shell_integration_is_authoritative(self.live_screen),
+            cell_width_subpixels: self.cell_width_subpixels,
+            cell_height_subpixels: self.cell_height_subpixels,
+            ascii_baseline_subpixels: self.ascii_baseline_subpixels,
         }
     }
 

@@ -2039,3 +2039,57 @@ fn an_off_band_record_comes_back_in_the_read_that_brings_its_source_back() {
         "an exact re-anchor must not schedule detection again"
     );
 }
+
+/// **A shell marker changes what every row on the screen is eligible to be, and writes no cell.**
+///
+/// Each row's site is read off its own cells, and the per-cell claim is in the row fingerprint, so
+/// a cell whose provenance changed moves the content revision like any other change. But whether
+/// this session listens to a shell on this screen at all is asked once for the whole grid, and that
+/// answer flips when an OSC 133 marker is heard — a few bytes that touch nothing. Every row's site
+/// moves with it while no cell, no generation, no checkpoint and no transcript line does, so a memo
+/// that does not hold that answer can speak for a grid whose rows have just changed what they are.
+///
+/// Counted rather than looked at, because counting is what the memo decides: the marker's read must
+/// ask the off-band question again, and the read after it — which changes nothing at all — must
+/// not.
+#[test]
+fn a_shell_marker_alone_re_asks_the_off_band_question() {
+    let start = std::time::Instant::now();
+    let mut session = session_with_one_off_band_block(start);
+    let settled = start + Duration::from_millis(400);
+    for repaint in 0..2 {
+        session
+            .feed_at(
+                &synchronized_repaint(&scrolled_away_screen()),
+                settled + Duration::from_millis(repaint),
+            )
+            .unwrap();
+    }
+    let passes = session.offscreen_restore_pass_count();
+
+    // A prompt cycle begins. Not one cell is written.
+    session
+        .feed_at(
+            b"\x1b]133;A\x07\x1b]133;B\x07",
+            settled + Duration::from_millis(10),
+        )
+        .unwrap();
+    assert_eq!(
+        session.offscreen_restore_pass_count(),
+        passes + 1,
+        "the rows changed what they are eligible to be and the off-band question was not re-asked"
+    );
+
+    // And the read after it, which changes nothing at all, still skips.
+    session
+        .feed_at(
+            &synchronized_repaint(&scrolled_away_screen()),
+            settled + Duration::from_millis(20),
+        )
+        .unwrap();
+    assert_eq!(
+        session.offscreen_restore_pass_count(),
+        passes + 1,
+        "an unchanged screen re-asked a question whose answer cannot have changed"
+    );
+}
