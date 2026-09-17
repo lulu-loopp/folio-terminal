@@ -68,9 +68,11 @@ Nothing yet.
   network share or a cloud-sync drive that has gone quiet, that is for ever —
   the windows are already leaving and there is nothing left to click. Folio now
   gives the save three seconds, writes one line in its own log saying the save
-  did not finish and that the last completed one still stands, and closes. The
-  file itself was never at risk either way: a save replaces it whole or leaves
-  the previous one exactly where it was.
+  did not finish, and closes. What you find on the disk next time is the last
+  save that completed, which may be the one that was still going when Folio
+  left: the file is never half written, so whichever of the two it is, it is
+  whole. Folio also keeps the marker that says this run did not see its save
+  finish, so the next start offers to restore rather than assuming all was well.
 - **Closing a pane whose reader is stuck no longer hangs the window.** When a
   pane closes, Folio waits for the thread that was reading that shell's output
   to come out of its last read. On one machine that wait held the window for
