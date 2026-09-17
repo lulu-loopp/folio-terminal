@@ -1218,6 +1218,76 @@ fn a_block_scrolling_back_onto_a_row_of_its_own_is_re_anchored_without_re_detect
     );
 }
 
+/// The same edit, made while the block's *first* scan is still out.
+///
+/// A record's band is what says which rows an answer was read from, and before the first completion
+/// lands there is no record — only a scan in flight, which carries the same knowledge in its own
+/// dependency rows. The scan comes back describing a body that has since been replaced and is
+/// refused, correctly; but the refusal only counted itself, and the opener's signature still claimed
+/// an answer was out for that row. Nothing asked again, and the formula stayed at source for as long
+/// as the screen did.
+#[test]
+fn a_body_edited_while_its_first_scan_is_in_flight_is_still_typeset() {
+    for alternate in [true, false] {
+        let start = std::time::Instant::now();
+        let mut session = DualPlaneSession::new(nz(48), nz(16));
+        let mut first = Vec::new();
+        if alternate {
+            first.extend_from_slice(b"\x1b[?1049h");
+            first.extend_from_slice(&synchronized_repaint(&[
+                "header", "$$", "x^2", "$$", "tail", "prompt> ",
+            ]));
+        } else {
+            first.extend_from_slice(b"header\r\n$$\r\nx^2\r\n$$\r\ntail\r\nprompt> ");
+        }
+        session.feed_at(&first, start).unwrap();
+        assert!(
+            session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL) > 0,
+            "the fixture scheduled no scan (alternate={alternate})"
+        );
+
+        // The work goes out to the renderer and stays there.
+        let mut in_flight = Vec::new();
+        while let Some(task) = session.take_math_worker_task() {
+            let SessionMathTask::Live(mut task) = task else {
+                panic!("the fixture unexpectedly scheduled frozen math");
+            };
+            let resolved = bt_detect::resolve_live_detection_task(&mut task);
+            in_flight.push((resolved, task));
+        }
+        assert!(
+            in_flight.iter().any(|(resolved, _)| *resolved),
+            "the fixture never resolved its block (alternate={alternate})"
+        );
+
+        // While it is out, the producer replaces the body and puts the cursor back on its prompt.
+        let rewritten = start + Duration::from_millis(300);
+        session
+            .feed_at(b"\x1b[3;1H\x1b[Ky^2\x1b[6;9H", rewritten)
+            .unwrap();
+
+        for (resolved, task) in in_flight {
+            let accepted = if resolved {
+                session.complete_live_worker_result(task, Ok(synthetic_raster(40, 40)))
+            } else {
+                session.complete_live_worker_result(task, Err(MathRenderError::NotDetected))
+            };
+            assert!(
+                !(resolved && accepted),
+                "a raster made from the body that was replaced was accepted (alternate={alternate})"
+            );
+        }
+
+        session.advance_live_stability(rewritten + LIVE_MATH_STABLE_INTERVAL);
+        complete_live_math(&mut session);
+        assert_band_is_a_picture(
+            &mut session,
+            &format!("the replacement was never typeset (alternate={alternate})"),
+        );
+        assert!(session.held_unbacked_records().is_empty());
+    }
+}
+
 /// The control the two fixtures above are measured against: **a row rewritten with the bytes it
 /// already had did not change, whoever is looking at it.**
 ///

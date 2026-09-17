@@ -41,6 +41,11 @@ All notable changes to Folio are recorded here. The format follows
   redraw that was still in progress when the window changed size went on measuring
   against the old shape of the screen, so a formula could be drawn over the wrong
   lines and another one lost — on a screen whose text had not changed at all.
+- **A formula edited before Folio finished reading it the first time is read
+  again.** If a program replaced a formula's middle while Folio was still drawing
+  that formula, the drawing was thrown away — rightly, it was of text that had gone
+  — but nothing went back to look at what replaced it, and the formula stayed as
+  LaTeX for as long as it was on the screen.
 
 ## 0.4.2-preview — 2026-09-17
 

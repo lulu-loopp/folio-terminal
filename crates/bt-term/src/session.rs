@@ -6972,6 +6972,16 @@ impl DualPlaneSession {
         }
     }
 
+    /// Ask again about every row in `first ..= last`.
+    fn rearm_live_rows(&mut self, first: u32, last: u32) {
+        for row in first..=last {
+            if let Some(state) = self.live_rows.get_mut(row as usize) {
+                state.candidate_signature = None;
+                state.settled_revision = None;
+            }
+        }
+    }
+
     fn invalidate_live_row(&mut self, row: u32) {
         let removed = self
             .live_decorations
@@ -7358,6 +7368,25 @@ impl DualPlaneSession {
         let accepted = outcome.is_none();
         if let Some(reason) = outcome {
             self.stale_results = self.stale_results.saturating_add(1);
+            // **A scan refused because its rows changed under it re-asks the question.** This is the
+            // same sentence `rearm_live_bands_containing` says about a resident record, said about
+            // work that is still in flight — and it has to be said separately, because before the
+            // first completion lands there is no record, only the scan, and the scan is the only
+            // thing that knows which rows its answer was read from. A producer that rewrites a
+            // formula's body while the first scan of that block is still out leaves the two `$$`
+            // rows holding the bytes they already had, so the opener went on claiming an answer was
+            // out for it while the answer was being thrown away here. Nothing asked again and the
+            // formula stayed at source for as long as the screen did.
+            //
+            // Only this refusal. The rest already re-arm wholesale where they happen — a screen
+            // switch rebuilds every row's state, `redetect` and `invalidate_layout` clear every
+            // signature, a reflow replaces `live_rows` outright — and `NoLongerDetected` means the
+            // rows still hold their bytes, so whatever changed the verdict changed a row the context
+            // signature hashes and the candidate is armed by that.
+            if reason == LiveCompletionRefusal::SourceChanged {
+                let (first, last) = live_task_dependency_rows(&task);
+                self.rearm_live_rows(first, last);
+            }
             // A refused completion used to leave nothing behind but a counter nobody prints, so a
             // formula that stayed at source because its raster was thrown away looked in the trace
             // exactly like a formula that was never scanned. It is the one outcome a recording of
@@ -13935,6 +13964,20 @@ impl std::fmt::Display for LiveCompletionRefusal {
             Self::Unproven => "unproven",
         };
         formatter.write_str(word)
+    }
+}
+
+/// The rows one scan's answer was read from, together with the row it was armed on: the in-flight
+/// equivalent of a resident record's band, and wanted for the same thing — when an answer is thrown
+/// away because those rows no longer hold the bytes it read, these are the rows to ask about again.
+fn live_task_dependency_rows(task: &LiveDetectionTask) -> (u32, u32) {
+    if task.resolved {
+        (
+            task.band_start_row.min(task.candidate_row),
+            task.band_end_row.max(task.candidate_row),
+        )
+    } else {
+        (task.candidate_row, task.candidate_row)
     }
 }
 
