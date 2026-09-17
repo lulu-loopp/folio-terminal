@@ -12727,7 +12727,7 @@ struct WindowRuntime {
     /// a request an input method may refuse, and the lifecycle notices around it
     /// are not the composition ending — a barrier a notice can take down is not
     /// a barrier. See [`composition_ruling`] for the whole rule.
-    composing_in: Option<CompositionOrigin>,
+    composing_in: Composing,
     ime_active: bool,
     ime_cursor_throttle: ImeCursorThrottle,
     /// The tab-rename caret's line box in window pixels, as the strip last drew
@@ -18306,99 +18306,177 @@ enum ComposingEvent {
     Commits,
 }
 
-/// What the window should remember about the composition once this event has
-/// been answered.
+/// **What this window is holding on behalf of an input method** (§7.1.5a″;
+/// review 2026-09-17 P2, rounds 3 and 4).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+enum Composing {
+    /// Nothing is being composed.
+    #[default]
+    Idle,
+    /// A composition is live, and it began in this field.
+    In(CompositionOrigin),
+    /// **A composition whose letters have already been taken off the glass, in
+    /// a field that is not the one it began in** — and whose end has therefore
+    /// reached this window *after* the keyboard moved.
+    ///
+    /// It is a state and not a verdict because one event decides which of two
+    /// things it was, and that event is the very next composition event this
+    /// window sees. A refused cancel finishes with a result, so its commit
+    /// arrives immediately and is judged by the origin. An honoured cancel
+    /// finishes with nothing, so the next thing to arrive is the reader's own
+    /// typing, and the composition simply retires.
+    ///
+    /// **The boundary is the next event, not a clock and not a turn**, and the
+    /// backends are what make that exact. Every one of the three places pinned
+    /// winit 0.30.13 emits `Ime::Commit` emits `Ime::Preedit("")` on the line
+    /// immediately above it, with nothing in between — Windows
+    /// `platform_impl/windows/event_loop.rs:1553-1557` (`WM_IME_COMPOSITION`
+    /// with `GCS_RESULTSTR`) and `:1595-1599` (`WM_IME_ENDCOMPOSITION`), macOS
+    /// `platform_impl/macos/view.rs:412-413` (`insertText:`). So "an empty
+    /// pre-edit and then a commit" is one composition finishing with a result,
+    /// and an empty pre-edit followed by anything else is one finishing without
+    /// one — `unmarkText` queues exactly that lone empty pre-edit
+    /// (`view.rs:344`), as does `WM_IME_COMPOSITION` with an `lparam` of zero
+    /// (`event_loop.rs:1537-1542`).
+    Retiring(CompositionOrigin),
+}
+
+impl Composing {
+    /// The field a live or retiring composition began in.
+    const fn origin(&self) -> Option<&CompositionOrigin> {
+        match self {
+            Self::Idle => None,
+            Self::In(origin) | Self::Retiring(origin) => Some(origin),
+        }
+    }
+
+    /// Apply what [`composition_ruling`] decided.
+    fn after(self, next: ComposingAfter, here: &CompositionOrigin) -> Self {
+        match next {
+            ComposingAfter::Unchanged => self,
+            ComposingAfter::Idle => Self::Idle,
+            ComposingAfter::AdoptHere => Self::In(here.clone()),
+            ComposingAfter::Retire => match self {
+                Self::Idle => Self::Idle,
+                Self::In(origin) | Self::Retiring(origin) => Self::Retiring(origin),
+            },
+        }
+    }
+}
+
+/// What the window should be holding once this event has been answered.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum OriginAfter {
+enum ComposingAfter {
     /// Leave it exactly as it is.
-    Keep,
+    Unchanged,
     /// There is no composition any more.
-    Forget,
+    Idle,
     /// This event begins one, here.
-    Adopt,
+    AdoptHere,
+    /// The letters are off the glass somewhere else; the next event says
+    /// whether they were finished or abandoned. See [`Composing::Retiring`].
+    Retire,
 }
 
 /// [`composition_ruling`]'s answer: whether these letters are answered at all,
-/// and what becomes of the recorded origin.
+/// and what becomes of the recorded composition.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CompositionRuling {
     /// `false` is a **discard**: nothing is inserted, into this field or any
     /// other, by any rung of the ladder.
     deliver: bool,
-    origin: OriginAfter,
+    next: ComposingAfter,
 }
 
 /// **A composition belongs to the field it began in, and a cancel is a request**
 /// (§7.1.5a″; review 2026-09-17 P2).
 ///
 /// [`Runtime::cancel_composition`] asks an input method to stop; `ImmNotifyIME`
-/// answers a bool and §7.1.5a″ already names a method that says no. So the
-/// keyboard moves — a dropped path, a click, a pane chord, a palette closing —
-/// the window stops drawing the letters, and the method sends the commit anyway.
-/// Every rung of `ime_input` resolves the owner *now*, so those letters would be
-/// inserted into whatever field the keyboard has arrived in. The ruling is that
-/// this must never happen, and a request cannot be what enforces it.
+/// answers a bool and §7.1.5a″ already names a method that says no. And whether
+/// it says yes or no, **the answer arrives after the keyboard has already
+/// moved**: winit buffers its callbacks until the application returns
+/// (`platform_impl/windows/event_loop/runner.rs`, `macos/app_state.rs`), so the
+/// events an ending composition produces are delivered against the field the
+/// gesture moved to. Every rung of `ime_input` resolves the owner *now*, so
+/// those letters would be inserted into whatever the keyboard has arrived in.
+/// The ruling is that this must never happen, and a request cannot be what
+/// enforces it.
 ///
 /// **The rule, in full.** A composition's **origin** is the identity of the
-/// keyboard owner it began under ([`CompositionOrigin`]). It is set by the first
-/// non-empty pre-edit and it is ended by exactly two things: that composition's
-/// own commit, and a non-empty pre-edit that re-homes it. It is **not** cleared
-/// by `cancel_composition`, by `Ime::Enabled` or `Ime::Disabled`, or by the
-/// window losing and regaining focus — those are lifecycle notices, and a
-/// barrier a notice can take down is not a barrier. A commit is delivered only
-/// when its origin is `None` or equal to the field that would receive it now;
-/// otherwise it is discarded, everywhere.
+/// keyboard owner it began under ([`CompositionOrigin`]), set by the first
+/// non-empty pre-edit. A **commit** is delivered only when there is no
+/// composition behind it — which is how an input method sends a single
+/// character — or when its origin is the field that would receive it now;
+/// otherwise it is discarded, everywhere. The origin is **not** cleared by
+/// `cancel_composition`, by `Ime::Enabled` or `Ime::Disabled`, or by the window
+/// losing and regaining focus: those are lifecycle notices about the method, and
+/// a barrier a notice can take down is not a barrier.
 ///
-/// **The one thing an empty pre-edit decides, and why it is not a third
-/// exception.** Pressing `Esc` mid-composition is an empty pre-edit with no
-/// commit behind it, and it happens *in the field being typed in*. A refused
-/// cancel's clearing is the same event arriving *after* the keyboard has already
-/// moved. The window can tell those apart without a clock, because it is the
-/// same comparison the commit makes: an empty pre-edit whose origin **is** the
-/// current field ends that composition (`Forget`), and one whose origin is some
-/// other field is the refused cancel tidying up and leaves the origin standing
-/// (`Keep`), so the commit behind it is still judged by it. Without this, an
-/// abandoned composition would leave its origin set for ever and the reader's
-/// next single-character commit somewhere else would be swallowed.
+/// **What ends a composition, given that a cancel cannot be trusted to.** An
+/// empty pre-edit is the letters coming off the glass, and it is the last thing
+/// every ending does. Where it arrives says what it is:
 ///
-/// **Two bounds, both stated rather than hidden.**
+/// * **in the field the composition began in** — the reader pressed `Esc` where
+///   they were typing — it is simply over;
+/// * **anywhere else** — the ending crossed a field boundary, which is exactly
+///   the case this whole rule is about — it puts the composition into
+///   [`Composing::Retiring`], and the **very next composition event** decides.
+///   A commit is that composition finishing with a result and is judged by the
+///   origin (so a refused cancel's letters are discarded); anything else means
+///   it finished without one, and the composition retires with no verdict owed.
+///
+/// **That next-event boundary is exact rather than approximate**, and pinned
+/// winit is what makes it so: every `Ime::Commit` it emits is preceded on the
+/// line above by `Ime::Preedit("")`, at all three sites, with no event in
+/// between (see [`Composing::Retiring`] for the file and line of each). So a
+/// finishing commit cannot arrive anywhere but immediately, and an honoured
+/// cancel — whose empty pre-edit comes alone — cannot be mistaken for one. No
+/// clock and no turn boundary is involved.
+///
+/// **Two bounds, stated rather than hidden.**
 ///
 /// ① A method that answers a refused cancel with a *non-empty* pre-edit is
 /// indistinguishable from a reader beginning to type, so it re-homes. Those
-/// letters are drawn at the new caret before any commit — a picture the reader
-/// can see and refuse, not bytes on a command line — and the alternative is
+/// letters are drawn at the new caret before any commit — a picture that can be
+/// seen and refused, not bytes on a command line — and the alternative is
 /// refusing the first real composition after every focus change.
 ///
-/// ② A composition abandoned with **neither** a commit nor an empty pre-edit
-/// would leave its origin standing, and a later bare single-character commit in
-/// another field would be discarded. Those two cannot be told apart by event
-/// order, and §7.1.5a″ chooses the conservative side: never write into a field
-/// the text did not begin in. The cost is bounded by both backends actually
-/// ending compositions — winit's Windows arm emits the result string before
-/// `Disabled` (`event_loop.rs`), and its macOS arm queues an empty pre-edit when
-/// marked text is cleared (`view.rs`) — so the order that would pay it is one
-/// neither of them produces.
+/// ② A composition abandoned with **no event at all** — no commit and no empty
+/// pre-edit — leaves its origin standing, so the next committed character in
+/// another field arrives as `Retiring` + commit and is discarded. That is one
+/// character, after which the window is idle and everything works; and it is
+/// indistinguishable by event order from a refused cancel's late result, which
+/// is the thing §7.1.5a″ forbids. The conservative side is the ruling's own:
+/// never insert into a field the text did not begin in. Neither pinned backend
+/// produces it — an ending always emits its result or its empty pre-edit — so
+/// the order that would pay for it is one that has to be invented.
 fn composition_ruling(
-    origin: Option<&CompositionOrigin>,
+    state: &Composing,
     here: &CompositionOrigin,
     event: ComposingEvent,
 ) -> CompositionRuling {
     match event {
         ComposingEvent::Opens => CompositionRuling {
             deliver: true,
-            origin: OriginAfter::Adopt,
+            next: ComposingAfter::AdoptHere,
         },
         ComposingEvent::Clears => CompositionRuling {
             deliver: true,
-            origin: if origin == Some(here) {
-                OriginAfter::Forget
-            } else {
-                OriginAfter::Keep
+            next: match state {
+                // An ending that has not crossed a boundary, and an empty
+                // pre-edit with nothing behind it: over, with nothing owed.
+                Composing::Idle => ComposingAfter::Unchanged,
+                Composing::In(origin) if origin == here => ComposingAfter::Idle,
+                // The ending reached us in another field. One event decides.
+                Composing::In(_) => ComposingAfter::Retire,
+                // A second empty pre-edit with no commit between: the first
+                // ending had no result, so there is nothing left to judge.
+                Composing::Retiring(_) => ComposingAfter::Idle,
             },
         },
         ComposingEvent::Commits => CompositionRuling {
-            deliver: origin.is_none_or(|origin| origin == here),
-            origin: OriginAfter::Forget,
+            deliver: state.origin().is_none_or(|origin| origin == here),
+            next: ComposingAfter::Idle,
         },
     }
 }
@@ -37313,7 +37391,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         cards: focus_thumb::CardClock::default(),
         preedit: None,
         composing: None,
-        composing_in: None,
+        composing_in: Composing::Idle,
         ime_active: false,
         ime_cursor_throttle: ImeCursorThrottle::default(),
         rename_caret_line: None,
@@ -99283,12 +99361,9 @@ impl Runtime<'_> {
             // of all of them. See [`composition_ruling`].
             let here = self.composition_origin_now();
             if let Some(what) = composing_event_of(&event) {
-                let ruling = composition_ruling(self.window.composing_in.as_ref(), &here, what);
-                match ruling.origin {
-                    OriginAfter::Keep => {}
-                    OriginAfter::Forget => self.window.composing_in = None,
-                    OriginAfter::Adopt => self.window.composing_in = Some(here),
-                }
+                let ruling = composition_ruling(&self.window.composing_in, &here, what);
+                let held = std::mem::take(&mut self.window.composing_in);
+                self.window.composing_in = held.after(ruling.next, &here);
                 if !ruling.deliver {
                     return Ok(());
                 }
@@ -172709,109 +172784,130 @@ mod clipboard_path_tests {
     }
 
     /// **A composition that was left behind never reaches the field the keyboard
-    /// moved to — whichever way the input method answers the cancel, and
-    /// whichever two fields they are** (§7.1.5a″; review 2026-09-17 P2).
+    /// moved to — and one that was honoured costs the reader nothing** (§7.1.5a″;
+    /// review 2026-09-17 P2, rounds 3 and 4).
     ///
-    /// `cancel_composition` asks; `ImmNotifyIME` answers a bool, and §7.1.5a″
-    /// records a method that says no. So the window stops *drawing* the letters
-    /// and the method sends them anyway, and every rung of `ime_input` resolves
-    /// the owner as it stands now — which after a dropped path, a click or a
-    /// pane chord is some other field. This drives the rule that stops it.
+    /// `cancel_composition` asks; the answer arrives after the keyboard has
+    /// already moved, because winit buffers its callbacks until the application
+    /// returns. So the *ending* of a composition is always judged in the field
+    /// the gesture went to, whether the input method honoured the cancel or not,
+    /// and the two have to be told apart there.
     ///
-    /// **The orders.** On Windows a refused `CPS_CANCEL` leaves the composition
-    /// running, so `WM_IME_COMPOSITION` with `GCS_RESULTSTR` arrives as a
-    /// `Commit` — on its own, or behind the empty pre-edit that clears the
-    /// composition string. On macOS winit's `unmarkText` road clears marked text
-    /// and queues an empty pre-edit, and it will not emit a `Commit` without
-    /// marked text in hand — so the shape that can arrive there is the queued
-    /// commit of a composition that was still marked, judged by the same rule.
-    /// And a method that honoured the cancel sends neither, which must leave the
-    /// next real composition alone.
+    /// **The boundary is the very next composition event**, which pinned winit
+    /// 0.30.13 makes exact: all three of its `Ime::Commit` emissions are
+    /// preceded on the line above by `Ime::Preedit("")` with nothing between —
+    /// Windows `event_loop.rs:1553-1557` and `:1595-1599`, macOS
+    /// `view.rs:412-413`. An ending with a result is therefore that pair,
+    /// adjacent; an ending without one is the lone empty pre-edit that
+    /// `unmarkText` (`view.rs:344`) and a zero `lparam` (`event_loop.rs:1537`)
+    /// queue.
     ///
-    /// MUTATION: deliver a commit whose origin names another field and every
-    /// "stale" row goes red. MUTATION: let an empty pre-edit forget the origin
-    /// unconditionally and the `Preedit("")` rows go red, which is the order the
-    /// first attempt at this missed. MUTATION: refuse a commit with no origin
-    /// behind it and the direct-commit row goes red, taking ordinary typing with
-    /// it.
+    /// MUTATION: judge the commit from `Retiring` against the current field
+    /// instead of the origin and the refused-cancel rows go red. MUTATION: make
+    /// an out-of-field empty pre-edit go straight to `Idle` and the refused
+    /// cancel's late pair is delivered into the pane the path was dropped on.
+    /// MUTATION: make it `Unchanged` instead of `Retire` and the honoured
+    /// cancel eats the reader's next character.
     #[test]
     fn a_left_behind_ime_composition_is_discarded_however_the_method_answers() {
         let (a, b) = (shell_origin(1, 2, 7), shell_origin(1, 5, 9));
 
         // The composition opens in A and is A's from then on.
-        let opened = composition_ruling(None, &a, ComposingEvent::Opens);
+        let opened = composition_ruling(&Composing::Idle, &a, ComposingEvent::Opens);
         assert!(opened.deliver);
+        let live = Composing::Idle.after(opened.next, &a);
         assert_eq!(
-            opened.origin,
-            OriginAfter::Adopt,
+            live,
+            Composing::In(a.clone()),
             "a pre-edit belongs to the field the keyboard is in while it is typed"
         );
 
-        // ① **Commit alone.** The keyboard is B's; the composition is A's.
-        let stale = composition_ruling(Some(&a), &b, ComposingEvent::Commits);
+        // ① **The refused cancel.** The method keeps composing; the keyboard
+        //    moves to B; later the composition finishes, which is the adjacent
+        //    pair arriving at B.
+        let clearing = composition_ruling(&live, &b, ComposingEvent::Clears);
+        assert!(
+            clearing.deliver,
+            "letters coming off the glass are always drawn"
+        );
+        let retiring = live.clone().after(clearing.next, &b);
+        assert_eq!(
+            retiring,
+            Composing::Retiring(a.clone()),
+            "an ending that reached another field is not over until the next \
+             event says what it was"
+        );
+        let stale = composition_ruling(&retiring, &b, ComposingEvent::Commits);
         assert!(
             !stale.deliver,
             "the letters A was half-way through typing were written into B"
         );
         assert_eq!(
-            stale.origin,
-            OriginAfter::Forget,
-            "and the composition is over either way, so nothing is left to poison \
-             the next one"
+            retiring.clone().after(stale.next, &b),
+            Composing::Idle,
+            "and the composition is over either way"
         );
 
-        // ② **Empty pre-edit, then commit.** The clear is answered — taking
-        //    letters off the glass is safe wherever it came from — but it must
-        //    not launder the commit behind it, because it arrived *after* the
-        //    keyboard had already moved.
-        let cleared = composition_ruling(Some(&a), &b, ComposingEvent::Clears);
-        assert!(cleared.deliver);
+        // ② **The bare stale commit**, with no clearing pre-edit in front of it.
+        //    Neither backend emits one, and it is refused all the same.
+        assert!(!composition_ruling(&live, &b, ComposingEvent::Commits).deliver);
+
+        // ③ **The honoured cancel, which is the ordinary case.** The lone empty
+        //    pre-edit arrives at B; no commit follows it. The reader then types
+        //    punctuation, which arrives as its own adjacent pair — and the first
+        //    half of that pair is what retires A.
+        let after_clear = live.clone().after(
+            composition_ruling(&live, &b, ComposingEvent::Clears).next,
+            &b,
+        );
+        assert_eq!(after_clear, Composing::Retiring(a.clone()));
+        let punctuation_clear = composition_ruling(&after_clear, &b, ComposingEvent::Clears);
+        assert!(punctuation_clear.deliver);
+        let idle = after_clear.after(punctuation_clear.next, &b);
         assert_eq!(
-            cleared.origin,
-            OriginAfter::Keep,
-            "an empty pre-edit that reaches a different field is the refused \
-             cancel tidying up, and claims nothing"
+            idle,
+            Composing::Idle,
+            "a second empty pre-edit with no commit between means the first \
+             ending had no result"
         );
         assert!(
-            !composition_ruling(Some(&a), &b, ComposingEvent::Commits).deliver,
-            "a `Preedit(\"\")` in front of it made the stale commit deliverable"
+            composition_ruling(&idle, &b, ComposingEvent::Commits).deliver,
+            "the reader's next character after an honoured cancel was swallowed"
         );
 
-        // ③ **Nothing at all**, and then the reader starts composing in B. The
-        //    first pre-edit after the move is a new composition and is B's.
-        let fresh = composition_ruling(Some(&a), &b, ComposingEvent::Opens);
-        assert!(fresh.deliver, "a fresh composition in B is drawn in B");
-        assert_eq!(fresh.origin, OriginAfter::Adopt);
-        assert!(
-            composition_ruling(Some(&b), &b, ComposingEvent::Commits).deliver,
-            "and it commits into B, which is the half the barrier must not break"
+        // ④ **`Commit("")`** — Windows maps a zero-sized result to one — retires
+        //    the composition whatever else it does.
+        assert_eq!(
+            composition_ruling(&retiring, &b, ComposingEvent::Commits).next,
+            ComposingAfter::Idle,
+            "an empty result left the barrier armed"
         );
 
-        // **Ordinary typing is untouched.** Input methods commit single
-        // characters with no pre-edit at all; refusing those would swallow them.
-        assert!(
-            composition_ruling(None, &b, ComposingEvent::Commits).deliver,
-            "a commit with no composition behind it is ordinary typing"
-        );
-        // And a composition that never left its own field commits there.
-        assert!(
-            composition_ruling(Some(&b), &b, ComposingEvent::Commits).deliver,
-            "a reader who composed and committed without moving got nothing"
-        );
-        // **A shell restarted in the same hole is a different field**, which is
-        // the whole reason the origin is a `PasteTarget` and not a seat.
-        assert!(
-            !composition_ruling(Some(&a), &shell_origin(1, 2, 8), ComposingEvent::Commits).deliver,
-            "the pane's shell was restarted under the composition and the letters \
-             went to its replacement"
-        );
-        assert!(
-            composition_ruling(Some(&a), &a, ComposingEvent::Commits).deliver,
-            "tab, seat and incarnation name the field, and none of them moved"
-        );
+        // ⑤ **`Esc` in the field being typed in** is over at once, so the very
+        //    next character anywhere is ordinary typing.
+        let escaped = composition_ruling(&live, &a, ComposingEvent::Clears);
+        assert!(escaped.deliver);
+        assert_eq!(live.clone().after(escaped.next, &a), Composing::Idle);
 
-        // The winit events these rulings are read off, so that the mapping is
-        // part of the same test rather than a source pin somewhere else.
+        // ⑥ **A fresh composition after the move** is the destination's and
+        //    commits there, which is the half the barrier must not break.
+        let fresh = composition_ruling(&retiring, &b, ComposingEvent::Opens);
+        assert!(fresh.deliver);
+        let in_b = retiring.after(fresh.next, &b);
+        assert_eq!(in_b, Composing::In(b.clone()));
+        assert!(composition_ruling(&in_b, &b, ComposingEvent::Commits).deliver);
+
+        // Ordinary typing with nothing composed, and a composition that never
+        // left its own field, are both delivered.
+        assert!(composition_ruling(&Composing::Idle, &b, ComposingEvent::Commits).deliver);
+        assert!(composition_ruling(&Composing::In(b.clone()), &b, ComposingEvent::Commits).deliver);
+        // A shell restarted in the same hole is a different field.
+        assert!(
+            !composition_ruling(&live, &shell_origin(1, 2, 8), ComposingEvent::Commits).deliver
+        );
+        assert!(composition_ruling(&live, &a, ComposingEvent::Commits).deliver);
+
+        // The winit events these rulings are read off.
         assert_eq!(
             composing_event_of(&Ime::Preedit("ni".to_owned(), None)),
             Some(ComposingEvent::Opens)
@@ -172824,6 +172920,11 @@ mod clipboard_path_tests {
             composing_event_of(&Ime::Commit("\u{4f60}".to_owned())),
             Some(ComposingEvent::Commits)
         );
+        assert_eq!(
+            composing_event_of(&Ime::Commit(String::new())),
+            Some(ComposingEvent::Commits),
+            "a zero-sized result is still a commit, and still retires"
+        );
         for bookkeeping in [Ime::Enabled, Ime::Disabled] {
             assert_eq!(
                 composing_event_of(&bookkeeping),
@@ -172834,27 +172935,25 @@ mod clipboard_path_tests {
         }
     }
 
-    /// **The lifecycle notices around a refused cancel do not take the barrier
-    /// down** (review 2026-09-17 P2, round 3).
+    /// **The lifecycle notices around an ending do not take the barrier down**
+    /// (review 2026-09-17 P2, rounds 3 and 4).
     ///
     /// The sequence, exactly as it was traced: a pre-edit in pane A; a dropped
     /// path moves the keyboard to B; the cancel is refused; `Ime::Disabled`;
     /// `Ime::Enabled`; the method's own empty pre-edit; the commit. Every one of
     /// those middle events is winit telling this window what the *input method*
-    /// is doing — pinned winit 0.30.13 emits the result string before `Disabled`
-    /// and re-enables results on `WM_IME_STARTCOMPOSITION`, which is what makes
-    /// the `Enabled` in the middle reachable — and none of them is the
-    /// composition ending. A barrier a notice can take down is not a barrier.
+    /// is doing — pinned winit emits the result string before `Disabled`
+    /// (`event_loop.rs:1595-1605`) and re-enables results on
+    /// `WM_IME_STARTCOMPOSITION` (`:1513`), which is what makes the `Enabled` in
+    /// the middle reachable — and none of them is the composition ending. A
+    /// barrier a notice can take down is not a barrier.
     ///
-    /// MUTATION: clear the origin on `Enabled` or on `Disabled` — as both arms
-    /// did before this round — and the last assertion goes red: the commit is
-    /// admitted and the half-typed letters are written into the pane the path
-    /// was dropped on.
+    /// MUTATION: clear the composition on `Enabled` or on `Disabled` and the
+    /// source pin goes red: the commit is admitted and the half-typed letters
+    /// are written into the pane the path was dropped on.
     #[test]
     fn ime_lifecycle_notices_do_not_erase_a_compositions_origin() {
         let (a, b) = (shell_origin(1, 2, 7), shell_origin(1, 5, 9));
-        // `Enabled` and `Disabled` are not composition events at all, so the
-        // ruling is never asked about them and the origin cannot move.
         for notice in [Ime::Enabled, Ime::Disabled] {
             assert_eq!(
                 composing_event_of(&notice),
@@ -172862,27 +172961,30 @@ mod clipboard_path_tests {
                 "{notice:?} reached the ruling, which is one way to lose the origin"
             );
         }
-        // And the arms that answer them do not clear it by hand either.
         let source = include_str!("main.rs");
         let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
         let door = method_text(before_this_fixture, "    fn ime_input(");
         assert_eq!(
-            door.matches("self.window.composing_in = None").count(),
+            door.matches("self.window.composing_in = ").count(),
             1,
-            "the origin is forgotten somewhere other than the one ruling that is \
-             allowed to forget it:\n{door}"
+            "the composition is set somewhere other than the one ruling that is \
+             allowed to set it:\n{door}"
         );
         assert!(
             !method_text(before_this_fixture, "    fn cancel_composition(")
                 .contains("composing_in = "),
-            "the cancel clears the origin, which is the barrier taking itself \
-             down at the moment it is needed"
+            "the cancel clears the composition, which is the barrier taking \
+             itself down at the moment it is needed"
         );
         // The whole sequence, run through the rule that survives it.
-        let after_clear = composition_ruling(Some(&a), &b, ComposingEvent::Clears);
-        assert_eq!(after_clear.origin, OriginAfter::Keep);
+        let live = Composing::In(a.clone());
+        let retiring = live.clone().after(
+            composition_ruling(&live, &b, ComposingEvent::Clears).next,
+            &b,
+        );
+        assert_eq!(retiring, Composing::Retiring(a));
         assert!(
-            !composition_ruling(Some(&a), &b, ComposingEvent::Commits).deliver,
+            !composition_ruling(&retiring, &b, ComposingEvent::Commits).deliver,
             "the commit behind a disable/enable pair was written into B"
         );
     }
@@ -172891,14 +172993,14 @@ mod clipboard_path_tests {
     ///
     /// The owner ladder is *routing*: it answers where text goes now, which is
     /// exactly the question a composition that has outlived its field must not
-    /// be allowed to ask. Before this round the barrier stood inside the shell's
+    /// be allowed to ask. Before round 3 the barrier stood inside the shell's
     /// arm, so a composition begun at a prompt and finished after the keyboard
     /// had moved to a preview or the search capsule was inserted there — and, in
     /// the other direction, a composition begun in a preview or the capsule had
     /// no shell origin at all, so a dropped path into a terminal took its commit.
     ///
-    /// Six crossings, each with the refused cancel's two orders, plus the fresh
-    /// composition that has to keep working after each of them.
+    /// Six crossings, each with the refused cancel's two orders, the honoured
+    /// cancel's, and the fresh composition that has to keep working after them.
     ///
     /// MUTATION: put the ruling back inside the shell's arm and every row whose
     /// destination is not a shell goes red at once.
@@ -172925,96 +173027,74 @@ mod clipboard_path_tests {
             ),
             (&palette, &shell_b, "the palette to a prompt"),
         ] {
+            let live = Composing::In(from.clone());
+            // A bare stale commit.
             assert!(
-                !composition_ruling(Some(from), to, ComposingEvent::Commits).deliver,
+                !composition_ruling(&live, to, ComposingEvent::Commits).deliver,
                 "letters begun in one field were inserted after crossing {what}"
             );
-            // And the same with the refused cancel's clearing pre-edit in front
-            // of the commit, which must not launder it.
-            let cleared = composition_ruling(Some(from), to, ComposingEvent::Clears);
+            // The refused cancel's adjacent pair.
+            let retiring = live.clone().after(
+                composition_ruling(&live, to, ComposingEvent::Clears).next,
+                to,
+            );
             assert_eq!(
-                cleared.origin,
-                OriginAfter::Keep,
-                "the clearing pre-edit gave up the origin crossing {what}"
+                retiring,
+                Composing::Retiring(from.clone()),
+                "the clearing pre-edit gave up the composition crossing {what}"
             );
             assert!(
-                !composition_ruling(Some(from), to, ComposingEvent::Commits).deliver,
+                !composition_ruling(&retiring, to, ComposingEvent::Commits).deliver,
                 "a `Preedit(\"\")` laundered the commit crossing {what}"
             );
-            // A fresh composition after the move is the destination's and
-            // commits there, which is the half the barrier must not break.
-            assert_eq!(
-                composition_ruling(Some(from), to, ComposingEvent::Opens).origin,
-                OriginAfter::Adopt,
-                "a fresh composition after {what} was refused"
+            // The honoured cancel: the reader's next character still arrives.
+            let idle = retiring.clone().after(
+                composition_ruling(&retiring, to, ComposingEvent::Clears).next,
+                to,
             );
+            assert_eq!(idle, Composing::Idle);
             assert!(
-                composition_ruling(Some(to), to, ComposingEvent::Commits).deliver,
-                "and it could not commit after {what}"
+                composition_ruling(&idle, to, ComposingEvent::Commits).deliver,
+                "an honoured cancel crossing {what} ate the next character"
             );
-            // A single character committed with no composition behind it is
-            // ordinary typing wherever the keyboard is.
-            assert!(composition_ruling(None, to, ComposingEvent::Commits).deliver);
+            // A fresh composition after the move is the destination's.
+            let in_to = retiring.clone().after(
+                composition_ruling(&retiring, to, ComposingEvent::Opens).next,
+                to,
+            );
+            assert_eq!(
+                in_to,
+                Composing::In(to.clone()),
+                "a fresh composition after {what}"
+            );
+            assert!(composition_ruling(&in_to, to, ComposingEvent::Commits).deliver);
+            // A single character with nothing composed is ordinary typing.
+            assert!(composition_ruling(&Composing::Idle, to, ComposingEvent::Commits).deliver);
         }
         // **And the rule stands in front of the ladder, not inside one of its
-        // arms**, which is the placement every row above depends on: the ladder
-        // answers where text goes *now*, and that is exactly the question a
-        // composition which has outlived its field must not be allowed to ask.
+        // arms**, which is the placement every row above depends on.
         let source = include_str!("main.rs");
         let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
         let door = method_text(before_this_fixture, "    fn ime_input(");
         let (ruled, routed) = (
-            door.find("composition_ruling(self.window.composing_in.as_ref()"),
+            door.find("composition_ruling(&self.window.composing_in"),
             door.find("match ime_owner(self.keyboard_owner())"),
         );
         assert!(
             ruled.is_some() && ruled < routed,
-            "the ruling has moved below the owner ladder, so every rung but one              routes a composition that has outlived its field:
-{door}"
+            "the ruling has moved below the owner ladder, so every rung but one \
+             routes a composition that has outlived its field:\n{door}"
         );
         // Two instances of the *same* rung are two fields, which is the half a
         // category comparison cannot see — the defect this whole rule replaces.
         assert!(
             !composition_ruling(
-                Some(&CompositionOrigin::Preview(Some(PreviewSurface::Peek))),
+                &Composing::In(CompositionOrigin::Preview(Some(PreviewSurface::Peek))),
                 &CompositionOrigin::Preview(None),
                 ComposingEvent::Commits
             )
             .deliver,
             "two preview surfaces are one kind of owner and two fields"
-        );
-    }
-
-    /// **`Esc` in the field you are typing in ends the composition, so the next
-    /// single character is not swallowed** (review 2026-09-17 P2, round 3).
-    ///
-    /// An empty pre-edit with no commit behind it is the ordinary way a reader
-    /// abandons a composition, and it happens *where they are*. The refused
-    /// cancel's clearing is the same event arriving *after* the keyboard has
-    /// moved. They are told apart by the comparison the commit already makes,
-    /// with no clock anywhere: an empty pre-edit whose origin is the current
-    /// field ends that composition; one whose origin is elsewhere leaves it
-    /// standing. Without this the origin would sit there for ever and the
-    /// reader's next bare commit somewhere else would vanish.
-    ///
-    /// MUTATION: make `Clears` always keep the origin and the last assertion
-    /// goes red — a reader who pressed `Esc`, went to another pane and typed a
-    /// character with an input method that commits directly loses it.
-    #[test]
-    fn an_abandoned_ime_composition_stops_being_owed_where_it_was_abandoned() {
-        let (a, b) = (shell_origin(1, 2, 7), shell_origin(1, 5, 9));
-        let escaped = composition_ruling(Some(&a), &a, ComposingEvent::Clears);
-        assert!(escaped.deliver);
-        assert_eq!(
-            escaped.origin,
-            OriginAfter::Forget,
-            "a composition abandoned in its own field is over, and goes on being \
-             owed to nobody"
-        );
-        assert!(
-            composition_ruling(None, &b, ComposingEvent::Commits).deliver,
-            "the reader pressed `Esc`, moved to another pane and typed one \
-             character, and it was swallowed"
         );
     }
 
@@ -173041,7 +173121,13 @@ mod clipboard_path_tests {
              a click on your own prompt ends the word you were typing:\n{door}"
         );
         let here = shell_origin(1, 2, 7);
-        assert!(composition_ruling(Some(&here), &here, ComposingEvent::Commits).deliver);
+        let live = Composing::In(here.clone());
+        assert!(composition_ruling(&live, &here, ComposingEvent::Commits).deliver);
+        assert_eq!(
+            composition_ruling(&live, &here, ComposingEvent::Clears).next,
+            ComposingAfter::Idle,
+            "an `Esc` where you are typing is over, with nothing owed"
+        );
     }
 
     /// A shell field, by the three facts that name one.
