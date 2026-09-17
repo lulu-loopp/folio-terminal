@@ -8,6 +8,38 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **A formula scrolling back into view inside a code block stays code.** When a
+  formula came back onto the screen, Folio asked whether it still reads those
+  lines as a formula — but it worked out the answer for those lines on their
+  own, while reading the screen as a whole can reach a different one. On a
+  screen whose first `$$` belongs to a formula that began above the top of it,
+  the two disagree: reading the whole screen finds a code fence and leaves the
+  `$$x^2$$` below it as code, and the shorter reading did not see the fence at
+  all — so a picture appeared over a line inside a code block, went away on the
+  next redraw of the same screen, and came back on the one after. The question
+  is now answered once, by reading the whole screen, which is the same reading
+  everything else in Folio uses.
+- **Folio no longer looks for a formula it has already failed to find, over and
+  over, on a screen that has not changed.** When a formula scrolls out of view,
+  Folio keeps its picture aside so that it can be given straight back the moment
+  the same text comes into view again. Looking for it means reading the whole
+  screen and working out what is on it, and that was being done afresh on every
+  read from the program — so a full-screen program that redraws its whole screen
+  each time you press a key made Folio do all of it on every keystroke, for each
+  formula it was holding aside, to reach the answer it had reached the moment
+  before. It is now asked once and asked again the instant anything it depends
+  on moves, so a formula scrolling back into view is still typeset in the very
+  frame that brings it back.
+- **A picture Folio has just taken down does not come back a moment later.**
+  While a full-screen program or a reprinting one is redrawing, Folio holds the
+  formulas already on the screen steady. If something ruled one of them out
+  during that redraw — the shell saying those lines are the command line you
+  type on, or Folio reading them again and deciding they are no longer a
+  formula, for instance because a code fence opened above them — the picture
+  went, and then the end of the redraw put it straight back, over lines it had
+  just been ruled off. A formula ruled out while a redraw is in progress now
+  stays out; one that is worked out again in the same redraw keeps its new
+  picture.
 - **After dragging a window's edge back to where it started, formulas in that
   pane are typeset again — they used to stop for good.** If a drag, a divider,
   a zoom or a move between monitors ended on the same size it began on, the
@@ -39,6 +71,51 @@ All notable changes to Folio are recorded here. The format follows
   block leaves the window in the same instant it leaves the live screen, so
   what came back was already out of sight. It is work that is no longer done,
   not a flicker that has stopped.
+- **A formula typeset while a full-screen program was redrawing no longer
+  disappears the moment that redraw finishes.** Folio holds its formulas steady
+  across a redraw by remembering them when one starts — but a formula Folio
+  worked out *during* the redraw was not in that memory, and finishing the redraw
+  threw it away, so it went back to LaTeX and had to be worked out and drawn all
+  over again. Replaying the owner's own recording, that happened at every one of
+  its 117 redraws.
+- **When a program finishes one screenful and begins the next in the same breath,
+  the formulas on the finished one stay where they are.** Folio went on reading the
+  new screen against the old one's layout, so with two identical formulas on show
+  one picture was placed over the other's lines and the other went back to LaTeX.
+- **A picture is never left standing over a formula that has just been edited.** A
+  program that replaced a formula's body in the middle of redrawing could leave
+  Folio showing the old picture over the new text until the redraw after it. Every
+  picture is now checked against the lines underneath it the moment they change.
+- **A formula edited in place is typeset again.** When a program rewrote only the
+  middle of a formula and left its `$$` lines untouched, the old picture went — it
+  was a picture of text that was no longer there — and nothing replaced it: Folio
+  had already answered the question on that formula's first line, and nothing on
+  that line had changed to make it ask again. A line that changes now reopens every
+  formula it belonged to, and a formula whose lines come back unchanged is still
+  never read twice.
+- **A picture is never put on a line that is a formula plus something else.** When
+  a formula scrolled back into view on the very last line of the content — the line
+  a full-screen program often shares with its own "jump to bottom" chip — Folio drew
+  the picture there even though it does not read such a line as a formula at all. A
+  moment later it took the picture off again, and drew it for real only once the
+  formula had scrolled onto a line of its own. Replaying the owner's own scrolling
+  session, that was the last of its flicker. A formula scrolling back onto a
+  bulleted line, a heading, or a line ending in a comma keeps its picture, and one
+  indented as code is left as code — Folio asks the same question there that it
+  asks everywhere else.
+- **Resizing the window while a program is drawing no longer loses a formula.** A
+  redraw that was still in progress when the window changed size went on measuring
+  against the old shape of the screen, so a formula could be drawn over the wrong
+  lines and another one lost — on a screen whose text had not changed at all. The
+  same redraw no longer loses them for a frame when Windows hands back the size it
+  settled on, either.
+- **A formula edited before Folio finished reading it the first time is read
+  again.** If a program replaced a formula's middle while Folio was still drawing
+  that formula, the drawing was thrown away — rightly, it was of text that had gone
+  — but nothing went back to look at what replaced it, and the formula stayed as
+  LaTeX for as long as it was on the screen. Going back to look costs the same
+  whether the screen is drawn thirty times a second or three hundred: Folio waits
+  for the whole formula to stop moving, not just its first line.
 
 ## 0.4.2-preview — 2026-09-17
 

@@ -815,6 +815,10 @@ struct AlternateRepaintSnapshot {
     dormant_decorations: Vec<LiveDecorationRecord>,
     invalidation_count: u64,
     snapshot_boundary: bool,
+    /// `DualPlaneSession::live_content_revision` when this snapshot was taken. While it still
+    /// matches, `inputs` is not a memory of the grid: it *is* the grid, and every record proven
+    /// since was proven in its coordinates.
+    live_content_revision: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -1437,6 +1441,32 @@ pub struct DualPlaneSession {
     live_decorations: BTreeMap<u32, LiveDecorationRecord>,
     next_live_occurrence_id: u64,
     offscreen_decorations: VecDeque<LiveDecorationRecord>,
+    /// What the last off-band re-anchor pass was asked, when it could give nothing back.
+    ///
+    /// "Can this record be re-anchored on this grid" is a pure function of the grid and the record,
+    /// so asking it twice about the same grid is asking it twice. `restore_offscreen_decorations`
+    /// runs from every feed turn and its only early-out was an empty queue, so one record whose
+    /// source is nowhere on the screen — the state the owner's recording sat in, six of them at
+    /// once — paid a full detection context, a parser prefix walk and a detector re-run on every
+    /// read, which under a program that repaints per keystroke is every keystroke.
+    ///
+    /// Not a retry count and not a clock: a record whose source may legitimately scroll back into
+    /// view has to be found the moment it does, and both of those would eventually stop looking.
+    /// This remembers the question instead, and asks it again the moment any part of the question
+    /// moves. See [`LiveGridAnswer`].
+    offscreen_restore_memo: OffBandRestoreMemo,
+    /// How many times the off-band re-anchor has actually read the grid.
+    ///
+    /// Instrumentation, and the only honest currency for "this is asked once per change and not
+    /// once per read": the pass returns the same answer either way, so nothing about the frame can
+    /// tell the two apart. Its sibling `live_detection_count` counts scans, which a skipped pass
+    /// does not schedule.
+    offscreen_restore_pass_count: u64,
+    /// The whole-grid detection the live detector itself would run, kept for as long as its answer
+    /// cannot have changed. Both the bounded re-detection a repaint window's close arms and the
+    /// off-band re-anchor's ownership question read it, so one grid is scanned once however many
+    /// closes and restores that grid sees.
+    live_grid_blocks_memo: Option<(LiveGridAnswer, Vec<LiveDetectionTask>)>,
     feed_turn: Option<FeedTurn>,
     alternate_repaint_snapshot: Option<AlternateRepaintSnapshot>,
     alternate_repaint_in_progress: bool,
@@ -1484,6 +1514,16 @@ pub struct DualPlaneSession {
     frozen_detection_count: u64,
     live_detection_count: u64,
     live_invalidation_count: u64,
+    /// **How many times a live row's content has actually changed** — bumped once per row by
+    /// [`Self::observe_live_damage`], and only where the row's own fingerprint says the cells are
+    /// not the cells it had. Damage alone will not do: a full-screen program rewrites every row
+    /// every frame and the vendor reports every one of them, so a counter driven by damage would
+    /// move on a frame that painted the same picture.
+    ///
+    /// It is what a repaint window compares itself against. A window is a promise about one
+    /// particular grid — the one its snapshot describes — and the promise holds only while that
+    /// grid is still the grid on the glass. See [`Self::settle_feed_turn`].
+    live_content_revision: u64,
     math_failure_validate_count: u64,
     math_failure_convert_count: u64,
     math_failure_compile_count: u64,
@@ -1492,6 +1532,72 @@ pub struct DualPlaneSession {
     /// return — zero hot-path cost. See `trace_decorations`.
     decor_trace: Option<PathBuf>,
     decor_trace_frame: u64,
+}
+
+/// **Everything the live detector's answer about this grid is a function of.**
+///
+/// The detector is given a list of input lines and a parser checkpoint to start from, and it is a
+/// pure function of the two plus its options: the same three give the same blocks, at the same
+/// rows, every time. So this names the three in the currency this session already keeps, and two
+/// answers derived from equal keys are the same answer.
+///
+/// Field by field, because each is here for a reason and a missing one is a stale picture:
+/// `content_revision` moves when a live row's cells are not the cells it had (and only then — a
+/// program rewriting its screen with the bytes it already had changes nothing); `generation` when
+/// the grid itself is replaced, which a reflow does without a byte arriving; `detection_revision`
+/// when detection is invalidated wholesale; `options` and `layout` because they are what the scan
+/// is run with; `screen` because the two screens have different inputs entirely; `history_lines`
+/// and `history_tail` because the primary screen's inputs begin with the transcript's last lines,
+/// which freezing appends to and eviction takes from; and the two checkpoints because they are the
+/// state the scan starts in, which a boundary resets and a scroll advances without touching a cell.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LiveGridAnswer {
+    screen: ScreenId,
+    content_revision: u64,
+    generation: GridGeneration,
+    detection_revision: DetectionRevision,
+    layout: LayoutKey,
+    options: DetectionOptions,
+    history_lines: usize,
+    history_tail: Option<TranscriptId>,
+    frozen_context: DetectionContext,
+    alternate_context: DetectionContext,
+}
+
+/// The question the last fruitless off-band re-anchor pass was asked.
+///
+/// The grid's own answer key, and the two things about this session's records that the pass also
+/// reads: which records are waiting, and which rows the resident ones already hold — a match is
+/// refused on a row another record occupies, so a resident record leaving its rows can turn a "no"
+/// into a "yes" without one cell changing.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct OffBandRestoreMemo {
+    /// `None` until a pass has actually been run and left something waiting.
+    answer: Option<LiveGridAnswer>,
+    queued: Vec<LiveMathOccurrenceId>,
+    occupied: Vec<(u32, u32)>,
+}
+
+impl OffBandRestoreMemo {
+    /// Would this pass be asked the same question it was asked last time? Compared in place: the
+    /// two lists are walked against the live ones rather than collected again, so the skip this
+    /// whole memo exists for costs no allocation at all.
+    fn still_holds(
+        &self,
+        answer: &LiveGridAnswer,
+        queued: &VecDeque<LiveDecorationRecord>,
+        resident: &BTreeMap<u32, LiveDecorationRecord>,
+    ) -> bool {
+        self.answer.as_ref() == Some(answer)
+            && self
+                .queued
+                .iter()
+                .copied()
+                .eq(queued.iter().map(|record| record.identity.occurrence_id))
+            && self.occupied.iter().copied().eq(resident
+                .values()
+                .map(|record| (record.band_start_row, record.band_end_row)))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1790,6 +1896,9 @@ impl DualPlaneSession {
             live_decorations: BTreeMap::new(),
             next_live_occurrence_id: 1,
             offscreen_decorations: VecDeque::new(),
+            offscreen_restore_memo: OffBandRestoreMemo::default(),
+            offscreen_restore_pass_count: 0,
+            live_grid_blocks_memo: None,
             feed_turn: None,
             alternate_repaint_snapshot: None,
             alternate_repaint_in_progress: false,
@@ -1806,6 +1915,7 @@ impl DualPlaneSession {
             frozen_detection_count: 0,
             live_detection_count: 0,
             live_invalidation_count: 0,
+            live_content_revision: 0,
             math_failure_validate_count: 0,
             math_failure_convert_count: 0,
             math_failure_compile_count: 0,
@@ -2302,6 +2412,12 @@ impl DualPlaneSession {
 
     pub fn frozen_detection_count(&self) -> u64 {
         self.frozen_detection_count
+    }
+
+    /// How many times the off-band re-anchor has read the grid, as opposed to how many times it was
+    /// called. The two used to be the same number; see [`Self::restore_offscreen_decorations`].
+    pub fn offscreen_restore_pass_count(&self) -> u64 {
+        self.offscreen_restore_pass_count
     }
 
     pub fn inline_image_records(&self) -> Vec<InlineImageRecordView> {
@@ -3093,13 +3209,42 @@ impl DualPlaneSession {
     }
 
     fn settle_feed_turn(&mut self, turn: FeedTurn) {
-        if self.synchronized_update_deadline().is_none() {
-            if let Some(snapshot) = self.alternate_repaint_snapshot.take() {
-                self.finish_alternate_repaint(snapshot);
-            }
-            if let Some(snapshot) = self.primary_repaint_snapshot.take() {
-                self.finish_primary_repaint(snapshot, false);
-            }
+        // **A repaint window lives as long as the grid it snapshotted, not as long as some block is
+        // buffering.** Both are true for the ordinary DEC 2026 repaint — the block withholds every
+        // cell, so the grid under the window cannot move — and that is why "is a block still open"
+        // stood in for the real condition for so long. It stops being true in one read: a producer
+        // that ends one frame's block and begins the next one's in the same drain
+        // (`… ESU`, `BSU`, `HOME`, …) leaves a deadline standing here while the first block's cells
+        // are already on the glass. The window was then held open, over a snapshot of a grid that
+        // no longer exists, and two things followed from it. Detection between reads proves blocks
+        // in the *new* grid's coordinates, and the close pushed them through the old grid's delta a
+        // second time — with two identical blocks on screen the first lands on the second's rows and
+        // the second is lost. And a record whose source was rewritten by those very cells was never
+        // judged against them, so its raster went on being painted over text it does not match,
+        // which is the one thing this window may never do.
+        //
+        // So the window settles the moment its grid moves, against the cells that are on the glass
+        // now — every record verified and reseated by the same projection an ESU would have run —
+        // and a block that is still buffering afterwards opens a *new* window over the grid that
+        // commit just settled. A carried record is then in the snapshot's coordinates by
+        // construction, and no frame is published between a commit and its verification.
+        let revision = self.live_content_revision;
+        let settled = self.synchronized_update_deadline().is_none();
+        let outlived = |snapshot: &AlternateRepaintSnapshot| {
+            settled || snapshot.live_content_revision != revision
+        };
+        if self
+            .alternate_repaint_snapshot
+            .as_ref()
+            .is_some_and(outlived)
+            && let Some(snapshot) = self.alternate_repaint_snapshot.take()
+        {
+            self.finish_alternate_repaint(snapshot);
+        }
+        if self.primary_repaint_snapshot.as_ref().is_some_and(outlived)
+            && let Some(snapshot) = self.primary_repaint_snapshot.take()
+        {
+            self.finish_primary_repaint(snapshot, false);
         }
         self.alternate_repaint_in_progress = self.alternate_repaint_snapshot.is_some();
         // Re-seat already-known paths and records only after the whole repaint has landed.
@@ -3109,6 +3254,18 @@ impl DualPlaneSession {
         if self.synchronized_update_deadline().is_none() {
             self.primary_repaint_in_progress = false;
             self.primary_reprint_history_floor = None;
+        }
+        // The block that is still buffering gets its own window, over the settled grid — taken
+        // after the off-band queue has been offered back, so its snapshot is the whole census. The
+        // primary side re-snapshots on its next feed (`feed_at`) while `primary_repaint_in_progress`
+        // stands; alternate has to do it here, because `begin_alternate_repaint` reads the bytes of
+        // a read and the read that would reopen this window has already gone by.
+        if self.alternate_repaint_snapshot.is_none()
+            && turn.cursor_memory_reprint_boundary
+            && self.synchronized_update_deadline().is_some()
+        {
+            self.alternate_repaint_snapshot = self.snapshot_alternate_repaint(true);
+            self.alternate_repaint_in_progress = self.alternate_repaint_snapshot.is_some();
         }
         // A buffering synchronized update still exposes the pre-transaction cursor.
         if !(turn.cursor_memory_reprint_boundary && self.synchronized_update_deadline().is_some()) {
@@ -3368,7 +3525,42 @@ impl DualPlaneSession {
                 self.retire_marks_with_stale_anchors();
             }
         }
+        self.rebase_open_repaint_windows();
         Ok(())
+    }
+
+    /// **A reflow ends the grid an open repaint window snapshotted, exactly as a commit does.**
+    ///
+    /// A window is a promise about one particular grid, and it keeps that promise by comparing the
+    /// records it holds against the cells the snapshot describes. A resize replaces those cells
+    /// without a byte arriving: it takes a snapshot of its own, reflows, and reprojects every record
+    /// onto the new grid itself — so by the time this is called the records are already correctly
+    /// seated, in the *new* grid's coordinates. A window left open over that, still holding the
+    /// snapshot of the grid the reflow replaced, then ran the old grid's delta over them a second
+    /// time at its close. With two byte-identical blocks on screen the first lands on the second's
+    /// rows and the second is lost, on a screen whose text never changed between the reflow and the
+    /// close.
+    ///
+    /// Moving `live_content_revision` here would not be enough, and this is why: the comparison
+    /// would notice, but the snapshot the close then projected from would still be the old grid's.
+    /// The window is rebased instead — re-taken over the grid the reflow has just settled, keeping
+    /// the boundary it was opened with so its close still re-detects what it was going to. A window
+    /// with nothing left to preserve simply does not come back.
+    ///
+    /// Called after the reflow's own projection and off-band restore, never before: what this
+    /// snapshots has to be the answer that reflow arrived at.
+    fn rebase_open_repaint_windows(&mut self) {
+        if let Some(boundary) = self
+            .alternate_repaint_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.snapshot_boundary)
+        {
+            self.alternate_repaint_snapshot = self.snapshot_alternate_repaint(boundary);
+            self.alternate_repaint_in_progress = self.alternate_repaint_snapshot.is_some();
+        }
+        if self.primary_repaint_snapshot.is_some() {
+            self.primary_repaint_snapshot = self.snapshot_primary_repaint();
+        }
     }
 
     pub fn set_layout_key(&mut self, layout_key: LayoutKey) {
@@ -3530,6 +3722,15 @@ impl DualPlaneSession {
         let primary_reconcile = reconciled
             .then(|| self.snapshot_primary_resize_transition())
             .flatten();
+        // **Taken before the install, because that is the grid these records are standing on.**
+        // `reconcile_resize_transaction_to_viewport` replaces the grid and the parser with the ones
+        // the console host decided on, which is a reflow like any other; the alternate screen had no
+        // projection across it at all, so its pictures went at the reconcile and came back only at
+        // the next terminator, and every frame published in between showed LaTeX. Primary's own
+        // snapshot is taken here for the same reason and has been all along.
+        let alternate_reconcile = reconciled
+            .then(|| self.snapshot_alternate_repaint(false))
+            .flatten();
         self.resize_epoch.final_request_sent(observed_at);
         self.trace_resize_event(
             observed_at,
@@ -3557,6 +3758,15 @@ impl DualPlaneSession {
             // marker decides whether its line-start coordinate is end-exclusive.
             self.reanchor_semantic_input_regions_after_resize();
             self.reanchor_semantic_output_regions_after_resize();
+            // Re-seat the alternate screen's records against the grid that was just installed, by
+            // the same projection `resize_at` runs after its own reflow. It comes before the window
+            // is rebased below, and the order is the whole point: a rebase re-takes the *snapshot*,
+            // and a snapshot of records that are still standing on the grid the host replaced is
+            // exactly what it must not be.
+            if let Some(snapshot) = alternate_reconcile {
+                self.finish_alternate_repaint(snapshot);
+                self.restore_offscreen_decorations();
+            }
             // The vendor reconcile can shift rows and always bumps the grid generation, which
             // strands the formulas `restore_offscreen_decorations` re-anchored inside `resize_at`
             // one generation behind the frame the app is about to publish. Re-anchor them against
@@ -3591,6 +3801,9 @@ impl DualPlaneSession {
             self.stage_resize_history();
             self.reseat_anchors_after_reflow(reflow);
             self.retire_marks_with_stale_anchors();
+            // The console host's reconcile is the second reflow of a resize transaction, and it ends
+            // the grid an open window snapshotted for exactly the reason the first one does.
+            self.rebase_open_repaint_windows();
         }
         reconciled
     }
@@ -5837,10 +6050,8 @@ impl DualPlaneSession {
                 self.semantic_input_overlaps_live(record.screen, record.start, record.end)
                     .then_some(*row)
             })
-            .collect::<Vec<_>>();
-        for row in retired_live {
-            self.live_decorations.remove(&row);
-        }
+            .collect::<BTreeSet<_>>();
+        self.retire_live_decorations(|row, _| retired_live.contains(&row));
         let suppressed_frozen = self
             .decorations
             .keys()
@@ -6045,11 +6256,12 @@ impl DualPlaneSession {
                 dormant_decorations: self.offscreen_decorations.iter().cloned().collect(),
                 invalidation_count: self.live_invalidation_count,
                 snapshot_boundary,
+                live_content_revision: self.live_content_revision,
             }
         })
     }
 
-    fn finish_alternate_repaint(&mut self, snapshot: AlternateRepaintSnapshot) {
+    fn finish_alternate_repaint(&mut self, mut snapshot: AlternateRepaintSnapshot) {
         if self.live_screen != ScreenId::Alternate || !self.terminal.modes().alternate_screen {
             return;
         }
@@ -6079,9 +6291,39 @@ impl DualPlaneSession {
         let mut unresolved = Vec::new();
         self.offscreen_decorations.clear();
 
-        for record in snapshot
+        // **The snapshot is a floor, not the census.** It is taken when the repaint window opens and
+        // the window can stay open for several reads — for the whole of a DEC 2026 block, or for a
+        // repaint the operating system split — and detection goes on running inside it. Every block
+        // proven during the window is resident by the time the window closes and is in no snapshot,
+        // so rebuilding `live_decorations` from the snapshot alone destroyed exactly those: on the
+        // owner's recording of 2026-09-17 each repaint's close wiped every formula the repaint
+        // before it had proven, and the screen went back to LaTeX until the detector and the
+        // rasteriser had done the whole job again. They are projected here beside the snapshot's
+        // own, and they come first, because where they say they are is the newer answer.
+        //
+        // The snapshot's own copy of an occurrence that is still held is dropped where it lies,
+        // rather than skipped by a set built for the purpose: a `BTreeSet` and the `Vec` that had to
+        // be collected behind it are two structures per close whose only job is to answer a question
+        // about a handful of records, and `Vec::retain` answers it in place. Both lists are bounded
+        // by what fits on a screen and by `MAX_OFFSCREEN_RECORDS`, so the walk is a few dozen `u64`
+        // comparisons and never an allocation.
+        let carried = std::mem::take(&mut self.live_decorations);
+        let held = |record: &LiveDecorationRecord,
+                    carried: &BTreeMap<u32, LiveDecorationRecord>| {
+            carried
+                .values()
+                .any(|held| held.identity.occurrence_id == record.identity.occurrence_id)
+        };
+        snapshot
             .decorations
-            .into_iter()
+            .retain(|record| !held(record, &carried));
+        snapshot
+            .dormant_decorations
+            .retain(|record| !held(record, &carried));
+
+        for record in carried
+            .into_values()
+            .chain(snapshot.decorations)
             .chain(snapshot.dormant_decorations)
         {
             if row_mappings.is_empty() {
@@ -6115,51 +6357,58 @@ impl DualPlaneSession {
         }
 
         if snapshot.snapshot_boundary && !unresolved.is_empty() {
-            let detected = self.bounded_alternate_repaint_detection(
-                Arc::clone(&current_inputs),
-                current_initial_context.clone(),
+            let pending = std::mem::take(&mut unresolved);
+            unresolved = self.live_grid_owned_blocks(
+                &current_inputs,
+                &current_initial_context,
+                |session, detected| {
+                    let mut still_unresolved = Vec::new();
+                    for record in pending {
+                        let matches = detected
+                            .iter()
+                            .filter(|task| task.span.render_equivalent(&record.span))
+                            .collect::<Vec<_>>();
+                        let [task] = matches.as_slice() else {
+                            still_unresolved.push(record);
+                            continue;
+                        };
+                        let delta = i64::from(task.start.row)
+                            .saturating_sub(record.placement.logical_band_start)
+                            .saturating_sub(i64::from(record.identity.source_start_offset));
+                        let Some(mut record) = shift_live_record(
+                            &record,
+                            delta,
+                            session.grid_generation,
+                            session.detection_revision,
+                            session.layout_key,
+                            current_initial_context.clone(),
+                            Arc::clone(&current_inputs),
+                        ) else {
+                            still_unresolved.push(record);
+                            continue;
+                        };
+                        if record.end.row != task.end.row
+                            || !alternate_borrowed_band_is_clear(
+                                &record,
+                                &current_inputs,
+                                &occupied,
+                            )
+                        {
+                            still_unresolved.push(record);
+                            continue;
+                        }
+                        record.start = task.start;
+                        record.end = task.end;
+                        record.span = task.span.clone();
+                        if let Some(record) =
+                            insert_nonoverlapping_live_record(&mut preserved, &mut occupied, record)
+                        {
+                            still_unresolved.push(record);
+                        }
+                    }
+                    still_unresolved
+                },
             );
-            let mut still_unresolved = Vec::new();
-            for record in unresolved {
-                let matches = detected
-                    .iter()
-                    .filter(|task| task.span.render_equivalent(&record.span))
-                    .collect::<Vec<_>>();
-                let [task] = matches.as_slice() else {
-                    still_unresolved.push(record);
-                    continue;
-                };
-                let delta = i64::from(task.start.row)
-                    .saturating_sub(record.placement.logical_band_start)
-                    .saturating_sub(i64::from(record.identity.source_start_offset));
-                let Some(mut record) = shift_live_record(
-                    &record,
-                    delta,
-                    self.grid_generation,
-                    self.detection_revision,
-                    self.layout_key,
-                    current_initial_context.clone(),
-                    Arc::clone(&current_inputs),
-                ) else {
-                    still_unresolved.push(record);
-                    continue;
-                };
-                if record.end.row != task.end.row
-                    || !alternate_borrowed_band_is_clear(&record, &current_inputs, &occupied)
-                {
-                    still_unresolved.push(record);
-                    continue;
-                }
-                record.start = task.start;
-                record.end = task.end;
-                record.span = task.span.clone();
-                if let Some(record) =
-                    insert_nonoverlapping_live_record(&mut preserved, &mut occupied, record)
-                {
-                    still_unresolved.push(record);
-                }
-            }
-            unresolved = still_unresolved;
         }
 
         self.live_invalidation_count = snapshot.invalidation_count;
@@ -6199,11 +6448,62 @@ impl DualPlaneSession {
         }
     }
 
-    fn bounded_alternate_repaint_detection(
+    /// The grid's own answer key, asked as cheaply as it can be: not one row is read and nothing is
+    /// allocated. See [`LiveGridAnswer`] for why each field is in it.
+    fn live_grid_answer(&self) -> LiveGridAnswer {
+        let entries = self.document.entries();
+        LiveGridAnswer {
+            screen: self.live_screen,
+            content_revision: self.live_content_revision,
+            generation: self.grid_generation,
+            detection_revision: self.detection_revision,
+            layout: self.layout_key,
+            options: self.detection_options(),
+            history_lines: entries.len(),
+            history_tail: entries.keys().next_back().copied(),
+            frozen_context: self.frozen_detection_context.clone(),
+            alternate_context: self.alternate_detection_context.clone(),
+        }
+    }
+
+    /// **What the live detector, reading this whole grid, owns — read once per grid.**
+    ///
+    /// This is the scan itself: every row the prefilter arms, resolved against the complete input
+    /// list and the real parser checkpoint, which is what lets it make the clip-witness and
+    /// phantom-opener decisions that only a reader of the whole line list can make. Two callers ask
+    /// it — the bounded re-detection a repaint window's close arms for records projection could not
+    /// place, and the off-band re-anchor's ownership question — and they ask it about the same grid
+    /// over and over: a close per read, a restore per feed turn. It is a pure function of the
+    /// inputs, the checkpoint and the options, so the answer is kept for exactly as long as all
+    /// three stand still, and a program repainting its screen with the bytes it already had asks it
+    /// once rather than once a keystroke.
+    /// The list is *lent* to `read_them` and put back, rather than handed over: it is a screenful
+    /// of resolved detection tasks, and copying it out per caller would be its own cost per close.
+    /// `read_them` cannot change the answer either — nothing it does feeds a byte to the grid, moves
+    /// the cursor or reflows — so the key taken before it is still the key afterwards.
+    fn live_grid_owned_blocks<T>(
+        &mut self,
+        inputs: &Arc<[LiveDetectionInput]>,
+        initial_context: &DetectionContext,
+        read_them: impl FnOnce(&mut Self, &[LiveDetectionTask]) -> T,
+    ) -> T {
+        let answer = self.live_grid_answer();
+        let blocks = match self.live_grid_blocks_memo.take() {
+            Some((remembered, blocks)) if remembered == answer => blocks,
+            _ => self.scan_live_grid(inputs, initial_context),
+        };
+        let read = read_them(self, &blocks);
+        self.live_grid_blocks_memo = Some((answer, blocks));
+        read
+    }
+
+    fn scan_live_grid(
         &self,
-        inputs: Arc<[LiveDetectionInput]>,
-        initial_context: DetectionContext,
+        inputs: &Arc<[LiveDetectionInput]>,
+        initial_context: &DetectionContext,
     ) -> Vec<LiveDetectionTask> {
+        let inputs = Arc::clone(inputs);
+        let initial_context = initial_context.clone();
         let armed = inputs
             .iter()
             .any(|input| may_arm_math(input.text.trim(), self.inline_math_bands, || input.site))
@@ -6270,6 +6570,7 @@ impl DualPlaneSession {
             dormant_decorations: self.offscreen_decorations.iter().cloned().collect(),
             invalidation_count: self.live_invalidation_count,
             snapshot_boundary: true,
+            live_content_revision: self.live_content_revision,
         })
     }
 
@@ -6684,109 +6985,179 @@ impl DualPlaneSession {
         self.live_invalidation_count = self.live_invalidation_count.saturating_add(dropped);
     }
 
+    /// **Ask the grid once, not once a read.**
+    ///
+    /// This runs from every feed turn, and whether a record can be re-anchored is a pure function
+    /// of the grid and the record — so a record that could not be placed on this grid cannot be
+    /// placed on it a read later either, and every part of the asking is expensive: the whole grid
+    /// read into a fresh detection context, a parser walk over it, a substring search per record
+    /// and the detector's own verdict on what that search found. One record whose source is nowhere
+    /// on the screen paid all of it on every read, which under a program that repaints per
+    /// keystroke is every keystroke; the owner's recording sat with six.
+    ///
+    /// The memo is the question, not a countdown: no retry limit and no clock, because a record
+    /// whose source may legitimately scroll back into view has to be found in the very read that
+    /// brings it back, and both of those would eventually stop looking. [`LiveGridAnswer`] names
+    /// what the grid's half of the question is made of, and the queue and the resident bands are
+    /// the rest of it — a match is refused on a row another record holds, so a resident record
+    /// leaving its rows can turn a "no" into a "yes" with no cell changing.
+    ///
+    /// **And the question the door asks is the detector's own whole-grid answer, because nothing
+    /// less is the detector's answer.** `exact_live_source_match` is a substring search: it says
+    /// the bytes are on the grid and where they are, and nothing about whether that makes a block.
+    /// Something has to say the second thing, and a second copy of the detector's rules written
+    /// here drifts — it did, as a whitespace test, which refused a list item, a heading and a
+    /// single-line environment with trailing punctuation, and accepted a line indented four columns
+    /// that CommonMark calls code. The repair after that asked the detector, but over the rows the
+    /// match had found and with a checkpoint from a prefix walker, and *that* is still not the
+    /// detector's answer: the real scan reads the whole line list, and the two decisions it makes
+    /// by reading ahead — a `$$` consumed as a clipped closer whose opener is above the window, and
+    /// a phantom opener abandoned when the blocks below re-synchronise — cannot be made by a walker
+    /// that sees one line at a time and must stay that way for its own job. Where they part, they
+    /// part in the direction that matters: rows `x=y`, `$$`, an opening fence, `code`, `$$x^2$$`
+    /// and a closing fence give a scan that disowns row 4 as fenced and a walker that opens
+    /// `Dollars` at row 1 and never sees the fence at all, so the door seated a picture over text
+    /// the detector does not read as that block. The whole-grid scan is what decides ownership
+    /// here now, with the rows it owns each block at, and the walker's checkpoint and the
+    /// extent-limited re-run are gone: one rule, one owner. Its cost is one scan per grid, shared
+    /// with the bounded re-detection through [`Self::live_grid_owned_blocks`], where before it was
+    /// a bounded scan per record per read.
     fn restore_offscreen_decorations(&mut self) {
         if self.offscreen_decorations.is_empty() {
             return;
         }
+        let answer = self.live_grid_answer();
+        if self.offscreen_restore_memo.still_holds(
+            &answer,
+            &self.offscreen_decorations,
+            &self.live_decorations,
+        ) {
+            return;
+        }
+        self.offscreen_restore_pass_count = self.offscreen_restore_pass_count.saturating_add(1);
         let inputs = self.live_detection_context();
         let initial_context = self.live_initial_detection_context(&inputs);
-        let prefixes = live_grid_parser_prefixes(&inputs, initial_context.clone());
-        let mut occupied = self
-            .live_decorations
-            .values()
-            .flat_map(|record| record.band_start_row..=record.band_end_row)
-            .collect::<BTreeSet<_>>();
-        let mut remaining = VecDeque::new();
-        let mut relayout_tasks = Vec::new();
-        while let Some(mut record) = self.offscreen_decorations.pop_front() {
-            let Some((start, end, segments)) =
-                exact_live_source_match(&record.span.original_source, &inputs, &occupied)
-            else {
-                remaining.push_back(record);
-                continue;
-            };
-            if prefixes
-                .get(&start.row)
-                .is_some_and(DetectionContext::is_commonmark_code)
-            {
-                remaining.push_back(record);
-                continue;
-            }
-            // **The band is the extent that was just matched, and the identity is re-based onto
-            // it.** `band_rows` and the two source offsets are physical row counts of the grid this
-            // occurrence was *proven* on, so a re-wrap makes every one of them stale together: the
-            // old length reached past the new closing row and blanked the ordinary text under the
-            // block, and an expression built from the offsets instead is the same staleness in a
-            // different digit. A fresh detection of this occurrence would own exactly its source
-            // extent (`size_resolved_live_task_band`), so that is what a restore installs.
-            //
-            // Re-basing the identity is the other half and not a tidy-up: `project_live_record`
-            // reads `source_rows[i].band_offset` and the span's live-grid rows as offsets from the
-            // band's top, so leaving them measured against a band that no longer exists would move
-            // every later projection of this record by the difference.
-            if !rebase_identity_onto_match(&mut record, start, end, &segments, &inputs) {
-                remaining.push_back(record);
-                continue;
-            }
-            let logical_band_start = i64::from(start.row);
-            record.start = start;
-            record.end = end;
-            record.band_start_row = start.row;
-            record.band_end_row = end.row;
-            record.clipped_top_rows = 0;
-            record.clipped_bottom_rows = 0;
-            // The re-anchor proved this occurrence's *complete* source inside the live grid, so no
-            // part of it is frozen any more: a prefix carried over from the anchor it lost would
-            // name history lines this placement does not span.
-            record.frozen_prefix.clear();
-            record.staging_prefix.clear();
-            record.placement.logical_band_start = logical_band_start;
-            record.placement.occluded_source_rows = 0;
-            record.placement.occluded_visible_rows.clear();
-            record.generation = self.grid_generation;
-            record.detection_revision = self.detection_revision;
-            if record.rendered_layout != self.layout_key
-                && let Some(artifact) = record.artifact.take()
-            {
-                record.stale_artifact = Some(StaleArtifact {
-                    artifact,
-                    rendered_layout: record.rendered_layout,
-                });
-            }
-            record.layout = self.layout_key;
-            record.initial_context = initial_context.clone();
-            record.inputs = Arc::clone(&inputs);
-            record.span = record.identity.span.clone();
-            record.span.cell_segments = segments;
-            if record.artifact.is_none() && record.stale_artifact.is_some() {
-                relayout_tasks.push(LiveDetectionTask {
-                    candidate_row: record.end.row,
-                    screen: record.screen,
-                    grid_generation: record.generation,
-                    detection_revision: record.detection_revision,
-                    layout: record.layout,
-                    cell_width_subpixels: self.cell_width_subpixels.get(),
-                    cell_height_subpixels: self.cell_height_subpixels.get(),
-                    ascii_baseline_subpixels: self
-                        .ascii_baseline_subpixels
-                        .map_or(0, NonZeroI64::get),
-                    options: self.detection_options(),
-                    initial_context: record.initial_context.clone(),
-                    inputs: Arc::clone(&record.inputs),
-                    start: record.start,
-                    end: record.end,
-                    band_start_row: record.band_start_row,
-                    band_end_row: record.band_end_row,
-                    span: record.span.clone(),
-                    detection_complete: true,
-                    resolved: true,
-                    refused_table_rows: Vec::new(),
-                });
-            }
-            occupied.extend(record.band_start_row..=record.band_end_row);
-            self.live_decorations.insert(record.start.row, record);
-        }
-        self.offscreen_decorations = remaining;
+        let relayout_tasks =
+            self.live_grid_owned_blocks(&inputs, &initial_context, |session, owned| {
+                let mut occupied = session
+                    .live_decorations
+                    .values()
+                    .flat_map(|record| record.band_start_row..=record.band_end_row)
+                    .collect::<BTreeSet<_>>();
+                let mut remaining = VecDeque::new();
+                let mut relayout_tasks = Vec::new();
+                while let Some(mut record) = session.offscreen_decorations.pop_front() {
+                    let Some((start, end, segments)) =
+                        exact_live_source_match(&record.span.original_source, &inputs, &occupied)
+                    else {
+                        remaining.push_back(record);
+                        continue;
+                    };
+                    // The scan owns this block, at these rows, from this source — or the match the
+                    // substring search found is not this block and no picture goes on it.
+                    if !owned
+                        .iter()
+                        .any(|task| live_scan_owns_record_at(task, &record, start, end))
+                    {
+                        remaining.push_back(record);
+                        continue;
+                    }
+                    // **The band is the extent that was just matched, and the identity is re-based
+                    // onto it.** `band_rows` and the two source offsets are physical row counts of
+                    // the grid this occurrence was *proven* on, so a re-wrap makes every one of
+                    // them stale together: the old length reached past the new closing row and
+                    // blanked the ordinary text under the block, and an expression built from the
+                    // offsets instead is the same staleness in a different digit. A fresh detection
+                    // of this occurrence would own exactly its source extent
+                    // (`size_resolved_live_task_band`), so that is what a restore installs.
+                    //
+                    // Re-basing the identity is the other half and not a tidy-up:
+                    // `project_live_record` reads `source_rows[i].band_offset` and the span's
+                    // live-grid rows as offsets from the band's top, so leaving them measured
+                    // against a band that no longer exists would move every later projection of
+                    // this record by the difference.
+                    if !rebase_identity_onto_match(&mut record, start, end, &segments, &inputs) {
+                        remaining.push_back(record);
+                        continue;
+                    }
+                    let logical_band_start = i64::from(start.row);
+                    record.start = start;
+                    record.end = end;
+                    record.band_start_row = start.row;
+                    record.band_end_row = end.row;
+                    record.clipped_top_rows = 0;
+                    record.clipped_bottom_rows = 0;
+                    // The re-anchor proved this occurrence's *complete* source inside the live
+                    // grid, so no part of it is frozen any more: a prefix carried over from the
+                    // anchor it lost would name history lines this placement does not span.
+                    record.frozen_prefix.clear();
+                    record.staging_prefix.clear();
+                    record.placement.logical_band_start = logical_band_start;
+                    record.placement.occluded_source_rows = 0;
+                    record.placement.occluded_visible_rows.clear();
+                    record.generation = session.grid_generation;
+                    record.detection_revision = session.detection_revision;
+                    if record.rendered_layout != session.layout_key
+                        && let Some(artifact) = record.artifact.take()
+                    {
+                        record.stale_artifact = Some(StaleArtifact {
+                            artifact,
+                            rendered_layout: record.rendered_layout,
+                        });
+                    }
+                    record.layout = session.layout_key;
+                    record.initial_context = initial_context.clone();
+                    record.inputs = Arc::clone(&inputs);
+                    record.span = record.identity.span.clone();
+                    record.span.cell_segments = segments;
+                    if record.artifact.is_none() && record.stale_artifact.is_some() {
+                        relayout_tasks.push(LiveDetectionTask {
+                            candidate_row: record.end.row,
+                            screen: record.screen,
+                            grid_generation: record.generation,
+                            detection_revision: record.detection_revision,
+                            layout: record.layout,
+                            cell_width_subpixels: session.cell_width_subpixels.get(),
+                            cell_height_subpixels: session.cell_height_subpixels.get(),
+                            ascii_baseline_subpixels: session
+                                .ascii_baseline_subpixels
+                                .map_or(0, NonZeroI64::get),
+                            options: session.detection_options(),
+                            initial_context: record.initial_context.clone(),
+                            inputs: Arc::clone(&record.inputs),
+                            start: record.start,
+                            end: record.end,
+                            band_start_row: record.band_start_row,
+                            band_end_row: record.band_end_row,
+                            span: record.span.clone(),
+                            detection_complete: true,
+                            resolved: true,
+                            refused_table_rows: Vec::new(),
+                        });
+                    }
+                    occupied.extend(record.band_start_row..=record.band_end_row);
+                    session.live_decorations.insert(record.start.row, record);
+                }
+                session.offscreen_decorations = remaining;
+                relayout_tasks
+            });
+        // Remember what was asked. The two lists are refilled in the buffers the last pass left
+        // behind rather than collected afresh, so a pane sitting on an unresolvable record asks for
+        // no memory at all after its first pass.
+        let memo = &mut self.offscreen_restore_memo;
+        memo.answer = Some(answer);
+        memo.queued.clear();
+        memo.queued.extend(
+            self.offscreen_decorations
+                .iter()
+                .map(|record| record.identity.occurrence_id),
+        );
+        memo.occupied.clear();
+        memo.occupied.extend(
+            self.live_decorations
+                .values()
+                .map(|record| (record.band_start_row, record.band_end_row)),
+        );
         for task in relayout_tasks {
             self.enqueue_live_task(task);
         }
@@ -6865,6 +7236,11 @@ impl DualPlaneSession {
             state.last_damage_at = Some(observed_at);
             state.settled_revision = None;
             state.candidate_signature = None;
+            // Counted here, above every suppression below it, because it is a fact about the glass
+            // and not about what this session decided to do with it: a repaint window that skips
+            // the invalidation is exactly the case that has to know the cells moved.
+            self.live_content_revision = self.live_content_revision.wrapping_add(1);
+            self.rearm_live_bands_containing(row);
             // Suppression: inside a repaint window the proven raster keeps rendering over the rows
             // being rewritten instead of the record being torn down (and its source flashing
             // through). Alternate suppresses across a boundary repaint; primary suppresses across an
@@ -6883,6 +7259,38 @@ impl DualPlaneSession {
                 continue;
             }
             self.invalidate_live_row(row);
+        }
+    }
+
+    /// **A row that changed voids every answer that was derived from it.**
+    ///
+    /// Detection arms on a block's *opener* and marks that row with a signature meaning "a task for
+    /// this row is already out". `observe_live_damage` clears the signature of the row it is
+    /// looking at, which is the whole story when a block's opener is what changed — and none of it
+    /// when a producer rewrites a formula's body where it stands, leaving the two `$$` rows holding
+    /// the bytes they already had. Nothing then cleared the opener, so the replacement formula was
+    /// never asked about: the old picture went (correctly, its source is gone) and no new one ever
+    /// came. The signature cannot catch this on its own either, because the context it hashes is the
+    /// rows that may contain math and a plain body row is not one of them.
+    ///
+    /// A record's band is exactly the set of rows its answer was read from, so it is exactly the set
+    /// to re-arm. Said here, above the suppression a repaint window applies, because suppression is
+    /// about not tearing the *record* down while the screen is half-painted — it was never about
+    /// pretending the row did not change. A record that survives the window has its signature put
+    /// back by `finish_alternate_repaint` / `finish_primary_repaint`, which is that close's way of
+    /// saying the answer is still good; a record that does not survive leaves its rows armed, and
+    /// whatever is there now gets asked about.
+    ///
+    /// No allocation: the resident records are walked in place, and there are as many of them as
+    /// there are blocks on one screen.
+    fn rearm_live_bands_containing(&mut self, row: u32) {
+        let live_rows = &mut self.live_rows;
+        for record in self
+            .live_decorations
+            .values()
+            .filter(|record| record.band_start_row <= row && row <= record.band_end_row)
+        {
+            rearm_live_row_band(live_rows, record.band_start_row, record.band_end_row);
         }
     }
 
@@ -6919,6 +7327,60 @@ impl DualPlaneSession {
                 self.live_detection_count, self.live_invalidation_count
             ));
         }
+    }
+
+    /// **A record retired for cause is retired from every copy of the census this session is
+    /// holding, and an open repaint window is holding one.**
+    ///
+    /// A window's snapshot is a clone of `live_decorations` taken when the window opened, and its
+    /// close projects that clone back onto the settled grid. So a removal that only reaches
+    /// `live_decorations` is undone a few reads later: the record is not among the carried, the
+    /// carried-first de-duplication has nothing to match it against, and projection's exact-row
+    /// proof *passes* — the whole point of these removals is that the rows are unchanged and the
+    /// verdict about them is not. The shell said those rows are the command line, or the detector
+    /// read them again and refused the block, or a frozen rendering superseded it; and at the
+    /// window's close the raster went back over them anyway. That is the one thing a window may
+    /// never do.
+    ///
+    /// Every removal that is a *verdict* comes through here, and the verdict is applied to the
+    /// window's floor as well as to the resident census. Damage-driven invalidation deliberately
+    /// does not: tearing a record down because its rows were rewritten is exactly what suppression
+    /// exists to defer, and `finish_*_repaint` re-judges those records against the settled grid.
+    ///
+    /// The off-band queue is struck by the same id for the same reason — a retired occurrence must
+    /// not come back through the re-anchor either — and both snapshot lists are struck, because a
+    /// record that was off-band when the window opened was cloned into `dormant_decorations` and
+    /// may since have been re-anchored into `live_decorations`.
+    ///
+    /// No allocation unless something is actually retired: `Vec::new` does not allocate, and these
+    /// doors say "nothing to retire" on almost every call.
+    fn retire_live_decorations(
+        &mut self,
+        mut doomed: impl FnMut(u32, &LiveDecorationRecord) -> bool,
+    ) {
+        let mut retired = Vec::new();
+        self.live_decorations.retain(|row, record| {
+            if doomed(*row, record) {
+                retired.push(record.identity.occurrence_id);
+                false
+            } else {
+                true
+            }
+        });
+        if retired.is_empty() {
+            return;
+        }
+        let struck =
+            |record: &LiveDecorationRecord| !retired.contains(&record.identity.occurrence_id);
+        for snapshot in self
+            .primary_repaint_snapshot
+            .iter_mut()
+            .chain(self.alternate_repaint_snapshot.iter_mut())
+        {
+            snapshot.decorations.retain(struck);
+            snapshot.dormant_decorations.retain(struck);
+        }
+        self.offscreen_decorations.retain(struck);
     }
 
     fn invalidate_all_live_decorations(&mut self) {
@@ -7272,6 +7734,38 @@ impl DualPlaneSession {
         let accepted = outcome.is_none();
         if let Some(reason) = outcome {
             self.stale_results = self.stale_results.saturating_add(1);
+            // **A scan refused because its rows changed under it re-asks the question.** This is the
+            // same sentence `rearm_live_bands_containing` says about a resident record, said about
+            // work that is still in flight — and it has to be said separately, because before the
+            // first completion lands there is no record, only the scan, and the scan is the only
+            // thing that knows which rows its answer was read from. A producer that rewrites a
+            // formula's body while the first scan of that block is still out leaves the two `$$`
+            // rows holding the bytes they already had, so the opener went on claiming an answer was
+            // out for it while the answer was being thrown away here. Nothing asked again and the
+            // formula stayed at source for as long as the screen did.
+            //
+            // Only this refusal. The rest already re-arm wholesale where they happen — a screen
+            // switch rebuilds every row's state, `redetect` and `invalidate_layout` clear every
+            // signature, a reflow replaces `live_rows` outright — and `NoLongerDetected` means the
+            // rows still hold their bytes, so whatever changed the verdict changed a row the context
+            // signature hashes and the candidate is armed by that.
+            if reason == LiveCompletionRefusal::SourceChanged {
+                let (first, last) = live_task_dependency_rows(&task);
+                // A scan older than an answer that has already been accepted for these rows has
+                // nothing to re-ask: the record standing on them *is* the newer answer, and it got
+                // there by being read from the grid as it is now. The queue's own de-duplication
+                // only reaches candidates still waiting to go out, never work already with the
+                // renderer, so two scans of one band can be in flight at once and the loser arrives
+                // last. Re-arming for it would schedule a scan whose answer is already on the
+                // screen.
+                let answered = self
+                    .live_decorations
+                    .values()
+                    .any(|record| record.band_start_row <= first && last <= record.band_end_row);
+                if !answered {
+                    rearm_live_row_band_after_refusal(&mut self.live_rows, first, last);
+                }
+            }
             // A refused completion used to leave nothing behind but a counter nobody prints, so a
             // formula that stayed at source because its raster was thrown away looked in the trace
             // exactly like a formula that was never scanned. It is the one outcome a recording of
@@ -7359,22 +7853,21 @@ impl DualPlaneSession {
             // block above it down and made the block's survival a question of which completion
             // landed last. A row whose *bytes* changed is a different matter and is torn down where
             // that is known, in `invalidate_live_row`.
-            self.live_decorations
-                .retain(|_, record| record.end.row != task.candidate_row);
-            // The live half of `retire_refused_table`, and for its reason: a table drawn from rows
-            // that were on the grid before this one arrived stands above the candidate rather than
-            // over it, so the retain above never reaches it.
-            for row in &task.refused_table_rows {
-                self.live_decorations.remove(row);
-            }
+            //
+            // The second clause is the live half of `retire_refused_table`, and for its reason: a
+            // table drawn from rows that were on the grid before this one arrived stands above the
+            // candidate rather than over it, so the first clause never reaches it.
+            self.retire_live_decorations(|row, record| {
+                record.end.row == task.candidate_row || task.refused_table_rows.contains(&row)
+            });
             return None;
         }
         if self.semantic_input_overlaps_live(task.screen, task.start, task.end) {
-            self.live_decorations.remove(&task.start.row);
+            self.retire_live_decorations(|row, _| row == task.start.row);
             return None;
         }
         if artifact.is_none() && failure_reason.is_none() {
-            self.live_decorations.remove(&task.start.row);
+            self.retire_live_decorations(|row, _| row == task.start.row);
             return None;
         }
         if self.new_live_decoration_is_cursor_suppressed(&task) {
@@ -7406,8 +7899,9 @@ impl DualPlaneSession {
                     record.vertical_scroll_px,
                 )
             });
-        self.live_decorations
-            .retain(|_, record| record.end.row < task.start.row || record.start.row > task.end.row);
+        self.retire_live_decorations(|_, record| {
+            record.end.row >= task.start.row && record.start.row <= task.end.row
+        });
         let (show_source, hovered, horizontal_scroll_px, vertical_scroll_px) =
             remembered.unwrap_or((false, false, 0, 0));
         let occurrence_id = LiveMathOccurrenceId(self.next_live_occurrence_id);
@@ -11133,10 +11627,8 @@ impl DualPlaneSession {
                 })
             })
             .map(|(start, _)| *start)
-            .collect::<Vec<_>>();
-        for start in superseded {
-            self.live_decorations.remove(&start);
-        }
+            .collect::<BTreeSet<_>>();
+        self.retire_live_decorations(|row, _| superseded.contains(&row));
         let document = &self.document;
         let snapshots = self
             .primary_repaint_snapshot
@@ -12669,6 +13161,11 @@ fn rebase_identity_onto_match(
     true
 }
 
+/// Find a record's proven source in the live grid, and say where.
+///
+/// A substring search: it says the bytes are there and where they are, and nothing about whether
+/// this is a block. The whole-grid scan `DualPlaneSession::live_grid_owned_blocks` asks that, of
+/// the detector.
 fn exact_live_source_match(
     source: &str,
     inputs: &[LiveDetectionInput],
@@ -13144,6 +13641,31 @@ fn may_arm_table(text: &str, previous_continues_paragraph: impl FnOnce() -> bool
     bt_detect::table::is_row_shaped(text) && previous_continues_paragraph()
 }
 
+/// **Does this block the live scan owns *is* the record the re-anchor is holding, here?**
+///
+/// The five span fields are the ones a live occurrence is identified by everywhere else in this
+/// file — the bytes the renderer was given, the bytes the user typed, which delimiter opened it,
+/// display or inline, and math or table — and the rows are the rows: a scan that owns the same
+/// source somewhere else on the grid says nothing about the place the substring search found.
+/// Inline records go through the same test as display ones and always did: an inline line is one
+/// occurrence with its runs inside it, so there is one owned block per line either way, and the
+/// drift this test replaces is the scanner's whole-list reading, which decides a line's ownership
+/// whatever mode it is in.
+fn live_scan_owns_record_at(
+    task: &LiveDetectionTask,
+    record: &LiveDecorationRecord,
+    start: GridPoint,
+    end: GridPoint,
+) -> bool {
+    task.start.row == start.row
+        && task.end.row == end.row
+        && task.span.original_source == record.span.original_source
+        && task.span.render_source == record.span.render_source
+        && task.span.delimiter_kind == record.span.delimiter_kind
+        && task.span.mode == record.span.mode
+        && task.span.kind == record.span.kind
+}
+
 fn empty_live_math_span() -> MathSpan {
     MathSpan {
         byte_start: 0,
@@ -13157,49 +13679,6 @@ fn empty_live_math_span() -> MathSpan {
         inline_runs: Vec::new(),
         inline_joined_head: None,
     }
-}
-
-fn live_grid_parser_prefixes(
-    inputs: &[LiveDetectionInput],
-    mut context: DetectionContext,
-) -> BTreeMap<u32, DetectionContext> {
-    let mut prefixes = BTreeMap::new();
-    let mut logical_text = String::new();
-    let mut logical_rows = Vec::new();
-    let mut logical_prefix = context.clone();
-    let mut logical_id = 1_u64;
-    let mut active = false;
-
-    for input in inputs {
-        if !active {
-            logical_prefix = context.clone();
-            active = true;
-        }
-        logical_text.push_str(&input.text);
-        if let LiveDetectionSource::Grid { row, .. } = input.source {
-            logical_rows.push(row);
-        }
-        if input.continues {
-            continue;
-        }
-        for row in logical_rows.drain(..) {
-            prefixes.insert(row, logical_prefix.clone());
-        }
-        advance_detection_context(
-            &mut context,
-            TranscriptId(logical_id),
-            logical_text.as_str(),
-        );
-        logical_id = logical_id.saturating_add(1);
-        logical_text.clear();
-        active = false;
-    }
-    if active {
-        for row in logical_rows {
-            prefixes.insert(row, logical_prefix.clone());
-        }
-    }
-    prefixes
 }
 
 fn exact_row_content(left: &LiveDetectionInput, right: &LiveDetectionInput) -> bool {
@@ -13853,6 +14332,68 @@ impl std::fmt::Display for LiveCompletionRefusal {
             Self::Unproven => "unproven",
         };
         formatter.write_str(word)
+    }
+}
+
+/// Ask again about `first ..= last`.
+fn rearm_live_row_band(rows: &mut [LiveRowStability], first: u32, last: u32) {
+    for row in first..=last {
+        let Some(state) = rows.get_mut(row as usize) else {
+            continue;
+        };
+        state.candidate_signature = None;
+        state.settled_revision = None;
+    }
+}
+
+/// Ask again about `first ..= last`, and **give every row of the band the newest damage time in
+/// it**, because this ask is a *retry*.
+///
+/// A band is one answer read from several rows, and the stability interval is the rule that an
+/// answer is only worth asking for once its source has stopped moving. Applied to the row detection
+/// is armed on, it says nothing: that row is a delimiter, and a delimiter sits still while an agent
+/// streams the body between them in. So the opener read as stable while the thing its answer depends
+/// on was still arriving — the scan went out, came back describing a body that had moved on, was
+/// refused, re-armed the opener, and went out again, every frame for as long as the stream lasted.
+/// Measured 58 scans over 60 frames of a body changing every 16 ms, against 8 now, which is both
+/// `$$` rows looking once per interval.
+///
+/// **Only the retry, and the difference is the whole of it.** The re-arm `observe_live_damage` makes
+/// is not one: it is the first ask after a change, gated already by the changed row's own stability,
+/// and it happens once because the record is torn down in the same breath. Carrying the clock there
+/// as well made an ordinary unsynchronized repaint — which rewrites a band over several reads — wait
+/// a further interval after its last row landed, and one frame inside that wait published the
+/// complete source of a block with no picture on it. On the owner's unwrapped recording that was
+/// exactly one frame, and one is the number that matters. The clock is carried where the loop is,
+/// and nowhere else.
+fn rearm_live_row_band_after_refusal(rows: &mut [LiveRowStability], first: u32, last: u32) {
+    let newest = (first..=last)
+        .filter_map(|row| {
+            rows.get(row as usize)
+                .and_then(|state| state.last_damage_at)
+        })
+        .max();
+    rearm_live_row_band(rows, first, last);
+    if newest.is_some() {
+        for row in first..=last {
+            if let Some(state) = rows.get_mut(row as usize) {
+                state.last_damage_at = newest;
+            }
+        }
+    }
+}
+
+/// The rows one scan's answer was read from, together with the row it was armed on: the in-flight
+/// equivalent of a resident record's band, and wanted for the same thing — when an answer is thrown
+/// away because those rows no longer hold the bytes it read, these are the rows to ask about again.
+fn live_task_dependency_rows(task: &LiveDetectionTask) -> (u32, u32) {
+    if task.resolved {
+        (
+            task.band_start_row.min(task.candidate_row),
+            task.band_end_row.max(task.candidate_row),
+        )
+    } else {
+        (task.candidate_row, task.candidate_row)
     }
 }
 
@@ -18409,10 +18950,9 @@ mod tests {
             .unwrap();
         let detections = session.live_detection_count();
         let before_inputs = session.live_detection_context();
-        let before_prefixes = live_grid_parser_prefixes(
-            &before_inputs,
-            session.live_initial_detection_context(&before_inputs),
-        );
+        // The checkpoint the scan of the first grid row starts from, which is what the two sides of
+        // this fixture have to disagree about for it to be measuring anything.
+        let before_prefix = session.live_initial_detection_context(&before_inputs);
 
         // Clear/home establishes a fresh Known prefix, while the original directional occurrence
         // was proven under an Ambiguous prefix. Exact prefix preservation therefore cannot prove
@@ -18425,11 +18965,8 @@ mod tests {
             )
             .unwrap();
         let after_inputs = session.live_detection_context();
-        let after_prefixes = live_grid_parser_prefixes(
-            &after_inputs,
-            session.live_initial_detection_context(&after_inputs),
-        );
-        assert_ne!(before_prefixes.get(&0), after_prefixes.get(&0));
+        let after_prefix = session.live_initial_detection_context(&after_inputs);
+        assert_ne!(before_prefix, after_prefix);
         let record = session.live_decorations.get(&0).unwrap();
         assert_eq!((record.band_start_row, record.band_end_row), (0, 0));
         assert_eq!(
@@ -19697,15 +20234,23 @@ mod tests {
         assert_eq!(before.math_blocks.len(), after.math_blocks.len());
     }
 
-    /// Batch ③ unbacked case (the audit's masking mechanism): a resize opens the preservation window,
-    /// then the reflow reprints the transcript with a stray unbalanced `$$` opener above the block —
-    /// the exact odd-parity poison the three audits name. The block's source `$$x$$` is still literally
-    /// on the grid, so the hold re-anchors and keeps rendering (display is UNCHANGED, the hold is
-    /// honest about the pixels), but the detector's global toggle is now off-phase and no longer PAIRS
-    /// it into a block. That divergence — a hold showing a formula the settled detector no longer
-    /// accounts — is reported exactly as `HeldUnbacked`, the observable the flash oracle cannot see.
+    /// Batch ③'s unbacked case, and **the answer to it has changed**: a resize opens the
+    /// preservation window, then the reflow reprints the transcript with a stray unbalanced `$$`
+    /// opener above the block — the exact odd-parity poison the three audits name. The block's
+    /// source is still literally on the grid, so the re-anchor's substring search still finds it;
+    /// but the detector's toggle is now off-phase and it no longer pairs those rows into a block at
+    /// all.
+    ///
+    /// This used to re-anchor anyway and go on painting, and the divergence was *reported* as
+    /// `HeldUnbacked` — a hold showing a formula the settled detector no longer accounts, named so
+    /// that an audit could see what the flash oracle cannot. The re-anchor now asks the detector
+    /// instead of a copy of its rules (`live_grid_owned_blocks`), and the detector, reading these
+    /// rows in the parity state the stray opener left, does not give the block back. So the hold is
+    /// refused, the rows show their source, and there is nothing left to report: a picture over
+    /// text the detector does not read as that block is the one thing this pane may not publish,
+    /// and reporting it was always second best to not doing it.
     #[test]
-    fn a_hold_over_a_parity_poisoned_block_is_reported_held_unbacked_without_changing_display() {
+    fn a_parity_poisoned_reprint_drops_the_hold_instead_of_masking_dead_detection() {
         let start = Instant::now();
         let mut session = DualPlaneSession::new(nz(40), nz(12));
         // A multi-line block whose opener and closer sit on separate rows — the shape a stray `$$`
@@ -19739,8 +20284,15 @@ mod tests {
             )
             .unwrap();
 
-        // Display behaviour is unchanged: the block's source `$$\ny=1\n$$` is still literally on the
-        // grid, so the hold re-anchors and keeps rendering its raster.
+        // The poison genuinely desynced the detector off the block the hold was showing.
+        assert!(
+            !session
+                .live_detection_ownership_ledger()
+                .owns_source(&held_source),
+            "the fixture did not poison the parity it set out to poison"
+        );
+
+        // So the re-anchor is refused and the rows show their source.
         let mut projection = session.new_projection(session.layout_key());
         session.refresh_projection(&mut projection);
         let frame = session.viewport_frame(&mut projection).unwrap();
@@ -19748,25 +20300,17 @@ mod tests {
             frame
                 .math_blocks
                 .iter()
-                .any(|block| block.display == MathBlockDisplay::Rendered),
-            "the hold must keep rendering the block — display is untouched by this batch"
+                .all(|block| block.display != MathBlockDisplay::Rendered),
+            "a hold was seated on rows the detector does not read as that block"
         );
 
-        // ...but the settled detector no longer Owns that block: reported as exactly one HeldUnbacked
-        // — a hold masking dead detection, the observable the flash oracle cannot see.
+        // And there is nothing left to report: the masking mechanism the audits named cannot arise
+        // through this door, because the hold never takes the rows.
         assert!(
-            !session
-                .live_detection_ownership_ledger()
-                .owns_source(&held_source),
-            "the poison genuinely desynced the detector off the block the hold is showing"
+            session.held_unbacked_records().is_empty(),
+            "a hold masking dead detection survived: {:?}",
+            session.held_unbacked_records()
         );
-        let unbacked = session.held_unbacked_records();
-        assert_eq!(
-            unbacked.len(),
-            1,
-            "the masked-dead-detection strand must surface exactly once"
-        );
-        assert_eq!(unbacked[0].original_source, held_source);
     }
 
     #[test]
