@@ -1705,6 +1705,16 @@ pub enum Text {
     /// [`Self::DragSwapPanes`] and [`Self::DragReplacePane`].
     DragOpenInPreview,
     DragRootTreeHere,
+    /// **The caption a file row earns over a terminal's middle** (§7.1.1, user
+    /// ruling 2026-09-16).
+    ///
+    /// The third of this family and the one that is not a view verb at all: the
+    /// two above change what a pane is *showing*, and this one puts characters
+    /// on a command line. Which is exactly why the word has to be on the box —
+    /// the ruling that opened this zone rests on the label being there, because
+    /// the label is the whole of what tells a reader that this middle means
+    /// something the other middles do not.
+    DragPastePath,
 
     // ── the Terminal page's Scrollback row (P2-9 slice 2, 2026-08-19) ──────
     //
@@ -4191,6 +4201,7 @@ impl Text {
             Self::DragRootTreeHere => {
                 pick(lang, "Root the files column here", "把这棵树的根设到这里")
             }
+            Self::DragPastePath => pick(lang, "Paste path", "粘贴路径"),
 
             // ── the Terminal page's Scrollback row ─────────────────────────
             //
@@ -4977,7 +4988,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 684] = [
+    pub const ALL: [Self; 685] = [
         Self::PastePathEncoding,
         Self::PastePathControl,
         Self::PastePathPowerShellQuote,
@@ -5474,6 +5485,7 @@ impl Text {
         Self::GitDocumentEmpty,
         Self::DragOpenInPreview,
         Self::DragRootTreeHere,
+        Self::DragPastePath,
         Self::RowScrollback,
         Self::DescScrollback,
         Self::RowLineWrapping,

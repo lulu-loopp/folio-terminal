@@ -6,6 +6,49 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- **Dragging a file out of the files column into the middle of a terminal now
+  pastes its path, spelled for the shell running there.** The pane you are over
+  says which of the two things it will do before you let go: aim at a pane's
+  edge and you get the same split preview you have always got, and the file
+  opens beside it; aim at the middle of a terminal and the pane lights up with
+  `Paste path` on it, and the path arrives on that terminal's command line —
+  the one you dropped it on, not the one you had been typing in. It is the same
+  quoting a file dropped in from File Explorer or the Finder gets, so
+  PowerShell, `cmd`, a WSL shell and the rest each get the spelling they read,
+  and Folio runs no command of its own: the path is put in front of the cursor
+  for you to finish the line. A preview pane and a files column are unchanged —
+  their middles still mean what they meant — and `Esc` still calls the whole
+  thing off. If anything moves between the moment the pane lights up and the
+  moment you let go — your hand to another pane, a pane closing, a tab closing
+  under it — nothing is written at all, rather than written somewhere else.
+
+### Fixed
+
+- **Losing the graphics device no longer closes Folio.** A power cut that
+  switches a laptop to battery, a graphics driver that updates itself, a machine
+  that changes which GPU it draws on: each of these takes the device away
+  underneath whatever is on screen at that instant. Folio already knew how to
+  ask the machine for another one and carry on, but a picture that was halfway
+  prepared when the device went reached a call that could only end the run —
+  the window closed, and every shell open in it closed with it. Nothing on
+  that path can end the run any more: the half-prepared picture is dropped, the
+  device is asked for again, and the window draws everything it was saying on
+  the new one.
+
+- **A dropped file now lands in the terminal you dropped it on even when Folio
+  is busy, or when you were last hovering somewhere else.** Where the file was
+  let go of was worked out after the fact — when Folio got round to typing the
+  path — and it preferred the last place it had seen your pointer, which during
+  a drag from another program is wherever your hand happened to be the previous
+  time it was over the window. On a split, either reading could name the wrong
+  terminal: the one you had been hovering before you went to fetch the file, or
+  whichever one your hand had moved on to while Folio was catching up with a
+  busy pane. The position is now read at the instant the file is released, and
+  nothing later can change it.
+
+
 ## 0.4.2-preview — 2026-09-17
 
 ### Added
@@ -17,8 +60,8 @@ All notable changes to Folio are recorded here. The format follows
   file you *copied* has had since 0.4.1, so PowerShell, `cmd`, a WSL shell and
   the rest each get the spelling they read. Several files let go of together
   arrive on one line, one argument each, and a name the shell has no way to
-  spell is reported instead of being mangled. Nothing is run: the path is put in
-  front of the cursor for you to finish the line.
+  spell is reported instead of being mangled. Folio runs no command of its own:
+  the path is put in front of the cursor for you to finish the line.
 
 - **A picture on the clipboard now pastes as the path of a file Folio writes
   for it.** A screenshot taken with `Win`+`Shift`+`S`, or with

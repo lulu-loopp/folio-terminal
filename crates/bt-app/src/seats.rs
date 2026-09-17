@@ -49737,6 +49737,55 @@ mod drop_geometry_tests {
         );
     }
 
+    /// **The band and the middle a *file* drag reads** (§7.1.1, user ruling
+    /// 2026-09-16), at two scales.
+    ///
+    /// The ruling that reopened a terminal's middle to a path gave the gesture
+    /// two meanings over one pane, and it rests on the two being told apart by
+    /// where the hand is: the outer band is the split zone a card or a tab drag
+    /// already aims at, and what is left in the middle is the paste. So the
+    /// geometry a file drag reads is not a second geometry — it is
+    /// [`aim_at_layout`], unchanged and asked the same way — and this says so at
+    /// both ends of the scale range, because a band that shifted with the
+    /// display would move the line between "open it beside" and "paste it" for
+    /// the same hand on two monitors.
+    ///
+    /// All four sides of one pane, and the middle, at 100% and 200%. The points
+    /// are fractions of the pane, which is what makes the answers scale-free;
+    /// the rim is *not* a fraction ([`DROP_RIM_LOGICAL_PX`]), so the band points
+    /// are taken at 30% rather than at 10% — far enough in that the 48-logical
+    /// px rim, twice as deep in device pixels at 200%, does not answer first.
+    ///
+    /// Red gate: make [`DROP_EDGE_FRACTION`] a device-pixel distance and the
+    /// 200% column stops agreeing with the 100% one.
+    #[test]
+    fn a_pane_offers_one_middle_and_four_bands_at_every_scale() {
+        for dpi_milli in [1_000u32, 2_000] {
+            let stage = stage(side_by_side(), dpi_milli);
+            let pane = rect_of(&stage.0, 1);
+            let (w, h) = (pane.width() as f64, pane.height() as f64);
+            let at =
+                |fx: f64, fy: f64| aim(&stage, pane.left as f64 + w * fx, pane.top as f64 + h * fy);
+            assert_eq!(
+                at(0.5, 0.5),
+                Some(LayoutAim::SeatCentre(SeatId(1))),
+                "the middle is the middle at {dpi_milli} milli-DPI"
+            );
+            for (fx, fy, edge) in [
+                (0.30, 0.50, DropEdge::Left),
+                (0.70, 0.50, DropEdge::Right),
+                (0.50, 0.30, DropEdge::Top),
+                (0.50, 0.70, DropEdge::Bottom),
+            ] {
+                assert_eq!(
+                    at(fx, fy),
+                    Some(LayoutAim::SeatEdge(SeatId(1), edge)),
+                    "the {edge:?} band at {dpi_milli} milli-DPI"
+                );
+            }
+        }
+    }
+
     /// **K132 — no pane under the pointer means nothing to aim at.** That is a
     /// pointer on a divider, and a divider is not a target.
     ///
@@ -51161,6 +51210,51 @@ mod drop_plan_tests {
                 .plan_content_drop(&metrics(), view(), SeatId(99))
                 .is_none(),
             "a centre aimed at a seat this tree does not have is not a plan"
+        );
+    }
+
+    /// PIN — **a content plan the window is too small for is a refusal, and it
+    /// says so the way every other refusal does** (review 2026-09-17 P1-b).
+    ///
+    /// `plan_content_drop` moves no rectangle, which is exactly why it is easy
+    /// to read it as "always fits". It does not: the plan carries the layout the
+    /// window would have, and a window dragged below what its own tree needs has
+    /// none — so `fits()` is false, the caption comes off the box
+    /// (`Runtime::dock_overlay_layers`) and a dashed outline is drawn instead.
+    ///
+    /// **This is a `bool` a text write now reads.** "Open in this preview"
+    /// behind a refused box costs a pane showing the wrong document; `Paste
+    /// path` behind one costs characters on a command line, so
+    /// `Runtime::paste_offer_kept` asks `fits()` before writing and this is what
+    /// says there is a real answer for it to ask.
+    ///
+    /// Mutation: make `plan_content_drop` skip the `plan_fits` filter and hand
+    /// back the solve unconditionally — the second assertion fails, the outline
+    /// goes solid, and the release starts writing behind it.
+    #[test]
+    fn a_content_drop_into_a_window_below_its_minimum_is_refused() {
+        let seats = window(row(1, term(1), preview(2)));
+        assert!(
+            seats
+                .plan_content_drop(&metrics(), view(), SeatId(2))
+                .is_some_and(|plan| plan.fits()),
+            "the control: at the fixture's own size this centre is offered"
+        );
+        // Two panes side by side cannot both clear `MIN_PANE_W` in a window this
+        // narrow, so the tree the plan describes has no lawful layout.
+        let squeezed = logical_viewport(
+            300,
+            H,
+            scale_ppm(DPI),
+            0,
+            folio_band_device_px(scale_ppm(DPI)),
+        );
+        let plan = seats
+            .plan_content_drop(&metrics(), squeezed, SeatId(2))
+            .expect("the seat is still in the tree — it is the window that shrank");
+        assert!(
+            !plan.fits(),
+            "a window below its own tree's minimum still offered a content drop"
         );
     }
 
