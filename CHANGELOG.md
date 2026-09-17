@@ -8,6 +8,14 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **Right-clicking a formula copies that formula, not one from the pane you
+  last typed in.** Copy LaTeX asked whichever pane held the keyboard, and a
+  right press does not move the keyboard — so in a split, copying from a formula
+  in the pane you were only pointing at either did nothing at all or, when the
+  other pane happened to hold a block in the same place, copied that one
+  instead. All three of a formula's actions — copy, show source, and the source
+  toggle's animation — now act on the pane the formula is in.
+
 - **One formula that cannot be drawn no longer takes the whole window with
   it.** A fault while typesetting was caught in one stage of the work and not in
   the others, so a fault in any of the rest ended Folio — every pane, every

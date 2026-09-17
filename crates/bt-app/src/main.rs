@@ -12914,7 +12914,7 @@ struct WindowRuntime {
     /// which ruling 6 (2026-08-12) collapsed every acknowledgement in this
     /// window onto.
     math_copied: Option<(MathBlockAnchor, Instant)>,
-    pending_math_context_anchor: Option<MathBlockAnchor>,
+    pending_math_context_anchor: Option<(SeatId, MathBlockAnchor)>,
     /// The layout tree this window hosts. A lone terminal leaf by default, which
     /// is today's window written down.
     /// The most recent answer from `solve`. Every rectangle the renderer and the
@@ -85171,13 +85171,19 @@ impl Runtime<'_> {
     /// seat, for [`Self::pane_hit_context`]'s own reason: `position` has already
     /// been measured from the body's corner, and the boxes must be cut to the
     /// same rectangle they are measured in.
-    fn math_hit(&self) -> Option<MathHit> {
+    /// **The seat comes back with the hit**, because a block anchor does not name a pane and two
+    /// panes can hold anchors that compare equal — a `Live` anchor is a screen, two grid points and
+    /// a generation counter, and every one of those is a per-session number. Asking "which session
+    /// answers for this anchor" can therefore be answered by the wrong one; asking the pane the
+    /// pointer was in cannot.
+    fn math_hit(&self) -> Option<(SeatId, MathHit)> {
         let (seat, position, frame) = self.pane_hit_context()?;
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let body = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)?;
         self.window
             .renderer
             .math_hit_test(body, frame, position.x, position.y)
+            .map(|hit| (seat, hit))
     }
 
     fn hyperlink_hit(&self, hit: bt_render::GridHit) -> Option<HyperlinkHit> {
@@ -86170,7 +86176,7 @@ impl Runtime<'_> {
     /// that pane's own shell. Writing it to the focused shell instead would darken a block in the
     /// pane holding the keyboard because the pointer was somewhere else entirely.
     fn update_math_hover(&mut self, now: Instant) -> Result<Option<MathHit>> {
-        let hit = self.math_hit();
+        let hit = self.math_hit().map(|(_, hit)| hit);
         if let Some(hit) = hit.as_ref() {
             self.window.math_hover_clear_at = None;
             if self.window.math_hover_anchor.as_ref() != Some(&hit.anchor) {
@@ -86284,7 +86290,7 @@ impl Runtime<'_> {
     /// arms that are not verbs answer `None` — a pointer on the formula itself
     /// is not on a control.
     fn hovered_math_tool(&self) -> Option<formula_tools::FormulaTool> {
-        match self.math_hit()?.target {
+        match self.math_hit()?.1.target {
             MathHitTarget::ToggleSource => Some(formula_tools::FormulaTool::ToggleSource),
             MathHitTarget::CopyLatex => Some(formula_tools::FormulaTool::CopyLatex),
             MathHitTarget::Block | MathHitTarget::Failure => None,
@@ -86604,15 +86610,17 @@ impl Runtime<'_> {
     /// `None` for a block no session in this tab can measure between two faces: a live block (for
     /// which §7.1.5p ⑪ gives the reason), an inline run, a block whose record went away, and every
     /// block in a tab with no shell at all (§7.1.6h).
+    /// **Asked of the pane the block is in, never of whichever pane answers first.** Two panes can
+    /// hold anchors that compare equal — see [`Self::math_hit`] — so a search over the sessions is
+    /// a coin toss between them, and all three of this window's block verbs take the seat for that
+    /// reason rather than each deciding for itself.
     fn math_toggle_faces(
         &self,
+        seat: SeatId,
         anchor: &MathBlockAnchor,
-    ) -> Option<(SeatId, bt_term::MathToggleFaces)> {
-        self.sessions.iter().find_map(|(seat, leaf)| {
-            leaf.session
-                .math_toggle_faces(&leaf.projection, anchor)
-                .map(|faces| (*seat, faces))
-        })
+    ) -> Option<bt_term::MathToggleFaces> {
+        let leaf = self.sessions.get(&seat)?;
+        leaf.session.math_toggle_faces(&leaf.projection, anchor)
     }
 
     /// **[`Self::math_toggle_faces`] without the other face's rows** — the pane
@@ -86624,26 +86632,23 @@ impl Runtime<'_> {
     /// the owner's stutter report of 2026-09-15 names
     /// (`bt_term::DualPlaneSession::math_toggle_heights`). The rows belong to
     /// the press, which asks for them once.
-    fn math_toggle_heights(&self, anchor: &MathBlockAnchor) -> Option<(SeatId, [i64; 2])> {
-        self.sessions.iter().find_map(|(seat, leaf)| {
-            leaf.session
-                .math_toggle_heights(&leaf.projection, anchor)
-                .map(|heights| (*seat, heights))
-        })
+    fn math_toggle_heights(&self, seat: SeatId, anchor: &MathBlockAnchor) -> Option<[i64; 2]> {
+        let leaf = self.sessions.get(&seat)?;
+        leaf.session.math_toggle_heights(&leaf.projection, anchor)
     }
 
     /// **The `‹›` mark was pressed** — see [`formula_tools::FormulaToggleMotion`] for what the
     /// ninety milliseconds after it are made of.
-    fn press_math_toggle(&mut self, anchor: &MathBlockAnchor) -> Result<()> {
+    fn press_math_toggle(&mut self, seat: SeatId, anchor: &MathBlockAnchor) -> Result<()> {
         let now = Instant::now();
         let motion = self.app.motion;
         if let Some(mut flight) = self.window.math_toggle.take() {
-            if flight.anchor().same_block(anchor) {
+            if flight.seat() == seat && flight.anchor().same_block(anchor) {
                 // **A second press turns the journey round where it stands.** The document is not
                 // touched and cannot need to be: the block has been one entry with an artifact
                 // height for the whole of the flight, in *both* directions, so changing where it
                 // is heading only moves which end the telling happens at.
-                let Some((seat, faces)) = self.math_toggle_faces(anchor) else {
+                let Some(faces) = self.math_toggle_faces(seat, anchor) else {
                     // The session stopped being able to measure this block between the two
                     // presses. Landing it is the only answer that leaves the picture and the
                     // document agreeing.
@@ -86660,15 +86665,15 @@ impl Runtime<'_> {
             self.window.math_toggle = Some(flight);
             self.settle_math_toggle()?;
         }
-        let Some((seat, faces)) = self.math_toggle_faces(anchor) else {
+        let Some(faces) = self.math_toggle_faces(seat, anchor) else {
             // Not a history display band. It changes in the one frame it always did.
-            return self.switch_math_source_now(anchor);
+            return self.switch_math_source_now(seat, anchor);
         };
         if motion == Motion::Reduced {
             // **Stillness lands the change on the frame it is asked for** and wakes the loop for
             // none of it — the answer every other surface in this window gives, given here by
             // never starting a journey rather than by a second reading of the setting.
-            return self.switch_math_source_now(anchor);
+            return self.switch_math_source_now(seat, anchor);
         }
         let to_source = !faces.showing_source;
         if !to_source {
@@ -86685,6 +86690,7 @@ impl Runtime<'_> {
         }
         self.clear_selection();
         self.window.math_toggle = Some(formula_tools::FormulaToggleMotion::begin(
+            seat,
             anchor.clone(),
             faces.heights(),
             to_source,
@@ -86697,10 +86703,13 @@ impl Runtime<'_> {
     /// **The change made in a single frame** — what pressing `‹›` was before this clause, and what
     /// it still is under [`Motion::Reduced`], on the live plane, and wherever the two faces cannot
     /// be measured.
-    fn switch_math_source_now(&mut self, anchor: &MathBlockAnchor) -> Result<()> {
-        // `math_hit()` answered, so a shell drew the block that was clicked and this tab has one
-        // (§7.1.6h).
-        if self.shell_mut().session.toggle_math_source(anchor) {
+    fn switch_math_source_now(&mut self, seat: SeatId, anchor: &MathBlockAnchor) -> Result<()> {
+        // `math_hit()` answered, so a shell drew the block that was clicked, and it drew it in this
+        // seat's pane rather than in whichever pane holds the keyboard (§7.1.6h).
+        let Some(leaf) = self.sessions.get_mut(&seat) else {
+            return Ok(());
+        };
+        if leaf.session.toggle_math_source(anchor) {
             self.clear_selection();
             self.publish_interaction_frame()?;
         }
@@ -86764,10 +86773,8 @@ impl Runtime<'_> {
         // The heights and not the faces: all this door wants is *which pane still answers for the
         // block*, and it is the last thing that runs before the change lands (T-MATH-MARKS-IN-
         // SOURCE-FACE).
-        let Some(seat) = self
-            .math_toggle_heights(flight.anchor())
-            .map(|(seat, _)| seat)
-        else {
+        let seat = flight.seat();
+        if self.math_toggle_heights(seat, flight.anchor()).is_none() {
             // No session in this tab can answer for the block any more — it was rewritten, or the
             // pane holding it went away. There is nothing left to tell and nothing to land on, but
             // a presentation is a thing a session is *holding*, so every leaf is told to let go of
@@ -86777,7 +86784,7 @@ impl Runtime<'_> {
                 leaf.session.set_math_toggle_presentation(None);
             }
             return Ok(());
-        };
+        }
         let switched = flight.switch_owed();
         if let Some(leaf) = self.sessions.get_mut(&seat) {
             leaf.session.set_math_toggle_presentation(None);
@@ -86820,15 +86827,16 @@ impl Runtime<'_> {
     /// press asks for them once.
     fn advance_math_toggle_if_due(&mut self, now: Instant) -> Result<()> {
         let motion = self.app.motion;
-        let Some((anchor, landed)) = self
-            .window
-            .math_toggle
-            .as_ref()
-            .map(|flight| (flight.anchor().clone(), flight.landed(now, motion)))
-        else {
+        let Some((seat, anchor, landed)) = self.window.math_toggle.as_ref().map(|flight| {
+            (
+                flight.seat(),
+                flight.anchor().clone(),
+                flight.landed(now, motion),
+            )
+        }) else {
             return Ok(());
         };
-        let Some((seat, heights)) = self.math_toggle_heights(&anchor) else {
+        let Some(heights) = self.math_toggle_heights(seat, &anchor) else {
             return self.settle_math_toggle();
         };
         let still_measures = self
@@ -86920,12 +86928,18 @@ impl Runtime<'_> {
         }]
     }
 
-    fn copy_math_latex(&mut self, anchor: &MathBlockAnchor) {
+    /// **Asked of the pane the block is in.** This used to ask the *focused* one, and a right
+    /// press does not move the keyboard — the focus move lives inside the left-only route — so
+    /// copying from a formula in an unfocused pane asked a session where the anchor names nothing
+    /// and copied nothing, or, where that session happened to hold a block of the same shape,
+    /// copied the wrong formula. The seat comes from the press, like the other two verbs'.
+    fn copy_math_latex(&mut self, seat: SeatId, anchor: &MathBlockAnchor) {
         // A block anchor names a place in a shell's transcript, so a tab with no
         // shell has no anchor anybody could have clicked and nothing to copy
         // (§7.1.6h) — the same `None` a stale anchor already answers with.
         let Some(source) = self
-            .focused()
+            .sessions
+            .get(&seat)
             .and_then(|leaf| leaf.session.math_source(anchor))
         else {
             return;
@@ -86949,7 +86963,7 @@ impl Runtime<'_> {
         let anchor = self.window.pending_math_context_anchor.take();
         self.window.mouse_route = None;
         match (result, anchor) {
-            (Ok(true), Some(anchor)) => self.copy_math_latex(&anchor),
+            (Ok(true), Some((seat, anchor))) => self.copy_math_latex(seat, &anchor),
             (Ok(true), None) => {
                 eprintln!("recoverable formula context-menu result had no pending anchor");
             }
@@ -93538,7 +93552,7 @@ impl Runtime<'_> {
             return Ok(());
         }
         if state == ElementState::Pressed
-            && let Some(math_hit) = self.math_hit()
+            && let Some((math_seat, math_hit)) = self.math_hit()
             && matches!(button, MouseButton::Left | MouseButton::Right)
         {
             // Formula pixels are one indivisible presentation object in this slice. Swallowing the
@@ -93569,10 +93583,10 @@ impl Runtime<'_> {
                     // be still happens — under `Motion::Reduced`, on the live
                     // plane, and wherever the two faces cannot be measured — and
                     // it happens inside this door rather than beside it.
-                    self.press_math_toggle(&math_hit.anchor)?;
+                    self.press_math_toggle(math_seat, &math_hit.anchor)?;
                 }
                 (MouseButton::Left, MathHitTarget::CopyLatex) => {
-                    self.copy_math_latex(&math_hit.anchor);
+                    self.copy_math_latex(math_seat, &math_hit.anchor);
                     // The tick has to reach the glass: nothing else in this
                     // gesture asks for a frame, so without this the
                     // acknowledgement would wait for the next thing to twitch.
@@ -93580,7 +93594,8 @@ impl Runtime<'_> {
                 }
                 (MouseButton::Right, _) => match self.window.math_context_menu.request() {
                     Ok(true) => {
-                        self.window.pending_math_context_anchor = Some(math_hit.anchor.clone());
+                        self.window.pending_math_context_anchor =
+                            Some((math_seat, math_hit.anchor.clone()));
                     }
                     Ok(false) => {}
                     Err(error) => {
@@ -97071,7 +97086,7 @@ impl Runtime<'_> {
                 position.y * bt_viewport::SUBPIXELS_PER_PX as f64
             }
         };
-        if let Some(math_hit) = self.math_hit() {
+        if let Some((_, math_hit)) = self.math_hit() {
             // A hovered math block pans by whole pixels derived from the same exact motion, so
             // trackpads feel identical over blocks and text. The commit is tentative: nothing is
             // taken from the local accumulator until the block actually scrolls, because a
@@ -106343,13 +106358,19 @@ mod formula_tool_seat_tests {
         // is in flight. MUTATION: put `math_toggle_faces` back here and the tween pays a full
         // `layout_frozen_line` of every line of the block per wake-up.
         assert!(
-            advancer.contains("self.math_toggle_heights(&anchor)")
+            advancer.contains("self.math_toggle_heights(seat, &anchor)")
                 && !advancer.contains("math_toggle_faces"),
             "the advancer re-measures the other face's rows on every turn:\n{advancer}"
         );
 
         // Stillness and the live plane take the one-frame switch, in the press's own door.
-        let press = body(&["    fn press_math", "_toggle(&mut self, anchor"].concat());
+        let press = body(
+            &[
+                "    fn press_math",
+                "_toggle(&mut self, seat: SeatId, anchor",
+            ]
+            .concat(),
+        );
         assert!(
             press.contains("Motion::Reduced") && press.contains("self.switch_math_source_now("),
             "a reader who asked for no motion gets the change on the frame it is asked for:\n\
@@ -106377,6 +106398,54 @@ mod formula_tool_seat_tests {
         assert!(
             lane.contains("leaf.last_presented_frame.as_ref()"),
             "and it is the picture the pane has actually shown, as every band reader here is"
+        );
+    }
+
+    /// RED GATE — **all three of a block's verbs ask the pane the block is in.**
+    ///
+    /// A `MathBlockAnchor` does not name a pane, and it cannot be made to name one by looking: a
+    /// `Live` anchor is a screen, two grid points and a generation counter, and every one of those
+    /// is a number a *session* keeps, so two panes showing the same output hold anchors that
+    /// compare equal. `copy_math_latex` asked `self.focused()` — and a right press never moves the
+    /// keyboard, because the focus move lives inside the left-only route — so the one verb reached
+    /// by the context menu asked a pane the pointer had never been in. The toggles searched the
+    /// sessions instead, which is the same ambiguity wearing a better disguise: the first pane that
+    /// answers is not the pane that was pressed.
+    ///
+    /// The seat is known at the press and nowhere later, so it travels from there: `math_hit`
+    /// hands it back, the flight carries it for the ninety milliseconds it lives, and the context
+    /// menu's pending block carries it across the menu.
+    ///
+    /// MUTATIONS: put `self.focused()` back in the copy verb and the formula under the pointer is
+    /// copied from another pane, or not at all. Give any of the three a `self.sessions.iter()`
+    /// search again and two panes can answer for one block.
+    #[test]
+    fn a_blocks_verbs_all_ask_the_pane_the_block_is_in() {
+        let copy =
+            body("    fn copy_math_latex(&mut self, seat: SeatId, anchor: &MathBlockAnchor) {");
+        assert!(
+            copy.contains("self\n            .sessions\n            .get(&seat)"),
+            "the copy verb asks the seat the press handed it:\n{copy}"
+        );
+        assert!(
+            !copy.contains("self.focused()"),
+            "and never the pane that happens to hold the keyboard:\n{copy}"
+        );
+        for signature in [
+            "    fn math_toggle_faces(\n        &self,\n        seat: SeatId,",
+            "    fn math_toggle_heights(&self, seat: SeatId, anchor: &MathBlockAnchor)",
+            "    fn switch_math_source_now(&mut self, seat: SeatId, anchor: &MathBlockAnchor)",
+        ] {
+            let lane = body(signature);
+            assert!(
+                !lane.contains("self.sessions.iter()"),
+                "no verb searches for a pane that will answer:\n{lane}"
+            );
+        }
+        let hit = body("    fn math_hit(&self) -> Option<(SeatId, MathHit)> {");
+        assert!(
+            hit.contains(".map(|hit| (seat, hit))"),
+            "and the seat the hit was taken in comes back with it:\n{hit}"
         );
     }
 
@@ -106424,7 +106493,13 @@ mod formula_tool_seat_tests {
 
         // And the rows are laid out in exactly the two places a change acquires them: setting out,
         // and turning round.
-        let press = body(&["    fn press_math", "_toggle(&mut self, anchor"].concat());
+        let press = body(
+            &[
+                "    fn press_math",
+                "_toggle(&mut self, seat: SeatId, anchor",
+            ]
+            .concat(),
+        );
         assert_eq!(
             press.matches("faces.source.rows").count(),
             2,
