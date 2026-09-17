@@ -6,6 +6,22 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Fixed
+
+- **After dragging a window's edge back to where it started, formulas in that
+  pane are typeset again — they used to stop for good.** If a drag, a divider,
+  a zoom or a move between monitors ended on the same size it began on, the
+  pane it happened to was left believing the gesture had never finished. Nothing
+  looked wrong at the time, and nothing ever came back: from that moment on
+  that pane typeset no formula, drew no table, and showed no picture for an
+  image path you printed — the ones already on the screen stayed, so the change
+  was easy to miss until the next thing you ran came out as source text and
+  stayed that way. Anything else Folio waits for a quiet screen to do was
+  waiting on the same signal, so it stopped too. It is over when the gesture is,
+  now, whether or not the size changed; the shell in that pane is still told
+  only when its size actually moved, so nothing is sent to it that it does not
+  need.
+
 ## 0.4.2-preview — 2026-09-17
 
 ### Added

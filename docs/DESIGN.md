@@ -7698,6 +7698,110 @@ BT_DPI stage=resized ... rect=-13,-13,2893,1813     swapchain_size=2880x1800 inn
 
 **但顺着那条 fallback 链往下查,尽头上还有一个洞,一并补了。** 「上一次说过的话」的兜底是 `WindowStateV1::default()`——100,100,1280,800——而那是「**根本没有上一次会话**」的答案,不是「**这扇窗还没照过相**」的答案。**第二扇窗恰好就是后者**:`Runtime::open_window` 从不播种,而一扇从文件里恢复出来、一出生就是 maximized 的第二扇窗,它的第一张相没有可量的 normal 矩形,于是文件里为它记的角与尺寸在**它之后的第一次启动**就被换成了那个占位。`resumed` 那一句 `window_pictures: vec![(window.id(), opening.clone())]` 就是第一扇窗从没中招的原因;现在另一扇门也说同一句话,用它唯一能说的形式——**它正站着的那个矩形**,而对一扇恢复出来的窗,那正是存下来的那个。三行的先后就是全部:先入库、再造 runtime、再在**还没 `SW_MAXIMIZE`** 之前照第一张全相。红门 `a_window_is_in_the_vault_before_it_is_asked_what_it_looks_like` 按住这个先后(变异:删掉 `record_window`,或把它挪到 `new_window_runtime` 之后;把第一张相挪到 `show_new_window` 之后则第二条断言红)。**明账**:这一条只在多窗下才伤人,而它是照着「一个没有自己矩形的姿态,兜底应当是这扇窗开在哪里,而不是产品的占位」这句话修的——这句话现在两扇门都遵守。
 
+#### 7.53a A resize transaction is opened by a reflow and can only be closed by a settlement (user report 2026-09-17; `crates/bt-term/src/{scheduling,session}.rs`, `crates/bt-app/src/main.rs`)
+
+**The invariant, in one sentence: every gesture that reflows a pane must end at one of exactly two
+doors.** `DualPlaneSession::resize_at` calls `ResizeEpoch::changed`, which opens a transaction the
+moment this pane's own grid follows the hand. Only `ResizeEpoch::final_request_sent` arms
+`quiescence_deadline`, only a deadline makes `is_quiescent_at` true, and only that lets
+`finish_resize_if_quiescent` close the transaction. An unclosed transaction is not a slow pane; it
+is a permanent one.
+
+**The two doors, and why the second one had to exist.** A gesture either gives the child a new size
+or it does not. `mark_pty_resize_requested_at` was the only door, so a drag whose last wobble came
+back to the width ConPTY already held — one column out and one back, a divider let go where it
+started, a zoom stepped up and down, a monitor change that netted out, a window minimised mid-drag
+and restored, or any of the active tab's unfocused panes following the same solve — reflowed the
+pane through widths it no longer wore and then had nothing to report. The window said nothing at
+all, and the transaction stayed open for the rest of that pane's life.
+`mark_resize_settled_unchanged_at` is that missing sentence. The window states which ending it is;
+the session never infers it, because a session has no idea what size the child holds.
+
+**What an open transaction withholds** — all of it silently, none of it self-healing:
+
+- `ResizeEpoch::decorations_allowed` gates every decoration scan there is: live math
+  (`schedule_live_artifacts`), frozen math and table arming, `schedule_existing_artifacts`,
+  `schedule_retry_artifacts` and `rearm_stranded_pending`. No formula is ever typeset again.
+- `ResizeEpoch::is_active` stops the stability clock itself: `live_stability_deadline` answers
+  `None` and `advance_live_stability` answers `0`, so no row ever settles.
+- New inline image paths are neither detected nor retired, because `reconcile_live_image_paths` is
+  only asked to create and retire from inside `schedule_live_artifacts`.
+- `ViewportProjection::set_resize_reflow_active` stays true, holding the review-hold and
+  scroll-anchor gate in its resize mode.
+
+**The child keeps its guard, and it is the same guard.** A `ResizePseudoConsole` — `TIOCSWINSZ` on
+Unix, same rule — is still sent only when the grid the child holds actually moves, so the sidecar
+ruling pinned at cc37d01 is untouched and a clean same-DPI restore still reaches zero of them after
+spawn. The settlement that closes the transaction is not a call to the child: it installs the
+canonical branch (the fork that has only ever been given sizes the child was told, and is therefore
+already at this one) over the path-dependent displayed branch, re-seats anchors and semantic
+regions, and re-anchors the decorations projected across it. And because conhost did not reflow,
+PSReadLine's anchor is still the one it drew with: the unchanged-size ending records no repair debt
+and writes **no private bytes at all**.
+
+**A gesture no hand is reported to have let go of ends anyway** (Codex review 2026-09-17). A
+divider drag is torn down by the button coming up, by `Esc`, by a re-solve and by a blur, and
+capture loss is none of them: Windows announces it with `WM_CAPTURECHANGED`, winit 0.30.13 answers
+that message by zeroing its own capture count and emitting nothing, and a steal need not blur the
+window. `divider_drag` then stays `Some` for good, `flush_pending_pty_resize` reads it as a hand
+still on the geometry, and from that moment no pane of that window can release or settle another
+resize — the same permanent silence by another road. So the gesture carries the pointer it began
+with (`DividerDrag::capture`) and `flush_pending_pty_resize` re-reads it before it believes it,
+cancelling through the door `Esc` already uses. The predicate is *the same window still holds it*,
+not *we hold it*: on macOS both readings are `None`, because AppKit has no per-thread capture to
+report, and a rule phrased the other way would cancel every divider drag there on its first turn.
+
+**The macOS limit, stated as a limit.** `in_size_move` is always `false` on that platform
+(`bt-platform/src/portable_impl.rs`), and this winit gives no end-of-gesture boundary for a native
+live resize — its `windowDidEndLiveResize` only resets resize increments. On Windows the frame's
+own modal loop is read and a drag is one `ResizePseudoConsole`; on macOS the only thing that ends a
+gesture is the 200 ms quiet window, so **a live resize that pauses longer than that can notify the
+child twice** — at two *different* sizes, never the same size twice, because a release whose grid
+equals the child's own tells it nothing. One notification per physical drag therefore holds on
+Windows and is not established on macOS, which is a gap in the platform's signals rather than in
+this path.
+
+**What is queued is the end of a gesture, not a size the child is owed.** A solve that moved either
+grid queues a release; a solve that moved neither queues nothing but no longer cancels one that is
+already waiting, and always overwrites it with the last grid solved — which a pane behind another
+tab needs said out loud, since its actor does not follow the solve and `local_grid` cannot stand in
+for "the last thing we were asked for". A release that finds neither the child's grid moved nor a
+transaction open does nothing, which is that hidden pane's ordinary answer.
+
+**Red gates.**
+
+- `a_gesture_that_ends_on_the_childs_own_size_closes_its_transaction_in_silence` (bt-term,
+  math-free) — commit one gesture, wobble away and back, settle through the unchanged-size door:
+  the transaction closes at its deadline, `decorations_allowed` comes back, `take_pty_writes` is
+  empty, and the trace names the ending as itself rather than as a request nobody sent. Mutation:
+  settle with nothing, as the window used to — an hour of silence cannot close it.
+- `a_gesture_that_wobbles_back_to_the_childs_width_keeps_the_lines_pictures` (bt-term, primary and
+  alternate) — the witness at the height it was reported from: the sentence drops to source while
+  the fold moves through its runs, which is right, and comes back the moment the pane may scan
+  again. Same mutation.
+- `a_gesture_that_returns_to_the_childs_own_width_still_queues_its_release` and
+  `a_drag_that_ends_where_the_child_already_is_settles_without_telling_it` (bt-app) — the queue
+  carries the gesture's end and never an intermediate size; the release tells the child nothing,
+  settles anyway, and sends no anchor chord. Mutation: restore `*pending = None` in
+  `coalesce_pty_resize_on_grid_change`'s `else`.
+- `every_gesture_that_lands_back_on_the_childs_grid_settles_whatever_moved_it` (bt-app) — the sweep
+  that says the fix is at the shape and not at the window edge: five entrances, each one shown and
+  behind. The behind half is the other side of the sentence — a pane whose actor never followed the
+  solve opens no transaction and is right to owe nothing.
+- `a_divider_drag_that_loses_its_pointer_stops_holding_the_resize` (bt-app) — capture taken away
+  with no blur and no button-up: the gesture ends, the release it was holding is delivered, and the
+  transaction closes. Mutation: delete the recovery call from `flush_pending_pty_resize`.
+- `a_repair_owed_before_a_wobble_is_still_owed_after_it_and_paid_once` (bt-app) — the wobble
+  arrives before the earlier real commit's quiescence, so its PSReadLine repair is still unpaid:
+  the wobble banks none of its own and the one that is owed is paid exactly once.
+- `a_wobble_settled_on_the_childs_own_size_leaves_a_reader_where_they_were` (bt-term) — the same
+  settlement under a view parked twenty rows up in scrollback: zero jump, and the hold clears.
+- `settling_a_gesture_over_a_long_history_stays_within_its_budget` (lifecycle matrix) — what one
+  ending costs over 3,971 resident entries, because `schedule_existing_artifacts` walks all of
+  them: 2,244,719 B / 71 allocations over prose, 3,261,024 B / 8,025 allocations over a history
+  half made of formulas, which queues the worker cap and no more.
+
+
 ### 7.54 一扇没人能看见的窗才需要一把不在任何窗里的钥匙:快捷终端(0.2 功能单,2026-09-02,已落地;`crates/bt-platform/src/hotkey.rs`(新)、`crates/bt-platform/src/lib.rs`、`crates/bt-app/src/quake.rs`(新)、`crates/bt-app/src/{main,settings,shortcuts,i18n,webhost}.rs`、`crates/bt-persist/src/{session,settings,migrate,lib}.rs`)
 
 **它是一扇普通的窗,只有三件事不普通。** 有自己的 tab 与 pane,进 `windows[]`,窗里的每一个动词照常。不普通的那三件写在 `crates/bt-app/src/quake.rs` 的头上,这一节是它们的理由。
