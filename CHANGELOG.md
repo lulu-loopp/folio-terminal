@@ -8,6 +8,16 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **Two lines with the same formulas in them no longer show each other's
+  picture.** Where a line has more than one `$…$` in it, Folio draws the whole
+  line's formulas as one picture, and it was filing that picture under the
+  formulas alone — so two lines carrying the same formulas with different words
+  between them were treated as the same picture, and whichever Folio drew first
+  was shown for both. On the other line the second formula appeared in the wrong
+  place, over the words beside it. The picture is now filed under where its
+  formulas actually sit as well, and lines that really do match go on sharing
+  one.
+
 - **Right-clicking a formula copies that formula, not one from the pane you
   last typed in.** Copy LaTeX asked whichever pane held the keyboard, and a
   right press does not move the keyboard — so in a split, copying from a formula

@@ -12041,6 +12041,7 @@ fn artifact_from_raster(task: &DetectionTask, raster: MathRaster) -> Placeholder
             &task.span.render_source,
             task.versions.layout,
             task.versions.detection,
+            &raster.inline_runs,
         ),
         kind: task.span.kind,
         block_end: task.block_end,
@@ -12064,6 +12065,7 @@ fn artifact_from_live_raster(task: &LiveDetectionTask, raster: MathRaster) -> Pl
             &task.span.render_source,
             task.layout,
             task.detection_revision,
+            &raster.inline_runs,
         ),
         kind: task.span.kind,
         block_end: TranscriptId(0),
@@ -12078,12 +12080,28 @@ fn artifact_from_live_raster(task: &LiveDetectionTask, raster: MathRaster) -> Pl
     }
 }
 
+/// The name a raster is uploaded, cached and drawn under.
+///
+/// **It has to identify the whole recipe, because the renderer uploads by name and never looks at
+/// what it already holds.** For a display block the source is the recipe. For an inline composite
+/// it is not: the composite is one raster per logical line with each run blitted at an x that
+/// follows from the prose in front of it, while `render_source` is only the run sources joined with
+/// "; " — so two lines carrying the same formulas with prose of different widths named one texture,
+/// and whichever was admitted first supplied the picture for both. The second line then drew its
+/// later runs at the first line's offsets, over its own prose, with its own source cells already
+/// cleared.
+///
+/// So the runs' own geometry goes in: which run, how far into the raster, and how wide. That is the
+/// part of the recipe the source cannot imply, and it is deliberately the *geometry* rather than
+/// the prose — two lines whose prose differs but whose runs land in the same cells really are the
+/// same picture, and should go on sharing one.
 fn shared_math_artifact_key(
     kind: BlockKind,
     mode: MathMode,
     source: &str,
     layout: LayoutKey,
     detection: DetectionRevision,
+    inline_runs: &[InlineRunPlacement],
 ) -> String {
     let mut hasher = DefaultHasher::new();
     kind.hash(&mut hasher);
@@ -12091,6 +12109,11 @@ fn shared_math_artifact_key(
     source.hash(&mut hasher);
     layout.hash(&mut hasher);
     detection.hash(&mut hasher);
+    for run in inline_runs {
+        run.run.hash(&mut hasher);
+        run.x_px.hash(&mut hasher);
+        run.width_px.hash(&mut hasher);
+    }
     format!("math:{:016x}", hasher.finish())
 }
 
@@ -12102,6 +12125,9 @@ fn live_placeholder(task: &LiveDetectionTask) -> PlaceholderArtifact {
             &task.span.render_source,
             task.layout,
             task.detection_revision,
+            // A placeholder is one grey pixel and has no runs in it yet; its name is its own and is
+            // replaced whole by the raster's when the raster lands.
+            &[],
         ),
         kind: task.span.kind,
         block_end: TranscriptId(0),
@@ -15736,14 +15762,16 @@ mod tests {
                 MathMode::Display,
                 "x",
                 layout,
-                DetectionRevision(1)
+                DetectionRevision(1),
+                &[]
             ),
             shared_math_artifact_key(
                 BlockKind::Math,
                 MathMode::Inline,
                 "x",
                 layout,
-                DetectionRevision(1)
+                DetectionRevision(1),
+                &[]
             ),
         );
         assert_ne!(
@@ -15752,14 +15780,16 @@ mod tests {
                 MathMode::Display,
                 "x",
                 layout,
-                DetectionRevision(1)
+                DetectionRevision(1),
+                &[]
             ),
             shared_math_artifact_key(
                 BlockKind::Table,
                 MathMode::Display,
                 "x",
                 layout,
-                DetectionRevision(1)
+                DetectionRevision(1),
+                &[]
             ),
             "two renderers reading the same bytes are two artifacts, not one cache entry"
         );
@@ -28667,6 +28697,67 @@ mod tests {
     /// fits one grid row, and a long one the pane wraps into two. Both formulas of the wrapped line
     /// sit on its first row, so what this fixture exercises is the *line* spanning two rows, not a
     /// formula split across them (that is `a_formula_split_across_two_printed_rows_is_joined`).
+    /// **Two composites that are not the same picture may not be the same texture.**
+    ///
+    /// An inline composite is one raster per logical line, with each run blitted at an x that
+    /// follows from the prose in front of it. The artifact key carried the run *sources* joined
+    /// with "; " and nothing about where they sit, so two lines with the same formulas and prose of
+    /// different widths hashed the same — and the renderer uploads by key, never comparing what it
+    /// already holds against what the placement is carrying.
+    /// Whichever line was admitted first supplied the picture for both, so the second line drew its
+    /// `y` at the first line's offset, over its own prose, with its source cells already cleared.
+    ///
+    /// The key must name the whole recipe, and the geometry is the part the source cannot imply.
+    /// Prose is deliberately not in it: two lines whose prose differs but whose runs land in the
+    /// same cells are the same picture and should share it.
+    #[test]
+    fn two_inline_composites_with_different_run_offsets_do_not_share_a_texture() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut session);
+        session
+            .feed_at(
+                format!(
+                    "{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\n\
+                     a = $x^2$, b = $y^2$\r\n\
+                     a = $x^2$, and b = $y^2$\r\n{OUTPUT_D}"
+                )
+                .as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert_eq!(
+            session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL),
+            2,
+            "both lines must arm"
+        );
+        assert_eq!(complete_live_math_for_real(&mut session), 2);
+
+        let artifacts = session
+            .live_decorations
+            .values()
+            .filter_map(|record| record.artifact.as_ref())
+            .collect::<Vec<_>>();
+        assert_eq!(artifacts.len(), 2);
+        assert_eq!(
+            artifacts[0].inline_runs.len(),
+            2,
+            "the fixture must really put two runs on each line"
+        );
+        let offsets = artifacts
+            .iter()
+            .map(|artifact| artifact.inline_runs[1].x_px)
+            .collect::<Vec<_>>();
+        assert_ne!(
+            offsets[0], offsets[1],
+            "the fixture must really give the second run two different offsets"
+        );
+        assert_ne!(
+            artifacts[0].key, artifacts[1].key,
+            "two pictures that differ must not be one texture"
+        );
+    }
+
     /// The site of one grid row, as the live scan sees it.
     fn grid_site_at(session: &DualPlaneSession, row: u32) -> InlineMathSite {
         live_grid_input(&session.live_detection_context(), row)
