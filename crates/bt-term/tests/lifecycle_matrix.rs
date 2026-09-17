@@ -2472,6 +2472,150 @@ fn a_repaint_carrying_proven_formulas_stays_within_its_close_budget() {
     );
 }
 
+/// The cycles in one measured burst of off-band records going away and coming back.
+const RESTORED_FORMULA_CYCLES: usize = 64;
+
+/// The screen `restored_formula_arm` alternates between: `count` blocks, each on a heading line of
+/// its own, or the same screen with every one of them gone.
+///
+/// Each block's source is distinct, because the re-anchor requires its proven source to appear
+/// exactly once on the grid — `count` copies of one formula would be ambiguous and none of them
+/// would come back, which would measure a door that never opened. The heading marker is there for
+/// the same reason the review's scratch used one: it is a line the detector owns and a whitespace
+/// rule would have refused, so it keeps the arm on the path the detector actually decides.
+fn restored_formula_screen(count: usize, present: bool) -> Vec<String> {
+    let mut rows = vec!["header".to_owned()];
+    for block in 0..count {
+        rows.push(format!("section {block}"));
+        rows.push(if present {
+            format!(r"# $$x_{{{block}}} = {block}$$")
+        } else {
+            format!("gone {block}")
+        });
+        rows.push(String::new());
+    }
+    rows.push("prompt> ".to_owned());
+    rows
+}
+
+/// The restore arm of the repaint pin: `RESTORED_FORMULA_CYCLES` cycles of "every block leaves the
+/// screen, every block comes back", so each cycle drains `count` records off-band and re-anchors all
+/// of them — the door `detector_owns_live_match` guards, which no other arm reaches, because their
+/// off-band record's source is never on the screen again.
+///
+/// Returns what one cycle drew from the heap, and proves along the way that the blocks came back by
+/// re-anchor and not by being read again.
+fn restored_formula_arm(columns: u32, rows: u32, count: usize) -> (u64, u64) {
+    let start = Instant::now();
+    let mut session = DualPlaneSession::new(nz32(columns), nz32(rows));
+    let present = synchronized_screen(&restored_formula_screen(count, true));
+    let away = synchronized_screen(&restored_formula_screen(count, false));
+
+    let mut first = b"\x1b[?1049h".to_vec();
+    first.extend_from_slice(&present);
+    session.feed_at(&first, start).unwrap();
+    session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+    complete_live_math(&mut session);
+    assert_restored_blocks_are_pictures(&mut session, count, "before the burst");
+    let proven = session.live_detection_count();
+
+    let settled = start + Duration::from_millis(400);
+    let bytes_before = HEAP_BYTES.with(std::cell::Cell::get);
+    let allocations_before = HEAP_ALLOCATIONS.with(std::cell::Cell::get);
+    let started = Instant::now();
+    for cycle in 0..RESTORED_FORMULA_CYCLES {
+        let at = settled + Duration::from_millis(2 * cycle as u64);
+        session.feed_at(&away, at).unwrap();
+        session
+            .feed_at(&present, at + Duration::from_millis(1))
+            .unwrap();
+    }
+    let elapsed = started.elapsed();
+    let cycles = RESTORED_FORMULA_CYCLES as u64;
+    let heap_bytes = (HEAP_BYTES.with(std::cell::Cell::get) - bytes_before) / cycles;
+    let heap_allocations =
+        (HEAP_ALLOCATIONS.with(std::cell::Cell::get) - allocations_before) / cycles;
+    eprintln!(
+        "G1_RESTORED_REPAINT {columns}x{rows} blocks={count} cycles={RESTORED_FORMULA_CYCLES} \
+         elapsed={elapsed:?} per_cycle_allocations={heap_allocations} per_cycle_bytes={heap_bytes}"
+    );
+
+    assert_eq!(
+        session.live_detection_count(),
+        proven,
+        "a re-anchored record must not be detected all over again"
+    );
+    assert_restored_blocks_are_pictures(&mut session, count, "after the burst");
+    (heap_allocations, heap_bytes)
+}
+
+fn assert_restored_blocks_are_pictures(session: &mut DualPlaneSession, count: usize, after: &str) {
+    let mut projection = session.new_projection(session.layout_key());
+    session.refresh_projection(&mut projection);
+    let frame = session.viewport_frame(&mut projection).unwrap();
+    for block in 0..count {
+        let row = 2 + block * 3;
+        assert!(
+            frame_row_text(&frame, row).trim().is_empty(),
+            "row {row} shows its LaTeX {after}: {:?}",
+            (0..frame.drawable_rows().min(12))
+                .map(|row| frame_row_text(&frame, row))
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+/// PIN - **what it costs to give a formula back its picture when it returns to the screen.**
+///
+/// The two arms above measure a close that carries records across a repaint, and a close under an
+/// off-band record whose source never comes back. Neither reaches the re-anchor: the door where a
+/// record's proven source *is* found on the new grid, the detector is asked whether it still reads
+/// those rows as that block, and the picture is put back without anything being read again. That is
+/// the door the review of 2026-09-17 asked for and the one every scroll-back-into-view goes through.
+///
+/// Measured 2026-09-17 on a 100x40 alternate screen, one cycle being every block leaving the screen
+/// and every block returning:
+///
+///   1 block   2,984 allocations, 1,994,690 B a cycle
+///   8 blocks  3,477 allocations, 2,204,756 B a cycle
+///
+/// These are whole-cycle costs — two full-screen synchronized repaints, two closes and a restore —
+/// not the re-anchor in isolation; what the second arm adds over the first is what seven more
+/// records cost at this door.
+///
+/// The budgets carry the same ~12% of slack the neighbouring arms use.
+#[test]
+fn a_repaint_that_gives_formulas_back_their_pictures_stays_within_its_restore_budget() {
+    /// Measured 2,984.
+    const ONE_BLOCK_ALLOCATIONS: u64 = 3340;
+    /// Measured 1,994,690 B.
+    const ONE_BLOCK_BYTES: u64 = 2180 * 1024;
+    /// Measured 3,477.
+    const EIGHT_BLOCK_ALLOCATIONS: u64 = 3890;
+    /// Measured 2,204,756 B.
+    const EIGHT_BLOCK_BYTES: u64 = 2410 * 1024;
+
+    let (allocations, bytes) = restored_formula_arm(100, 40, 1);
+    assert!(
+        allocations <= ONE_BLOCK_ALLOCATIONS,
+        "restoring one formula made {allocations} allocations, budget {ONE_BLOCK_ALLOCATIONS}"
+    );
+    assert!(
+        bytes <= ONE_BLOCK_BYTES,
+        "restoring one formula asked for {bytes} B, budget {ONE_BLOCK_BYTES} B"
+    );
+
+    let (allocations, bytes) = restored_formula_arm(100, 40, 8);
+    assert!(
+        allocations <= EIGHT_BLOCK_ALLOCATIONS,
+        "restoring eight formulas made {allocations} allocations, budget {EIGHT_BLOCK_ALLOCATIONS}"
+    );
+    assert!(
+        bytes <= EIGHT_BLOCK_BYTES,
+        "restoring eight formulas asked for {bytes} B, budget {EIGHT_BLOCK_BYTES} B"
+    );
+}
+
 #[test]
 fn g1_ris_and_deccolm_invalidate_candidates_but_keep_frozen_history() {
     for reset in [b"\x1bc".as_slice(), b"\x1b[?3h".as_slice()] {
