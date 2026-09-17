@@ -803,6 +803,32 @@ pub struct CapturedCell {
     pub hyperlink: Option<CellHyperlink>,
     /// A terminal wide-character spacer has no source text of its own.
     pub wide_spacer: bool,
+    /// A shell command's output put this cell's text here — it was written between that command's
+    /// OSC 133 `C` and its `D`.
+    ///
+    /// **Provenance, not style.** It is a fact about the write and it rides on the cell because the
+    /// cell is the thing that moves: a scroll, a scroll region, `IL`/`DL`, `RI`, `CSI S`/`T`, a
+    /// reflow that re-cuts the row, all carry it without anything having to be kept in step.
+    ///
+    /// **It is the claim, and a reader asks for it rather than for its absence.** Text that arrived
+    /// by a road nobody stamped — `DECALN`, a reset, a cell a shift created, anything unaudited —
+    /// therefore claims nothing and is refused, which is the conservative direction to fail in.
+    pub command_output_write: bool,
+}
+
+impl CapturedCell {
+    /// Does this cell carry text that no command's output claims?
+    ///
+    /// The question a line's provenance is folded from, in one place so that the live grid and the
+    /// freeze cannot come to answer it differently. A wide-character spacer has no text of its own —
+    /// its base cell answers for the pair — and a blank cell carries none either, so an untouched
+    /// gap claims nothing in either direction and neither is asked.
+    #[must_use]
+    pub fn carries_unclaimed_text(&self) -> bool {
+        !self.wide_spacer
+            && !self.command_output_write
+            && !self.text.chars().all(char::is_whitespace)
+    }
 }
 
 impl CapturedCell {
@@ -904,6 +930,15 @@ pub struct FrozenLine {
     pub fragments: Vec<PhysicalFragment>,
     pub shell_marks: Vec<(u32, String)>,
     pub wrap_split: bool,
+    /// A shell command's output wrote every cell of this line that carries text — the fold of
+    /// [`CapturedCell::carries_unclaimed_text`] over all of its rows.
+    ///
+    /// **The frozen half of the same fact the live grid reads off the cells directly.** A line does
+    /// not change who wrote it by scrolling, and this is the last moment its cells are in hand, so
+    /// it is folded here rather than worked out afterwards from where the line's coordinates fell.
+    /// One cell of unclaimed text anywhere in the line answers for the whole of it, which is the
+    /// reading the live plane's own fold takes — the same predicate, asked once each.
+    pub command_output_write: bool,
 }
 
 impl FrozenLine {
@@ -1438,6 +1473,7 @@ fn normalize(
     let mut fragments = Vec::new();
     let mut shell_marks = Vec::new();
     let mut mappings = Vec::new();
+    let mut command_output_write = true;
 
     for staged in rows {
         let fragment_start = text.len() as u32;
@@ -1456,6 +1492,9 @@ fn normalize(
         if let Some(mark) = shell_mark {
             shell_marks.push((fragment_start, mark));
         }
+        // Over every cell the row arrived with, before the padding trim below, so that this asks
+        // exactly what the live plane asks of the same row.
+        command_output_write &= !cells.iter().any(CapturedCell::carries_unclaimed_text);
 
         // A WRAPLINE fragment owns every cell through its wrap boundary.  In particular a space
         // in the final column is source text, not padding; trimming it turns "find path" into
@@ -1514,6 +1553,7 @@ fn normalize(
             fragments,
             shell_marks,
             wrap_split,
+            command_output_write,
         },
         mappings,
     )

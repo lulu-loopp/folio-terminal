@@ -62,11 +62,15 @@ fn osc_9_4_progress_matrix_accepts_bel_and_st_clamps_and_ignores_malformed_repor
     session.feed(b"before\x1b]9;4;bogus\x07after").unwrap();
     assert!(session.terminal().visible_text()[0].contains("beforeafter"));
 
+    // Whole prompt cycles: a `C` standing in none at all is not this session's evidence that a
+    // command started, and is refused before it reaches any of this.
     session
-        .feed(b"\x1b]133;C\x07\x1b]9;4;1;55\x07\x1b]133;D;0\x07")
+        .feed(b"\x1b]133;A\x07\x1b]133;B\x07\x1b]133;C\x07\x1b]9;4;1;55\x07\x1b]133;D;0\x07")
         .unwrap();
     assert_eq!(session.status().progress, Some(ProgressState::Normal(55)));
-    session.feed(b"\x1b]133;C\x07").unwrap();
+    session
+        .feed(b"\x1b]133;A\x07\x1b]133;B\x07\x1b]133;C\x07")
+        .unwrap();
     assert_eq!(session.status().progress, None);
 }
 
@@ -90,12 +94,17 @@ fn osc_133_failure_latch_tracks_exit_code_and_clears_on_next_command() {
     session.feed(b"\x1b]133;D\x07").unwrap();
     assert_eq!(session.status().failure_exit_code, None);
 
-    session.feed(b"\x1b]133;C\x07\x1b]133;D;17\x1b\\").unwrap();
+    // Whole prompt cycles, for the reason given in the progress matrix above.
+    session
+        .feed(b"\x1b]133;A\x07\x1b]133;B\x07\x1b]133;C\x07\x1b]133;D;17\x1b\\")
+        .unwrap();
     assert_eq!(session.status().failure_exit_code, Some(17));
     session.feed(b"\x1b]133;D\x07").unwrap();
     assert_eq!(session.status().failure_exit_code, Some(17));
 
-    session.feed(b"\x1b]133;C\x07").unwrap();
+    session
+        .feed(b"\x1b]133;A\x07\x1b]133;B\x07\x1b]133;C\x07")
+        .unwrap();
     assert_eq!(session.status().failure_exit_code, None);
 
     session.feed(b"\x1b]133;D;0\x07").unwrap();

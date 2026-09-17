@@ -52,7 +52,7 @@ use bt_render::{
 use bt_viewport::{MathBlockAnchor, MathBlockDisplay};
 
 use crate::{
-    Motion,
+    Motion, PasteTarget,
     icons::MarkSlot,
     marks::{ChromeMark, ChromeSprite},
     tooltip,
@@ -567,6 +567,9 @@ impl FormulaToolFollow {
 /// surface keeps no second number, exactly as the marks beside it keep none.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FormulaToggleMotion {
+    /// The tab, seat and shell incarnation from the press; delayed work validates this owner
+    /// before measuring, changing or presenting its block.
+    target: PasteTarget,
     /// The block, by the identity every other reader of a band keys on.
     anchor: MathBlockAnchor,
     /// Where this is heading. `true` is the `$$…$$` source — which the document is told about when
@@ -589,6 +592,7 @@ impl FormulaToggleMotion {
     /// and both measured by the pane the block is in; `source_rows` is what those rows say.
     #[must_use]
     pub fn begin(
+        target: PasteTarget,
         anchor: MathBlockAnchor,
         heights: [i64; 2],
         to_source: bool,
@@ -603,6 +607,7 @@ impl FormulaToggleMotion {
             (text, picture)
         };
         Self {
+            target,
             anchor,
             to_source,
             journey: Ease {
@@ -642,6 +647,12 @@ impl FormulaToggleMotion {
             [rendered, 0.0]
         };
         self.journey.retarget(to, now, motion);
+    }
+
+    /// The pane this journey is happening in.
+    #[must_use]
+    pub fn target(&self) -> PasteTarget {
+        self.target
     }
 
     /// The block this belongs to.
@@ -1760,7 +1771,18 @@ mod tests {
     }
 
     fn flight(to_source: bool, now: Instant) -> FormulaToggleMotion {
-        FormulaToggleMotion::begin(flight_anchor(), HEIGHTS, to_source, source_lines(), now)
+        FormulaToggleMotion::begin(
+            PasteTarget {
+                tab: crate::TabId(7),
+                seat: crate::SeatId(1),
+                incarnation: 42,
+            },
+            flight_anchor(),
+            HEIGHTS,
+            to_source,
+            source_lines(),
+            now,
+        )
     }
 
     /// RED (owner's ruling 2026-09-15, T-MATH-TOGGLE-MOTION): **the block travels between the two

@@ -591,6 +591,10 @@ impl TerminalAdapter {
         let size = GridSize { columns, rows };
         let listener = CaptureListener::default();
         let mut term = Term::new(config, &size, listener.clone());
+        // Fail closed from the first byte: until a session says otherwise, nothing written here is
+        // a command's output. The vendored default is the empty one, so that a caller which never
+        // speaks — upstream's own test suite — writes exactly the cells upstream writes.
+        term.set_write_provenance(false, false);
         install_transcript_hook(&mut term, &listener);
         let row_fingerprint_seed = RandomState::new().build_hasher().finish();
         Self {
@@ -777,6 +781,16 @@ impl TerminalAdapter {
                     events.extend(self.drain_grid_write_events());
                 }
                 InlineImageStreamAction::Image(encoded) => {
+                    // **An image names a cell too, and for the same reason it has to be read
+                    // against a grid the bytes before it have reached.** Everything the block was
+                    // holding — the `CUP` that put the cursor where the image belongs, the swap
+                    // that changed which screen it belongs to — is parsed first; without it an
+                    // image drawn inside a synchronized update was filed at the cursor from before
+                    // the block, on the screen from before the block, and its placeholder was
+                    // measured against a column it was not written at. The placeholder itself was
+                    // never misplaced: it goes through the same parser, so it landed correctly and
+                    // the record pointed somewhere else.
+                    events.extend(self.commit_synchronized_update_before_marker());
                     let cursor = self.cursor();
                     let screen = if self.modes().alternate_screen {
                         RemovalScreen::Alternate
@@ -795,6 +809,28 @@ impl TerminalAdapter {
                     });
                 }
                 InlineImageStreamAction::ShellIntegration(marker) => {
+                    // **A marker is a statement about the grid, so the grid has to have caught
+                    // up with the bytes before it.** DEC 2026 is the one thing that puts writes
+                    // out of order with this stream: the vendored parser holds a block's bytes
+                    // and applies them all at the terminator, while this scanner has already
+                    // handed their markers out. So a `B` read the cursor from before the prompt
+                    // the block was drawing, a marker after a buffered `?1049l` named the screen
+                    // the block had already left, and the provenance the session states for the
+                    // next segment was stamped on text that arrived under the last one — a
+                    // prompt's `$…$` typeset as output, and a command's left as source when it
+                    // printed inside a block that ended after the prompt came back.
+                    //
+                    // Committing the block here is the commit its own deadline already makes,
+                    // taken at the one other point where the order is load-bearing. **Every
+                    // recognised marker ends the block, `A` and `B` included**: what precedes the
+                    // first marker in it is committed whole and what follows draws
+                    // unsynchronised, so a producer that puts markers inside a block can be seen
+                    // drawing in pieces. None of the integrations this terminal ships, and none
+                    // of the prompt painters read for the 2026-09-17 review, does that — their
+                    // markers arrive with no block open, where this costs one stored `Option`
+                    // read. What it buys is that a marker never describes a grid the parser has
+                    // not reached.
+                    events.extend(self.commit_synchronized_update_before_marker());
                     let cursor = self.cursor();
                     let screen = if self.modes().alternate_screen {
                         RemovalScreen::Alternate
@@ -835,6 +871,23 @@ impl TerminalAdapter {
                 break;
             }
         }
+        events
+    }
+
+    /// Write out a DEC 2026 block that is still holding bytes back, so that the fact about to be
+    /// reported — a shell marker, an inline image — is read against a grid those bytes have
+    /// reached.
+    ///
+    /// The same commit [`Self::finish_synchronized_update`] makes when the block's own deadline
+    /// passes, and it reports the same events — with this one's grid writes as well, because the
+    /// session records which rows a command line was typed on and those rows are written here.
+    /// Silent, and free, when no block is open: one stored `Option` read and an empty vector.
+    fn commit_synchronized_update_before_marker(&mut self) -> Vec<AdapterEvent> {
+        if self.synchronized_update_deadline().is_none() {
+            return Vec::new();
+        }
+        let mut events = self.finish_synchronized_update();
+        events.extend(self.drain_grid_write_events());
         events
     }
 
@@ -1216,6 +1269,31 @@ impl TerminalAdapter {
     /// decide where one logical line ends, so capturing (and cloning) a whole row of cells for one
     /// bit is the wrong price. The bit itself is where the capture reads it: WRAPLINE on the row's
     /// last cell.
+    /// Say whether the bytes fed from here on are a shell command's output, **for each screen**.
+    ///
+    /// Stamped by the terminal onto every cell it prints, and read back off the captured cells as
+    /// [`bt_transcript::CapturedCell::command_output_write`]. The session states it before every
+    /// segment: the adapter pauses the stream at each shell-integration marker, so a segment
+    /// carries no change of phase inside it. What a segment *can* carry inside it is a screen
+    /// swap, which is a change of answer with no marker to restate it — so both screens' answers
+    /// are stated here and the terminal takes up the one belonging to the screen that is showing.
+    ///
+    /// The resize transaction's canonical branch is told as well: it parses the same bytes into its
+    /// own grid, and rows harvested from it become transcript lines like any other.
+    pub fn set_write_provenance(
+        &mut self,
+        primary_is_command_output: bool,
+        alternate_is_command_output: bool,
+    ) {
+        self.term
+            .set_write_provenance(primary_is_command_output, alternate_is_command_output);
+        if let Some(canonical) = self.resize_canonical.as_mut() {
+            canonical
+                .term
+                .set_write_provenance(primary_is_command_output, alternate_is_command_output);
+        }
+    }
+
     pub fn visible_row_continues(&self, row: u32) -> bool {
         let columns = self.columns.get() as usize;
         row < self.rows.get()
@@ -2849,6 +2927,201 @@ mod tests {
             } if rows == &[0]
         )));
         assert_eq!(terminal.visible_text()[0], "pre[image]post");
+    }
+
+    /// **Twelve grapheme families, each kept whole in the cell it opened, however its bytes are
+    /// cut** (review 2026-09-17 third pass).
+    ///
+    /// The retained cluster is checked against the cell it describes before it is extended
+    /// (`Term::cell_holds_cluster`), which is what stops an erase, a tab or a scroll under that
+    /// coordinate from resurrecting text the screen no longer holds. The other side of that check
+    /// is this: ordinary text must never trip it. These are the families the stock fixtures did not
+    /// cover — Devanagari, Thai and an ideographic variation sequence among them — driven whole, at
+    /// every byte boundary, and one byte at a time, which is how a cluster actually arrives from a
+    /// pipe.
+    ///
+    /// The width each family occupies is the oracle's business and is deliberately not asserted
+    /// here; what is asserted is that the cell holds the complete text, so nothing was dropped and
+    /// nothing was pushed into a cell of its own.
+    #[test]
+    fn every_grapheme_family_keeps_its_cluster_however_its_bytes_arrive() {
+        let clusters = [
+            (
+                "family with zero-width joiners",
+                "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466}",
+            ),
+            ("regional indicator flag", "\u{1f1ef}\u{1f1f5}"),
+            ("skin-tone modifier", "\u{1f44d}\u{1f3fd}"),
+            ("two stacked accents", "e\u{301}\u{327}"),
+            ("Devanagari vowel sign", "\u{915}\u{93f}"),
+            ("Devanagari conjunct", "\u{915}\u{94d}\u{937}"),
+            ("Thai tone mark", "\u{e01}\u{e49}"),
+            ("CJK with a text selector", "\u{6f22}\u{fe0e}"),
+            ("CJK with an emoji selector", "\u{6f22}\u{fe0f}"),
+            ("ideographic variation sequence", "\u{6f22}\u{e0100}"),
+            ("an arrow the selector widens", "\u{2194}\u{fe0f}"),
+            ("a watch the selector narrows", "\u{231a}\u{fe0e}"),
+        ];
+
+        for (name, cluster) in clusters {
+            let bytes = cluster.as_bytes();
+            let mut feeds = vec![vec![bytes.to_vec()]];
+            for split in 1..bytes.len() {
+                feeds.push(vec![bytes[..split].to_vec(), bytes[split..].to_vec()]);
+            }
+            feeds.push(bytes.iter().map(|byte| vec![*byte]).collect());
+
+            for pieces in feeds {
+                let mut terminal = TerminalAdapter::new(nz(10), nz(2));
+                terminal.feed(b"\x1b[?2027h");
+                for piece in &pieces {
+                    terminal.feed(piece);
+                }
+                let row = terminal.visible_row(0).expect("row 0 is on the grid");
+                assert_eq!(
+                    row.cells[0].text.as_str(),
+                    cluster,
+                    "{name}: the cell that opened the cluster holds all of it, fed as {pieces:?}"
+                );
+                assert_eq!(
+                    row.cells
+                        .iter()
+                        .skip(1)
+                        .map(|cell| cell.text.as_str())
+                        .collect::<String>()
+                        .trim(),
+                    "",
+                    "{name}: and no part of it was pushed into a cell of its own"
+                );
+            }
+        }
+    }
+
+    /// One base64 `image/png` payload: the smallest complete PNG there is, a single opaque pixel.
+    /// Built rather than pasted so that what it is stays readable — the eight-byte signature, the
+    /// header, one zlib-stored scanline and the end marker, each with its own CRC.
+    fn one_pixel_png() -> String {
+        use base64::Engine as _;
+
+        fn chunk(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+            let crc = crc32(&[kind.as_slice(), payload].concat());
+            let mut bytes = (payload.len() as u32).to_be_bytes().to_vec();
+            bytes.extend_from_slice(kind);
+            bytes.extend_from_slice(payload);
+            bytes.extend_from_slice(&crc.to_be_bytes());
+            bytes
+        }
+
+        fn crc32(bytes: &[u8]) -> u32 {
+            let mut crc = u32::MAX;
+            for byte in bytes {
+                crc ^= u32::from(*byte);
+                for _ in 0..8 {
+                    crc = if crc & 1 == 1 {
+                        (crc >> 1) ^ 0xEDB8_8320
+                    } else {
+                        crc >> 1
+                    };
+                }
+            }
+            !crc
+        }
+
+        // One stored-mode deflate block holding the single scanline `00 ff ff ff` (filter 0, then
+        // one opaque white pixel), wrapped in the zlib header and Adler-32 the format asks for.
+        let scanline = [0u8, 0xff, 0xff, 0xff];
+        let mut deflate = vec![0x78, 0x01, 0x01, 0x04, 0x00, 0xfb, 0xff];
+        deflate.extend_from_slice(&scanline);
+        let (mut a, mut b) = (1u32, 0u32);
+        for byte in scanline {
+            a = (a + u32::from(byte)) % 65521;
+            b = (b + a) % 65521;
+        }
+        deflate.extend_from_slice(&((b << 16) | a).to_be_bytes());
+
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        png.extend(chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0]));
+        png.extend(chunk(b"IDAT", &deflate));
+        png.extend(chunk(b"IEND", &[]));
+        base64::engine::general_purpose::STANDARD.encode(png)
+    }
+
+    /// **An image is a fact about the grid, so it is read against a grid the bytes before it have
+    /// reached** (review 2026-09-17 third pass).
+    ///
+    /// DEC 2026 holds a block of writes back and applies them at the terminator, and the image's
+    /// own position was read while they were still held: the `CUP` that put the cursor where the
+    /// image belongs had not been parsed, nor had the swap that decides which screen it is on. So
+    /// an image drawn inside a synchronized update was filed at the cursor from before the block,
+    /// on the screen from before it, while its placeholder — which goes through the same parser —
+    /// landed in the right place. The record pointed at a cell that held something else, which is
+    /// where a reader's hover and peek look.
+    ///
+    /// Every byte split of each sequence, because the defect is about when a fact is read and a
+    /// read that happens to fall on a feed boundary is not a different rule.
+    #[test]
+    fn an_image_inside_a_synchronized_update_is_filed_where_its_placeholder_lands() {
+        let payload = one_pixel_png();
+        let held = format!("\x1b[?2026h\x1b[3;5H\x1b]1337;File=inline=1:{payload}\x07\x1b[?2026l");
+        let swapped = format!(
+            "\x1b[?2026h\x1b[?1049h\x1b[3;5H\x1b]1337;File=inline=1:{payload}\x07\x1b[?2026l"
+        );
+        // The right margin, where the placeholder is measured rather than simply counted: seven
+        // columns of `[image]` do not fit in the three left at column 37 of a 40-column grid.
+        let margin =
+            format!("\x1b[?2026h\x1b[1;38H\x1b]1337;File=inline=1:{payload}\x07\x1b[?2026l");
+
+        for (name, stream, expected) in [
+            (
+                "a held update",
+                held,
+                AdapterEvent::InlineImage {
+                    screen: RemovalScreen::Primary,
+                    row: 2,
+                    column: 4,
+                    placeholder_columns: 7,
+                    encoded: payload.clone().into_bytes(),
+                },
+            ),
+            (
+                "a held update that took the alternate screen first",
+                swapped,
+                AdapterEvent::InlineImage {
+                    screen: RemovalScreen::Alternate,
+                    row: 2,
+                    column: 4,
+                    placeholder_columns: 7,
+                    encoded: payload.clone().into_bytes(),
+                },
+            ),
+            (
+                "a held update at the right margin",
+                margin,
+                AdapterEvent::InlineImage {
+                    screen: RemovalScreen::Primary,
+                    row: 0,
+                    column: 37,
+                    placeholder_columns: 3,
+                    encoded: payload.clone().into_bytes(),
+                },
+            ),
+        ] {
+            let bytes = stream.as_bytes();
+            for split in 0..=bytes.len() {
+                let mut terminal = TerminalAdapter::new(nz(40), nz(4));
+                let mut events = terminal.feed(&bytes[..split]);
+                events.extend(terminal.feed(&bytes[split..]));
+                let images = events
+                    .iter()
+                    .filter(|event| matches!(event, AdapterEvent::InlineImage { .. }))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    images,
+                    vec![&expected],
+                    "{name}, split={split}: the image is filed where its placeholder is written"
+                );
+            }
+        }
     }
 
     #[test]

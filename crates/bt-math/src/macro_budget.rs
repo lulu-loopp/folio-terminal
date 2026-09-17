@@ -32,7 +32,7 @@ use crate::MathRenderError;
 
 const MAX_WORK: usize = 32 * 1024;
 const MAX_DEFINITIONS: usize = 128;
-type Tok<'a> = (Token, &'a str);
+pub(super) type Tok<'a> = (Token, &'a str);
 
 #[derive(Default)]
 struct Definition<'a> {
@@ -212,6 +212,17 @@ pub(super) fn validate(source: &str) -> Result<(), MathRenderError> {
             return Err(MathRenderError::MacroCycle);
         }
     }
+
+    // **The nesting a macro expands to is not counted here, and deliberately so.** It was, and the
+    // count was wrong: two scalars per definition cannot represent a parser state, and the
+    // arithmetic missed every command that *wraps* what stands to its left. What bounds the
+    // expansion's depth now is the parser itself — `mitex-parser` sees expanded tokens, because
+    // MiTeX's macro engine sits under its lexer and pushes what a call expands to back into the
+    // token stream (`mitex_lexer::MacroEngine::trapped_by_macro`), iteratively. So a body of a
+    // hundred `\sqrt` invoked forty-eight times arrives at the parser as four thousand eight
+    // hundred commands, and is refused at the four-hundred-and-something'th, by the guard that is
+    // standing where the level would be created. What this file still owes is the *work*: how many
+    // tokens that expansion may produce at all.
     let mut work = tokens
         .iter()
         .filter_map(|token| command(*token))

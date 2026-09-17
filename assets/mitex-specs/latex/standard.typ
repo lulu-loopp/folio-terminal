@@ -1,3 +1,9 @@
+// MODIFIED BY THE FOLIO CONTRIBUTORS — not the upstream MiTeX
+// specification. Change: `\hspace`, `\vspace` and `\raisebox` parse their
+// length instead of handing it to Typst's `eval`.
+// Index: assets/mitex-specs/README.md
+// Notice given under section 4(b) of the Apache License, Version 2.0.
+
 #import "../prelude.typ": *
 
 // 0. Some useful internal variables or functions
@@ -25,6 +31,60 @@
   get-tex-str-from-arr(tex.children)
 } else {
   tex.text
+}
+// Folio: a TeX length is *parsed* here, never evaluated.
+//
+// `\hspace`, `\vspace` and `\raisebox` used to read their argument back out of
+// the typeset content with `get-tex-str` and hand the string to Typst's `eval`.
+// That is an arbitrary Typst expression assembled from a formula — and in Folio
+// a formula is text that a program merely printed into a terminal. Measured
+// 2026-09-17: `\hspace{4pt*10}` drew exactly as wide as `\hspace{40pt}`, and
+// `\hspace{(2pt+2pt)*10}` did too, so parentheses, digits, letters and operators
+// all reached `eval`; `range(0, 100000000)` is spelled with the same characters
+// and would have taken the process with it. The math worker is one thread and
+// cannot be interrupted, so there is no version of that this program survives.
+//
+// What a length may be is small and is written out. Anything else fails the
+// compile, which is exactly what `eval` did with it before — `\hspace{1ex}`
+// already came back as "invalid floating point number" — so nothing that used to
+// draw stops drawing.
+#let mitex-length-units = (
+  "pt": 1pt,
+  "mm": 1mm,
+  "cm": 1cm,
+  "in": 1in,
+  "em": 1em,
+)
+// The most points each of those units can be worth, for the size check below.
+// `em` is relative, so what bounds it is the largest size a formula is set at
+// rather than arithmetic; a hundred points is far above any of them.
+#let mitex-length-points = (
+  "pt": 1.0,
+  "mm": 2.84,
+  "cm": 28.35,
+  "in": 72.0,
+  "em": 100.0,
+)
+#let mitex-length(s) = {
+  let matched = s.trim().match(
+    regex("^([+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+))(pt|mm|cm|in|em)$"),
+  )
+  if matched == none {
+    panic("mitex: a length was expected, not " + s)
+  }
+  let value = float(matched.captures.at(0))
+  let unit = matched.captures.at(1)
+  // A formula is a line of mathematics, and ten thousand points is three and a
+  // half metres of it. Measured 2026-09-17: an enormous length is already
+  // refused downstream, by the raster-dimension check in `bt_math`, which runs
+  // before a pixmap is allocated — `\hspace{999999999999999999999999pt}` comes
+  // back "raster dimensions are invalid or too large" in ten milliseconds and
+  // allocates nothing. This says the same thing one step earlier, so the answer
+  // does not depend on a float surviving a cast three stages later.
+  if calc.abs(value) * mitex-length-points.at(unit) > 10000.0 {
+    panic("mitex: a length longer than a page: " + s)
+  }
+  value * mitex-length-units.at(unit)
 }
 #let get-tex-color-from-arr(arr) = {
   mitex-color-map.at(lower(get-tex-str-from-arr(arr)), default: none)
@@ -980,7 +1040,7 @@
   underbar: define-cmd(1, handle: it => $underline(it)$),
   plim: of-sym(math.op("plim", limits: true)),
   projlim: of-sym(math.op("proj\u{2009}lim", limits: true)),
-  raisebox: define-cmd(2, handle: (sp, it) => text(baseline: -eval(get-tex-str(sp)), it)),
+  raisebox: define-cmd(2, handle: (sp, it) => text(baseline: -mitex-length(get-tex-str(sp)), it)),
   sh: of-sym(math.op("sh")),
   smallint: of-sym($inline(integral)$),
   thickapprox: of-sym($bold(approx)$),
@@ -1096,8 +1156,8 @@
   operatorname: define-cmd(1, handle: it => math.op(math.upright(it))),
   operatornamewithlimits: define-cmd(1, alias: "operatornamewithlimits", handle: operatornamewithlimits),
   "operatorname*": define-cmd(1, alias: "operatornamewithlimits", handle: operatornamewithlimits),
-  vspace: define-cmd(1, handle: it => v(eval(get-tex-str(it)))),
-  hspace: define-cmd(1, handle: it => h(eval(get-tex-str(it)))),
+  vspace: define-cmd(1, handle: it => v(mitex-length(get-tex-str(it)))),
+  hspace: define-cmd(1, handle: it => h(mitex-length(get-tex-str(it)))),
   text: define-cmd(1, alias: "#textmath", handle: it => it),
   textmd: define-cmd(1, alias: "#textmd", handle: it => it),
   textnormal: define-cmd(1, alias: "#textnormal", handle: it => it),

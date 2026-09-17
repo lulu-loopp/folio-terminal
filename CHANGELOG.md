@@ -8,6 +8,135 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **A prompt that scrolls up the screen still is not typeset.** Folio decides
+  what a command printed from the text itself as it arrives, and it now keeps
+  that decision when the line scrolls off into the history rather than working
+  it out again from where the line used to sit — so a prompt that spelled the
+  same thing a command had printed stayed a prompt on its way past, instead of
+  becoming a formula the moment it left the screen.
+
+- **Dragging a window edge no longer lets a formula swallow the line under
+  it.** A formula kept while you resize is put back where its source now sits,
+  but it went on claiming as many rows as it used to occupy — so widening the
+  window, which lets a long formula fit in fewer lines, left it covering the
+  text underneath, and narrowing it left the formula showing its source until
+  the next redraw. Both lasted as long as the drag. A formula now occupies
+  exactly the lines its own source occupies at the width you are at.
+
+- **Two lines with the same formulas in them no longer show each other's
+  picture.** Where a line has more than one `$…$` in it, Folio draws the whole
+  line's formulas as one picture, and it was filing that picture under the
+  formulas alone — so two lines carrying the same formulas with different words
+  between them were treated as the same picture, and whichever Folio drew first
+  was shown for both. On the other line the second formula appeared in the wrong
+  place, over the words beside it. The picture is now filed under where its
+  formulas actually sit as well, and lines that really do match go on sharing
+  one. The same is true of a line whose formulas are spread over more than one
+  row: each row's picture is now filed under the part of the image it shows,
+  rather than only under where that part begins.
+
+- **Right-clicking a formula copies that formula, not one from the pane you
+  last typed in.** Copy LaTeX asked whichever pane held the keyboard, and a
+  right press does not move the keyboard — so in a split, copying from a formula
+  in the pane you were only pointing at either did nothing at all or, when the
+  other pane happened to hold a block in the same place, copied that one
+  instead. All three of a formula's actions — copy, show source, and the source
+  toggle's animation — now act on the pane the formula is in.
+
+- **A formula nested past what Folio can draw is refused, rather than ending
+  the program.** Some shapes of mathematics nest as deeply as they are long —
+  a stack of superscripts, a fraction inside a fraction inside a fraction, or a
+  short definition repeated — and following one down far enough used to end
+  Folio outright, from text a program had only printed. Folio now stops at its
+  limit as it reads, rather than trying to guess beforehand how far a formula
+  would take it, and leaves anything past that limit as the text you printed,
+  the way it leaves anything else it cannot draw. The limit is far beyond any
+  formula written to be read: thirty fractions inside one another, a dozen roots
+  inside one another, and every ordinary matrix and alignment are drawn as
+  before. An earlier attempt at the same fix guessed the depth in advance, and
+  guessed it wrong in both directions — it let several shapes of deep nesting
+  through, and refused a long row of perfectly flat fractions.
+
+- **A table of mathematics that would be too big to draw is refused before it is
+  drawn, not after.** A row of column markers and a column of row markers is a
+  handful of characters, and it asks for a grid as wide and as tall as both —
+  eight thousand characters could have asked for seven million cells, which is
+  minutes of work and more memory than Folio has. It now works that out from the
+  formula itself and leaves anything past its limit as the text you printed. It
+  works it out from what the formula becomes rather than from how it was written,
+  so putting the markers in a group, or behind an abbreviation, or in no table at
+  all, makes no difference. The limit is a sixty-four by sixty-four grid; an
+  ordinary matrix, a long alignment, a definition with thirty cases and a
+  multi-line derivation are all nowhere near it.
+
+- **A formula cannot run a program.** Mathematics written for TeX has a corner
+  of its notation that says "and here is some Typst" — Folio passed that through
+  and ran it, so a line of text a program printed into a pane could ask Folio to
+  loop forever, or to build something so large that it ran out of memory. The
+  first would have left every later formula on screen as plain text, with nothing
+  to show it was waiting; the second would have ended Folio. Folio now leaves
+  such a formula as the text you printed, the way it leaves anything else it
+  cannot draw, and the spacing commands that used to be worked out by running
+  them are read instead. Nothing that was ever a formula changes.
+
+- **One formula that cannot be drawn no longer takes the whole window with
+  it.** A fault while typesetting was caught in one stage of the work and not in
+  the others, so a fault in any of the rest ended Folio — every pane, every
+  shell, over one line of mathematics. A formula that goes wrong now stays as
+  the text you printed and nothing else is disturbed. Folio also refuses a
+  formula nested past its stated limit when the nesting is written without
+  braces, which it used to count only one way and let through the other.
+
+- **A screenful of formulas all at once no longer leaves the first few as raw
+  text.** Printing a dense page of mathematics — a report, a log, anything that
+  arrives in one go — gave Folio more formulas to draw than it queues at a time,
+  and the ones it could not take right away were forgotten rather than picked up
+  on the next pass. They stayed as `$…$` until something else disturbed the
+  line. Folio now comes back for them without letting a continually repainted
+  line hold up the rest.
+
+- **An inline formula in a command's output is typeset even when its picture is
+  ready only after the prompt has come back.** Printing a file of mathematics
+  hands Folio the whole file and the shell's "the command is done" mark in one
+  breath, so every picture in it is finished a moment later — and a `$…$` was
+  being judged, at that moment, against a command that had already ended. Some
+  of them typeset and some were left as raw text, the same file coming out
+  differently from one run to the next, and a line long enough to wrap tended to
+  lose both of its formulas at once. Which text a command printed is now written
+  down as it is printed, so the answer no longer depends on when the picture
+  happens to be ready. Displayed `$$` blocks were never affected: they carry
+  their own proof.
+
+- **Your prompt is never typeset as mathematics, whatever it says, wherever it
+  moves, and whatever a command does to the line afterwards.** Folio decides what a command printed by remembering it at the
+  moment it arrives, rather than by working it out afterwards from where things
+  sit — so a shell that redraws its prompt with the very text a command had just
+  printed gets a prompt, not a formula, and so does one that clears the screen
+  first, or reprints after a reset, or writes a shorter prompt over an older
+  line. The same holds when the screen moves underneath: inserting, deleting,
+  scrolling or shrinking rows carries each line's own history with it instead of
+  handing it whatever used to stand in that place. And a command that writes
+  over part of your prompt's line — with a tab, an accent, or by filling the
+  screen first — does not thereby take the rest of it: Folio asks that every
+  character on a line be one a command printed, so text that arrives by a route
+  nobody has taught it about is left alone rather than taken for output.
+
+- **Formulas printed after a full-screen program exits are typeset again.** When
+  a command shows something full-screen on its way — a pager, an editor, a menu
+  — and then carries on printing, everything it printed after that program left
+  was treated as though nobody knew where it came from, so `$…$` in it stayed as
+  raw text until the next command started. What a command prints on the screen
+  it has just been handed back is that command's output, and it is typeset like
+  the rest of it. What the full-screen program itself drew is unchanged.
+
+- **A formula is no longer taken down by its neighbour's result.** Folio looks
+  at every line that could be the start of something, and inside a block of
+  mathematics its own body lines look like that too. When one of those came back
+  as "nothing here", it took down whichever picture happened to be standing over
+  it — so a matrix could vanish the instant the formula above it finished, and
+  come back only when something else made Folio look again. An answer about one
+  line is now an answer about that line.
+
 - **A formula block that had partly scrolled into the history is no longer cut
   off at the bottom by the line after it.** Print the same file twice and the
   second printing pushed the first one's `$$` block up until its opening line

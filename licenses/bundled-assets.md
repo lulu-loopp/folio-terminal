@@ -35,6 +35,28 @@ in the repository at `vendor/alacritty_terminal/LICENSE-APACHE`.
 
 ---
 
+### `mitex` 0.2.4 and `mitex-parser` 0.2.4, vendored and modified
+
+<https://github.com/mitex-rs/mitex> — Apache License, Version 2.0.
+
+`vendor/mitex/` and `vendor/mitex-parser/` are the crates.io 0.2.4 archives with
+changes by the Folio contributors. Every file that differs carries a notice at the
+top of the file, as section 4(b) requires, and `vendor/mitex/CHANGES-FOLIO.md` and
+`vendor/mitex-parser/CHANGES-FOLIO.md` index them.
+
+They are vendored for the depth these two crates will recurse to. Both are
+recursive descent — the parser over a formula's tokens, the converter over the
+tree it builds — and in Folio they run over text a program printed into a
+terminal, where a stack overflow is not something the caller can contain.
+
+Upstream ships **no licence file** with either crate — the published archives
+carry only the `license = "Apache-2.0"` line in their manifests — so there is no
+attribution notice to propagate under section 4(d).
+
+The Apache-2.0 text is reproduced in this document under the crate listing.
+
+---
+
 ### Microsoft ConPTY sidecar — `conpty.dll` and `OpenConsole.exe`
 
 <https://github.com/microsoft/terminal> — MIT.

@@ -1096,6 +1096,7 @@ mod tests {
             styles: Vec::new(),
             shell_marks: Vec::new(),
             wrap_split: false,
+            command_output_write: false,
         }
     }
 

@@ -1,7 +1,8 @@
 // MODIFIED BY THE FOLIO CONTRIBUTORS — not the upstream
 // alacritty_terminal 0.26.0 file of the same name.
-// Change: reformatted to this repository's rustfmt settings, and a ceiling on the zerowidth marks
-// one cell holds (`push_zerowidth`).
+// Change: reformatted to this repository's rustfmt settings, a ceiling on the zerowidth marks
+// one cell holds (`push_zerowidth`), and one added flag, `COMMAND_OUTPUT_WRITE`, which records for
+// each cell whether the write that put its text there was a shell command's output.
 // Index: vendor/alacritty_terminal/CHANGES-FOLIO.md
 // Notice given under section 4(b) of the Apache License, Version 2.0.
 
@@ -38,6 +39,24 @@ bitflags! {
         const UNDERCURL                 = 0b0001_0000_0000_0000;
         const DOTTED_UNDERLINE          = 0b0010_0000_0000_0000;
         const DASHED_UNDERLINE          = 0b0100_0000_0000_0000;
+        /// **Folio's, not upstream's: a command's output put this cell's text here.**
+        ///
+        /// Set by the cell-writing path on every cell whose text it *replaces* while the terminal
+        /// is inside a shell's OSC 133 `C..D` command-output region, and cleared by the same write
+        /// when it is not. `Cell::reset` takes the default flags, so an erase clears it too, and a
+        /// cell nothing has written since is left claiming nothing.
+        ///
+        /// **It is set by the claim and read as the claim**, which is the direction that fails
+        /// safely. An owner outside the emulator asks whether *every* cell carrying text on a line
+        /// has it; a road that puts text into a cell without going through the stamp — `DECALN`, a
+        /// reset, a cell a shift creates, anything nobody has audited yet — therefore produces text
+        /// that claims nothing, and the line is refused rather than quietly accepted.
+        ///
+        /// It lives on the cell because the cell is what moves: a scroll, a scroll region,
+        /// `IL`/`DL`, `RI`, `CSI S`/`T`, a resize reflow that re-cuts the row it was in, and
+        /// eviction into a scrollback all carry it with no bookkeeping of their own to keep in
+        /// step. The terminal never reads it; the value is [`super::Term::set_write_provenance`]'s.
+        const COMMAND_OUTPUT_WRITE      = 0b1000_0000_0000_0000;
         const ALL_UNDERLINES            = Self::UNDERLINE.bits() | Self::DOUBLE_UNDERLINE.bits()
                                         | Self::UNDERCURL.bits() | Self::DOTTED_UNDERLINE.bits()
                                         | Self::DASHED_UNDERLINE.bits();

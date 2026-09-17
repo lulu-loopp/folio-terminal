@@ -59,6 +59,14 @@ pub(crate) fn captured_row_fingerprint(
         cell.flags
             .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
             .hash(&mut hasher);
+        // Provenance is not style, so `capture_flags` does not carry it and it is hashed on its
+        // own. It has to be in here twice over: the captured row is cached under this fingerprint,
+        // so a stale capture would answer for a cell the prompt has since claimed; and a prompt
+        // that reprints a line byte for byte changes no glyph, which is exactly the sequence that
+        // used to leave a retired command's eligibility on the row it overwrote.
+        cell.flags
+            .contains(Flags::COMMAND_OUTPUT_WRITE)
+            .hash(&mut hasher);
     }
     let continues = term.columns() != 0
         && term.grid()[Line(row as i32)][Column(term.columns() - 1)]
@@ -187,6 +195,7 @@ pub(crate) fn to_captured_row(row: &[Cell]) -> CapturedRow {
                 wide_spacer: cell
                     .flags
                     .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER),
+                command_output_write: cell.flags.contains(Flags::COMMAND_OUTPUT_WRITE),
             }
         })
         .collect();
