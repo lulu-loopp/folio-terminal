@@ -29537,6 +29537,76 @@ fn paste_offer_survives(promised: Option<PasteOffer>, at_release: Option<PasteOf
     promised.is_some() && promised == at_release
 }
 
+/// **Whose glass a point is on**, as the window manager answers it — kept at
+/// three values because the two gestures that ask want opposite things from the
+/// third one.
+///
+/// See [`Runtime::glass_here`] for where each answer comes from on each system.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GlassHere {
+    /// This window's own glass is what is visible at that point.
+    Ours,
+    /// Somebody else's is — another Folio window, or another application's.
+    Theirs,
+    /// Nothing answered. A point no window covers, a window this process cannot
+    /// ask about, or — on macOS — any window belonging to another application.
+    Unknown,
+}
+
+/// **A drag that moves panes goes on unless the glass is certainly somebody
+/// else's** (multiwindow F2).
+///
+/// The unknown answer stays home, and that is the conservative direction here:
+/// the cost of being wrong is that a pane lands in the window holding the
+/// gesture instead of the one under the hand, which the reader can see happen
+/// and undo by dragging it again.
+const fn glass_allows_a_drop(glass: GlassHere) -> bool {
+    !matches!(glass, GlassHere::Theirs)
+}
+
+/// **A text write happens only when the glass is certainly ours** (review
+/// 2026-09-17 round 2).
+///
+/// The opposite default to [`glass_allows_a_drop`], and the asymmetry is the
+/// ruling rather than an inconsistency: bytes on a command line are not visible
+/// as a mistake and cannot be undone by repeating the gesture, so the answer
+/// this window does not have is the answer it refuses on.
+///
+/// **What it is defending against.** The pointer is captured for the whole of a
+/// drag, so a release is delivered to the window that started it wherever the
+/// hand actually is — and the survey reads this window's own geometry, which
+/// goes on describing a pane that an always-on-top window is sitting in front
+/// of. Hover a visible part of a terminal's middle, move into the part another
+/// window covers, let go: every identity is unchanged, the plan fits, and
+/// without this the path is typed into a terminal nobody could see. Neither the
+/// broker's aim nor its pointer closes it — both are refreshed by *delivered*
+/// motion, which is the reading the release already distrusts.
+const fn glass_allows_a_text_write(glass: GlassHere) -> bool {
+    matches!(glass, GlassHere::Ours)
+}
+
+/// **Every condition a dragged path must clear before a byte is written**, in
+/// one place and as a function of four plain facts.
+///
+/// Written as one function so that the answer can be read, and tested, without
+/// a window — and so that no caller can satisfy three of the four and reach the
+/// write. [`Runtime::paste_offer_kept`] is what gathers the facts; this is what
+/// they mean, and it hands back the **address** rather than a `bool` so that a
+/// caller cannot take the verdict from here and the destination from somewhere
+/// older.
+fn paste_offer_is_kept(
+    glass: GlassHere,
+    promised: Option<PasteOffer>,
+    at_release: Option<PasteOffer>,
+    plan_fits: bool,
+) -> Option<PasteTarget> {
+    let at_release = at_release?;
+    (glass_allows_a_text_write(glass)
+        && plan_fits
+        && paste_offer_survives(promised, Some(at_release)))
+    .then_some(at_release.target)
+}
+
 impl RowVerb {
     /// The pane this verb *names*, for the two that name one.
     ///
@@ -89888,17 +89958,41 @@ impl Runtime<'_> {
     /// and none of them is visible from here.
     ///
     /// A window this process cannot ask about answers `true`, which is the
-    /// conservative half: with no answer, the gesture is the ordinary one it
-    /// always was, in the window that is holding it.
+    /// conservative half **for a gesture that moves panes**: with no answer, the
+    /// gesture is the ordinary one it always was, in the window that is holding
+    /// it. It is not the conservative half for a text write, which is why the
+    /// third answer is kept rather than folded away — see [`GlassHere`].
     fn pointer_is_on_our_own_glass(&self, position: PhysicalPosition<f64>) -> bool {
+        glass_allows_a_drop(self.glass_here(position))
+    }
+
+    /// **Who owns the glass under this pointer**, as the window manager sees it
+    /// — all three answers, because this window's two readers want opposite
+    /// things from the third.
+    ///
+    /// The one door onto the question, so that the release asks the very thing
+    /// [`Self::drive_drag`] asks before it surveys, with the same conversion
+    /// into screen pixels, and only the *default* differs between them.
+    ///
+    /// **[`GlassHere::Unknown`] is a real answer and not a failure.** It is what
+    /// a point no window covers gives on Windows, and — the case that matters —
+    /// what a window belonging to **another application** gives on macOS, where
+    /// `windowWithWindowNumber` only knows this process's own windows. So a
+    /// covered pane answers `Theirs` on one platform and `Unknown` on the other,
+    /// and a rule that treated the two differently would be right on one system
+    /// only.
+    fn glass_here(&self, position: PhysicalPosition<f64>) -> GlassHere {
         let Some((x, y)) = self.to_screen(position) else {
-            return true;
+            return GlassHere::Unknown;
         };
         let Ok(mine) = native_window(&self.window.window) else {
-            return true;
+            return GlassHere::Unknown;
         };
-        bt_platform::top_level_window_at(x.round() as i32, y.round() as i32)
-            .is_none_or(|under| under == mine)
+        match bt_platform::top_level_window_at(x.round() as i32, y.round() as i32) {
+            Some(under) if under == mine => GlassHere::Ours,
+            Some(_) => GlassHere::Theirs,
+            None => GlassHere::Unknown,
+        }
     }
 
     /// **Open the broker for a payload that is allowed to leave this window**
@@ -90352,8 +90446,8 @@ impl Runtime<'_> {
         self.finish_drag()
     }
 
-    /// **The three questions a text write answers that no other drop has to**
-    /// (review 2026-09-17 P1-a and P1-b).
+    /// **The four questions a text write answers that no other drop has to**
+    /// (review 2026-09-17, both rounds).
     ///
     /// Every other landing this engine commits moves panes inside one tree: a
     /// stale aim there costs a rectangle, which the reader can see and undo by
@@ -90390,6 +90484,18 @@ impl Runtime<'_> {
     /// and draws the refusal. Writing behind that outline would make the picture
     /// a lie in the one direction that costs a command line.
     ///
+    /// ④ **That the pane is the one that is actually visible there.** The
+    /// pointer is captured for the whole of a drag, so the release is delivered
+    /// to the window that started it wherever the hand has got to — and
+    /// [`Self::survey_drop`] reads *this window's* geometry, which goes on
+    /// describing a pane that another window may be sitting in front of. So the
+    /// window manager is asked what is on top at the fresh point, with the same
+    /// door and the same conversion [`Self::drive_drag`] uses before it surveys
+    /// ([`Self::glass_here`]) — and, unlike the drag engine, a text write refuses
+    /// the answer it does not get ([`glass_allows_a_text_write`]). Neither the
+    /// broker's aim nor the broker's pointer would do: both are refreshed by
+    /// delivered motion, which is precisely the reading ① exists to distrust.
+    ///
     /// Answers the address to write to — the one **both** readings agree on —
     /// rather than a `bool`, so that no caller can take the verdict from here and
     /// the destination from somewhere older.
@@ -90400,8 +90506,12 @@ impl Runtime<'_> {
         // gesture is over.
         let mut seam = drag.seam;
         let at_release = self.survey_drop(&drag.source, drag.home, released_at, &mut seam);
-        let now = self.paste_offer_at(at_release)?;
-        (paste_offer_survives(drag.paste_offer, Some(now)) && plan.fits()).then_some(now.target)
+        paste_offer_is_kept(
+            self.glass_here(released_at),
+            drag.paste_offer,
+            self.paste_offer_at(at_release),
+            plan.fits(),
+        )
     }
 
     /// **U7 — let go over the layout** (L136-L140, G81-G83, D43).
@@ -171498,25 +171608,33 @@ mod clipboard_path_tests {
                 "and aims again from there, against the tree as it stands now",
             ),
             (
-                "self.paste_offer_at(at_release)?",
+                "self.glass_here(released_at)",
+                "and asks the window manager whose glass is under that same fresh \
+                 point — the ownership question `drive_drag` asks before it \
+                 surveys, asked again at the release. Not the broker's aim and \
+                 not the broker's pointer: delivered motion is what refreshes \
+                 those, which is the very reading the line above distrusts",
+            ),
+            (
+                "self.paste_offer_at(at_release)",
                 "reading the shell that aim names a second time",
             ),
             (
-                "paste_offer_survives(drag.paste_offer, Some(now))",
-                "which must be the very offer the box was drawn for",
-            ),
-            (
                 "plan.fits()",
-                "and the box must not have been a refusal (P1-b)",
+                "and the box must not have been a refusal (P1-b) — with all four \
+                 facts weighed in one place, `paste_offer_is_kept`",
             ),
         ] {
             assert_eq!(kept.matches(once).count(), 1, "`{once}` — {what}:\n{kept}");
         }
-        assert!(
-            !kept.contains("drag.pointer"),
-            "the release fell back on the drag's cached pointer, which is the \
-             reading this whole function exists to distrust:\n{kept}"
-        );
+        for forbidden in ["drag.pointer", "broker", "pointer_position"] {
+            assert!(
+                !kept.contains(forbidden),
+                "`{forbidden}` in the release's own reading — every one of those is \
+                 refreshed by delivered motion, which is the reading this whole \
+                 function exists to distrust:\n{kept}"
+            );
+        }
         // And the offer the release compares against is taken on the pointer
         // move that drew the box, not recomputed at the release — two readings
         // of one function at two moments is the entire mechanism.
@@ -171528,26 +171646,29 @@ mod clipboard_path_tests {
         );
     }
 
-    /// **The four ways a hover-time aim stops naming the shell it named, and the
-    /// one rule that refuses all four** (review 2026-09-17 P1-a).
+    /// **Every way a release stops being the release the box promised, and the
+    /// one rule that refuses all of them** (review 2026-09-17, both rounds).
     ///
-    /// Each row below is one of the sequences the review traced in the source,
-    /// written as the pair of readings the release compares: what the box
-    /// promised, and what the same question answers at the release. The rule is
-    /// equality, so every row is a refusal — and the first row is the control
-    /// that stops "refuse everything" from passing this test.
+    /// Each assertion below is one of the sequences the two reviews traced in
+    /// the source, written as the facts [`Runtime::paste_offer_kept`] gathers:
+    /// whose glass is under the fresh point, what the box promised, what the
+    /// same question answers at the release, and whether the plan still fits.
+    /// The rule is that all four must agree, so every row but the control is a
+    /// refusal — and the control is what stops "refuse everything" from passing.
     ///
     /// **Why this is the whole of it.** `paste_offer_kept` builds `at_release`
-    /// out of the platform's cursor and the live tree
+    /// out of the platform's cursor and the live tree, and asks the window
+    /// manager about that same fresh point
     /// ([`a_rows_centre_verbs_leave_by_three_doors`] pins that it does), so the
-    /// four sequences differ from each other only in *which field* of the second
-    /// reading comes back different — and that is what is set out here.
+    /// sequences differ from each other only in *which fact* comes back
+    /// different — and that is what is set out here.
     ///
-    /// MUTATION: compare only the landings and row 4 passes, which is the
-    /// active-tab closure — the nastiest of the four, because the seat numbers
-    /// agree. MUTATION: compare only the targets and rows 1 and 2 pass.
-    /// MUTATION: make a missing `at_release` fall back to the promise and row 3
-    /// pastes into a pane that is not there.
+    /// MUTATION: compare only the landings and the active-tab closure passes —
+    /// the nastiest of them, because the seat numbers agree. MUTATION: compare
+    /// only the targets and the first two pass. MUTATION: let a missing
+    /// `at_release` fall back to the promise and a vanished pane is written
+    /// into. MUTATION: give the text write [`glass_allows_a_drop`]'s default
+    /// instead of its own and both covered-pane rows pass.
     #[test]
     fn a_stale_aim_is_refused_however_it_went_stale() {
         const B: SeatId = bt_layout::SeatId(2);
@@ -171564,57 +171685,93 @@ mod clipboard_path_tests {
         };
         let centre = |seat| DropLanding::SeatCentre { target: seat };
         let promised = offer(centre(B), 1, B, 7);
+        // The three facts that are *not* the subject of a row, so that each row
+        // below changes exactly one thing.
+        let kept = |glass, at_release| paste_offer_is_kept(glass, promised, at_release, true);
 
-        assert!(
-            paste_offer_survives(promised, promised),
-            "the control: a hand that let go where the box was drawn, over the \
-             shell the box named, pastes"
+        assert_eq!(
+            kept(GlassHere::Ours, promised),
+            promised.map(|offer| offer.target),
+            "the control: a hand that let go on our own glass, where the box was              drawn, over the shell the box named, pastes — and pastes into that              shell by name"
         );
 
         // ① The hand moved to another pane and no motion was delivered before
         //    the button came up (winit's Windows backend emits the release
         //    without refreshing the cursor). The release surveys the platform's
         //    own position and gets A.
-        assert!(
-            !paste_offer_survives(promised, offer(centre(A), 1, A, 9)),
+        assert_eq!(
+            kept(GlassHere::Ours, offer(centre(A), 1, A, 9)),
+            None,
             "a missed final motion wrote into the pane the hand had left"
         );
         // ② The target survived but the layout reflowed under a still hand — a
         //    sibling closed, the solver moved B — so the release point is now in
         //    B's edge band. An edge promises a split and names no shell, so the
         //    second reading is nothing at all.
-        assert!(
-            !paste_offer_survives(promised, None),
-            "a pane that moved out from under the pointer was still written into"
-        );
-        // ③ The target vanished: the seat is not in the tree, so there is no
-        //    shell to name. Same shape as ②, different cause, and the rule does
-        //    not have to tell them apart.
-        assert!(
-            !paste_offer_survives(promised, None),
-            "a pane that closed under the hand was still written into"
+        //
+        // ③ And the same nothing for a target that vanished: the seat is not in
+        //    the tree, so there is no shell to name. Different cause, same
+        //    reading, and the rule does not have to tell them apart.
+        assert_eq!(
+            kept(GlassHere::Ours, None),
+            None,
+            "a pane that moved or closed under the hand was still written into"
         );
         // ④ The active tab closed — a row drag carries no tab, so the drag is
         //    not cancelled with it — and the neighbour came up. Seat ids are
         //    minted per tree, so the *same number* now names a different
         //    terminal, and the landing is identical. Only the tab and the
         //    incarnation say so.
-        assert!(
-            !paste_offer_survives(promised, offer(centre(B), 4, B, 11)),
+        assert_eq!(
+            kept(GlassHere::Ours, offer(centre(B), 4, B, 11)),
+            None,
             "an active-tab closure wrote into whatever pane inherited the number"
         );
-        assert!(
-            !paste_offer_survives(promised, offer(centre(B), 1, B, 11)),
+        assert_eq!(
+            kept(GlassHere::Ours, offer(centre(B), 1, B, 11)),
+            None,
             "a shell that was restarted in the same hole is a different shell"
+        );
+
+        // ⑤ **Round 2: nothing about the offer changed at all.** Same landing,
+        //    same tab, same seat, same shell, a plan that fits — and another
+        //    window is covering that part of the pane. The pointer is captured,
+        //    so the release still comes to this window and the survey still
+        //    describes a pane the reader cannot see. Both platforms are here,
+        //    because a covered pane answers differently on each: Windows names
+        //    the window on top, and macOS answers nothing at all for a window
+        //    belonging to another application.
+        for covered in [GlassHere::Theirs, GlassHere::Unknown] {
+            assert_eq!(
+                kept(covered, promised),
+                None,
+                "{covered:?}: the path was typed into a terminal behind another                  window, with every identity in the offer unchanged"
+            );
+        }
+        assert!(
+            !glass_allows_a_text_write(GlassHere::Unknown),
+            "a text write on an answer the window manager would not give is a              guess, and this one cannot be seen or undone"
+        );
+        assert!(
+            glass_allows_a_drop(GlassHere::Unknown),
+            "and the pane-moving drag keeps the opposite default, which is F2's:              with no answer the payload stays in the window holding it"
+        );
+
+        // ⑥ P1-b: the box was a refusal — the window is below what its own tree
+        //    needs — so there was never anything to keep.
+        assert_eq!(
+            paste_offer_is_kept(GlassHere::Ours, promised, promised, false),
+            None,
+            "a path was written behind the dashed outline"
         );
         // And a release with no promise behind it — a box that never said
         // `Paste path` — writes nothing either.
-        assert!(
-            !paste_offer_survives(None, promised),
+        assert_eq!(
+            paste_offer_is_kept(GlassHere::Ours, None, promised, true),
+            None,
             "a release wrote a path the box never promised"
         );
     }
-
     /// The body of one method, from its signature to the brace that closes it at
     /// the `impl`'s own indentation — `layer_shape_tests::fn_body`'s reader,
     /// borrowed for one pin. The doc comment above the signature is deliberately
