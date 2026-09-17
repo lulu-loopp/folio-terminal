@@ -51213,6 +51213,51 @@ mod drop_plan_tests {
         );
     }
 
+    /// PIN — **a content plan the window is too small for is a refusal, and it
+    /// says so the way every other refusal does** (review 2026-09-17 P1-b).
+    ///
+    /// `plan_content_drop` moves no rectangle, which is exactly why it is easy
+    /// to read it as "always fits". It does not: the plan carries the layout the
+    /// window would have, and a window dragged below what its own tree needs has
+    /// none — so `fits()` is false, the caption comes off the box
+    /// (`Runtime::dock_overlay_layers`) and a dashed outline is drawn instead.
+    ///
+    /// **This is a `bool` a text write now reads.** "Open in this preview"
+    /// behind a refused box costs a pane showing the wrong document; `Paste
+    /// path` behind one costs characters on a command line, so
+    /// `Runtime::paste_offer_kept` asks `fits()` before writing and this is what
+    /// says there is a real answer for it to ask.
+    ///
+    /// Mutation: make `plan_content_drop` skip the `plan_fits` filter and hand
+    /// back the solve unconditionally — the second assertion fails, the outline
+    /// goes solid, and the release starts writing behind it.
+    #[test]
+    fn a_content_drop_into_a_window_below_its_minimum_is_refused() {
+        let seats = window(row(1, term(1), preview(2)));
+        assert!(
+            seats
+                .plan_content_drop(&metrics(), view(), SeatId(2))
+                .is_some_and(|plan| plan.fits()),
+            "the control: at the fixture's own size this centre is offered"
+        );
+        // Two panes side by side cannot both clear `MIN_PANE_W` in a window this
+        // narrow, so the tree the plan describes has no lawful layout.
+        let squeezed = logical_viewport(
+            300,
+            H,
+            scale_ppm(DPI),
+            0,
+            folio_band_device_px(scale_ppm(DPI)),
+        );
+        let plan = seats
+            .plan_content_drop(&metrics(), squeezed, SeatId(2))
+            .expect("the seat is still in the tree — it is the window that shrank");
+        assert!(
+            !plan.fits(),
+            "a window below its own tree's minimum still offered a content drop"
+        );
+    }
+
     // ── P61: the stand-in ───────────────────────────────────────────────────
 
     fn preview(id: u64) -> LayoutNode {

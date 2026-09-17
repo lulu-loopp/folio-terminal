@@ -101,7 +101,7 @@
 | 乙26 | 拖 tab 悬在某 pane 中心 | 该 pane 被整棵 tab 替换 | `main.rs:19871` | 框里写「Replace pane」(`i18n.rs:2275`) | 同上 |
 | 乙27 | 拖文件行悬在预览 pane 中心 | 在那个预览里打开 | `main.rs:19967` | 框里写「Open in this preview」(`i18n.rs:2868`) | 同上 |
 | 乙28 | 拖文件夹行悬在 files 列中心 | 该列换根到这个目录 | `main.rs:19969` | 框里写「Root this tree here」(`i18n.rs:2869`) | 同上 |
-| 乙29 | 拖到不接受的中心(文件落树 / 文件夹落预览 / 任何落终端) | 诚实拒绝 | `main.rs:19972` | **虚线框、框里无字**——拒绝是画出来的(`main.rs:32910`) | 有画面 |
+| 乙29 | 拖到不接受的中心(文件落树 / 文件夹落预览 / 文件夹落终端) — **superseded in part 2026-09-16**: a *file* over a terminal's middle is no longer refused, it pastes the path and the box says `Paste path` (§7.1.1). The rest of this row stands. | 诚实拒绝 | `main.rs:19972` | **虚线框、框里无字**——拒绝是画出来的(`main.rs:32910`) | 有画面 |
 | 乙30 | 拖 pane 到 tab 条空白 / 两 tab 之间 | 撕成一个新 tab | `main.rs:20451`,提交 `64014` | 条里插入一枚替身 tab(`main.rs:32576`);菜单同义行 `Move pane to new tab`(`profiles.rs:7898`) | 双线索 |
 | 乙31 | 拖 pane 到另一个 tab 上 | 并入那个 tab(接在树末) | `main.rs:20442`,提交 `64040` | 该 tab 整块高亮(`main.rs:27856`) | 落点高亮 |
 | 乙32 | 拖文件夹行到 tab 条 | 新建 files tab | `main.rs:63840` 一族 | 替身 tab | 同上 |

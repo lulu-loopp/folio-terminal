@@ -17,9 +17,12 @@ All notable changes to Folio are recorded here. The format follows
   the one you dropped it on, not the one you had been typing in. It is the same
   quoting a file dropped in from File Explorer or the Finder gets, so
   PowerShell, `cmd`, a WSL shell and the rest each get the spelling they read,
-  and nothing is run: the path is put in front of the cursor for you to finish
-  the line. A preview pane and a files column are unchanged — their middles
-  still mean what they meant — and `Esc` still calls the whole thing off.
+  and Folio runs no command of its own: the path is put in front of the cursor
+  for you to finish the line. A preview pane and a files column are unchanged —
+  their middles still mean what they meant — and `Esc` still calls the whole
+  thing off. If anything moves between the moment the pane lights up and the
+  moment you let go — your hand to another pane, a pane closing, a tab closing
+  under it — nothing is written at all, rather than written somewhere else.
 
 ### Fixed
 
@@ -56,8 +59,8 @@ All notable changes to Folio are recorded here. The format follows
   file you *copied* has had since 0.4.1, so PowerShell, `cmd`, a WSL shell and
   the rest each get the spelling they read. Several files let go of together
   arrive on one line, one argument each, and a name the shell has no way to
-  spell is reported instead of being mangled. Nothing is run: the path is put in
-  front of the cursor for you to finish the line.
+  spell is reported instead of being mangled. Folio runs no command of its own:
+  the path is put in front of the cursor for you to finish the line.
 
 - **A picture on the clipboard now pastes as the path of a file Folio writes
   for it.** A screenshot taken with `Win`+`Shift`+`S`, or with
