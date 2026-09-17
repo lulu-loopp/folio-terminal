@@ -12713,6 +12713,20 @@ struct WindowRuntime {
     /// [`Runtime::settle_composition_owner`] at the tail of every pass, which is
     /// the one place that notices the keyboard has moved.
     composing: Option<ImeOwner>,
+    /// **Which shell a live composition belongs to** (§7.1.5a″; review
+    /// 2026-09-17 P2) — `None` when no shell has one.
+    ///
+    /// Beside [`Self::composing`] and set in the same breath, because the two
+    /// are one fact read at two grains: that one says *what kind* of surface the
+    /// letters were typed into, which is all the pass-tail settlement needs, and
+    /// this one says *which shell*, which is what two terminals need to be told
+    /// apart. Kept as a [`PasteTarget`] so the answer survives a tab moving and
+    /// a shell restarting in the same seat.
+    ///
+    /// **It outlives [`Runtime::cancel_composition`] on purpose.** That call is
+    /// a request an input method may refuse, and this is what makes the refusal
+    /// safe: see [`shell_ime_ruling`].
+    shell_composing: Option<PasteTarget>,
     ime_active: bool,
     ime_cursor_throttle: ImeCursorThrottle,
     /// The tab-rename caret's line box in window pixels, as the strip last drew
@@ -18238,6 +18252,107 @@ fn composition_outlived_its_field(
     holds_the_keyboard: ImeOwner,
 ) -> bool {
     composing.is_some_and(|started_in| started_in != holds_the_keyboard)
+}
+
+/// **What a composition event arriving for a shell is**, as far as the ruling
+/// below needs to know (§7.1.5a″; review 2026-09-17 P2).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ShellIme {
+    /// A pre-edit with letters in it. This is somebody composing **now**, so it
+    /// belongs to whatever shell holds the keyboard at this instant — which is
+    /// what "the first pre-edit after the keyboard moved starts a new
+    /// composition" means.
+    Opens,
+    /// An empty pre-edit: the letters that were on the glass are taken off. It
+    /// ends nothing and claims nothing — an input method whose cancel *was*
+    /// honoured says this, and so does one that is about to commit anyway.
+    Clears,
+    /// A commit. The letters are about to be written to a child.
+    Commits,
+}
+
+/// What [`shell_ime_ruling`] decided: whether these letters reach a shell, and
+/// which shell the window should consider the composition to belong to
+/// afterwards.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ShellImeRuling {
+    /// Whether the event is answered at all. `false` is a **discard**: nothing
+    /// is written, to this pane or to any other.
+    deliver: bool,
+    /// The shell the composition belongs to from here on.
+    belongs_to: Option<PasteTarget>,
+}
+
+/// **A composition belongs to the shell it began in, and a cancel that was not
+/// honoured does not change that** (§7.1.5a″; review 2026-09-17 P2).
+///
+/// [`Runtime::cancel_composition`] is a *request*: `ImmNotifyIME` answers a
+/// bool, and §7.1.5a″ already records an input method that does not honour it.
+/// So the keyboard moves from pane A to pane B — a dropped path, a click, a
+/// pane chord — the window clears everything it was drawing, and the method
+/// then sends the commit anyway. Every rung above resolves the owner *now*, so
+/// the letters A was half-way through typing would be written into B's shell.
+/// The ruling §7.1.5a″ makes is that this must never happen, and a request
+/// cannot be what enforces it.
+///
+/// So the composition carries its destination. `belongs_to` is the shell a live
+/// composition began in — tab, seat and incarnation ([`PasteTarget`], which is
+/// this window's one way of naming a shell, so a restarted shell in the same
+/// hole is a different one here too) — and it is deliberately **not** cleared by
+/// the cancel. `holding` is the shell the keyboard is in at the instant the
+/// event arrives. The three events then decide themselves:
+///
+/// * [`ShellIme::Opens`] re-homes and delivers. Somebody is composing now, so
+///   the letters are for the shell they are looking at, and a fresh composition
+///   in B after the handoff works exactly as it always did.
+/// * [`ShellIme::Clears`] delivers — taking letters *off* the glass is safe
+///   wherever it came from — and changes nothing about whose composition it is,
+///   so a `Preedit("")` followed by a stale commit does not launder it.
+/// * [`ShellIme::Commits`] is the one that can write, and it is delivered only
+///   when the composition is the current shell's. A commit with **no** live
+///   composition behind it is delivered: input methods commit single characters
+///   with no pre-edit at all, and refusing those would swallow ordinary typing.
+///
+/// **The bound this does not close**, stated rather than hidden: an input
+/// method that answers a refused cancel by re-sending a *non-empty* pre-edit is
+/// indistinguishable from a reader starting a new composition in B, so it
+/// re-homes. The letters are drawn at B's caret before any commit, which is the
+/// difference between a picture the reader can see and refuse and bytes on a
+/// command line — and the alternative is refusing the first real composition
+/// after every focus change.
+fn shell_ime_ruling(
+    belongs_to: Option<PasteTarget>,
+    holding: Option<PasteTarget>,
+    event: ShellIme,
+) -> ShellImeRuling {
+    match event {
+        ShellIme::Opens => ShellImeRuling {
+            deliver: true,
+            belongs_to: holding,
+        },
+        ShellIme::Clears => ShellImeRuling {
+            deliver: true,
+            belongs_to,
+        },
+        ShellIme::Commits => ShellImeRuling {
+            deliver: belongs_to.is_none() || belongs_to == holding,
+            belongs_to: None,
+        },
+    }
+}
+
+/// Which of the three a winit composition event is, or `None` for the two that
+/// are the window's own bookkeeping.
+///
+/// Written beside [`shell_ime_ruling`] rather than inside it so that the ruling
+/// can be read — and tested — without constructing winit's event.
+const fn shell_ime_of(event: &Ime) -> Option<ShellIme> {
+    match event {
+        Ime::Preedit(text, _) if !text.is_empty() => Some(ShellIme::Opens),
+        Ime::Preedit(..) => Some(ShellIme::Clears),
+        Ime::Commit(_) => Some(ShellIme::Commits),
+        Ime::Enabled | Ime::Disabled => None,
+    }
 }
 
 /// Whether a shell has the keyboard — `InputOwner == Terminal`.
@@ -37136,6 +37251,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         cards: focus_thumb::CardClock::default(),
         preedit: None,
         composing: None,
+        shell_composing: None,
         ime_active: false,
         ime_cursor_throttle: ImeCursorThrottle::default(),
         rename_caret_line: None,
@@ -99134,11 +99250,38 @@ impl Runtime<'_> {
                 }
                 ImeOwner::Shell => {}
             }
+            // **§7.1.5a″ — and the letters have to belong to *this* shell**
+            // (review 2026-09-17 P2). Every rung above resolves the owner as it
+            // stands now, which is right for "which kind of surface" and blind
+            // to the one case two terminals make: a composition begun at pane
+            // A's prompt, the keyboard moved to B by a dropped path or a click,
+            // and an input method that did not honour the cancel sending the
+            // commit anyway. `cancel_composition` is a request — `ImmNotifyIME`
+            // answers a bool and §7.1.5a″ names a method that says no — so the
+            // barrier is here: the composition carries the shell it began in,
+            // and a commit that is not that shell's is **discarded**, written
+            // neither to the pane it was typed in nor to the one holding the
+            // keyboard now. See [`shell_ime_ruling`].
+            if let Some(what) = shell_ime_of(&event) {
+                let ruling = shell_ime_ruling(
+                    self.window.shell_composing,
+                    self.paste_target(self.focused_leaf),
+                    what,
+                );
+                self.window.shell_composing = ruling.belongs_to;
+                if !ruling.deliver {
+                    return Ok(());
+                }
+            }
             self.reset_cursor_blink(Instant::now());
         }
         match event {
             Ime::Enabled => {
                 self.window.ime_active = true;
+                // A composition context opening is a clean slate: whatever a
+                // previous one was owed, it is not owed through this (review
+                // 2026-09-17 P2, and the same sentence `Disabled` makes below).
+                self.window.shell_composing = None;
                 self.window.ime_cursor_throttle.reset();
                 self.publish_frame(FrameTrigger {
                     occurred_at: Instant::now(),
@@ -99186,6 +99329,7 @@ impl Runtime<'_> {
                     self.window.preedit.is_some() && self.preview_edit_focus().is_some();
                 self.window.preedit = None;
                 self.window.composing = None;
+                self.window.shell_composing = None;
                 self.window.ime_active = false;
                 self.window.ime_cursor_throttle.reset();
                 self.window.ime_system_caret.destroy();
@@ -99250,6 +99394,16 @@ impl Runtime<'_> {
     /// move and is not: that re-associates the input context for the whole
     /// window and drops the method's state with it.
     fn cancel_composition(&mut self, started_in: ImeOwner) -> Result<()> {
+        // **The answer is not read, and `shell_composing` is not cleared, and
+        // those two are the same decision** (review 2026-09-17 P2).
+        // `ImmNotifyIME` answers a bool this window has no honest use for: a
+        // `false` is not a state to recover from, it is an input method that
+        // will send the commit anyway — §7.1.5a″ names one. So this stays a
+        // request, and what makes a refused request *safe* is one field further
+        // down: the composition goes on naming the shell it began in, and
+        // [`shell_ime_ruling`] discards a commit that is not that shell's.
+        // Clearing it here would take the barrier down at exactly the moment it
+        // is needed.
         bt_platform::cancel_composition();
         self.window.preedit = None;
         self.window.composing = None;
@@ -172452,6 +172606,182 @@ mod clipboard_path_tests {
                  composition is settled at:\n{text}"
             );
         }
+    }
+
+    /// **A composition that was left behind never reaches the shell the keyboard
+    /// moved to — whichever way the input method answers the cancel** (§7.1.5a″;
+    /// review 2026-09-17 P2).
+    ///
+    /// `cancel_composition` asks; `ImmNotifyIME` answers a bool, and §7.1.5a″
+    /// records a method that says no. So the window stops *drawing* the letters
+    /// and the method sends them anyway, and every rung of `ime_input` resolves
+    /// the owner as it stands now — which after a dropped path, a click or a
+    /// pane chord is the **other** shell. This drives the rule that stops it,
+    /// over the three orders winit can deliver a refused cancel in.
+    ///
+    /// **The orders.** On Windows a refused `CPS_CANCEL` leaves the composition
+    /// running, so `WM_IME_COMPOSITION` with `GCS_RESULTSTR` arrives as a
+    /// `Commit` — either on its own (①) or behind the empty pre-edit that clears
+    /// the composition string (②). On macOS the same shape comes out of
+    /// `NSTextInputClient`: `unmarkText` may be ignored and `insertText:` still
+    /// arrive, with or without a `setMarkedText:` of nothing first. And a method
+    /// that *did* honour the cancel sends neither (③), which must leave the next
+    /// real composition alone.
+    ///
+    /// MUTATION: deliver a commit whose composition names another shell and ①
+    /// and ② both go red — the half-typed letters land in the pane the reader
+    /// was dropped into. MUTATION: let an empty pre-edit clear `belongs_to` and
+    /// ② alone goes red, which is the order the first attempt at this would
+    /// have missed. MUTATION: refuse a commit with no composition behind it and
+    /// the direct-commit row goes red, taking ordinary typing with it.
+    #[test]
+    fn a_composition_left_behind_is_discarded_however_the_method_answers() {
+        let shell = |tab: u64, seat: u64, incarnation: u64| {
+            Some(PasteTarget {
+                tab: TabId(tab),
+                seat: bt_layout::SeatId(seat),
+                incarnation,
+            })
+        };
+        // Pane A, where the reader was composing, and pane B, where the dropped
+        // path went and where the keyboard now is.
+        let (a, b) = (shell(1, 2, 7), shell(1, 5, 9));
+
+        // The composition opens in A and is A's from then on.
+        let opened = shell_ime_ruling(None, a, ShellIme::Opens);
+        assert!(opened.deliver);
+        assert_eq!(
+            opened.belongs_to, a,
+            "a pre-edit belongs to the shell the keyboard is in while it is typed"
+        );
+
+        // ① **Commit alone.** The keyboard is B's; the composition is A's.
+        let stale = shell_ime_ruling(a, b, ShellIme::Commits);
+        assert!(
+            !stale.deliver,
+            "the letters A was half-way through typing were written into B"
+        );
+        assert_eq!(
+            stale.belongs_to, None,
+            "and the composition is over either way, so nothing is left to poison \
+             the next one"
+        );
+
+        // ② **Empty pre-edit, then commit.** The clear is answered — taking
+        //    letters off the glass is safe wherever it came from — but it must
+        //    not launder the commit behind it.
+        let cleared = shell_ime_ruling(a, b, ShellIme::Clears);
+        assert!(cleared.deliver);
+        assert_eq!(
+            cleared.belongs_to, a,
+            "an empty pre-edit ends nothing and claims nothing, so the commit \
+             behind it is still A's"
+        );
+        assert!(
+            !shell_ime_ruling(cleared.belongs_to, b, ShellIme::Commits).deliver,
+            "a `Preedit(\"\")` in front of it made the stale commit deliverable"
+        );
+
+        // ③ **Nothing at all**, and then the reader starts composing in B. The
+        //    first pre-edit after the move is a new composition and is B's.
+        let fresh = shell_ime_ruling(a, b, ShellIme::Opens);
+        assert!(fresh.deliver, "a fresh composition in B is drawn in B");
+        assert_eq!(fresh.belongs_to, b);
+        assert!(
+            shell_ime_ruling(fresh.belongs_to, b, ShellIme::Commits).deliver,
+            "and it commits into B, which is the half the barrier must not break"
+        );
+
+        // **Ordinary typing is untouched.** Input methods commit single
+        // characters with no pre-edit at all; refusing those would swallow them.
+        assert!(
+            shell_ime_ruling(None, b, ShellIme::Commits).deliver,
+            "a commit with no composition behind it is ordinary typing"
+        );
+        // And a composition that never left its own shell commits there.
+        assert!(
+            shell_ime_ruling(b, b, ShellIme::Commits).deliver,
+            "a reader who composed and committed without moving got nothing"
+        );
+        // **A shell restarted in the same hole is a different shell**, which is
+        // the whole reason the destination is a `PasteTarget` and not a seat.
+        assert!(
+            !shell_ime_ruling(a, shell(1, 2, 8), ShellIme::Commits).deliver,
+            "the pane's shell was restarted under the composition and the letters \
+             went to its replacement"
+        );
+        // A tab that moved does not make the shell a different one.
+        assert!(
+            shell_ime_ruling(a, a, ShellIme::Commits).deliver,
+            "tab, seat and incarnation name the shell, and none of them moved"
+        );
+        // **And a commit that reaches a window with no shell at all writes
+        // nothing**, rather than being delivered against `None`.
+        assert!(
+            !shell_ime_ruling(a, None, ShellIme::Commits).deliver,
+            "the keyboard is in no shell, so A's letters have nowhere honest to go"
+        );
+
+        // The winit events these three rulings are read off, so that the mapping
+        // is part of the same test rather than a source pin somewhere else.
+        assert_eq!(
+            shell_ime_of(&Ime::Preedit("ni".to_owned(), None)),
+            Some(ShellIme::Opens)
+        );
+        assert_eq!(
+            shell_ime_of(&Ime::Preedit(String::new(), None)),
+            Some(ShellIme::Clears)
+        );
+        assert_eq!(
+            shell_ime_of(&Ime::Commit("\u{4f60}".to_owned())),
+            Some(ShellIme::Commits)
+        );
+        for bookkeeping in [Ime::Enabled, Ime::Disabled] {
+            assert_eq!(
+                shell_ime_of(&bookkeeping),
+                None,
+                "{bookkeeping:?} is the window's own bookkeeping and claims no \
+                 composition; its arm clears the destination outright"
+            );
+        }
+    }
+
+    /// **A move that is not a move between two shells settles nothing** (review
+    /// 2026-09-17 P2, keeping what round 2 confirmed).
+    ///
+    /// The barrier above is armed by the keyboard leaving one shell for another,
+    /// and the two gestures that look like that and are not must go on being
+    /// nothing: clicking the pane that already has the keyboard, and moving a
+    /// caret inside a preview. Neither cancels a composition today and neither
+    /// may start doing so — a reader composing at a prompt who clicks their own
+    /// prompt has not finished the word.
+    ///
+    /// MUTATION: drop the `self.focused_leaf != seat` half of the guard in
+    /// `take_keyboard_into` and the first assertion goes red.
+    #[test]
+    fn a_click_on_the_pane_that_already_has_the_keyboard_settles_nothing() {
+        let source = include_str!("main.rs");
+        let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
+        let door = method_text(before_this_fixture, "    fn take_keyboard_into(");
+        assert!(
+            door.contains("self.sessions.contains_key(&seat) && self.focused_leaf != seat"),
+            "the door no longer asks whether the keyboard is actually moving, so \
+             a click on your own prompt ends the word you were typing:\n{door}"
+        );
+        // And the ruling itself says the same thing about a composition that has
+        // not left its shell, which is what a same-pane click leaves behind.
+        let here = Some(PasteTarget {
+            tab: TabId(1),
+            seat: bt_layout::SeatId(2),
+            incarnation: 7,
+        });
+        assert!(shell_ime_ruling(here, here, ShellIme::Commits).deliver);
+        assert_eq!(
+            shell_ime_ruling(here, here, ShellIme::Clears).belongs_to,
+            here,
+            "and a caret move that clears the glass leaves the composition where \
+             it was"
+        );
     }
 
     /// The body of one method, from its signature to the brace that closes it at
