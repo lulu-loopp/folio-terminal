@@ -56,7 +56,7 @@ file produces the vendored file byte for byte. Upstream formats with its own
 | `src/index.rs` | Formatting only. |
 | `src/selection.rs` | Formatting only. |
 | `src/sync.rs` | Formatting only. |
-| `src/term/cell.rs` | **Code.** A ceiling on the zerowidth marks one cell stores (`push_zerowidth`), from `bt_unicode::MAX_GRAPHEME_CLUSTER_CHARS`, and one added flag, `Flags::NON_OUTPUT_WRITE`, in the one bit of the `u16` upstream leaves free. Otherwise formatting only. |
+| `src/term/cell.rs` | **Code.** A ceiling on the zerowidth marks one cell stores (`push_zerowidth`), from `bt_unicode::MAX_GRAPHEME_CLUSTER_CHARS`, and one added flag, `Flags::COMMAND_OUTPUT_WRITE`, in the one bit of the `u16` upstream leaves free. Otherwise formatting only. |
 | `src/term/search.rs` | Formatting only. |
 | `src/thread.rs` | Formatting only. |
 | `src/tty/mod.rs` | Formatting only. |
@@ -95,6 +95,22 @@ file produces the vendored file byte for byte. Upstream formats with its own
   that a `U+FE0F` variation selector now widens the preceding
   emoji-presentation base to two cells, which is what `wcwidth`-plus-emoji and
   `string-width` conventions expect. `U+FE0E` deliberately does not narrow.
+- **The retained cluster is checked against the cell it describes.**
+  `can_extend_grapheme` compares the cursor, the pending wrap, the screen and
+  Unicode continuation; upstream stops there, and so did this copy. But the
+  retained cluster is a *copy* of text on the grid, and the grid can be
+  rewritten under it by anything that does not move the cursor — `ECH` blanks
+  the cell, a tab walks over it, `CSI S` scrolls the row out from under the
+  coordinate, and `DECSC`/`DECRC` puts the cursor back exactly where the cache
+  expects it afterwards. Extending the stale copy wrote the old text again:
+  erased characters came back on screen, and a cluster that had scrolled was
+  duplicated a row below itself. `Term::cell_holds_cluster` now asks the cell,
+  and `reanchor_grapheme_after_resize` is written in terms of it. It is asked of
+  every candidate character while the mode is set — before the continuation
+  test, so of the character that starts the next cluster too — allocates
+  nothing, walks at most the `MAX_GRAPHEME_CLUSTER_CHARS` a retained cluster is
+  already capped at, and is not reached in the legacy mode, which retains no
+  cluster.
 - **A ceiling on one cluster.** `extend_grapheme` stops storing past
   `bt_unicode::MAX_GRAPHEME_CLUSTER_CHARS` code points, and `Cell::push_zerowidth`
   refuses the same. Every mark added to a cluster re-copies and re-measures the
@@ -125,23 +141,40 @@ file produces the vendored file byte for byte. Upstream formats with its own
   received printable input since the last drain — distinct from render damage,
   which is about what must be repainted.
 - **Write provenance.** `set_write_provenance` says whether the bytes fed from
-  here on are a shell command's output, and every cell whose text the terminal
-  *replaces* from then on carries the answer as `Flags::COMMAND_OUTPUT_WRITE`
+  here on are a shell command's output — once for each screen, because a screen
+  swap happens mid-stream and is itself a change of answer: `swap_alt` and a
+  reset exchange the two along with the grids they belong to, and every print
+  reads the one belonging to the screen that is showing. Leaving the alternate
+  screen also empties the answer left waiting for it, because the canvas it was
+  stated about is discarded there and the next entry resets that grid. Every cell whose text
+  the terminal *replaces* from then on carries that answer as
+  `Flags::COMMAND_OUTPUT_WRITE`
   (see that flag's own documentation). It is there because the answer is a fact
   about a *write* and the cell is the thing that moves: a scroll, a scroll
   region, `IL`/`DL`, `RI`, `CSI S`/`T`, a resize reflow that re-cuts a row and an
   eviction into a scrollback all carry it without anybody having to keep a
   parallel record in step. The terminal never reads it back.
 
-  Three rules go with it, and they are what make the flag mean what it says. A
-  write that replaces a cell's text sets or clears it from the current
-  provenance. A write that does *not* replace the text leaves it alone — which
-  is `put_tab` over an occupied cell, whose whole job is to leave that cell's
-  character where it was. And a zero-width mark appended under a non-output
-  provenance clears it on the cell it lands on, because that cell's text is now
-  partly the appender's; appended under an output provenance it neither grants a
-  claim nor removes one. `Cell::reset` takes the default flags, so an erase
-  clears it too.
+  One rule governs all of it: **a cell's claim is the conjunction over every
+  piece of text in the cell** — it holds when a command's output put *all* of
+  that text there. The rest follow from it. A write that replaces the whole of a
+  cell's text sets or clears the claim from the current provenance. A write that
+  does *not* replace the text leaves it alone — which is `put_tab` over an
+  occupied cell, whose whole job is to leave that cell's character where it was.
+  A zero-width mark appended under a non-output provenance clears the claim on
+  the cell it lands on, because that cell's text is now partly the appender's;
+  appended under an output provenance it neither grants a claim nor removes one.
+  `Cell::reset` takes the default flags, so an erase clears it too.
+
+  Two writes keep somebody else's text while putting text of their own into the
+  same cell, and both intersect rather than stamp. `rewrite_grapheme_width`
+  re-cuts a cluster whose width changed, and at the right margin it relocates
+  the whole cluster to the next row through the printing path — so it carries
+  the claim the cluster had (`Term::carry_claim`) instead of letting
+  `write_at_cursor` date the base character by the mark that widened it. And
+  `put_tab` over a blank cell replaces the base character while leaving that
+  cell's zero-width marks in place, so where such marks survive it intersects
+  with what the cell could claim before.
 
   The field starts empty and the flag is the *claim* rather than its denial, so
   a caller that never speaks — upstream's own test suite — writes exactly the

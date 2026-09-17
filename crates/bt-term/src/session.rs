@@ -3040,13 +3040,29 @@ impl DualPlaneSession {
     ///
     /// Said before every segment rather than only when it changes, because the cost is a field
     /// store and the failure of forgetting is a prompt wearing a retired command's eligibility.
+    ///
+    /// **Both screens are stated, because a segment can change screens inside itself.** A marker
+    /// ends a segment; `ESC[?1049l` does not, and it is how a pager or an editor hands the screen
+    /// back in the middle of the command that ran it. The answer for the screen that comes back is
+    /// this session's answer *for that screen* — the command is still running, so the primary
+    /// screen's output after the swap is that command's output — and the two values are already
+    /// kept apart here, one phase per screen. The terminal holds them the same way and takes up
+    /// the one belonging to the screen that is showing; nothing has to be restated at the swap,
+    /// which is the only form of this rule that cannot miss a road into one.
     fn state_write_provenance(&mut self) {
-        let is_command_output = self.shell_integration_is_authoritative(self.live_screen)
+        self.terminal.set_write_provenance(
+            self.screen_is_inside_command_output(ScreenId::Primary),
+            self.screen_is_inside_command_output(ScreenId::Alternate),
+        );
+    }
+
+    /// Is this screen, right now, inside an output region that a shell this session trusts opened?
+    fn screen_is_inside_command_output(&self, screen: ScreenId) -> bool {
+        self.shell_integration_is_authoritative(screen)
             && matches!(
-                self.shell_phases.get(&self.live_screen),
+                self.shell_phases.get(&screen),
                 Some(ShellIntegrationPhase::Output(_))
-            );
-        self.terminal.set_write_provenance(is_command_output);
+            )
     }
 
     fn settle_feed_turn(&mut self, turn: FeedTurn) {
@@ -4215,6 +4231,37 @@ impl DualPlaneSession {
                     .insert(screen, ShellIntegrationPhase::Input(region));
             }
             ShellIntegrationMarker::CommandExecuted => {
+                // **A `C` is heard only inside a prompt cycle this session watched open.**
+                //
+                // OSC 133 is in band and unauthenticated: these bytes are a claim by whoever wrote
+                // them, and a program — or a file with the escape in it, reaching the screen
+                // through `cat` — can write the same bytes the shell writes. Nothing here can
+                // establish *who* emitted a marker, and pretending otherwise would be worse than
+                // saying so. What can be checked is the **order**, and one order is worth
+                // refusing: a `C` that stands in no prompt cycle at all. On a screen where the
+                // phase is `None` nothing has ever spoken — a pane with no shell integration
+                // installed — and a `C` there used to create this session's authority over that
+                // screen out of nothing, which is the whole of the machinery a lone forged marker
+                // needed to have the text after it typeset. `Finished` is the same statement
+                // between two commands: the last one ended at `D` and no prompt has begun.
+                //
+                // `Prompt` and `Input` are both accepted, not `Input` alone. A shell that reports
+                // `A`, `C` and `D` and never `B` is a shell whose command line this session simply
+                // does not know the extent of, and refusing it would cost it every formula while
+                // closing nothing: a stream that can forge a `C` can forge the `B` before it just
+                // as cheaply. `Output` keeps the repeated-`C` rule below exactly as it was — a
+                // second `C` inside a command's own output re-opens the region it was already
+                // stamping, and no cell's claim changes either way.
+                if !matches!(
+                    phase,
+                    Some(
+                        ShellIntegrationPhase::Prompt
+                            | ShellIntegrationPhase::Input(_)
+                            | ShellIntegrationPhase::Output(_)
+                    )
+                ) {
+                    return;
+                }
                 // Primary only, on the same terms as the command-mark ledger three lines below and
                 // the prompt/finished arms around it (§7.1.5c: alt-screen 一律不记). A full-screen
                 // program running its own command cycle on its own canvas is describing that
@@ -4518,13 +4565,22 @@ impl DualPlaneSession {
         }
     }
 
-    /// Drop the regions that described the alternate screen once that screen is gone.
+    /// Drop what described the alternate screen once that screen is gone.
     ///
     /// The alternate screen keeps no history, so an alternate region can never be retired by a
     /// line leaving the transcript - there is no line. Leaving one behind means a full-screen
     /// program that speaks OSC 133 adds regions to this session on every run of itself and none of
     /// them ever go.
+    ///
+    /// **The phase and the authority go with the regions, because they describe the same canvas.**
+    /// A canvas is discarded when the primary screen comes back, and the next `?1049h` resets it,
+    /// so a program that re-enters starts on a surface nothing has been said about. Keeping a
+    /// phase of `Output` past that left the claim standing on a canvas whose region had been
+    /// deleted, and an unmarked program's first screenful of drawing wore the last program's
+    /// command (review 2026-09-17 second pass, F3 P2).
     fn retire_alternate_semantic_regions(&mut self) {
+        self.shell_phases.remove(&ScreenId::Alternate);
+        self.shell_region_screens.remove(&ScreenId::Alternate);
         let input = self
             .semantic_input_regions
             .iter()
@@ -15633,8 +15689,11 @@ mod tests {
         for pass in 0..=8 {
             if pass != 0 {
                 at += LIVE_MATH_STABLE_INTERVAL;
+                // The whole prompt cycle, as a shell that reprints one emits it. A `C` standing in
+                // no cycle at all is refused now, and a repaint that skipped `A` and `B` was never
+                // a stream a shell produces.
                 session.feed_at(
-                    format!("\x1b[1;1H\x1b]133;C\x07\x1b[2Kformula $y_{{{pass}}}^2$ here\x1b[{};1H\x1b]133;D;0\x07", count + 1).as_bytes(),
+                    format!("\x1b[1;1H\x1b]133;A\x07\x1b]133;B\x07\x1b]133;C\x07\x1b[2Kformula $y_{{{pass}}}^2$ here\x1b[{};1H\x1b]133;D;0\x07", count + 1).as_bytes(),
                     at,
                 ).unwrap();
             }
@@ -29230,6 +29289,11 @@ mod tests {
     const OUTPUT_C: &str = "\x1b]133;C\x07";
     const OUTPUT_D: &str = "\x1b]133;D;0\x07";
     const ENERGY: &str = "energy $E = mc^2$ here";
+    /// A whole prompt cycle and the newline that starts the command's first line of output, for
+    /// fixtures whose attack begins on a line a command has printed. A bare `C` would be refused
+    /// before any of it — see `a_command_start_that_stands_in_no_prompt_cycle_is_refused` — and a
+    /// negative fixture that never has a claim to launder proves nothing about laundering.
+    const CYCLE: &str = "\x1b]133;A\x07PS> \x1b]133;B\x07run\x1b]133;C\x07\r\n";
 
     /// Drive one sequence into a fresh pane and count two things: how many of the rows carrying the
     /// formula's text a lone `$` may be read on, and how many pictures actually reached the glass.
@@ -29280,11 +29344,11 @@ mod tests {
             ("a tab walked along every column of the prompt's line", tabs),
             (
                 "a combining mark appended by the prompt",
-                format!("{OUTPUT_C}{ENERGY}{OUTPUT_D}{PROMPT_A}\u{301}"),
+                format!("{CYCLE}{ENERGY}{OUTPUT_D}{PROMPT_A}\u{301}"),
             ),
             (
                 "a combining mark appended by the prompt, clustered",
-                format!("\x1b[?2027h{OUTPUT_C}{ENERGY}{OUTPUT_D}{PROMPT_A}\u{301}"),
+                format!("\x1b[?2027h{CYCLE}{ENERGY}{OUTPUT_D}{PROMPT_A}\u{301}"),
             ),
             (
                 "output overwriting part of a screen the prompt aligned",
@@ -29295,7 +29359,7 @@ mod tests {
             ),
             (
                 "a screen the prompt aligned, with nothing else written",
-                format!("{OUTPUT_C}{ENERGY}{OUTPUT_D}{PROMPT_A}\x1b#8"),
+                format!("{CYCLE}{ENERGY}{OUTPUT_D}{PROMPT_A}\x1b#8"),
             ),
             (
                 "a repeat of the prompt's own last character",
@@ -29341,11 +29405,311 @@ mod tests {
                 "a command's own line after a reset",
                 format!("{PROMPT_A}{ENERGY}\x1bc{OUTPUT_C}\x1b[1;1H{ENERGY}\r\n{OUTPUT_D}"),
             ),
+            // The two combining-mark arms, with the mark put there by the command that printed the
+            // line. Without these the arms above are satisfied by a fixture that never had a claim
+            // to lose: what they must show is that the *appender* is what decides, and that takes
+            // the same sequence twice with only the appender changed.
+            (
+                "a combining mark appended by the command itself",
+                format!("{CYCLE}{ENERGY}\u{301}{OUTPUT_D}"),
+            ),
+            (
+                "a combining mark appended by the command itself, clustered",
+                format!("\x1b[?2027h{CYCLE}{ENERGY}\u{301}{OUTPUT_D}"),
+            ),
         ] {
             assert_eq!(
                 laundering_attempt(&stream),
                 (1, 1),
                 "{name} is still typeset"
+            );
+        }
+    }
+
+    /// The same drive, carried on until every row of it has scrolled into history: how many frozen
+    /// lines carrying the formula's text a lone `$` may be read on, and how many pictures the
+    /// frozen scan resolved. The freeze folds the very cells the live plane reads, so a claim that
+    /// is wrong on one plane is wrong on both, and a fixture proven on only one proves half.
+    fn frozen_laundering_attempt(stream: &str) -> (usize, usize) {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut session);
+        session.feed_at(stream.as_bytes(), started).unwrap();
+        // The carriage return first: a fixture may leave the cursor in the middle of the row it
+        // is about to be asked about, and padding printed onto that row would answer for it.
+        session
+            .feed_at(
+                b"\r\npad\r\npad\r\npad\r\npad\r\npad\r\npad\r\npad\r\npad\r\npad\r\npad\r\n\
+                  pad\r\npad\r\n",
+                started,
+            )
+            .unwrap();
+        let frozen = session
+            .document
+            .entries()
+            .values()
+            .filter(|entry| entry.line.text.contains("nergy"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            frozen.len(),
+            1,
+            "the fixture must freeze the formula's line exactly once, or the site read below \
+             proves nothing: {:?}",
+            session
+                .document
+                .entries()
+                .values()
+                .map(|entry| entry.line.text.clone())
+                .collect::<Vec<_>>()
+        );
+        let eligible = usize::from(frozen[0].inline_site.permits_inline());
+        complete_frozen_math_for_real(&mut session);
+        let drawn = session
+            .decorations
+            .values()
+            .filter(|record| {
+                record
+                    .span
+                    .as_ref()
+                    .is_some_and(|span| span.mode == MathMode::Inline)
+            })
+            .count();
+        (eligible, drawn)
+    }
+
+    /// Drive a session's live math to the glass and count the inline pictures that reached it.
+    fn rendered_inline_block_count(session: &mut DualPlaneSession, started: Instant) -> usize {
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        complete_live_math_for_real(session);
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        rendered_inline_blocks(&frame).len()
+    }
+
+    /// Everything one stream leaves in history, once every row of it has scrolled off.
+    fn frozen_text(stream: &str) -> String {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut session);
+        session.feed_at(stream.as_bytes(), started).unwrap();
+        session
+            .feed_at(
+                b"\r\npad\r\npad\r\npad\r\npad\r\npad\r\npad\r\npad\r\npad\r\npad\r\npad\r\n\
+                  pad\r\npad\r\n",
+                started,
+            )
+            .unwrap();
+        session
+            .document
+            .entries()
+            .values()
+            .map(|entry| entry.line.text.as_str())
+            .collect()
+    }
+
+    /// Everything the terminal is showing, row by row.
+    fn grid_text(session: &DualPlaneSession) -> String {
+        (0..session.live_rows.len() as u32)
+            .map(|row| grid_row_text(session, row))
+            .collect()
+    }
+
+    /// The text the terminal is showing on one grid row, cell by cell.
+    fn grid_row_text(session: &DualPlaneSession, row: u32) -> String {
+        session
+            .terminal
+            .visible_row(row)
+            .expect("the fixture's row is on the grid")
+            .cells
+            .iter()
+            .map(|cell| cell.text.as_str())
+            .collect()
+    }
+
+    /// **A cluster the terminal is still collecting is a copy of text on the grid, and the grid can
+    /// be rewritten under it** (review 2026-09-17 second pass, F1 P1).
+    ///
+    /// Under `DECSET 2027` the terminal keeps the cluster it is building so that the next mark can
+    /// extend it, and it checked the cursor, the pending wrap, the screen and Unicode continuation
+    /// before doing so — everything except whether the cell it remembers still holds that text.
+    /// `ECH` blanks a cell, a tab walks over one, `CSI S` scrolls the row out from under the
+    /// coordinate, and `DECSC`/`DECRC` puts the cursor back exactly where the cache expects it
+    /// afterwards. Extending the stale copy then wrote the old text again.
+    ///
+    /// That is two faults in one. **Erased text came back**, which is a terminal reading its own
+    /// screen wrong and is worth refusing on its own; and because a re-cut cluster is written
+    /// through the printing path, the resurrected text was dated by whoever was printing now — so
+    /// a command could restore a glyph the prompt had written, and be handed it.
+    #[test]
+    fn a_retained_cluster_is_not_written_again_over_the_text_that_replaced_it() {
+        let started = Instant::now();
+        // 59 columns of output put the prompt's glyph on the last column, which is where a width
+        // change has to relocate it and therefore where it is rebuilt from the cache.
+        let margin = "o".repeat(59);
+        // A save, the command reaching over to the cached cell to erase it and walk a tab across
+        // it, and the restore that puts the cursor back exactly where the cache is waiting. None of
+        // those three writes goes through the printing path, which is why the cache never noticed.
+        let reach = |cell: &str| format!("\x1b7{OUTPUT_C}\x1b[{cell}\x1b[X\t\x1b8");
+
+        // Codex's first reproduction, widening: the prompt's arrow in the last column, erased by
+        // the command and walked over by its tab, then asked to become two cells wide by the
+        // command's `U+FE0F`. It used to be rebuilt on the next row, wearing the claim of the
+        // blank the tab had just taken.
+        let mut erased = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut erased);
+        let widened = format!(
+            "\x1b[?2027h{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\n{margin}{OUTPUT_D}\
+             {PROMPT_A}\u{2194}{reach}\u{fe0f}energy $x^2$ here\r\n{OUTPUT_D}",
+            reach = reach("2;60H")
+        );
+        erased.feed_at(widened.as_bytes(), started).unwrap();
+        assert!(
+            !grid_text(&erased).contains('\u{2194}'),
+            "the erase removed that glyph, so nothing may put it back anywhere on the screen: {:?}",
+            grid_text(&erased)
+        );
+        assert_eq!(
+            rendered_inline_block_count(&mut erased, started),
+            1,
+            "and with the prompt's glyph gone for good this line really is the command's, so the \
+             fixture reaches a picture instead of proving its point by refusing everything"
+        );
+        assert!(
+            !frozen_text(&widened).contains('\u{2194}'),
+            "nor may it come back on the way into history, which folds the same cells"
+        );
+
+        // Codex's second reproduction, shrinking: the same reach, but the prompt's glyph is a wide
+        // watch that wrapped to the next row, so narrowing it relocates it *back* to the
+        // placeholder at the end of the row above.
+        let mut narrowed = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut narrowed);
+        let shrunk = format!(
+            "\x1b[?2027h{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\n{margin}{OUTPUT_D}\
+             {PROMPT_A}\u{231a}{reach}\u{fe0e}energy $x^2$ here\r\n{OUTPUT_D}",
+            reach = reach("3;1H")
+        );
+        narrowed.feed_at(shrunk.as_bytes(), started).unwrap();
+        assert!(
+            !grid_text(&narrowed).contains('\u{231a}'),
+            "a narrowing mark rebuilds the cluster in the other direction, and it may not bring \
+             the erased watch back with it: {:?}",
+            grid_text(&narrowed)
+        );
+        assert!(
+            !frozen_text(&shrunk).contains('\u{231a}'),
+            "nor into history"
+        );
+
+        // A scroll is the same staleness without an erase: `CSI S` moves every cell and leaves the
+        // cursor where it was, so the cached coordinate names another row's text. Rebuilding from
+        // the cache there does not resurrect a glyph — it *duplicates* one, because the real arrow
+        // is still on the screen, one row up.
+        let mut scrolled = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut scrolled);
+        scrolled
+            .feed_at(
+                format!(
+                    "\x1b[?2027h{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\n{margin}{OUTPUT_D}\
+                     {PROMPT_A}\u{2194}{OUTPUT_C}\x1b[S\u{fe0f}energy $x^2$ here\r\n{OUTPUT_D}"
+                )
+                .as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert_eq!(
+            grid_text(&scrolled).matches('\u{2194}').count(),
+            1,
+            "one arrow was written and one arrow is on the screen: {:?}",
+            grid_text(&scrolled)
+        );
+    }
+
+    /// **A cell's claim is the conjunction over every piece of text in it, and moving that text
+    /// does not re-date it** (review 2026-09-17, F1).
+    ///
+    /// Two writes keep text somebody else put on the grid while putting something of their own
+    /// beside it, and both used to stamp the whole cell with the current writer:
+    ///
+    /// * a grapheme that **changes width** is taken off the grid and written again through the
+    ///   printing path. At the right margin a one-cell base is relocated to the next row to make
+    ///   room for the second half, so a `U+FE0F` a command prints after a prompt's `↔` rebuilt the
+    ///   prompt's own glyph as the command's. The zero-width rule cannot see it: nothing is
+    ///   appended, the cluster is reconstructed.
+    /// * a **tab over a blank cell** replaces the base character and leaves the cell's zero-width
+    ///   marks where they are. A prompt's combining accent on a command's trailing space therefore
+    ///   survived as `"\t\u{301}"` with the command's claim on it — text that is half the prompt's,
+    ///   on a cell that says a command wrote all of it.
+    ///
+    /// Each fixture is driven on both planes, and each has a control differing only in *who* writes
+    /// the glyph, because an assertion that nothing is typeset is satisfied by a fixture that never
+    /// reaches a formula at all.
+    #[test]
+    fn re_cutting_and_partial_writes_carry_the_claim_of_the_text_they_keep() {
+        // 59 columns of output put the cursor on the last column of a 60-column pane, which is the
+        // one column where widening a glyph has to relocate it. Printable padding rather than
+        // spaces: a logical line that opens with a screenful of blanks is indented code to the
+        // scanner, and would refuse the control fixture for a reason that has nothing to do with
+        // provenance.
+        let margin = "o".repeat(59);
+        let relocated = |glyph_is_the_prompts: bool| {
+            let (leave, back) = if glyph_is_the_prompts {
+                (format!("{OUTPUT_D}{PROMPT_A}"), OUTPUT_C.to_string())
+            } else {
+                (String::new(), String::new())
+            };
+            format!(
+                "{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\n{margin}{leave}\u{2194}{back}\
+                 \u{fe0f}energy $x^2$ here\r\n{OUTPUT_D}"
+            )
+        };
+        // `energy $E = mc^2$ here` is 22 columns, so its trailing space is column 23 (one-based),
+        // which is the cell the prompt's accent lands on and the cell the tab then rewrites.
+        let tabbed = |accent: &str| {
+            format!(
+                "{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\n{ENERGY} {OUTPUT_D}{PROMPT_A}{accent}\
+                 {OUTPUT_C}\x1b[2;23H\t{OUTPUT_D}"
+            )
+        };
+
+        for (name, stream) in [
+            (
+                "a prompt's glyph widened by the command that follows it",
+                relocated(true),
+            ),
+            (
+                "a tab over a blank cell the prompt hung an accent on",
+                tabbed("\u{301}"),
+            ),
+        ] {
+            assert_eq!(
+                laundering_attempt(&stream),
+                (0, 0),
+                "{name}: the cell holds text the prompt put there, so its line is the prompt's"
+            );
+            assert_eq!(
+                frozen_laundering_attempt(&stream),
+                (0, 0),
+                "{name}: and the freeze folds the same cells"
+            );
+        }
+
+        for (name, stream) in [
+            (
+                "the same widening, with the command writing the glyph too",
+                relocated(false),
+            ),
+            ("the same tab, over a cell nothing else wrote", tabbed("")),
+        ] {
+            assert_eq!(
+                laundering_attempt(&stream),
+                (1, 1),
+                "{name} is still typeset"
+            );
+            assert_eq!(
+                frozen_laundering_attempt(&stream),
+                (1, 1),
+                "{name} is still typeset once it is frozen"
             );
         }
     }
@@ -31466,6 +31830,498 @@ mod tests {
         assert!(
             !text.contains('$'),
             "the rendered run's source delimiters must be cleared from the grid: {text:?}"
+        );
+    }
+
+    /// Does the one row carrying this text hold any cell no command's output claims?
+    fn row_carries_unclaimed_text(session: &DualPlaneSession, needle: &str) -> bool {
+        let inputs = session.live_detection_context();
+        let rows = (0..session.live_rows.len() as u32)
+            .filter(|row| {
+                live_grid_input(&inputs, *row).is_some_and(|input| input.text.contains(needle))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rows.len(),
+            1,
+            "the fixture must put {needle:?} on exactly one grid row: {:?}",
+            inputs.iter().map(|input| &input.text).collect::<Vec<_>>()
+        );
+        session
+            .terminal
+            .visible_row(rows[0])
+            .expect("the fixture's row is on the grid")
+            .cells
+            .iter()
+            .any(bt_transcript::CapturedCell::carries_unclaimed_text)
+    }
+
+    /// The whole of one command that runs a full-screen program: output, the swap out to the
+    /// program's own canvas, and output again after the program hands the screen back.
+    ///
+    /// ASCII throughout, so that every byte index in it is a place the stream may be cut.
+    fn pager_command_stream() -> String {
+        format!(
+            "{PROMPT_A}PS> {PROMPT_B}less{OUTPUT_C}\r\nfirst $x^2$ here\r\n\x1b[?1049h\
+             during $y^2$ here\r\n\x1b[?1049lafter $z^2$ here\r\n{OUTPUT_D}"
+        )
+    }
+
+    /// **A screen swap is a change of provenance, and it happens in the middle of a segment**
+    /// (review 2026-09-17, F3 — a false refusal in ordinary use).
+    ///
+    /// A segment ends at every shell-integration marker, so no *phase* can change inside one. A
+    /// screen can: `ESC[?1049l` is how a pager or an editor hands the screen back, and it carries
+    /// no marker, because the command that ran the program has not finished. One provenance value
+    /// therefore spanned the swap — the alternate screen's, where this session holds no output
+    /// state of its own — and everything the command printed after the program exited landed on
+    /// cells that claimed nothing. Inline formulas in a `git log` paged by `less`, in a build's
+    /// summary after `$EDITOR` closed: all of them stayed as source, for as long as this rule was
+    /// stated once per segment.
+    ///
+    /// The answer is kept per screen on both sides — one phase per screen here, one provenance per
+    /// screen in the terminal — so the swap exchanges them with the grids and nothing has to be
+    /// restated at a boundary somebody has to remember to find.
+    #[test]
+    fn output_printed_after_a_full_screen_program_exits_is_still_the_commands() {
+        let stream = pager_command_stream();
+        let bytes = stream.as_bytes();
+        // Every cut, including the two that are no cut at all: the defect was first seen with the
+        // swap and the output after it arriving in feeds of their own, and a rule about *when* an
+        // answer is stated has to hold however the reads happen to fall.
+        for split in 0..=bytes.len() {
+            let started = Instant::now();
+            let mut session = DualPlaneSession::new(nz(60), nz(8));
+            seat_inline_metrics(&mut session);
+            session.feed_at(&bytes[..split], started).unwrap();
+            session.feed_at(&bytes[split..], started).unwrap();
+
+            assert_eq!(
+                grid_site_of(&session, "first"),
+                InlineMathSite::CommandOutput,
+                "split={split}: output printed before the program started is the command's"
+            );
+            assert_eq!(
+                grid_site_of(&session, "after"),
+                InlineMathSite::CommandOutput,
+                "split={split}: the command is still running, so what it prints on the screen it \
+                 has just been handed back is still its output"
+            );
+            assert!(
+                !row_carries_unclaimed_text(&session, "after"),
+                "split={split}: and the claim is on the cells themselves"
+            );
+        }
+    }
+
+    /// **A synchronized update parks bytes, and a marker read over the top of them is read against
+    /// a screen that has not received them** (review 2026-09-17 second pass, F3 P1).
+    ///
+    /// DEC 2026 asks the terminal to hold a block of writes back and apply them all at once, and
+    /// the vendored parser does exactly that: the bytes sit in its buffer and are parsed at the
+    /// terminator, against whatever the terminal's state is *then*. The adapter meanwhile pauses
+    /// at every shell-integration marker, so a segment carries one phase — but the block's bytes
+    /// arrived under an earlier one, and were being written under a later one.
+    ///
+    /// Both directions are wrong and the second is the one ordinary use meets: a prompt drawn
+    /// inside a block that commits after `C` was typeset as output, and a command's own output
+    /// printed inside a block that commits after `D` and the next `A` — a program killed inside a
+    /// block it never closed, a prompt theme that wraps its drawing — was left as source. The
+    /// block is now committed where the order matters, at the marker.
+    #[test]
+    fn a_synchronized_update_is_written_before_the_marker_that_follows_it() {
+        let prompt_side =
+            format!("{PROMPT_A}\x1b[?2026h{ENERGY}\r\n{PROMPT_B}{OUTPUT_C}\x1b[?2026l{OUTPUT_D}");
+        let output_side = format!(
+            "{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\n\x1b[?2026h{ENERGY}\r\n{OUTPUT_D}{PROMPT_A}\
+             \x1b[?2026l"
+        );
+
+        for split in 0..=prompt_side.len() {
+            let started = Instant::now();
+            let mut session = DualPlaneSession::new(nz(60), nz(8));
+            seat_inline_metrics(&mut session);
+            session
+                .feed_at(&prompt_side.as_bytes()[..split], started)
+                .unwrap();
+            session
+                .feed_at(&prompt_side.as_bytes()[split..], started)
+                .unwrap();
+            assert_eq!(
+                grid_site_of(&session, "energy"),
+                InlineMathSite::Ineligible,
+                "split={split}: this text arrived while the shell was drawing its prompt, and a \
+                 block that commits after `C` does not make it the command's"
+            );
+        }
+        assert_eq!(
+            laundering_attempt(&prompt_side),
+            (0, 0),
+            "and none of it is typeset"
+        );
+        assert_eq!(
+            frozen_laundering_attempt(&prompt_side),
+            (0, 0),
+            "on either plane"
+        );
+
+        for split in 0..=output_side.len() {
+            let started = Instant::now();
+            let mut session = DualPlaneSession::new(nz(60), nz(8));
+            seat_inline_metrics(&mut session);
+            session
+                .feed_at(&output_side.as_bytes()[..split], started)
+                .unwrap();
+            session
+                .feed_at(&output_side.as_bytes()[split..], started)
+                .unwrap();
+            assert_eq!(
+                grid_site_of(&session, "energy"),
+                InlineMathSite::CommandOutput,
+                "split={split}: the command printed this before it ended, and a block that \
+                 commits after the next prompt does not take that away from it"
+            );
+        }
+        assert_eq!(
+            laundering_attempt(&output_side),
+            (1, 1),
+            "and it is typeset, which is the false refusal this closes"
+        );
+        assert_eq!(
+            frozen_laundering_attempt(&output_side),
+            (1, 1),
+            "on either plane"
+        );
+    }
+
+    /// A screen swap parked in the same block: the marker after it must name the screen the swap
+    /// left the terminal on, not the one the parser had not reached yet.
+    #[test]
+    fn a_marker_after_a_parked_screen_swap_names_the_screen_the_swap_left() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut session);
+        // Stopped before the terminator, which is the whole point: the block is still open, and
+        // the prompt marker inside it has already been handed to the session.
+        session
+            .feed_at(
+                format!(
+                    "{PROMPT_A}PS> {PROMPT_B}pager{OUTPUT_C}\r\n\x1b[?1049h\x1b[?2026h\
+                     \x1b[?1049lafter $z^2$ here\r\n{PROMPT_A}"
+                )
+                .as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert!(
+            !session.terminal.modes().alternate_screen,
+            "the parked swap back is applied before the marker after it is read"
+        );
+        assert_eq!(
+            session.shell_phases.get(&ScreenId::Primary),
+            Some(&ShellIntegrationPhase::Prompt),
+            "so the prompt the shell printed is the primary screen's prompt"
+        );
+        assert_eq!(
+            session.shell_phases.get(&ScreenId::Alternate),
+            None,
+            "and the canvas the pager gave back is told nothing about it"
+        );
+        session.feed_at(b"\x1b[?2026l", started).unwrap();
+        assert_eq!(
+            grid_site_of(&session, "after"),
+            InlineMathSite::CommandOutput,
+            "the command printed it on the screen it had just been handed back, inside a block"
+        );
+    }
+
+    /// The same command, stopped while the program still owns the screen: its canvas is eligible by
+    /// the alternate-screen policy and by nothing else, and the claim is not on those cells.
+    #[test]
+    fn the_canvas_a_program_owns_carries_no_command_of_its_own() {
+        let started = Instant::now();
+        let stream = pager_command_stream();
+        let head = stream
+            .split_once("\x1b[?1049l")
+            .expect("the fixture leaves the alternate screen exactly once")
+            .0;
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut session);
+        session.feed_at(head.as_bytes(), started).unwrap();
+
+        assert_eq!(
+            grid_site_of(&session, "during"),
+            InlineMathSite::AltScreenContent,
+            "a surface a full-screen program owns is eligible structurally, which this change \
+             leaves exactly where it found it"
+        );
+        assert!(
+            row_carries_unclaimed_text(&session, "during"),
+            "and it is eligible *without* the claim: this session knows nothing about who printed \
+             on a canvas it was told nothing about"
+        );
+    }
+
+    /// **A canvas carries the claims of a cycle it was told about, and only while it is that
+    /// canvas** (review 2026-09-17 second pass, F3 P2).
+    ///
+    /// The per-screen answer is not "the alternate screen claims nothing". A full-screen program
+    /// that speaks OSC 133 on its own canvas opens a cycle there, and what it prints between its
+    /// own `C` and `D` is that cycle's output as much as a shell's is on the primary screen — the
+    /// claim is about the marker state that was accepted for a screen, not about which screen it
+    /// is. What the canvas cannot do is borrow the primary screen's command, which is the arm
+    /// above this one.
+    ///
+    /// The half that was wrong is what survives leaving. A canvas is discarded when the primary
+    /// screen comes back and reset by the next `?1049h`, and the regions that described it are
+    /// retired with it — but its phase and its authority stayed, so a second program, speaking no
+    /// protocol at all, had its first screenful drawn onto cells wearing the first program's
+    /// command. Inline eligibility on that surface is the alternate-screen policy's answer and
+    /// never asks the claim, so what this fixes is the claim itself, where every other reader of
+    /// it finds it.
+    #[test]
+    fn a_canvas_carries_only_the_claims_of_a_cycle_it_was_told_about() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut session);
+        session
+            .feed_at(
+                format!(
+                    "{PROMPT_A}PS> {PROMPT_B}tui{OUTPUT_C}\r\n\x1b[?1049h\
+                     {PROMPT_A}{PROMPT_B}{OUTPUT_C}zeta $z^2$ here\r\n"
+                )
+                .as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert!(
+            !row_carries_unclaimed_text(&session, "zeta"),
+            "the program ran its own cycle on its own canvas, and this is that cycle's output"
+        );
+
+        session
+            .feed_at(
+                b"\x1b[?1049l\x1b[?1049hqux $q^2$ here\r\n".as_slice(),
+                started,
+            )
+            .unwrap();
+        assert!(
+            row_carries_unclaimed_text(&session, "qux"),
+            "the canvas that cycle was drawn on is gone, so the program that gets the next one \
+             starts from nothing"
+        );
+    }
+
+    /// A program that crashes without restoring the screen, and a shell that prints its next
+    /// prompt onto the canvas the program left behind.
+    ///
+    /// The tempting reading of F3 is that the command is still running, so everything is its
+    /// output until `D` — and under that reading the prompt below, and whatever the reader then
+    /// types at it, would carry the command's claim. The claim is per screen precisely because it
+    /// must not: what this session was told about the primary screen says nothing about a canvas
+    /// it was never told about. The row stays eligible by the alternate-screen policy, which is a
+    /// separate and structural answer, and the claim stays off it.
+    #[test]
+    fn a_prompt_that_returns_on_a_crashed_programs_canvas_claims_nothing() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut session);
+        session
+            .feed_at(
+                format!(
+                    "{PROMPT_A}PS> {PROMPT_B}tui{OUTPUT_C}\r\n\x1b[?1049h{PROMPT_A}PS> \
+                     {PROMPT_B}energy $x^2$ here"
+                )
+                .as_bytes(),
+                started,
+            )
+            .unwrap();
+
+        assert_eq!(
+            grid_site_of(&session, "energy"),
+            InlineMathSite::AltScreenContent,
+            "the canvas is eligible by policy, and the command's own region cannot reach it"
+        );
+        assert!(
+            row_carries_unclaimed_text(&session, "energy"),
+            "a command running on the primary screen claims nothing a shell writes on the \
+             alternate one"
+        );
+    }
+
+    /// Nested swaps, and the two modes this emulator does not implement.
+    ///
+    /// `1049` set twice is one swap and `1049` unset twice is one return, so the answer has to
+    /// come back on the first of the two — a count kept anywhere else would need a stack. `47` and
+    /// `1047` reach the unknown-mode branch in this vendored terminal (upstream implements neither)
+    /// and therefore move no screen at all, which is worth pinning: a rule that split the stream on
+    /// the bytes of a mode sequence rather than on the swap itself would answer differently here.
+    #[test]
+    fn nested_and_unimplemented_screen_modes_leave_the_claim_where_the_screen_is() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut session);
+        session
+            .feed_at(
+                format!(
+                    "{PROMPT_A}PS> {PROMPT_B}pager{OUTPUT_C}\r\n\x1b[?1049h\x1b[?1049h\
+                     \x1b[?1049l\x1b[?1049lafter $z^2$ here\r\n{OUTPUT_D}"
+                )
+                .as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert_eq!(
+            grid_site_of(&session, "after"),
+            InlineMathSite::CommandOutput,
+            "the second set and the second unset are no-ops, and the answer came back with the \
+             first unset"
+        );
+
+        let mut plain = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut plain);
+        plain
+            .feed_at(
+                format!(
+                    "{PROMPT_A}PS> {PROMPT_B}pager{OUTPUT_C}\r\n\x1b[?47h\x1b[?1047h\
+                     still $z^2$ here\r\n{OUTPUT_D}"
+                )
+                .as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert!(
+            !plain.terminal.modes().alternate_screen,
+            "the fixture must really exercise modes this terminal does not implement"
+        );
+        assert_eq!(
+            grid_site_of(&plain, "still"),
+            InlineMathSite::CommandOutput,
+            "a mode that swaps no screen changes no answer"
+        );
+    }
+
+    /// **The order a marker stands in can be checked; who wrote it cannot** (review 2026-09-17,
+    /// F2).
+    ///
+    /// OSC 133 is an in-band protocol with no authentication: a `C` is a claim by whoever wrote
+    /// those bytes, and a program — or a file with the escape in it, reaching the screen through
+    /// `cat` — writes them exactly as a shell does. Nothing here can establish the producer, and
+    /// the consequence of being wrong is cosmetic: text drawn as a picture of itself, never an
+    /// action, with the source still on the grid and still what a copy yields.
+    ///
+    /// What is checkable is the order, and one order is refused: a `C` that stands in no prompt
+    /// cycle this session watched open. The two arms below are the two ways that happens — a
+    /// screen nothing has ever spoken on, which is a pane with no shell integration installed, and
+    /// the gap between one command's `D` and the next prompt's `A`. Both used to create this
+    /// session's authority over the screen out of the forged marker itself, which is the whole of
+    /// the machinery the text after it needed to be typeset.
+    ///
+    /// The other three arms are what the check must *not* cost, and the last of them is the honest
+    /// limit of all of this: a program that prints a whole `A…B…C` cycle is indistinguishable from
+    /// a nested shell that speaks the protocol, and is left alone deliberately.
+    #[test]
+    fn a_command_start_that_stands_in_no_prompt_cycle_is_refused() {
+        let started = Instant::now();
+
+        let mut bare = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut bare);
+        bare.feed_at(
+            format!("{OUTPUT_C}\r\n{ENERGY}\r\n{OUTPUT_D}").as_bytes(),
+            started,
+        )
+        .unwrap();
+        assert!(
+            !bare.shell_integration_is_authoritative(ScreenId::Primary),
+            "a marker nobody's prompt cycle accounts for cannot make this session authoritative \
+             over a screen"
+        );
+        assert!(
+            !bare.working,
+            "and it cannot start a command on the tab strip either"
+        );
+        assert_eq!(
+            grid_site_of(&bare, "energy"),
+            InlineMathSite::Ineligible,
+            "so what follows it is what it was before the escape arrived: text nobody claims"
+        );
+
+        let mut between = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut between);
+        between
+            .feed_at(
+                format!("{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\nfirst line\r\n{OUTPUT_D}")
+                    .as_bytes(),
+                started,
+            )
+            .unwrap();
+        between
+            .feed_at(format!("{OUTPUT_C}{ENERGY}\r\n").as_bytes(), started)
+            .unwrap();
+        assert_eq!(
+            grid_site_of(&between, "energy"),
+            InlineMathSite::Ineligible,
+            "the last command ended at its `D` and no prompt has begun, so this `C` belongs to no \
+             command of this shell's"
+        );
+        between
+            .feed_at(
+                format!("{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\nreal $x^2$ here\r\n").as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert_eq!(
+            grid_site_of(&between, "real"),
+            InlineMathSite::CommandOutput,
+            "and the shell's own next command is heard exactly as before"
+        );
+
+        // A `C` inside a command's own output is the `cat` of a file carrying the escape, and it
+        // is left where it was: the region it re-opens is the same command's, and every cell it
+        // covers was already being stamped by the command that is running. The repeated-`C` rule
+        // that closes the stale region before opening the new one is unchanged.
+        let mut inside = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut inside);
+        inside
+            .feed_at(
+                format!("{PROMPT_A}PS> {PROMPT_B}cat{OUTPUT_C}\r\n{OUTPUT_C}{ENERGY}\r\n")
+                    .as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert_eq!(
+            grid_site_of(&inside, "energy"),
+            InlineMathSite::CommandOutput,
+            "the command really was printing this line, whatever the escape in the middle of it \
+             said"
+        );
+
+        // A shell that reports `A`, `C` and `D` and never `B` keeps everything it had. Requiring
+        // the `B` as well would close nothing — a stream that can forge a `C` can forge a `B` —
+        // and would cost such a shell every formula it prints.
+        let mut without_b = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut without_b);
+        without_b
+            .feed_at(
+                format!("{PROMPT_A}PS> run\r\n{OUTPUT_C}{ENERGY}\r\n{OUTPUT_D}").as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert_eq!(
+            grid_site_of(&without_b, "energy"),
+            InlineMathSite::CommandOutput,
+            "the prompt cycle is open, which is all this check asks"
+        );
+
+        // **The limit, stated as a measurement.** These are the same bytes a shell sends, in the
+        // same order, and this session has no way to know they came from a program. It is where
+        // the guarantee ends, and the cost of being wrong here is a formula drawn over text.
+        assert_eq!(
+            laundering_attempt(&format!(
+                "{PROMPT_A}forged> {PROMPT_B}x{OUTPUT_C}\r\n{ENERGY}\r\n{OUTPUT_D}"
+            )),
+            (1, 1),
+            "a whole forged cycle is indistinguishable from a nested shell's own, by contract"
         );
     }
 

@@ -94,6 +94,14 @@ All notable changes to Folio are recorded here. The format follows
   character on a line be one a command printed, so text that arrives by a route
   nobody has taught it about is left alone rather than taken for output.
 
+- **Formulas printed after a full-screen program exits are typeset again.** When
+  a command shows something full-screen on its way — a pager, an editor, a menu
+  — and then carries on printing, everything it printed after that program left
+  was treated as though nobody knew where it came from, so `$…$` in it stayed as
+  raw text until the next command started. What a command prints on the screen
+  it has just been handed back is that command's output, and it is typeset like
+  the rest of it. What the full-screen program itself drew is unchanged.
+
 - **A formula is no longer taken down by its neighbour's result.** Folio looks
   at every line that could be the start of something, and inside a block of
   mathematics its own body lines look like that too. When one of those came back

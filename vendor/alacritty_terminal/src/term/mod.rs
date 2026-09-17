@@ -353,6 +353,15 @@ fn character_tail(text: &str) -> char {
         .expect("grapheme state is never empty")
 }
 
+/// One screen's write provenance as the flags a print stamps: the claim, or nothing at all.
+fn write_provenance_flags(is_command_output: bool) -> Flags {
+    if is_command_output {
+        Flags::COMMAND_OUTPUT_WRITE
+    } else {
+        Flags::empty()
+    }
+}
+
 impl TermDamageState {
     fn new(num_cols: usize, num_lines: usize) -> Self {
         let lines = (0..num_lines)
@@ -443,7 +452,21 @@ pub struct Term<T> {
     /// It starts empty and stays empty for a caller that never speaks, so upstream writes exactly
     /// the cells it always wrote — and, because the flag is the *claim* rather than its denial,
     /// that silence reads as "claimed by nobody" rather than as "claimed by a command".
+    ///
+    /// This is the answer for the screen that is **showing**; the one below is the answer waiting
+    /// for the other screen. Every print reads this field and nothing else, so a swap costs one
+    /// exchange and a printed cell costs nothing.
     write_provenance: Flags,
+
+    /// The same answer, for the screen that is not showing.
+    ///
+    /// **A screen swap is a change of provenance, and it happens in the middle of a segment.** The
+    /// caller states the answer for both screens before it feeds, because it knows both and the
+    /// emulator knows which screen is showing; `swap_alt` and a reset then exchange the two along
+    /// with the grids they belong to. Without it one answer spanned the swap, and the primary
+    /// screen's output after a full-screen program exited — still the same command's output, with
+    /// no marker between — landed on cells that claimed nothing.
+    inactive_write_provenance: Flags,
 
     /// A pending-wrap cursor position just returned by CPR.
     ///
@@ -589,18 +612,30 @@ impl<T> Term<T> {
         fork
     }
 
-    /// Say whether the writes that follow are a shell command's output.
+    /// Say whether the writes that follow are a shell command's output — **once per screen**.
     ///
-    /// Stamped onto every cell the terminal prints from here on, as [`Flags::NON_OUTPUT_WRITE`]
-    /// when they are *not* (see that flag). The caller is expected to state it before every segment
-    /// it feeds rather than only when it changes: the emulator has no way to know, and the value
-    /// that leaves a cell unclaimed is the safe one to hold by default.
-    pub fn set_write_provenance(&mut self, is_command_output: bool) {
-        self.write_provenance = if is_command_output {
-            Flags::COMMAND_OUTPUT_WRITE
+    /// Stamped onto every cell the terminal prints from here on, as
+    /// [`Flags::COMMAND_OUTPUT_WRITE`] when they are (see that flag). The caller is expected to
+    /// state it before every segment it feeds rather than only when it changes: the emulator has no
+    /// way to know, and the value that leaves a cell unclaimed is the safe one to hold by default.
+    ///
+    /// **Both screens, because one segment can cross between them.** `ESC[?1049l` inside a
+    /// command's output hands the screen back mid-segment, and the answer for the screen that comes
+    /// back is a different answer — the shell's own bookkeeping is kept per screen for exactly that
+    /// reason. The caller has both in hand and the emulator knows which screen is showing, so the
+    /// pair is stated here and [`Self::swap_alt`] exchanges them with the grids.
+    pub fn set_write_provenance(
+        &mut self,
+        primary_is_command_output: bool,
+        alternate_is_command_output: bool,
+    ) {
+        let (showing, waiting) = if self.mode.contains(TermMode::ALT_SCREEN) {
+            (alternate_is_command_output, primary_is_command_output)
         } else {
-            Flags::empty()
+            (primary_is_command_output, alternate_is_command_output)
         };
+        self.write_provenance = write_provenance_flags(showing);
+        self.inactive_write_provenance = write_provenance_flags(waiting);
     }
 
     /// Drain rows which received printable input, preserving the active screen at write time.
@@ -797,6 +832,7 @@ impl<T> Term<T> {
             grapheme: Default::default(),
             reported_pending_wrap: None,
             write_provenance: Flags::empty(),
+            inactive_write_provenance: Flags::empty(),
         }
     }
 
@@ -1164,6 +1200,22 @@ impl<T> Term<T> {
         self.set_keyboard_mode(keyboard_mode, KeyboardModesApplyBehavior::Replace);
 
         mem::swap(&mut self.grid, &mut self.inactive_grid);
+        // The provenance belongs to the screen, not to the segment: what a command's output is on
+        // the primary screen is not what it is on the canvas a full-screen program owns, and a
+        // swap lands in the middle of a segment with no marker to restate it. See
+        // `inactive_write_provenance`.
+        mem::swap(
+            &mut self.write_provenance,
+            &mut self.inactive_write_provenance,
+        );
+        if !entering {
+            // **The canvas is discarded here, and the answer stated for it goes with it.** What a
+            // caller said about the alternate screen was said about the screenful that is being
+            // thrown away — the next entry resets that grid — so a program that comes back and
+            // draws before anything is said about it draws on cells claiming nothing, rather than
+            // on cells wearing the last program's command.
+            self.inactive_write_provenance = Flags::empty();
+        }
         self.mode ^= TermMode::ALT_SCREEN;
         if let Some(hook) = &self.transcript_hook {
             hook(if entering {
@@ -1675,6 +1727,21 @@ impl<T> Term<T> {
         Some((lead, wrap_placeholder))
     }
 
+    /// Leave on `point` only the claim that *both* the text that was already in the cell and the
+    /// write that has just rewritten it can make.
+    ///
+    /// **A cell's claim is the conjunction over every piece of text in it**, so text that was
+    /// already on the grid keeps whatever it could claim before, however it is moved or re-cut.
+    /// `write_at_cursor` stamps the current writer on everything it puts down, which is the whole
+    /// truth only when everything it puts down is new; a cluster that is taken off the grid and
+    /// written again to change its width is not new, and intersecting here is what stops the
+    /// appender's provenance from being granted to the base character somebody else wrote.
+    fn carry_claim(&mut self, point: Point, carried: Flags) {
+        if !carried.contains(Flags::COMMAND_OUTPUT_WRITE) {
+            self.grid[point].flags.remove(Flags::COMMAND_OUTPUT_WRITE);
+        }
+    }
+
     /// Hang a zero-width mark on a cell, and let that say who the cell's text now belongs to.
     ///
     /// **A mark makes the cell's text partly the writer's.** So a mark added while this is not a
@@ -1790,11 +1857,35 @@ impl<T> Term<T> {
         };
     }
 
+    /// Does this cell still hold exactly the text of the retained cluster?
+    ///
+    /// **Change from upstream, and the whole of what makes the retained cluster safe to write
+    /// again.** `self.grapheme` is a copy of text that is on the grid, and the grid can be
+    /// rewritten under it by anything that does not move the cursor: `ECH` blanks the cell, a tab
+    /// walks over it, `CSI S` scrolls the row out from under the coordinate, and `DECSC`/`DECRC`
+    /// puts the cursor back exactly where the cache expects it afterwards. The other three checks
+    /// are all about the cursor, so none of them can see that. Extending the cache then writes the
+    /// *old* text again — which resurrects erased characters onto the screen, and, because the
+    /// re-cut cluster is written through the printing path, dates them by whoever is printing now.
+    ///
+    /// It is asked of **every candidate character** while `DECSET 2027` is set — before the
+    /// Unicode continuation test, so also of the character that starts the next cluster — and not
+    /// only where an extension succeeds. It allocates nothing, walks at most the
+    /// [`MAX_GRAPHEME_CLUSTER_CHARS`] a retained cluster is already capped at, and is never
+    /// reached in the legacy single-codepoint mode, where no cluster is retained at all.
+    fn cell_holds_cluster(&self, point: Point, cluster: &str) -> bool {
+        let cell = &self.grid[point];
+        std::iter::once(cell.c)
+            .chain(cell.zerowidth().into_iter().flatten().copied())
+            .eq(cluster.chars())
+    }
+
     fn can_extend_grapheme(&self, character: char) -> bool {
         !self.grapheme.cluster.is_empty()
             && self.grapheme.expected_cursor == self.grid.cursor.point
             && self.grapheme.expected_wrap == self.grid.cursor.input_needs_wrap
             && self.grapheme.alternate_screen == self.mode.contains(TermMode::ALT_SCREEN)
+            && self.cell_holds_cluster(self.grapheme.lead, &self.grapheme.cluster)
             && extends_grapheme_cluster(&self.grapheme.cluster, character)
     }
 
@@ -1813,11 +1904,7 @@ impl<T> Term<T> {
         for line in self.topmost_line().0..=self.bottommost_line().0 {
             for column in 0..self.columns() {
                 let point = Point::new(Line(line), Column(column));
-                let cell = &self.grid[point];
-                let matches = std::iter::once(cell.c)
-                    .chain(cell.zerowidth().into_iter().flatten().copied())
-                    .eq(self.grapheme.cluster.chars());
-                if matches {
+                if self.cell_holds_cluster(point, &self.grapheme.cluster) {
                     let index = line as i64 * columns + column as i64;
                     let distance = cursor_index.abs_diff(index);
                     if best.is_none_or(|(_, best_distance)| distance < best_distance) {
@@ -1883,6 +1970,11 @@ impl<T> Term<T> {
         // occupied, and a cleared cell claims nothing — the same rule `Cell::reset` follows. The
         // glyph that replaces it is printed through `write_at_cursor`, which does stamp.
         let template = self.grid.cursor.template.clone();
+        // What the cluster could claim *before* this width change. The two branches below take the
+        // whole cluster off the grid and write it again through the printing path, which would
+        // otherwise stamp the appender on a base character the appender never wrote — the prompt's
+        // glyph at the right margin, widened by a command's `U+FE0F`. See `carry_claim`.
+        let carried = self.grid[state.lead].flags & Flags::COMMAND_OUTPUT_WRITE;
 
         if let Some(placeholder) = state.wrap_placeholder.take() {
             let spacer = Point::new(state.lead.line, state.lead.column + 1);
@@ -1896,6 +1988,7 @@ impl<T> Term<T> {
                     .expect("one-cell grapheme must fit at a valid cursor");
                 state.lead = lead;
                 state.wrap_placeholder = wrap_placeholder;
+                self.carry_claim(lead, carried);
                 self.mark_fully_damaged();
                 return true;
             }
@@ -1915,6 +2008,7 @@ impl<T> Term<T> {
             };
             state.lead = lead;
             state.wrap_placeholder = wrap_placeholder;
+            self.carry_claim(lead, carried);
             self.mark_fully_damaged();
             return true;
         }
@@ -2326,10 +2420,19 @@ impl<T: EventListener> Handler for Term<T> {
             // cell's character exactly where it was — so over an occupied cell it is not a write at
             // all, and must not restate who wrote what is already there. Stamping it regardless let
             // a tab walked along a prompt's own line hand that line to a command.
+            //
+            // A blank cell can still be carrying somebody's zero-width marks, and the tab replaces
+            // the base character underneath them without touching them. The claim is the
+            // conjunction over everything in the cell, so where that text survives the answer is
+            // intersected with what the cell could claim before — the old claim is the strongest
+            // thing those marks can say for themselves, and a prompt's accent on a command's
+            // trailing space therefore keeps the cell out of the command's line.
             if cell.c == ' ' {
+                let keeps_earlier_text = cell.zerowidth().is_some_and(|marks| !marks.is_empty());
+                let claimed = provenance.contains(Flags::COMMAND_OUTPUT_WRITE)
+                    && (!keeps_earlier_text || cell.flags.contains(Flags::COMMAND_OUTPUT_WRITE));
                 cell.c = c;
-                cell.flags.remove(Flags::COMMAND_OUTPUT_WRITE);
-                cell.flags.insert(provenance);
+                cell.flags.set(Flags::COMMAND_OUTPUT_WRITE, claimed);
             }
 
             loop {
@@ -2824,6 +2927,14 @@ impl<T: EventListener> Handler for Term<T> {
 
         if self.mode.contains(TermMode::ALT_SCREEN) {
             mem::swap(&mut self.grid, &mut self.inactive_grid);
+            // RIS puts the primary screen back, so the answer for the primary screen comes back
+            // with it — the same exchange `swap_alt` makes, for the same reason, and the canvas
+            // this leaves behind drops its answer the same way.
+            mem::swap(
+                &mut self.write_provenance,
+                &mut self.inactive_write_provenance,
+            );
+            self.inactive_write_provenance = Flags::empty();
         }
         self.active_charset = Default::default();
         self.cursor_style = None;
