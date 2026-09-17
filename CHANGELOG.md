@@ -8,6 +8,19 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **A formula no longer flashes back to its source while you scroll inside a
+  full-screen program.** On macOS the system hands a terminal a program's
+  output in pieces of at most 1,024 bytes, so one redraw of a full screen
+  arrives as several of them a millisecond or two apart — and Folio could draw a
+  frame in between, with half of the redraw on it and a formula's source only
+  half written, which is not a formula, so the picture came down and the text
+  showed through. Folio now waits up to three milliseconds for the rest
+  whenever the system says there was more to come, and draws the whole redraw at
+  once. Typing is not delayed: a keystroke's echo is the system saying there is
+  nothing more, so it is drawn on the same frame as before. A program that
+  pauses in the middle of writing its own redraw can still be caught half-drawn
+  — nothing outside that program can know it has not finished — unless it marks
+  its redraws with synchronized output, which Folio has always honoured.
 - **A formula scrolling back into view inside a code block stays code.** When a
   formula came back onto the screen, Folio asked whether it still reads those
   lines as a formula — but it worked out the answer for those lines on their

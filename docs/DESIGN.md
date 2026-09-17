@@ -396,6 +396,113 @@ move the hang one layer out rather than remove it. Each thread then waits, at
 most, for the device it chose. The exit error and footer still use the queue, so
 shutdown reaches its bounded flush without waiting for a stalled trace write.
 
+### 1.6 A drain turn waits for the rest of a burst the kernel said was coming (T-COALESCE-CAPPED, 2026-09-17)
+
+A pty carries a byte stream and no record boundary, so a terminal is never told
+where a program's repaint ends. On macOS the kernel hands over at most 1,024
+bytes per `read(2)`, so a full-screen program's repaint of a few kilobytes
+arrives as three to eight reads with a genuinely empty ring between them — and
+an empty ring is the drain's only end-of-output signal (§1.3). Folio therefore
+composed and published a frame built from half a repaint: a grid on which a
+typeset formula's source is incomplete, so its picture is rightly withdrawn and
+its torn source shown. Every scroll inside a TUI did it.
+
+**The rule.** When a drain turn ends because the ring ran dry and the last read
+that filled it *filled the transport's transfer unit*, the turn does not
+publish. It records a deadline of `first unpublished byte + 3 ms`, which stands
+in the window's deadline fold beside every other clock it keeps, and the next
+turn publishes — either because the rest of the burst arrived, or because the
+deadline did. `bt_app::coalesce::decide` is the whole of it, a pure function of
+the clock; `Runtime::drain_pty` is its one caller.
+
+**It is an I/O rule, not content inference.** The input is the kernel's own
+answer to "was there more than you could give me", which is the signal every
+read-loop in Unix uses to decide whether to call `read` again; waiting a bounded
+time for the rest is what any reader that wants a record out of a byte stream
+has always had to do. Nothing reads a byte, asks what program is running, or
+distinguishes the two screens. Inferring the boundary from escape sequences
+(`CSI ?25l`/`h`, `ED`, `CUP 1;1`) would *not* be sound — those are conventions,
+and acting on them is reading the application's mind. Measured on the owner's
+recording of 2026-09-17: of its 116 cursor-hidden repaint brackets, not one had
+all of its interior read boundaries capped, so a terminal that framed on them
+would have been wrong 116 times out of 116.
+
+**The transfer unit is learned, because the obvious spelling is wrong where it
+matters.** `count == buffer.len()` is never true on macOS, where the pty caps at
+1,024 against our 16 KiB buffer. `bt_pty::CappedReads` therefore uses
+`min(buffer.len(), the largest count seen on this reader)`, and a maximum seen
+once proves nothing: `capped` first becomes true on the **second** read that
+returns the largest length so far. A read that fills our own buffer needs no
+corroboration. A later, larger read raises the maximum and starts it
+uncorroborated again; the chunks flagged under the old one are long consumed and
+all their flag bought was a bounded wait. On the owner's recording this flags 123
+reads, 122 of them genuine — every capped read but the first — with one false
+positive in seven minutes.
+
+This also says, from mechanism rather than platform name, why Windows never
+showed the defect and needs no `cfg`: ConPTY hands over 6–9 KiB of *whatever was
+there*, so a few-KiB repaint arrives in one read, equality with the running
+maximum is rare, and the deferral almost never arms.
+
+**Two bounds, and they are what keep it a scheduling rule.** Never past 3 ms
+after the *first* unpublished byte — so a flood whose every read is capped
+publishes at `1/T` and cannot be starved, which is measured rather than argued:
+eight capped reads a millisecond apart publish three times. And never past the
+next display deadline; a `Fifo` surface does not say when that is, and 3 ms is
+shorter than one frame at any refresh rate up to 333 Hz, so the constant
+satisfies that bound today and the input stays for the day there is a frame
+pacer.
+
+**What it costs.** Nothing for interactive echo. A keystroke's echo is a short
+read — the kernel saying there is nothing more — so the deferral never arms and
+the frame is published on the same turn as before, which keeps §7.1's standing
+rule that a keystroke's result is on the next frame. Keying the rule on the gap
+between reads instead would be simpler and would fix the same defect, but it
+charges every keystroke 3 ms, and on the recording up to 19 ms.
+
+**DEC 2026.** A program that brackets its repaint has already made it atomic, so
+the deferral never arms while a block is open — the parser is withholding the
+bytes and a frame composed now cannot differ — and a block that *commits* during
+a turn publishes at once: an ESU is the application naming its own frame's end,
+which is better information than any timer and must not wait behind one. The
+150 ms sync-update timeout (`vte`'s own, on the real clock) is untouched, and the
+two deadlines cannot be pending for one pane at the same time.
+
+**The measured limit.** Coalescing removes the tearing the *transport* causes and
+not the tearing an *application* causes. Of the 392 read boundaries interior to a
+repaint bracket in the recording, 245 (62 %) follow a capped read; the other
+38 % follow a short read — a moment the kernel itself said there was no more,
+i.e. the program paused between its own `write(2)` calls. Nothing outside that
+program can bridge those, and only synchronized output does. That the 62 % of
+boundaries the rule removes is exactly the 62 % by which the torn-source events
+fell (58 → 22 over the recording) is the evidence that the cause and the size of
+the fix are both right.
+
+**Publication is the window's, not the pane's.** `publish_pty_drain_frame`
+composes one picture for the whole window, so the deferral is the window's too.
+`DrainOutcome::arrived_uncapped` is or-ed across panes on purpose, in the safe
+direction: **one pane with nothing to wait for publishes the frame for all of
+them.** Publishing early is never wrong, only untidy; holding a pane that has
+finished speaking behind a pane that has not would be a pane delayed by a
+decision that was never about it. Every other road to the glass — a keystroke, an
+expose, chrome, an animation, the resize transaction — is untouched, and each
+settles the debt on its way through `publish_frame_inner`.
+
+**The invariant.** `coalesce::Pending::until` is never `Some` without a wake
+booked for it: it stands in the fold that computes `ControlFlow::WaitUntil`, and
+`finish_pty_coalesce_if_due` runs on every turn and publishes and disarms the
+instant it passes. A deadline outliving its wake would be a pane that silently
+stopped presenting — the failure `bt_term::scheduling::ResizeEpoch` is written
+against — so the deadline and the debt live in one type and are settled together,
+at the one door every publish comes through.
+
+**Tracing.** `BT_PERF_TRACE drain slices= bytes= capped= ring_pending= sync_open=
+sync_closed= owed_us= publish= deferred_us= reason=` is written once per drain
+turn, and only when tracing is on. The rule's whole effect is a frame that did
+not happen, which no other line reports; with `BT_PTY_DUMP` recording every read
+boundary and arrival in its `.chunks` sidecar, a traced run can be replayed
+against its own recording and every decision checked.
+
 
 ## 2. 渲染管线
 

@@ -628,12 +628,14 @@ fn read_pty_output(
 /// Keep the normal reader loop free of dump branches, clocks, allocations, and file operations.
 fn read_pty_output_without_dump(reader: &mut dyn Read, output: &OutputRing, wake: &OutputWake) {
     let mut buffer = [0_u8; READER_CHUNK_BYTES];
+    let mut capped = CappedReads::new(buffer.len());
     loop {
         let count = match reader.read(&mut buffer) {
             Ok(0) | Err(_) => break,
             Ok(count) => count,
         };
-        if output.push(buffer[..count].to_vec()).is_err() {
+        let capped = capped.observe(count);
+        if output.push_read(buffer[..count].to_vec(), capped).is_err() {
             drain_to_the_end(reader);
             break;
         }
@@ -667,24 +669,26 @@ fn read_pty_output_with_dump(
     dump: Arc<Mutex<PtyDump>>,
 ) {
     let mut buffer = [0_u8; READER_CHUNK_BYTES];
+    let mut capped_reads = CappedReads::new(buffer.len());
     loop {
         let count = match reader.read(&mut buffer) {
             Ok(0) | Err(_) => break,
             Ok(count) => count,
         };
+        let capped = capped_reads.observe(count);
         let write_result = dump
             .lock()
             .map_err(|_| std::io::Error::other("dump mutex poisoned"))
             .and_then(|mut dump| dump.write_chunk(&buffer[..count]));
         if let Err(error) = write_result {
             eprintln!("BT_PTY_DUMP disabled after write failure: {error}");
-            if output.push(buffer[..count].to_vec()).is_ok() {
+            if output.push_read(buffer[..count].to_vec(), capped).is_ok() {
                 wake();
                 read_pty_output_without_dump(reader, output, wake);
             }
             return;
         }
-        if output.push(buffer[..count].to_vec()).is_err() {
+        if output.push_read(buffer[..count].to_vec(), capped).is_err() {
             drain_to_the_end(reader);
             break;
         }
@@ -986,9 +990,93 @@ fn program_is_the_last_resort_shell(program: &OsStr) -> bool {
     }
 }
 
+/// One `read(2)`, kept whole in the ring with the one thing only the reader knows about it.
+struct Chunk {
+    bytes: Vec<u8>,
+    /// **The transport had more than it could hand over in this call.** See [`CappedReads`].
+    capped: bool,
+}
+
+/// What one [`OutputRing::try_pop_slice`] handed out.
+///
+/// The bytes, and whether the last of them was the last byte of a `read(2)` the transport
+/// capped — the kernel's own way of saying "there was more". A window that has just fed a
+/// capped read and found the ring dry is a window one or two milliseconds ahead of the rest of
+/// a burst, and that is the only fact this type exists to carry.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct OutputSlice {
+    pub bytes: Vec<u8>,
+    /// True only when a *whole* capped chunk ends this slice. A slice that stopped in the
+    /// middle of a chunk says nothing: the rest of that chunk is still in the ring, and the
+    /// caller is coming straight back for it.
+    pub ends_capped: bool,
+}
+
+impl OutputSlice {
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+}
+
+/// **Which reads the transport capped, learned from the transport itself.**
+///
+/// A `read(2)` that returned as much as this transport ever returns in one call is the kernel
+/// saying it had more than it could give; the next bytes of that burst are already written and
+/// are a millisecond or two away. A read that returned less is the kernel saying that is all
+/// there is. Nothing here inspects a byte: this is a property of the transfer, not of the
+/// stream.
+///
+/// The obvious spelling — `count == buffer.len()` — is **wrong on macOS**, where the pty caps a
+/// read at 1024 bytes however large the buffer is, so a 16 KiB buffer is never filled and the
+/// test never fires on the one platform that needs it. So the unit is learned:
+/// `min(buffer.len(), the largest count seen on this reader)`.
+///
+/// **A maximum seen once is indistinguishable from a coincidence**, so a single sighting proves
+/// nothing and `capped` stays false. The maximum has to come back: `capped` first becomes true
+/// on the **second** read that returns the largest length seen so far. A read that fills our own
+/// buffer needs no corroboration — the buffer is ours, and a read that filled it provably had no
+/// room for more — so that one is capped the first time.
+///
+/// **A larger read later raises the maximum**, which retrospectively says the earlier
+/// corroborated maximum was not the transport's unit after all. That costs nothing: those chunks
+/// are long since consumed, and all their flag ever bought was a bounded wait for bytes that
+/// were not coming. The new maximum starts uncorroborated in its turn, so nothing is flagged
+/// again until it repeats.
+///
+/// Measured against the owner's macOS recording of 2026-09-17 (350 reads, 123 of them the pty's
+/// 1024-byte cap): 123 reads flagged, 122 of them genuine — every capped read but the first,
+/// which had nothing to corroborate it — and exactly one false positive, a 508-byte read that
+/// repeated before any 1024-byte read had raised the maximum. One bounded wait, once, in seven
+/// minutes.
+struct CappedReads {
+    buffer_len: usize,
+    maximum: usize,
+    sightings: u32,
+}
+
+impl CappedReads {
+    fn new(buffer_len: usize) -> Self {
+        Self {
+            buffer_len,
+            maximum: 0,
+            sightings: 0,
+        }
+    }
+
+    fn observe(&mut self, count: usize) -> bool {
+        if count > self.maximum {
+            self.maximum = count;
+            self.sightings = 1;
+        } else if count == self.maximum {
+            self.sightings = self.sightings.saturating_add(1);
+        }
+        count == self.buffer_len || (count == self.maximum && self.sightings >= 2)
+    }
+}
+
 #[derive(Default)]
 struct RingState {
-    chunks: VecDeque<Vec<u8>>,
+    chunks: VecDeque<Chunk>,
     bytes: usize,
     maximum_bytes: usize,
     blocked_pushes: u64,
@@ -1026,7 +1114,15 @@ impl OutputRing {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// A push with nothing to say about the transport — the shape every test that only cares
+    /// about bytes wants. Production always comes through [`Self::push_read`], which is where
+    /// the reader's one extra fact is put on the record.
+    #[cfg(test)]
     fn push(&self, chunk: Vec<u8>) -> Result<(), PtyError> {
+        self.push_read(chunk, false)
+    }
+
+    fn push_read(&self, chunk: Vec<u8>, capped: bool) -> Result<(), PtyError> {
         if chunk.len() > self.capacity.get() {
             return Err(PtyError::Backend(format!(
                 "reader chunk {} exceeds ring capacity {}",
@@ -1051,31 +1147,48 @@ impl OutputRing {
         }
         state.bytes += chunk.len();
         state.maximum_bytes = state.maximum_bytes.max(state.bytes);
-        state.chunks.push_back(chunk);
+        state.chunks.push_back(Chunk {
+            bytes: chunk,
+            capped,
+        });
         self.changed.notify_all();
         Ok(())
     }
 
     pub fn try_pop(&self, quantum: NonZeroUsize) -> Vec<u8> {
+        self.try_pop_slice(quantum).bytes
+    }
+
+    pub fn try_pop_slice(&self, quantum: NonZeroUsize) -> OutputSlice {
         let mut state = self.state();
         let mut output = Vec::with_capacity(quantum.get().min(state.bytes));
+        let mut ends_capped = false;
         while output.len() < quantum.get() {
             let Some(mut chunk) = state.chunks.pop_front() else {
                 break;
             };
             let remaining = quantum.get() - output.len();
-            if chunk.len() <= remaining {
-                state.bytes -= chunk.len();
-                output.extend(chunk);
+            if chunk.bytes.len() <= remaining {
+                state.bytes -= chunk.bytes.len();
+                ends_capped = chunk.capped;
+                output.extend(chunk.bytes);
             } else {
-                let tail = chunk.split_off(remaining);
-                state.bytes -= chunk.len();
-                output.extend(chunk);
-                state.chunks.push_front(tail);
+                let tail = chunk.bytes.split_off(remaining);
+                state.bytes -= chunk.bytes.len();
+                output.extend(chunk.bytes);
+                // The read is not over, so its flag is not spent: it travels with the tail.
+                ends_capped = false;
+                state.chunks.push_front(Chunk {
+                    bytes: tail,
+                    capped: chunk.capped,
+                });
             }
         }
         self.changed.notify_all();
-        output
+        OutputSlice {
+            bytes: output,
+            ends_capped,
+        }
     }
 
     pub fn close(&self) {
@@ -1755,8 +1868,12 @@ impl PtySession {
     /// back on the front, so a slice boundary is a boundary in the byte stream
     /// and nowhere else — the same contract a quantum-sized pop has always had
     /// with the chunks the reader thread happened to deliver.
-    pub fn read_output_slice(&self) -> Vec<u8> {
-        self.output.try_pop(TERM_READ_SLICE)
+    ///
+    /// The slice carries [`OutputSlice::ends_capped`] because only the reader can see a read
+    /// boundary, and it is gone by the time the bytes are here: a pop concatenates whatever the
+    /// reader happened to deliver.
+    pub fn read_output_slice(&self) -> OutputSlice {
+        self.output.try_pop_slice(TERM_READ_SLICE)
     }
 
     pub fn output_is_drained(&self) -> bool {
@@ -7889,5 +8006,90 @@ mod tests {
 
         session.shutdown().unwrap();
         wait_until_the_process_table_forgets(pid);
+    }
+
+    /// A maximum seen once proves nothing; a maximum that comes back is the transport's unit.
+    #[test]
+    fn a_capped_read_is_a_repeated_maximum_or_a_filled_buffer() {
+        let mut capped = CappedReads::new(16 * 1024);
+        // The macOS shape: a 16 KiB buffer the kernel never fills, capping at 1024.
+        assert!(!capped.observe(118), "one sighting is a coincidence");
+        assert!(!capped.observe(27));
+        assert!(
+            !capped.observe(1024),
+            "the first 1024 has nothing to corroborate it"
+        );
+        assert!(capped.observe(1024), "the second says 1024 is the unit");
+        assert!(capped.observe(1024));
+        assert!(
+            !capped.observe(508),
+            "short of the unit is the kernel saying that is all"
+        );
+        assert!(capped.observe(1024));
+
+        // Our own buffer needs no corroboration: a read that filled it had no room for more.
+        let mut filled = CappedReads::new(64);
+        assert!(filled.observe(64));
+    }
+
+    /// A larger read later says the earlier maximum was not the unit. Nothing is owed for it.
+    #[test]
+    fn a_larger_read_raises_the_unit_and_the_new_one_starts_uncorroborated() {
+        let mut capped = CappedReads::new(16 * 1024);
+        assert!(!capped.observe(508));
+        assert!(
+            capped.observe(508),
+            "508 looked like the unit, and was flagged"
+        );
+        assert!(
+            !capped.observe(1024),
+            "a larger read raises the maximum and starts its own count"
+        );
+        assert!(
+            !capped.observe(508),
+            "the old maximum is no longer the maximum"
+        );
+        assert!(
+            capped.observe(1024),
+            "the new unit is corroborated in its turn"
+        );
+    }
+
+    /// The flag belongs to a whole read. A slice that stopped inside one says nothing, and the
+    /// rest of that read keeps the flag for the pop that finishes it.
+    #[test]
+    fn only_a_whole_capped_read_ends_a_slice_capped() {
+        let ring = OutputRing::new(NonZeroUsize::new(64).unwrap());
+        ring.push_read(vec![b'a'; 10], true).unwrap();
+        let whole = ring.try_pop_slice(NonZeroUsize::new(32).unwrap());
+        assert_eq!(whole.bytes.len(), 10);
+        assert!(whole.ends_capped);
+
+        ring.push_read(vec![b'b'; 10], true).unwrap();
+        let head = ring.try_pop_slice(NonZeroUsize::new(4).unwrap());
+        assert_eq!(head.bytes.len(), 4);
+        assert!(
+            !head.ends_capped,
+            "the read is not over, so its flag is not spent"
+        );
+        let tail = ring.try_pop_slice(NonZeroUsize::new(32).unwrap());
+        assert_eq!(tail.bytes.len(), 6);
+        assert!(
+            tail.ends_capped,
+            "the tail of a capped read is still capped"
+        );
+
+        // An uncapped read ends a slice uncapped even when a capped one preceded it.
+        ring.push_read(vec![b'c'; 4], true).unwrap();
+        ring.push_read(vec![b'd'; 4], false).unwrap();
+        let both = ring.try_pop_slice(NonZeroUsize::new(32).unwrap());
+        assert_eq!(both.bytes.len(), 8);
+        assert!(!both.ends_capped);
+
+        // An empty ring hands out nothing and claims nothing.
+        assert_eq!(
+            ring.try_pop_slice(NonZeroUsize::new(32).unwrap()),
+            OutputSlice::default()
+        );
     }
 }
