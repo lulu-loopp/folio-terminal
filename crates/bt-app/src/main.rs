@@ -12713,6 +12713,21 @@ struct WindowRuntime {
     /// [`Runtime::settle_composition_owner`] at the tail of every pass, which is
     /// the one place that notices the keyboard has moved.
     composing: Option<ImeOwner>,
+    /// **Which field a live composition belongs to** (§7.1.5a″; review
+    /// 2026-09-17 P2) — `None` when there is no composition.
+    ///
+    /// Beside [`Self::composing`] and set in the same breath, because the two
+    /// are one fact read at two grains: that one says *what kind* of surface the
+    /// letters were typed into, which is all the pass-tail settlement needs, and
+    /// this one says *which* surface, which is what two terminals, or two
+    /// previews, need to be told apart.
+    ///
+    /// **It outlives [`Runtime::cancel_composition`], `Ime::Enabled`,
+    /// `Ime::Disabled` and every window focus change, on purpose.** A cancel is
+    /// a request an input method may refuse, and the lifecycle notices around it
+    /// are not the composition ending — a barrier a notice can take down is not
+    /// a barrier. See [`composition_ruling`] for the whole rule.
+    composing_in: Composing,
     ime_active: bool,
     ime_cursor_throttle: ImeCursorThrottle,
     /// The tab-rename caret's line box in window pixels, as the strip last drew
@@ -18016,6 +18031,31 @@ struct KeyboardOwner {
     palette: bool,
 }
 
+impl KeyboardOwner {
+    /// **The owners a drop is refused under, as against the ones it takes the
+    /// keyboard back from** (review 2026-09-17 P1-b).
+    ///
+    /// Every rung of this struct takes the keyboard away from the shell, and
+    /// until this line they were all one kind of thing. A dropped path splits
+    /// them in two, and the split is what the reader would say:
+    ///
+    /// * a files column, a preview (edited or browsed), the graph's search field
+    ///   and the in-pane capsule are **borrowing** it — they sit inside the
+    ///   layout, the panes behind them are visible, and a gesture aimed at a
+    ///   pane may simply ask for the keyboard back;
+    /// * a menu, any of the four modals, the palette, a git prompt and the
+    ///   tab-name box are **being answered**. The window is waiting for a reply
+    ///   and the reply is a keystroke, so a path written underneath one would be
+    ///   followed by an `Enter` that answers the card instead of running the
+    ///   command.
+    ///
+    /// Only the second list is here. [`Runtime::a_modal_holds_the_window`] is
+    /// its one reader.
+    const fn is_modal(self) -> bool {
+        self.menu_or_dialog || self.rename || self.git_prompt || self.palette
+    }
+}
+
 /// Where a **composition** goes — [`KeyboardOwner`] resolved to a destination.
 ///
 /// # The bug this exists to close (user report, 2026-08-12)
@@ -18213,6 +18253,279 @@ fn composition_outlived_its_field(
     holds_the_keyboard: ImeOwner,
 ) -> bool {
     composing.is_some_and(|started_in| started_in != holds_the_keyboard)
+}
+
+/// **The field a composition began in, named exactly enough to tell it from the
+/// next one** (§7.1.5a″; review 2026-09-17 P2, rounds 2 and 3).
+///
+/// [`ImeOwner`] says what *kind* of surface the letters are going to, which is
+/// what routes them. It is not enough to say whether a composition is still the
+/// one it started as: two terminals are both `Shell`, two preview surfaces are
+/// both `Preview`, and a composition that crosses from one to the other has
+/// outlived its field exactly as much as one that crossed from a palette to a
+/// page. So each rung carries whatever this window already uses to tell its own
+/// instances apart, and nothing more:
+///
+/// * a shell by [`PasteTarget`] — tab, seat and incarnation, so a shell
+///   restarted in the same hole is a different field;
+/// * a preview and the graph's field by [`PreviewSurface`], the id every
+///   preview map in this window is keyed by;
+/// * a files column and the search capsule by the seat they stand on;
+/// * the name box by its [`RenameSubject`], which is what it is editing;
+/// * the palette, a git prompt and a popup by themselves — this window has one
+///   of each at a time.
+///
+/// The `Option`s inside are not uncertainty to be resolved: a surface that
+/// cannot be named right now is one no text can be inserted into either, so two
+/// of them comparing equal costs nothing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum CompositionOrigin {
+    Shell(Option<PasteTarget>),
+    Preview(Option<PreviewSurface>),
+    GraphSearch(Option<PreviewSurface>),
+    Search(Option<SeatId>),
+    FilesTree(Option<SeatId>),
+    Rename(Option<RenameSubject>),
+    GitPrompt,
+    Palette,
+    Modal,
+}
+
+/// **What a composition event is**, as far as [`composition_ruling`] needs to
+/// know (§7.1.5a″).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ComposingEvent {
+    /// A pre-edit with letters in it. This is somebody composing **now**, so it
+    /// belongs to whatever field holds the keyboard at this instant — which is
+    /// what "the first pre-edit after the keyboard moved starts a new
+    /// composition" means.
+    Opens,
+    /// An empty pre-edit: the letters that were on the glass are taken off.
+    Clears,
+    /// A commit. The letters are about to be inserted somewhere.
+    Commits,
+}
+
+/// **What this window is holding on behalf of an input method** (§7.1.5a″;
+/// review 2026-09-17 P2, rounds 3 and 4).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+enum Composing {
+    /// Nothing is being composed.
+    #[default]
+    Idle,
+    /// A composition is live, and it began in this field.
+    In(CompositionOrigin),
+    /// **A composition whose letters have already been taken off the glass, in
+    /// a field that is not the one it began in** — and whose end has therefore
+    /// reached this window *after* the keyboard moved.
+    ///
+    /// It is a state and not a verdict because one event decides which of two
+    /// things it was, and that event is the very next composition event this
+    /// window sees. A refused cancel finishes with a result, so its commit
+    /// arrives immediately and is judged by the origin. An honoured cancel
+    /// finishes with nothing, so the next thing to arrive is the reader's own
+    /// typing, and the composition simply retires.
+    ///
+    /// **The boundary is the next event, not a clock and not a turn**, and the
+    /// backends are what make that exact. Every one of the three places pinned
+    /// winit 0.30.13 emits `Ime::Commit` sends `Ime::Preedit("")` immediately
+    /// before it — **adjacent send calls, not adjacent source lines** — with no
+    /// event in between: Windows
+    /// `platform_impl/windows/event_loop.rs:1550-1557` (`WM_IME_COMPOSITION`
+    /// with `GCS_RESULTSTR`; the empty pre-edit at `:1552`, the commit at
+    /// `:1556`) and `:1592-1599` (`WM_IME_ENDCOMPOSITION`; `:1594` and `:1598`,
+    /// both before `Ime::Disabled` at `:1603-1607`), macOS
+    /// `platform_impl/macos/view.rs:412-413` (`insertText:`, gated on
+    /// `hasMarkedText` at `:411`). So "an empty pre-edit and then a commit" is
+    /// one composition finishing with a result, and an empty pre-edit followed
+    /// by anything else is one finishing without one — `unmarkText` clears the
+    /// marked text at `:340` and queues exactly that lone empty pre-edit at
+    /// `:345`, as does `WM_IME_COMPOSITION` with an `lparam` of zero
+    /// (`event_loop.rs:1537-1542`).
+    ///
+    /// **What that adjacency proves, and what it does not.** It proves no event
+    /// can come between an ending's clear and its result, so a result cannot be
+    /// mistaken for the reader's own typing. It does **not** prove that a clear
+    /// this window has already seen was the only one — see bound ③ on
+    /// [`composition_ruling`].
+    Retiring(CompositionOrigin),
+}
+
+impl Composing {
+    /// The field a live or retiring composition began in.
+    const fn origin(&self) -> Option<&CompositionOrigin> {
+        match self {
+            Self::Idle => None,
+            Self::In(origin) | Self::Retiring(origin) => Some(origin),
+        }
+    }
+
+    /// Apply what [`composition_ruling`] decided.
+    fn after(self, next: ComposingAfter, here: &CompositionOrigin) -> Self {
+        match next {
+            ComposingAfter::Unchanged => self,
+            ComposingAfter::Idle => Self::Idle,
+            ComposingAfter::AdoptHere => Self::In(here.clone()),
+            ComposingAfter::Retire => match self {
+                Self::Idle => Self::Idle,
+                Self::In(origin) | Self::Retiring(origin) => Self::Retiring(origin),
+            },
+        }
+    }
+}
+
+/// What the window should be holding once this event has been answered.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ComposingAfter {
+    /// Leave it exactly as it is.
+    Unchanged,
+    /// There is no composition any more.
+    Idle,
+    /// This event begins one, here.
+    AdoptHere,
+    /// The letters are off the glass somewhere else; the next event says
+    /// whether they were finished or abandoned. See [`Composing::Retiring`].
+    Retire,
+}
+
+/// [`composition_ruling`]'s answer: whether these letters are answered at all,
+/// and what becomes of the recorded composition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompositionRuling {
+    /// `false` is a **discard**: nothing is inserted, into this field or any
+    /// other, by any rung of the ladder.
+    deliver: bool,
+    next: ComposingAfter,
+}
+
+/// **A composition belongs to the field it began in, and a cancel is a request**
+/// (§7.1.5a″; review 2026-09-17 P2).
+///
+/// [`Runtime::cancel_composition`] asks an input method to stop; `ImmNotifyIME`
+/// answers a bool and §7.1.5a″ already names a method that says no. And whether
+/// it says yes or no, **the answer arrives after the keyboard has already
+/// moved**: winit buffers its callbacks until the application returns
+/// (`platform_impl/windows/event_loop/runner.rs`, `macos/app_state.rs`), so the
+/// events an ending composition produces are delivered against the field the
+/// gesture moved to. Every rung of `ime_input` resolves the owner *now*, so
+/// those letters would be inserted into whatever the keyboard has arrived in.
+/// The ruling is that this must never happen, and a request cannot be what
+/// enforces it.
+///
+/// **The rule, in full.** A composition's **origin** is the identity of the
+/// keyboard owner it began under ([`CompositionOrigin`]), set by the first
+/// non-empty pre-edit. A **commit** is delivered only when there is no
+/// composition behind it — which is how an input method sends a single
+/// character — or when its origin is the field that would receive it now;
+/// otherwise it is discarded, everywhere. The origin is **not** cleared by
+/// `cancel_composition`, by `Ime::Enabled` or `Ime::Disabled`, or by the window
+/// losing and regaining focus: those are lifecycle notices about the method, and
+/// a barrier a notice can take down is not a barrier.
+///
+/// **What ends a composition, given that a cancel cannot be trusted to.** An
+/// empty pre-edit is the letters coming off the glass, and it is the last thing
+/// every ending does. Where it arrives says what it is:
+///
+/// * **in the field the composition began in** — the reader pressed `Esc` where
+///   they were typing — it is simply over;
+/// * **anywhere else** — the ending crossed a field boundary, which is exactly
+///   the case this whole rule is about — it puts the composition into
+///   [`Composing::Retiring`], and the **very next composition event** decides.
+///   A commit is that composition finishing with a result and is judged by the
+///   origin (so a refused cancel's letters are discarded); anything else means
+///   it finished without one, and the composition retires with no verdict owed.
+///
+/// **That next-event boundary is exact rather than approximate**, and pinned
+/// winit is what makes it so: every `Ime::Commit` it emits is sent immediately
+/// after an `Ime::Preedit("")` — adjacent send calls, not adjacent source lines
+/// — at all three sites, with no event in between (see [`Composing::Retiring`]
+/// for the file and line of each). So a finishing commit cannot arrive anywhere
+/// but immediately after its own clear, and an honoured cancel — whose empty
+/// pre-edit comes alone — is not mistaken for one. No clock and no turn boundary
+/// is involved. **The adjacency proves there is no event between a clear and its
+/// result; it does not prove that the clear this window is looking at was the
+/// first one** (bound ③).
+///
+/// **Three bounds, stated rather than hidden.**
+///
+/// ① A method that answers a refused cancel with a *non-empty* pre-edit is
+/// indistinguishable from a reader beginning to type, so it re-homes. Those
+/// letters are drawn at the new caret before any commit — a picture that can be
+/// seen and refused, not bytes on a command line — and the alternative is
+/// refusing the first real composition after every focus change.
+///
+/// ② A composition abandoned with **no event at all** — no commit and no empty
+/// pre-edit — leaves its origin standing, so the next committed character in
+/// another field arrives as `Retiring` + commit and is discarded. That is one
+/// character, after which the window is idle and everything works; and it is
+/// indistinguishable by event order from a refused cancel's late result, which
+/// is the thing §7.1.5a″ forbids. The conservative side is the ruling's own:
+/// never insert into a field the text did not begin in. Neither pinned backend
+/// produces it — an ending always emits its result or its empty pre-edit — so
+/// the order that would pay for it is one that has to be invented.
+///
+/// ③ **A double clear followed by the old result is delivered**, and this is the
+/// bound the next-event boundary buys the other two with. `In(A)` → the
+/// cancel-time empty pre-edit arrives at B → `Retiring(A)` → a *second* empty
+/// pre-edit arrives at B → `Idle`, because an empty pre-edit with no commit
+/// behind it is exactly what an honoured cancel looks like → `Commit(old text)`
+/// is then judged against `Idle` and **reaches B**. It is not a hole that could
+/// be closed by looking harder: those two states are the same states an honoured
+/// cancel followed by the reader's own punctuation passes through, which is the
+/// case ② above pays for, and the two orders are identical event for event.
+/// Refusing here would put the honoured cancel's cost back.
+///
+/// Windows can *represent* it — a zero `lparam` clears the composition string
+/// without disabling composition (`event_loop.rs:1537-1542`), so a later
+/// `GCS_RESULTSTR` on the same context can still send the pair — and macOS
+/// cannot, because `unmarkText` removes the marked text that `insertText:`
+/// requires before it will commit at all (`view.rs:340`, `:411`). No supported
+/// input method is shown to clear its composition string and then commit the old
+/// text, so this is a shape the platform admits rather than a sequence anything
+/// is known to produce.
+fn composition_ruling(
+    state: &Composing,
+    here: &CompositionOrigin,
+    event: ComposingEvent,
+) -> CompositionRuling {
+    match event {
+        ComposingEvent::Opens => CompositionRuling {
+            deliver: true,
+            next: ComposingAfter::AdoptHere,
+        },
+        ComposingEvent::Clears => CompositionRuling {
+            deliver: true,
+            next: match state {
+                // An ending that has not crossed a boundary, and an empty
+                // pre-edit with nothing behind it: over, with nothing owed.
+                Composing::Idle => ComposingAfter::Unchanged,
+                Composing::In(origin) if origin == here => ComposingAfter::Idle,
+                // The ending reached us in another field. One event decides.
+                Composing::In(_) => ComposingAfter::Retire,
+                // A second empty pre-edit with no commit between: the first
+                // ending had no result, so there is nothing left to judge.
+                Composing::Retiring(_) => ComposingAfter::Idle,
+            },
+        },
+        ComposingEvent::Commits => CompositionRuling {
+            deliver: state.origin().is_none_or(|origin| origin == here),
+            next: ComposingAfter::Idle,
+        },
+    }
+}
+
+/// Which of the three a winit composition event is, or `None` for the two that
+/// are the window's own bookkeeping.
+///
+/// Written beside [`composition_ruling`] rather than inside it so that the
+/// ruling can be read — and tested — without constructing winit's event.
+const fn composing_event_of(event: &Ime) -> Option<ComposingEvent> {
+    match event {
+        Ime::Preedit(text, _) if !text.is_empty() => Some(ComposingEvent::Opens),
+        Ime::Preedit(..) => Some(ComposingEvent::Clears),
+        Ime::Commit(_) => Some(ComposingEvent::Commits),
+        Ime::Enabled | Ime::Disabled => None,
+    }
 }
 
 /// Whether a shell has the keyboard — `InputOwner == Terminal`.
@@ -18616,16 +18929,63 @@ fn take_psreadline_resize_reanchor_input(
 /// A leaf with no child at all (`BT_PROBE_INPUT`, a restored pane whose shell is gone) is not a
 /// refusal and not an error: there is nowhere for the bytes to go and never was.
 fn write_pty_input(pty: Option<&PtySession>, bytes: &[u8], what: &'static str) -> Result<()> {
+    offer_pty_input(pty, bytes, what).map(drop)
+}
+
+/// **What became of the bytes** — the same door, for the callers that have to
+/// know (review 2026-09-17 P2-a).
+///
+/// [`write_pty_input`] swallows a refusal on purpose and always will: a shell
+/// sitting on a megabyte of unread input is a fact about that shell, not an
+/// error for the window to die of. But "swallowed" and "delivered" are two
+/// different things to a caller that is about to **move the keyboard** on the
+/// strength of it, and the drop roads are exactly that caller: a path the ring
+/// turned away, or a pane with no child behind it, must not take the reader's
+/// keyboard to a shell that received nothing and must not bring the window
+/// forward for it.
+///
+/// **[`PtyInput::Queued`] means queued, and no more than that.** The bytes are
+/// on `bt_pty::InputRing` and the writer thread will hand them to the child;
+/// whether the program on the other end reads them, and what it makes of them,
+/// is its own business and nothing this process can report. A drop's focus move
+/// is answering "did this window send it", which is the question this answers.
+fn offer_pty_input(pty: Option<&PtySession>, bytes: &[u8], what: &'static str) -> Result<PtyInput> {
     let Some(pty) = pty else {
-        return Ok(());
+        return Ok(PtyInput::NoChild);
     };
     match pty.write(bytes) {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(PtyInput::Queued),
         Err(refused @ PtyError::InputRefused { .. }) => {
             eprintln!("{what}: {refused}");
-            Ok(())
+            Ok(PtyInput::Refused)
         }
         Err(error) => Err(anyhow::Error::new(error).context(what)),
+    }
+}
+
+/// What [`offer_pty_input`] found at the other end.
+///
+/// Three answers and not a `bool`, because the two that are not `Queued` are
+/// different facts and a reader of the log needs to be able to tell them apart:
+/// a ring that turned a paste away is a shell that has stopped reading, and a
+/// leaf with no child never had anywhere to put anything.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PtyInput {
+    /// On the ring. The writer thread has it.
+    Queued,
+    /// `PtyError::InputRefused` — the ring is full because the child stopped
+    /// draining it. Said to the log by the door above.
+    Refused,
+    /// No ConPTY behind this leaf at all: `BT_PROBE_INPUT`, or a restored pane
+    /// whose shell is gone. Not a refusal and not an error — there is nowhere
+    /// for the bytes to go and never was.
+    NoChild,
+}
+
+impl PtyInput {
+    /// Whether this window actually sent the bytes.
+    const fn queued(self) -> bool {
+        matches!(self, Self::Queued)
     }
 }
 
@@ -29607,8 +29967,16 @@ const fn glass_allows_a_text_write(glass: GlassHere) -> bool {
 /// **Every condition a dragged path must clear before a byte is written**, in
 /// one place and as a function of four plain facts.
 ///
+/// **`modal` is the fifth** (review 2026-09-17 P1-b), and it is here rather than
+/// only on the external road because the two roads must answer one question the
+/// same way. A press cannot *start* a row drag under a modal — `chrome_mouse_input`
+/// swallows every press for the quit card, the dirty gate and the first-run card
+/// and returns above the drag routing — but a card that came up *during* a drag
+/// leaves a gesture in flight over a window that is now waiting for a keystroke,
+/// and the keystroke after a drop is `Enter`.
+///
 /// Written as one function so that the answer can be read, and tested, without
-/// a window — and so that no caller can satisfy three of the four and reach the
+/// a window — and so that no caller can satisfy four of the five and reach the
 /// write. [`Runtime::paste_offer_kept`] is what gathers the facts; this is what
 /// they mean, and it hands back the **address** rather than a `bool` so that a
 /// caller cannot take the verdict from here and the destination from somewhere
@@ -29618,10 +29986,12 @@ fn paste_offer_is_kept(
     promised: Option<PasteOffer>,
     at_release: Option<PasteOffer>,
     plan_fits: bool,
+    modal: bool,
 ) -> Option<PasteTarget> {
     let at_release = at_release?;
     (glass_allows_a_text_write(glass)
         && plan_fits
+        && !modal
         && paste_offer_survives(promised, Some(at_release)))
     .then_some(at_release.target)
 }
@@ -37073,6 +37443,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         cards: focus_thumb::CardClock::default(),
         preedit: None,
         composing: None,
+        composing_in: Composing::Idle,
         ime_active: false,
         ime_cursor_throttle: ImeCursorThrottle::default(),
         rename_caret_line: None,
@@ -54873,7 +55244,7 @@ impl Runtime<'_> {
         };
         // Keyboard first, and independently of whether layout focus moved: the
         // two can already disagree when a pane was focused by other means.
-        self.take_keyboard_into(seat);
+        self.take_keyboard_into(seat)?;
         // **D40's rule, now that there is a second kind of thing to focus.**
         // Pressing a pane is how you say "type here", and a files column is
         // somewhere you can type — arrows and Enter are its whole vocabulary. So
@@ -54940,8 +55311,136 @@ impl Runtime<'_> {
     /// queue jumping to a seat.
     fn focus_seat(&mut self, seat: SeatId) -> Result<()> {
         self.leave_hovered_math(Instant::now())?;
-        self.take_keyboard_into(seat);
+        self.take_keyboard_into(seat)?;
         self.settle_focus_on(seat)
+    }
+
+    /// **A path that landed in a terminal takes the keyboard with it**
+    /// (owner's ruling 2026-09-17, `T-FOCUS-FOLLOWS-DROPPED-PATH`).
+    ///
+    /// The ruling's own reason, met on the machine: what a reader types after
+    /// dropping a file is `Enter`, or the rest of the argument. With the
+    /// keyboard left where it was, that keystroke goes into a different shell —
+    /// which is the wrong-pane hazard the drop's three review rounds closed for
+    /// the path, reopened for the key after it.
+    ///
+    /// **[`Self::focus_seat`] with one line in front of it**, and the line is
+    /// [`Self::insert_path_into_terminal`]'s own (K144): the column very likely
+    /// holds the keyboard, because the press that picked the row up is
+    /// [`Self::focus_pane_at`]'s files arm, and a path that arrives in a shell
+    /// the arrow keys do not reach is a path you cannot edit. The external drop
+    /// road takes the same line for the same reason — the column may have been
+    /// clicked at any point before the hand went to another application.
+    ///
+    /// [`FilesFocusArrival::Pointer`] because a drop is a pointer gesture: it
+    /// said where it was going, so nothing is lit.
+    ///
+    /// **Called only after bytes have actually been written**, never on a
+    /// refusal. See [`Self::paste_paths_into`], which answers that question, and
+    /// [`Self::paste_offer_kept`], which is not consulted here at all — where
+    /// the bytes go is settled before this runs and this cannot reach it.
+    fn focus_the_pane_a_path_landed_in(&mut self, seat: SeatId) -> Result<()> {
+        // **Every surface that could be holding the keyboard instead has to
+        // give it up, not just the column** (review 2026-09-17 P1-a). Moving
+        // the tree's focus resolves exactly one of the four rungs
+        // ([`Self::keyboard_owner`]) — the *focused preview seat*, which stops
+        // being a preview the moment a terminal is focused. The other three
+        // survive it, and each is a measured way for the next `Enter` to go
+        // somewhere other than the shell the path just landed in:
+        //
+        // * a **torn-off preview float** the reader clicked into, which
+        //   `focused_preview_float` goes on finding;
+        // * a **live preview editor**, which `preview_edit_focus` goes on
+        //   naming even after the pane behind it loses the layout's focus;
+        // * the **search capsule's field**, which owns the keys while the caret
+        //   is in it.
+        //
+        // Each is released through the door the pointer road already uses —
+        // `float.blur()` from [`Self::focus_pane_at`], `leave_preview_page` from
+        // the click-away roads, `search.blur()` from the button router — because
+        // a second spelling of "give the keyboard back" is a second place for
+        // one of these to be forgotten, which is how this one was missed.
+        //
+        // The modal owners are **not** on this list and must never be: a quit
+        // card, a settings page, a gate, a menu, the palette and the rename box
+        // are answered rather than dismissed, and a drop does not reach this
+        // function while one of them is up — [`Self::a_modal_holds_the_window`]
+        // refuses the whole gesture before anything is written.
+        if self.set_files_keyboard(None, FilesFocusArrival::Pointer) {
+            self.refresh_chrome();
+        }
+        if let Some(surface) = self.preview_edit_focus() {
+            self.leave_preview_page(surface);
+        }
+        if self.window.search.is_focused() {
+            self.window.search.blur();
+            self.after_search_change()?;
+        }
+        if self.window.float.blur() && self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        self.focus_seat(seat)
+    }
+
+    /// **Whether something is standing in front of this window that a drop must
+    /// not go under** (review 2026-09-17 P1-b).
+    ///
+    /// The line this draws is the one [`Self::focus_the_pane_a_path_landed_in`]
+    /// is the other side of. A files column, a preview and the search capsule
+    /// borrow the keyboard and can simply be asked for it back, so a drop takes
+    /// it. A quit card, a settings page, the dirty gate, the first-run card, the
+    /// PSReadLine invitation, any open menu or popup, the command palette and
+    /// the tab-name box are **answered**: they own the keyboard because the
+    /// window is waiting for a reply, and the reply is `Enter`.
+    ///
+    /// So a file let go of over one of them is refused outright rather than
+    /// written into whatever terminal happens to be behind it. Three things
+    /// would otherwise all be wrong at once: a path typed into a pane the reader
+    /// cannot see, a window brought to the front over the card it is asking
+    /// about, and — worst — the next `Enter` answering the card instead of
+    /// running the command they just built.
+    ///
+    /// Read off [`Self::keyboard_owner`] rather than from a list of surfaces of
+    /// its own, so that a modal added to this window is covered by this the day
+    /// it takes the keyboard.
+    fn a_modal_holds_the_window(&self) -> bool {
+        self.keyboard_owner().is_modal()
+    }
+
+    /// **Bring this window to the front, because a drop is the reader pointing
+    /// at it** (owner's ruling 2026-09-17).
+    ///
+    /// The two steps [`FolioApp::raise_for_a_launch`] makes for a second start,
+    /// from the window's own side and for the same reason: un-minimise first,
+    /// because a foreground call on an iconified window brings it forward on
+    /// some configurations without restoring it, and then the one platform door
+    /// that actually takes the keyboard.
+    ///
+    /// **This is not focus stealing, and the gesture is why.** A file let go of
+    /// over this window is the reader saying "this one, here" with their hand;
+    /// answering it by typing a path into a window that stays behind the one
+    /// they dragged from is the drop half-honoured. It happens on no other road:
+    /// a clipboard paste is made *in* this window and an internal drag never
+    /// left it.
+    ///
+    /// `bt_platform::hotkey::give_foreground_to` and not winit's
+    /// `focus_window()`, because only one of the two is enough on macOS:
+    /// `makeKeyAndOrderFront:` raises a window inside its own application, and
+    /// the call there pairs it with `-[NSApplication activate]` so the
+    /// application itself becomes the frontmost one. On Windows it is the
+    /// foreground-lock dance with the answer read back. **Failure is silent to
+    /// the reader and one line in the log**, which is that door's own rule:
+    /// there is nothing a person can do about a foreground lock, and the path is
+    /// on the command line either way.
+    fn bring_this_window_forward(&mut self) {
+        if self.window.window.is_minimized() == Some(true) {
+            self.window.window.set_minimized(false);
+        }
+        if let Ok(native) = native_window(&self.window.window)
+            && !bt_platform::hotkey::give_foreground_to(native)
+        {
+            eprintln!("BT_DROP the window a file was dropped on could not take the keyboard");
+        }
     }
 
     /// The keyboard half: typing goes here now.
@@ -54949,13 +55448,42 @@ impl Runtime<'_> {
     /// Guarded on there being a session at the seat, because a files column has
     /// nothing to type into and a folder tab has no shell at all — the guard
     /// every focus move in this window carries, written once.
-    fn take_keyboard_into(&mut self, seat: SeatId) {
-        if self.sessions.contains_key(&seat) && self.focused_leaf != seat {
-            self.focused_leaf = seat;
-            // The frame slot holds the pane that *was* focused. Leaving it would
-            // let the next present assert a stale grid against the new pane.
-            self.window.last_presented_frame = None;
+    ///
+    /// **And a composition does not come with it** (review 2026-09-17 P2-b).
+    /// §7.1.5a″'s ruling is that a composition belongs to the field it started
+    /// in and is cancelled when that field goes away — never committed into
+    /// whatever is holding the keyboard next. [`settle_composition_owner`] keeps
+    /// that promise at the tail of every pass, but it asks it of
+    /// [`composition_outlived_its_field`], which compares **kinds** of owner:
+    /// one shell and another shell are both [`ImeOwner::Shell`], so a
+    /// composition begun at pane A's prompt survives the keyboard moving to pane
+    /// B and the next commit arrives at B. A pane is a field, so that is the
+    /// same report said about two terminals.
+    ///
+    /// **Closed here, at the door, and therefore for every road at once.** This
+    /// is the one place `focused_leaf` moves — the pointer's
+    /// ([`Self::focus_pane_at`]) and the named one's ([`Self::focus_seat`], which
+    /// the palette, the attention queue and a dropped path all come through) —
+    /// and the pointer road had the identical hole, so fixing it anywhere else
+    /// would have closed one of the two. The branch this sits in is exactly
+    /// "the shell holding the keyboard is changing", which is exactly when the
+    /// old field goes away.
+    ///
+    /// **Cancelled and not committed**, through the window's one door
+    /// ([`Self::cancel_composition`]), because that is the ruling: half-typed
+    /// letters meant for A's prompt must not be handed to B's.
+    fn take_keyboard_into(&mut self, seat: SeatId) -> Result<()> {
+        if !(self.sessions.contains_key(&seat) && self.focused_leaf != seat) {
+            return Ok(());
         }
+        if self.window.composing == Some(ImeOwner::Shell) {
+            self.cancel_composition(ImeOwner::Shell)?;
+        }
+        self.focused_leaf = seat;
+        // The frame slot holds the pane that *was* focused. Leaving it would
+        // let the next present assert a stale grid against the new pane.
+        self.window.last_presented_frame = None;
+        Ok(())
     }
 
     /// The layout half: the tree's own focus, and everything that hangs off it.
@@ -60623,6 +61151,40 @@ impl Runtime<'_> {
             // The search capsule, and only while the caret is in it.
             search: self.window.search.is_focused(),
             palette: self.window.palette.is_some(),
+        }
+    }
+
+    /// **Which field the keyboard is in, named down to the instance**
+    /// (§7.1.5a″; review 2026-09-17 P2).
+    ///
+    /// [`Self::keyboard_owner`] read one grain finer. The ladder it goes through
+    /// is `ime_owner`'s own, unchanged and not copied — this only attaches the
+    /// id that tells one instance of a rung from the next, because "the field
+    /// this composition began in" is a question two terminals and two preview
+    /// surfaces can answer differently while `ImeOwner` cannot.
+    ///
+    /// Asked twice per composition event, and that is deliberate: once to record
+    /// where a composition begins, and once, later, to ask whether the letters
+    /// are still that field's. Both readings are of this same function, so they
+    /// cannot disagree for a reason that is not about the window.
+    fn composition_origin_now(&self) -> CompositionOrigin {
+        match ime_owner(self.keyboard_owner()) {
+            ImeOwner::Rename => CompositionOrigin::Rename(
+                self.window
+                    .rename
+                    .as_ref()
+                    .map(|editor| editor.subject.clone()),
+            ),
+            ImeOwner::GraphSearch => {
+                CompositionOrigin::GraphSearch(self.preview_keyboard_surface())
+            }
+            ImeOwner::GitPrompt => CompositionOrigin::GitPrompt,
+            ImeOwner::Palette => CompositionOrigin::Palette,
+            ImeOwner::Modal => CompositionOrigin::Modal,
+            ImeOwner::FilesTree => CompositionOrigin::FilesTree(self.files_keyboard_seat()),
+            ImeOwner::Preview => CompositionOrigin::Preview(self.preview_keyboard_surface()),
+            ImeOwner::Search => CompositionOrigin::Search(self.window.search.seat()),
+            ImeOwner::Shell => CompositionOrigin::Shell(self.paste_target(self.focused_leaf)),
         }
     }
 
@@ -90604,6 +91166,7 @@ impl Runtime<'_> {
             drag.paste_offer,
             self.paste_offer_at(at_release),
             plan.fits(),
+            self.a_modal_holds_the_window(),
         )
     }
 
@@ -90677,7 +91240,18 @@ impl Runtime<'_> {
                         return Ok(false);
                     };
                     let path = payload.path.clone();
-                    self.paste_paths_into(target, vec![path], "write dragged path to PTY")?;
+                    // **And the keyboard follows the path, strictly afterwards**
+                    // (owner's ruling 2026-09-17). Behind the write's own
+                    // answer, so a release that reached no shell — a stale
+                    // target, a name the shell cannot spell — moves nothing:
+                    // the reader is left exactly where they were, which is what
+                    // every other refusal on this road already does. And it is
+                    // the seat of the `PasteTarget` the two readings agreed on
+                    // — never the hover-time seat, and never whichever pane
+                    // happens to be holding the keyboard.
+                    if self.paste_paths_into(target, vec![path], "write dragged path to PTY")? {
+                        self.focus_the_pane_a_path_landed_in(target.seat)?;
+                    }
                     return Ok(true);
                 }
                 RowVerb::Split => {}
@@ -96623,10 +97197,31 @@ impl Runtime<'_> {
         // shell, because the tab on top and the program in that seat can both
         // have changed by now (X-1). A batch aimed at nothing is spent on
         // nobody.
-        let pasted = match batch.target {
-            Some(target) => {
-                self.paste_paths_into(target, batch.paths, "write dropped paths to PTY")
-            }
+        // **Admission is asked again here** (review 2026-09-17 P1-b). The
+        // address travelled with the batch precisely because the world moves
+        // between the release and the turn that spends it — and what can move is
+        // not only the tab and the shell. A quit card, a gate or a settings page
+        // that came up in between is a window now waiting for a keystroke, and a
+        // path written under it would be followed by an `Enter` that answers the
+        // card. Refused the same way an unaimed drop is: nothing typed, nothing
+        // focused, nothing raised, and the point said out loud for the report
+        // somebody will make.
+        let target = batch.target.filter(|_| !self.a_modal_holds_the_window());
+        let pasted = match target {
+            Some(target) => self
+                .paste_paths_into(target, batch.paths, "write dropped paths to PTY")
+                .and_then(|written| {
+                    // **The keyboard follows the path, and the window comes to
+                    // the front with it** (owner's ruling 2026-09-17) — once for
+                    // the whole batch, because a batch is one drop however many
+                    // files it carried. Behind the write's own answer: a drop
+                    // that reached no shell raises nothing and focuses nothing.
+                    if written {
+                        self.focus_the_pane_a_path_landed_in(target.seat)?;
+                        self.bring_this_window_forward();
+                    }
+                    Ok(())
+                }),
             // A drop aimed at chrome, at a files column, or at a pane with no
             // shell behind it: nothing is typed, which is the answer
             // `paste_paths_into` gave for those before the address existed. The
@@ -96676,10 +97271,18 @@ impl Runtime<'_> {
         // belongs to, are what the hand was aimed at — facts about this instant
         // and not about the turn that spends them. Only on the opening file, so
         // that a drop of forty does not re-aim thirty-nine times.
+        // **And a drop is refused outright while the window is asking something**
+        // (review 2026-09-17 P1-b). Asked here, on the file that opens the
+        // batch, because this runs inside the platform's delivery of the release
+        // — the card the file was let go of over is the card that was on screen
+        // when it was let go of. Asked *again* at the flush, because a gate can
+        // open between the two. See [`Self::a_modal_holds_the_window`].
         let target = opening
             .then(|| {
-                let seat = self.dropped_files_seat(point);
-                self.paste_target(seat)
+                (!self.a_modal_holds_the_window())
+                    .then(|| self.dropped_files_seat(point))
+                    .flatten()
+                    .and_then(|seat| self.paste_target(seat))
             })
             .flatten();
         DropBatch::collect(&mut self.window.dropped_files, path, point, target);
@@ -96725,14 +97328,14 @@ impl Runtime<'_> {
     /// 0.4.2 X-10), and travels here inside the batch. The keyboard's pane is
     /// what is left when even that answers nothing, which is a window on a
     /// session with no desktop to read.
-    fn dropped_files_seat(&mut self, position: Option<PhysicalPosition<f64>>) -> SeatId {
+    fn dropped_files_seat(&mut self, position: Option<PhysicalPosition<f64>>) -> Option<SeatId> {
         let covered = position.is_some_and(|position| {
             matches!(
                 self.pointer_target_at(position),
                 Some(PointerTarget::Float(..))
             ) || self.panel_covers(position)
         });
-        dropped_files_seat_at(&self.seat_layout, position, covered, self.focused_leaf)
+        dropped_files_seat_at(&self.seat_layout, position, covered)
     }
 
     /// **Where the cursor is, this instant, in this window's own pixels**
@@ -98532,6 +99135,10 @@ impl Runtime<'_> {
         // refusal notice still leaves by the one door every paste's notices leave by
         // — and the line below is then an ordinary paste with nothing in it.
         let offered = std::mem::take(&mut prepared.picture);
+        // Whether it reached a shell is not asked here: a clipboard paste goes
+        // to the pane that already holds the keyboard, so there is no focus for
+        // it to move (owner's ruling 2026-09-17 changed the two *drop* roads and
+        // left this one alone).
         self.deliver_paste(target, prepared, "write clipboard paste to PTY")?;
         if offered.is_empty() {
             return Ok(());
@@ -98551,9 +99158,24 @@ impl Runtime<'_> {
     /// key, the joining of several files into one command line and the refusal
     /// notices one implementation rather than two that drift.
     ///
-    /// **Focus does not move**, on [`Self::paste_from_clipboard_into`]'s own
-    /// rule: a drop is a pointer gesture, and a pointer gesture does not take
-    /// the keyboard away from the pane the reader was typing in.
+    /// **Focus is not moved here**, and the caller is what moves it (owner's
+    /// ruling 2026-09-17). The rule used to be that a drop leaves the keyboard
+    /// alone, on the footing that a pointer gesture does not take it away from
+    /// the pane the reader was typing in; the owner met the other half of that
+    /// on the machine — the keystroke *after* a drop is `Enter` or the rest of
+    /// the argument, and with the keyboard left behind it goes into a different
+    /// shell, which is the wrong-pane hazard this road spent three review rounds
+    /// closing for the path itself. So the two drop roads move it and the
+    /// clipboard road does not, because a clipboard paste already went to the
+    /// pane holding the keyboard. That decision belongs to each caller, not
+    /// here: this function is the one door all three share.
+    ///
+    /// **Answers whether a shell actually received bytes**, which is what a
+    /// caller that moves focus has to know. `false` for a target that is no
+    /// longer live, for a path no shell could spell (the refusal card has been
+    /// raised by then) and for a seat whose session has gone — three different
+    /// reasons and one meaning: nothing was written, so nothing is focused and
+    /// nothing is raised.
     ///
     /// **Two roads arrive here and not one** (§7.61). The second is the file
     /// Folio writes for a picture on the clipboard, which by the time it has a
@@ -98567,9 +99189,9 @@ impl Runtime<'_> {
         target: PasteTarget,
         paths: Vec<PathBuf>,
         context: &'static str,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let Some(index) = self.live_paste_target(target) else {
-            return Ok(());
+            return Ok(false);
         };
         let leaf = &self.window.tabs[index].sessions[&target.seat];
         let recipient = leaf.paste_recipient.clone();
@@ -98632,13 +99254,13 @@ impl Runtime<'_> {
         target: PasteTarget,
         prepared: PreparedClipboardPaste,
         context: &'static str,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         // **The address is checked before anything is said**, which is why this
         // stands above the notice rather than beside the write (review X-1): a
         // card about a path that could not be spelled for a shell that is no
         // longer there is a card about nothing.
         let Some(active) = self.live_paste_target(target) else {
-            return Ok(());
+            return Ok(false);
         };
         let seat = target.seat;
         if let Some(notice) = prepared.notice {
@@ -98650,7 +99272,7 @@ impl Runtime<'_> {
             )?;
         }
         let Some(text) = prepared.text else {
-            return Ok(());
+            return Ok(false);
         };
         let Some(LeafSession {
             pty,
@@ -98659,10 +99281,16 @@ impl Runtime<'_> {
             ..
         }) = self.window.tabs[active].sessions.get_mut(&seat)
         else {
-            return Ok(());
+            return Ok(false);
         };
-        paste_text(session, projection, &text, |bytes| {
-            write_pty_input(pty.as_ref(), bytes, context)
+        // **The answer travels back out of the paste** (review 2026-09-17 P2-a):
+        // `write_pty_input` swallows a refusal, which is right for a keystroke
+        // and wrong for a caller that is about to move the reader's keyboard on
+        // the strength of it. Everything below this line is unchanged — the
+        // bookkeeping a paste owes is owed for the gesture rather than for the
+        // ring's mood — and only what this function *answers* now depends on it.
+        let landed = paste_text(session, projection, &text, |bytes| {
+            offer_pty_input(pty.as_ref(), bytes, context)
         })?;
         // A paste is one gesture landing in one named pane, so it answers whatever that pane was
         // asking — and it is the pane the clipboard went into, not the one holding the keyboard
@@ -98678,13 +99306,15 @@ impl Runtime<'_> {
         // own pane is judged by. The other pane still has to reach the glass,
         // which is exactly what `repaint_pane_change` is for.
         if seat != self.focused_leaf {
-            return self.repaint_pane_change(seat);
+            self.repaint_pane_change(seat)?;
+            return Ok(landed.queued());
         }
         self.pending_keyboard_at = Some(Instant::now());
         self.publish_frame(FrameTrigger {
             occurred_at: self.pending_keyboard_at.unwrap_or_else(Instant::now),
             source: FrameSource::Keyboard,
-        })
+        })?;
+        Ok(landed.queued())
     }
 
     /// **Start the worker that turns a clipboard picture into a file**
@@ -98809,11 +99439,15 @@ impl Runtime<'_> {
                 );
             }
         };
+        // The same as the clipboard's own road above, for the same reason: the
+        // picture was pasted into the pane that had the keyboard, and it still
+        // has it.
         self.paste_paths_into(
             landed.target,
             vec![path],
             "write clipboard picture path to PTY",
         )
+        .map(drop)
     }
 
     /// A composition event, routed by [`ime_owner`].
@@ -98844,6 +99478,23 @@ impl Runtime<'_> {
                 Ime::Preedit(text, _) if !text.is_empty() => Some(ime_owner(self.keyboard_owner())),
                 _ => None,
             };
+            // **§7.1.5a″ — and the letters have to belong to *this* field**
+            // (review 2026-09-17 P2). Above the ladder and not inside one of its
+            // arms, because the ladder is *routing*: it answers where text goes
+            // now, which is exactly the question a composition that has outlived
+            // its field must not be allowed to ask. Every crossing is the same
+            // crossing — one terminal to another, a terminal to a page, a page
+            // to a terminal, a palette to anything — so one rule stands in front
+            // of all of them. See [`composition_ruling`].
+            let here = self.composition_origin_now();
+            if let Some(what) = composing_event_of(&event) {
+                let ruling = composition_ruling(&self.window.composing_in, &here, what);
+                let held = std::mem::take(&mut self.window.composing_in);
+                self.window.composing_in = held.after(ruling.next, &here);
+                if !ruling.deliver {
+                    return Ok(());
+                }
+            }
             match ime_owner(self.keyboard_owner()) {
                 // The name editor, through the same two doors every other field
                 // in this window uses: a pre-edit is **drawn at its caret and is
@@ -98922,6 +99573,14 @@ impl Runtime<'_> {
         match event {
             Ime::Enabled => {
                 self.window.ime_active = true;
+                // **`composing_in` is deliberately untouched** (review
+                // 2026-09-17 P2, round 3). A composition context opening is a
+                // notice, not a composition ending — and the order that makes
+                // that load-bearing is a real one: a refused cancel, then
+                // `Disabled`, then `Enabled` (winit re-enables results on
+                // `WM_IME_STARTCOMPOSITION`), then the method's own clearing
+                // pre-edit, then its commit. Clearing here would hand that
+                // commit to whichever field the keyboard had moved to.
                 self.window.ime_cursor_throttle.reset();
                 self.publish_frame(FrameTrigger {
                     occurred_at: Instant::now(),
@@ -98969,6 +99628,10 @@ impl Runtime<'_> {
                     self.window.preedit.is_some() && self.preview_edit_focus().is_some();
                 self.window.preedit = None;
                 self.window.composing = None;
+                // And `composing_in` is not cleared here either, for the reason
+                // `Enabled` gives one arm up: this is the method telling us it
+                // has ended a composition, which is precisely what a method that
+                // refused the cancel says before sending the commit anyway.
                 self.window.ime_active = false;
                 self.window.ime_cursor_throttle.reset();
                 self.window.ime_system_caret.destroy();
@@ -99033,6 +99696,16 @@ impl Runtime<'_> {
     /// move and is not: that re-associates the input context for the whole
     /// window and drops the method's state with it.
     fn cancel_composition(&mut self, started_in: ImeOwner) -> Result<()> {
+        // **The answer is not read, and `composing_in` is not cleared, and
+        // those two are the same decision** (review 2026-09-17 P2).
+        // `ImmNotifyIME` answers a bool this window has no honest use for: a
+        // `false` is not a state to recover from, it is an input method that
+        // will send the commit anyway — §7.1.5a″ names one. So this stays a
+        // request, and what makes a refused request *safe* is one field further
+        // down: the composition goes on naming the field it began in, and
+        // [`composition_ruling`] discards a commit that is not that field's.
+        // Clearing it here would take the barrier down at exactly the moment it
+        // is needed.
         bt_platform::cancel_composition();
         self.window.preedit = None;
         self.window.composing = None;
@@ -109325,21 +109998,36 @@ mod pty_drain_budget_tests {
     /// `?`s a refusal out of a key handler reaches `App::fail` and takes every other pane in the
     /// window down with it.
     ///
+    /// **The door is a pair since the review of 2026-09-17, and it is still one door.**
+    /// `offer_pty_input` is where the pipe is touched and where a refusal is understood;
+    /// `write_pty_input` is the same call with the answer thrown away, which is what every
+    /// caller that has nothing to do with the answer goes on using. The two drop roads are
+    /// the callers that do: they move the reader's keyboard and bring the window forward on
+    /// the strength of a write, and "swallowed" must not look like "delivered" to them.
+    ///
     /// Mutation: call `PtySession::write` from anywhere else in the product and the count moves.
+    /// Mutation: give `write_pty_input` a second body of its own and the delegation assertion
+    /// goes red, which is the moment there are two doors again.
     #[test]
     fn the_window_thread_sends_a_child_bytes_through_exactly_one_door() {
-        let door = ["write_pty_", "input"].concat();
+        let door = ["offer_pty_", "input"].concat();
         let body = free_fn_body(&door);
         let refusal = body
             .find("PtyError::InputRefused")
             .expect("the door is the place that knows what a refusal is");
         let answer = body[refusal..]
-            .find("Ok(())")
+            .find("Ok(PtyInput::Refused)")
             .expect("and it answers a refusal with the window carrying on");
         assert!(
             !body[refusal..refusal + answer].contains("return Err"),
             "a refusal turned back into an `Err` reaches `App::fail` and ends the process over \
              one wedged shell"
+        );
+        assert!(
+            free_fn_body(&["write_pty_", "input"].concat())
+                .contains(&[&door, "(pty, bytes, what).map(drop)"].concat()),
+            "the forgiving spelling has grown a body of its own, so there are two places that \
+             know what a refusal is"
         );
         // Every other `.write(` in this file is a test's, a clipboard's, or a `writeln!`; what
         // this counts is the product's calls onto a `PtySession`.
@@ -114682,20 +115370,35 @@ fn prepare_clipboard_paste(
 /// function so the routing can be read against a real solved layout without a
 /// window: which pane a point falls in is arithmetic, and arithmetic is the half
 /// of this that can go wrong silently.
+///
+/// **`None` is a refusal, and the fallback that used to stand here is gone**
+/// (review 2026-09-17 P1-b). It answered the *focused* pane for a point that
+/// named no pane — no cursor at all, a point a float or an open rail had
+/// claimed, a point on a divider or on chrome — and that was an untruthful aim
+/// twice over: the comment one surface up already said such a drop reaches no
+/// shell, and the owner's rule for this whole gesture is that **the target
+/// decides**. A path is not a keystroke; "I could not tell where you let go, so
+/// I typed it where you were last typing" is the one answer a drop must not
+/// give, and since 2026-09-17 it would also have taken the keyboard there and
+/// brought the window forward for it.
+///
+/// **No platform is kept on the old road**, which was checked rather than
+/// assumed: `bt_platform::pointer_position_in_window` is implemented on both
+/// systems this product ships on — `GetCursorPos` through `ScreenToClient` on
+/// Windows, `NSEvent.mouseLocation` through the view on macOS — so `None` here
+/// is a window on a session with no desktop to read, and a refusal is the honest
+/// answer for it too.
 fn dropped_files_seat_at(
     layout: &SeatLayout,
     position: Option<PhysicalPosition<f64>>,
     covered: bool,
-    focused: SeatId,
-) -> SeatId {
+) -> Option<SeatId> {
     match position {
-        Some(position) if !covered => {
-            seats::pane_at(layout, position.x, position.y).unwrap_or(focused)
-        }
-        // No pointer, or a point that belongs to something standing over the
-        // panes: the keyboard's pane is the only command line this window can
-        // honestly mean.
-        Some(_) | None => focused,
+        Some(position) if !covered => seats::pane_at(layout, position.x, position.y),
+        // No cursor, or a point that belongs to something standing over the
+        // panes: this window does not know where the file was let go of, and an
+        // unknown target is a refusal.
+        Some(_) | None => None,
     }
 }
 
@@ -114750,12 +115453,12 @@ fn prepare_dropped_paste(
 /// *between* them, and `bt_pty::InputRing` only promises a whole write, never a partial one. As
 /// one write it either reaches the shell entire or is refused entire, which is the only pair of
 /// outcomes a pasted command line can survive.
-fn paste_text(
+fn paste_text<T>(
     session: &mut DualPlaneSession,
     projection: &mut ViewportProjection,
     text: &str,
-    write: impl FnOnce(&[u8]) -> Result<()>,
-) -> Result<()> {
+    write: impl FnOnce(&[u8]) -> Result<T>,
+) -> Result<T> {
     let bytes = input::paste_bytes(text, session.bracketed_paste_mode());
     session.set_view_selection(None);
     projection.set_selection(None);
@@ -160909,27 +161612,29 @@ mod tests {
         );
     }
 
-    /// **A dropped file's path goes into the pane it was let go of over**
-    /// (GitHub issue #1 ②), and into the keyboard's pane when the drop belongs
-    /// to nothing the layout can name.
+    /// **A dropped file's path goes into the pane it was let go of over, and
+    /// nowhere at all otherwise** (GitHub issue #1 ②; review 2026-09-17 P1-b).
     ///
     /// The routing half of the drop, read against a real solved three-pane
     /// layout: the same arithmetic a press is answered by, asked of the same
-    /// rectangles. The rest of the rule is its fall-backs — a point a float or
+    /// rectangles. The rest of the rule is its **refusals** — a point a float or
     /// an open rail has claimed, a point in no pane at all, and a drop with
-    /// neither a pointer of its own nor a cursor the platform would answer with,
-    /// which is the last resort and is now much narrower than it was: since the
-    /// owner's ruling of 2026-09-16 a drag that came from another application is
-    /// routed by the queried cursor, and the closing block reads that road all
-    /// the way through.
+    /// neither a pointer of its own nor a cursor the platform would answer with.
+    ///
+    /// **Those three used to answer with the pane holding the keyboard, and the
+    /// owner's rule is that the target decides.** "I could not tell where you
+    /// let go, so I typed it where you were last typing" is the one answer a
+    /// drop must not give — and since the keyboard and the window's own
+    /// foreground now follow a path in, it would have moved the reader there
+    /// too. Every one of them is `None`, which `flush_dropped_files` spends on
+    /// nobody.
     ///
     /// MUTATION ①: ignore `covered` and a point a floating window has claimed
     /// answers with the pane it is standing on top of — the second assertion in
-    /// the loop goes red for all three. MUTATION ②: go back to routing a
-    /// pointerless drop to the keyboard's pane and the closing block goes red,
-    /// because that is the pane the cursor is deliberately *not* over.
+    /// the loop goes red for all three. MUTATION ②: bring back the fall-back to
+    /// the keyboard's pane and the three refusals go red together.
     #[test]
-    fn a_drop_lands_in_the_pane_under_it_and_otherwise_on_the_keyboards_pane() {
+    fn a_drop_lands_in_the_pane_under_it_and_otherwise_nowhere() {
         let seats = cross_seats(3);
         let (layout, _) = cross_solve(&seats);
         let rects = pane_rects_of(&layout);
@@ -160947,15 +161652,15 @@ mod tests {
                 f64::from((rect[1] + rect[3]) / 2.0),
             );
             assert_eq!(
-                dropped_files_seat_at(&layout, Some(middle), false, focused),
-                *seat,
+                dropped_files_seat_at(&layout, Some(middle), false),
+                Some(*seat),
                 "a drop in the middle of {seat:?} is that pane's"
             );
             assert_eq!(
-                dropped_files_seat_at(&layout, Some(middle), true, focused),
-                focused,
+                dropped_files_seat_at(&layout, Some(middle), true),
+                None,
                 "a float or an open rail standing over {seat:?} keeps the drop \
-                 off the pane it is covering"
+                 off the pane it is covering, and gives it to nobody else"
             );
             if *seat != focused {
                 elsewhere += 1;
@@ -160964,20 +161669,22 @@ mod tests {
         assert_eq!(
             elsewhere, 2,
             "two of the three panes are not the keyboard's, so the assertions \
-             above are about the routing and not about the fall-back"
+             above are about the routing and not about a pane that happens to be \
+             the focused one"
         );
 
         let off_every_pane = PhysicalPosition::new(-1.0, -1.0);
         assert_eq!(
-            dropped_files_seat_at(&layout, Some(off_every_pane), false, focused),
-            focused,
-            "a drop on the chrome is the keyboard's pane's"
+            dropped_files_seat_at(&layout, Some(off_every_pane), false),
+            None,
+            "a drop on the chrome names no pane, so it is refused rather than \
+             typed into the one holding the keyboard"
         );
         assert_eq!(
-            dropped_files_seat_at(&layout, None, false, focused),
-            focused,
-            "and so is a drop the platform would give no cursor for — the last \
-             resort and nothing less"
+            dropped_files_seat_at(&layout, None, false),
+            None,
+            "and so is a drop the platform would give no cursor for: an unknown \
+             target is a refusal"
         );
 
         // **The road a drag from another application really takes** (owner's
@@ -161004,8 +161711,8 @@ mod tests {
              and is not scaled a second time"
         );
         assert_eq!(
-            dropped_files_seat_at(&layout, point, false, focused),
-            elsewhere_seat,
+            dropped_files_seat_at(&layout, point, false),
+            Some(elsewhere_seat),
             "a drop whose point came from the cursor lands in the pane under it, \
              not in the pane holding the keyboard"
         );
@@ -171482,8 +172189,12 @@ mod clipboard_path_tests {
                 "the batch has one reader, and it takes the whole of it",
             ),
             (
-                "self.paste_paths_into(target, batch.paths,",
-                "a dropped batch reaches a shell through one door",
+                ".paste_paths_into(target, batch.paths, \"write dropped paths to PTY\")",
+                "a dropped batch reaches a shell through one door, and takes the                  whole batch with it — which is what makes the focus and the                  raise behind its answer happen once per drop and not once per                  file",
+            ),
+            (
+                "self.bring_this_window_forward();",
+                "and a drop brings this window to the front, from the one place                  that spends a whole batch (owner's ruling 2026-09-17)",
             ),
             (
                 "self.paste_target(seat)",
@@ -171547,6 +172258,24 @@ mod clipboard_path_tests {
              so the point is taken later than the release:\n{collecting}"
         );
         let flushing = method_text(before_this_fixture, "    fn flush_dropped_files(");
+        // **The focus and the raise are behind the write's own answer, and both
+        // are inside the one function that spends a whole batch** (owner's
+        // ruling 2026-09-17). Three files let go of together are one drop, so
+        // they are one line, one focus and one raise; and a drop that reached no
+        // shell — chrome, a files column, a pane with no session, a name the
+        // shell cannot spell — moves nothing and raises nothing.
+        assert!(
+            flushing.contains("if written {")
+                && flushing.contains("self.focus_the_pane_a_path_landed_in(target.seat)?;")
+                && flushing.contains("self.bring_this_window_forward();"),
+            "a drop no longer takes the keyboard and the window with it, or does              so without asking whether anything was written:
+{flushing}"
+        );
+        assert!(
+            flushing.find("paste_paths_into") < flushing.find("focus_the_pane_a_path_landed_in"),
+            "the focus moved before the write, so where the bytes went could              depend on it:
+{flushing}"
+        );
         for forbidden in ["platform_pointer_now", "pointer_position"] {
             assert!(
                 !flushing.contains(forbidden),
@@ -171660,8 +172389,16 @@ mod clipboard_path_tests {
                 "a preview's centre opens the file as that pane",
             ),
             (
-                "self.paste_paths_into(target, vec![path], \"write dragged path to PTY\")?;",
-                "a terminal's centre pastes through the external drop's own door",
+                "if self.paste_paths_into(target, vec![path], \"write dragged path to PTY\")? {",
+                "a terminal's centre pastes through the external drop's own door, \
+                 and asks that door whether anything was actually written",
+            ),
+            (
+                "self.focus_the_pane_a_path_landed_in(target.seat)?;",
+                "and the keyboard follows the path into the shell that received it \
+                 — addressed by the delivered `PasteTarget`'s seat, never the \
+                 hover-time seat and never `focused_leaf` (owner's ruling \
+                 2026-09-17)",
             ),
             (
                 "RowVerb::PastePath(_) => {",
@@ -171678,13 +172415,46 @@ mod clipboard_path_tests {
                 "`{once}` — {what}:\n{commit}"
             );
         }
-        for forbidden in ["focused_leaf", "shell_literal::", "set_focus"] {
+        for forbidden in ["focused_leaf", "shell_literal::"] {
             assert!(
                 !commit.contains(forbidden),
-                "`{forbidden}` in the commit — a drop is a pointer gesture, and it \
-                 neither takes the keyboard nor spells a path a second way:\n{commit}"
+                "`{forbidden}` in the commit — the pane a drop is about is the one \
+                 the hand was over, never the one holding the keyboard, and the \
+                 path is not spelled a second way here:\n{commit}"
             );
         }
+        // **The focus move is strictly after the write, and cannot reach where
+        // the bytes went** (owner's ruling 2026-09-17, and the three review
+        // rounds it must not undo). The order is the assertion: `paste_offer_kept`
+        // settles the address, `paste_paths_into` spends it and says whether a
+        // shell received anything, and only then does anything about the keyboard
+        // happen. A focus call above either of those would be a fourth reading of
+        // "which pane" taken before the write rather than after it.
+        let arm = commit
+            .split_once("RowVerb::PastePath(_) => {")
+            .expect("the commit answers a text verb")
+            .1;
+        let (kept, wrote, focused) = (
+            arm.find("self.paste_offer_kept(drag, &plan)"),
+            arm.find("self.paste_paths_into(target,"),
+            arm.find("self.focus_the_pane_a_path_landed_in(target.seat)"),
+        );
+        assert!(
+            kept.is_some() && kept < wrote && wrote < focused,
+            "the text verb's three steps are out of order — the address, then the \
+             write, then the keyboard:\n{arm}"
+        );
+        // **And every refusal returns above all three.** This is the other half
+        // of `a_stale_aim_is_refused_however_it_went_stale`: each of its rows is
+        // a `None` out of `paste_offer_kept`, and what that means for the reader
+        // is that the keyboard does not move either — they are left in the pane
+        // they were typing in, with nothing written anywhere.
+        let refused = arm.find("return Ok(false);");
+        assert!(
+            refused.is_some() && kept < refused && refused < wrote,
+            "a refused release no longer leaves above the write and the focus, so \
+             a stale aim can still move the keyboard:\n{arm}"
+        );
         // **The second reading is a reading, and it is of the platform and of
         // the live tree** (review 2026-09-17 P1-a). A `Runtime` is not
         // constructible here, so which calls stand in this function is what says
@@ -171757,6 +172527,13 @@ mod clipboard_path_tests {
     /// sequences differ from each other only in *which fact* comes back
     /// different — and that is what is set out here.
     ///
+    /// **Every row here is also a row about the keyboard** (owner's ruling
+    /// 2026-09-17). A refusal is a `None` out of `Runtime::paste_offer_kept`,
+    /// and the commit leaves on it above both the write and the focus move — so
+    /// a stale aim writes nothing *and* leaves the reader in the pane they were
+    /// typing in. `a_rows_centre_verbs_leave_by_three_doors` is what pins that
+    /// ordering; this is what enumerates the refusals it protects.
+    ///
     /// MUTATION: compare only the landings and the active-tab closure passes —
     /// the nastiest of them, because the seat numbers agree. MUTATION: compare
     /// only the targets and the first two pass. MUTATION: let a missing
@@ -171781,7 +172558,8 @@ mod clipboard_path_tests {
         let promised = offer(centre(B), 1, B, 7);
         // The three facts that are *not* the subject of a row, so that each row
         // below changes exactly one thing.
-        let kept = |glass, at_release| paste_offer_is_kept(glass, promised, at_release, true);
+        let kept =
+            |glass, at_release| paste_offer_is_kept(glass, promised, at_release, true, false);
 
         assert_eq!(
             kept(GlassHere::Ours, promised),
@@ -171854,18 +172632,640 @@ mod clipboard_path_tests {
         // ⑥ P1-b: the box was a refusal — the window is below what its own tree
         //    needs — so there was never anything to keep.
         assert_eq!(
-            paste_offer_is_kept(GlassHere::Ours, promised, promised, false),
+            paste_offer_is_kept(GlassHere::Ours, promised, promised, false, false),
             None,
             "a path was written behind the dashed outline"
+        );
+        // ⑦ **Round 4: a card came up while the hand was still down.** Nothing
+        //    about the offer changed and the glass is ours; what changed is that
+        //    the window is now waiting for a keystroke, and the keystroke after a
+        //    drop is `Enter`. A press cannot start a drag under a modal, so this
+        //    is only reachable by a card raised mid-gesture — and it is refused
+        //    there too, rather than writing a path the next `Enter` will not run.
+        assert_eq!(
+            paste_offer_is_kept(GlassHere::Ours, promised, promised, true, true),
+            None,
+            "a path was written under a card the window was waiting on"
         );
         // And a release with no promise behind it — a box that never said
         // `Paste path` — writes nothing either.
         assert_eq!(
-            paste_offer_is_kept(GlassHere::Ours, None, promised, true),
+            paste_offer_is_kept(GlassHere::Ours, None, promised, true, false),
             None,
             "a release wrote a path the box never promised"
         );
     }
+    /// One row of [`a_dropped_path_takes_the_keyboard_and_is_refused_under_a_card`]'s
+    /// two tables: a surface, and the bit of [`KeyboardOwner`] that is it.
+    ///
+    /// A named pair rather than a tuple because the tuple had grown a function
+    /// pointer in it and stopped reading as a table — which is what clippy's
+    /// `type_complexity` is about, and it was right: `what` and `set` say what
+    /// the two halves are for, and [`Self::owner`] is the third thing that used
+    /// to be a closure standing beside the tables.
+    struct KeyboardOwnerCase {
+        /// How the row is named in the failure, in the reader's words.
+        what: &'static str,
+        /// The one bit that makes this surface the keyboard's owner.
+        set: fn(&mut KeyboardOwner),
+    }
+
+    impl KeyboardOwnerCase {
+        const fn new(what: &'static str, set: fn(&mut KeyboardOwner)) -> Self {
+            Self { what, set }
+        }
+
+        /// The owner as the window would report it with this surface holding the
+        /// keys and every other bit false — which is what makes each row about
+        /// one surface.
+        fn owner(&self) -> KeyboardOwner {
+            let mut owner = KeyboardOwner::default();
+            (self.set)(&mut owner);
+            owner
+        }
+    }
+
+    /// **A dropped path takes the keyboard from every surface that was holding
+    /// it, and is refused under every surface that must be answered** (review
+    /// 2026-09-17 P1-a and P1-b).
+    ///
+    /// Two lists and one line between them, and the line is what a reader would
+    /// draw. A files column, a preview — torn off into a float, edited in place,
+    /// or merely browsed — and the search capsule's field all *borrow* the
+    /// keyboard: they sit inside the layout, the panes behind them are visible,
+    /// and a gesture aimed at a pane may simply ask for it back. A menu, the
+    /// four modals, the palette, a git prompt and the tab-name box are being
+    /// *answered*: the window is waiting for a keystroke, and the keystroke
+    /// after a drop is `Enter`.
+    ///
+    /// **Why this is a routing test and not a list of calls.** What the owner's
+    /// ruling promises is about the *next key*, and where the next key goes is
+    /// `keyboard_owner` — so that is what is asked here, over the owners one at
+    /// a time. `ime_owner` is the same reading one rung out and is asserted
+    /// beside it, because a composition and a keystroke must not disagree about
+    /// which surface is being typed into.
+    ///
+    /// MUTATION: drop the float blur from `focus_the_pane_a_path_landed_in` and
+    /// the float row goes red — the path reaches the terminal and the `Enter`
+    /// after it reaches the preview. MUTATION: drop the editor's or the
+    /// capsule's line and its row goes red the same way. MUTATION: put a modal
+    /// on the borrowing list and `is_modal` stops refusing it, so a drop writes
+    /// under a card and the `Enter` answers the card.
+    #[test]
+    fn a_dropped_path_takes_the_keyboard_and_is_refused_under_a_card() {
+        // The shell's turn, which is what every borrower below is released
+        // *into* — asserted once so the rows can be about the release alone.
+        assert!(keyboard_owner_is_a_shell(KeyboardOwner::default()));
+        assert_eq!(ime_owner(KeyboardOwner::default()), ImeOwner::Shell);
+        // A drop onto the pane that already holds the keyboard is this same
+        // state before and after, which is why it needs no branch anywhere.
+        assert!(!KeyboardOwner::default().is_modal());
+
+        // (i)-(iii) **The borrowers.** Each is a surface the next `Enter` would
+        // have gone to, and each is released by a line of
+        // `focus_the_pane_a_path_landed_in`.
+        for row in [
+            KeyboardOwnerCase::new("a files column", |o| o.files_tree = true),
+            KeyboardOwnerCase::new("a preview float or a live editor", |o| o.preview = true),
+            KeyboardOwnerCase::new("the graph's search field", |o| o.graph_search = true),
+            KeyboardOwnerCase::new("the in-pane search capsule", |o| o.search = true),
+        ] {
+            let (what, owner) = (row.what, row.owner());
+            assert!(
+                !keyboard_owner_is_a_shell(owner),
+                "{what} has to be holding the keyboard for this row to be about \
+                 anything at all"
+            );
+            assert_ne!(
+                ime_owner(owner),
+                ImeOwner::Shell,
+                "{what} takes the composition with the keystroke, so both have to \
+                 come back"
+            );
+            assert!(
+                !owner.is_modal(),
+                "{what} borrows the keyboard, so a drop asks for it back rather \
+                 than being refused"
+            );
+        }
+
+        // (iv) **The answered.** None of these is released by anything; the drop
+        // itself is refused instead, on both roads.
+        for row in [
+            KeyboardOwnerCase::new("a menu or a modal", |o| o.menu_or_dialog = true),
+            KeyboardOwnerCase::new("the tab-name box", |o| o.rename = true),
+            KeyboardOwnerCase::new("a git prompt", |o| o.git_prompt = true),
+            KeyboardOwnerCase::new("the command palette", |o| o.palette = true),
+        ] {
+            assert!(
+                row.owner().is_modal(),
+                "{} is answered with a keystroke, so a path written underneath it \
+                 would be followed by an `Enter` that answers it",
+                row.what
+            );
+        }
+
+        // And the door that releases the borrowers, by the one thing a test
+        // without a window can read: which call stands where. Each line is one
+        // row of the first list, and the files column's was there already.
+        let source = include_str!("main.rs");
+        let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
+        let door = method_text(
+            before_this_fixture,
+            "    fn focus_the_pane_a_path_landed_in(",
+        );
+        for (call, what) in [
+            (
+                "self.set_files_keyboard(None, FilesFocusArrival::Pointer)",
+                "the column gives the keyboard back",
+            ),
+            (
+                "self.leave_preview_page(surface)",
+                "and so does a live preview editor, through the click-away road's \
+                 own door",
+            ),
+            (
+                "self.window.search.blur()",
+                "and the search capsule, through the button router's",
+            ),
+            (
+                "self.window.float.blur()",
+                "and every torn-off float, through `focus_pane_at`'s",
+            ),
+        ] {
+            assert!(
+                door.contains(call),
+                "`{call}` — {what}; without it the path lands in the shell and \
+                 the next key does not:\n{door}"
+            );
+        }
+        assert!(
+            door.find("focus_seat") > door.find("self.window.float.blur()"),
+            "the keyboard is handed to the shell before the surfaces holding it \
+             have given it up:\n{door}"
+        );
+    }
+
+    /// **The keyboard only follows a path a shell actually received** (review
+    /// 2026-09-17 P2-a).
+    ///
+    /// `write_pty_input` swallows a refused write on purpose — a shell sitting
+    /// on a megabyte of unread input is a fact about that shell, not an error
+    /// for the window to die of — and that is right for a keystroke and wrong
+    /// for a caller about to move the reader's keyboard and bring the window
+    /// forward on the strength of it. So the drop roads go through
+    /// [`offer_pty_input`], which says what became of the bytes, and only
+    /// [`PtyInput::Queued`] counts.
+    ///
+    /// **Queued and not consumed**, which is the honest limit: the bytes are on
+    /// the ring and the writer thread has them. What the program does with them
+    /// is its own business and nothing this process can report.
+    ///
+    /// MUTATION: make `queued` answer true for `Refused` and a path the ring
+    /// turned away still takes the keyboard to a shell that received nothing.
+    #[test]
+    fn only_a_queued_write_moves_the_keyboard() {
+        assert!(PtyInput::Queued.queued());
+        assert!(
+            !PtyInput::Refused.queued(),
+            "a ring that turned the path away is a shell that has stopped \
+             reading, and the reader must not be sent to it"
+        );
+        assert!(
+            !PtyInput::NoChild.queued(),
+            "a leaf with no ConPTY behind it never had anywhere to put the path"
+        );
+        // And the paste carries that answer out rather than reporting the
+        // swallowing wrapper's success.
+        let source = include_str!("main.rs");
+        let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
+        let deliver = method_text(before_this_fixture, "    fn deliver_paste(");
+        assert!(
+            deliver.contains("offer_pty_input(pty.as_ref(), bytes, context)")
+                && deliver.contains("Ok(landed.queued())"),
+            "the paste reports the wrapper's success rather than what the ring \
+             did with the bytes:\n{deliver}"
+        );
+        // The three callers that must not change: a keystroke, the row menu and
+        // the clipboard all go on through the swallowing door.
+        assert!(
+            method_text(before_this_fixture, "    fn insert_path_into_terminal(")
+                .contains("write_pty_input("),
+            "K144 has been moved onto the answering door, which is a behaviour \
+             change nobody asked for"
+        );
+    }
+
+    /// **A composition does not follow the keyboard from one shell to another**
+    /// (review 2026-09-17 P2-b; §7.1.5a″'s ruling, applied to two terminals).
+    ///
+    /// The ruling is that a composition belongs to the field it started in and
+    /// is cancelled when that field goes away — never committed into whatever
+    /// holds the keyboard next. [`Runtime::settle_composition_owner`] keeps it
+    /// at the tail of every pass through [`composition_outlived_its_field`],
+    /// which compares **kinds**: two shells are both [`ImeOwner::Shell`], so
+    /// half-typed letters begun at pane A's prompt survived the keyboard moving
+    /// to pane B and the next commit arrived at B. A pane is a field, so that is
+    /// the same report said about two terminals.
+    ///
+    /// Closed at [`Runtime::take_keyboard_into`] — the one place `focused_leaf`
+    /// moves — so the pointer's road and the named road are shut together. The
+    /// pointer road had the identical hole.
+    ///
+    /// MUTATION: take the cancel out of that door and the source pin below goes
+    /// red; leave the category comparison as the only guard and the first two
+    /// assertions say why that is not enough.
+    #[test]
+    fn a_shell_to_shell_move_settles_the_composition_it_leaves_behind() {
+        assert!(
+            !composition_outlived_its_field(Some(ImeOwner::Shell), ImeOwner::Shell),
+            "two shells are one kind of owner, so the pass-tail settlement \
+             cannot be what closes this"
+        );
+        assert!(
+            composition_outlived_its_field(Some(ImeOwner::Shell), ImeOwner::Preview),
+            "the control: it does still close every move between two kinds"
+        );
+        let source = include_str!("main.rs");
+        let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
+        let door = method_text(before_this_fixture, "    fn take_keyboard_into(");
+        assert!(
+            door.contains("self.cancel_composition(ImeOwner::Shell)?;"),
+            "the keyboard moves between two shells without ending the \
+             composition the old one was holding, so the next commit lands in \
+             the new pane:\n{door}"
+        );
+        assert!(
+            door.find("cancel_composition") < door.find("self.focused_leaf = seat;"),
+            "the composition is settled after the keyboard has already moved, \
+             which is the same defect one line later:\n{door}"
+        );
+        for road in ["    fn focus_pane_at(", "    fn focus_seat("] {
+            let text = method_text(before_this_fixture, road);
+            assert!(
+                text.contains("self.take_keyboard_into(seat)?;"),
+                "`{road}` no longer moves the keyboard through the door the \
+                 composition is settled at:\n{text}"
+            );
+        }
+    }
+
+    /// **A composition that was left behind never reaches the field the keyboard
+    /// moved to — and one that was honoured costs the reader nothing** (§7.1.5a″;
+    /// review 2026-09-17 P2, rounds 3 and 4).
+    ///
+    /// `cancel_composition` asks; the answer arrives after the keyboard has
+    /// already moved, because winit buffers its callbacks until the application
+    /// returns. So the *ending* of a composition is always judged in the field
+    /// the gesture went to, whether the input method honoured the cancel or not,
+    /// and the two have to be told apart there.
+    ///
+    /// **The boundary is the very next composition event**, which pinned winit
+    /// 0.30.13 makes exact: all three of its `Ime::Commit` emissions are
+    /// preceded on the line above by `Ime::Preedit("")` with nothing between —
+    /// Windows `event_loop.rs:1553-1557` and `:1595-1599`, macOS
+    /// `view.rs:412-413`. An ending with a result is therefore that pair,
+    /// adjacent; an ending without one is the lone empty pre-edit that
+    /// `unmarkText` (`view.rs:344`) and a zero `lparam` (`event_loop.rs:1537`)
+    /// queue.
+    ///
+    /// MUTATION: judge the commit from `Retiring` against the current field
+    /// instead of the origin and the refused-cancel rows go red. MUTATION: make
+    /// an out-of-field empty pre-edit go straight to `Idle` and the refused
+    /// cancel's late pair is delivered into the pane the path was dropped on.
+    /// MUTATION: make it `Unchanged` instead of `Retire` and the honoured
+    /// cancel eats the reader's next character.
+    #[test]
+    fn a_left_behind_ime_composition_is_discarded_however_the_method_answers() {
+        let (a, b) = (shell_origin(1, 2, 7), shell_origin(1, 5, 9));
+
+        // The composition opens in A and is A's from then on.
+        let opened = composition_ruling(&Composing::Idle, &a, ComposingEvent::Opens);
+        assert!(opened.deliver);
+        let live = Composing::Idle.after(opened.next, &a);
+        assert_eq!(
+            live,
+            Composing::In(a.clone()),
+            "a pre-edit belongs to the field the keyboard is in while it is typed"
+        );
+
+        // ① **The refused cancel.** The method keeps composing; the keyboard
+        //    moves to B; later the composition finishes, which is the adjacent
+        //    pair arriving at B.
+        let clearing = composition_ruling(&live, &b, ComposingEvent::Clears);
+        assert!(
+            clearing.deliver,
+            "letters coming off the glass are always drawn"
+        );
+        let retiring = live.clone().after(clearing.next, &b);
+        assert_eq!(
+            retiring,
+            Composing::Retiring(a.clone()),
+            "an ending that reached another field is not over until the next \
+             event says what it was"
+        );
+        let stale = composition_ruling(&retiring, &b, ComposingEvent::Commits);
+        assert!(
+            !stale.deliver,
+            "the letters A was half-way through typing were written into B"
+        );
+        assert_eq!(
+            retiring.clone().after(stale.next, &b),
+            Composing::Idle,
+            "and the composition is over either way"
+        );
+
+        // ② **The bare stale commit**, with no clearing pre-edit in front of it.
+        //    Neither backend emits one, and it is refused all the same.
+        assert!(!composition_ruling(&live, &b, ComposingEvent::Commits).deliver);
+
+        // ③ **The honoured cancel, which is the ordinary case.** The lone empty
+        //    pre-edit arrives at B; no commit follows it. The reader then types
+        //    punctuation, which arrives as its own adjacent pair — and the first
+        //    half of that pair is what retires A.
+        let after_clear = live.clone().after(
+            composition_ruling(&live, &b, ComposingEvent::Clears).next,
+            &b,
+        );
+        assert_eq!(after_clear, Composing::Retiring(a.clone()));
+        let punctuation_clear = composition_ruling(&after_clear, &b, ComposingEvent::Clears);
+        assert!(punctuation_clear.deliver);
+        let idle = after_clear.after(punctuation_clear.next, &b);
+        assert_eq!(
+            idle,
+            Composing::Idle,
+            "a second empty pre-edit with no commit between means the first \
+             ending had no result"
+        );
+        assert!(
+            composition_ruling(&idle, &b, ComposingEvent::Commits).deliver,
+            "the reader's next character after an honoured cancel was swallowed"
+        );
+
+        // ④ **`Commit("")`** — Windows maps a zero-sized result to one — retires
+        //    the composition whatever else it does.
+        assert_eq!(
+            composition_ruling(&retiring, &b, ComposingEvent::Commits).next,
+            ComposingAfter::Idle,
+            "an empty result left the barrier armed"
+        );
+
+        // ⑤ **`Esc` in the field being typed in** is over at once, so the very
+        //    next character anywhere is ordinary typing.
+        let escaped = composition_ruling(&live, &a, ComposingEvent::Clears);
+        assert!(escaped.deliver);
+        assert_eq!(live.clone().after(escaped.next, &a), Composing::Idle);
+
+        // ⑥ **A fresh composition after the move** is the destination's and
+        //    commits there, which is the half the barrier must not break.
+        let fresh = composition_ruling(&retiring, &b, ComposingEvent::Opens);
+        assert!(fresh.deliver);
+        let in_b = retiring.after(fresh.next, &b);
+        assert_eq!(in_b, Composing::In(b.clone()));
+        assert!(composition_ruling(&in_b, &b, ComposingEvent::Commits).deliver);
+
+        // Ordinary typing with nothing composed, and a composition that never
+        // left its own field, are both delivered.
+        assert!(composition_ruling(&Composing::Idle, &b, ComposingEvent::Commits).deliver);
+        assert!(composition_ruling(&Composing::In(b.clone()), &b, ComposingEvent::Commits).deliver);
+        // A shell restarted in the same hole is a different field.
+        assert!(
+            !composition_ruling(&live, &shell_origin(1, 2, 8), ComposingEvent::Commits).deliver
+        );
+        assert!(composition_ruling(&live, &a, ComposingEvent::Commits).deliver);
+
+        // The winit events these rulings are read off.
+        assert_eq!(
+            composing_event_of(&Ime::Preedit("ni".to_owned(), None)),
+            Some(ComposingEvent::Opens)
+        );
+        assert_eq!(
+            composing_event_of(&Ime::Preedit(String::new(), None)),
+            Some(ComposingEvent::Clears)
+        );
+        assert_eq!(
+            composing_event_of(&Ime::Commit("\u{4f60}".to_owned())),
+            Some(ComposingEvent::Commits)
+        );
+        assert_eq!(
+            composing_event_of(&Ime::Commit(String::new())),
+            Some(ComposingEvent::Commits),
+            "a zero-sized result is still a commit, and still retires"
+        );
+        for bookkeeping in [Ime::Enabled, Ime::Disabled] {
+            assert_eq!(
+                composing_event_of(&bookkeeping),
+                None,
+                "{bookkeeping:?} is the window's own bookkeeping and claims no \
+                 composition"
+            );
+        }
+    }
+
+    /// **The lifecycle notices around an ending do not take the barrier down**
+    /// (review 2026-09-17 P2, rounds 3 and 4).
+    ///
+    /// The sequence, exactly as it was traced: a pre-edit in pane A; a dropped
+    /// path moves the keyboard to B; the cancel is refused; `Ime::Disabled`;
+    /// `Ime::Enabled`; the method's own empty pre-edit; the commit. Every one of
+    /// those middle events is winit telling this window what the *input method*
+    /// is doing — pinned winit emits the result string before `Disabled`
+    /// (`event_loop.rs:1595-1605`) and re-enables results on
+    /// `WM_IME_STARTCOMPOSITION` (`:1513`), which is what makes the `Enabled` in
+    /// the middle reachable — and none of them is the composition ending. A
+    /// barrier a notice can take down is not a barrier.
+    ///
+    /// MUTATION: clear the composition on `Enabled` or on `Disabled` and the
+    /// source pin goes red: the commit is admitted and the half-typed letters
+    /// are written into the pane the path was dropped on.
+    #[test]
+    fn ime_lifecycle_notices_do_not_erase_a_compositions_origin() {
+        let (a, b) = (shell_origin(1, 2, 7), shell_origin(1, 5, 9));
+        for notice in [Ime::Enabled, Ime::Disabled] {
+            assert_eq!(
+                composing_event_of(&notice),
+                None,
+                "{notice:?} reached the ruling, which is one way to lose the origin"
+            );
+        }
+        let source = include_str!("main.rs");
+        let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
+        let door = method_text(before_this_fixture, "    fn ime_input(");
+        assert_eq!(
+            door.matches("self.window.composing_in = ").count(),
+            1,
+            "the composition is set somewhere other than the one ruling that is \
+             allowed to set it:\n{door}"
+        );
+        assert!(
+            !method_text(before_this_fixture, "    fn cancel_composition(")
+                .contains("composing_in = "),
+            "the cancel clears the composition, which is the barrier taking \
+             itself down at the moment it is needed"
+        );
+        // The whole sequence, run through the rule that survives it.
+        let live = Composing::In(a.clone());
+        let retiring = live.clone().after(
+            composition_ruling(&live, &b, ComposingEvent::Clears).next,
+            &b,
+        );
+        assert_eq!(retiring, Composing::Retiring(a));
+        assert!(
+            !composition_ruling(&retiring, &b, ComposingEvent::Commits).deliver,
+            "the commit behind a disable/enable pair was written into B"
+        );
+    }
+
+    /// **Every crossing is the same crossing** (review 2026-09-17 P2, round 3).
+    ///
+    /// The owner ladder is *routing*: it answers where text goes now, which is
+    /// exactly the question a composition that has outlived its field must not
+    /// be allowed to ask. Before round 3 the barrier stood inside the shell's
+    /// arm, so a composition begun at a prompt and finished after the keyboard
+    /// had moved to a preview or the search capsule was inserted there — and, in
+    /// the other direction, a composition begun in a preview or the capsule had
+    /// no shell origin at all, so a dropped path into a terminal took its commit.
+    ///
+    /// Six crossings, each with the refused cancel's two orders, the honoured
+    /// cancel's, and the fresh composition that has to keep working after them.
+    ///
+    /// MUTATION: put the ruling back inside the shell's arm and every row whose
+    /// destination is not a shell goes red at once.
+    #[test]
+    fn an_ime_composition_carries_its_origin_across_every_kind_of_field() {
+        let shell_a = shell_origin(1, 2, 7);
+        let shell_b = shell_origin(1, 5, 9);
+        let preview = CompositionOrigin::Preview(Some(PreviewSurface::Peek));
+        let search = CompositionOrigin::Search(Some(bt_layout::SeatId(2)));
+        let palette = CompositionOrigin::Palette;
+        for (from, to, what) in [
+            (&shell_a, &shell_b, "one prompt to another"),
+            (&shell_a, &preview, "a prompt to a page"),
+            (&shell_a, &search, "a prompt to the search capsule"),
+            (
+                &preview,
+                &shell_b,
+                "a page to the prompt a path was dropped on",
+            ),
+            (
+                &search,
+                &shell_b,
+                "the capsule to the prompt a path was dropped on",
+            ),
+            (&palette, &shell_b, "the palette to a prompt"),
+        ] {
+            let live = Composing::In(from.clone());
+            // A bare stale commit.
+            assert!(
+                !composition_ruling(&live, to, ComposingEvent::Commits).deliver,
+                "letters begun in one field were inserted after crossing {what}"
+            );
+            // The refused cancel's adjacent pair.
+            let retiring = live.clone().after(
+                composition_ruling(&live, to, ComposingEvent::Clears).next,
+                to,
+            );
+            assert_eq!(
+                retiring,
+                Composing::Retiring(from.clone()),
+                "the clearing pre-edit gave up the composition crossing {what}"
+            );
+            assert!(
+                !composition_ruling(&retiring, to, ComposingEvent::Commits).deliver,
+                "a `Preedit(\"\")` laundered the commit crossing {what}"
+            );
+            // The honoured cancel: the reader's next character still arrives.
+            let idle = retiring.clone().after(
+                composition_ruling(&retiring, to, ComposingEvent::Clears).next,
+                to,
+            );
+            assert_eq!(idle, Composing::Idle);
+            assert!(
+                composition_ruling(&idle, to, ComposingEvent::Commits).deliver,
+                "an honoured cancel crossing {what} ate the next character"
+            );
+            // A fresh composition after the move is the destination's.
+            let in_to = retiring.clone().after(
+                composition_ruling(&retiring, to, ComposingEvent::Opens).next,
+                to,
+            );
+            assert_eq!(
+                in_to,
+                Composing::In(to.clone()),
+                "a fresh composition after {what}"
+            );
+            assert!(composition_ruling(&in_to, to, ComposingEvent::Commits).deliver);
+            // A single character with nothing composed is ordinary typing.
+            assert!(composition_ruling(&Composing::Idle, to, ComposingEvent::Commits).deliver);
+        }
+        // **And the rule stands in front of the ladder, not inside one of its
+        // arms**, which is the placement every row above depends on.
+        let source = include_str!("main.rs");
+        let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
+        let door = method_text(before_this_fixture, "    fn ime_input(");
+        let (ruled, routed) = (
+            door.find("composition_ruling(&self.window.composing_in"),
+            door.find("match ime_owner(self.keyboard_owner())"),
+        );
+        assert!(
+            ruled.is_some() && ruled < routed,
+            "the ruling has moved below the owner ladder, so every rung but one \
+             routes a composition that has outlived its field:\n{door}"
+        );
+        // Two instances of the *same* rung are two fields, which is the half a
+        // category comparison cannot see — the defect this whole rule replaces.
+        assert!(
+            !composition_ruling(
+                &Composing::In(CompositionOrigin::Preview(Some(PreviewSurface::Peek))),
+                &CompositionOrigin::Preview(None),
+                ComposingEvent::Commits
+            )
+            .deliver,
+            "two preview surfaces are one kind of owner and two fields"
+        );
+    }
+
+    /// **A move that is not a move between two fields settles nothing** (review
+    /// 2026-09-17, keeping what round 2 confirmed).
+    ///
+    /// The barrier is armed by the keyboard leaving one field for another, and
+    /// the two gestures that look like that and are not must go on being
+    /// nothing: clicking the pane that already has the keyboard, and moving a
+    /// caret inside a preview. Neither cancels a composition today and neither
+    /// may start doing so — a reader composing at a prompt who clicks their own
+    /// prompt has not finished the word.
+    ///
+    /// MUTATION: drop the `self.focused_leaf != seat` half of the guard in
+    /// `take_keyboard_into` and the first assertion goes red.
+    #[test]
+    fn a_click_on_the_pane_that_already_has_the_keyboard_settles_no_ime_state() {
+        let source = include_str!("main.rs");
+        let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
+        let door = method_text(before_this_fixture, "    fn take_keyboard_into(");
+        assert!(
+            door.contains("self.sessions.contains_key(&seat) && self.focused_leaf != seat"),
+            "the door no longer asks whether the keyboard is actually moving, so \
+             a click on your own prompt ends the word you were typing:\n{door}"
+        );
+        let here = shell_origin(1, 2, 7);
+        let live = Composing::In(here.clone());
+        assert!(composition_ruling(&live, &here, ComposingEvent::Commits).deliver);
+        assert_eq!(
+            composition_ruling(&live, &here, ComposingEvent::Clears).next,
+            ComposingAfter::Idle,
+            "an `Esc` where you are typing is over, with nothing owed"
+        );
+    }
+
+    /// A shell field, by the three facts that name one.
+    fn shell_origin(tab: u64, seat: u64, incarnation: u64) -> CompositionOrigin {
+        CompositionOrigin::Shell(Some(PasteTarget {
+            tab: TabId(tab),
+            seat: bt_layout::SeatId(seat),
+            incarnation,
+        }))
+    }
+
     /// The body of one method, from its signature to the brace that closes it at
     /// the `impl`'s own indentation — `layer_shape_tests::fn_body`'s reader,
     /// borrowed for one pin. The doc comment above the signature is deliberately
