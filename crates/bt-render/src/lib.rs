@@ -6837,7 +6837,7 @@ impl GpuContext {
     fn vertex_buffer<T: Pod>(&self, label: &str, contents: &[T]) -> wgpu::Buffer {
         const {
             assert!(
-                size_of::<T>() % wgpu::COPY_BUFFER_ALIGNMENT as usize == 0,
+                size_of::<T>().is_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT as usize),
                 "a vertex written through the queue has to be a whole number of copy words"
             );
         }
