@@ -207,28 +207,40 @@ jobs:
         shell: pwsh
         run: ./scripts/check-portable-core.ps1
 
-      # vendor/alacritty_terminal must stay a workspace member: its own upstream
-      # suite is our regression line against our patches breaking VT semantics,
-      # and it only runs while it is a member. A real regression hid behind
-      # exactly this gap — see docs/reviews/claude-review-M-1-part1-rework.md.
+      # Each vendored crate must stay a workspace member: its own upstream suite
+      # is our regression line against our patches breaking its semantics, and it
+      # only runs while it is a member. A real regression hid behind exactly this
+      # gap for alacritty — see docs/reviews/claude-review-M-1-part1-rework.md —
+      # and mitex-parser is the same bet with a harder stake: what Folio changed
+      # there is the recursion bound that keeps a printed formula from ending the
+      # process, so upstream's hundred parse snapshots are how we know the bound
+      # changed nothing else.
       #
-      # Asked of cargo, not of a grep: the manifest mentions this path twice
+      # Asked of cargo, not of a grep: the manifest mentions each path twice
       # (members and [patch.crates-io]), so grepping it passes even with the
       # member deleted.
-      - name: vendored alacritty is a workspace member at the pinned version
+      - name: the vendored crates are workspace members at their pinned versions
         shell: pwsh
         run: |
           $meta = cargo metadata --format-version 1 --no-deps --locked | ConvertFrom-Json
-          $want = [IO.Path]::GetFullPath("vendor/alacritty_terminal/Cargo.toml", $PWD.Path)
-          $pkg = $meta.packages | Where-Object {
-            $_.name -eq "alacritty_terminal" -and
-            [IO.Path]::GetFullPath($_.manifest_path) -eq $want
+          foreach ($vendored in @(
+            @{ name = "alacritty_terminal"; dir = "vendor/alacritty_terminal"; version = "0.26.0" },
+            @{ name = "mitex";              dir = "vendor/mitex";              version = "0.2.4"  },
+            @{ name = "mitex-parser";       dir = "vendor/mitex-parser";       version = "0.2.4"  }
+          )) {
+            $want = [IO.Path]::GetFullPath("$($vendored.dir)/Cargo.toml", $PWD.Path)
+            $pkg = $meta.packages | Where-Object {
+              $_.name -eq $vendored.name -and
+              [IO.Path]::GetFullPath($_.manifest_path) -eq $want
+            }
+            if (-not $pkg) { throw "vendored $($vendored.name) is not in the workspace" }
+            if ($pkg.id -notin $meta.workspace_members) {
+              throw "vendored $($vendored.name) left workspace.members - its upstream tests would stop running"
+            }
+            if ($pkg.version -ne $vendored.version) {
+              throw "vendored $($vendored.name) is $($pkg.version), expected $($vendored.version)"
+            }
           }
-          if (-not $pkg) { throw "vendored alacritty_terminal is not in the workspace" }
-          if ($pkg.id -notin $meta.workspace_members) {
-            throw "vendored alacritty_terminal left workspace.members - its upstream tests would stop running"
-          }
-          if ($pkg.version -ne "0.26.0") { throw "vendored alacritty is $($pkg.version), expected 0.26.0" }
 
       # First-party only: vendor is upstream's code in upstream's format, and
       # reformatting it would bury our patches in 300 lines of whitespace diff.
@@ -244,8 +256,21 @@ jobs:
           --package bt-render --package bt-winres --package bt-app
           -- --check
 
+      # The two excluded packages are still *linted* — their libraries are
+      # dependencies of `bt-math`, and a path dependency does not get
+      # `--cap-lints allow`, so the code Folio patched inside them is held to
+      # this line exactly as first-party code is. What the exclusion takes out is
+      # their own test targets, which upstream wrote against upstream's lints:
+      # `mitex-parser` declares `missing_docs = "warn"` and `-D warnings` turns
+      # that into a demand for doc comments on test helpers nobody here wrote.
+      # Holding somebody else's test fixtures to our bar buys nothing and would
+      # be paid for by editing files we want byte-identical to the published
+      # crate (`scripts/check-vendor-notices.ps1` reads exactly that).
       - name: clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: >
+          cargo clippy --workspace --all-targets --locked
+          --exclude mitex --exclude mitex-parser
+          -- -D warnings
 
       # Ours and alacritty's upstream suite in one go, because vendor is a
       # member — minus the two crates whose tests are about hardware. `bt-pty`

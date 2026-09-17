@@ -1,0 +1,34 @@
+[package]
+name = "mitex-parser"
+description = "Parser for MiTeX"
+authors.workspace = true
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[[bench]]
+name = "simple"
+harness = false
+
+[dependencies]
+
+mitex-glob.workspace = true
+mitex-lexer.workspace = true
+mitex-spec.workspace = true
+
+rowan.workspace = true
+
+[dev-dependencies]
+
+mitex-spec-gen.workspace = true
+
+once_cell.workspace = true
+insta.workspace = true
+divan.workspace = true
+
+[lints]
+workspace = true

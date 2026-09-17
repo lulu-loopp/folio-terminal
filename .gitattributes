@@ -69,3 +69,12 @@ licenses/** -text
 docs/plans/attention/evidence/** -text
 docs/plans/web-preview/codex-final-pass.md -text
 docs/spikes/artifacts/win-landing/probes/** -text
+
+# The MiTeX parser and converter, vendored from crates.io. Their author wrote
+# them with CRLF and the published archives carry it, and
+# `scripts/check-vendor-notices.ps1` proves Apache-2.0 §4(b) by hashing every
+# vendored file against that archive: a checkout that rewrote their endings would
+# make all two hundred of them "differ from upstream" and demand a modification
+# notice on files nobody here has touched.
+vendor/mitex/** -text
+vendor/mitex-parser/** -text
