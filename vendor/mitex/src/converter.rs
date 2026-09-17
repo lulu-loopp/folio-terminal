@@ -1,8 +1,9 @@
 // MODIFIED BY THE FOLIO CONTRIBUTORS — not the upstream
 // mitex 0.2.4 converter.
 // Change: `Converter::convert` counts its own recursion and refuses past
-// `mitex_parser::MAX_TREE_DEPTH`, and the bounded conversion entry point
-// carries a parse refused for depth out as one.
+// `mitex_parser::MAX_TREE_DEPTH`; a math-content-only mode refuses every site
+// that would copy source text into the Typst output as code; and the bounded
+// conversion entry point carries both refusals out under names.
 // Index: vendor/mitex/CHANGES-FOLIO.md
 // Notice given under section 4(b) of the Apache License, Version 2.0.
 
@@ -63,10 +64,22 @@ pub struct Converter {
     /// counter cannot fire on a tree that came from it — which is the point of keeping it: it
     /// answers for a tree that arrived some other way, and it costs one add per node.
     depth: usize,
+    /// Folio: refuse anything that would put source text into the output as Typst *code*.
+    ///
+    /// **A formula is mathematics, not a program.** Three sites in this converter copy source
+    /// text through unchanged instead of mapping it token by token — `\iftypst`'s body,
+    /// `\includegraphics`'s path and lengths, and `\label`'s name — and each of them lands in a
+    /// place where Typst reads code: respectively the output itself, the inside of a string
+    /// literal, and markup after a `<`. Everywhere else, a source character reaches the output
+    /// only through the token map below, which escapes `#`, `"`, `^`, `_`, `*`, `@`, `;`, `,`,
+    /// `/`, `(`, `)`, `[` and `]`, drops `$`, `{`, `}` and comments, and otherwise emits a
+    /// `Word`, whose own lexer class excludes every one of those characters. So refusing these
+    /// three is what makes "the converted source is math content" true rather than hopeful.
+    math_content_only: bool,
 }
 
 impl Converter {
-    fn new(mode: LaTeXMode) -> Self {
+    fn new(mode: LaTeXMode, math_content_only: bool) -> Self {
         Self {
             mode,
             env: LaTeXEnv::default(),
@@ -74,7 +87,16 @@ impl Converter {
             label: None,
             skip_next_space: true,
             depth: 0,
+            math_content_only,
         }
+    }
+
+    /// Folio: refuse a site that would copy source text into the output as code.
+    fn refuse_raw_typst(&self) -> Result<(), ConvertError> {
+        if self.math_content_only {
+            return Err(ConvertError::RawTypstCode);
+        }
+        Ok(())
     }
 
     #[must_use]
@@ -120,6 +142,8 @@ enum ConvertError {
     Str(String),
     /// Folio: the tree handed to the converter is deeper than it will descend.
     NestingTooDeep,
+    /// Folio: the source asked for Typst code rather than mathematics.
+    RawTypstCode,
 }
 
 impl fmt::Display for ConvertError {
@@ -128,6 +152,7 @@ impl fmt::Display for ConvertError {
             Self::Fmt(e) => write!(f, "fmt: {}", e),
             Self::Str(e) => write!(f, "error: {}", e),
             Self::NestingTooDeep => write!(f, "error: nesting too deep"),
+            Self::RawTypstCode => write!(f, "error: raw Typst code in a formula"),
         }
     }
 }
@@ -154,6 +179,8 @@ impl From<String> for ConvertError {
 pub enum BoundedConvertError {
     /// The formula nests deeper than `mitex_parser::MAX_TREE_DEPTH`.
     NestingTooDeep,
+    /// The formula asked for Typst code rather than mathematics.
+    RawTypstCode,
     /// Everything else MiTeX says about a formula it cannot convert.
     Convert(String),
 }
@@ -162,6 +189,7 @@ impl fmt::Display for BoundedConvertError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NestingTooDeep => NestingTooDeep.fmt(f),
+            Self::RawTypstCode => f.write_str("raw Typst code in a formula"),
             Self::Convert(message) => f.write_str(message),
         }
     }
@@ -345,6 +373,10 @@ impl Converter {
                 self.convert_env(f, elem, spec)?;
             }
             ItemTypstCode => {
+                // Folio: `\iftypst … \fi` is collected by the parser without its structure being
+                // read, and emitted here verbatim — a formula that a program merely printed can
+                // therefore carry a Typst program. Refused where it would be copied.
+                self.refuse_raw_typst()?;
                 write!(f, "{}", elem.as_node().unwrap().text())?;
             }
         };
@@ -562,6 +594,10 @@ impl Converter {
         match self.env {
             LaTeXEnv::None | LaTeXEnv::Itemize | LaTeXEnv::Enumerate => {
                 if matches!(self.mode, LaTeXMode::Text) {
+                    // Folio: `label` is the source text between the braces, unmapped, and `<…>` in
+                    // Typst markup ends at the first `>` — so the rest of it is markup, where `#`
+                    // is code. In math mode nothing is written here and nothing changes.
+                    self.refuse_raw_typst()?;
                     f.write_char('<')?;
                     f.write_str(label)?;
                     f.write_char('>')?;
@@ -580,6 +616,11 @@ impl Converter {
         f: &mut fmt::Formatter<'_>,
         cmd: &CmdItem,
     ) -> Result<(), ConvertError> {
+        // Folio: this writes `#image("<source text>")` — a Typst call whose string argument is
+        // copied from the formula, quote marks and all, so a `"` in the path closes the string and
+        // what follows is code. It is also a file read, which nothing in a printed line of
+        // mathematics has any business asking for.
+        self.refuse_raw_typst()?;
         let opt_arg = cmd.arguments().find(|arg| {
             matches!(
                 arg.first_child().unwrap().kind(),
@@ -905,6 +946,8 @@ impl Converter {
         // handle label, only add <label> for text mode
         if matches!(self.mode, LaTeXMode::Text) {
             if let Some(label) = self.label.take() {
+                // Folio: the same unmapped source text as `convert_command_label`'s.
+                self.refuse_raw_typst()?;
                 f.write_char('<')?;
                 f.write_str(label.as_str())?;
                 f.write_char('>')?;
@@ -1130,16 +1173,22 @@ struct TypstRepr {
     mode: LaTeXMode,
     spec: CommandSpec,
     error: Rc<RefCell<String>>,
+    /// Folio: the conversion is held to math content only.
+    math_content_only: bool,
     /// Folio: a refusal for depth, kept apart from the message so a caller can act on it.
     nesting_too_deep: Rc<Cell<bool>>,
+    /// Folio: a refusal for raw Typst code, likewise.
+    raw_typst_code: Rc<Cell<bool>>,
 }
 
 impl fmt::Display for TypstRepr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut ctx = Converter::new(self.mode);
+        let mut ctx = Converter::new(self.mode, self.math_content_only);
         if let Err(e) = ctx.convert(f, self.elem.clone(), &self.spec) {
-            if matches!(e, ConvertError::NestingTooDeep) {
-                self.nesting_too_deep.set(true);
+            match e {
+                ConvertError::NestingTooDeep => self.nesting_too_deep.set(true),
+                ConvertError::RawTypstCode => self.raw_typst_code.set(true),
+                _ => {}
             }
             self.error.borrow_mut().push_str(&e.to_string());
             return Err(fmt::Error);
@@ -1156,13 +1205,11 @@ pub fn convert_inner(
     do_parse: fn(input: &str, spec: CommandSpec) -> SyntaxNode,
 ) -> Result<String, String> {
     let node = do_parse(input, spec.unwrap_or_else(|| DEFAULT_SPEC.clone()));
-    convert_node(node, mode).map_err(|error| match error {
-        BoundedConvertError::NestingTooDeep => NestingTooDeep.to_string(),
-        BoundedConvertError::Convert(message) => message,
-    })
+    convert_node(node, mode, false).map_err(|error| error.to_string())
 }
 
-/// Folio: [`convert_inner`] over a parse that may itself have been refused for depth.
+/// Folio: [`convert_inner`] over a parse that may itself have been refused for depth, and with the
+/// conversion held to math content only.
 #[inline(always)]
 pub fn convert_inner_bounded(
     input: &str,
@@ -1172,26 +1219,35 @@ pub fn convert_inner_bounded(
 ) -> Result<String, BoundedConvertError> {
     let node = do_parse(input, spec.unwrap_or_else(|| DEFAULT_SPEC.clone()))
         .map_err(|NestingTooDeep| BoundedConvertError::NestingTooDeep)?;
-    convert_node(node, mode)
+    convert_node(node, mode, true)
 }
 
-fn convert_node(node: SyntaxNode, mode: LaTeXMode) -> Result<String, BoundedConvertError> {
+fn convert_node(
+    node: SyntaxNode,
+    mode: LaTeXMode,
+    math_content_only: bool,
+) -> Result<String, BoundedConvertError> {
     // println!("{:#?}", node);
     // println!("{:#?}", node.text());
     let mut output = String::new();
     let err = String::new();
     let err = Rc::new(RefCell::new(err));
     let too_deep = Rc::new(Cell::new(false));
+    let raw_code = Rc::new(Cell::new(false));
     let repr = TypstRepr {
         elem: LatexSyntaxElem::Node(node),
         mode,
         spec: DEFAULT_SPEC.clone(),
         error: err.clone(),
+        math_content_only,
         nesting_too_deep: too_deep.clone(),
+        raw_typst_code: raw_code.clone(),
     };
     core::fmt::write(&mut output, format_args!("{}", repr)).map_err(|_| {
         if too_deep.get() {
             BoundedConvertError::NestingTooDeep
+        } else if raw_code.get() {
+            BoundedConvertError::RawTypstCode
         } else {
             BoundedConvertError::Convert(err.borrow().to_owned())
         }

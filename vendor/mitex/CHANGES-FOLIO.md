@@ -46,6 +46,33 @@ are `convert_math`, `convert_text` and `convert_math_no_macro` over
 `mitex_parser::parse_bounded`. The originals keep their signatures and upstream's
 tests keep calling them.
 
+## `src/converter.rs` — a math-content-only mode
+
+Three sites in this converter copy source text into the output without mapping it
+token by token, and each lands where Typst reads code:
+
+| site | what it writes | why it is code |
+| --- | --- | --- |
+| `ItemTypstCode` | the body of `\iftypst … \fi`, verbatim | it *is* the Typst source |
+| `convert_command_includegraphics` | `#image("<path>")` | the path goes inside a string literal, so a `"` in it closes the string |
+| `convert_command_label` and `convert_env`'s label | `<name>` in markup | markup after the closing `>` is markup, where `#` is code |
+
+Everywhere else a source character reaches the output only through the token map
+in `convert_element`, which escapes `#`, `"`, `^`, `_`, `*`, `@`, `;`, `,`, `/`,
+`(`, `)`, `[` and `]`, drops `$`, `{`, `}` and comments, and otherwise emits a
+`Word` — whose lexer class excludes every one of those characters. So refusing
+those three is what makes "the converted source is math content" a statement
+rather than a hope.
+
+`Converter` therefore carries a `math_content_only` flag, set only by
+`convert_inner_bounded`, and those three sites answer `ConvertError::RawTypstCode`
+when it is set. Upstream's entry points are unchanged and upstream's sixty-two
+conversion tests still pass unmodified, `\iftypst` snapshots included.
+
+`ConvertError` and `BoundedConvertError` gain a `RawTypstCode` variant, carried
+out under a name for the same reason the depth refusal is: the reader is owed the
+source text, not a diagnostic about their own formula.
+
 ## The manifest
 
 The `divan` benchmark target is dropped (`[[bench]]` removed, `autobenches =
