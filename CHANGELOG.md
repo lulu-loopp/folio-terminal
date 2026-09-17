@@ -57,6 +57,15 @@ All notable changes to Folio are recorded here. The format follows
   guessed it wrong in both directions — it let several shapes of deep nesting
   through, and refused a long row of perfectly flat fractions.
 
+- **A table of mathematics that would be too big to draw is refused before it is
+  drawn, not after.** A row of column markers and a column of row markers is a
+  handful of characters, and it asks for a grid as wide and as tall as both —
+  eight thousand characters could have asked for seven million cells, which is
+  minutes of work and more memory than Folio has. It now works that out from the
+  formula itself and leaves anything past its limit as the text you printed. The
+  limit is a sixty-four by sixty-four grid; an ordinary matrix, a long alignment
+  or a definition with thirty cases is nowhere near it.
+
 - **A formula cannot run a program.** Mathematics written for TeX has a corner
   of its notation that says "and here is some Typst" — Folio passed that through
   and ran it, so a line of text a program printed into a pane could ask Folio to

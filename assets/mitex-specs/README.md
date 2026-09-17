@@ -32,6 +32,13 @@ for anything else, which is what `eval` already did with `\hspace{1ex}`. Nothing
 that used to draw stops drawing; `a_length_is_parsed_and_never_evaluated` in
 `bt-math` holds both halves of that.
 
+It also refuses a length longer than ten thousand points, which is three and a
+half metres of mathematics. That one is belt rather than buckle: measured the
+same day, `\hspace{999999999999999999999999pt}` was *already* refused downstream,
+by `bt_math`'s raster-dimension check, which runs before a pixmap is allocated —
+ten milliseconds, nothing allocated. Saying it at the length as well means the
+answer does not rest on a float surviving a cast three stages later.
+
 This file is not covered by `scripts/check-vendor-notices.ps1`: that gate hashes
 a vendored tree against a published `.crate` archive, and these come from a git
 repository rather than from crates.io. The notice in the file and this section

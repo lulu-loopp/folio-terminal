@@ -55,6 +55,16 @@
   "in": 1in,
   "em": 1em,
 )
+// The most points each of those units can be worth, for the size check below.
+// `em` is relative, so what bounds it is the largest size a formula is set at
+// rather than arithmetic; a hundred points is far above any of them.
+#let mitex-length-points = (
+  "pt": 1.0,
+  "mm": 2.84,
+  "cm": 28.35,
+  "in": 72.0,
+  "em": 100.0,
+)
 #let mitex-length(s) = {
   let matched = s.trim().match(
     regex("^([+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+))(pt|mm|cm|in|em)$"),
@@ -62,7 +72,19 @@
   if matched == none {
     panic("mitex: a length was expected, not " + s)
   }
-  float(matched.captures.at(0)) * mitex-length-units.at(matched.captures.at(1))
+  let value = float(matched.captures.at(0))
+  let unit = matched.captures.at(1)
+  // A formula is a line of mathematics, and ten thousand points is three and a
+  // half metres of it. Measured 2026-09-17: an enormous length is already
+  // refused downstream, by the raster-dimension check in `bt_math`, which runs
+  // before a pixmap is allocated — `\hspace{999999999999999999999999pt}` comes
+  // back "raster dimensions are invalid or too large" in ten milliseconds and
+  // allocates nothing. This says the same thing one step earlier, so the answer
+  // does not depend on a float surviving a cast three stages later.
+  if calc.abs(value) * mitex-length-points.at(unit) > 10000.0 {
+    panic("mitex: a length longer than a page: " + s)
+  }
+  value * mitex-length-units.at(unit)
 }
 #let get-tex-color-from-arr(arr) = {
   mitex-color-map.at(lower(get-tex-str-from-arr(arr)), default: none)
