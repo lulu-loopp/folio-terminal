@@ -15,6 +15,14 @@ All notable changes to Folio are recorded here. The format follows
   threw it away, so it went back to LaTeX and had to be worked out and drawn all
   over again. Replaying the owner's own recording, that happened at every one of
   its 117 redraws.
+- **When a program finishes one screenful and begins the next in the same breath,
+  the formulas on the finished one stay where they are.** Folio went on reading the
+  new screen against the old one's layout, so with two identical formulas on show
+  one picture was placed over the other's lines and the other went back to LaTeX.
+- **A picture is never left standing over a formula that has just been edited.** A
+  program that replaced a formula's body in the middle of redrawing could leave
+  Folio showing the old picture over the new text until the redraw after it. Every
+  picture is now checked against the lines underneath it the moment they change.
 
 ## 0.4.2-preview — 2026-09-17
 

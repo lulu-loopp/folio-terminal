@@ -815,6 +815,10 @@ struct AlternateRepaintSnapshot {
     dormant_decorations: Vec<LiveDecorationRecord>,
     invalidation_count: u64,
     snapshot_boundary: bool,
+    /// `DualPlaneSession::live_content_revision` when this snapshot was taken. While it still
+    /// matches, `inputs` is not a memory of the grid: it *is* the grid, and every record proven
+    /// since was proven in its coordinates.
+    live_content_revision: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -1457,6 +1461,16 @@ pub struct DualPlaneSession {
     frozen_detection_count: u64,
     live_detection_count: u64,
     live_invalidation_count: u64,
+    /// **How many times a live row's content has actually changed** — bumped once per row by
+    /// [`Self::observe_live_damage`], and only where the row's own fingerprint says the cells are
+    /// not the cells it had. Damage alone will not do: a full-screen program rewrites every row
+    /// every frame and the vendor reports every one of them, so a counter driven by damage would
+    /// move on a frame that painted the same picture.
+    ///
+    /// It is what a repaint window compares itself against. A window is a promise about one
+    /// particular grid — the one its snapshot describes — and the promise holds only while that
+    /// grid is still the grid on the glass. See [`Self::settle_feed_turn`].
+    live_content_revision: u64,
     math_failure_validate_count: u64,
     math_failure_convert_count: u64,
     math_failure_compile_count: u64,
@@ -1779,6 +1793,7 @@ impl DualPlaneSession {
             frozen_detection_count: 0,
             live_detection_count: 0,
             live_invalidation_count: 0,
+            live_content_revision: 0,
             math_failure_validate_count: 0,
             math_failure_convert_count: 0,
             math_failure_compile_count: 0,
@@ -3066,13 +3081,42 @@ impl DualPlaneSession {
     }
 
     fn settle_feed_turn(&mut self, turn: FeedTurn) {
-        if self.synchronized_update_deadline().is_none() {
-            if let Some(snapshot) = self.alternate_repaint_snapshot.take() {
-                self.finish_alternate_repaint(snapshot);
-            }
-            if let Some(snapshot) = self.primary_repaint_snapshot.take() {
-                self.finish_primary_repaint(snapshot, false);
-            }
+        // **A repaint window lives as long as the grid it snapshotted, not as long as some block is
+        // buffering.** Both are true for the ordinary DEC 2026 repaint — the block withholds every
+        // cell, so the grid under the window cannot move — and that is why "is a block still open"
+        // stood in for the real condition for so long. It stops being true in one read: a producer
+        // that ends one frame's block and begins the next one's in the same drain
+        // (`… ESU`, `BSU`, `HOME`, …) leaves a deadline standing here while the first block's cells
+        // are already on the glass. The window was then held open, over a snapshot of a grid that
+        // no longer exists, and two things followed from it. Detection between reads proves blocks
+        // in the *new* grid's coordinates, and the close pushed them through the old grid's delta a
+        // second time — with two identical blocks on screen the first lands on the second's rows and
+        // the second is lost. And a record whose source was rewritten by those very cells was never
+        // judged against them, so its raster went on being painted over text it does not match,
+        // which is the one thing this window may never do.
+        //
+        // So the window settles the moment its grid moves, against the cells that are on the glass
+        // now — every record verified and reseated by the same projection an ESU would have run —
+        // and a block that is still buffering afterwards opens a *new* window over the grid that
+        // commit just settled. A carried record is then in the snapshot's coordinates by
+        // construction, and no frame is published between a commit and its verification.
+        let revision = self.live_content_revision;
+        let settled = self.synchronized_update_deadline().is_none();
+        let outlived = |snapshot: &AlternateRepaintSnapshot| {
+            settled || snapshot.live_content_revision != revision
+        };
+        if self
+            .alternate_repaint_snapshot
+            .as_ref()
+            .is_some_and(outlived)
+            && let Some(snapshot) = self.alternate_repaint_snapshot.take()
+        {
+            self.finish_alternate_repaint(snapshot);
+        }
+        if self.primary_repaint_snapshot.as_ref().is_some_and(outlived)
+            && let Some(snapshot) = self.primary_repaint_snapshot.take()
+        {
+            self.finish_primary_repaint(snapshot, false);
         }
         self.alternate_repaint_in_progress = self.alternate_repaint_snapshot.is_some();
         // Re-seat already-known paths and records only after the whole repaint has landed.
@@ -3082,6 +3126,18 @@ impl DualPlaneSession {
         if self.synchronized_update_deadline().is_none() {
             self.primary_repaint_in_progress = false;
             self.primary_reprint_history_floor = None;
+        }
+        // The block that is still buffering gets its own window, over the settled grid — taken
+        // after the off-band queue has been offered back, so its snapshot is the whole census. The
+        // primary side re-snapshots on its next feed (`feed_at`) while `primary_repaint_in_progress`
+        // stands; alternate has to do it here, because `begin_alternate_repaint` reads the bytes of
+        // a read and the read that would reopen this window has already gone by.
+        if self.alternate_repaint_snapshot.is_none()
+            && turn.cursor_memory_reprint_boundary
+            && self.synchronized_update_deadline().is_some()
+        {
+            self.alternate_repaint_snapshot = self.snapshot_alternate_repaint(true);
+            self.alternate_repaint_in_progress = self.alternate_repaint_snapshot.is_some();
         }
         // A buffering synchronized update still exposes the pre-transaction cursor.
         if !(turn.cursor_memory_reprint_boundary && self.synchronized_update_deadline().is_some()) {
@@ -5960,6 +6016,7 @@ impl DualPlaneSession {
                 dormant_decorations: self.offscreen_decorations.iter().cloned().collect(),
                 invalidation_count: self.live_invalidation_count,
                 snapshot_boundary,
+                live_content_revision: self.live_content_revision,
             }
         })
     }
@@ -6199,6 +6256,7 @@ impl DualPlaneSession {
             dormant_decorations: self.offscreen_decorations.iter().cloned().collect(),
             invalidation_count: self.live_invalidation_count,
             snapshot_boundary: true,
+            live_content_revision: self.live_content_revision,
         })
     }
 
@@ -6794,6 +6852,10 @@ impl DualPlaneSession {
             state.last_damage_at = Some(observed_at);
             state.settled_revision = None;
             state.candidate_signature = None;
+            // Counted here, above every suppression below it, because it is a fact about the glass
+            // and not about what this session decided to do with it: a repaint window that skips
+            // the invalidation is exactly the case that has to know the cells moved.
+            self.live_content_revision = self.live_content_revision.wrapping_add(1);
             // Suppression: inside a repaint window the proven raster keeps rendering over the rows
             // being rewritten instead of the record being torn down (and its source flashing
             // through). Alternate suppresses across a boundary repaint; primary suppresses across an

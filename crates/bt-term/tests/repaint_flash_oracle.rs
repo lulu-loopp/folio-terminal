@@ -60,6 +60,21 @@ fn synchronized_repaint(rows: &[&str]) -> Vec<u8> {
     out
 }
 
+/// The same screen rewrite [`synchronized_repaint`] makes, without the DEC 2026 wrapper around it:
+/// every cell lands as its bytes are parsed instead of waiting for a terminator.
+fn unsynchronized_repaint(rows: &[&str]) -> Vec<u8> {
+    let mut out = b"\x1b[?25l\x1b[H".to_vec();
+    for (row, line) in rows.iter().enumerate() {
+        if row != 0 {
+            out.extend_from_slice(format!("\x1b[{};1H", row + 1).as_bytes());
+        }
+        out.extend_from_slice(b"\x1b[K");
+        out.extend_from_slice(line.as_bytes());
+    }
+    out.extend_from_slice(b"\x1b[?25h");
+    out
+}
+
 fn frame_row_text(frame: &bt_viewport::ViewportFrame, row: usize) -> String {
     let columns = frame.columns.get() as usize;
     frame.cells[row * columns..(row + 1) * columns]
@@ -593,4 +608,266 @@ fn a_formula_proven_inside_an_open_repaint_window_survives_its_close() {
         "the formula must survive, not be detected all over again"
     );
     assert!(!oracle.flash_detected(), "sequence={:?}", oracle.frames());
+}
+
+/// The screen the mixed-coordinate fixtures below repaint away from: two byte-identical three-row
+/// blocks at rows 1 and 5, neither of them proven yet, with three unique rows between and under
+/// them for a mapping to anchor on.
+const TWO_BLOCKS_BEFORE: &[&str] = &[
+    "keep zero",
+    "$$",
+    "x^2",
+    "$$",
+    "keep one",
+    "$$",
+    "x^2",
+    "$$",
+    "keep two",
+    "prompt> ",
+];
+
+/// The same screen four rows further down: the blocks now open at rows 5 and 9, and every unique
+/// row moved by the same +4, so the mapping a close computes from it is exact and unambiguous.
+const TWO_BLOCKS_AFTER: &[&str] = &[
+    "head alpha",
+    "head beta",
+    "head gamma",
+    "head delta",
+    "keep zero",
+    "$$",
+    "x^2",
+    "$$",
+    "keep one",
+    "$$",
+    "x^2",
+    "$$",
+    "keep two",
+    "prompt> ",
+];
+
+/// Prove one formula, then repaint it away, so the pane holds an off-band record and every later
+/// repaint has something to open a window for. Returns nothing: what it leaves behind is the queue.
+fn seed_one_off_band_record(
+    session: &mut DualPlaneSession,
+    projection: &mut bt_viewport::ViewportProjection,
+    oracle: &mut FormulaFlashOracle,
+    start: std::time::Instant,
+    after: &[&str],
+) {
+    let mut first = b"\x1b[?1049h".to_vec();
+    first.extend_from_slice(&synchronized_repaint(&[
+        "seed head",
+        "$$",
+        r"\oint \mathbf{B} \cdot d\ell = \mu_0 I",
+        "$$",
+        "seed tail",
+        "prompt> ",
+    ]));
+    session.feed_at(&first, start).unwrap();
+    session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+    complete_live_math(session);
+    assert_eq!(
+        observe_frame(session, projection, oracle),
+        FormulaFrameState::Rendered,
+        "the seed formula never rendered"
+    );
+    session
+        .feed_at(
+            &synchronized_repaint(after),
+            start + Duration::from_millis(300),
+        )
+        .unwrap();
+    observe_frame(session, projection, oracle);
+}
+
+/// **A record proven on the grid a repaint already committed is seated where it says it is.**
+///
+/// A read that ends one DEC 2026 block and begins another leaves a synchronized-update deadline
+/// standing at the end of the drain, so the repaint window that was open over the first block was
+/// held open over the second — with the snapshot it took before the first block's cells, while
+/// those cells were already on the glass. Detection between reads then proves blocks in the *new*
+/// grid's coordinates, and the close pushed them through the old grid's delta a second time.
+///
+/// Two byte-identical blocks make the double shift visible rather than merely wrong: the +4 seats
+/// the first carried record on the second's rows, where its source matches byte for byte, and the
+/// second falls off the grid entirely. Neither the identity fallback (four `$$` rows tie its
+/// origin vote) nor the bounded re-detection (two render-equivalent tasks, no unique match) can
+/// recover it, so one of the two pictures is lost and its LaTeX is exposed.
+///
+/// Mutation: keeping the window open whenever any block is still buffering, rather than only while
+/// the grid it snapshotted is still the grid on the glass, renders one block instead of two.
+#[test]
+fn a_block_proven_after_a_commit_reopened_the_window_keeps_its_own_coordinates() {
+    let start = std::time::Instant::now();
+    let mut session = DualPlaneSession::new(nz(48), nz(14));
+    let mut projection = session.new_projection(session.layout_key());
+    let mut oracle = FormulaFlashOracle::default();
+    seed_one_off_band_record(
+        &mut session,
+        &mut projection,
+        &mut oracle,
+        start,
+        TWO_BLOCKS_BEFORE,
+    );
+
+    // One read: the repaint's cells land unsynchronized, and the producer opens its next frame's
+    // block in the same breath. The window has nothing left to preserve the old grid for.
+    let at = start + Duration::from_millis(400);
+    let mut commit_and_reopen = unsynchronized_repaint(TWO_BLOCKS_AFTER);
+    commit_and_reopen.extend_from_slice(b"\x1b[?2026h\x1b[H");
+    session.feed_at(&commit_and_reopen, at).unwrap();
+    observe_frame(&mut session, &mut projection, &mut oracle);
+
+    // Both blocks are proven and rastered while that second block is still buffering.
+    session.advance_live_stability(at + LIVE_MATH_STABLE_INTERVAL);
+    complete_live_math(&mut session);
+    assert_eq!(
+        observe_frame(&mut session, &mut projection, &mut oracle),
+        FormulaFrameState::Rendered,
+        "the fixture never rendered its two blocks"
+    );
+    let detections = session.live_detection_count();
+
+    // The second block ends without touching a cell. Nothing may move.
+    session
+        .feed_at(
+            b"\x1b[?2026l",
+            at + LIVE_MATH_STABLE_INTERVAL + Duration::from_millis(2),
+        )
+        .unwrap();
+    observe_frame(&mut session, &mut projection, &mut oracle);
+    session.refresh_projection(&mut projection);
+    let settled = session.viewport_frame(&mut projection).unwrap();
+    for row in [5usize, 6, 7, 9, 10, 11] {
+        assert!(
+            frame_row_text(&settled, row).trim().is_empty(),
+            "row {row} still shows its LaTeX after the close: {:?}",
+            (5..=11)
+                .map(|row| frame_row_text(&settled, row))
+                .collect::<Vec<_>>()
+        );
+    }
+    assert_eq!(
+        session.live_detection_count(),
+        detections,
+        "both blocks must survive the close, not be detected all over again"
+    );
+    assert!(!oracle.flash_detected(), "sequence={:?}", oracle.frames());
+}
+
+/// The control the fixture above is measured against: **one block, opened once and never
+/// interrupted, still carries its formulas across a real scroll.**
+///
+/// Here the cells are withheld for the whole life of the window, so every record the close carries
+/// was proven against the grid the snapshot describes and the old grid's delta is exactly the right
+/// thing to push them through. `CSI 4 S` moves both blocks up four rows inside the block, and both
+/// pictures come out the other side.
+#[test]
+fn an_atomic_scroll_inside_one_block_carries_both_formulas_through_its_close() {
+    let start = std::time::Instant::now();
+    let mut session = DualPlaneSession::new(nz(48), nz(14));
+    let mut projection = session.new_projection(session.layout_key());
+    let mut oracle = FormulaFlashOracle::default();
+    seed_one_off_band_record(
+        &mut session,
+        &mut projection,
+        &mut oracle,
+        start,
+        TWO_BLOCKS_AFTER,
+    );
+
+    let at = start + Duration::from_millis(400);
+    session.feed_at(b"\x1b[?2026h\x1b[?25l\x1b[H", at).unwrap();
+    session.advance_live_stability(at + LIVE_MATH_STABLE_INTERVAL);
+    complete_live_math(&mut session);
+    assert_eq!(
+        observe_frame(&mut session, &mut projection, &mut oracle),
+        FormulaFrameState::Rendered,
+        "the fixture never rendered its two blocks inside the window"
+    );
+    let detections = session.live_detection_count();
+
+    session
+        .feed_at(
+            b"\x1b[4S\x1b[?25h\x1b[?2026l",
+            at + LIVE_MATH_STABLE_INTERVAL + Duration::from_millis(2),
+        )
+        .unwrap();
+    observe_frame(&mut session, &mut projection, &mut oracle);
+    session.refresh_projection(&mut projection);
+    let settled = session.viewport_frame(&mut projection).unwrap();
+    for row in [1usize, 2, 3, 5, 6, 7] {
+        assert!(
+            frame_row_text(&settled, row).trim().is_empty(),
+            "row {row} shows its LaTeX after an atomic scroll: {:?}",
+            (1..=7)
+                .map(|row| frame_row_text(&settled, row))
+                .collect::<Vec<_>>()
+        );
+    }
+    assert_eq!(
+        session.live_detection_count(),
+        detections,
+        "an atomic scroll must not schedule detection again"
+    );
+    assert!(!oracle.flash_detected(), "sequence={:?}", oracle.frames());
+}
+
+/// **No raster is ever held over text it does not match, not even for the one read between a
+/// commit and the next block's terminator.**
+///
+/// The owner's hard bar. A proven block is rendered inside an open window; one read then carries
+/// the cursor move, a new body, the terminator that writes all three to the glass, and the next
+/// frame's block start. The cells that landed say `y^2`; suppression skipped the invalidation those
+/// cells would otherwise have caused, and settlement — seeing the *next* block's deadline — skipped
+/// the projection that would have judged the record against them, so the frame went on showing the
+/// `x^2` picture over a row that no longer says `x^2`.
+///
+/// Mutation: deciding the window is still open because a block is buffering, rather than because
+/// the grid has not moved under it, leaves `held_unbacked_records` reporting that exact raster.
+#[test]
+fn a_body_rewritten_at_a_commit_never_keeps_the_picture_of_what_it_replaced() {
+    let start = std::time::Instant::now();
+    let mut session = DualPlaneSession::new(nz(48), nz(8));
+    let mut projection = session.new_projection(session.layout_key());
+    let mut oracle = FormulaFlashOracle::default();
+
+    let mut first = b"\x1b[?1049h".to_vec();
+    first.extend_from_slice(&synchronized_repaint(&[
+        "header", "$$", "x^2", "$$", "tail", "prompt> ",
+    ]));
+    session.feed_at(&first, start).unwrap();
+    session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+    complete_live_math(&mut session);
+    assert_eq!(
+        observe_frame(&mut session, &mut projection, &mut oracle),
+        FormulaFrameState::Rendered
+    );
+
+    // The window opens over the proven block, and the block that opens it withholds its cells.
+    let at = start + Duration::from_millis(300);
+    session.feed_at(b"\x1b[?2026h\x1b[?25l\x1b[H", at).unwrap();
+    observe_frame(&mut session, &mut projection, &mut oracle);
+
+    // One read: the new body, the terminator that puts it on the glass, and the next block.
+    session
+        .feed_at(
+            b"\x1b[3;1H\x1b[Ky^2\x1b[?25h\x1b[?2026l\x1b[?2026h\x1b[?25l\x1b[H",
+            at + Duration::from_millis(20),
+        )
+        .unwrap();
+    observe_frame(&mut session, &mut projection, &mut oracle);
+
+    assert!(
+        session.held_unbacked_records().is_empty(),
+        "a raster survived the body it was made from: {:?}",
+        session.held_unbacked_records()
+    );
+    session.refresh_projection(&mut projection);
+    let committed = session.viewport_frame(&mut projection).unwrap();
+    assert_eq!(
+        frame_row_text(&committed, 2).trim(),
+        "y^2",
+        "the committed body must be the text the frame carries"
+    );
 }
