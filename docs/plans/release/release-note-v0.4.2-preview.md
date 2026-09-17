@@ -14,7 +14,14 @@
   and its edges still open a pane.
 - A typeset formula stays typeset: it no longer flashes back to its `$$…$$`
   source while a program repaints the screen, and an older one no longer comes
-  back as plain text when you resize the window.
+  back as plain text when you resize the window. An inline formula is typeset
+  even when its picture is ready after the prompt has come back — the first
+  `cat` of a fresh window included — and your prompt is never typeset, whatever
+  it says.
+- A formula a program prints cannot harm the window it is printed in: one nested
+  too deeply or asking for too large a table is refused and left as text, a
+  formula cannot run a program, and one that cannot be drawn no longer takes the
+  whole window with it.
 - Typing and the pointer stay responsive: a picture that has not changed is not
   drawn again, a wheel notch that moves nothing no longer publishes a frame, and
   resizing no longer copies every pane's whole history twice before it draws.
@@ -49,6 +56,32 @@
 
 ### Fixed
 
+- **An inline formula in a command's output is typeset even when its picture is
+  ready after the prompt has come back**, and a wrapped one stays typeset when
+  the window's width changes.
+- **Your prompt is never typeset as mathematics**, whatever it says and wherever
+  on the screen it is redrawn.
+- **Formulas printed after a full-screen program exits are typeset again.**
+- **A formula is no longer taken down by its neighbour's result**, and a
+  screenful of formulas all at once no longer leaves the first few as source.
+- **Dragging a window edge no longer lets a formula swallow the line under it.**
+- **Two lines with the same formulas in them no longer show each other's
+  picture.**
+- **A formula block that had partly scrolled into the history is no longer cut
+  off** by the line after it.
+- **Clicking a command's mark beside the scroll bar goes to that command every
+  time**, also when a formula is on screen.
+- **Right-clicking a formula copies that formula**, not one from the pane you
+  were typing in.
+- **A formula nested past what Folio can draw, or a table of mathematics too big
+  to draw, is refused and left as text** rather than ending the program.
+- **A formula cannot run a program**, and one formula that cannot be drawn no
+  longer takes the whole window with it.
+- **The keyboard follows a dropped path**: the terminal that receives it takes
+  the keyboard, a file from another program brings Folio to the front, and a
+  drop under a dialog, or on nothing that is a terminal, is typed nowhere.
+- **Text being composed in an input method is never committed into a different
+  pane** from the one it was begun in.
 - **Losing the graphics device no longer closes Folio.** The half-prepared
   picture is dropped, the device is asked for again, and the window draws
   everything it was saying on the new one.

@@ -6,6 +6,72 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+## 0.4.2-preview — 2026-09-17
+
+### Added
+
+- **Dragging a file out of the files column into the middle of a terminal now
+  pastes its path, spelled for the shell running there.** The pane you are over
+  says which of the two things it will do before you let go: aim at a pane's
+  edge and you get the same split preview you have always got, and the file
+  opens beside it; aim at the middle of a terminal and the pane lights up with
+  `Paste path` on it, and the path arrives on that terminal's command line —
+  the one you dropped it on, not the one you had been typing in. It is the same
+  quoting a file dropped in from File Explorer or the Finder gets, so
+  PowerShell, `cmd`, a WSL shell and the rest each get the spelling they read,
+  and Folio runs no command of its own: the path is put in front of the cursor
+  for you to finish the line. A preview pane and a files column are unchanged —
+  their middles still mean what they meant — and `Esc` still calls the whole
+  thing off. If anything moves between the moment the pane lights up and the
+  moment you let go — your hand to another pane, a pane closing, a tab closing
+  under it — nothing is written at all, rather than written somewhere else. The
+  terminal that receives the path also takes the keyboard, so the next thing you
+  type — `Enter`, or the rest of the command — goes to the shell you dropped
+  onto; a drop that writes nothing leaves the keyboard where it was.
+
+- **Dropping a file onto Folio now puts its path on the command line.** Drag a
+  file out of File Explorer or the Finder and let go of it over a split, and its
+  path arrives in the terminal you dropped it on — not the one you happened to
+  be typing in — spelled for the shell running there. It is the same quoting a
+  file you *copied* has had since 0.4.1, so PowerShell, `cmd`, a WSL shell and
+  the rest each get the spelling they read. Several files let go of together
+  arrive on one line, one argument each, and a name the shell has no way to
+  spell is reported instead of being mangled. Folio runs no command of its own:
+  the path is put in front of the cursor for you to finish the line. The terminal
+  that receives the path also takes the keyboard, and Folio comes to the front —
+  you dropped the file here, so here is where you can carry on typing. A drop
+  that writes nothing changes neither, and a file let go of anywhere that is not
+  a terminal — over a card Folio is asking you something on, over a floating
+  window, on the tabs or in the gap between panes — is not typed anywhere at
+  all, rather than going to whichever pane you were last typing in.
+
+- **A picture on the clipboard now pastes as the path of a file Folio writes
+  for it.** A screenshot taken with `Win`+`Shift`+`S`, or with
+  `⌘`+`Ctrl`+`Shift`+`4` on a Mac, is on the clipboard as a picture rather than
+  as a file, so pasting it into a terminal used to type nothing at all — there
+  was nothing there a shell could be handed. Folio now writes it out as a PNG
+  and pastes that file's path, quoted for the shell in the pane exactly as the
+  path of a file copied in Explorer or the Finder already was. What the
+  clipboard holds still decides in one order: a copied file pastes its path,
+  text pastes as text, and only a clipboard holding a picture and nothing else
+  becomes a file — so copying a picture in a browser, which puts the page's own
+  text on the clipboard beside it, goes on pasting the text. The files are
+  written to `%TEMP%\folio\clipboard\` on Windows and to the same folder inside
+  your own temporary directory on a Mac, named for the moment they were taken,
+  and Folio keeps the twenty newest and removes the rest as it writes.
+
+### Changed
+
+- **When Folio's window stops answering, its own log now says which kind of
+  event it was answering.** The line Folio writes about a window that held on
+  too long used to end at `window_event`, which is every key, every pointer
+  move, every redraw and every resize under one word; it now names the handler
+  the event went to — `keyboard_input`, `redraw`, `resized` and ten others — so
+  a report about a window that froze for a few seconds says where inside it the
+  time went. And a run started with `BT_PERF_TRACE` set now writes a full hang
+  report after two seconds of silence instead of five, which is where the stalls
+  people actually notice live; a run started without it is unchanged.
+
 ### Fixed
 
 - **A prompt that scrolls up the screen still is not typeset.** Folio decides
@@ -160,74 +226,6 @@ All notable changes to Folio are recorded here. The format follows
   things. A jump is now kept as the place you asked for until you say
   otherwise, and a pane resting at the bottom still follows new output exactly
   as it did.
-
-## 0.4.2-preview — 2026-09-17
-
-### Added
-
-- **Dragging a file out of the files column into the middle of a terminal now
-  pastes its path, spelled for the shell running there.** The pane you are over
-  says which of the two things it will do before you let go: aim at a pane's
-  edge and you get the same split preview you have always got, and the file
-  opens beside it; aim at the middle of a terminal and the pane lights up with
-  `Paste path` on it, and the path arrives on that terminal's command line —
-  the one you dropped it on, not the one you had been typing in. It is the same
-  quoting a file dropped in from File Explorer or the Finder gets, so
-  PowerShell, `cmd`, a WSL shell and the rest each get the spelling they read,
-  and Folio runs no command of its own: the path is put in front of the cursor
-  for you to finish the line. A preview pane and a files column are unchanged —
-  their middles still mean what they meant — and `Esc` still calls the whole
-  thing off. If anything moves between the moment the pane lights up and the
-  moment you let go — your hand to another pane, a pane closing, a tab closing
-  under it — nothing is written at all, rather than written somewhere else. The
-  terminal that receives the path also takes the keyboard, so the next thing you
-  type — `Enter`, or the rest of the command — goes to the shell you dropped
-  onto; a drop that writes nothing leaves the keyboard where it was.
-
-- **Dropping a file onto Folio now puts its path on the command line.** Drag a
-  file out of File Explorer or the Finder and let go of it over a split, and its
-  path arrives in the terminal you dropped it on — not the one you happened to
-  be typing in — spelled for the shell running there. It is the same quoting a
-  file you *copied* has had since 0.4.1, so PowerShell, `cmd`, a WSL shell and
-  the rest each get the spelling they read. Several files let go of together
-  arrive on one line, one argument each, and a name the shell has no way to
-  spell is reported instead of being mangled. Folio runs no command of its own:
-  the path is put in front of the cursor for you to finish the line. The terminal
-  that receives the path also takes the keyboard, and Folio comes to the front —
-  you dropped the file here, so here is where you can carry on typing. A drop
-  that writes nothing changes neither, and a file let go of anywhere that is not
-  a terminal — over a card Folio is asking you something on, over a floating
-  window, on the tabs or in the gap between panes — is not typed anywhere at
-  all, rather than going to whichever pane you were last typing in.
-
-- **A picture on the clipboard now pastes as the path of a file Folio writes
-  for it.** A screenshot taken with `Win`+`Shift`+`S`, or with
-  `⌘`+`Ctrl`+`Shift`+`4` on a Mac, is on the clipboard as a picture rather than
-  as a file, so pasting it into a terminal used to type nothing at all — there
-  was nothing there a shell could be handed. Folio now writes it out as a PNG
-  and pastes that file's path, quoted for the shell in the pane exactly as the
-  path of a file copied in Explorer or the Finder already was. What the
-  clipboard holds still decides in one order: a copied file pastes its path,
-  text pastes as text, and only a clipboard holding a picture and nothing else
-  becomes a file — so copying a picture in a browser, which puts the page's own
-  text on the clipboard beside it, goes on pasting the text. The files are
-  written to `%TEMP%\folio\clipboard\` on Windows and to the same folder inside
-  your own temporary directory on a Mac, named for the moment they were taken,
-  and Folio keeps the twenty newest and removes the rest as it writes.
-
-### Changed
-
-- **When Folio's window stops answering, its own log now says which kind of
-  event it was answering.** The line Folio writes about a window that held on
-  too long used to end at `window_event`, which is every key, every pointer
-  move, every redraw and every resize under one word; it now names the handler
-  the event went to — `keyboard_input`, `redraw`, `resized` and ten others — so
-  a report about a window that froze for a few seconds says where inside it the
-  time went. And a run started with `BT_PERF_TRACE` set now writes a full hang
-  report after two seconds of silence instead of five, which is where the stalls
-  people actually notice live; a run started without it is unchanged.
-
-### Fixed
 
 - **Losing the graphics device no longer closes Folio.** A power cut that
   switches a laptop to battery, a graphics driver that updates itself, a machine
