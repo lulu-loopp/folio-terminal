@@ -489,6 +489,18 @@ struct BoundaryPerformer {
     xtversion_queried: bool,
 }
 
+/// What one byte through the boundary parser leaves for the terminal processor's pace to decide:
+/// everything else a byte changes is settled where it is seen. See
+/// [`TerminalAdapter::advance_terminal_bytes`].
+struct BoundaryByte {
+    /// A bell to report, once the processor has reached the same byte — the child can order a bell
+    /// against a title, and a title comes from the processor.
+    bell: bool,
+    /// An XTVERSION query ended on this byte, so the stream's place for its answer is here: after
+    /// everything the processor answers before this byte, and before everything it answers after.
+    xtversion_queried: bool,
+}
+
 impl Perform for BoundaryPerformer {
     fn print(&mut self, _character: char) {
         self.complete = true;
@@ -914,14 +926,71 @@ impl TerminalAdapter {
         events
     }
 
+    /// **Parse what the child sent, and answer each question where it stands in the stream.**
+    ///
+    /// DA1, DSR and DECRQM are answered by the terminal processor as it reaches them, into the same
+    /// queue the XTVERSION reply goes into; XTVERSION is answered from the boundary parser instead,
+    /// for the reasons in [`Self::answer_xtversion_if_not_buffering`]. The two have to meet, because
+    /// the order the answers leave in is itself an answer. A program writes XTVERSION and then DA1
+    /// as a sentinel — DA1 is answered by every terminal ever made — reads until the sentinel, and
+    /// concludes from "DA1 came first" that this terminal does not answer XTVERSION at all. Answered
+    /// in the wrong order is not answered.
+    ///
+    /// So the feed is cut at the end of each completed XTVERSION query, the processor is advanced
+    /// segment by segment, and that query's answer is pushed between the segments. The queue is then
+    /// the stream's own order by construction — in both directions, for any interleaving, and at
+    /// every pty read boundary — rather than one kind of answer being moved to the front or held to
+    /// the back. **A feed carrying no query is one segment**, which is every feed in ordinary use:
+    /// the processor still sees the whole slice in a single `advance`, the boundary parser makes the
+    /// per-byte pass it has always made, and nothing is allocated.
+    ///
+    /// Finding where a segment ends means the boundary parser runs ahead of the processor over that
+    /// segment, which is safe because nothing it does per byte reads the processor or the grid: it
+    /// keeps its own parse state, the retained tail, and adapter-side facts — `announced_focus`,
+    /// `cursor_row_positioned_explicitly` — that only it writes. The two things that do cross over
+    /// are handled rather than assumed. A bell is an event the child can order against a title the
+    /// processor reports, so it is counted here and pushed once the processor has reached the same
+    /// byte, which is exactly where it was pushed before. And every question that is put to the
+    /// processor — is a synchronized update still open, and may a reply leave yet — is asked after
+    /// the advance it depends on, never before it.
     fn advance_terminal_bytes(&mut self, bytes: &[u8]) {
-        self.processor.advance(&mut self.term, bytes);
+        let mut segment_start = 0;
+        let mut bells = 0usize;
+        for (index, &byte) in bytes.iter().enumerate() {
+            let step = self.observe_parser_boundary_byte(byte);
+            bells += usize::from(step.bell);
+            if step.xtversion_queried {
+                self.advance_parsers(&bytes[segment_start..=index], &mut bells);
+                segment_start = index + 1;
+                self.xtversion_replies_owed = self.xtversion_replies_owed.saturating_add(1);
+                self.answer_xtversion_if_not_buffering();
+            }
+        }
+        self.advance_parsers(&bytes[segment_start..], &mut bells);
+        self.settle_parser_boundary();
+    }
+
+    /// Advance both terminal parsers over one segment of a feed, then report the bells the boundary
+    /// parser found in it. The canonical fork a resize transaction keeps sees the same bytes in the
+    /// same order as the displayed branch, segmented or not, and its replies are thrown away either
+    /// way. See [`Self::advance_terminal_bytes`] for why the bells wait for this call.
+    fn advance_parsers(&mut self, segment: &[u8], bells: &mut usize) {
+        self.processor.advance(&mut self.term, segment);
         if let Some(canonical) = self.resize_canonical.as_mut() {
-            canonical.processor.advance(&mut canonical.term, bytes);
+            canonical.processor.advance(&mut canonical.term, segment);
             discard_listener_output(&canonical.listener);
             let _ = canonical.term.take_input_writes();
         }
-        self.observe_parser_boundary(bytes);
+        if *bells > 0 {
+            let mut events = self
+                .listener
+                .adapter_events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            for _ in 0..std::mem::take(bells) {
+                events.push(AdapterEvent::Bell);
+            }
+        }
     }
 
     fn drain_grid_write_events(&mut self) -> Vec<AdapterEvent> {
@@ -1486,89 +1555,92 @@ impl TerminalAdapter {
             .collect()
     }
 
-    fn observe_parser_boundary(&mut self, bytes: &[u8]) {
-        for &byte in bytes {
-            let execute_at_ground = !self.parser_sequence_open;
-            let sequence_was_open = self.parser_sequence_open;
-            if self.parser_tail.len() < PARSER_TAIL_MAX_BYTES {
-                self.parser_tail.push(byte);
-            } else {
-                // See [`PARSER_TAIL_MAX_BYTES`]: nothing is still legitimately uncommitted after
-                // this much, so the update the tail was being kept for is treated as ended. The
-                // next completed sequence clears the tail on the ordinary path below.
-                self.parser_sync_active = false;
-            }
-            let mut performer = BoundaryPerformer {
-                execute_at_ground,
-                ..BoundaryPerformer::default()
-            };
-            self.parser_boundary
-                .advance(&mut performer, std::slice::from_ref(&byte));
-            if performer.bell {
-                self.listener
-                    .adapter_events
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .push(AdapterEvent::Bell);
-            }
-            if performer.xtversion_queried {
-                self.xtversion_replies_owed = self.xtversion_replies_owed.saturating_add(1);
-            }
-            if performer.focus_reports_requested {
-                // A new subscriber has nothing to inherit: whatever was last
-                // said was said to whoever asked before it. See
-                // [`AnnouncedFocus`] — this is the "re-enabled" half of the
-                // subscription edge, and on this platform it is the *only* half
-                // a child ever gets.
-                self.announced_focus = AnnouncedFocus::Unknown;
-            }
-            if performer.complete {
-                self.parser_sequence_open = byte == 0x1b;
-            } else if !self.parser_sequence_open {
-                self.parser_sequence_open = true;
-            }
-            if let Some(explicit) = performer.cursor_row_positioned_explicitly {
-                self.cursor_row_positioned_explicitly = explicit;
-            }
-
-            if performer.dcs_hook {
-                self.parser_dcs_active = true;
-            } else if performer.dcs_put && self.parser_dcs_active {
-                // Once the DCS hook has selected its handler, payload bytes do not affect parser
-                // state. The disposable seed term must only replay the introducer, not retain an
-                // unbounded sixel/image payload.
-                self.parser_tail.pop();
-            }
-
-            let mut tail_cleared = false;
-            if performer.sync_start {
-                self.parser_sync_active = true;
-            } else if performer.sync_end {
-                self.parser_sync_active = false;
-                self.parser_tail.clear();
-                tail_cleared = true;
-            } else if performer.complete && !self.parser_sync_active {
-                self.parser_dcs_active = false;
-                self.parser_tail.clear();
-                tail_cleared = true;
-                // ESC can terminate OSC/DCS while simultaneously starting the ST escape. Keep it
-                // as the seed for the parser's new Escape state.
-                if byte == 0x1b {
-                    self.parser_tail.push(byte);
-                }
-            }
-
-            if tail_cleared {
-                // Whatever is left is the sequence this byte opened, and it starts at the front.
-                self.parser_tail_open_start = 0;
-            } else if !self.parser_sequence_open {
-                self.parser_tail_open_start = self.parser_tail.len();
-            } else if !sequence_was_open {
-                self.parser_tail_open_start = self.parser_tail.len().saturating_sub(1);
-            }
-            self.parser_tail_open_start = self.parser_tail_open_start.min(self.parser_tail.len());
+    /// Put one byte of the feed through the boundary parser and fold what it said into this side's
+    /// state, reporting back only the two things the caller has to act on at the processor's pace.
+    ///
+    /// Everything else this touches is the boundary parser's own — its parse state, the retained
+    /// tail, and the adapter-side facts nothing downstream writes — so it is correct here whether
+    /// the processor has reached this byte yet or not. See [`Self::advance_terminal_bytes`].
+    fn observe_parser_boundary_byte(&mut self, byte: u8) -> BoundaryByte {
+        let execute_at_ground = !self.parser_sequence_open;
+        let sequence_was_open = self.parser_sequence_open;
+        if self.parser_tail.len() < PARSER_TAIL_MAX_BYTES {
+            self.parser_tail.push(byte);
+        } else {
+            // See [`PARSER_TAIL_MAX_BYTES`]: nothing is still legitimately uncommitted after
+            // this much, so the update the tail was being kept for is treated as ended. The
+            // next completed sequence clears the tail on the ordinary path below.
+            self.parser_sync_active = false;
+        }
+        let mut performer = BoundaryPerformer {
+            execute_at_ground,
+            ..BoundaryPerformer::default()
+        };
+        self.parser_boundary
+            .advance(&mut performer, std::slice::from_ref(&byte));
+        if performer.focus_reports_requested {
+            // A new subscriber has nothing to inherit: whatever was last
+            // said was said to whoever asked before it. See
+            // [`AnnouncedFocus`] — this is the "re-enabled" half of the
+            // subscription edge, and on this platform it is the *only* half
+            // a child ever gets.
+            self.announced_focus = AnnouncedFocus::Unknown;
+        }
+        if performer.complete {
+            self.parser_sequence_open = byte == 0x1b;
+        } else if !self.parser_sequence_open {
+            self.parser_sequence_open = true;
+        }
+        if let Some(explicit) = performer.cursor_row_positioned_explicitly {
+            self.cursor_row_positioned_explicitly = explicit;
         }
 
+        if performer.dcs_hook {
+            self.parser_dcs_active = true;
+        } else if performer.dcs_put && self.parser_dcs_active {
+            // Once the DCS hook has selected its handler, payload bytes do not affect parser
+            // state. The disposable seed term must only replay the introducer, not retain an
+            // unbounded sixel/image payload.
+            self.parser_tail.pop();
+        }
+
+        let mut tail_cleared = false;
+        if performer.sync_start {
+            self.parser_sync_active = true;
+        } else if performer.sync_end {
+            self.parser_sync_active = false;
+            self.parser_tail.clear();
+            tail_cleared = true;
+        } else if performer.complete && !self.parser_sync_active {
+            self.parser_dcs_active = false;
+            self.parser_tail.clear();
+            tail_cleared = true;
+            // ESC can terminate OSC/DCS while simultaneously starting the ST escape. Keep it
+            // as the seed for the parser's new Escape state.
+            if byte == 0x1b {
+                self.parser_tail.push(byte);
+            }
+        }
+
+        if tail_cleared {
+            // Whatever is left is the sequence this byte opened, and it starts at the front.
+            self.parser_tail_open_start = 0;
+        } else if !self.parser_sequence_open {
+            self.parser_tail_open_start = self.parser_tail.len();
+        } else if !sequence_was_open {
+            self.parser_tail_open_start = self.parser_tail.len().saturating_sub(1);
+        }
+        self.parser_tail_open_start = self.parser_tail_open_start.min(self.parser_tail.len());
+
+        BoundaryByte {
+            bell: performer.bell,
+            xtversion_queried: performer.xtversion_queried,
+        }
+    }
+
+    /// Everything the boundary pass owes once the processor has been advanced over the whole feed —
+    /// both of these read the processor, which is why they are here and not in the per-byte step.
+    fn settle_parser_boundary(&mut self) {
         // **The vendored parser owns whether a synchronized update is open.** It force-ends one
         // whose buffer overflows and clears its deadline in the same breath
         // (`vte-0.15.0/src/ansi.rs` `advance_sync`), which leaves this side armed over a parser
@@ -1593,9 +1665,25 @@ impl TerminalAdapter {
     /// real stream only, never on the resize canonical fork whose replies `discard_listener_output`
     /// throws away. The reply joins the same queue DA1 and DSR use, so it is drained in order with
     /// them and inherits the same "no PTY writer, no reply" behaviour from the caller.
+    /// [`TerminalAdapter::advance_terminal_bytes`] is what makes that order the stream's own: it
+    /// cuts the feed at this query so the answer is pushed where the question stood.
     ///
     /// The string is fixed. Nothing from the query is echoed back, and a flood of queries costs one
     /// short reply each, which is what DA1 costs.
+    ///
+    /// **The limit, stated.** Inside a DEC 2026 block the order is not the stream's. The vendored
+    /// processor buffers the block's bytes and replays them all at the ESU, its deadline or its
+    /// overflow, so this side cannot stand between two of them; a query the block carried is
+    /// answered at the commit, after the replies that replay produced, however the two were
+    /// interleaved in the block. Getting it right would mean cutting the block's replay the way the
+    /// feed is cut here, which is inside `vte` — a registry dependency, not one of this
+    /// repository's vendored crates. What holds either way is what a child can act on: exactly one
+    /// answer per question, and never from inside a frame that is not on the screen yet.
+    ///
+    /// **A reset does not un-ask a question.** A RIS that arrives while a block is still buffering
+    /// clears the screen and the modes, and the reply owed from inside that block still goes out at
+    /// the commit: xterm answers what it parsed, the child is blocked on an answer it asked for
+    /// before the reset, and dropping it would hang a probe over a screen clear.
     ///
     /// **The name is this product's own.** A program that allow-lists terminal names will simply not
     /// match it, which is the honest outcome; pretending to be another terminal would claim its
@@ -2863,6 +2951,133 @@ mod tests {
             vec![b"\x1b[?2026;2$y".to_vec()],
             "the mode must be reported as a mode this terminal has"
         );
+    }
+
+    /// **Answers leave in the order their questions were asked**, and the probe that matters most
+    /// depends on it. A program writes XTVERSION and DA1 in one breath and uses DA1 as a sentinel:
+    /// DA1 is answered by every terminal ever made, so hearing it back *before* an XTVERSION reply
+    /// is how the program concludes that this terminal does not answer XTVERSION at all and stops
+    /// waiting. Answering both but in the wrong order is therefore the same as not answering.
+    #[test]
+    fn a_question_asked_before_da1_is_answered_before_da1() {
+        let mut terminal = TerminalAdapter::new(nz(20), nz(3));
+        terminal.feed(b"\x1b[>q\x1b[c");
+        assert_eq!(
+            terminal.take_pty_writes(),
+            vec![XTVERSION_REPLY.as_bytes().to_vec(), b"\x1b[?6c".to_vec()],
+            "the sentinel must not overtake the question it was written to follow"
+        );
+    }
+
+    /// The same rule read from the other end: a question asked after DA1 is answered after it. This
+    /// is the arm that a fix which simply put every XTVERSION reply first would break.
+    #[test]
+    fn a_question_asked_after_da1_is_answered_after_da1() {
+        let mut terminal = TerminalAdapter::new(nz(20), nz(3));
+        terminal.feed(b"\x1b[c\x1b[>q");
+        assert_eq!(
+            terminal.take_pty_writes(),
+            vec![b"\x1b[?6c".to_vec(), XTVERSION_REPLY.as_bytes().to_vec()],
+        );
+    }
+
+    /// Four questions of three kinds, interleaved in one feed: the queue is the stream's own order,
+    /// not one kind of answer batched behind another.
+    #[test]
+    fn four_questions_in_one_feed_are_answered_in_the_order_they_were_asked() {
+        let mut terminal = TerminalAdapter::new(nz(20), nz(3));
+        terminal.feed(b"\x1b[>q\x1b[6n\x1b[>q\x1b[c");
+        assert_eq!(
+            terminal.take_pty_writes(),
+            vec![
+                XTVERSION_REPLY.as_bytes().to_vec(),
+                b"\x1b[1;1R".to_vec(),
+                XTVERSION_REPLY.as_bytes().to_vec(),
+                b"\x1b[?6c".to_vec(),
+            ]
+        );
+    }
+
+    /// Where a pty read happens to end is not a fact about the stream, so it cannot be a fact about
+    /// the answers: every one of these streams, cut at every byte position and delivered as two
+    /// feeds, gives back the same replies in the same order as the whole.
+    #[test]
+    fn cutting_a_stream_at_any_byte_changes_neither_the_answers_nor_their_order() {
+        for (stream, expected) in [
+            (
+                b"\x1b[>q\x1b[c".as_slice(),
+                vec![XTVERSION_REPLY.as_bytes().to_vec(), b"\x1b[?6c".to_vec()],
+            ),
+            (
+                b"\x1b[c\x1b[>q",
+                vec![b"\x1b[?6c".to_vec(), XTVERSION_REPLY.as_bytes().to_vec()],
+            ),
+            (
+                b"\x1b[>q\x1b[6n\x1b[>q\x1b[c",
+                vec![
+                    XTVERSION_REPLY.as_bytes().to_vec(),
+                    b"\x1b[1;1R".to_vec(),
+                    XTVERSION_REPLY.as_bytes().to_vec(),
+                    b"\x1b[?6c".to_vec(),
+                ],
+            ),
+        ] {
+            for split in 0..=stream.len() {
+                let mut terminal = TerminalAdapter::new(nz(20), nz(3));
+                terminal.feed(&stream[..split]);
+                let mut replies = terminal.take_pty_writes();
+                terminal.feed(&stream[split..]);
+                replies.extend(terminal.take_pty_writes());
+                assert_eq!(
+                    replies, expected,
+                    "{stream:?} cut at {split} was answered differently"
+                );
+            }
+        }
+    }
+
+    /// **The probe as a real program writes it**, which is one `write` carrying both questions
+    /// rather than the two turns [`the_capability_probe_gets_both_answers_in_order`] takes. The
+    /// program reads until it sees DA1; everything it received before DA1 is what it believes about
+    /// this terminal, so the XTVERSION reply has to be in there. Only then does it ask the second
+    /// question.
+    #[test]
+    fn the_capability_probe_written_in_one_breath_gets_its_answers_in_order() {
+        let mut terminal = TerminalAdapter::new(nz(40), nz(6));
+        terminal.feed(b"\x1b[>q\x1b[c");
+        assert_eq!(
+            terminal.take_pty_writes(),
+            vec![XTVERSION_REPLY.as_bytes().to_vec(), b"\x1b[?6c".to_vec()]
+        );
+        terminal.feed(b"\x1b[?2026$p");
+        assert_eq!(
+            terminal.take_pty_writes(),
+            vec![b"\x1b[?2026;2$y".to_vec()],
+            "the mode must be reported as a mode this terminal has"
+        );
+    }
+
+    /// **The one place the queue is not the stream's order, and it is a limit rather than a
+    /// choice.** Inside a DEC 2026 block the vendored parser holds the bytes and replays them all at
+    /// the commit, so this side cannot stand between two of them: the block's own replies are
+    /// produced by that replay and the XTVERSION reply is appended after it. The guarantee that
+    /// survives is the one the child can act on — exactly one answer, and not before the frame those
+    /// bytes describe is on the screen.
+    #[test]
+    fn a_query_inside_a_synchronized_update_is_answered_after_the_blocks_own_replies() {
+        let mut terminal = TerminalAdapter::new(nz(20), nz(3));
+        terminal.feed(b"\x1b[?2026h\x1b[>q\x1b[c");
+        assert!(
+            terminal.take_pty_writes().is_empty(),
+            "the block is still holding its bytes, so nothing it carried has been read out"
+        );
+        terminal.feed(b"\x1b[?2026l");
+        assert_eq!(
+            terminal.take_pty_writes(),
+            vec![b"\x1b[?6c".to_vec(), XTVERSION_REPLY.as_bytes().to_vec()],
+            "one answer, at the commit, behind the replies the block's own replay produced"
+        );
+        assert!(terminal.take_pty_writes().is_empty());
     }
 
     #[test]
