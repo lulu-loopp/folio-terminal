@@ -6,6 +6,21 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- **Dragging a file out of the files column into the middle of a terminal now
+  pastes its path, spelled for the shell running there.** The pane you are over
+  says which of the two things it will do before you let go: aim at a pane's
+  edge and you get the same split preview you have always got, and the file
+  opens beside it; aim at the middle of a terminal and the pane lights up with
+  `Paste path` on it, and the path arrives on that terminal's command line —
+  the one you dropped it on, not the one you had been typing in. It is the same
+  quoting a file dropped in from File Explorer or the Finder gets, so
+  PowerShell, `cmd`, a WSL shell and the rest each get the spelling they read,
+  and nothing is run: the path is put in front of the cursor for you to finish
+  the line. A preview pane and a files column are unchanged — their middles
+  still mean what they meant — and `Esc` still calls the whole thing off.
+
 ### Fixed
 
 - **A dropped file now lands in the terminal you dropped it on even when Folio

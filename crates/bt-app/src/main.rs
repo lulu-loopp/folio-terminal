@@ -29162,22 +29162,44 @@ impl DropLanding {
     /// gesture, chosen by an implementation detail the reader cannot see. The
     /// ruling makes every pane's centre a trade, so the question the caption asks
     /// is the one a reader would ask — a pane, or a tab.
-    fn caption(self, source: &DragSource) -> &'static str {
+    ///
+    /// **A row's centre reads `target_kind` as well, since the 2026-09-16
+    /// ruling.** The other two sources say their word off the hand alone, and a
+    /// row used to: there were two row captions and the payload chose between
+    /// them, because which pane the centre belonged to only ever decided whether
+    /// the box was refused. A file's centre now means one of *two* real things —
+    /// open it in this preview, or paste its path into this shell — and which it
+    /// is, is a fact about the pane rather than about the hand. So the word is
+    /// read off [`row_verb`], which is the same table the plan and the commit
+    /// read: a caption derived from the verb cannot promise a verb the release
+    /// will not perform.
+    fn caption(
+        self,
+        source: &DragSource,
+        target_kind: Option<bt_layout::SeatKind>,
+    ) -> &'static str {
         match (self, source) {
             (Self::SeatCentre { .. }, DragSource::Pane(_)) => i18n::Text::DragSwapPanes.text(),
             (Self::SeatCentre { .. }, DragSource::Tab(_)) => i18n::Text::DragReplacePane.text(),
             // L141/L142 — a row's centre verbs say their names for exactly the
             // reason a pane's and a tab's do: the box is the same rectangle and
             // the outcome is not. "Open in this preview" changes what a page is
-            // showing; "Root this tree here" changes where a column is pointed.
-            // Neither moves a pane, which is precisely why the shape cannot say
+            // showing; "Root this tree here" changes where a column is pointed;
+            // "Paste path" changes neither and writes on a command line. None of
+            // the three moves a pane, which is precisely why the shape cannot say
             // it. A refused centre says nothing at all, and it does not have to
             // be suppressed here — a refusal is a plan with no rectangles, and
             // `dock_overlay_layers` already prints "" for one.
-            (Self::SeatCentre { .. }, DragSource::Row(payload)) => match payload.kind {
-                RowPayloadKind::File => i18n::Text::DragOpenInPreview.text(),
-                RowPayloadKind::Folder => i18n::Text::DragRootTreeHere.text(),
-            },
+            (Self::SeatCentre { .. }, DragSource::Row(payload)) => {
+                match row_verb(payload.kind, self, target_kind) {
+                    RowVerb::Retarget(_) => match payload.kind {
+                        RowPayloadKind::File => i18n::Text::DragOpenInPreview.text(),
+                        RowPayloadKind::Folder => i18n::Text::DragRootTreeHere.text(),
+                    },
+                    RowVerb::PastePath(_) => i18n::Text::DragPastePath.text(),
+                    RowVerb::Split | RowVerb::Refused => "",
+                }
+            }
             _ => "",
         }
     }
@@ -29186,10 +29208,26 @@ impl DropLanding {
 /// **The drop table** (P82-P85, S3, and the 2026-08-13 ruling that settles it
 /// against the mock-up) — what a row payload means at a landing, stated once.
 ///
-/// | | edge / rim | a preview's centre | a tree's centre | any other centre |
-/// |---|---|---|---|---|
-/// | file | split a preview out | show it here | **refused** | refused |
-/// | folder | split a tree out | refused | re-root that column | refused |
+/// | | edge / rim | a preview's centre | a terminal's centre | a tree's centre | any other centre |
+/// |---|---|---|---|---|---|
+/// | file | split a preview out | show it here | **paste its path** | **refused** | refused |
+/// | folder | split a tree out | refused | refused | re-root that column | refused |
+///
+/// **A file on a terminal's centre is the 2026-09-16 ruling, and it reverses the
+/// 2026-07-17 one this table was written under.** The old sentence was that a
+/// terminal's middle refuses honestly, and its reason was sound as far as it
+/// went: path insertion is a *text* verb among space and content verbs, and one
+/// gesture must not mean two families of thing. What the ruling adds is the
+/// clause that was doing the work all along — **without feedback**. The pane
+/// under the hand now says which of the two it is before the hand opens: the
+/// outer band draws the same split preview a card drag draws, and the middle
+/// draws the landing box with `Paste path` written in it
+/// ([`i18n::Text::DragPastePath`]). The ambiguity the old ruling cut was an
+/// ambiguity the *reader* had, and a box that says its own name is what removes
+/// it — which is the identical argument L137 already makes about a pane's centre
+/// and a tab's being the same blue rectangle with two different outcomes.
+/// The row menu's `Insert path into terminal` (K144) stays exactly where it is:
+/// it is the keyboard-reachable half, and this is the pointer's.
 ///
 /// **The two refusals that are rulings rather than omissions.**
 ///
@@ -29219,9 +29257,35 @@ enum RowVerb {
     /// A **content** verb: no pane moves at all, and this one changes what it is
     /// showing — a preview's buffer, or a column's root.
     Retarget(SeatId),
+    /// A **text** verb (user ruling 2026-09-16): no pane moves and nothing about
+    /// this one changes either — the path is spelled for the named pane's shell
+    /// and put on its command line, through the very door an Explorer or Finder
+    /// drop goes through ([`Runtime::paste_paths_into`]).
+    ///
+    /// Carries the seat for [`Self::Retarget`]'s reason and one sharper: the
+    /// pane pasted into is the pane the pointer named, never the pane holding the
+    /// keyboard. A drop is a pointer gesture, and the seat is captured here at
+    /// the drop rather than read off `focused_leaf` afterwards.
+    PastePath(SeatId),
     /// M147 — the honest refusal: a traced box over the pane that will not take
     /// it, and no words.
     Refused,
+}
+
+impl RowVerb {
+    /// The pane this verb *names*, for the two that name one.
+    ///
+    /// A split names no pane — it names a side of one, and the pane it produces
+    /// does not exist yet — and a refusal names nothing at all. Written as one
+    /// sentence because two callers ask it: the plan, which refuses a centre
+    /// whose verb does not name the seat that was aimed at, and the caption,
+    /// which is the same question asked for a word instead of a rectangle.
+    fn content_target(self) -> Option<SeatId> {
+        match self {
+            Self::Retarget(target) | Self::PastePath(target) => Some(target),
+            Self::Split | Self::Refused => None,
+        }
+    }
 }
 
 /// The leaf a row payload arrives as when it splits a pane open.
@@ -29265,6 +29329,13 @@ fn row_verb(
             (RowPayloadKind::File, Some(bt_layout::SeatKind::Preview))
             | (RowPayloadKind::Folder, Some(bt_layout::SeatKind::Files)) => {
                 RowVerb::Retarget(target)
+            }
+            // The 2026-09-16 ruling, and the only cell of the table it moves.
+            // A folder is not on this row: a path on a command line is what a
+            // file is for, and the shell verbs a directory would want are the
+            // ones a reader types rather than ones this gesture could guess.
+            (RowPayloadKind::File, Some(bt_layout::SeatKind::Terminal)) => {
+                RowVerb::PastePath(target)
             }
             _ => RowVerb::Refused,
         },
@@ -45971,7 +46042,13 @@ impl Runtime<'_> {
             let mut plan =
                 self.seats
                     .plan_content_drop(&self.seat_metrics(), inputs.viewport, target)?;
-            if row_verb(payload.kind, inputs.landing, kind) != RowVerb::Retarget(target) {
+            // **And the same plan carries the 2026-09-16 text verb**, which
+            // moves no rectangle either: the box over a terminal's middle is the
+            // live layout with `Paste path` written in it, exactly as a
+            // preview's is with "Open in this preview". Asking which *verb*
+            // rather than comparing against `Retarget` is what keeps the promise
+            // on screen and the release reading one table.
+            if row_verb(payload.kind, inputs.landing, kind).content_target() != Some(target) {
                 plan.refuse();
             }
             return Some(plan);
@@ -46050,6 +46127,22 @@ impl Runtime<'_> {
         )
     }
 
+    /// **What kind of pane a landing is aimed at**, or `None` for the rim and
+    /// the strip's three, which are aimed at no pane at all.
+    ///
+    /// One sentence rather than the same three-line chain at each of the places
+    /// that asks it, and the places are the ones the 2026-09-16 ruling made ask:
+    /// the caption on the box, the commit behind it, and the plan that decides
+    /// whether the box is drawn at all. A row's centre now means one of three
+    /// things depending on the pane under it, so "which pane is under it" had
+    /// better be one reading.
+    fn aimed_seat_kind(&self, landing: DropLanding) -> Option<bt_layout::SeatKind> {
+        landing
+            .aimed_at()
+            .and_then(|seat| self.seats.tree().find_seat(seat))
+            .map(|seat| seat.kind)
+    }
+
     /// The dock drawing's layers: the destinations, then the box over them.
     ///
     /// Under every menu and every tip, because the mock-up puts them there
@@ -46073,7 +46166,10 @@ impl Runtime<'_> {
             // dashed and empty, and "Swap panes" printed inside an outline that
             // means "this will not happen" is the box arguing with itself.
             if shown.plan.fits() {
-                shown.inputs.landing.caption(&shown.inputs.source)
+                shown.inputs.landing.caption(
+                    &shown.inputs.source,
+                    self.aimed_seat_kind(shown.inputs.landing),
+                )
             } else {
                 ""
             },
@@ -77587,6 +77683,16 @@ impl Runtime<'_> {
     /// mean two different families of thing) and put it here, "explicit,
     /// discoverable, keyboard-reachable".
     ///
+    /// **It still lives here now that the drag has it too** (§7.1.1, user ruling
+    /// 2026-09-16). What that ruling reversed was the *refusal* on a terminal's
+    /// middle, on the finding that the 0717 objection was about a reader who
+    /// could not tell the two families apart until the hand had opened — so the
+    /// zone came back with the answer written on it. It reversed nothing about
+    /// this row: a pointer gesture and a keyboard-reachable menu are the two
+    /// halves of one verb, and the difference between them is where they put the
+    /// path. **This one goes to the focused terminal and takes the keyboard with
+    /// it; the drop goes to the pane under the pointer and takes nothing.**
+    ///
     /// **Which terminal.** The one holding the keyboard, which `focused_leaf`
     /// names whenever this tab has a shell at all. The mock-up also searched the
     /// tree for a fallback terminal, because in the mock-up focus could be *on*
@@ -89958,17 +90064,27 @@ impl Runtime<'_> {
         // gesture that moved no pane. What the drop actually is, is one sentence
         // about one pane's content — and the verb table decides which.
         if let Some(payload) = drag.source.row() {
-            let target_kind = inputs
-                .landing
-                .aimed_at()
-                .and_then(|seat| self.seats.tree().find_seat(seat))
-                .map(|seat| seat.kind);
+            let target_kind = self.aimed_seat_kind(inputs.landing);
             match row_verb(payload.kind, inputs.landing, target_kind) {
                 // M147 — the box said so while the hand was open, and the
                 // release says the same thing by doing nothing at all.
                 RowVerb::Refused => return Ok(false),
                 RowVerb::Retarget(target) => {
                     self.retarget_row_drop(payload, target)?;
+                    return Ok(true);
+                }
+                // **The 2026-09-16 ruling's own line** — and it is one line,
+                // which is the point. A path let go of over a terminal's middle
+                // goes through the door an Explorer or Finder drop goes through
+                // ([`Runtime::paste_paths_into`]), so the quoting, the
+                // `paste_paths_as` spelling, the refusal notice and the delivery
+                // are that road's rather than a second one that drifts from it.
+                // The seat is the one the pointer named — captured in the verb,
+                // at the drop — and the keyboard does not move to it, because a
+                // drop is a pointer gesture.
+                RowVerb::PastePath(target) => {
+                    let path = payload.path.clone();
+                    self.paste_paths_into(target, vec![path], "write dragged path to PTY")?;
                     return Ok(true);
                 }
                 RowVerb::Split => {}
@@ -144797,7 +144913,8 @@ mod tests {
         );
         assert_eq!(DropLanding::StripAdopt { tab: TabId(4) }.aimed_at(), None);
         assert_eq!(
-            DropLanding::StripAdopt { tab: TabId(4) }.caption(&held_pane(1)),
+            DropLanding::StripAdopt { tab: TabId(4) }
+                .caption(&held_pane(1), Some(bt_layout::SeatKind::Terminal)),
             "",
             "and the tab it lights up has already said where"
         );
@@ -163301,6 +163418,11 @@ mod tests {
     #[test]
     fn only_the_centre_says_a_word_and_it_depends_on_what_is_in_the_hand() {
         let target = bt_layout::SeatId(2);
+        // The pane under the pointer, which a *pane* and a *tab* say their word
+        // without consulting: a terminal's middle is the one kind a row now
+        // reads (the 2026-09-16 ruling), so aiming these two at one is what
+        // states that the other two sources are untouched by it.
+        const TERM: Option<bt_layout::SeatKind> = Some(bt_layout::SeatKind::Terminal);
         let pane = DragSource::Pane(LeafId {
             tab: TabId(1),
             seat: SeatId(1),
@@ -163311,18 +163433,18 @@ mod tests {
         });
         let tab = DragSource::Tab(TabId(1));
         assert_eq!(
-            DropLanding::SeatCentre { target }.caption(&pane),
+            DropLanding::SeatCentre { target }.caption(&pane, TERM),
             "Swap panes",
             "a pane trades places with the target (L138)"
         );
         assert_eq!(
-            DropLanding::SeatCentre { target }.caption(&elsewhere),
+            DropLanding::SeatCentre { target }.caption(&elsewhere, TERM),
             "Swap panes",
             "B4: and so does a pane whose tab is not the one on screen — where it \
              came from is not something the box may say two different words about"
         );
         assert_eq!(
-            DropLanding::SeatCentre { target }.caption(&tab),
+            DropLanding::SeatCentre { target }.caption(&tab, TERM),
             "Replace pane",
             "a whole tab still takes the target's place outright (L139)"
         );
@@ -163338,11 +163460,11 @@ mod tests {
             DropLanding::StripReorder { slot: 0 },
         ] {
             assert_eq!(
-                landing.caption(&pane),
+                landing.caption(&pane, TERM),
                 "",
                 "{landing:?} draws its own meaning"
             );
-            assert_eq!(landing.caption(&tab), "");
+            assert_eq!(landing.caption(&tab, TERM), "");
         }
     }
 
@@ -163576,14 +163698,21 @@ mod tests {
         DropLanding::SeatCentre { target: TARGET }
     }
 
-    /// PIN — **P82: "A FILE drag carries only VIEW verbs."**
+    /// PIN — **a file row's four cells, as the 2026-09-16 ruling leaves them.**
     ///
-    /// The whole ruling of 2026-07-17's second pass, as a table: edges split out
-    /// a preview, a preview's centre shows it there, and **every other centre
-    /// refuses honestly**. The refusal on a terminal's centre is the one the
-    /// ruling is really about — the earlier design inserted the path there, and
-    /// it was cut because it "made one gesture speak two languages (space verbs
-    /// vs text verbs)".
+    /// P82's table with one cell moved: edges split out a preview, a preview's
+    /// centre shows it there, **a terminal's centre pastes its path**, and every
+    /// other centre refuses honestly.
+    ///
+    /// **The terminal cell is the ruling, and the ruling is a revision.** The
+    /// 2026-07-17 pass cut path insertion off this gesture because it "made one
+    /// gesture speak two languages (space verbs vs text verbs)"; the 2026-09-16
+    /// pass puts it back on the finding that the objection was about *silence*
+    /// rather than about the two languages — the drop target now says which
+    /// language it speaks before the hand opens, with the split preview on the
+    /// outer band and `Paste path` on the middle. The two are still two
+    /// languages; they are no longer two languages a reader has to guess
+    /// between.
     ///
     /// The refusal on a *files* centre is this build's own addition and the
     /// 2026-08-13 ruling: the mock-up offers "Save into this folder" there, but
@@ -163592,10 +163721,13 @@ mod tests {
     /// already on the disk.
     ///
     /// Mutation: make the `SeatCentre` arm answer `Retarget` for any target kind
-    /// — the terminal and the files column both accept a file, and two of these
-    /// four assertions fail at once.
+    /// — the terminal would open in a preview it has not got and the files
+    /// column would accept a file, and two of these assertions fail at once.
+    /// Mutation: answer `PastePath` for a files centre too — the third
+    /// assertion's neighbour fails, and a drop on a column would type into a
+    /// shell it is not.
     #[test]
-    fn a_file_row_splits_at_an_edge_shows_in_a_preview_and_is_refused_everywhere_else() {
+    fn a_file_row_splits_at_an_edge_shows_in_a_preview_pastes_into_a_terminal() {
         for landing in [
             DropLanding::SeatEdge {
                 target: TARGET,
@@ -163630,8 +163762,9 @@ mod tests {
                 centre(),
                 Some(bt_layout::SeatKind::Terminal)
             ),
-            RowVerb::Refused,
-            "P82: a terminal's centre refuses honestly — path insertion is the row menu's"
+            RowVerb::PastePath(TARGET),
+            "2026-09-16: a terminal's centre pastes the path, into the pane the \
+             pointer named and not into the one holding the keyboard"
         );
         assert_eq!(
             row_verb(
@@ -163641,6 +163774,16 @@ mod tests {
             ),
             RowVerb::Refused,
             "2026-08-13: a tree row carries no save verb, so a tree's centre refuses too"
+        );
+        assert_eq!(
+            row_verb(
+                RowPayloadKind::File,
+                centre(),
+                Some(bt_layout::SeatKind::Placeholder)
+            )
+            .content_target(),
+            None,
+            "a leaf this build cannot read is not a shell to type into either"
         );
     }
 
@@ -163726,25 +163869,59 @@ mod tests {
         );
     }
 
-    /// PIN — **L141/L142: a row's centre says its name.**
+    /// PIN — **L141/L142: a row's centre says its name**, and since the
+    /// 2026-09-16 ruling there are three names to say.
     ///
-    /// The centre box is the same blue rectangle for four different outcomes,
-    /// and the two a row can ask for are content verbs that move nothing at all
-    /// — so the shape has *even less* to say than it does for a pane swap. An
-    /// edge, a rim and the strip stay silent, because their shapes already
-    /// spoke.
+    /// The centre box is the same blue rectangle for five different outcomes,
+    /// and the three a row can ask for move nothing at all — so the shape has
+    /// *even less* to say than it does for a pane swap. An edge, a rim and the
+    /// strip stay silent, because their shapes already spoke.
     ///
-    /// Mutation: give both row kinds one shared caption — the second assertion
+    /// **`Paste path` is the one the new ruling rests on.** The 2026-07-17
+    /// ruling cut this zone because one gesture must not mean two families of
+    /// thing *without feedback*; the word on the box is that feedback, so a
+    /// caption that went missing here would not be a cosmetic loss — it would be
+    /// the reason the zone was reopened, gone.
+    ///
+    /// Mutation: give every row kind one shared caption — the second assertion
     /// fails, and a folder over a tree would be promising to open a document.
+    /// Mutation: read the caption off the payload alone instead of off
+    /// [`row_verb`] — the terminal and the preview promise the same thing, and
+    /// one of the two boxes is lying.
     #[test]
-    fn a_rows_centre_says_which_of_its_two_verbs_it_means() {
+    fn a_rows_centre_says_which_of_its_three_verbs_it_means() {
+        const PREVIEW: Option<bt_layout::SeatKind> = Some(bt_layout::SeatKind::Preview);
+        const TERMINAL: Option<bt_layout::SeatKind> = Some(bt_layout::SeatKind::Terminal);
+        const FILES: Option<bt_layout::SeatKind> = Some(bt_layout::SeatKind::Files);
         let file = DragSource::Row(file_row("notes.md"));
         let folder = DragSource::Row(folder_row("src"));
         // A row's cargo is neither shape the flag is about — it has no tree of
-        // its own and it is not a seat of this one — so its two verbs are read
-        // off the payload and the flag says nothing here either way.
-        assert_eq!(centre().caption(&file), "Open in this preview");
-        assert_eq!(centre().caption(&folder), "Root the files column here");
+        // its own and it is not a seat of this one — so its verbs are read off
+        // the payload and the pane, and the flag says nothing here either way.
+        assert_eq!(centre().caption(&file, PREVIEW), "Open in this preview");
+        assert_eq!(
+            centre().caption(&folder, FILES),
+            "Root the files column here"
+        );
+        assert_eq!(
+            centre().caption(&file, TERMINAL),
+            "Paste path",
+            "the 2026-09-16 ruling: the middle of a terminal says what it will do"
+        );
+        // And every centre the table refuses says nothing, which is the half
+        // that keeps the word from wandering onto a box that will not happen.
+        for (source, kind) in [
+            (&file, FILES),
+            (&folder, PREVIEW),
+            (&folder, TERMINAL),
+            (&file, None),
+        ] {
+            assert_eq!(
+                centre().caption(source, kind),
+                "",
+                "a refused centre is traced and wordless: {kind:?}"
+            );
+        }
         for landing in [
             DropLanding::SeatEdge {
                 target: TARGET,
@@ -163756,7 +163933,7 @@ mod tests {
             DropLanding::StripExtract { slot: 0 },
         ] {
             assert_eq!(
-                landing.caption(&file),
+                landing.caption(&file, TERMINAL),
                 "",
                 "{landing:?} draws its own meaning"
             );
@@ -170376,6 +170553,114 @@ mod clipboard_path_tests {
             "a drop is routed by the window's cached pointer, which is a \
              different gesture's:\n{collecting}"
         );
+    }
+
+    /// **A file row let go over a terminal's middle is spelled exactly as a file
+    /// dropped from Explorer or Finder is** (§7.1.1, user ruling 2026-09-16).
+    ///
+    /// The sibling of [`a_dropped_path_is_spelled_like_a_copied_one`] and the
+    /// same promise one road further out: the ruling reopened this zone on the
+    /// footing that what arrives is *the path*, which is the very thing an
+    /// external drop and a clipboard copy already deliver. Three roads, one
+    /// spelling, compared over the characters that make spelling hard.
+    ///
+    /// MUTATION: spell the row's path here instead of handing it to
+    /// [`Runtime::paste_paths_into`] — the rows below still pass, and the pin in
+    /// [`a_rows_centre_verbs_leave_by_three_doors`] is what goes red, which is
+    /// why the two are written as a pair.
+    #[test]
+    fn a_row_dropped_on_a_terminal_is_spelled_like_a_dropped_file() {
+        use bt_platform::ClipboardPayload;
+        for name in [
+            r"D:\Reports\Q3 draft.txt",
+            "D:\\Reports\\a \"quoted\" name.txt",
+            r"D:\Reports\it's here.txt",
+        ] {
+            for doubled in [&[] as &'static [char], &['\''] as &'static [char]] {
+                for leading_space in [false, true] {
+                    let row = RowPayload {
+                        kind: RowPayloadKind::File,
+                        path: PathBuf::from(name),
+                        name: name.to_owned(),
+                    };
+                    let recipient = powershell_recipient(doubled);
+                    // What the commit hands over: the payload's own path, in a
+                    // list of one, through the drop's door.
+                    let dragged =
+                        prepare_dropped_paste(vec![row.path.clone()], &recipient, leading_space);
+                    let dropped =
+                        prepare_dropped_paste(vec![name.into()], &recipient, leading_space);
+                    let copied = prepare_clipboard_paste(
+                        Ok(ClipboardPayload::Files(vec![name.into()])),
+                        &recipient,
+                        leading_space,
+                    );
+                    assert_eq!(
+                        dragged.text, dropped.text,
+                        "{name} is spelled differently when it comes off the files column"
+                    );
+                    assert_eq!(dragged.text, copied.text, "{name} is spelled a third way");
+                    assert_eq!(
+                        dragged.notice, copied.notice,
+                        "{name} is refused differently when it comes off the files column"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **A row's three centre verbs leave the commit by three different doors,
+    /// and the paste's door is the drop's** (§7.1.1, user ruling 2026-09-16).
+    ///
+    /// A source pin for [`a_drop_is_collected_in_the_dispatcher_and_spent_at_the_turn_boundary`]'s
+    /// reason: a `Runtime` is not constructible in a test, so what holds the
+    /// wiring is which call stands in which arm. Three things are being said at
+    /// once, and each was a way of getting this wrong:
+    ///
+    /// * the paste goes through [`Runtime::paste_paths_into`], so the quoting,
+    ///   the `paste_paths_as` spelling and the refusal notice are the external
+    ///   drop's rather than a second set that drifts;
+    /// * it is handed the **target**, which the verb captured at the drop — a
+    ///   paste into `focused_leaf` would put the path in whichever pane held the
+    ///   keyboard, which is not the pane the hand was over;
+    /// * and the preview's centre still goes to [`Runtime::retarget_row_drop`],
+    ///   which is "open it as this pane" and is untouched by the ruling.
+    ///
+    /// MUTATIONS: paste into `self.focused_leaf` and the second assertion fails;
+    /// give the arm a speller of its own and the first does.
+    #[test]
+    fn a_rows_centre_verbs_leave_by_three_doors() {
+        let source = include_str!("main.rs");
+        let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
+        let commit = method_text(before_this_fixture, "    fn commit_layout_drop(");
+        for (once, what) in [
+            (
+                "RowVerb::Refused => return Ok(false),",
+                "a refused centre does nothing at all",
+            ),
+            (
+                "self.retarget_row_drop(payload, target)?;",
+                "a preview's centre opens the file as that pane",
+            ),
+            (
+                "self.paste_paths_into(target, vec![path], \"write dragged path to PTY\")?;",
+                "a terminal's centre pastes through the external drop's own door, \
+                 into the pane the pointer named",
+            ),
+        ] {
+            assert_eq!(
+                commit.matches(once).count(),
+                1,
+                "`{once}` — {what}:\n{commit}"
+            );
+        }
+        for forbidden in ["focused_leaf", "shell_literal::", "set_focus"] {
+            assert!(
+                !commit.contains(forbidden),
+                "`{forbidden}` in the commit — a drop is a pointer gesture, and it \
+                 neither takes the keyboard nor spells a path a second way:\n{commit}"
+            );
+        }
     }
 
     /// The body of one method, from its signature to the brace that closes it at

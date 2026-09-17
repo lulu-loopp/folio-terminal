@@ -1705,6 +1705,16 @@ pub enum Text {
     /// [`Self::DragSwapPanes`] and [`Self::DragReplacePane`].
     DragOpenInPreview,
     DragRootTreeHere,
+    /// **The caption a file row earns over a terminal's middle** (§7.1.1, user
+    /// ruling 2026-09-16).
+    ///
+    /// The third of this family and the one that is not a view verb at all: the
+    /// two above change what a pane is *showing*, and this one puts characters
+    /// on a command line. Which is exactly why the word has to be on the box —
+    /// the ruling that opened this zone rests on the label being there, because
+    /// the label is the whole of what tells a reader that this middle means
+    /// something the other middles do not.
+    DragPastePath,
 
     // ── the Terminal page's Scrollback row (P2-9 slice 2, 2026-08-19) ──────
     //
@@ -4194,6 +4204,10 @@ impl Text {
             Self::DragRootTreeHere => {
                 pick(lang, "Root the files column here", "把这棵树的根设到这里")
             }
+            // CHINESE_PENDING: both columns, written 2026-09-16. The English is
+            // two words on a small box and the Chinese owed is the same verb the
+            // row menu's `Insert path into terminal` already says.
+            Self::DragPastePath => pick(lang, "Paste path", "Paste path"),
 
             // ── the Terminal page's Scrollback row ─────────────────────────
             //
@@ -4980,7 +4994,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 684] = [
+    pub const ALL: [Self; 685] = [
         Self::PastePathEncoding,
         Self::PastePathControl,
         Self::PastePathPowerShellQuote,
@@ -5477,6 +5491,7 @@ impl Text {
         Self::GitDocumentEmpty,
         Self::DragOpenInPreview,
         Self::DragRootTreeHere,
+        Self::DragPastePath,
         Self::RowScrollback,
         Self::DescScrollback,
         Self::RowLineWrapping,
@@ -5808,7 +5823,13 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 3] = [
+    const CHINESE_PENDING: [(Self, HostPlatform); 5] = [
+        // zh: pending opus46 — the caption a file row earns over a terminal's
+        // middle (§7.1.1, user ruling 2026-09-16). Both columns, because the
+        // gesture says nothing about the machine: the same two words over the
+        // same box on either platform.
+        (Self::DragPastePath, HostPlatform::Windows),
+        (Self::DragPastePath, HostPlatform::MacOs),
         // zh: pending opus46 — the card raised when a picture on the clipboard
         // could not be written to a file (§7.61). Both columns, because the
         // sentence says nothing about the machine: the same file, the same

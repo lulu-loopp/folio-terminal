@@ -49737,6 +49737,55 @@ mod drop_geometry_tests {
         );
     }
 
+    /// **The band and the middle a *file* drag reads** (§7.1.1, user ruling
+    /// 2026-09-16), at two scales.
+    ///
+    /// The ruling that reopened a terminal's middle to a path gave the gesture
+    /// two meanings over one pane, and it rests on the two being told apart by
+    /// where the hand is: the outer band is the split zone a card or a tab drag
+    /// already aims at, and what is left in the middle is the paste. So the
+    /// geometry a file drag reads is not a second geometry — it is
+    /// [`aim_at_layout`], unchanged and asked the same way — and this says so at
+    /// both ends of the scale range, because a band that shifted with the
+    /// display would move the line between "open it beside" and "paste it" for
+    /// the same hand on two monitors.
+    ///
+    /// All four sides of one pane, and the middle, at 100% and 200%. The points
+    /// are fractions of the pane, which is what makes the answers scale-free;
+    /// the rim is *not* a fraction ([`DROP_RIM_LOGICAL_PX`]), so the band points
+    /// are taken at 30% rather than at 10% — far enough in that the 48-logical
+    /// px rim, twice as deep in device pixels at 200%, does not answer first.
+    ///
+    /// Red gate: make [`DROP_EDGE_FRACTION`] a device-pixel distance and the
+    /// 200% column stops agreeing with the 100% one.
+    #[test]
+    fn a_pane_offers_one_middle_and_four_bands_at_every_scale() {
+        for dpi_milli in [1_000u32, 2_000] {
+            let stage = stage(side_by_side(), dpi_milli);
+            let pane = rect_of(&stage.0, 1);
+            let (w, h) = (pane.width() as f64, pane.height() as f64);
+            let at =
+                |fx: f64, fy: f64| aim(&stage, pane.left as f64 + w * fx, pane.top as f64 + h * fy);
+            assert_eq!(
+                at(0.5, 0.5),
+                Some(LayoutAim::SeatCentre(SeatId(1))),
+                "the middle is the middle at {dpi_milli} milli-DPI"
+            );
+            for (fx, fy, edge) in [
+                (0.30, 0.50, DropEdge::Left),
+                (0.70, 0.50, DropEdge::Right),
+                (0.50, 0.30, DropEdge::Top),
+                (0.50, 0.70, DropEdge::Bottom),
+            ] {
+                assert_eq!(
+                    at(fx, fy),
+                    Some(LayoutAim::SeatEdge(SeatId(1), edge)),
+                    "the {edge:?} band at {dpi_milli} milli-DPI"
+                );
+            }
+        }
+    }
+
     /// **K132 — no pane under the pointer means nothing to aim at.** That is a
     /// pointer on a divider, and a divider is not a target.
     ///
