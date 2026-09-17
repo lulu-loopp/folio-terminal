@@ -104,9 +104,13 @@ the second question was never heard, and the program drew its frames without a s
 The reply is produced from the adapter's boundary parser rather than from the vendored handler,
 because `vte` 0.15 has no arm for `q` with a `>` intermediate — the sequence never reaches `Term`,
 and `vte` is a registry dependency rather than one of this repository's vendored crates. The
-boundary parser is where it belongs regardless: it is a real `Perform`, so the question is parsed
-rather than matched against bytes and a query split across two pty reads is held by the parser's own
-state; it runs once per byte on the real stream and never on the resize canonical fork, whose
+boundary parser is where it belongs regardless: it is a real `Perform`, so the question is parsed —
+a query split across two pty reads is held by the parser's own state, and no run of bytes is matched
+as a substring, so text a program prints or pastes is never mistaken for the question. That is a
+claim about matching and not about what may appear inside a string: an ESC ends an OSC, DCS or APC
+payload in `vte`, so a query written after one in the same read is a query and is answered, which is
+the parser's answer rather than a guess about quoting. It runs once per byte on the real stream and
+never on the resize canonical fork, whose
 replies are thrown away; and the reply joins the same queue DA1 and DSR are drained from, so it goes
 out in order with them. A query inside a synchronized update is answered when that block's bytes
 reach the grid, so the child never hears from inside a frame that is not on the screen yet.
@@ -120,21 +124,29 @@ to be made to meet: `advance_terminal_bytes` cuts the feed at the end of each co
 query, advances the processor segment by segment, and pushes that query's answer between the
 segments. The queue is then the stream's own order by construction — in either direction, for any
 interleaving, and wherever a pty read happens to have been cut — rather than one kind of answer
-being moved to the front or held to the back. A feed carrying no query, which is every feed in
-ordinary use, is one segment and costs nothing: one `advance` over the whole slice, the per-byte
-boundary pass that was always made, no allocation.
+being moved to the front or held to the back. An answer owed from inside a synchronized block
+becomes due at that block's commit, and the ESU that commits it is cut at the same way and for the
+same reason; waiting instead for a moment when no block happens to be open is a different rule and
+an insufficient one, because a program repainting in synchronized frames opens the next block in the
+write that closed the last. A feed carrying no query, which is every feed in ordinary use, is one
+segment, and what it costs is what it cost before: one `advance` over the whole slice, the per-byte
+boundary pass the adapter has always made, and no allocation added by any of this.
 
-**The limit is DEC 2026.** Inside a synchronized block the order is not the stream's. The vendored
-processor buffers the block's bytes and replays them all at the ESU, its deadline or its overflow,
-so this side cannot stand between two of them: a query the block carried is answered at the commit,
-after the replies that replay produced, however the two were interleaved inside the block. Cutting
-the replay the way the feed is cut would mean changing `vte`, a registry dependency rather than one
-of this repository's vendored crates, and no rule of thumb applied on this side would be the
-stream's order — it would only look like it. What holds either way is what a child can act on:
-exactly one answer per question, never from inside a frame that is not on the screen yet. And a
-reset does not un-ask a question — a RIS arriving while the block still buffers clears the screen
-and the modes, and the answer owed from inside the block still goes out at the commit, because the
-child is blocked on an answer it asked for before the reset.
+**The limit is one block wide.** Nothing outside a synchronized block is ever overtaken — everything
+asked before it is answered before it, everything asked after it is answered after it. What is not
+the stream's order is the inside: the vendored processor buffers the block's bytes and replays them
+all at once, so this side cannot stand between two of them, and the block's own replies leave ahead
+of the XTVERSION answer however the two were interleaved within the block. Cutting the replay the
+way the feed is cut would mean changing `vte`, a registry dependency rather than one of this
+repository's vendored crates, and no rule of thumb applied on this side would be the stream's order
+— it would only look like it. One block ending is outside the rule by nature: when `vte` gives up on
+a block because its own 2 MiB buffer would overflow, it commits and parses the rest of the slice in
+the same call, leaving no offset to cut at, so an answer owed from such a block leaves at the end of
+that feed. What holds in every case is what a child can act on: exactly one answer per question,
+never from inside a frame that is not on the screen yet. And a reset does not un-ask a question — a
+RIS arriving while the block still buffers clears the screen and the modes, and the answer owed from
+inside the block still goes out at the commit, because the child is blocked on an answer it asked
+for before the reset.
 
 - **冻结历史有两个限额，先到的那个说话（用户报告，2026-08-24，已修）**：每个 pane 的冻结转录除读者选的 `Scrollback` 行数外，还受一个**由该行数推导**的内存顶——`scrollback_lines × FROZEN_BYTES_PER_LINE`（2 KiB），出厂 100,000 行即 195.3 MiB。超出时从最老一端按行淘汰，走的正是行数溢出那一条 `evict_oldest`（**不造第二套淘汰**），且**永不淘汰最新那一行**。设置面不因此多一行：行数是读者的答案，字节是工程的护栏。理由、算术与红证见 §7.1.6g ③。
 - **每一次 ConPTY 通知都过同一扇 200 ms 静默门，包括没拿键盘的那些 pane（窗口线程无界调用清缴，2026-08-24，已修）**：焦点叶从来就有 `WINDOW_RESIZE_QUIET` 合流，兄弟叶一个都没有——`resize_leaves_to_layout` 对每个非焦点 pane、每个 `Resized` 直接调 `ResizePseudoConsole`，不合并。四分屏拖一秒窗 = 3×60 次同步进 conhost，每一次都重排子进程的屏幕缓冲、作废一次 PSReadLine 锚点，全发生在窗口线程上；「兄弟没有拖拽可合流」这句旧注释根本不成立，被拖的是**窗口**，它一次移动每个 pane 的矩形。**修法**：`schedule_leaf_grid_change` 是每个叶唯一的入口（焦点叶经 `schedule_grid_change` 走同一个），`plan_grid_change` 照旧一句话分两半，`flush_pending_pty_resize` 从「只问拿键盘那个叶」改成走每 tab 每叶、取最早的醒来时刻——队列本来就长在 `LeafSession` 上，缺的只是有人去抽。**被去抖的是通知，不是画面**（用户裁决 2026-08-06「实时放行 resize」）：`leaf.grid` 当轮就动，玻璃跟着手；`conpty_grid` 到静默边界才动。红证：`a_pane_without_the_keyboard_coalesces_a_drag_into_one_conpty_notification`——把入口换回立即提交，六十个事件里第一个就把 `conpty_grid` 推到 41 列（应当仍是 40），结构钉 `the_only_road_from_a_solved_rectangle_to_conpty_is_the_quiet_window` 同时红。**明账**：这条封的是**频率**不是**时长**——`ResizePseudoConsole` 本身仍是窗口线程上一次同步进 conhost 的往返，现在每 pane 每 200 ms 至多一次；它自己有没有上限还没有人量过，要清就得像写侧那样把它也搬到线程上，那是另一张单子。

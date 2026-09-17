@@ -499,6 +499,9 @@ struct BoundaryByte {
     /// An XTVERSION query ended on this byte, so the stream's place for its answer is here: after
     /// everything the processor answers before this byte, and before everything it answers after.
     xtversion_queried: bool,
+    /// A DEC 2026 terminator ended on this byte. Only interesting when an answer is owed from
+    /// inside the block it ends, which is the moment that answer becomes due.
+    sync_ended: bool,
 }
 
 impl Perform for BoundaryPerformer {
@@ -940,9 +943,22 @@ impl TerminalAdapter {
     /// segment by segment, and that query's answer is pushed between the segments. The queue is then
     /// the stream's own order by construction — in both directions, for any interleaving, and at
     /// every pty read boundary — rather than one kind of answer being moved to the front or held to
-    /// the back. **A feed carrying no query is one segment**, which is every feed in ordinary use:
-    /// the processor still sees the whole slice in a single `advance`, the boundary parser makes the
-    /// per-byte pass it has always made, and nothing is allocated.
+    /// the back.
+    ///
+    /// **A query inside a DEC 2026 block is answered at that block's commit**, and the ESU that
+    /// commits it is cut at for the same reason and in the same way. Waiting instead for a moment
+    /// when no block happens to be buffering is not the same rule and is not enough: a program
+    /// repainting in synchronized frames opens the next block in the write that closed the last, so
+    /// the answer was held for an unrelated later frame, and anything the child asked *after* the
+    /// block — a DA1 sentinel above all — was answered ahead of it. The cut is made only when an
+    /// answer is actually owed, so a block in a feed that asked nothing costs nothing; and whether
+    /// the answer may leave is still decided by the processor's own deadline afterwards, never by
+    /// the boundary parser's reading of the terminator, so a terminator this side recognises and
+    /// the vendored parser does not simply cuts a segment and changes nothing.
+    ///
+    /// **A feed carrying no query is one segment**, which is every feed in ordinary use: the
+    /// processor sees the whole slice in a single `advance`, the boundary parser makes the per-byte
+    /// pass it has always made, and this adds no allocation of its own.
     ///
     /// Finding where a segment ends means the boundary parser runs ahead of the processor over that
     /// segment, which is safe because nothing it does per byte reads the processor or the grid: it
@@ -959,10 +975,16 @@ impl TerminalAdapter {
         for (index, &byte) in bytes.iter().enumerate() {
             let step = self.observe_parser_boundary_byte(byte);
             bells += usize::from(step.bell);
-            if step.xtversion_queried {
+            // A completed query is where its own answer belongs. A completed ESU, when an answer is
+            // already owed from inside the block it ends, is where *that* answer belongs — the same
+            // cut, made for the same reason.
+            let commits_a_debt = step.sync_ended && self.xtversion_replies_owed > 0;
+            if step.xtversion_queried || commits_a_debt {
                 self.advance_parsers(&bytes[segment_start..=index], &mut bells);
                 segment_start = index + 1;
-                self.xtversion_replies_owed = self.xtversion_replies_owed.saturating_add(1);
+                if step.xtversion_queried {
+                    self.xtversion_replies_owed = self.xtversion_replies_owed.saturating_add(1);
+                }
                 self.answer_xtversion_if_not_buffering();
             }
         }
@@ -1635,6 +1657,7 @@ impl TerminalAdapter {
         BoundaryByte {
             bell: performer.bell,
             xtversion_queried: performer.xtversion_queried,
+            sync_ended: performer.sync_end,
         }
     }
 
@@ -1660,25 +1683,35 @@ impl TerminalAdapter {
     /// `unhandled!` log for everything else), so the sequence never reaches `Term`, and `vte` is a
     /// registry dependency rather than one of this repository's vendored crates. The boundary
     /// parser is the right place regardless of that: it is a real `Perform`, so the question is
-    /// *parsed* rather than matched against bytes — a query split across two pty reads is held by
-    /// the parser's own state, exactly like every other sequence — and it runs once per byte on the
-    /// real stream only, never on the resize canonical fork whose replies `discard_listener_output`
-    /// throws away. The reply joins the same queue DA1 and DSR use, so it is drained in order with
-    /// them and inherits the same "no PTY writer, no reply" behaviour from the caller.
+    /// *parsed* — a query split across two pty reads is held by the parser's own state, exactly like
+    /// every other sequence, and no run of bytes is matched as a substring, so the text a program
+    /// prints or pastes is never mistaken for the question. (That is a claim about matching and not
+    /// about what may appear inside a string: an ESC ends an OSC, DCS or APC payload in `vte`, so a
+    /// query written after one inside the same read is a query, and is answered. It is the parser's
+    /// answer, not a guess about quoting.) It runs once per byte on the real stream only, never on
+    /// the resize canonical fork whose replies `discard_listener_output` throws away. The reply
+    /// joins the same queue DA1 and DSR use, so it is drained in order with them and inherits the
+    /// same "no PTY writer, no reply" behaviour from the caller.
     /// [`TerminalAdapter::advance_terminal_bytes`] is what makes that order the stream's own: it
     /// cuts the feed at this query so the answer is pushed where the question stood.
     ///
     /// The string is fixed. Nothing from the query is echoed back, and a flood of queries costs one
     /// short reply each, which is what DA1 costs.
     ///
-    /// **The limit, stated.** Inside a DEC 2026 block the order is not the stream's. The vendored
-    /// processor buffers the block's bytes and replays them all at the ESU, its deadline or its
-    /// overflow, so this side cannot stand between two of them; a query the block carried is
-    /// answered at the commit, after the replies that replay produced, however the two were
-    /// interleaved in the block. Getting it right would mean cutting the block's replay the way the
-    /// feed is cut here, which is inside `vte` — a registry dependency, not one of this
-    /// repository's vendored crates. What holds either way is what a child can act on: exactly one
-    /// answer per question, and never from inside a frame that is not on the screen yet.
+    /// **The limit, stated, and it is the width of one block.** A query inside a DEC 2026 block is
+    /// answered at that block's commit, so nothing outside the block is ever overtaken: everything
+    /// asked before the block is answered before it, and everything asked after the block is
+    /// answered after it. What is not the stream's order is the inside: the vendored processor
+    /// buffers the block's bytes and replays them all at once, so this side cannot stand between two
+    /// of them, and the block's own replies come out of that replay ahead of the XTVERSION answer
+    /// however the two were interleaved within the block. Getting that right would mean cutting the
+    /// replay the way the feed is cut here, which is inside `vte` — a registry dependency, not one
+    /// of this repository's vendored crates. One more block ending is outside this rule by nature:
+    /// when `vte` gives up on a block because its own 2 MiB buffer would overflow, it commits and
+    /// parses the rest of the slice in the same `advance`, with no offset for this side to cut at,
+    /// so an answer owed from such a block leaves at the end of that feed. What holds in every case
+    /// is what a child can act on: exactly one answer per question, and never from inside a frame
+    /// that is not on the screen yet.
     ///
     /// **A reset does not un-ask a question.** A RIS that arrives while a block is still buffering
     /// clears the screen and the modes, and the reply owed from inside that block still goes out at
@@ -3078,6 +3111,245 @@ mod tests {
             "one answer, at the commit, behind the replies the block's own replay produced"
         );
         assert!(terminal.take_pty_writes().is_empty());
+    }
+
+    /// **An answer owed from inside a block leaves at that block's commit, not whenever no block
+    /// happens to be open.** A program that repaints in synchronized frames opens the next one in
+    /// the same write that closed the last, so "is a block buffering right now?" is a question that
+    /// is true again a handful of bytes later — and an answer held on that condition was held until
+    /// some unrelated later frame ended, or not delivered in this feed at all.
+    #[test]
+    fn a_debt_from_one_block_is_not_held_by_the_next_block() {
+        let mut terminal = TerminalAdapter::new(nz(20), nz(3));
+        terminal.feed(b"\x1b[?2026h\x1b[>q\x1b[?2026l\x1b[?2026h");
+        assert_eq!(
+            terminal.take_pty_writes(),
+            vec![XTVERSION_REPLY.as_bytes().to_vec()],
+            "the block that carried the question ended, so the answer is due"
+        );
+    }
+
+    /// **The limit stays inside the block it is a limit about.** A program is free to wrap its
+    /// capability probe in a synchronized frame, and if it does, the answer owed from inside that
+    /// frame must still come back ahead of the DA1 sentinel written after it — otherwise the probe
+    /// fails exactly as it did before this window answered at all.
+    #[test]
+    fn a_debt_from_one_block_is_not_overtaken_by_a_reply_after_it() {
+        let mut terminal = TerminalAdapter::new(nz(20), nz(3));
+        terminal.feed(b"\x1b[?2026h\x1b[>q\x1b[?2026l\x1b[c");
+        assert_eq!(
+            terminal.take_pty_writes(),
+            vec![XTVERSION_REPLY.as_bytes().to_vec(), b"\x1b[?6c".to_vec()],
+            "nothing outside the block may overtake an answer the block already owed"
+        );
+    }
+
+    /// The same two streams cut at every byte position: where a pty read ended is not a fact about
+    /// the stream, and a block that ends in one read and is reopened in the next is the ordinary
+    /// shape of a repaint.
+    #[test]
+    fn cutting_a_block_that_owes_an_answer_changes_neither_the_answer_nor_its_place() {
+        for (stream, expected) in [
+            (
+                b"\x1b[?2026h\x1b[>q\x1b[?2026l\x1b[?2026h".as_slice(),
+                vec![XTVERSION_REPLY.as_bytes().to_vec()],
+            ),
+            (
+                b"\x1b[?2026h\x1b[>q\x1b[?2026l\x1b[c",
+                vec![XTVERSION_REPLY.as_bytes().to_vec(), b"\x1b[?6c".to_vec()],
+            ),
+        ] {
+            for split in 0..=stream.len() {
+                let mut terminal = TerminalAdapter::new(nz(20), nz(3));
+                terminal.feed(&stream[..split]);
+                let mut replies = terminal.take_pty_writes();
+                terminal.feed(&stream[split..]);
+                replies.extend(terminal.take_pty_writes());
+                assert_eq!(
+                    replies, expected,
+                    "{stream:?} cut at {split} was answered differently"
+                );
+            }
+        }
+    }
+
+    /// **Segmenting must not change what lands on the grid, and the one place it could is the
+    /// vendored parser's own overflow rule.** `vte` 0.15 gives up on a synchronized block when the
+    /// bytes it is holding plus *the slice it was just handed* would reach its 2 MiB buffer
+    /// (`ansi.rs` `advance_sync`), so cutting a feed in two can move the moment that trips: a block
+    /// large enough to overflow a whole feed can be buffered when the same bytes arrive as two
+    /// segments and overflow on the second. Both endings write the same bytes to the grid in the
+    /// same order — the block's held bytes first, then the rest parsed live — and this is the pin
+    /// on that. The stream is built to straddle the rule deliberately, and the straddle is asserted
+    /// rather than assumed, so it cannot quietly stop testing anything.
+    #[test]
+    fn a_block_that_straddles_the_vendored_overflow_rule_lands_the_same_either_way() {
+        // `vte-0.15.0/src/ansi.rs`: `SYNC_BUFFER_SIZE`, and `advance_sync` gives up when
+        // `buffer.len() + bytes.len() >= SYNC_BUFFER_SIZE - 1`.
+        const SYNC_BUFFER_SIZE: usize = 0x20_0000;
+        const HEAD: &[u8] = b"\x1b[HTOP";
+        const QUERY: &[u8] = b"\x1b[>q";
+        const FOOT: &[u8] = b"\x1b[2;1HEND";
+        const BSU: &[u8] = b"\x1b[?2026h";
+        const ESU: &[u8] = b"\x1b[?2026l";
+        // NUL is ignored by both parsers and never leaves the ground state, so the filler is size
+        // and nothing else. Chosen so that the whole feed without the query reaches the rule in one
+        // slice, while the segment the query ends does not.
+        let filler = vec![0u8; SYNC_BUFFER_SIZE - 14];
+        let queried: Vec<u8> = [BSU, HEAD, &filler, QUERY, FOOT, ESU].concat();
+        let quiet: Vec<u8> = [BSU, HEAD, &filler, FOOT, ESU].concat();
+        assert!(
+            HEAD.len() + filler.len() + FOOT.len() + ESU.len() >= SYNC_BUFFER_SIZE - 1,
+            "the whole feed must reach the vendored overflow rule in one slice"
+        );
+        assert!(
+            HEAD.len() + filler.len() + QUERY.len() < SYNC_BUFFER_SIZE - 1,
+            "the segment the query ends must not reach it"
+        );
+
+        // The straddle itself: the same bytes, one slice short of the block's terminator, leave the
+        // vendored parser in two different states — still holding the block, or already given up.
+        let mut buffering = TerminalAdapter::new(nz(20), nz(3));
+        buffering.feed(&queried[..queried.len() - FOOT.len() - ESU.len()]);
+        assert!(
+            buffering.synchronized_update_pending_bytes() > 0,
+            "the segment ending at the query is under the rule and must still be held"
+        );
+        let mut overflowed = TerminalAdapter::new(nz(20), nz(3));
+        overflowed.feed(&quiet[..quiet.len() - ESU.len()]);
+        assert_eq!(
+            overflowed.synchronized_update_pending_bytes(),
+            0,
+            "the unsegmented feed is over the rule and must already have been given up on"
+        );
+
+        let mut segmented = TerminalAdapter::new(nz(20), nz(3));
+        segmented.feed(&queried);
+        assert_eq!(
+            segmented.take_pty_writes(),
+            vec![XTVERSION_REPLY.as_bytes().to_vec()]
+        );
+        let mut whole = TerminalAdapter::new(nz(20), nz(3));
+        whole.feed(&quiet);
+        assert!(whole.take_pty_writes().is_empty());
+        assert_eq!(
+            segmented.visible_text(),
+            whole.visible_text(),
+            "the two endings of the same block must leave the same screen"
+        );
+        assert_eq!(segmented.visible_text()[0].trim_end(), "TOP");
+        assert_eq!(segmented.visible_text()[1].trim_end(), "END");
+    }
+
+    /// **A feed that asks nothing reports its events in the order it always did.** Cutting the feed
+    /// is what a query costs, and a feed without one must not pay it: the bell the boundary parser
+    /// found, the title the processor reported and the rows it wrote come back exactly as they came
+    /// back before segments existed, which is transcript, then adapter events, then grid writes.
+    #[test]
+    fn a_feed_that_asks_nothing_reports_its_events_in_the_order_it_always_did() {
+        let mut terminal = TerminalAdapter::new(nz(20), nz(3));
+        let events = terminal.feed(b"\x07\x1b]0;title\x07text");
+        assert_eq!(
+            events,
+            vec![
+                AdapterEvent::Title {
+                    title: "title".to_string()
+                },
+                AdapterEvent::Bell,
+                AdapterEvent::GridWrites {
+                    screen: RemovalScreen::Primary,
+                    rows: vec![0],
+                },
+            ]
+        );
+    }
+
+    /// A shell marker stops the stream where it stands, so the bells on either side of one are found
+    /// in different turns of the pump. Each is reported once, in its own turn, and neither is lost
+    /// to the early return the pause makes.
+    #[test]
+    fn bells_on_both_sides_of_a_paused_marker_are_each_reported_once() {
+        let mut terminal = TerminalAdapter::new(nz(20), nz(3));
+        let before = terminal.feed(b"\x07\x1b]133;A\x07\x07");
+        assert_eq!(
+            before
+                .iter()
+                .filter(|event| **event == AdapterEvent::Bell)
+                .count(),
+            1,
+            "the bell before the marker is reported with the bytes before the marker"
+        );
+        assert!(terminal.stream_paused());
+        let after = terminal.resume_stream();
+        assert_eq!(
+            after
+                .iter()
+                .filter(|event| **event == AdapterEvent::Bell)
+                .count(),
+            1,
+            "the bell after the marker is reported when the stream continues"
+        );
+        assert!(!terminal.stream_paused());
+    }
+
+    /// **The one order this branch changes, pinned deliberately.** A feed that does carry a query is
+    /// cut at it, and the bells found before the cut are reported when the processor reaches the
+    /// cut — so a bell written before the query now precedes a title written after it, where before
+    /// every bell in a feed came after every title in it. This is the more faithful of the two: the
+    /// bell really did come first in the stream. Nothing downstream can tell the difference in any
+    /// case — a bell sets `bell` on the session and a title sets `window_title`, two fields neither
+    /// of which is read while the other is applied.
+    #[test]
+    fn a_bell_before_a_query_is_reported_before_a_title_after_it() {
+        let mut terminal = TerminalAdapter::new(nz(20), nz(3));
+        let events = terminal.feed(b"\x07\x1b[>q\x1b]0;title\x07");
+        assert_eq!(
+            events,
+            vec![
+                AdapterEvent::Bell,
+                AdapterEvent::Title {
+                    title: "title".to_string()
+                },
+            ]
+        );
+        assert_eq!(
+            terminal.take_pty_writes(),
+            vec![XTVERSION_REPLY.as_bytes().to_vec()]
+        );
+    }
+
+    /// A character that takes more than one byte is held by the parser's own state across an
+    /// `advance`, so cutting a feed into segments cannot break one in half — and the canonical fork
+    /// a resize transaction keeps is fed the same segments, so it cannot break one either. Cut at
+    /// every byte position, with the fork armed and a reflow taken at the end.
+    #[test]
+    fn a_multi_byte_character_survives_every_cut_with_the_canonical_fork_armed() {
+        let stream = "café\x1b[>qnaïve".as_bytes();
+        for split in 0..=stream.len() {
+            let mut terminal = TerminalAdapter::new(nz(20), nz(3));
+            terminal.begin_resize_transaction();
+            terminal.feed(&stream[..split]);
+            let mut replies = terminal.take_pty_writes();
+            terminal.feed(&stream[split..]);
+            replies.extend(terminal.take_pty_writes());
+            assert_eq!(
+                replies,
+                vec![XTVERSION_REPLY.as_bytes().to_vec()],
+                "cut at {split}"
+            );
+            assert_eq!(
+                terminal.visible_text()[0].trim_end(),
+                "cafénaïve",
+                "cut at {split}"
+            );
+            terminal.resize(nz(16), nz(3));
+            let _ = terminal.finish_resize_transaction();
+            assert_eq!(
+                terminal.visible_text()[0].trim_end(),
+                "cafénaïve",
+                "cut at {split}, after the reflow"
+            );
+        }
     }
 
     #[test]
