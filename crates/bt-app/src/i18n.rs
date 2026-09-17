@@ -9615,8 +9615,7 @@ mod tests {
             mac
         );
         // Both platform columns now carry their own Chinese.
-        let chinese_mac =
-            Text::WebFailGuardsSay.on(Lang::Chinese, HostPlatform::MacOs);
+        let chinese_mac = Text::WebFailGuardsSay.on(Lang::Chinese, HostPlatform::MacOs);
         assert_ne!(
             chinese_mac, mac,
             "the Mac column's Chinese was filled and is no longer the English placeholder"
