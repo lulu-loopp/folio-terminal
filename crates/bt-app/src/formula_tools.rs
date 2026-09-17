@@ -46,14 +46,13 @@
 
 use std::time::Instant;
 
-use bt_layout::SeatId;
 use bt_render::{
     ChromeLabel, ChromeLabelWeight, ChromePalette, MATH_TOOL_PILL_RADIUS_LOGICAL_PX, MathToolBoxes,
 };
 use bt_viewport::{MathBlockAnchor, MathBlockDisplay};
 
 use crate::{
-    Motion,
+    Motion, PasteTarget,
     icons::MarkSlot,
     marks::{ChromeMark, ChromeSprite},
     tooltip,
@@ -568,10 +567,9 @@ impl FormulaToolFollow {
 /// surface keeps no second number, exactly as the marks beside it keep none.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FormulaToggleMotion {
-    /// The pane the block is in. A `MathBlockAnchor` does not name one and two panes can hold
-    /// anchors that compare equal, so the seat is carried beside it rather than searched for: the
-    /// press knows which pane the pointer was in, and nothing after the press can rediscover it.
-    seat: SeatId,
+    /// The tab, seat and shell incarnation from the press; delayed work validates this owner
+    /// before measuring, changing or presenting its block.
+    target: PasteTarget,
     /// The block, by the identity every other reader of a band keys on.
     anchor: MathBlockAnchor,
     /// Where this is heading. `true` is the `$$…$$` source — which the document is told about when
@@ -594,7 +592,7 @@ impl FormulaToggleMotion {
     /// and both measured by the pane the block is in; `source_rows` is what those rows say.
     #[must_use]
     pub fn begin(
-        seat: SeatId,
+        target: PasteTarget,
         anchor: MathBlockAnchor,
         heights: [i64; 2],
         to_source: bool,
@@ -609,7 +607,7 @@ impl FormulaToggleMotion {
             (text, picture)
         };
         Self {
-            seat,
+            target,
             anchor,
             to_source,
             journey: Ease {
@@ -653,8 +651,8 @@ impl FormulaToggleMotion {
 
     /// The pane this journey is happening in.
     #[must_use]
-    pub fn seat(&self) -> SeatId {
-        self.seat
+    pub fn target(&self) -> PasteTarget {
+        self.target
     }
 
     /// The block this belongs to.
@@ -1774,7 +1772,11 @@ mod tests {
 
     fn flight(to_source: bool, now: Instant) -> FormulaToggleMotion {
         FormulaToggleMotion::begin(
-            SeatId(1),
+            PasteTarget {
+                tab: crate::TabId(7),
+                seat: crate::SeatId(1),
+                incarnation: 42,
+            },
             flight_anchor(),
             HEIGHTS,
             to_source,
