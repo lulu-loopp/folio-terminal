@@ -3766,6 +3766,50 @@ fn note_a_rebuilt_device(rebuilds: &mut u64) -> String {
     format!("Folio rebuilt the GPU device after it was lost (#{rebuilds})")
 }
 
+/// **Latch the first thing a device says about itself, and answer with the line
+/// to write the one time it is worth writing.**
+///
+/// The two channels a device reports its own end through — the device-lost
+/// callback and the uncaptured-error handler — are alike in the three ways that
+/// matter here, so they are latched by one function rather than by two closures
+/// that happen to look the same. Both arrive **from inside wgpu**, on whatever
+/// thread and in the middle of whatever call happened to notice; both are called
+/// **many times** for one fault, because every later resource built on a dead
+/// device raises its own error; and for both, the sentence that matters is the
+/// *first* one, because every sentence after it is about a consequence.
+///
+/// So: the latch takes the first and refuses the rest, and the line is returned
+/// rather than printed, which is what makes "one fault, one line" a property of
+/// the code and lets a test hold it without a device. `None` is a latch that was
+/// already set — say nothing, and leave the sentence that was there.
+///
+/// The sentence is flattened to one line on the way in. A wgpu validation error
+/// is a paragraph with a `Caused by:` under it, and `diagnostics.log` is read a
+/// line at a time by whoever is on the machine; nothing is dropped, only the
+/// layout.
+fn note_what_the_device_said(
+    latch: &OnceLock<String>,
+    headline: &str,
+    said: &str,
+) -> Option<String> {
+    let said = said.split_whitespace().collect::<Vec<_>>().join(" ");
+    match latch.set(said.clone()) {
+        Ok(()) => Some(format!("{headline} — {said}")),
+        Err(_) => None,
+    }
+}
+
+/// The headline over what the driver said when it took a device away.
+const DEVICE_LOST_HEADLINE: &str = "Folio lost the GPU device";
+
+/// The headline over an error wgpu could attribute to no call of ours.
+///
+/// A different sentence from [`DEVICE_LOST_HEADLINE`] because it is a different
+/// finding, and the log is where the two are told apart: a device that was taken
+/// away is a fact about the machine, and an error raised on a device that is
+/// still here is a fact about this program.
+const DEVICE_FAULT_HEADLINE: &str = "Folio's GPU device reported an error";
+
 /// How many times a single episode of device loss may ask for a new device
 /// before this process gives up on the machine.
 ///
@@ -4222,6 +4266,26 @@ pub struct GpuContext {
     /// otherwise carry on over a corpse ask this first: composing a frame,
     /// closing one out on the shared atlas, and reading one back.
     device_loss: Arc<OnceLock<String>>,
+    /// **The first error wgpu could not hand back to a call**, once there has
+    /// been one.
+    ///
+    /// The other half of the same story the field above tells, and the half that
+    /// was pointed at `panic!` until 2026-09-16 (§7.1.3m ⑤″, user report of a
+    /// power cut). wgpu delivers a *lost device* through the callback beside
+    /// this one and delivers everything else — every validation error raised
+    /// against the quietly invalid resources a departed device goes on handing
+    /// out — to the device's error sink. With no handler installed, that sink's
+    /// default is to end the process, which is how a driver reset during a power
+    /// event closed a window full of live shells while the rebuild that was
+    /// meant to answer it stood two frames away.
+    ///
+    /// Latched exactly like the loss and for the same reason: the handler is
+    /// called once per error and a dead device raises them by the dozen, so the
+    /// sentence worth keeping is the first. Read through
+    /// [`GpuContext::still_has_its_device`], which is what makes a fault a
+    /// refused frame rather than a crash — and replaced, never cleared, when a
+    /// new device is minted.
+    device_fault: Arc<OnceLock<String>>,
     rect_pipeline: wgpu::RenderPipeline,
     /// The same pipeline blending `Replace`, for the chrome quads that *are*
     /// the window's ground — see [`ChromeSurface::Ground`].
@@ -5939,6 +6003,7 @@ fn limits_with_this_adapters_textures(adapter: &wgpu::Adapter) -> wgpu::Limits {
 /// device's.
 struct DeviceResources {
     device_loss: Arc<OnceLock<String>>,
+    device_fault: Arc<OnceLock<String>>,
     glyphon_cache: Cache,
     atlas: TextAtlas,
     rect_pipeline: wgpu::RenderPipeline,
@@ -5957,23 +6022,55 @@ struct DeviceResources {
 }
 
 impl DeviceResources {
-    /// Build the whole set against a device, **arming the loss callback before
-    /// anything else is built on it**.
+    /// Build the whole set against a device, **arming both of the device's own
+    /// channels before anything else is built on it**.
     ///
     /// The order is the one §7.1.3m ⑤ fixed and it holds for a replacement
     /// device exactly as it held for the first: the notice arrives once, from
     /// inside whichever call happens to notice, so a device that goes away
     /// during its own pipeline compilation has to have somewhere to say so.
+    ///
+    /// **Two channels and not one** (§7.1.3m ⑤″). A device that is taken away
+    /// says so through `set_device_lost_callback` and through nothing else —
+    /// wgpu classifies that one kind and drops it before the error sink
+    /// (`wgpu_core.rs`: `ErrorType::DeviceLost => return`). Everything that then
+    /// goes wrong *because* it went away is an ordinary validation error against
+    /// a resource that was handed out quietly invalid, and those go to the sink,
+    /// whose default handler is `panic!`. Arming only the first callback is
+    /// therefore arming the channel that reports the cause and leaving the one
+    /// that reports every consequence pointed at the process's own exit.
     fn mint(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         let device_loss: Arc<OnceLock<String>> = Arc::new(OnceLock::new());
         {
             let latch = Arc::clone(&device_loss);
             device.set_device_lost_callback(move |reason, message| {
-                let said = format!("{reason:?}: {message}");
-                if latch.set(said.clone()).is_ok() {
-                    eprintln!("Folio lost the GPU device — {said}");
+                if let Some(line) = note_what_the_device_said(
+                    &latch,
+                    DEVICE_LOST_HEADLINE,
+                    &format!("{reason:?}: {message}"),
+                ) {
+                    eprintln!("{line}");
                 }
             });
+        }
+        let device_fault: Arc<OnceLock<String>> = Arc::new(OnceLock::new());
+        {
+            let latch = Arc::clone(&device_fault);
+            device.on_uncaptured_error(Arc::new(move |error: wgpu::Error| {
+                // **Nothing in here may panic**, and that is the whole of what
+                // this handler is for. It is called from inside wgpu, on the
+                // thread of whatever call raised the error and with wgpu's own
+                // locks just released; a panic here is the same process-ending
+                // event the default handler was, raised from a place no `?` can
+                // catch it. Latching a string and writing at most one line is
+                // everything it does, and the frame path is where the fact is
+                // acted on — see [`GpuContext::still_has_its_device`].
+                if let Some(line) =
+                    note_what_the_device_said(&latch, DEVICE_FAULT_HEADLINE, &error.to_string())
+                {
+                    eprintln!("{line}");
+                }
+            }));
         }
         let glyphon_cache = Cache::new(device);
         let atlas = TextAtlas::new(device, queue, &glyphon_cache, format);
@@ -5990,6 +6087,7 @@ impl DeviceResources {
             create_blank_bind_group(device, queue, &video_bind_group_layout, &video_sampler);
         Self {
             device_loss,
+            device_fault,
             glyphon_cache,
             atlas,
             rect_pipeline,
@@ -6223,6 +6321,7 @@ impl GpuContext {
         let max_texture_dimension_2d = device.limits().max_texture_dimension_2d;
         let DeviceResources {
             device_loss,
+            device_fault,
             glyphon_cache,
             atlas,
             rect_pipeline,
@@ -6283,8 +6382,11 @@ impl GpuContext {
         for renderer in offscreen {
             renderer.adopt_new_device(self, None)?;
         }
-        // **The latch is replaced last, after every window has adopted** (review
-        // row R2-7). Replacing it is what says the device is back — an
+        // **Both latches are replaced last, after every window has adopted**
+        // (review row R2-7; the fault latch joined it in §7.1.3m ⑤″, and for the
+        // same reason — a context that kept the old device's faults would refuse
+        // every frame on the new one). Replacing them is what says the device is
+        // back — an
         // `OnceLock` cannot be un-set, so a context that kept the old one would
         // refuse every frame it was ever asked for again — and *when* it is
         // replaced is what says the recovery is over. It used to be installed
@@ -6297,6 +6399,7 @@ impl GpuContext {
         // pilot tries the whole rebuild again, and a machine that will not give
         // a device back reaches the exit that is there for it.
         self.device_loss = device_loss;
+        self.device_fault = device_fault;
         Ok(())
     }
 
@@ -6436,6 +6539,7 @@ impl GpuContext {
         // what makes the first device and every later one provably the same set.
         let DeviceResources {
             device_loss,
+            device_fault,
             glyphon_cache,
             atlas,
             rect_pipeline,
@@ -6468,6 +6572,7 @@ impl GpuContext {
             glyph_atlas_refitted: false,
             glyph_atlas_refits: 0,
             device_loss,
+            device_fault,
             rect_pipeline,
             ground_rect_pipeline,
             ground_fade_rect_pipeline,
@@ -6634,6 +6739,18 @@ impl GpuContext {
         self.device_loss.get().map(String::as_str)
     }
 
+    /// **What wgpu raised against this device that no call of ours could be
+    /// handed**, or `None` while it has raised nothing.
+    ///
+    /// The uncaptured-error handler's half of the answer — see the `device_fault`
+    /// field. Public for the same reason [`Self::device_loss`] is: the decision
+    /// about what a broken device costs belongs to the application, and this is
+    /// the only place the fact is kept.
+    #[must_use]
+    pub fn device_fault(&self) -> Option<&str> {
+        self.device_fault.get().map(String::as_str)
+    }
+
     /// **Take this context's device away for real**, the way a driver would.
     ///
     /// Not a simulation and not a flag: `wgpu::Device::destroy` marks the device
@@ -6660,13 +6777,83 @@ impl GpuContext {
     /// The same question asked the way the frame path spends it.
     ///
     /// **The one gate all three doors go through** — composing a frame, closing
-    /// one out on the shared atlas, reading one back — so that "a lost device is
-    /// an error and not a later panic" is one statement rather than three.
+    /// one out on the shared atlas, reading one back — so that "a broken device
+    /// is an error and not a later panic" is one statement rather than three.
+    ///
+    /// # Why the loss is read first, and why the fault is read at all
+    ///
+    /// A device that went away is the diagnosis; a fault raised afterwards is a
+    /// symptom of it, and naming the symptom would send the reader of
+    /// `diagnostics.log` after the wrong thing. The order is not a guess about
+    /// timing either: wgpu marks a device lost and calls the loss callback
+    /// **synchronously**, from inside the call that noticed, and only then does
+    /// it begin handing out the invalid resources whose use raises the faults —
+    /// so by the time any of those faults exists, the loss latch is already set.
+    ///
+    /// A fault on a device that is *not* lost is the other case, and it keeps
+    /// the answer §7.1.3m ⑤ gave: this program has done something wgpu refused,
+    /// and it is refused loudly. What changed is only where the noise comes
+    /// from. It used to be `panic!`, raised inside wgpu on whatever thread
+    /// noticed, unwinding through a callback nobody could catch; it is now an
+    /// error returned from the frame, carried up to `FolioApp::fail` with the
+    /// sentence wgpu wrote, where a device that can be rebuilt is rebuilt and
+    /// one that cannot ends the run with words a reader can use.
     fn still_has_its_device(&self) -> Result<(), RenderError> {
-        match self.device_loss.get() {
-            Some(said) => Err(RenderError::DeviceLost(said.clone())),
+        if let Some(said) = self.device_loss.get() {
+            return Err(RenderError::DeviceLost(said.clone()));
+        }
+        match self.device_fault.get() {
+            Some(said) => Err(RenderError::Wgpu(said.clone())),
             None => Ok(()),
         }
+    }
+
+    /// **A vertex buffer minted the one way that cannot end the process.**
+    ///
+    /// Every buffer the frame path makes is made here, and the reason is one
+    /// line of `wgpu::util`: `create_buffer_init` asks for a buffer
+    /// `mapped_at_creation` and then **unwraps** the mapping
+    /// (`util/device.rs`: `.expect("Failed to get mapped range …")`). On a
+    /// device the driver has just taken away, `create_buffer` hands back a
+    /// quietly invalid buffer — that is wgpu's contract for a lost device, and
+    /// §7.1.3m ⑤ is written about it — and the mapping of a quietly invalid
+    /// buffer is a `MapRangeError`. So the convenience that saves one line costs
+    /// the process: the crash of 2026-09-16 was a driver reset during a power
+    /// cut, met a millisecond later by this call, naming a buffer of terminal
+    /// cell grounds for a machine event that had nothing to do with it.
+    ///
+    /// `create_buffer` + `write_buffer` is the same two GPU operations without
+    /// the unwrap. Neither can panic: a failure of either goes to the device's
+    /// error sink, which since §7.1.3m ⑤″ is the handler armed in
+    /// [`DeviceResources::mint`], and the frame that asked for it is refused by
+    /// name on the next gate instead of taking the window with it.
+    ///
+    /// The `const` block is the whole of the alignment argument: wgpu wants a
+    /// write whose length is a multiple of [`wgpu::COPY_BUFFER_ALIGNMENT`], and
+    /// every vertex type in this file is built of four-byte fields. Holding that
+    /// at compile time is what lets this body be two statements with no
+    /// arithmetic in it — a type that ever stopped being four-byte would not
+    /// build, rather than padding at run time for a case that cannot arise.
+    fn vertex_buffer<T: Pod>(&self, label: &str, contents: &[T]) -> wgpu::Buffer {
+        const {
+            assert!(
+                size_of::<T>() % wgpu::COPY_BUFFER_ALIGNMENT as usize == 0,
+                "a vertex written through the queue has to be a whole number of copy words"
+            );
+        }
+        let contents: &[u8] = bytemuck::cast_slice(contents);
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: contents.len() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        // Ordered before the command buffers of the next submit by the queue
+        // itself, and every one of these buffers is drawn from by exactly that
+        // submit — so this is the same write `create_buffer_init` did, done
+        // where a failure is reportable.
+        self.queue.write_buffer(&buffer, 0, contents);
+        buffer
     }
 
     /// **The one place the shared atlas is told a frame is over** — called by
@@ -6761,7 +6948,7 @@ impl GpuContext {
     /// that comes after says what actually happened, once, by name
     /// ([`RenderError::DeviceLost`]).
     fn close_the_frame(&mut self, outcome: &Result<PresentOutcome, RenderError>) {
-        if self.device_loss.get().is_some() {
+        if self.still_has_its_device().is_err() {
             return;
         }
         match outcome {
@@ -8756,14 +8943,19 @@ impl WindowRenderer {
             let math_batch = self.prepare_math_draws(gpu, frame);
             table_block_bodies.extend(self.table_block_bodies(frame));
             math_prepared_at = Instant::now();
-            let math_vertex_buffer = (!math_batch.vertices.is_empty()).then(|| {
-                gpu.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("visible math block vertices"),
-                        contents: bytemuck::cast_slice(&math_batch.vertices),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    })
-            });
+            // **The gate again, where this seat starts asking the device for
+            // memory** (§7.1.3m ⑤″). The one at the top of this function
+            // answered for the instant the frame began, and a frame does not
+            // begin and end in the same instant: everything between the two —
+            // the shaping, the atlas prepares, the math rasters, each of them a
+            // queue write and a poll — is time in which a driver reset can land,
+            // and the report of 2026-09-16 is a device lost in exactly that
+            // window. Asking here costs an atomic load per seat and is what
+            // makes the frame after a mid-frame loss a refusal by name rather
+            // than a picture drawn out of resources that are already rubble.
+            gpu.still_has_its_device()?;
+            let math_vertex_buffer = (!math_batch.vertices.is_empty())
+                .then(|| gpu.vertex_buffer("visible math block vertices", &math_batch.vertices));
             let SeatRects {
                 grounds: ground_rects,
                 ink: rects,
@@ -8778,25 +8970,13 @@ impl WindowRenderer {
             } else {
                 ground_rects.as_slice()
             };
-            let ground_rect_buffer =
-                gpu.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("terminal cell grounds"),
-                        contents: bytemuck::cast_slice(ground_rect_data),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    });
+            let ground_rect_buffer = gpu.vertex_buffer("terminal cell grounds", ground_rect_data);
             let rect_data = if rects.is_empty() {
                 empty_rect.as_slice()
             } else {
                 rects.as_slice()
             };
-            let rect_buffer = gpu
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("terminal cell rectangles"),
-                    contents: bytemuck::cast_slice(rect_data),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
+            let rect_buffer = gpu.vertex_buffer("terminal cell rectangles", rect_data);
             let status_rects = frame
                 .status_text
                 .as_deref()
@@ -8811,12 +8991,7 @@ impl WindowRenderer {
                 status_rects.as_slice()
             };
             let status_rect_buffer =
-                gpu.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("status overlay rectangle"),
-                        contents: bytemuck::cast_slice(status_rect_data),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    });
+                gpu.vertex_buffer("status overlay rectangle", status_rect_data);
             // The wash first, the block's own chrome after it: see
             // [`Self::math_selection_wash_rectangles`] for why this buffer's order is the
             // z-order that matters here.
@@ -8828,12 +9003,7 @@ impl WindowRenderer {
                 math_overlays.as_slice()
             };
             let math_overlay_buffer =
-                gpu.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("math toolbar overlay rectangles"),
-                        contents: bytemuck::cast_slice(overlay_data),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    });
+                gpu.vertex_buffer("math toolbar overlay rectangles", overlay_data);
             if entry.focused {
                 focused_text_stats = Some(text_stats);
             }
@@ -8868,41 +9038,21 @@ impl WindowRenderer {
         // band's right edge — means that one by it.
         self.seat = focused_seat;
 
+        // Every seat has prepared; the window's own furniture is about to. The
+        // same question as inside the loop, asked once for the half of the frame
+        // that has no seat in it.
+        gpu.still_has_its_device()?;
         let (peek_rects, peek_draws, peek_vertices) = self.prepare_peek_draws(gpu);
-        let peek_rect_buffer = (!peek_rects.is_empty()).then(|| {
-            gpu.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("peek flyout rectangles"),
-                    contents: bytemuck::cast_slice(&peek_rects),
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
-        });
-        let peek_vertex_buffer = (!peek_vertices.is_empty()).then(|| {
-            gpu.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("peek flyout image vertices"),
-                    contents: bytemuck::cast_slice(&peek_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
-        });
+        let peek_rect_buffer = (!peek_rects.is_empty())
+            .then(|| gpu.vertex_buffer("peek flyout rectangles", &peek_rects));
+        let peek_vertex_buffer = (!peek_vertices.is_empty())
+            .then(|| gpu.vertex_buffer("peek flyout image vertices", &peek_vertices));
         let (preview_stages, preview_vertices) = self.prepare_preview_draws(gpu);
-        let preview_vertex_buffer = (!preview_vertices.is_empty()).then(|| {
-            gpu.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("preview seat image vertices"),
-                    contents: bytemuck::cast_slice(&preview_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
-        });
+        let preview_vertex_buffer = (!preview_vertices.is_empty())
+            .then(|| gpu.vertex_buffer("preview seat image vertices", &preview_vertices));
         let (video_draws, video_vertices) = self.prepare_video_draws(gpu);
-        let video_vertex_buffer = (!video_vertices.is_empty()).then(|| {
-            gpu.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("video layer vertices"),
-                    contents: bytemuck::cast_slice(&video_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
-        });
+        let video_vertex_buffer = (!video_vertices.is_empty())
+            .then(|| gpu.vertex_buffer("video layer vertices", &video_vertices));
         // Seat chrome. Empty whenever the tree is a lone terminal leaf, and every
         // branch below is guarded on emptiness, so a lone leaf issues exactly the
         // command stream it issued before seats existed.
@@ -8926,14 +9076,8 @@ impl WindowRenderer {
                 )
             })
             .collect();
-        let chrome_ground_rect_buffer = (!chrome_ground_rects.is_empty()).then(|| {
-            gpu.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("seat chrome grounds"),
-                    contents: bytemuck::cast_slice(chrome_ground_rects.as_slice()),
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
-        });
+        let chrome_ground_rect_buffer = (!chrome_ground_rects.is_empty())
+            .then(|| gpu.vertex_buffer("seat chrome grounds", chrome_ground_rects.as_slice()));
         let chrome_rects: Vec<RectInstance> = self
             .chrome_quads
             .iter()
@@ -8942,14 +9086,8 @@ impl WindowRenderer {
                 surface_pixel_rect(quad.rect, quad.color, self.config.width, self.config.height)
             })
             .collect();
-        let chrome_rect_buffer = (!chrome_rects.is_empty()).then(|| {
-            gpu.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("seat chrome rectangles"),
-                    contents: bytemuck::cast_slice(chrome_rects.as_slice()),
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
-        });
+        let chrome_rect_buffer = (!chrome_rects.is_empty())
+            .then(|| gpu.vertex_buffer("seat chrome rectangles", chrome_rects.as_slice()));
         let chrome_icons = std::mem::take(&mut self.chrome_icons);
         // Two lists and one pass: the marks that stand under this pass's letters
         // and the run that covers them — see [`ChromeIcon::above_text`]. The
@@ -8984,28 +9122,18 @@ impl WindowRenderer {
         let (preview_raster_draws, preview_raster_vertices) =
             self.prepare_chrome_icon_draws(gpu, &preview_rasters);
         let preview_raster_buffer = (!preview_raster_vertices.is_empty()).then(|| {
-            gpu.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("preview document raster vertices"),
-                    contents: bytemuck::cast_slice(preview_raster_vertices.as_slice()),
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
+            gpu.vertex_buffer(
+                "preview document raster vertices",
+                preview_raster_vertices.as_slice(),
+            )
         });
-        let chrome_icon_buffer = (!chrome_icon_vertices.is_empty()).then(|| {
-            gpu.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("chrome mark vertices"),
-                    contents: bytemuck::cast_slice(chrome_icon_vertices.as_slice()),
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
-        });
+        let chrome_icon_buffer = (!chrome_icon_vertices.is_empty())
+            .then(|| gpu.vertex_buffer("chrome mark vertices", chrome_icon_vertices.as_slice()));
         let chrome_over_buffer = (!chrome_over_vertices.is_empty()).then(|| {
-            gpu.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("chrome mark vertices over the type"),
-                    contents: bytemuck::cast_slice(chrome_over_vertices.as_slice()),
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
+            gpu.vertex_buffer(
+                "chrome mark vertices over the type",
+                chrome_over_vertices.as_slice(),
+            )
         });
         // **The documents' words are asked for before the labels around them**
         // (user report 2026-08-29, `docs/DESIGN.md` §7.1.3l).
@@ -9110,14 +9238,8 @@ impl WindowRenderer {
                 preview_body_rect_instances(body, 1.0, self.config.width, self.config.height)
             })
             .collect();
-        let preview_body_rect_buffer = (!preview_body_rects.is_empty()).then(|| {
-            gpu.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("preview body fills"),
-                    contents: bytemuck::cast_slice(preview_body_rects.as_slice()),
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
-        });
+        let preview_body_rect_buffer = (!preview_body_rects.is_empty())
+            .then(|| gpu.vertex_buffer("preview body fills", preview_body_rects.as_slice()));
         // The holes, in the ground's own arithmetic at an alpha of zero — see
         // [`WindowRenderer::set_web_holes`]. The colour handed in is never read
         // by the shader once it has been multiplied by nothing, and naming it
@@ -9136,14 +9258,8 @@ impl WindowRenderer {
                 )
             })
             .collect();
-        let web_hole_buffer = (!web_hole_rects.is_empty()).then(|| {
-            gpu.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("web preview holes"),
-                    contents: bytemuck::cast_slice(web_hole_rects.as_slice()),
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
-        });
+        let web_hole_buffer = (!web_hole_rects.is_empty())
+            .then(|| gpu.vertex_buffer("web preview holes", web_hole_rects.as_slice()));
         // **The forensic line for "the body drew its rules and none of its
         // words"** (user report 2026-08-21). The three numbers are the three
         // places that picture can come from and they separate them completely:
@@ -9221,14 +9337,8 @@ impl WindowRenderer {
                     )
                 })
                 .collect();
-            let ground_buffer = (!ground_rects.is_empty()).then(|| {
-                gpu.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("overlay layer grounds"),
-                        contents: bytemuck::cast_slice(ground_rects.as_slice()),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    })
-            });
+            let ground_buffer = (!ground_rects.is_empty())
+                .then(|| gpu.vertex_buffer("overlay layer grounds", ground_rects.as_slice()));
             let mut rects: Vec<RectInstance> = layer
                 .faded_quads()
                 .iter()
@@ -9253,23 +9363,11 @@ impl WindowRenderer {
                     self.config.height,
                 ));
             }
-            let rect_buffer = (!rects.is_empty()).then(|| {
-                gpu.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("modal overlay rectangles"),
-                        contents: bytemuck::cast_slice(rects.as_slice()),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    })
-            });
+            let rect_buffer = (!rects.is_empty())
+                .then(|| gpu.vertex_buffer("modal overlay rectangles", rects.as_slice()));
             let hole_rects = std::mem::take(&mut layer_hole_rects[index]);
-            let hole_buffer = (!hole_rects.is_empty()).then(|| {
-                gpu.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("overlay layer web holes"),
-                        contents: bytemuck::cast_slice(hole_rects.as_slice()),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    })
-            });
+            let hole_buffer = (!hole_rects.is_empty())
+                .then(|| gpu.vertex_buffer("overlay layer web holes", hole_rects.as_slice()));
             // **The layer's own marks and its document's pictures, one channel.**
             // The two are the same kind of thing — a content-keyed raster placed
             // in surface pixels and cropped to a box — and the body's had no way
@@ -9281,12 +9379,7 @@ impl WindowRenderer {
             icons.extend(layer.faded_document_rasters());
             let (icon_draws, icon_vertices) = self.prepare_chrome_icon_draws(gpu, &icons);
             let icon_buffer = (!icon_vertices.is_empty()).then(|| {
-                gpu.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("modal overlay mark vertices"),
-                        contents: bytemuck::cast_slice(icon_vertices.as_slice()),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    })
+                gpu.vertex_buffer("modal overlay mark vertices", icon_vertices.as_slice())
             });
             let mut layouts = shape_chrome_labels(
                 &mut gpu.font_system,
@@ -9379,6 +9472,15 @@ impl WindowRenderer {
                 || layer.text_prepared
         });
         let rectangles_prepared_at = Instant::now();
+        // **The last gate, and the only one that stands in front of the
+        // swapchain.** Everything above is staging; below it the surface is
+        // configured, a back buffer is taken, an encoder is filled and a submit
+        // is made, and each of those on a device that has gone is a call whose
+        // failure is reported somewhere other than where it happened. It stands
+        // here rather than a few lines down because every `mem::take` this
+        // function does has been given back by now — a frame that leaves at this
+        // point leaves the window holding everything it was saying.
+        gpu.still_has_its_device()?;
         // Keep the old DXGI back buffers alive while CPU shaping and GPU resource preparation run.
         // ResizeBuffers discards them; configuring only immediately before acquire/submit bounds
         // both the default-black interval and DXGI's stretch of the old frame.
@@ -9420,17 +9522,15 @@ impl WindowRenderer {
                     image.height_px,
                 );
                 let [r, g, b] = srgb_rgb_to_linear(default_background());
-                gpu.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("window ground quad"),
-                        contents: bytemuck::cast_slice(&background_quad_vertices(
-                            uv,
-                            [r as f32, g as f32, b as f32],
-                            ground.alpha,
-                            ground.image_opacity,
-                        )),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    })
+                gpu.vertex_buffer(
+                    "window ground quad",
+                    &background_quad_vertices(
+                        uv,
+                        [r as f32, g as f32, b as f32],
+                        ground.alpha,
+                        ground.image_opacity,
+                    ),
+                )
             });
         let mut encoder = gpu
             .device
@@ -29500,6 +29600,187 @@ mod tests {
                 gpu.device_loss().is_some(),
                 "a rebuild that left a window blank has not recovered anything, and the \
                  pilot asks this before it decides the episode is over"
+            );
+        }
+
+        /// **One fault is one sentence and one line**, however many times the
+        /// device says it (§7.1.3m ⑤″).
+        ///
+        /// The uncaptured-error handler is called once per error, and a device
+        /// that has gone raises one for every resource built on it afterwards —
+        /// a frame's worth is dozens. What a reader of `diagnostics.log` needs
+        /// is the *first*, because every one after it is about a consequence;
+        /// what they must not be given is the same page printed forty times.
+        ///
+        /// The flattening is the other half of the same care: wgpu writes a
+        /// validation error as a paragraph with a `Caused by:` under it, and a
+        /// log read a line at a time is a log where that is four entries.
+        ///
+        /// MUTATION: return the line unconditionally instead of only on the
+        /// first set, and the second assertion goes red — which is the shape of
+        /// the log this handler would otherwise write.
+        #[test]
+        fn a_device_says_what_went_wrong_once_however_often_it_says_it() {
+            let latch = OnceLock::new();
+            let first = note_what_the_device_said(
+                &latch,
+                DEVICE_FAULT_HEADLINE,
+                "Validation Error\n\nCaused by:\n  Buffer with 'terminal cell grounds' \
+                 label is invalid\n",
+            );
+
+            assert_eq!(
+                first.as_deref(),
+                Some(
+                    "Folio's GPU device reported an error — Validation Error Caused by: \
+                     Buffer with 'terminal cell grounds' label is invalid"
+                ),
+                "the sentence wgpu wrote, whole, on one line"
+            );
+            assert!(
+                note_what_the_device_said(&latch, DEVICE_FAULT_HEADLINE, "and again").is_none(),
+                "the second report of the same fault is not a second line"
+            );
+            assert_eq!(
+                latch.get().map(String::as_str),
+                Some(
+                    "Validation Error Caused by: Buffer with 'terminal cell grounds' \
+                     label is invalid"
+                ),
+                "and it is the first sentence that is kept, because the ones after it \
+                 are about what the first one caused"
+            );
+        }
+
+        /// PIN (user report 2026-09-16) — **the buffer that used to end the
+        /// process.**
+        ///
+        /// A power cut put the laptop on battery, the AMD driver reset, and the
+        /// device went away in the middle of a frame that was already past the
+        /// gate at the top of `compose_frame`. The next thing that frame did was
+        /// ask for its cell grounds through `wgpu::util`'s `create_buffer_init`,
+        /// which mints `mapped_at_creation` and **unwraps** the mapping — and
+        /// the mapping of the quietly invalid buffer a departed device hands out
+        /// is a `MapRangeError`. Exit 101, a window full of live shells gone,
+        /// two frames after the rebuild that was meant to answer it had already
+        /// worked once.
+        ///
+        /// This is that line, against a device that is really gone. Nothing here
+        /// asserts a return value: the whole claim is that the process is still
+        /// running to make the assertions after it.
+        ///
+        /// MUTATION: put `create_buffer_init` back and this test does not fail,
+        /// it aborts — which is precisely what it is for.
+        #[cfg(target_os = "windows")]
+        #[test]
+        fn the_buffer_a_frame_mints_after_the_device_went_away_does_not_end_the_process() {
+            let mut gpu = on_this_machines_adapter(FORMAT);
+            let mut window =
+                WindowRenderer::offscreen(&mut gpu, 320, 200, 1.0, FORMAT).expect("a window");
+            window.set_modal_overlay(a_sentence_this_window_keeps());
+            let frame = single_cell_cursor_frame(window.metrics());
+            one_frame(&mut window, &mut gpu, &frame).expect("the frame before the loss");
+            let before = ink_pixels(&window.read_back(&gpu).expect("it reads back"));
+            assert!(before > 0, "there has to be a picture to lose");
+
+            gpu.lose_the_device_on_purpose();
+            // The crash, by name, in the middle of a frame the gate at the top
+            // of `compose_frame` has already let through.
+            let grounds = gpu.vertex_buffer("terminal cell grounds", &[RectInstance::zeroed()]);
+            drop(grounds);
+
+            assert!(
+                matches!(
+                    one_frame(&mut window, &mut gpu, &frame),
+                    Err(RenderError::DeviceLost(_))
+                ),
+                "the frame is refused by the name of what actually went wrong"
+            );
+            pollster::block_on(
+                gpu.rebuild_after_device_loss(vec![RebuiltWindow::Offscreen(&mut window)]),
+            )
+            .expect("a machine that has one device has another");
+            assert!(
+                gpu.device_loss().is_none() && gpu.device_fault().is_none(),
+                "a new device carries new latches — both of them, or every frame on it \
+                 is refused for something the device before it did"
+            );
+
+            one_frame(&mut window, &mut gpu, &frame).expect("the frame after the rebuild");
+            assert_eq!(
+                ink_pixels(&window.read_back(&gpu).expect("it reads back")),
+                before,
+                "the same words, on a device that did not exist when they were last said"
+            );
+        }
+
+        /// RED — **an error wgpu cannot hand back to a call is latched, not
+        /// thrown** (§7.1.3m ⑤″).
+        ///
+        /// Until this the workspace installed no `on_uncaptured_error` handler
+        /// at all, so the error sink's default stood: `panic!`, raised inside
+        /// wgpu on whatever thread noticed, where no `?` in this crate could
+        /// reach it. That is fail-loud in the only sense that matters against a
+        /// bug of our own — and it is also what turned every validation error
+        /// raised in the wake of a device loss into the end of the run.
+        ///
+        /// Loud is kept and the noise is moved: the fault is latched, the frame
+        /// after it is refused **by the sentence wgpu wrote**, and that error
+        /// travels up to `FolioApp::fail`, where a device that can be rebuilt is
+        /// rebuilt and one that cannot ends the run with words a reader can use.
+        ///
+        /// The fault is provoked the only way a test can provoke a real one on a
+        /// live device: a write past the end of a buffer, which wgpu classifies
+        /// `Validation` and has nowhere to return.
+        ///
+        /// MUTATION: take the handler off and this test aborts inside
+        /// `wgpu-core` on the write, three assertions early.
+        #[cfg(target_os = "windows")]
+        #[test]
+        fn an_error_wgpu_could_not_hand_back_is_latched_and_refuses_the_next_frame() {
+            let mut gpu = on_this_machines_adapter(FORMAT);
+            let mut window =
+                WindowRenderer::offscreen(&mut gpu, 240, 160, 1.0, FORMAT).expect("a window");
+            let frame = single_cell_cursor_frame(window.metrics());
+            one_frame(&mut window, &mut gpu, &frame).expect("the frame before the fault");
+            assert!(
+                gpu.device_fault().is_none(),
+                "a device nothing has gone wrong on has nothing to say"
+            );
+
+            let small = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("a buffer this test writes past the end of"),
+                size: 16,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            gpu.queue.write_buffer(&small, 0, &[0_u8; 64]);
+
+            let said = gpu
+                .device_fault()
+                .expect("the handler caught what used to be a panic")
+                .to_owned();
+            assert!(!said.contains('\n'), "one fault, one line: {said:?}");
+            gpu.queue.write_buffer(&small, 0, &[1_u8; 128]);
+            assert_eq!(
+                gpu.device_fault(),
+                Some(said.as_str()),
+                "the handler is idempotent — a second fault does not replace the first"
+            );
+
+            let refits = gpu.glyph_atlas_refits();
+            assert!(
+                matches!(
+                    one_frame(&mut window, &mut gpu, &frame),
+                    Err(RenderError::Wgpu(reported)) if reported == said
+                ),
+                "the frame after a fault is refused, carrying the sentence wgpu wrote"
+            );
+            assert_eq!(
+                gpu.glyph_atlas_refits(),
+                refits,
+                "and nothing was repaired on the way out: a re-pack on a device this \
+                 broken mints an atlas every later frame would take its ink from"
             );
         }
     }
