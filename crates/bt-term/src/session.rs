@@ -3621,6 +3621,15 @@ impl DualPlaneSession {
         let primary_reconcile = reconciled
             .then(|| self.snapshot_primary_resize_transition())
             .flatten();
+        // **Taken before the install, because that is the grid these records are standing on.**
+        // `reconcile_resize_transaction_to_viewport` replaces the grid and the parser with the ones
+        // the console host decided on, which is a reflow like any other; the alternate screen had no
+        // projection across it at all, so its pictures went at the reconcile and came back only at
+        // the next terminator, and every frame published in between showed LaTeX. Primary's own
+        // snapshot is taken here for the same reason and has been all along.
+        let alternate_reconcile = reconciled
+            .then(|| self.snapshot_alternate_repaint(false))
+            .flatten();
         self.resize_epoch.final_request_sent(observed_at);
         self.trace_resize_event(
             observed_at,
@@ -3648,6 +3657,15 @@ impl DualPlaneSession {
             // marker decides whether its line-start coordinate is end-exclusive.
             self.reanchor_semantic_input_regions_after_resize();
             self.reanchor_semantic_output_regions_after_resize();
+            // Re-seat the alternate screen's records against the grid that was just installed, by
+            // the same projection `resize_at` runs after its own reflow. It comes before the window
+            // is rebased below, and the order is the whole point: a rebase re-takes the *snapshot*,
+            // and a snapshot of records that are still standing on the grid the host replaced is
+            // exactly what it must not be.
+            if let Some(snapshot) = alternate_reconcile {
+                self.finish_alternate_repaint(snapshot);
+                self.restore_offscreen_decorations();
+            }
             // The vendor reconcile can shift rows and always bumps the grid generation, which
             // strands the formulas `restore_offscreen_decorations` re-anchored inside `resize_at`
             // one generation behind the frame the app is about to publish. Re-anchor them against

@@ -74,7 +74,9 @@ All notable changes to Folio are recorded here. The format follows
 - **Resizing the window while a program is drawing no longer loses a formula.** A
   redraw that was still in progress when the window changed size went on measuring
   against the old shape of the screen, so a formula could be drawn over the wrong
-  lines and another one lost — on a screen whose text had not changed at all.
+  lines and another one lost — on a screen whose text had not changed at all. The
+  same redraw no longer loses them for a frame when Windows hands back the size it
+  settled on, either.
 - **A formula edited before Folio finished reading it the first time is read
   again.** If a program replaced a formula's middle while Folio was still drawing
   that formula, the drawing was thrown away — rightly, it was of text that had gone

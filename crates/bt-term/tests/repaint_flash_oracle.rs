@@ -884,6 +884,107 @@ fn a_resize_under_an_open_window_does_not_project_its_records_twice() {
     );
 }
 
+/// Both blocks are pictures, wherever the reflow has put them, and no row of the frame is left
+/// showing their LaTeX. Said this way rather than by row number because a shrink the reader drags
+/// back returns the rows the shrink scrolled away, and where the blocks end up is the vendor's
+/// answer, not this fixture's.
+fn assert_two_blocks_are_pictures(session: &mut DualPlaneSession, why: &str) {
+    let mut projection = session.new_projection(session.layout_key());
+    session.refresh_projection(&mut projection);
+    let frame = session.viewport_frame(&mut projection).unwrap();
+    let observation = bt_term::observe_formula_frame(&frame);
+    assert_eq!(
+        observation.rendered_sources.len(),
+        2,
+        "{why}: {} of 2 pictures; frame={:?}",
+        observation.rendered_sources.len(),
+        (0..frame.drawable_rows())
+            .map(|row| frame_row_text(&frame, row))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        observation.source_rows.is_empty(),
+        "{why}: a block's source is exposed: {:?}",
+        observation.source_rows
+    );
+}
+
+/// **The console host's reconcile installs a new grid, and the frame published on it carries the
+/// pictures.**
+///
+/// A resize transaction reflows twice: once when the reader's gesture lands (`resize_at`) and once
+/// when the host hands back the grid it decided on (`reconcile_resize_transaction_to_viewport`). The
+/// second reflow projected the primary screen's records onto the installed grid and left the
+/// alternate screen's where they were — so on the alternate screen the pictures went at the
+/// reconcile and only came back at the next terminator, and every frame published in between showed
+/// LaTeX. Rebasing the open window is not enough by itself and this is the fixture that says why:
+/// a rebase re-takes the *snapshot*, and the records still have to be re-seated against the grid
+/// that was just installed, before it is taken.
+///
+/// Both endings: a shrink, and a shrink the reader immediately drags back — the second replaces the
+/// canonical grid a second time, and the pictures are on the rows the first reflow left them on.
+#[test]
+fn the_reconcile_that_installs_a_grid_reseats_the_pictures_on_it() {
+    for grow_back in [false, true] {
+        let start = std::time::Instant::now();
+        let mut session = DualPlaneSession::new(nz(48), nz(14));
+        let mut projection = session.new_projection(session.layout_key());
+        let mut oracle = FormulaFlashOracle::default();
+        seed_one_off_band_record(
+            &mut session,
+            &mut projection,
+            &mut oracle,
+            start,
+            TWO_BLOCKS_AFTER,
+        );
+        let at = start + Duration::from_millis(400) + LIVE_MATH_STABLE_INTERVAL;
+        session.advance_live_stability(at);
+        complete_live_math(&mut session);
+        assert_two_blocks_are_pictures(&mut session, "the fixture never rendered its two blocks");
+
+        // The producer opens its next frame's block; everything in it is withheld.
+        session.feed_at(b"\x1b[?2026h\x1b[?25l\x1b[H", at).unwrap();
+
+        // The reader's gesture, which moves both blocks up by four.
+        session
+            .resize_at(nz(48), nz(10), at + Duration::from_millis(20))
+            .unwrap();
+        complete_live_math(&mut session);
+        if grow_back {
+            session
+                .resize_at(nz(48), nz(14), at + Duration::from_millis(30))
+                .unwrap();
+            complete_live_math(&mut session);
+        }
+        let settled_rows = if grow_back { 14 } else { 10 };
+
+        // The host hands back the grid it decided on. The frame published on it — before any
+        // terminator arrives — has to carry the pictures.
+        session.mark_pty_resize_requested_at(
+            nz(48),
+            nz(settled_rows),
+            at + Duration::from_millis(40),
+        );
+        complete_live_math(&mut session);
+        assert_two_blocks_are_pictures(
+            &mut session,
+            &format!(
+                "the frame published on the installed grid shows LaTeX (grow_back={grow_back})"
+            ),
+        );
+
+        // And the block ends without touching a cell.
+        session
+            .feed_at(b"\x1b[?25h\x1b[?2026l", at + Duration::from_millis(60))
+            .unwrap();
+        complete_live_math(&mut session);
+        assert_two_blocks_are_pictures(
+            &mut session,
+            &format!("the terminator lost a picture (grow_back={grow_back})"),
+        );
+    }
+}
+
 /// **No raster is ever held over text it does not match, not even for the one read between a
 /// commit and the next block's terminator.**
 ///
