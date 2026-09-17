@@ -9,7 +9,9 @@
 ## Highlights
 
 - Drop a file onto a split, or paste a screenshot you have just taken, and its
-  path arrives on the command line, quoted for the shell running there.
+  path arrives on the command line, quoted for the shell running there; a file
+  dragged out of the files column into the middle of a terminal does the same,
+  and its edges still open a pane.
 - A typeset formula stays typeset: it no longer flashes back to its `$$…$$`
   source while a program repaints the screen, and an older one no longer comes
   back as plain text when you resize the window.
@@ -36,6 +38,9 @@
   one line.
 - **A picture on the clipboard pastes as the path of a file Folio writes for
   it**, so a screenshot can be handed straight to a command.
+- **Dragging a file from the files column into the middle of a terminal pastes
+  its path**; the box under the hand says so before you let go, and the edges
+  still open the file as a pane.
 
 ### Changed
 
