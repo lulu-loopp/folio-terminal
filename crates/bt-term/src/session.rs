@@ -545,10 +545,6 @@ struct LiveRowStability {
     settled_revision: Option<u64>,
     candidate_signature: Option<u64>,
     content_fingerprint: Option<CapturedRowFingerprint>,
-    /// Where this live row sat in the shell's command lifecycle, recorded when its bytes were
-    /// parsed — the live counterpart of [`bt_doc::HistoryEntry::inline_site`], and written for the
-    /// same reason. See [`DualPlaneSession::record_live_inline_sites`].
-    inline_site: InlineMathSite,
 }
 
 #[derive(Clone, Debug)]
@@ -2974,6 +2970,7 @@ impl DualPlaneSession {
         }
         let result = (|| {
             for chunk in bytes.chunks(PARSE_QUANTUM) {
+                self.state_write_provenance();
                 // The quantum is a *budget*, not the unit a fact is read in. The
                 // adapter hands back a segment at a time and pauses at every
                 // shell-integration marker (`TerminalAdapter::feed`), so a
@@ -2989,6 +2986,7 @@ impl DualPlaneSession {
                     if !self.terminal.stream_paused() {
                         break;
                     }
+                    self.state_write_provenance();
                     events = self.terminal.resume_stream();
                 }
             }
@@ -3025,6 +3023,27 @@ impl DualPlaneSession {
             }
         }
         result
+    }
+
+    /// Tell the terminal whether the bytes it is about to parse are a command's output, so that
+    /// every cell they print records it.
+    ///
+    /// **Provenance is a fact about a write, so it is stated before the write and stamped by it.**
+    /// The adapter pauses the stream at every shell-integration marker, so one segment is
+    /// homogeneous: `C` and `D` have already been applied when the next segment starts, and no
+    /// write inside a segment can straddle the two answers. Everything downstream — the fold in
+    /// [`Self::live_detection_context`], the cells a scroll or a reflow moves, the row a prompt
+    /// reprints byte for byte — then follows from the cells alone.
+    ///
+    /// Said before every segment rather than only when it changes, because the cost is a field
+    /// store and the failure of forgetting is a prompt wearing a retired command's eligibility.
+    fn state_write_provenance(&mut self) {
+        let is_command_output = self.shell_integration_is_authoritative(self.live_screen)
+            && matches!(
+                self.shell_phases.get(&self.live_screen),
+                Some(ShellIntegrationPhase::Output(_))
+            );
+        self.terminal.set_write_provenance(is_command_output);
     }
 
     fn settle_feed_turn(&mut self, turn: FeedTurn) {
@@ -3195,9 +3214,6 @@ impl DualPlaneSession {
         } else {
             ReflowSnapshot::default()
         };
-        // And, for the same reason and at the same moment, where each logical line was printed —
-        // see [`Self::reestablish_live_inline_sites`], which hands it back below.
-        let carried_sites = self.live_logical_line_sites();
         if plan.begin_transaction {
             self.cursor_logical_line_memory = None;
             if self.resize_epoch.is_active() {
@@ -3277,10 +3293,6 @@ impl DualPlaneSession {
         }
         self.reanchor_semantic_input_regions_after_resize();
         self.reanchor_semantic_output_regions_after_resize();
-        // The grid this rebuilt is not the grid the row records were written for, and the regions
-        // that prove them have just been re-seated onto it. Re-establish every row's site here,
-        // while that is true, rather than leaving it to whatever asks next.
-        self.reestablish_live_inline_sites(&carried_sites);
         let next_layout = LayoutKey {
             width_cells: columns,
             ..self.layout_key
@@ -3414,7 +3426,6 @@ impl DualPlaneSession {
         } else {
             ReflowSnapshot::default()
         };
-        let carried_sites = self.live_logical_line_sites();
         if reconciled {
             self.resume_resize_staging();
         }
@@ -3442,9 +3453,6 @@ impl DualPlaneSession {
             // marker decides whether its line-start coordinate is end-exclusive.
             self.reanchor_semantic_input_regions_after_resize();
             self.reanchor_semantic_output_regions_after_resize();
-            // The second reflow boundary re-establishes the row sites for the same reason the
-            // first does; the reconcile can shift rows under them.
-            self.reestablish_live_inline_sites(&carried_sites);
             // The vendor reconcile can shift rows and always bumps the grid generation, which
             // strands the formulas `restore_offscreen_decorations` re-anchored inside `resize_at`
             // one generation behind the frame the app is about to publish. Re-anchor them against
@@ -4936,38 +4944,6 @@ impl DualPlaneSession {
             })
     }
 
-    /// Is this whole live extent inside one OSC 133 `C..D` command-output region?
-    ///
-    /// **Coverage, not overlap** — and that is the one place this deliberately departs from
-    /// `semantic_input_overlaps_live` it otherwise mirrors. The input query withdraws a decoration,
-    /// so touching the command anywhere is reason enough and erring wide is safe. This query
-    /// *grants* the right to read a lone `$` as mathematics, so erring wide is the failure itself:
-    /// a row that is half output and half the prompt printed after `D` would otherwise be handed to
-    /// the disambiguator as proven output.
-    ///
-    /// `end` is the exclusive end of the extent, which is what lets a `D` landing exactly at
-    /// end-of-text on the final output row still cover that row.
-    ///
-    /// No shell integration on this screen means no region, and therefore `false`: an unmarked
-    /// screen is `InlineMathSite::Ineligible` in its entirety, which is scheme A's stated price.
-    fn command_output_covers_live(
-        &self,
-        screen: ScreenId,
-        start: GridPoint,
-        end: GridPoint,
-    ) -> bool {
-        if !self.shell_integration_is_authoritative(screen) {
-            return false;
-        }
-        let anchor = |point| ContentAnchor::Live {
-            screen,
-            point,
-            bias: Bias::Before,
-            generation: self.grid_generation,
-        };
-        self.command_output_covers(&anchor(start), &anchor(end))
-    }
-
     /// The same question asked of a frozen line: is the whole line inside a command-output region?
     ///
     /// A transcript line already is the WRAPLINE merge, so there is nothing to widen — the extent
@@ -5834,17 +5810,20 @@ impl DualPlaneSession {
                     }),
             );
         }
+        // Asked once for the whole grid rather than per row: no authoritative integration means no
+        // row on this screen can be a command's output, which is the rule `inline_math_site` is
+        // written around and the only thing the per-cell provenance is read against.
+        let command_output = self.shell_integration_is_authoritative(self.live_screen);
         let grid_inputs = (0..self.live_rows.len()).filter_map(|row| {
             self.terminal.visible_row(row as u32).map(|captured| {
                 // Detection reads these rows joined into logical lines, so each row contributes the
                 // text the logical line holds — a continuation keeps the space the wrap fell on.
                 let (text, cell_boundaries) = captured_row_logical_text_and_boundaries(&captured);
                 let row = row as u32;
-                // The site is read, not asked. It was settled when this row's bytes were parsed and
-                // is re-settled only when they change or a reflow rebuilds the grid — see
-                // [`Self::record_live_inline_sites`]. This context is rebuilt to check a returning
-                // raster against the source it was scanned from, and re-deriving the site here made
-                // that check depend on region bookkeeping that had moved on since the scan.
+                // The site is read off the cells, which is where the write that made them recorded
+                // it. Nothing is derived here and nothing is remembered: a cell carries its own
+                // provenance through every scroll, insertion, deletion and reflow that moves it, so
+                // this answer is as current as the grid is and needs no bookkeeping to stay so.
                 LiveDetectionInput {
                     source: LiveDetectionSource::Grid {
                         row,
@@ -5853,7 +5832,10 @@ impl DualPlaneSession {
                     text,
                     continues: captured.continues,
                     captured_columns: captured.captured_columns,
-                    site: self.live_rows[row as usize].inline_site,
+                    site: inline_math_site(
+                        self.live_screen,
+                        command_output && !captured.cells.iter().any(|cell| cell.non_output_write),
+                    ),
                     cell_boundaries,
                 }
             })
@@ -6761,10 +6743,6 @@ impl DualPlaneSession {
             TerminalDamage::Full => (0..self.live_rows.len() as u32).collect::<Vec<_>>(),
             TerminalDamage::Rows(rows) => rows,
         };
-        // Rows whose content genuinely changed, for the site record below. Collected rather than
-        // written inside the loop because a site is a fact about a *logical* line, and the row that
-        // completes one may be damaged later in this same batch than the row that begins it.
-        let mut changed = Vec::<u32>::new();
         for row in damaged {
             // Damage is "a cell was written", not "a cell changed": a TUI that repaints its whole
             // screen writes every row every frame, and the vendor reports every one of them. The
@@ -6793,7 +6771,6 @@ impl DualPlaneSession {
             state.last_damage_at = Some(observed_at);
             state.settled_revision = None;
             state.candidate_signature = None;
-            changed.push(row);
             // Suppression: inside a repaint window the proven raster keeps rendering over the rows
             // being rewritten instead of the record being torn down (and its source flashing
             // through). Alternate suppresses across a boundary repaint; primary suppresses across an
@@ -6813,196 +6790,6 @@ impl DualPlaneSession {
             }
             self.invalidate_live_row(row);
         }
-        self.record_live_inline_sites(&changed);
-    }
-
-    /// Record where each of these live rows sat in the shell's command lifecycle.
-    ///
-    /// **The live counterpart of [`Self::schedule_detection`]'s one write**, and it exists for the
-    /// same reason [`Self::history_inline_site`] gives: the OSC 133 bookkeeping is live state and a
-    /// row's provenance is not. A region is retired when the prompt line it starts on is evicted,
-    /// when a reflow declines to re-seat one of its anchors, or when the marks behind it go stale,
-    /// and every one of those leaves the rows below it on the grid, unchanged, and still carrying
-    /// formulas. Asking again would answer `Ineligible` for all of them.
-    ///
-    /// Asking again is what the grid used to do. `apply_live_worker_completion` rebuilds the whole
-    /// detection context to check a returning raster against the source it was scanned from, and
-    /// that rebuild carried a *fresh* site for every row — so a result was judged on regions that
-    /// had moved on since the scan. For a command whose output and whose `133;D` arrive in one PTY
-    /// burst, that is every result it produces, and it costs only the inline ones: a display
-    /// delimiter carries its own proof and no site gates it.
-    ///
-    /// **Called where the bytes are parsed**, from [`Self::observe_live_damage`], which the feed
-    /// loop runs after every parse quantum and at every shell-integration marker — so a row's site
-    /// is settled while the region that proves it is still the one the shell was describing, not at
-    /// whatever later moment something first asks the row for a formula.
-    ///
-    /// **One site per logical line.** The disambiguator judges a wrapped line as the one string its
-    /// fragments spell, so a line whose rows disagree is `Ineligible` in its entirety
-    /// ([`bt_detect`]'s unanimity fold). Its rows cannot disagree: they were printed by one command,
-    /// and the question is asked once, of the whole line's extent, rather than once per row and
-    /// reconciled afterwards. Coverage, not overlap, exactly as the per-row question was: a line
-    /// half of which is the prompt printed after `D` is not covered and stays ineligible.
-    ///
-    /// The alternate screen keeps its own rule unchanged — [`inline_math_site`] widens it
-    /// structurally and no coverage verdict is consulted there.
-    fn record_live_inline_sites(&mut self, rows: &[u32]) {
-        if rows.is_empty() {
-            return;
-        }
-        let screen = self.live_screen;
-        let mut recorded = BTreeSet::<u32>::new();
-        for row in rows.iter().copied().collect::<BTreeSet<_>>() {
-            if recorded.contains(&row) {
-                continue;
-            }
-            let (first, last) = self.live_logical_line_rows(row);
-            let site = inline_math_site(
-                screen,
-                self.live_logical_line_is_command_output(first, last),
-            );
-            for member in first..=last {
-                recorded.insert(member);
-                if let Some(state) = self.live_rows.get_mut(member as usize) {
-                    state.inline_site = site;
-                }
-            }
-        }
-    }
-
-    /// What each live logical line spells and the site it was printed at, top to bottom.
-    ///
-    /// Taken immediately before a reflow rebuilds the grid — beside [`Self::reflow_witnesses`],
-    /// and for its reason: that is the last moment the answer is still on the grid to be read.
-    fn live_logical_line_sites(&self) -> Vec<(String, InlineMathSite)> {
-        self.live_logical_line_spans()
-            .into_iter()
-            .map(|(first, _, text)| {
-                let site = self
-                    .live_rows
-                    .get(first as usize)
-                    .map_or(InlineMathSite::Ineligible, |state| state.inline_site);
-                (text, site)
-            })
-            .collect()
-    }
-
-    /// Re-establish every live row's site after a reflow, carrying across what can be carried.
-    ///
-    /// A reflow rewraps logical lines. It does not reorder them and it never takes one off the
-    /// bottom — rows leave at the top, into staging — so the *k*-th logical line from the bottom
-    /// before the reflow is the *k*-th from the bottom after it, and a line that still spells the
-    /// same string is that same line. Its provenance travels with it, exactly as a frozen line's
-    /// does: a command printed it, and a window being dragged does not unprint it.
-    ///
-    /// The walk stops at the first line whose text does not match, and everything above that is
-    /// asked of the regions instead — which the resize path has re-seated against the reflowed grid
-    /// on the line above this call, so it is the authority being read rather than a guess being
-    /// made. That is the one honest answer available for a line the reflow changed, and it is not a
-    /// fallback to a remembered site: a site is either carried because the line is provably the same
-    /// line, or established afresh.
-    fn reestablish_live_inline_sites(&mut self, carried: &[(String, InlineMathSite)]) {
-        let spans = self.live_logical_line_spans();
-        let mut proven_from = spans.len();
-        let mut carried_from = carried.len();
-        while proven_from > 0
-            && carried_from > 0
-            && spans[proven_from - 1].2 == carried[carried_from - 1].0
-        {
-            proven_from -= 1;
-            carried_from -= 1;
-        }
-        for (index, (first, last, _)) in spans.iter().enumerate() {
-            let site = if index >= proven_from {
-                carried[carried_from + (index - proven_from)].1
-            } else {
-                inline_math_site(
-                    self.live_screen,
-                    self.live_logical_line_is_command_output(*first, *last),
-                )
-            };
-            for row in *first..=*last {
-                if let Some(state) = self.live_rows.get_mut(row as usize) {
-                    state.inline_site = site;
-                }
-            }
-        }
-    }
-
-    /// Every live logical line as `(first row, last row, text)`, top to bottom.
-    fn live_logical_line_spans(&self) -> Vec<(u32, u32, String)> {
-        let mut spans = Vec::new();
-        let mut first = None;
-        let mut text = String::new();
-        for row in 0..u32::try_from(self.live_rows.len()).unwrap_or(u32::MAX) {
-            let Some(captured) = self.terminal.visible_row(row) else {
-                // A row the terminal has no capture for ends whatever was open above it rather than
-                // gluing the next captured row onto it across the gap.
-                if let Some(first_row) = first.take() {
-                    spans.push((first_row, row.saturating_sub(1), std::mem::take(&mut text)));
-                }
-                continue;
-            };
-            let first_row = *first.get_or_insert(row);
-            text.push_str(&captured_row_logical_text_and_boundaries(&captured).0);
-            if captured.continues {
-                continue;
-            }
-            spans.push((first_row, row, std::mem::take(&mut text)));
-            first = None;
-        }
-        if let Some(first_row) = first {
-            let last = u32::try_from(self.live_rows.len())
-                .unwrap_or(u32::MAX)
-                .saturating_sub(1);
-            spans.push((first_row, last, text));
-        }
-        spans
-    }
-
-    /// The inclusive grid-row span of the logical line `row` belongs to. A row the terminal has no
-    /// capture for is its own logical line, which is the conservative reading and the one the
-    /// caller's `Ineligible` default already assumes.
-    fn live_logical_line_rows(&self, row: u32) -> (u32, u32) {
-        let continues = |row: u32| {
-            self.terminal
-                .visible_row(row)
-                .is_some_and(|captured| captured.continues)
-        };
-        let mut first = row;
-        while first > 0 && continues(first - 1) {
-            first -= 1;
-        }
-        let last_row = u32::try_from(self.live_rows.len())
-            .unwrap_or(u32::MAX)
-            .saturating_sub(1);
-        let mut last = row;
-        while last < last_row && continues(last) {
-            last += 1;
-        }
-        (first, last)
-    }
-
-    /// Is this whole logical line inside one OSC 133 `C..D` region? The extent runs from the first
-    /// cell of its first row to one past the last cell of its last, which is the same half-open
-    /// extent the per-row question used and reduces to it exactly when the line occupies one row.
-    fn live_logical_line_is_command_output(&self, first: u32, last: u32) -> bool {
-        let Some(captured) = self.terminal.visible_row(last) else {
-            return false;
-        };
-        let (_, cell_boundaries) = captured_row_logical_text_and_boundaries(&captured);
-        let end = GridPoint {
-            row: last,
-            column: cell_boundaries.last().map_or(0, |(_, column)| *column),
-        };
-        self.command_output_covers_live(
-            self.live_screen,
-            GridPoint {
-                row: first,
-                column: 0,
-            },
-            end,
-        )
     }
 
     fn invalidate_live_row(&mut self, row: u32) {
@@ -28880,6 +28667,316 @@ mod tests {
     /// fits one grid row, and a long one the pane wraps into two. Both formulas of the wrapped line
     /// sit on its first row, so what this fixture exercises is the *line* spanning two rows, not a
     /// formula split across them (that is `a_formula_split_across_two_printed_rows_is_joined`).
+    /// The site of one grid row, as the live scan sees it.
+    fn grid_site_at(session: &DualPlaneSession, row: u32) -> InlineMathSite {
+        live_grid_input(&session.live_detection_context(), row)
+            .map_or(InlineMathSite::Ineligible, |input| input.site)
+    }
+
+    /// Every row that carries text and that the scan would let a lone `$` be read on.
+    fn eligible_text_rows(session: &DualPlaneSession) -> Vec<u32> {
+        let inputs = session.live_detection_context();
+        (0..session.live_rows.len() as u32)
+            .filter(|row| {
+                live_grid_input(&inputs, *row).is_some_and(|input| {
+                    !input.text.trim().is_empty() && input.site.permits_inline()
+                })
+            })
+            .collect()
+    }
+
+    const PROMPT_A: &str = "\x1b]133;A\x07";
+    const PROMPT_B: &str = "\x1b]133;B\x07";
+    const OUTPUT_C: &str = "\x1b]133;C\x07";
+    const OUTPUT_D: &str = "\x1b]133;D;0\x07";
+    const ENERGY: &str = "energy $E = mc^2$ here";
+
+    /// R1 — **a prompt that reprints a command's line byte for byte must not be typeset.**
+    ///
+    /// The reviewed sequence, through ordinary `feed_at` with nothing reached into: a command's
+    /// output scrolls until the OSC 133 region is evicted along with the prompt line it started on,
+    /// and the shell then prints the identical text at the top of the screen as its own prompt.
+    /// Equality of cells proves content and never ownership, so the answer cannot come from
+    /// comparing the row against itself; and the region is gone, so it cannot come from there
+    /// either. It comes from the cells, which remember which write put them down.
+    #[test]
+    fn a_prompt_that_reprints_a_commands_line_byte_for_byte_is_not_typeset() {
+        let started = Instant::now();
+        let one = NonZeroUsize::new(1).unwrap();
+        let mut session = DualPlaneSession::with_quotas(nz(60), nz(8), one, one);
+        seat_inline_metrics(&mut session);
+        session
+            .feed_at(
+                format!("{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\na\r\nb\r\nc\r\n{ENERGY}\r\n")
+                    .as_bytes(),
+                started,
+            )
+            .unwrap();
+        session
+            .feed_at(
+                format!("tail1\r\ntail2\r\ntail3\r\ntail4\r\ntail5\r\ntail6\r\n{OUTPUT_D}")
+                    .as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert!(
+            session.semantic_output_regions.is_empty(),
+            "the fixture must really evict the region, or this proves only that a closed region \
+             still covers the rows it closed over"
+        );
+
+        session
+            .feed_at(
+                format!("\x1b[1;1H{PROMPT_A}{ENERGY}{PROMPT_B}").as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert_eq!(
+            grid_site_at(&session, 0),
+            InlineMathSite::Ineligible,
+            "the shell wrote this row, so nothing on it may be read as mathematics"
+        );
+
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        complete_live_math_for_real(&mut session);
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert!(
+            rendered_inline_blocks(&frame).is_empty(),
+            "a prompt must not be typeset: {:?}",
+            frame
+                .math_blocks
+                .iter()
+                .map(|block| (block.artifact.mode, block.display))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            frame_row_text(&frame, 0).contains('$'),
+            "and its source stays exactly as the shell printed it"
+        );
+    }
+
+    /// The other half of that fixture: a command's own line keeps its site once the region that
+    /// proved it has gone. Retirement here is ordinary — the region leaves with the prompt line it
+    /// started on — and the rows the command printed are still on the grid, unchanged, still
+    /// carrying their formulas.
+    #[test]
+    fn a_command_output_line_keeps_its_site_when_its_region_is_evicted() {
+        let started = Instant::now();
+        let one = NonZeroUsize::new(1).unwrap();
+        let mut session = DualPlaneSession::with_quotas(nz(60), nz(8), one, one);
+        seat_inline_metrics(&mut session);
+        session
+            .feed_at(
+                format!("{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\na\r\nb\r\nc\r\n{ENERGY}\r\n")
+                    .as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert_eq!(
+            grid_site_at(&session, 4),
+            InlineMathSite::CommandOutput,
+            "the fixture must really print the formula inside C..D"
+        );
+        session
+            .feed_at(
+                format!("t1\r\nt2\r\nt3\r\nt4\r\nt5\r\nt6\r\n{OUTPUT_D}").as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert!(
+            session.semantic_output_regions.is_empty(),
+            "the fixture must really evict the region"
+        );
+        let inputs = session.live_detection_context();
+        let moved = (0..session.live_rows.len() as u32)
+            .find(|row| {
+                live_grid_input(&inputs, *row).is_some_and(|input| input.text.contains("energy"))
+            })
+            .expect("the formula is still on the grid");
+        assert_eq!(
+            grid_site_at(&session, moved),
+            InlineMathSite::CommandOutput,
+            "a scroll moves the cells, and their provenance goes with them"
+        );
+    }
+
+    /// R2 — **a feed that splits at a carriage return must not lose the site.**
+    ///
+    /// An open region's frontier used to be the cursor, and `\r` parks the cursor at column zero,
+    /// before the end of the line just printed. A split there recorded the row ineligible, and the
+    /// `\n` and the `D` that followed changed no byte, so nothing ever corrected it. Provenance
+    /// stamped by the write itself has no frontier to fall short of.
+    #[test]
+    fn a_feed_split_at_a_carriage_return_does_not_lose_the_site() {
+        let head = format!("{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\n{ENERGY}\r");
+        let tail = format!("\n{OUTPUT_D}");
+        for split_after_cr in [true, false] {
+            let started = Instant::now();
+            let mut session = DualPlaneSession::new(nz(60), nz(8));
+            seat_inline_metrics(&mut session);
+            if split_after_cr {
+                session.feed_at(head.as_bytes(), started).unwrap();
+                session.feed_at(tail.as_bytes(), started).unwrap();
+            } else {
+                session
+                    .feed_at(format!("{head}{tail}").as_bytes(), started)
+                    .unwrap();
+            }
+            assert_eq!(
+                grid_site_at(&session, 1),
+                InlineMathSite::CommandOutput,
+                "split_after_cr={split_after_cr}"
+            );
+        }
+    }
+
+    /// The same defect reached inside one `feed`, by putting the carriage return on the last byte
+    /// of a parse quantum. NUL is ignored by the parser and writes no cell, so the padding is
+    /// geometry and nothing else.
+    #[test]
+    fn a_carriage_return_on_the_parse_quantum_boundary_does_not_lose_the_site() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut session);
+        let head = format!("{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\n{ENERGY}\r");
+        let mut stream = vec![0u8; PARSE_QUANTUM - head.len()];
+        stream.extend_from_slice(head.as_bytes());
+        assert_eq!(
+            stream.len(),
+            PARSE_QUANTUM,
+            "the carriage return must land on the quantum's last byte"
+        );
+        stream.extend_from_slice(format!("\n{OUTPUT_D}").as_bytes());
+        session.feed_at(&stream, started).unwrap();
+        assert_eq!(grid_site_at(&session, 1), InlineMathSite::CommandOutput);
+    }
+
+    /// **No grid movement may leave a prompt row wearing a command's site.**
+    ///
+    /// Each of these rewrites or moves rows under an answer that was true of where they used to be:
+    /// an identical reprint, an erase and a reprint at home, a shorter prompt over an older output
+    /// row, the insert/delete/reverse-index family, the scroll pair, and a scroll region that
+    /// leaves rows fixed below it. A rule kept beside the grid has to name every one of them and
+    /// carry each exactly; a fact carried by the cell is moved by whatever moves the cell, and
+    /// there is nothing left to enumerate.
+    ///
+    /// The fixture prints one output line and one prompt line spelling the same thing, so the count
+    /// of rows a lone `$` may be read on is the whole assertion: one, wherever the movement has put
+    /// it, and never two.
+    #[test]
+    fn no_grid_movement_lets_a_prompt_row_wear_a_commands_site() {
+        // Row 0 carries the prompt and the command line, row 1 the command's output, and row 2 the
+        // next prompt — which spells exactly what the output spells. Nothing has moved yet, so the
+        // answer is the easy one and every design gets it right; each movement below is what turns
+        // an answer about where a row *was* into an answer about a row that is somewhere else.
+        let prologue = format!(
+            "{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\n{ENERGY}\r\n\
+             {OUTPUT_D}{PROMPT_A}{ENERGY}{PROMPT_B}"
+        );
+        for (name, movement, eligible) in [
+            ("nothing moves", String::new(), 1),
+            // The shell redraws its own line where its own line already was.
+            (
+                "an identical prompt reprint",
+                format!("\x1b[3;1H{ENERGY}"),
+                1,
+            ),
+            // Everything is erased, so every cell is unclaimed again and only the prompt writes.
+            (
+                "an erase and a reprint at home",
+                format!("\x1b[2J\x1b[H{PROMPT_A}{ENERGY}{PROMPT_B}"),
+                0,
+            ),
+            // A prompt that covers only part of the command's row still claims that row.
+            (
+                "a shorter prompt over the output row",
+                format!("\x1b[2;1H{PROMPT_A}energy $E = mc^2${PROMPT_B}"),
+                0,
+            ),
+            (
+                "an inserted line above both",
+                "\x1b[1;1H\x1b[L".to_string(),
+                1,
+            ),
+            ("the output line deleted", "\x1b[2;1H\x1b[M".to_string(), 0),
+            (
+                "a reverse index at the top",
+                "\x1b[1;1H\x1bM".to_string(),
+                1,
+            ),
+            // `CSI S` takes the top line, which is the command line rather than its output.
+            ("a scroll up", "\x1b[S".to_string(), 1),
+            ("a scroll down", "\x1b[T".to_string(), 1),
+            (
+                "a scroll up inside a region that leaves rows fixed below it",
+                "\x1b[1;3r\x1b[S\x1b[r".to_string(),
+                1,
+            ),
+            (
+                // This one pushes the prompt's row out of the region and leaves the command's.
+                "a scroll down inside a region that leaves rows fixed below it",
+                "\x1b[1;3r\x1b[T\x1b[r".to_string(),
+                1,
+            ),
+        ] {
+            let started = Instant::now();
+            let mut session = DualPlaneSession::new(nz(60), nz(6));
+            seat_inline_metrics(&mut session);
+            session.feed_at(prologue.as_bytes(), started).unwrap();
+            assert_eq!(
+                eligible_text_rows(&session).len(),
+                1,
+                "{name}: the fixture must itself start with exactly the command's own row"
+            );
+            session.feed_at(movement.as_bytes(), started).unwrap();
+            assert_eq!(
+                eligible_text_rows(&session).len(),
+                eligible,
+                "{name}: rows a formula may be read on"
+            );
+        }
+    }
+
+    /// A height change takes a row off the bottom, and the row that survives keeps its own
+    /// provenance rather than inheriting the one that used to stand where it now stands.
+    #[test]
+    fn shrinking_the_grid_does_not_hand_a_prompt_the_output_rows_site() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(2));
+        seat_inline_metrics(&mut session);
+        // Row 0 is the prompt and row 1 the command's output, and the two spell the same thing.
+        session
+            .feed_at(
+                // The cursor ends on the upper line, which is what makes the vendor drop the lower
+                // one rather than scroll the upper one away (`grid/resize.rs`).
+                format!("{PROMPT_A}{ENERGY}{PROMPT_B}{OUTPUT_C}\r\n{ENERGY}{OUTPUT_D}\x1b[1;1H")
+                    .as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert_eq!(
+            eligible_text_rows(&session),
+            vec![1],
+            "the fixture must start with the command's row eligible and the prompt's not"
+        );
+        session
+            .resize_at(nz(60), nz(1), started + Duration::from_millis(210))
+            .unwrap();
+        // The vendor takes the row off the bottom, so what survives is the prompt's own row — with
+        // the command's text on it, which is the whole point of the fixture.
+        let inputs = session.live_detection_context();
+        assert!(
+            live_grid_input(&inputs, 0).is_some_and(|input| input.text.contains("energy")),
+            "the surviving row must still carry the formula, or this proves nothing"
+        );
+        assert!(
+            eligible_text_rows(&session).is_empty(),
+            "the prompt's row does not inherit the site of the row that used to stand under it: {:?}",
+            eligible_text_rows(&session)
+        );
+    }
+
     const TWO_OUTPUT_LINES: &str = concat!(
         "\x1b]133;A\x07PS> \x1b]133;B\x07show\x1b]133;C\x07\r\n",
         "energy $E = mc^2$ here\r\n",
@@ -28949,10 +29046,17 @@ mod tests {
         let tasks = take_live_worker_tasks(&mut session);
         assert_eq!(tasks.len(), 2, "one scan per armed line");
 
-        // The rasters are in flight and the command's region goes. Everything the tasks depend on —
-        // the rows, their bytes, the site they were printed at — is unchanged; only the bookkeeping
-        // that once answered the site question a second time is gone.
-        session.semantic_output_regions.clear();
+        // The rasters are in flight while the session goes on being a session: the next prompt has
+        // already returned above, and now a second command runs and prints. Nothing touches the two
+        // rows the rasters are for, and everything those rasters depend on — the rows, their bytes,
+        // the write that put them there — is exactly as it was when they were scanned.
+        session
+            .feed_at(
+                format!("next{OUTPUT_C}\r\nunrelated output\r\n{OUTPUT_D}{PROMPT_A}PS> {PROMPT_B}")
+                    .as_bytes(),
+                started,
+            )
+            .unwrap();
 
         let engine = MathEngine::new();
         let mut accepted = 0;
@@ -29012,12 +29116,6 @@ mod tests {
             let result = render_live_detection_task(&engine, &mut task, [220, 220, 220]);
             session.complete_live_worker_result(task, result);
         }
-
-        // The rows, their bytes and their rasters are untouched; only the bookkeeping a re-derived
-        // site would have been read from is gone. A reflow is exactly where that happens for real:
-        // a region whose anchors the reflow declines to re-seat is retired, and the rows it printed
-        // stay on the grid carrying their formulas.
-        session.semantic_output_regions.clear();
 
         let resized_at = started + Duration::from_millis(210);
         session.resize_at(nz(70), nz(10), resized_at).unwrap();

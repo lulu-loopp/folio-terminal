@@ -803,6 +803,17 @@ pub struct CapturedCell {
     pub hyperlink: Option<CellHyperlink>,
     /// A terminal wide-character spacer has no source text of its own.
     pub wide_spacer: bool,
+    /// The write that put this cell here did not happen inside a shell's OSC 133 `C..D`
+    /// command-output region — a prompt, a line the user typed, or any write on a screen with no
+    /// shell integration speaking at all.
+    ///
+    /// **Provenance, not style.** It is a fact about the write and it rides on the cell because the
+    /// cell is the thing that moves: a scroll, a scroll region, `IL`/`DL`, `RI`, `CSI S`/`T`, a
+    /// reflow that re-cuts the row, all carry it without anything having to be kept in step. A cell
+    /// nothing has written since it was erased says `false` and means only that — an untouched gap
+    /// claims nothing, and a reader folding a line asks whether *any* of its cells was claimed by a
+    /// non-output write, never whether all of them were claimed by an output one.
+    pub non_output_write: bool,
 }
 
 impl CapturedCell {

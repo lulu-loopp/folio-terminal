@@ -591,6 +591,10 @@ impl TerminalAdapter {
         let size = GridSize { columns, rows };
         let listener = CaptureListener::default();
         let mut term = Term::new(config, &size, listener.clone());
+        // Fail closed from the first byte: until a session says otherwise, nothing written here is
+        // a command's output. The vendored default is the empty one, so that a caller which never
+        // speaks — upstream's own test suite — writes exactly the cells upstream writes.
+        term.set_write_provenance(false);
         install_transcript_hook(&mut term, &listener);
         let row_fingerprint_seed = RandomState::new().build_hasher().finish();
         Self {
@@ -1216,6 +1220,16 @@ impl TerminalAdapter {
     /// decide where one logical line ends, so capturing (and cloning) a whole row of cells for one
     /// bit is the wrong price. The bit itself is where the capture reads it: WRAPLINE on the row's
     /// last cell.
+    /// Say whether the bytes fed from here on are a shell command's output.
+    ///
+    /// Stamped by the terminal onto every cell it prints, and read back off the captured cells as
+    /// [`bt_transcript::CapturedCell::non_output_write`]. The session states it before every
+    /// segment: the adapter pauses the stream at each shell-integration marker, so a segment is
+    /// homogeneous and the answer cannot change inside one.
+    pub fn set_write_provenance(&mut self, is_command_output: bool) {
+        self.term.set_write_provenance(is_command_output);
+    }
+
     pub fn visible_row_continues(&self, row: u32) -> bool {
         let columns = self.columns.get() as usize;
         row < self.rows.get()

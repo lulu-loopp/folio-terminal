@@ -1,7 +1,8 @@
 // MODIFIED BY THE FOLIO CONTRIBUTORS — not the upstream
 // alacritty_terminal 0.26.0 file of the same name.
-// Change: reformatted to this repository's rustfmt settings, and a ceiling on the zerowidth marks
-// one cell holds (`push_zerowidth`).
+// Change: reformatted to this repository's rustfmt settings, a ceiling on the zerowidth marks
+// one cell holds (`push_zerowidth`), and one added flag, `NON_OUTPUT_WRITE`, which records for each
+// cell whether the write that put it there happened outside a shell's command-output region.
 // Index: vendor/alacritty_terminal/CHANGES-FOLIO.md
 // Notice given under section 4(b) of the Apache License, Version 2.0.
 
@@ -38,6 +39,21 @@ bitflags! {
         const UNDERCURL                 = 0b0001_0000_0000_0000;
         const DOTTED_UNDERLINE          = 0b0010_0000_0000_0000;
         const DASHED_UNDERLINE          = 0b0100_0000_0000_0000;
+        /// **Folio's, not upstream's: who wrote this cell.**
+        ///
+        /// Set on every cell written while the terminal was *not* inside a shell's OSC 133 `C..D`
+        /// command-output region — a prompt, a line the user typed, a program's output on a screen
+        /// with no shell integration at all. Clear on a cell written inside one, and clear on a
+        /// cell nothing has written since it was last erased, because `Cell::reset` takes the
+        /// default flags.
+        ///
+        /// It is a property of the *write*, which is why it lives on the cell rather than beside
+        /// the grid: a cell carries it through every operation that moves it — a scroll, a scroll
+        /// region, `IL`/`DL`, `RI`, `CSI S`/`T`, a resize reflow that re-cuts the row it was in,
+        /// and eviction into a scrollback — with no bookkeeping of its own to keep in step. The
+        /// terminal never reads it; the value is [`super::Term::set_write_provenance`]'s, and it is
+        /// there for an owner outside the emulator to fold over a line's cells.
+        const NON_OUTPUT_WRITE          = 0b1000_0000_0000_0000;
         const ALL_UNDERLINES            = Self::UNDERLINE.bits() | Self::DOUBLE_UNDERLINE.bits()
                                         | Self::UNDERCURL.bits() | Self::DOTTED_UNDERLINE.bits()
                                         | Self::DASHED_UNDERLINE.bits();

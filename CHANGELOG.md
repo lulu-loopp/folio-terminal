@@ -22,10 +22,20 @@ All notable changes to Folio are recorded here. The format follows
   being judged, at that moment, against a command that had already ended. Some
   of them typeset and some were left as raw text, the same file coming out
   differently from one run to the next, and a line long enough to wrap tended to
-  lose both of its formulas at once. Where a line was printed is now something
-  the line keeps, settled as it arrives and carried across a window resize, so
-  the answer no longer depends on when the picture happens to be ready.
-  Displayed `$$` blocks were never affected: they carry their own proof.
+  lose both of its formulas at once. Which text a command printed is now written
+  down as it is printed, so the answer no longer depends on when the picture
+  happens to be ready. Displayed `$$` blocks were never affected: they carry
+  their own proof.
+
+- **Your prompt is never typeset as mathematics, whatever it says and wherever
+  it moves.** Folio decides what a command printed by remembering it at the
+  moment it arrives, rather than by working it out afterwards from where things
+  sit — so a shell that redraws its prompt with the very text a command had just
+  printed gets a prompt, not a formula, and so does one that clears the screen
+  first, or reprints after a reset, or writes a shorter prompt over an older
+  line. The same holds when the screen moves underneath: inserting, deleting,
+  scrolling or shrinking rows carries each line's own history with it instead of
+  handing it whatever used to stand in that place.
 
 - **A formula is no longer taken down by its neighbour's result.** Folio looks
   at every line that could be the start of something, and inside a block of

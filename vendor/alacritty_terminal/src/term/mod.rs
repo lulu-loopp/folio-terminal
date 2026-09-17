@@ -8,7 +8,8 @@
 // cluster may grow; DEC 2031 theme-change notification; per-row input-write
 // tracking; `Term::fork`; an origin-mode cursor fix, so that a relative move is
 // not measured from the scroll region twice; UTF-8 mouse reporting refused
-// rather than recorded as set; and the tests for all of it. The rest is this
+// rather than recorded as set; a write-provenance flag stamped on every cell a
+// print puts down (`Term::set_write_provenance`); and the tests for all of it. The rest is this
 // repository's rustfmt settings.
 // Index: vendor/alacritty_terminal/CHANGES-FOLIO.md
 // Notice given under section 4(b) of the Apache License, Version 2.0.
@@ -431,6 +432,19 @@ pub struct Term<T> {
     /// Streaming UAX #29 state for DEC private mode 2027.
     grapheme: GraphemeState,
 
+    /// What a print records about itself on every cell it writes.
+    ///
+    /// Either empty or exactly [`Flags::NON_OUTPUT_WRITE`], set by
+    /// [`Self::set_write_provenance`] and OR-ed into the flags of every cell this terminal prints.
+    /// The emulator never reads it back: it is carried so that an owner outside the emulator can
+    /// ask, of any cell on the grid or of any cell that has since been moved, scrolled, reflowed or
+    /// evicted, whether the write that put it there was a command's output.
+    ///
+    /// It starts empty, so a caller that never speaks writes exactly the cells upstream writes.
+    /// The direction that is safe for a caller which *does* use it is the other one, so the owner
+    /// states it once at construction and again before every segment it feeds.
+    write_provenance: Flags,
+
     /// A pending-wrap cursor position just returned by CPR.
     ///
     /// Line editors commonly follow `CSI 6 n` by addressing the reported cell. CPR cannot encode
@@ -573,6 +587,20 @@ impl<T> Term<T> {
         fork.transcript_hook = None;
         fork.input_writes.clear();
         fork
+    }
+
+    /// Say whether the writes that follow are a shell command's output.
+    ///
+    /// Stamped onto every cell the terminal prints from here on, as [`Flags::NON_OUTPUT_WRITE`]
+    /// when they are *not* (see that flag). The caller is expected to state it before every segment
+    /// it feeds rather than only when it changes: the emulator has no way to know, and the value
+    /// that leaves a cell unclaimed is the safe one to hold by default.
+    pub fn set_write_provenance(&mut self, is_command_output: bool) {
+        self.write_provenance = if is_command_output {
+            Flags::empty()
+        } else {
+            Flags::NON_OUTPUT_WRITE
+        };
     }
 
     /// Drain rows which received printable input, preserving the active screen at write time.
@@ -768,6 +796,7 @@ impl<T> Term<T> {
             mode: Default::default(),
             grapheme: Default::default(),
             reported_pending_wrap: None,
+            write_provenance: Flags::empty(),
         }
     }
 
@@ -1504,7 +1533,9 @@ impl<T> Term<T> {
         let c = self.grid.cursor.charsets[self.active_charset].map(c);
         let fg = self.grid.cursor.template.fg;
         let bg = self.grid.cursor.template.bg;
-        let flags = self.grid.cursor.template.flags;
+        // The SGR template cannot carry the provenance: `SGR 0` sets `template.flags` to empty,
+        // and a shell writes one before nearly every line it prints.
+        let flags = self.grid.cursor.template.flags | self.write_provenance;
         let extra = self.grid.cursor.template.extra.clone();
 
         let mut cursor_cell = self.grid.cursor_cell();
@@ -1831,6 +1862,9 @@ impl<T> Term<T> {
         T: EventListener,
     {
         debug_assert!(matches!((state.width, new_width), (1, 2) | (2, 1)));
+        // No provenance here: these two assignments *clear* the cells the old-width grapheme
+        // occupied, and a cleared cell claims nothing — the same rule `Cell::reset` follows. The
+        // glyph that replaces it is printed through `write_at_cursor`, which does stamp.
         let template = self.grid.cursor.template.clone();
 
         if let Some(placeholder) = state.wrap_placeholder.take() {
@@ -2268,10 +2302,15 @@ impl<T: EventListener> Handler for Term<T> {
             count -= 1;
 
             let c = self.grid.cursor.charsets[self.active_charset].map('\t');
+            let provenance = self.write_provenance;
             let cell = self.grid.cursor_cell();
             if cell.c == ' ' {
                 cell.c = c;
             }
+            // A tab writes this cell as surely as a printable character does, and it is the one
+            // print that does not go through `write_at_cursor`.
+            cell.flags.remove(Flags::NON_OUTPUT_WRITE);
+            cell.flags.insert(provenance);
 
             loop {
                 if (self.grid.cursor.point.column + 1) == self.columns() {

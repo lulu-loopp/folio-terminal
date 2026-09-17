@@ -56,7 +56,7 @@ file produces the vendored file byte for byte. Upstream formats with its own
 | `src/index.rs` | Formatting only. |
 | `src/selection.rs` | Formatting only. |
 | `src/sync.rs` | Formatting only. |
-| `src/term/cell.rs` | **Code.** A ceiling on the zerowidth marks one cell stores (`push_zerowidth`), from `bt_unicode::MAX_GRAPHEME_CLUSTER_CHARS`. Otherwise formatting only. |
+| `src/term/cell.rs` | **Code.** A ceiling on the zerowidth marks one cell stores (`push_zerowidth`), from `bt_unicode::MAX_GRAPHEME_CLUSTER_CHARS`, and one added flag, `Flags::NON_OUTPUT_WRITE`, in the one bit of the `u16` upstream leaves free. Otherwise formatting only. |
 | `src/term/search.rs` | Formatting only. |
 | `src/thread.rs` | Formatting only. |
 | `src/tty/mod.rs` | Formatting only. |
@@ -124,6 +124,18 @@ file produces the vendored file byte for byte. Upstream formats with its own
 - **Input-write tracking.** `take_input_writes` drains the set of rows that
   received printable input since the last drain — distinct from render damage,
   which is about what must be repainted.
+- **Write provenance.** `set_write_provenance` says whether the bytes fed from
+  here on are a shell command's output, and every cell the terminal prints from
+  then on carries the answer as `Flags::NON_OUTPUT_WRITE` (see that flag's own
+  documentation, and note that `Cell::reset` clears it, so an erase leaves a cell
+  claiming nothing). The terminal never reads it back. It is there because the
+  answer is a fact about a *write* and the cell is the thing that moves: a
+  scroll, a scroll region, `IL`/`DL`, `RI`, `CSI S`/`T`, a resize reflow that
+  re-cuts a row and an eviction into a scrollback all carry it without anybody
+  having to keep a parallel record in step. The field starts empty, so a caller
+  that never speaks — upstream's own test suite — writes exactly the cells
+  upstream writes; the owner states it at construction and before every segment
+  it feeds.
 - **`primary_grid` is public.** The accessor itself is Folio's and already
   existed for the resize transaction; only its visibility changed. `resize`
   reflows the inactive grid as well as the active one, so a resize taken while a
