@@ -1505,6 +1505,96 @@ fn a_body_edited_while_its_first_scan_is_in_flight_is_still_typeset() {
     }
 }
 
+/// **The stability interval belongs to the band, not to the row detection was armed on.**
+///
+/// An agent streams a formula's body in, a few characters at a time, while the two `$$` rows around
+/// it sit still. Those rows have been quiet for a long time, so they read as stable; the scan they
+/// arm goes out, comes back describing a body that has moved on, and is refused as `SourceChanged`.
+/// Re-arming on that refusal is what makes the replacement get typeset at all — but re-arming on the
+/// opener's own clock re-arms it while the thing it depends on is still moving, and the answer is
+/// refused again, every frame, for as long as the stream lasts.
+///
+/// So a re-arm carries the newest damage in the band onto every row of it: the rows share one clock,
+/// because they are one answer. The recovery is the same recovery it always was — the stream stops,
+/// the band goes quiet for its interval, and the block is read once and typeset.
+#[test]
+fn a_body_streaming_into_a_block_does_not_schedule_a_scan_a_frame() {
+    const FRAMES: u64 = 60;
+    const FRAME: Duration = Duration::from_millis(16);
+    /// **The clock's own ceiling, not the frame rate's.** A body that never settles cannot be read,
+    /// and the stability interval's answer to that is to look again once it has been quiet for one;
+    /// a stream that outlasts the interval turns that into one look per interval. Both `$$` rows of
+    /// a block can arm a scan, so the rule's ceiling over this stream is
+    /// `2 × (1 + 960 ms / 200 ms)` = 12, and 8 is what it actually costs — against 48 before, which
+    /// was one a frame and would have been 480 at ten times the frame rate for the same second of
+    /// output.
+    const SCANS_DURING_THE_STREAM: u64 = 2
+        * (1 + (FRAMES * FRAME.as_millis() as u64)
+            .div_ceil(LIVE_MATH_STABLE_INTERVAL.as_millis() as u64));
+
+    let start = std::time::Instant::now();
+    let mut session = DualPlaneSession::new(nz(48), nz(16));
+    let mut first = b"\x1b[?1049h".to_vec();
+    first.extend_from_slice(&synchronized_repaint(&[
+        "header", "$$", "x", "$$", "tail", "prompt> ",
+    ]));
+    session.feed_at(&first, start).unwrap();
+    session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+    let settled = session.live_detection_count();
+
+    // Each frame: the body grows by a character, last frame's scan comes back describing the body
+    // it was given, and whatever this frame armed goes out to the renderer.
+    let mut in_flight: Vec<(bool, bt_detect::LiveDetectionTask)> = Vec::new();
+    for frame in 0..FRAMES {
+        let now = start + LIVE_MATH_STABLE_INTERVAL + FRAME * frame as u32;
+        // A body that changes every frame without ever growing past the pane: an agent revising
+        // what it is writing. One that only appended would wrap and stop being a three-row block,
+        // which is a different fixture.
+        session
+            .feed_at(
+                format!("\x1b[3;1H\x1b[Kx^{{{}}}\x1b[6;9H", frame % 9 + 1).as_bytes(),
+                now,
+            )
+            .unwrap();
+        session.advance_live_stability(now);
+        let mut armed = Vec::new();
+        while let Some(task) = session.take_math_worker_task() {
+            let SessionMathTask::Live(mut task) = task else {
+                panic!("the fixture unexpectedly scheduled frozen math");
+            };
+            let resolved = bt_detect::resolve_live_detection_task(&mut task);
+            armed.push((resolved, task));
+        }
+        for (resolved, task) in std::mem::replace(&mut in_flight, armed) {
+            if resolved {
+                let _ = session.complete_live_worker_result(task, Ok(synthetic_raster(40, 40)));
+            } else {
+                let _ =
+                    session.complete_live_worker_result(task, Err(MathRenderError::NotDetected));
+            }
+        }
+    }
+    let during = session.live_detection_count() - settled;
+    assert!(
+        during <= SCANS_DURING_THE_STREAM,
+        "a streaming body scheduled {during} scans over {FRAMES} frames, budget \
+         {SCANS_DURING_THE_STREAM}"
+    );
+    // Said a second way, because it is the half a reader would recognise: the work does not follow
+    // the frame rate. Drawing the same second of output twice as often must not cost twice as much.
+    assert!(
+        during * 4 < FRAMES,
+        "a streaming body scheduled {during} scans over {FRAMES} frames — that is a scan a frame \
+         in all but name"
+    );
+
+    // The stream stops. The band goes quiet for its interval, and the block is read and typeset.
+    let quiet = start + LIVE_MATH_STABLE_INTERVAL + FRAME * FRAMES as u32;
+    session.advance_live_stability(quiet + LIVE_MATH_STABLE_INTERVAL);
+    complete_live_math(&mut session);
+    assert_band_is_a_picture(&mut session, "the settled body was never typeset");
+}
+
 /// The control the two fixtures above are measured against: **a row rewritten with the bytes it
 /// already had did not change, whoever is looking at it.**
 ///

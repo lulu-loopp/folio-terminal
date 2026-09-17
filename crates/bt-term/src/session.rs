@@ -7159,22 +7159,7 @@ impl DualPlaneSession {
             .values()
             .filter(|record| record.band_start_row <= row && row <= record.band_end_row)
         {
-            for band_row in record.band_start_row..=record.band_end_row {
-                if let Some(state) = live_rows.get_mut(band_row as usize) {
-                    state.candidate_signature = None;
-                    state.settled_revision = None;
-                }
-            }
-        }
-    }
-
-    /// Ask again about every row in `first ..= last`.
-    fn rearm_live_rows(&mut self, first: u32, last: u32) {
-        for row in first..=last {
-            if let Some(state) = self.live_rows.get_mut(row as usize) {
-                state.candidate_signature = None;
-                state.settled_revision = None;
-            }
+            rearm_live_row_band(live_rows, record.band_start_row, record.band_end_row);
         }
     }
 
@@ -7581,7 +7566,20 @@ impl DualPlaneSession {
             // signature hashes and the candidate is armed by that.
             if reason == LiveCompletionRefusal::SourceChanged {
                 let (first, last) = live_task_dependency_rows(&task);
-                self.rearm_live_rows(first, last);
+                // A scan older than an answer that has already been accepted for these rows has
+                // nothing to re-ask: the record standing on them *is* the newer answer, and it got
+                // there by being read from the grid as it is now. The queue's own de-duplication
+                // only reaches candidates still waiting to go out, never work already with the
+                // renderer, so two scans of one band can be in flight at once and the loser arrives
+                // last. Re-arming for it would schedule a scan whose answer is already on the
+                // screen.
+                let answered = self
+                    .live_decorations
+                    .values()
+                    .any(|record| record.band_start_row <= first && last <= record.band_end_row);
+                if !answered {
+                    rearm_live_row_band(&mut self.live_rows, first, last);
+                }
             }
             // A refused completion used to leave nothing behind but a counter nobody prints, so a
             // formula that stayed at source because its raster was thrown away looked in the trace
@@ -14168,6 +14166,38 @@ impl std::fmt::Display for LiveCompletionRefusal {
             Self::Unproven => "unproven",
         };
         formatter.write_str(word)
+    }
+}
+
+/// Ask again about `first ..= last`, and **give every row of the band the newest damage time in
+/// it**.
+///
+/// The second half is what bounds the asking. A band is one answer read from several rows, and the
+/// stability interval is the rule that an answer is only worth asking for once its source has stopped
+/// moving — but it was applied to the row detection is armed on, and that row is a delimiter, which
+/// sits still while an agent streams the body between them in. So the opener read as stable while
+/// the thing its answer depends on was still arriving: the scan went out, came back describing a
+/// body that had moved on, was refused, re-armed the opener, and went out again — every frame, for
+/// as long as the stream lasted (measured 48 scans over 60 frames of a growing body).
+///
+/// The rows of a band share one clock because they are one answer. Nothing else changes: the stream
+/// stops, the band goes quiet for its interval like any other source, and the block is read once.
+fn rearm_live_row_band(rows: &mut [LiveRowStability], first: u32, last: u32) {
+    let newest = (first..=last)
+        .filter_map(|row| {
+            rows.get(row as usize)
+                .and_then(|state| state.last_damage_at)
+        })
+        .max();
+    for row in first..=last {
+        let Some(state) = rows.get_mut(row as usize) else {
+            continue;
+        };
+        state.candidate_signature = None;
+        state.settled_revision = None;
+        if newest.is_some() {
+            state.last_damage_at = newest;
+        }
     }
 }
 

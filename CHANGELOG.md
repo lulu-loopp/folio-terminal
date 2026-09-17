@@ -81,7 +81,9 @@ All notable changes to Folio are recorded here. The format follows
   again.** If a program replaced a formula's middle while Folio was still drawing
   that formula, the drawing was thrown away — rightly, it was of text that had gone
   — but nothing went back to look at what replaced it, and the formula stayed as
-  LaTeX for as long as it was on the screen.
+  LaTeX for as long as it was on the screen. Going back to look costs the same
+  whether the screen is drawn thirty times a second or three hundred: Folio waits
+  for the whole formula to stop moving, not just its first line.
 
 ## 0.4.2-preview — 2026-09-17
 
