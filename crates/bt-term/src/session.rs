@@ -4231,6 +4231,37 @@ impl DualPlaneSession {
                     .insert(screen, ShellIntegrationPhase::Input(region));
             }
             ShellIntegrationMarker::CommandExecuted => {
+                // **A `C` is heard only inside a prompt cycle this session watched open.**
+                //
+                // OSC 133 is in band and unauthenticated: these bytes are a claim by whoever wrote
+                // them, and a program — or a file with the escape in it, reaching the screen
+                // through `cat` — can write the same bytes the shell writes. Nothing here can
+                // establish *who* emitted a marker, and pretending otherwise would be worse than
+                // saying so. What can be checked is the **order**, and one order is worth
+                // refusing: a `C` that stands in no prompt cycle at all. On a screen where the
+                // phase is `None` nothing has ever spoken — a pane with no shell integration
+                // installed — and a `C` there used to create this session's authority over that
+                // screen out of nothing, which is the whole of the machinery a lone forged marker
+                // needed to have the text after it typeset. `Finished` is the same statement
+                // between two commands: the last one ended at `D` and no prompt has begun.
+                //
+                // `Prompt` and `Input` are both accepted, not `Input` alone. A shell that reports
+                // `A`, `C` and `D` and never `B` is a shell whose command line this session simply
+                // does not know the extent of, and refusing it would cost it every formula while
+                // closing nothing: a stream that can forge a `C` can forge the `B` before it just
+                // as cheaply. `Output` keeps the repeated-`C` rule below exactly as it was — a
+                // second `C` inside a command's own output re-opens the region it was already
+                // stamping, and no cell's claim changes either way.
+                if !matches!(
+                    phase,
+                    Some(
+                        ShellIntegrationPhase::Prompt
+                            | ShellIntegrationPhase::Input(_)
+                            | ShellIntegrationPhase::Output(_)
+                    )
+                ) {
+                    return;
+                }
                 // Primary only, on the same terms as the command-mark ledger three lines below and
                 // the prompt/finished arms around it (§7.1.5c: alt-screen 一律不记). A full-screen
                 // program running its own command cycle on its own canvas is describing that
@@ -15649,8 +15680,11 @@ mod tests {
         for pass in 0..=8 {
             if pass != 0 {
                 at += LIVE_MATH_STABLE_INTERVAL;
+                // The whole prompt cycle, as a shell that reprints one emits it. A `C` standing in
+                // no cycle at all is refused now, and a repaint that skipped `A` and `B` was never
+                // a stream a shell produces.
                 session.feed_at(
-                    format!("\x1b[1;1H\x1b]133;C\x07\x1b[2Kformula $y_{{{pass}}}^2$ here\x1b[{};1H\x1b]133;D;0\x07", count + 1).as_bytes(),
+                    format!("\x1b[1;1H\x1b]133;A\x07\x1b]133;B\x07\x1b]133;C\x07\x1b[2Kformula $y_{{{pass}}}^2$ here\x1b[{};1H\x1b]133;D;0\x07", count + 1).as_bytes(),
                     at,
                 ).unwrap();
             }
@@ -31819,6 +31853,130 @@ mod tests {
             grid_site_of(&plain, "still"),
             InlineMathSite::CommandOutput,
             "a mode that swaps no screen changes no answer"
+        );
+    }
+
+    /// **The order a marker stands in can be checked; who wrote it cannot** (review 2026-09-17,
+    /// F2).
+    ///
+    /// OSC 133 is an in-band protocol with no authentication: a `C` is a claim by whoever wrote
+    /// those bytes, and a program — or a file with the escape in it, reaching the screen through
+    /// `cat` — writes them exactly as a shell does. Nothing here can establish the producer, and
+    /// the consequence of being wrong is cosmetic: text drawn as a picture of itself, never an
+    /// action, with the source still on the grid and still what a copy yields.
+    ///
+    /// What is checkable is the order, and one order is refused: a `C` that stands in no prompt
+    /// cycle this session watched open. The two arms below are the two ways that happens — a
+    /// screen nothing has ever spoken on, which is a pane with no shell integration installed, and
+    /// the gap between one command's `D` and the next prompt's `A`. Both used to create this
+    /// session's authority over the screen out of the forged marker itself, which is the whole of
+    /// the machinery the text after it needed to be typeset.
+    ///
+    /// The other three arms are what the check must *not* cost, and the last of them is the honest
+    /// limit of all of this: a program that prints a whole `A…B…C` cycle is indistinguishable from
+    /// a nested shell that speaks the protocol, and is left alone deliberately.
+    #[test]
+    fn a_command_start_that_stands_in_no_prompt_cycle_is_refused() {
+        let started = Instant::now();
+
+        let mut bare = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut bare);
+        bare.feed_at(
+            format!("{OUTPUT_C}\r\n{ENERGY}\r\n{OUTPUT_D}").as_bytes(),
+            started,
+        )
+        .unwrap();
+        assert!(
+            !bare.shell_integration_is_authoritative(ScreenId::Primary),
+            "a marker nobody's prompt cycle accounts for cannot make this session authoritative \
+             over a screen"
+        );
+        assert!(
+            !bare.working,
+            "and it cannot start a command on the tab strip either"
+        );
+        assert_eq!(
+            grid_site_of(&bare, "energy"),
+            InlineMathSite::Ineligible,
+            "so what follows it is what it was before the escape arrived: text nobody claims"
+        );
+
+        let mut between = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut between);
+        between
+            .feed_at(
+                format!("{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\nfirst line\r\n{OUTPUT_D}")
+                    .as_bytes(),
+                started,
+            )
+            .unwrap();
+        between
+            .feed_at(format!("{OUTPUT_C}{ENERGY}\r\n").as_bytes(), started)
+            .unwrap();
+        assert_eq!(
+            grid_site_of(&between, "energy"),
+            InlineMathSite::Ineligible,
+            "the last command ended at its `D` and no prompt has begun, so this `C` belongs to no \
+             command of this shell's"
+        );
+        between
+            .feed_at(
+                format!("{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\nreal $x^2$ here\r\n").as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert_eq!(
+            grid_site_of(&between, "real"),
+            InlineMathSite::CommandOutput,
+            "and the shell's own next command is heard exactly as before"
+        );
+
+        // A `C` inside a command's own output is the `cat` of a file carrying the escape, and it
+        // is left where it was: the region it re-opens is the same command's, and every cell it
+        // covers was already being stamped by the command that is running. The repeated-`C` rule
+        // that closes the stale region before opening the new one is unchanged.
+        let mut inside = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut inside);
+        inside
+            .feed_at(
+                format!("{PROMPT_A}PS> {PROMPT_B}cat{OUTPUT_C}\r\n{OUTPUT_C}{ENERGY}\r\n")
+                    .as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert_eq!(
+            grid_site_of(&inside, "energy"),
+            InlineMathSite::CommandOutput,
+            "the command really was printing this line, whatever the escape in the middle of it \
+             said"
+        );
+
+        // A shell that reports `A`, `C` and `D` and never `B` keeps everything it had. Requiring
+        // the `B` as well would close nothing — a stream that can forge a `C` can forge a `B` —
+        // and would cost such a shell every formula it prints.
+        let mut without_b = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut without_b);
+        without_b
+            .feed_at(
+                format!("{PROMPT_A}PS> run\r\n{OUTPUT_C}{ENERGY}\r\n{OUTPUT_D}").as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert_eq!(
+            grid_site_of(&without_b, "energy"),
+            InlineMathSite::CommandOutput,
+            "the prompt cycle is open, which is all this check asks"
+        );
+
+        // **The limit, stated as a measurement.** These are the same bytes a shell sends, in the
+        // same order, and this session has no way to know they came from a program. It is where
+        // the guarantee ends, and the cost of being wrong here is a formula drawn over text.
+        assert_eq!(
+            laundering_attempt(&format!(
+                "{PROMPT_A}forged> {PROMPT_B}x{OUTPUT_C}\r\n{ENERGY}\r\n{OUTPUT_D}"
+            )),
+            (1, 1),
+            "a whole forged cycle is indistinguishable from a nested shell's own, by contract"
         );
     }
 
