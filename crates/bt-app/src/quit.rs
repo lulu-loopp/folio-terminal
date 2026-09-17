@@ -173,6 +173,34 @@ pub enum QuitStep {
     Abandon,
 }
 
+/// **What the [`QuitStep::Write`] step found, and therefore what happens next**
+/// (T-QUIT-TIMEOUT-PROCEEDS, release review X-8).
+///
+/// A `bool` said "landed or not", and that read a save which ran out of its budget as a save
+/// that was refused — so a disk that had stopped answering kept every window open in front of
+/// somebody who had asked to leave, which is the one thing the deadline exists to prevent.
+/// There are three answers, and only one of them keeps the windows.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WriteVerdict {
+    /// The document is on the disk.
+    Landed,
+    /// The save did not finish inside its budget, and the writer is still inside it. The last
+    /// completed save is what a reader would find, this run's document may yet land on top of
+    /// it, and the quit goes on either way — with `session.lock` left standing, because this run
+    /// never saw the save finish.
+    TimedOut,
+    /// The disk refused it. Nothing landed and nothing is on its way.
+    Refused,
+}
+
+impl WriteVerdict {
+    /// Whether the quit carries on to [`QuitStep::Retire`].
+    #[must_use]
+    pub fn leaves(self) -> bool {
+        matches!(self, Self::Landed | Self::TimedOut)
+    }
+}
+
 /// Where a quit has got to, and what it is asking about.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Quit {
@@ -271,6 +299,13 @@ impl Quit {
     /// It is `true` from [`Phase::Retiring`] on and never for
     /// [`Phase::Abandoned`]: a quit that could not write is a quit the
     /// application carries on past, and its session has everything still to say.
+    ///
+    /// A quit that retired on [`WriteVerdict::TimedOut`] answers `true` as any
+    /// other retirement does, and that is the answer it wants: the teardown's
+    /// second document would be handed to a writer already inside a write nobody
+    /// can bound, over windows that are leaving rather than as the reader left
+    /// them. What the disk holds is the last completed save, which is what the
+    /// line in the log says.
     #[must_use]
     pub fn document_is_written(&self) -> bool {
         matches!(
@@ -350,17 +385,25 @@ impl Quit {
         self.step()
     }
 
-    /// Whether the document reached the disk.
+    /// What became of the document.
     ///
-    /// A failure ends the quit here, before a single window has been hidden and
+    /// A refusal ends the quit here, before a single window has been hidden and
     /// before the sentinel is dropped: `session.lock` left in place is this
     /// process saying it did not reach a clean exit, and a quit that could not
     /// write the file did not.
-    pub fn written(&mut self, landed: bool) -> QuitStep {
+    ///
+    /// **A save that ran out of its budget is not a refusal** (release review
+    /// X-8). The window is standing in front of somebody who asked to leave, the
+    /// disk still holds the last completed save, and the document in hand may
+    /// yet land on top of it — none of which is a reason to stay. So
+    /// [`WriteVerdict::TimedOut`] retires exactly as a landing does, and the
+    /// sentinel it leaves behind is not this transaction's to drop: the store
+    /// keeps it precisely because nobody here saw the save finish.
+    pub fn written(&mut self, verdict: WriteVerdict) -> QuitStep {
         if self.phase != Phase::Writing {
             return self.step();
         }
-        self.phase = if landed {
+        self.phase = if verdict.leaves() {
             Phase::Retiring
         } else {
             Phase::Abandoned
@@ -420,7 +463,7 @@ mod tests {
     ///
     /// The witness for the ordering claims below: what a driver was *told* to do,
     /// in the order it was told, with no window and no GPU anywhere near it.
-    fn walk(answer: Option<QuitAnswer>, write_lands: bool) -> Vec<QuitStep> {
+    fn walk(answer: Option<QuitAnswer>, verdict: WriteVerdict) -> Vec<QuitStep> {
         let mut quit = Quit::begin(if answer.is_some() {
             names()
         } else {
@@ -443,7 +486,7 @@ mod tests {
             seen.push(quit.photographed());
         }
         if seen.last() == Some(&QuitStep::Write) {
-            seen.push(quit.written(write_lands));
+            seen.push(quit.written(verdict));
         }
         seen
     }
@@ -462,7 +505,7 @@ mod tests {
     #[test]
     fn nothing_is_torn_down_until_every_window_has_been_photographed() {
         for answer in [Some(QuitAnswer::Save), Some(QuitAnswer::Discard), None] {
-            let seen = walk(answer, true);
+            let seen = walk(answer, WriteVerdict::Landed);
             let photograph = seen
                 .iter()
                 .position(|step| *step == QuitStep::Photograph)
@@ -527,20 +570,60 @@ mod tests {
         );
     }
 
-    /// PIN — **a write that did not land does not leave.**
+    /// PIN — **a write the disk refused does not leave.**
     ///
     /// Acceptance gate 1's last third and the whole of ③: the store's final flush
     /// is judged, and a quit that could not write the file keeps its windows. Red
     /// gate: make `written` ignore its argument and the process leaves having
     /// silently lost the session it was quitting to preserve.
     #[test]
-    fn a_document_that_did_not_reach_the_disk_keeps_the_windows_open() {
-        let seen = walk(Some(QuitAnswer::Discard), false);
+    fn a_document_the_disk_refused_keeps_the_windows_open() {
+        let seen = walk(Some(QuitAnswer::Discard), WriteVerdict::Refused);
         assert_eq!(seen.last(), Some(&QuitStep::Abandon));
         assert!(
             !seen.contains(&QuitStep::Retire),
             "not one window is hidden: {seen:?}"
         );
+    }
+
+    /// RED (T-QUIT-TIMEOUT-PROCEEDS, release review X-8) — **a save that ran out
+    /// of its budget leaves.**
+    ///
+    /// The deadline on the session write buys back the window thread; X-8 is
+    /// that it was then spent on the wrong answer. `wait_for` reports a budget
+    /// that ran out, the old `written(landed.is_ok())` read that as "refused",
+    /// and a disk that had stopped answering therefore kept every window open —
+    /// the exact hang the deadline exists to end, three seconds later and with a
+    /// card on it. The transaction now walks the whole write-to-retire
+    /// transition on this answer.
+    ///
+    /// Red gate: fold `TimedOut` back in with `Refused` — give `leaves` a single
+    /// `matches!(self, Self::Landed)` — and this goes red at `Retire`, naming the
+    /// windows that stayed.
+    #[test]
+    fn a_save_that_ran_out_of_its_budget_still_leaves() {
+        let seen = walk(Some(QuitAnswer::Discard), WriteVerdict::TimedOut);
+        assert!(
+            seen.contains(&QuitStep::Retire),
+            "the windows are hidden even though nobody saw the save finish: {seen:?}"
+        );
+        assert!(
+            !seen.contains(&QuitStep::Abandon),
+            "and the quit is not abandoned: {seen:?}"
+        );
+
+        // And the rest of the ladder is the ordinary one: retire, wait for the
+        // pages, leave.
+        let mut quit = Quit::begin(Vec::new());
+        let start = Instant::now();
+        assert_eq!(quit.photographed(), QuitStep::Write);
+        assert_eq!(quit.written(WriteVerdict::TimedOut), QuitStep::Retire);
+        assert!(
+            quit.document_is_written(),
+            "the teardown does not hand a second document to a writer that is still inside one"
+        );
+        assert_eq!(quit.retired(start), QuitStep::WaitForPages);
+        assert_eq!(quit.pages(true, start), QuitStep::Exit);
     }
 
     /// PIN (審 #14) — **the wait for the pages is a bounded wait that the loop
@@ -556,7 +639,7 @@ mod tests {
         let start = Instant::now();
         let mut quit = Quit::begin(Vec::new());
         quit.photographed();
-        quit.written(true);
+        quit.written(WriteVerdict::Landed);
         assert_eq!(quit.retired(start), QuitStep::WaitForPages);
         assert_eq!(quit.deadline(), Some(start + PAGE_TEARDOWN_DEADLINE));
         assert_eq!(quit.pages(false, start), QuitStep::WaitForPages);
@@ -568,7 +651,7 @@ mod tests {
 
         let mut early = Quit::begin(Vec::new());
         early.photographed();
-        early.written(true);
+        early.written(WriteVerdict::Landed);
         early.retired(start);
         assert_eq!(
             early.pages(true, start),
@@ -626,13 +709,13 @@ mod tests {
         assert!(!quit.document_is_written(), "while the pictures are taken");
         assert_eq!(quit.photographed(), QuitStep::Write);
         assert!(!quit.document_is_written(), "while it is being written");
-        assert_eq!(quit.written(true), QuitStep::Retire);
+        assert_eq!(quit.written(WriteVerdict::Landed), QuitStep::Retire);
         assert!(quit.document_is_written(), "the moment it has landed");
         assert_eq!(quit.retired(Instant::now()), QuitStep::WaitForPages);
         assert!(quit.document_is_written(), "while the pages go");
         let mut abandoned = Quit::begin(Vec::new());
         assert_eq!(abandoned.photographed(), QuitStep::Write);
-        assert_eq!(abandoned.written(false), QuitStep::Abandon);
+        assert_eq!(abandoned.written(WriteVerdict::Refused), QuitStep::Abandon);
         assert!(
             !abandoned.document_is_written(),
             "a quit that could not write leaves an application with everything still to say"

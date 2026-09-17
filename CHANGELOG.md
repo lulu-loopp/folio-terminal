@@ -23,6 +23,17 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **Losing the graphics device no longer closes Folio.** A power cut that
+  switches a laptop to battery, a graphics driver that updates itself, a machine
+  that changes which GPU it draws on: each of these takes the device away
+  underneath whatever is on screen at that instant. Folio already knew how to
+  ask the machine for another one and carry on, but a picture that was halfway
+  prepared when the device went reached a call that could only end the run —
+  the window closed, and every shell open in it closed with it. Nothing on
+  that path can end the run any more: the half-prepared picture is dropped, the
+  device is asked for again, and the window draws everything it was saying on
+  the new one.
+
 - **A dropped file now lands in the terminal you dropped it on even when Folio
   is busy, or when you were last hovering somewhere else.** Where the file was
   let go of was worked out after the fact — when Folio got round to typing the
@@ -77,6 +88,18 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **Closing a pane or a tab no longer pauses the window while the program
+  inside it winds down.** Shutting a shell down is several steps, and one of
+  them waits for the console host to let go of everything running under it —
+  which for a pane that had an agent or a Node program in it can take seconds.
+  All of it used to happen between your click and the next frame, so closing a
+  tab could leave the window sitting still for as long as the program took to
+  go. The pane now leaves the window the moment you close it and is taken apart
+  on its own; if something in there takes an unusual amount of time, Folio notes
+  it in its own log instead of making you watch. Quitting still waits for those
+  to finish, briefly and with a limit, so nothing is left running behind a
+  window that has gone.
+
 - **On a Mac, Shift+wheel now scrolls the rows a formula pushed out of view.**
   A typeset formula is taller than the line it was typed on, so it lifts the
   rows above it off the top of the pane; the chip under a full-screen program
@@ -94,9 +117,15 @@ All notable changes to Folio are recorded here. The format follows
   network share or a cloud-sync drive that has gone quiet, that is for ever —
   the windows are already leaving and there is nothing left to click. Folio now
   gives the save three seconds, writes one line in its own log saying the save
+  did not finish, and closes. What you find on the disk next time is the last
+  save that completed, which may be the one that was still going when Folio
+  left: the file is never half written, so whichever of the two it is, it is
+  whole. Folio also keeps the marker that says this run did not see its save
+  finish, so the next start offers to restore rather than assuming all was well.
   did not finish and that the last completed one still stands, and closes. The
-  file itself was never at risk either way: a save replaces it whole or leaves
-  the previous one exactly where it was.
+  file itself is never left half written: a save replaces it in one move. A save
+  that has already begun can still finish after Folio has gone, so what you open
+  next time is the last save that completed.
 - **Closing a pane whose reader is stuck no longer hangs the window.** When a
   pane closes, Folio waits for the thread that was reading that shell's output
   to come out of its last read. On one machine that wait held the window for
@@ -235,9 +264,16 @@ All notable changes to Folio are recorded here. The format follows
   used to stop dead for seconds at a time, mid-keystroke, whenever the shell
   collecting the trace stopped reading it: the window was waiting for the
   recording to be taken, so the very thing being measured was what made it slow.
-  The lines now go to a thread of their own, and a run that produces them faster
-  than they can be written drops some and says how many rather than holding the
-  window.
+  The trace's lines now go to a thread of their own, and a run that produces them
+  faster than they can be written drops some and says how many rather than
+  holding the window. What Folio writes about itself no longer goes near that
+  recording either: the watchdog that reports a window which has stopped
+  answering writes the report and the line naming it into `diagnostics.log`
+  through a handle of its own, so it stays at work whatever the shell reading the
+  trace is doing, and so do the notes about a copied picture that could not be
+  saved and a session that could not be written on the way out. The other
+  messages Folio can print on that console — each of them about something that
+  has already gone wrong — still go to it directly and can still wait for it.
 
 ## 0.4.1-preview — 2026-09-16
 

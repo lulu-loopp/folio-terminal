@@ -208,6 +208,18 @@ const INITIAL_HEIGHT: f64 = 600.0;
 /// a crate name is a thing other Rust code says and this is a thing people say.
 pub(crate) const APP_NAME: &str = "Folio";
 
+/// **How long a quit waits for the panes it has told to go**
+/// (T-PANE-CLOSE-OFF-THREAD).
+///
+/// Closing a pane hands its whole teardown to a thread of its own and comes straight back, so
+/// the window thread never waits for one. The process may not simply walk out past them, though:
+/// a shell still being reaped when this process ends is a child that outlived the window that
+/// owned it. So the quit waits once, after every window has let go and while every window is
+/// already hidden — four seconds, which is what one teardown's own two bounded waits add up to
+/// (`bt_pty`'s child-exit and reader-exit budgets). What is still going past it is left to the
+/// job objects, which close with the process and take their children with them.
+const PANE_RETIREMENT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(4);
+
 #[cfg(test)]
 const WINDOW_TITLE: &str = "Folio M0-beta";
 const WIN32_DEFAULT_DPI: f64 = 96.0;
@@ -714,11 +726,70 @@ impl BackgroundDecodeMailbox {
 #[derive(Debug)]
 struct ClipboardPictureAnswer {
     generation: u64,
-    seat: SeatId,
+    target: PasteTarget,
     /// The file, or the sentence saying which half of the job refused. A reason
     /// and never a picture: a diagnostic that carried what was on the clipboard
     /// would be this process writing the reader's own screenshot into a log.
     result: std::result::Result<PathBuf, String>,
+}
+
+/// **The next shell's [`LeafSession::incarnation`]**, and the counter behind it.
+///
+/// Process-wide rather than per-window for the reason `TabId`'s counter is: a
+/// pane can be dragged from one window into another, and two counters would
+/// hand the same number to two shells that can meet.
+fn next_incarnation() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// **The rule [`Runtime::live_paste_target`] turns on**, as a function of the
+/// two facts it reads and nothing else (review X-1).
+///
+/// A named function rather than a run of `if`s inside the method, on the wheel
+/// ruling's own footing: this is a claim about a decision, and a decision that
+/// cannot be named cannot be pinned. Everything the method needs a window for —
+/// the tab list, the session map — happens before this is called, so the part
+/// that is a rule is testable and the part that is a lookup is not asked to be.
+///
+/// `standing` is the incarnation of whatever shell is in that seat now, and
+/// `None` is "no shell there at all" — a pane that was closed, or a seat that
+/// was never a terminal. Both answer the same way, because both mean the
+/// address names nothing.
+const fn paste_target_is_live(on_top: TabId, standing: Option<u64>, target: PasteTarget) -> bool {
+    on_top.0 == target.tab.0
+        && match standing {
+            Some(incarnation) => incarnation == target.incarnation,
+            None => false,
+        }
+}
+
+/// **Which shell a paste was promised to** (review X-1).
+///
+/// A `SeatId` on its own is not an address. Seats are numbered inside their tab
+/// and every new single-pane tab starts at `SeatId(1)`, so a delayed answer
+/// carrying only a seat and resolved against whichever tab is on top lands in
+/// whatever pane happens to be wearing that number now. Paste a screenshot in
+/// one tab, switch to another before the encode finishes, and the path is typed
+/// into the wrong shell.
+///
+/// Three facts, because it takes three to name a shell:
+///
+/// * the **tab**, by its own id and never by its position, which changes when
+///   tabs are dragged;
+/// * the **seat** inside it;
+/// * the **incarnation** of the shell standing in that seat, because a pane
+///   whose shell has been restarted is a different shell in the same hole and
+///   must not be handed input the reader gave to its predecessor.
+///
+/// A synchronous paste builds one of these and spends it in the same statement,
+/// which costs nothing and means there is one way of naming a paste's
+/// destination rather than two.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PasteTarget {
+    tab: TabId,
+    seat: SeatId,
+    incarnation: u64,
 }
 
 /// The clipboard picture worker's one-slot mailbox, on
@@ -731,34 +802,125 @@ struct ClipboardPictureAnswer {
 /// it.
 #[derive(Debug, Default)]
 struct ClipboardPictureMailbox {
-    generation: u64,
-    slot: Arc<std::sync::Mutex<Option<ClipboardPictureAnswer>>>,
+    inbox: Arc<std::sync::Mutex<ClipboardPictureInbox>>,
+}
+
+/// **The generation and the slot behind one lock** (review X-3).
+///
+/// They were two fields with the generation outside the mutex, and that is a
+/// race rather than an oversight: a slow request A and a fast request B, with B
+/// storing its answer and A then overwriting the slot unconditionally. The
+/// window's next look took A out, rejected it by generation, and B — the paste
+/// the reader actually made — was gone, with its notification finding an empty
+/// slot. Generation checks that only run on the *reading* side cannot see a
+/// write that has already happened.
+///
+/// Under one lock the check moves to where the decision is: a worker may only
+/// put its answer down if it is still the answer being waited for.
+#[derive(Debug, Default)]
+struct ClipboardPictureInbox {
+    /// The generation the window is waiting for. Bumped by every new paste.
+    wanted: u64,
+    landed: Option<ClipboardPictureAnswer>,
 }
 
 impl ClipboardPictureMailbox {
     /// Withdraw whatever the last paste asked for, and hand back the generation
     /// the next answer must carry to be delivered.
+    ///
+    /// The slot is emptied in the same breath: an answer to the paste that has
+    /// just been superseded is not going to be delivered, and leaving it there
+    /// would only give the next look something to reject.
     fn withdraw(&mut self) -> u64 {
-        self.generation += 1;
-        self.generation
+        let mut inbox = self
+            .inbox
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        inbox.wanted += 1;
+        inbox.landed = None;
+        inbox.wanted
     }
 
-    /// The slot itself, for the worker to leave its answer in.
-    fn slot(&self) -> Arc<std::sync::Mutex<Option<ClipboardPictureAnswer>>> {
-        Arc::clone(&self.slot)
+    /// The inbox itself, for the worker to leave its answer in.
+    fn inbox(&self) -> Arc<std::sync::Mutex<ClipboardPictureInbox>> {
+        Arc::clone(&self.inbox)
     }
 
     /// Take whatever landed, and answer with it only if it is still an answer to
-    /// the paste being waited for. A superseded answer is taken out and dropped
-    /// in the same move, so the next wake does not find it standing in front of
-    /// its own.
+    /// the paste being waited for.
     fn take_current(&mut self) -> Option<ClipboardPictureAnswer> {
-        let landed = self
-            .slot
+        let mut inbox = self
+            .inbox
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()?;
-        (landed.generation == self.generation).then_some(landed)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let wanted = inbox.wanted;
+        inbox
+            .landed
+            .take()
+            .filter(|landed| landed.generation == wanted)
+    }
+}
+
+/// **Put an answer down, but only if it is the one being waited for**
+/// (review X-3).
+///
+/// Free rather than a method because the caller is a worker thread holding
+/// nothing but the `Arc` — there is no mailbox on that side, and there must not
+/// be: the whole point is that the generation it is compared against is read
+/// under the same lock the write takes, not carried over from when the job
+/// started.
+fn deliver_clipboard_picture(
+    inbox: &std::sync::Mutex<ClipboardPictureInbox>,
+    answer: ClipboardPictureAnswer,
+) {
+    let mut inbox = inbox
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if inbox.wanted == answer.generation {
+        inbox.landed = Some(answer);
+    }
+}
+
+/// **How many picture encodes may be in flight at once** (review X-3, X-4).
+///
+/// A superseded worker is not cancellable — it is inside a decode — so holding
+/// `Ctrl+V` down starts one per press, each of them allowed a decoded picture
+/// under `clipboard_picture::MAX_DECODED_BYTES`. The ceiling on one job is not a
+/// ceiling on the process without this.
+///
+/// Four rather than one, because superseding a job must not mean waiting for it:
+/// the reader's newest paste is the one that matters and it should start now.
+/// Four of them at the per-job ceiling is a bound this machine can hold.
+const CLIPBOARD_PICTURE_JOBS: usize = 4;
+
+/// The count of them, and the only thing in this file that is process-wide
+/// rather than per-window: the memory they hold is the process's.
+static CLIPBOARD_PICTURE_JOBS_RUNNING: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// **A place in the queue, given up when the worker ends however it ends.**
+///
+/// A guard and not a pair of calls, because the worker can return from several
+/// places and a decrement that is written at each of them is a decrement that
+/// will be forgotten at the next one.
+struct ClipboardPictureJob;
+
+impl ClipboardPictureJob {
+    /// `None` when there are already [`CLIPBOARD_PICTURE_JOBS`] running.
+    fn take() -> Option<Self> {
+        use std::sync::atomic::Ordering;
+        CLIPBOARD_PICTURE_JOBS_RUNNING
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |running| {
+                (running < CLIPBOARD_PICTURE_JOBS).then_some(running + 1)
+            })
+            .ok()
+            .map(|_| Self)
+    }
+}
+
+impl Drop for ClipboardPictureJob {
+    fn drop(&mut self) {
+        CLIPBOARD_PICTURE_JOBS_RUNNING.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
     }
 }
 
@@ -10358,6 +10520,24 @@ struct DpiSnapshot {
 /// seat, and `bt-app` — the one crate allowed to know both — holds the pairing.
 struct LeafSession {
     pty: Option<PtySession>,
+    /// **Which shell this is, told apart from the one that stood here before**
+    /// (review X-1).
+    ///
+    /// A number from a process-wide counter, minted when this struct is built
+    /// and never again. It exists because a `SeatId` names a *hole* in a layout
+    /// and not what is in it: closing a pane's shell and starting another in the
+    /// same seat leaves every id in the window unchanged, so anything that
+    /// promised input to the first shell and delivered it on a later turn would
+    /// put it into the second.
+    ///
+    /// **A counter and not the process id**, because a pane may have no ConPTY
+    /// at all — `BT_PROBE_INPUT` panes and the no-program banner both — and a
+    /// shell that cannot be told apart is the whole defect said again.
+    ///
+    /// It travels with the struct, so tearing a pane out into its own tab or
+    /// merging it into another does *not* change it: those move a running shell,
+    /// and a running shell is the thing this names.
+    incarnation: u64,
     /// **Which window this shell nudges when it has spoken** — see [`LeafWake`].
     ///
     /// Held here rather than only inside the reader thread's closure because it
@@ -22142,6 +22322,18 @@ struct DropBatch {
     /// `CursorMoved`'s. `None` when the platform would not say, which is the one
     /// road left to the pane holding the keyboard.
     point: Option<PhysicalPosition<f64>>,
+    /// **The shell this drop was aimed at**, resolved at the same instant as
+    /// [`Self::point`] and for the same reason (review X-1 beside X-10).
+    ///
+    /// The point says where the hand let go; this says what was *there* when it
+    /// did — the tab, the seat and the shell standing in it. Both are facts
+    /// about the arrival and neither survives being asked again later: X-10 is
+    /// the pointer having moved by the flush, and X-1 is the tab or the shell
+    /// having changed by it. A batch that was aimed at nothing — chrome with no
+    /// shell behind it, a files column, a pane with no session — carries `None`
+    /// and is spent on nobody, which is the answer `paste_paths_into` gave for
+    /// that case before this field existed.
+    target: Option<PasteTarget>,
     /// Every file of this drop, in the order winit delivered them.
     paths: Vec<PathBuf>,
 }
@@ -22149,19 +22341,26 @@ struct DropBatch {
 impl DropBatch {
     /// **Add one file to the drop that is standing, or open one at `point`.**
     ///
-    /// `point` is read only on the arm that opens a batch, and that is stated
-    /// here rather than left to the caller: a second reading arriving mid-drop
-    /// is precisely the defect X-10 names, so the type refuses it even when it
-    /// is offered. The caller does not *take* a second reading either — see
-    /// [`Runtime::collect_dropped_file`] — and the two guards are not a
-    /// duplicate: one saves a call into the system, this one decides whose
-    /// answer wins.
-    fn collect(standing: &mut Option<Self>, path: PathBuf, point: Option<PhysicalPosition<f64>>) {
+    /// `point` and `target` are read only on the arm that opens a batch, and
+    /// that is stated here rather than left to the caller: a second reading
+    /// arriving mid-drop is precisely the defect X-10 names — and X-1 one step
+    /// on, because the tab could have changed between two files of one drop —
+    /// so the type refuses them even when they are offered. The caller does not
+    /// *take* a second reading either — see [`Runtime::collect_dropped_file`] —
+    /// and the two guards are not a duplicate: one saves a call into the system,
+    /// this one decides whose answer wins.
+    fn collect(
+        standing: &mut Option<Self>,
+        path: PathBuf,
+        point: Option<PhysicalPosition<f64>>,
+        target: Option<PasteTarget>,
+    ) {
         match standing {
             Some(batch) => batch.paths.push(path),
             None => {
                 *standing = Some(Self {
                     point,
+                    target,
                     paths: vec![path],
                 });
             }
@@ -31102,17 +31301,19 @@ impl TabState {
     /// a process with nothing to draw it and nothing to read it fills its pipe,
     /// and the child then blocks forever on a write nobody will ever drain.
     ///
-    /// The first failure stops the walk rather than being collected, because
-    /// there is nothing sensible to do with a second error while reporting the
-    /// first, and a shell that would not close is a fact about the window rather
-    /// than about the tab.
-    fn shutdown_all_shells(&mut self) -> Result<()> {
+    /// **And none of it happens here** (T-PANE-CLOSE-OFF-THREAD). Each session is *taken* out
+    /// of its leaf and handed to [`bt_pty::retire_session`], which takes it apart on a thread of
+    /// its own; this walk costs one `spawn` per shell and comes back. The take is the half that
+    /// makes that safe — a leaf whose `pty` is `None` is a leaf nothing on this thread can read,
+    /// resize or shut a second time — and it is why there is no longer a failure to collect: a
+    /// child that will not go is a fact the teardown thread says out loud, at a moment when
+    /// nobody is being kept waiting for it.
+    fn retire_all_shells(&mut self) {
         for (_, leaf) in self.leaves_mut() {
-            if let Some(pty) = leaf.pty.as_mut() {
-                pty.shutdown().context("shut down a closing tab's shell")?;
+            if let Some(pty) = leaf.pty.take() {
+                bt_pty::retire_session(pty);
             }
         }
-        Ok(())
     }
 
     /// Advance this tab's ring toward whatever its session is now reporting,
@@ -34585,6 +34786,7 @@ fn create_leaf_session(
     ));
     let projection = session.new_projection(session.layout_key());
     Ok(LeafSession {
+        incarnation: next_incarnation(),
         // A wake-up is the other end of a reader thread, and there is no thread
         // when there is no ConPTY — see the field.
         wake: pty.is_some().then_some(wake),
@@ -39477,7 +39679,7 @@ impl Runtime<'_> {
             // A placeholder holds one shell today and always has; asking for all
             // of them costs nothing and stops this being the copy that is still
             // wrong the day it holds two.
-            removed.shutdown_all_shells()?;
+            removed.retire_all_shells();
         }
         self.apply_window_min_inner_size()?;
         let landing = first_revived.saturating_sub(usize::from(placeholder.is_some()));
@@ -39496,7 +39698,7 @@ impl Runtime<'_> {
         }
         // Item 6, asked on the way *in* rather than on the way out. There is no
         // tab left afterwards to ask, and the fact worth catching is that the tab
-        // being taken apart was whole when it got here — `shutdown_all_shells`
+        // being taken apart was whole when it got here — `retire_all_shells`
         // walks `sessions`, so a shell that had come adrift from the tree would
         // be a ConPTY closed for a pane nobody could see, or one left running.
         debug_assert!(
@@ -39575,9 +39777,10 @@ impl Runtime<'_> {
                 }
                 // Every leaf's shell, not the focused one's. Reaching for
                 // `removed.pty` went through the deref and closed exactly one of
-                // them — see [`TabState::shutdown_all_shells`] for the ConPTY a
-                // two-pane tab used to leak on the way out.
-                removed.shutdown_all_shells()?;
+                // them — see [`TabState::retire_all_shells`] for the ConPTY a
+                // two-pane tab used to leak on the way out, and for why closing
+                // this tab does not wait for any of them to die.
+                removed.retire_all_shells();
                 self.window.active_tab = active_tab;
                 self.apply_window_min_inner_size()?;
                 if was_active {
@@ -53987,8 +54190,14 @@ impl Runtime<'_> {
                 &mut self.window.attention_next_place,
                 Instant::now(),
             );
-            if let Some(pty) = leaf.pty.as_mut() {
-                pty.shutdown().context("shut down closed pane's shell")?;
+            // **Taken, and taken apart somewhere else** (T-PANE-CLOSE-OFF-THREAD).
+            // The leaf is already out of `sessions`; the session comes out of the
+            // leaf, and what happens to it next happens on a thread nobody is
+            // waiting for. A click that closes a pane may not be answered with a
+            // `ClosePseudoConsole` that returns when the program inside has
+            // finished winding down.
+            if let Some(pty) = leaf.pty.take() {
+                bt_pty::retire_session(pty);
             }
             // Keyboard focus cannot stay on a seat that no longer exists. The
             // rule is [`TabState::refocus_after_losing`]'s, shared with the two
@@ -96023,8 +96232,31 @@ impl Runtime<'_> {
             return Ok(());
         };
         let leaving = hang_watch::enter(hang_watch::Station::FileDrop);
-        let seat = self.dropped_files_seat(batch.point);
-        let pasted = self.paste_paths_into(seat, batch.paths, "write dropped paths to PTY");
+        // **Nothing is resolved here.** Both halves of the address travelled
+        // inside the batch from the moment the drop opened: the point, because a
+        // reading taken at this line is taken after the release (X-10), and the
+        // shell, because the tab on top and the program in that seat can both
+        // have changed by now (X-1). A batch aimed at nothing is spent on
+        // nobody.
+        let pasted = match batch.target {
+            Some(target) => {
+                self.paste_paths_into(target, batch.paths, "write dropped paths to PTY")
+            }
+            // A drop aimed at chrome, at a files column, or at a pane with no
+            // shell behind it: nothing is typed, which is the answer
+            // `paste_paths_into` gave for those before the address existed. The
+            // point is said out loud because "I dropped a file and nothing
+            // happened" is a report somebody will make, and where the hand was
+            // is the whole of what answers it. A coordinate and never a path:
+            // the names in a drop are the reader's files.
+            None => {
+                eprintln!(
+                    "dropped files landed on no shell; opened at {:?}",
+                    batch.point
+                );
+                Ok(())
+            }
+        };
         hang_watch::at(leaving);
         pasted
     }
@@ -96054,7 +96286,18 @@ impl Runtime<'_> {
     fn collect_dropped_file(&mut self, path: PathBuf) {
         let opening = self.window.dropped_files.is_none();
         let point = opening.then(|| self.dropped_point_now()).flatten();
-        DropBatch::collect(&mut self.window.dropped_files, path, point);
+        // **And the shell, named here for the same reason the point is** (X-1):
+        // the pane under that point, and the tab and the running program it
+        // belongs to, are what the hand was aimed at — facts about this instant
+        // and not about the turn that spends them. Only on the opening file, so
+        // that a drop of forty does not re-aim thirty-nine times.
+        let target = opening
+            .then(|| {
+                let seat = self.dropped_files_seat(point);
+                self.paste_target(seat)
+            })
+            .flatten();
+        DropBatch::collect(&mut self.window.dropped_files, path, point, target);
     }
 
     /// **Which pane a dropped path is typed into** (GitHub issue #1 ②).
@@ -97871,6 +98114,13 @@ impl Runtime<'_> {
         let Some(leaf) = self.window.tabs[active].sessions.get(&seat) else {
             return Ok(());
         };
+        // Named now, while the gesture is happening, because the picture rung
+        // below spends it on a later turn (review X-1).
+        let target = PasteTarget {
+            tab: self.window.tabs[active].id,
+            seat,
+            incarnation: leaf.incarnation,
+        };
         let recipient = leaf.paste_recipient.clone();
         let leading_space = input_line_needs_a_space_first(&leaf.session);
         let leaving = hang_watch::enter(hang_watch::Station::ClipboardRead);
@@ -97884,11 +98134,11 @@ impl Runtime<'_> {
         // refusal notice still leaves by the one door every paste's notices leave by
         // — and the line below is then an ordinary paste with nothing in it.
         let offered = std::mem::take(&mut prepared.picture);
-        self.deliver_paste(seat, prepared, "write clipboard paste to PTY")?;
+        self.deliver_paste(target, prepared, "write clipboard paste to PTY")?;
         if offered.is_empty() {
             return Ok(());
         }
-        self.save_clipboard_picture(seat, offered)
+        self.save_clipboard_picture(target, offered)
     }
 
     /// **The same paste, with the paths already in hand** — what a drop onto a
@@ -97916,18 +98166,60 @@ impl Runtime<'_> {
     /// not a drop that could not.
     fn paste_paths_into(
         &mut self,
-        seat: SeatId,
+        target: PasteTarget,
         paths: Vec<PathBuf>,
         context: &'static str,
     ) -> Result<()> {
-        let active = self.window.active_tab;
-        let Some(leaf) = self.window.tabs[active].sessions.get(&seat) else {
+        let Some(index) = self.live_paste_target(target) else {
             return Ok(());
         };
+        let leaf = &self.window.tabs[index].sessions[&target.seat];
         let recipient = leaf.paste_recipient.clone();
         let leading_space = input_line_needs_a_space_first(&leaf.session);
         let prepared = prepare_dropped_paste(paths, &recipient, leading_space);
-        self.deliver_paste(seat, prepared, context)
+        self.deliver_paste(target, prepared, context)
+    }
+
+    /// **Name the shell in one of this window's seats**, as a paste's
+    /// destination (review X-1).
+    ///
+    /// `None` when there is no shell in that seat, which is the same answer
+    /// every paste road already gave for that case. Built at the moment of the
+    /// gesture, so that a road which spends it later spends an address rather
+    /// than a guess.
+    fn paste_target(&self, seat: SeatId) -> Option<PasteTarget> {
+        let tab = self.window.tabs.get(self.window.active_tab)?;
+        let leaf = tab.sessions.get(&seat)?;
+        Some(PasteTarget {
+            tab: tab.id,
+            seat,
+            incarnation: leaf.incarnation,
+        })
+    }
+
+    /// **Is the shell this paste was promised to still the shell on top?**
+    /// (review X-1) — the tab's index if so, and `None` if the paste has
+    /// nowhere left to land.
+    ///
+    /// Three questions and all three are load-bearing. The **tab** is found by
+    /// its id, never by the position it had, because tabs move. The **seat** has
+    /// to still be in it. And the **incarnation** has to match, because a seat
+    /// whose shell was restarted is a hole with a different program in it, and
+    /// typing a path into it is typing into something the reader never addressed.
+    ///
+    /// **And that tab has to be the one on top**, which is the conservative arm
+    /// and is stated rather than implied. The bookkeeping a delivered paste owes
+    /// — the attention answer, the typing note, the frame — is written against
+    /// the active tab throughout this file, so a paste into a background tab
+    /// would be bytes sent with none of it done. A reader who pressed `Ctrl+V`
+    /// and left for another tab before the encode finished gets nothing, which
+    /// is the honest half of that: the file is still on disk, the newest twenty
+    /// are kept, and no shell they were not looking at was typed into.
+    fn live_paste_target(&self, target: PasteTarget) -> Option<usize> {
+        let index = self.window.active_tab;
+        let tab = self.window.tabs.get(index)?;
+        let standing = tab.sessions.get(&target.seat).map(|leaf| leaf.incarnation);
+        paste_target_is_live(tab.id, standing, target).then_some(index)
     }
 
     /// **What a prepared paste does to one named pane**, whichever road
@@ -97939,11 +98231,18 @@ impl Runtime<'_> {
     /// drop that could not reach a shell is not a clipboard that could not.
     fn deliver_paste(
         &mut self,
-        seat: SeatId,
+        target: PasteTarget,
         prepared: PreparedClipboardPaste,
         context: &'static str,
     ) -> Result<()> {
-        let active = self.window.active_tab;
+        // **The address is checked before anything is said**, which is why this
+        // stands above the notice rather than beside the write (review X-1): a
+        // card about a path that could not be spelled for a shell that is no
+        // longer there is a card about nothing.
+        let Some(active) = self.live_paste_target(target) else {
+            return Ok(());
+        };
+        let seat = target.seat;
         if let Some(notice) = prepared.notice {
             self.toast(
                 toast::ToastKind::Error,
@@ -98005,26 +98304,46 @@ impl Runtime<'_> {
     /// waiting for this, with their hand still on the keyboard.
     fn save_clipboard_picture(
         &mut self,
-        seat: SeatId,
+        target: PasteTarget,
         offered: Vec<bt_platform::PictureBytes>,
     ) -> Result<()> {
+        // **A place in the queue before a thread is asked for** (review X-3/X-4).
+        // Superseding a job does not stop it — it is inside a decode — so a held
+        // `Ctrl+V` starts one per press, each entitled to a picture of its own.
+        // The guard is what makes the ceiling on one job a ceiling on the
+        // process; it is given up when the worker ends, however it ends.
+        let Some(place) = ClipboardPictureJob::take() else {
+            eprintln!("clipboard picture workers are all busy; paste ignored");
+            return self.toast(
+                toast::ToastKind::Error,
+                toast::ToastAnchor::Window,
+                None,
+                i18n::Text::PasteClipboardPicture.text().to_owned(),
+            );
+        };
         let generation = self.window.clipboard_picture.withdraw();
-        let slot = self.window.clipboard_picture.slot();
+        let inbox = self.window.clipboard_picture.inbox();
         let proxy = self.app.event_proxy.clone();
         let folder = clipboard_picture::directory();
         let started = bt_platform::spawn_at_priority(
             "clipboard-picture",
             bt_platform::ThreadPriority::Normal,
             move || {
+                // Held for the whole body and dropped with it, on every road out.
+                let _place = place;
                 let result = clipboard_picture::save(&folder, &offered, SystemTime::now());
-                *slot
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                    Some(ClipboardPictureAnswer {
+                // The generation is compared under the inbox's own lock, so an
+                // answer that has been superseded while it was being made is
+                // dropped rather than laid on top of the answer that supersedes
+                // it (review X-3).
+                deliver_clipboard_picture(
+                    &inbox,
+                    ClipboardPictureAnswer {
                         generation,
-                        seat,
+                        target,
                         result,
-                    });
+                    },
+                );
                 // After the answer is in the slot, never before.
                 let _ = proxy.send_event(AppEvent::ClipboardPictureReady);
             },
@@ -98032,7 +98351,7 @@ impl Runtime<'_> {
         if started.is_err() {
             // A machine that will not start a thread is a machine that cannot do
             // this paste, and saying nothing would look like a key that did not
-            // register.
+            // register. The place goes back with the closure that was never run.
             eprintln!("clipboard picture worker could not be started; paste ignored");
             return self.toast(
                 toast::ToastKind::Error,
@@ -98060,10 +98379,17 @@ impl Runtime<'_> {
     /// facts about the line the bytes are about to land on, and that line has had
     /// the whole of the encode to change.
     ///
-    /// A seat that is no longer in the tab on top is dropped in silence, on
-    /// [`Self::adopt_background_picture`]'s footing: it answers a gesture that
-    /// has been superseded, and the file it wrote is swept by the cap the next
-    /// paste applies.
+    /// **The address is the one the gesture was made at** (review X-1), carried
+    /// on the answer rather than re-derived here: a seat is numbered inside its
+    /// tab, every new single-pane tab starts at `SeatId(1)`, and resolving a
+    /// delayed answer against whichever tab is on top put one tab's screenshot
+    /// on another tab's command line. [`Self::live_paste_target`] is where the
+    /// three facts are checked.
+    ///
+    /// A shell that is gone, restarted, or in a tab the reader has left is
+    /// dropped in silence, on [`Self::adopt_background_picture`]'s footing: it
+    /// answers a gesture that has been superseded, and the file it wrote is
+    /// swept by the cap the next paste applies.
     fn adopt_clipboard_picture(&mut self) -> Result<()> {
         let Some(landed) = self.window.clipboard_picture.take_current() else {
             return Ok(());
@@ -98071,7 +98397,12 @@ impl Runtime<'_> {
         let path = match landed.result {
             Ok(path) => path,
             Err(reason) => {
-                eprintln!("clipboard picture could not be saved; paste ignored: {reason}");
+                // `diagnostics::note` and not `eprintln!` (X-7): this is the
+                // window thread, and a resident diagnostic it writes must not be
+                // able to wait behind whoever is reading a trace.
+                diagnostics::note(&format!(
+                    "clipboard picture could not be saved; paste ignored: {reason}"
+                ));
                 return self.toast(
                     toast::ToastKind::Error,
                     toast::ToastAnchor::Window,
@@ -98081,7 +98412,7 @@ impl Runtime<'_> {
             }
         };
         self.paste_paths_into(
-            landed.seat,
+            landed.target,
             vec![path],
             "write clipboard picture path to PTY",
         )
@@ -102307,7 +102638,7 @@ impl Runtime<'_> {
     /// **The shells are still told, and there are none to tell.** Since the
     /// 2026-08-27 report the receiving door opens its stand-in on a
     /// [`bt_layout::SeatKind::Placeholder`] rather than a terminal, precisely so
-    /// that this retirement costs nothing: `shutdown_all_shells` used to spend
+    /// that this retirement costs nothing: `retire_all_shells`'s ancestor spent
     /// **2.9 seconds** here killing a shell that was two hundred milliseconds
     /// old and had never been looked at. The call stays because the rule it
     /// enforces is about *any* tab being removed — a tab removed with its child
@@ -102334,7 +102665,7 @@ impl Runtime<'_> {
             .window
             .active_tab
             .min(self.window.tabs.len().saturating_sub(1));
-        removed.shutdown_all_shells()?;
+        removed.retire_all_shells();
         if self.window.placeholder_tab == Some(stand_in) {
             self.window.placeholder_tab = None;
         }
@@ -102356,24 +102687,18 @@ impl Runtime<'_> {
     /// *source* of a move leaves by, rather than a second one written for this
     /// door.
     ///
-    /// **Every shell is told, whatever the one before it answered**, and the
-    /// first refusal is what comes back — [`Self::let_go_of_this_window`]'s own
-    /// discipline, for its own reason.
+    /// **Every shell is told**, and none of them is waited for
+    /// (T-PANE-CLOSE-OFF-THREAD): each goes to its own teardown thread, which is
+    /// where a child that will not die is now said out loud. The tabs are taken
+    /// off the window first, as they always were, so nothing here is reaching
+    /// into a window that is still holding them.
     fn abandon_a_window_nothing_arrived_in(&mut self) -> Result<()> {
-        let mut refused = None;
         for mut tab in std::mem::take(&mut self.window.tabs) {
-            if let Err(error) = tab.shutdown_all_shells()
-                && refused.is_none()
-            {
-                refused = Some(error);
-            }
+            tab.retire_all_shells();
         }
         self.window.active_tab = 0;
         self.window.placeholder_tab = None;
-        match refused {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
+        Ok(())
     }
 
     /// **Everything this window is holding on to, let go** — the shut's second
@@ -102426,21 +102751,18 @@ impl Runtime<'_> {
         for web in self.window.web.values_mut() {
             let _ = web.close(&self.window.compositor);
         }
-        let mut refused = None;
+        // **Every child is told and none of them is waited for**
+        // (T-PANE-CLOSE-OFF-THREAD). Each session comes out of its leaf, so
+        // nothing left in this window can reach one that is being taken apart,
+        // and each goes to its own teardown thread — which is where a child that
+        // will not go is now said out loud, rather than as an error carried back
+        // to a window that has already gone. The quit does not walk out in front
+        // of them: its `Retire` step waits on
+        // [`bt_pty::wait_for_retirements`] once every window has let go.
         for tab in &mut self.window.tabs {
-            for (_, leaf) in tab.leaves_mut() {
-                if let Some(pty) = leaf.pty.as_mut()
-                    && let Err(error) = pty.shutdown().context("shut down child process")
-                    && refused.is_none()
-                {
-                    refused = Some(error);
-                }
-            }
+            tab.retire_all_shells();
         }
-        match refused {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
+        Ok(())
     }
 
     /// **Put this window in the vault as one row** (multiwindow slice D, ruling
@@ -107832,6 +108154,45 @@ mod quit_transaction_tests {
         );
     }
 
+    /// PIN (T-PANE-CLOSE-OFF-THREAD) — **no door that closes a pane, a tab or a
+    /// window takes a shell apart on the window thread.**
+    ///
+    /// The reader's report was a tab close that held the window for ten seconds
+    /// with an idle Claude Code pane in it, and the teardown is the same sequence
+    /// wherever it is spent — `kill`, a reap, `ClosePseudoConsole`, the ring, the
+    /// master, the reader's join. Bounding each step made "for ever" into "two
+    /// seconds"; taking every step off this thread is what makes the click
+    /// answer at once. There is one road now and it is
+    /// `bt_pty::retire_session`, so this checks that `PtySession::shutdown` is
+    /// not called from this file at all outside its own tests.
+    ///
+    /// Red gate: put a synchronous shutdown back into any of the three doors and
+    /// the count names it.
+    #[test]
+    fn a_pane_that_closes_is_taken_apart_somewhere_else() {
+        let on_this_thread = ["pty.shut", "down()"].concat();
+        assert_eq!(
+            SOURCE.matches(on_this_thread.as_str()).count(),
+            1,
+            "the only synchronous shutdown left in this file is the one its own test drives"
+        );
+        for door in [
+            "    fn retire_all_shells(&mut self) {",
+            "    fn let_go_of_this_",
+        ] {
+            let text = body(&[door]);
+            assert!(
+                !text.contains(&on_this_thread),
+                "`{door}` hands the session over rather than taking it apart here"
+            );
+        }
+        let handed = ["bt_pty::retire_", "session("].concat();
+        assert!(
+            body(&["    fn retire_all_shells(&mut self) {"]).contains(handed.as_str()),
+            "and the hand-over is what it does instead"
+        );
+    }
+
     /// PIN (方案 ③) — **the quit judges the write, and the ordinary paths do
     /// not have to.**
     ///
@@ -107853,12 +108214,16 @@ mod quit_transaction_tests {
             "the quit's write is the judged one"
         );
         assert!(
-            settle.contains("quit.written(landed.is_ok())"),
+            settle.contains("quit.written(verdict)"),
             "and the answer is what the transaction is told"
         );
         assert!(
+            settle.contains("refusal.quit_may_proceed()"),
+            "and a save that ran out of its budget is not read as one that was refused"
+        );
+        assert!(
             settle.contains("i18n::Text::QuitSessionNotWritten"),
-            "a write that did not land is said out loud on every window"
+            "a write that was refused is said out loud on every window"
         );
     }
 
@@ -112076,20 +112441,37 @@ impl FolioApp {
                         Some(app) => app.session_store.flush_judged(),
                         None => return Ok(()),
                     };
-                    if let Err(error) = &landed {
-                        eprintln!("{APP_NAME} did not quit: {error}");
-                        // Said on every window, because the failure is the
-                        // process's and the reader is looking at one of them.
-                        self.for_each_window(|runtime| {
-                            runtime.toast(
-                                toast::ToastKind::Error,
-                                toast::ToastAnchor::Window,
-                                None,
-                                i18n::Text::QuitSessionNotWritten.text(),
-                            )
-                        })?;
-                    }
-                    self.report_to_quit(|quit| quit.written(landed.is_ok()));
+                    // **A save that ran out of its budget leaves anyway**
+                    // (release review X-8). The reader asked to go, the disk
+                    // holds the last completed save, and the store has already
+                    // said so in the log and kept `session.lock` standing. A card
+                    // here would be a card on a window that is about to be
+                    // hidden, which is nobody's answer to anything.
+                    let verdict = match &landed {
+                        Ok(()) => quit::WriteVerdict::Landed,
+                        Err(refusal) if refusal.quit_may_proceed() => quit::WriteVerdict::TimedOut,
+                        Err(refusal) => {
+                            // On the window thread and on the way out, so it goes to
+                            // the log by its own road (X-7) rather than queueing
+                            // behind a stalled console.
+                            diagnostics::note(&format!(
+                                "{APP_NAME} did not quit: {}",
+                                refusal.message()
+                            ));
+                            // Said on every window, because the failure is the
+                            // process's and the reader is looking at one of them.
+                            self.for_each_window(|runtime| {
+                                runtime.toast(
+                                    toast::ToastKind::Error,
+                                    toast::ToastAnchor::Window,
+                                    None,
+                                    i18n::Text::QuitSessionNotWritten.text(),
+                                )
+                            })?;
+                            quit::WriteVerdict::Refused
+                        }
+                    };
+                    self.report_to_quit(|quit| quit.written(verdict));
                 }
                 quit::QuitStep::Retire => {
                     // **Not `for_each_window`**, and this is the one place in the
@@ -112104,6 +112486,22 @@ impl FolioApp {
                         {
                             eprintln!("{APP_NAME} quit, and a child did not go: {error:#}");
                         }
+                    }
+                    // **And the process does not walk out in front of them**
+                    // (T-PANE-CLOSE-OFF-THREAD). Every window has let go, and
+                    // each of their shells is being taken apart on a thread of
+                    // its own — including any pane the reader closed a moment
+                    // before asking to quit. The window thread never waits for
+                    // one of those; this is the one place that does, because a
+                    // shell still being reaped when the process ends is a child
+                    // outliving the window that owned it. Bounded like every
+                    // other wait on this path: what is still going past it goes
+                    // when the job objects close with the process.
+                    let still_going = bt_pty::wait_for_retirements(PANE_RETIREMENT_DEADLINE);
+                    if still_going > 0 {
+                        eprintln!(
+                            "{APP_NAME} quit with {still_going} pane(s) still being taken apart"
+                        );
                     }
                     let now = Instant::now();
                     self.report_to_quit(|quit| quit.retired(now));
@@ -117394,6 +117792,122 @@ mod opening_window_tests {
         assert_eq!(
             attributes.inner_size,
             Some(LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT).into())
+        );
+    }
+}
+
+/// Review X-1 and X-3: the two races a delayed picture paste can lose.
+#[cfg(test)]
+mod clipboard_picture_race_tests {
+    use super::{
+        ClipboardPictureAnswer, ClipboardPictureMailbox, PasteTarget, SeatId, TabId,
+        deliver_clipboard_picture, paste_target_is_live,
+    };
+
+    fn target(tab: u64, seat: u64, incarnation: u64) -> PasteTarget {
+        PasteTarget {
+            tab: TabId(tab),
+            seat: SeatId(seat),
+            incarnation,
+        }
+    }
+
+    fn answer(generation: u64, target: PasteTarget) -> ClipboardPictureAnswer {
+        ClipboardPictureAnswer {
+            generation,
+            target,
+            result: Ok(std::path::PathBuf::from("/tmp/folio/clipboard/shot.png")),
+        }
+    }
+
+    /// RED GATE (review X-1) — **a picture pasted in one tab never lands in
+    /// another**, and never in a shell that has been restarted since.
+    ///
+    /// The defect this closes is not hypothetical arithmetic: seats are numbered
+    /// inside their tab and every new single-pane tab starts at `SeatId(1)`, so
+    /// the *first pane of any tab* wears the number the first pane of every
+    /// other tab wears. Paste a screenshot in tab A, switch to B while the
+    /// encode runs, and a delivery addressed by seat alone and resolved against
+    /// whichever tab is on top typed A's path into B's shell.
+    ///
+    /// MUTATION: drop the tab from the comparison and the second case passes,
+    /// which is the shipped defect exactly; drop the incarnation and the fourth
+    /// does, which is the same mistake one level down.
+    #[test]
+    fn a_delayed_paste_lands_only_in_the_tab_and_the_shell_it_was_promised_to() {
+        let promised = target(7, 1, 42);
+        assert!(
+            paste_target_is_live(TabId(7), Some(42), promised),
+            "the same tab and the same shell is the whole of the happy case"
+        );
+        assert!(
+            !paste_target_is_live(TabId(8), Some(42), promised),
+            "another tab's first pane wears the same seat number and must not take it"
+        );
+        assert!(
+            !paste_target_is_live(TabId(7), None, promised),
+            "a pane that was closed has nothing to be pasted into"
+        );
+        assert!(
+            !paste_target_is_live(TabId(7), Some(43), promised),
+            "a restarted shell is a different program in the same hole"
+        );
+        // And the seat is still part of the address: two panes of one tab are
+        // two destinations, which is what `sessions.get(&target.seat)` answers
+        // and what `standing` is read through.
+        assert_ne!(target(7, 1, 42), target(7, 2, 42));
+    }
+
+    /// RED GATE (review X-3) — **a slow answer that arrives after a fast one
+    /// cannot erase it.**
+    ///
+    /// The shipped order: request A (slow) starts, request B (fast) supersedes
+    /// it and lands, and *then* A finishes and writes the one slot anyway. The
+    /// window's next look took A out, rejected it by generation, and B — the
+    /// paste the reader actually made — was gone with its wake finding nothing.
+    /// Generation checks on the reading side alone cannot see a write that has
+    /// already happened, which is why the check moved under the same lock as the
+    /// write.
+    ///
+    /// MUTATION: store unconditionally in `deliver_clipboard_picture` and the
+    /// last assertion hands back A's path, or nothing at all.
+    #[test]
+    fn a_stale_answer_landing_after_a_newer_one_is_dropped_rather_than_stored() {
+        let mut mailbox = ClipboardPictureMailbox::default();
+        let slow = mailbox.withdraw();
+        let fast = mailbox.withdraw();
+        assert_ne!(slow, fast, "each paste withdraws the last one's question");
+
+        let inbox = mailbox.inbox();
+        // B lands first...
+        deliver_clipboard_picture(&inbox, answer(fast, target(1, 1, 1)));
+        // ...and A, still running, finishes afterwards and tries to put its own
+        // answer down on top of it.
+        deliver_clipboard_picture(&inbox, answer(slow, target(2, 2, 2)));
+
+        let landed = mailbox.take_current().expect("the newest paste survives");
+        assert_eq!(landed.generation, fast);
+        assert_eq!(landed.target, target(1, 1, 1));
+        assert!(
+            mailbox.take_current().is_none(),
+            "and the slot is spent by the one look that took it"
+        );
+
+        // A lone stale answer is not stored either, so a wake it raises finds an
+        // empty slot rather than a paste the reader has already replaced.
+        let stale = ClipboardPictureMailbox::default();
+        let first = {
+            let mut fresh = stale;
+            let first = fresh.withdraw();
+            fresh.withdraw();
+            let inbox = fresh.inbox();
+            deliver_clipboard_picture(&inbox, answer(first, target(3, 3, 3)));
+            assert!(fresh.take_current().is_none());
+            first
+        };
+        assert_eq!(
+            first, 1,
+            "the first question a mailbox asks is generation 1"
         );
     }
 }
@@ -159332,6 +159846,10 @@ mod tests {
             rows: std::num::NonZeroU16::new(4).unwrap(),
         };
         LeafSession {
+            // A fixture is a shell for the purposes of being told apart from the
+            // next one, so it takes a number from the same counter production
+            // takes one from.
+            incarnation: next_incarnation(),
             pty: None,
             // No ConPTY, so no reader thread, so nothing to wake — see the field.
             wake: None,
@@ -160109,30 +160627,65 @@ mod tests {
     /// rather than of one caller's discipline; and a drop that follows a spent
     /// one opens afresh.
     ///
-    /// MUTATION: let the `Some` arm overwrite `point` and the second block goes
-    /// red — that arm is exactly what a flush-time reading would be, arriving
-    /// through the door the fix closed.
+    /// **And the same three of the address beside it** (review X-1). The shell a
+    /// drop is aimed at is the other fact that belongs to the arrival, and it
+    /// goes stale in the same way and worse: the point moves with the hand,
+    /// where the tab on top and the program in a seat can both have been
+    /// replaced by the turn that spends the batch. One type carries both, so
+    /// there is one answer to "when was this decided".
+    ///
+    /// MUTATION: let the `Some` arm overwrite `point` or `target` and the second
+    /// block goes red — that arm is exactly what a flush-time reading would be,
+    /// arriving through the door the fix closed.
     #[test]
-    fn a_drop_keeps_the_point_it_opened_with() {
+    fn a_drop_keeps_the_point_and_the_shell_it_opened_with() {
         let opened_at = PhysicalPosition::new(37.0, 41.0);
         let later = PhysicalPosition::new(900.0, 12.0);
+        let aimed_at = PasteTarget {
+            tab: TabId(3),
+            seat: SeatId(2),
+            incarnation: 11,
+        };
+        let elsewhere = PasteTarget {
+            tab: TabId(4),
+            seat: SeatId(1),
+            incarnation: 12,
+        };
         let mut standing: Option<DropBatch> = None;
 
-        DropBatch::collect(&mut standing, "/first".into(), Some(opened_at));
+        DropBatch::collect(
+            &mut standing,
+            "/first".into(),
+            Some(opened_at),
+            Some(aimed_at),
+        );
         let batch = standing.as_ref().expect("the first file opens the drop");
         assert_eq!(batch.point, Some(opened_at));
+        assert_eq!(batch.target, Some(aimed_at));
         assert_eq!(batch.paths, [PathBuf::from("/first")]);
 
         // The second and third files of the same drop. The point offered with
-        // them is where the hand has since travelled to, and it is refused.
-        DropBatch::collect(&mut standing, "/second file".into(), Some(later));
-        DropBatch::collect(&mut standing, "/third".into(), None);
+        // them is where the hand has since travelled to, and the address is the
+        // shell that is under it now. Both are refused.
+        DropBatch::collect(
+            &mut standing,
+            "/second file".into(),
+            Some(later),
+            Some(elsewhere),
+        );
+        DropBatch::collect(&mut standing, "/third".into(), None, None);
         let batch = standing.as_ref().expect("the drop is still standing");
         assert_eq!(
             batch.point,
             Some(opened_at),
             "a point offered after the drop opened has replaced the one it \
              opened with, which is the flush-time reading X-10 named"
+        );
+        assert_eq!(
+            batch.target,
+            Some(aimed_at),
+            "and an address offered after it opened has replaced the shell the \
+             hand was actually over, which is X-1 one door along"
         );
         assert_eq!(
             batch.paths,
@@ -160151,12 +160704,46 @@ mod tests {
             standing.is_none(),
             "nothing is left behind to be pasted twice"
         );
-        DropBatch::collect(&mut standing, "/fourth".into(), Some(later));
+        DropBatch::collect(
+            &mut standing,
+            "/fourth".into(),
+            Some(later),
+            Some(elsewhere),
+        );
+        let next = standing.expect("the next drop opens");
         assert_eq!(
-            standing.expect("the next drop opens").point,
+            next.point,
             Some(later),
             "a new drop reads the cursor again; the point belongs to the drop \
              and not to the window"
+        );
+        assert_eq!(
+            next.target,
+            Some(elsewhere),
+            "and names the shell afresh, for the same reason"
+        );
+    }
+
+    /// **A drop that was aimed at no shell types nothing** (review X-1).
+    ///
+    /// Chrome, a files column, a preview pane, a pane whose shell has gone: all
+    /// of them answer `None` at the arrival, and `None` is carried rather than
+    /// re-asked at the flush. The claim is that the batch is still assembled and
+    /// still spent — the drop is not *lost*, it is delivered to nobody — which
+    /// is what keeps a second drop from finding the first one still standing.
+    #[test]
+    fn a_drop_aimed_at_no_shell_is_still_collected_and_still_spent() {
+        let mut standing: Option<DropBatch> = None;
+        let at = PhysicalPosition::new(5.0, 5.0);
+        DropBatch::collect(&mut standing, "/one".into(), Some(at), None);
+        DropBatch::collect(&mut standing, "/two".into(), Some(at), None);
+        let batch = standing.take().expect("the drop opened all the same");
+        assert_eq!(batch.target, None, "there was nothing under the hand");
+        assert_eq!(batch.point, Some(at), "but the window still knows where");
+        assert_eq!(batch.paths.len(), 2);
+        assert!(
+            standing.is_none(),
+            "and the batch is spent, not left to rot"
         );
     }
 
@@ -170438,7 +171025,7 @@ mod clipboard_path_tests {
     fn three_files_of_one_drop_become_one_command_line() {
         let mut standing: Option<DropBatch> = None;
         for path in ["/first", "/second file", "/third"] {
-            DropBatch::collect(&mut standing, path.into(), None);
+            DropBatch::collect(&mut standing, path.into(), None, None);
         }
         let batch = standing.take().expect("three events, one batch");
         assert_eq!(batch.paths.len(), 3, "one drop, three events, one batch");
@@ -170482,7 +171069,7 @@ mod clipboard_path_tests {
                 "the arm writes the path down and pastes nothing itself",
             ),
             (
-                "DropBatch::collect(&mut self.window.dropped_files, path, point);",
+                "DropBatch::collect(&mut self.window.dropped_files, path, point, target);",
                 "one drop is assembled in one place",
             ),
             (
@@ -170490,8 +171077,12 @@ mod clipboard_path_tests {
                 "the batch has one reader, and it takes the whole of it",
             ),
             (
-                "self.paste_paths_into(seat, batch.paths,",
+                "self.paste_paths_into(target, batch.paths,",
                 "a dropped batch reaches a shell through one door",
+            ),
+            (
+                "self.paste_target(seat)",
+                "and it is addressed — tab, seat and shell — as it arrives (X-1)",
             ),
             (
                 "self.dropped_point_now()",
@@ -170531,6 +171122,12 @@ mod clipboard_path_tests {
         // collector is what the arm calls, and it is the only thing in this file
         // that asks the platform where the cursor is.
         let collecting = method_text(before_this_fixture, "    fn collect_dropped_file(");
+        assert!(
+            collecting.contains("self.paste_target(seat)"),
+            "the file that opens a drop no longer names the shell it was aimed at, \
+             so a drop spent after a tab switch lands wherever the seat number \
+             points now (X-1):\n{collecting}"
+        );
         assert!(
             collecting.contains("self.dropped_point_now()"),
             "the file that opens a drop no longer reads the cursor as it arrives, \

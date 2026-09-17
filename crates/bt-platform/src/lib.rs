@@ -9856,6 +9856,60 @@ mod windows_impl {
         }
     }
 
+    /// **Put these bytes on this process's standard error without taking
+    /// Rust's shared `Stderr` lock** (X-7).
+    ///
+    /// For the one writer that can be stuck in this call for seconds: the trace
+    /// sink's thread, writing a batch to a console whose reader has stopped
+    /// reading. `eprintln!` reaches the same destination through one process-wide
+    /// lock, so a writer parked inside `WriteFile` while holding it parks every
+    /// other thread that says anything — the window thread included, which is
+    /// the whole of the fault the sink was built to remove, moved one layer out.
+    /// Writing the slot directly leaves those threads to wait on the *device*
+    /// they chose and never on this one's turn at a mutex.
+    ///
+    /// `GetStdHandle` on every call and not once, for
+    /// [`redirect_std_streams_to_file`]'s reason: the slot moves, and Rust's own
+    /// Windows stdio re-reads it for the same reason.
+    ///
+    /// A null slot is the silenced state and answers `true` having written
+    /// nothing, which is what a null standard handle does for `eprintln!` too.
+    /// Answers whether every byte reached the handle.
+    pub fn write_std_error(bytes: &[u8]) -> bool {
+        use windows::Win32::Storage::FileSystem::WriteFile;
+        use windows::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE};
+
+        let Ok(handle) = (unsafe { GetStdHandle(STD_ERROR_HANDLE) }) else {
+            return false;
+        };
+        if handle.0.is_null() {
+            return true;
+        }
+        if handle.is_invalid() {
+            return false;
+        }
+        let mut rest = bytes;
+        while !rest.is_empty() {
+            let mut written = 0u32;
+            // SAFETY: the buffer outlives this synchronous call, and `written`
+            // is a local the call fills in.
+            if unsafe { WriteFile(handle, Some(rest), Some(&raw mut written), None) }.is_err() {
+                return false;
+            }
+            let Some(remaining) = rest.get(written as usize..) else {
+                return false;
+            };
+            if remaining.len() == rest.len() {
+                // Nothing moved and no error: a handle that will never take
+                // these bytes. Looping on it would be the wait this exists to
+                // refuse.
+                return false;
+            }
+            rest = remaining;
+        }
+        true
+    }
+
     /// Whether `stderr` currently lands on a console screen.
     ///
     /// Not "did we mean to redirect" but "is the byte a diagnostic writes going
@@ -10334,7 +10388,7 @@ pub use windows_impl::{
     std_error_is_console, system_backdrop_available, system_uses_light_apps, take_keyboard_focus,
     taskbar_auto_hidden_from_state, taskbar_is_auto_hidden, thread_mouse_capture,
     top_level_window_at, virtual_key_for_character, virtual_screen_rect, wheel_scroll_amount,
-    window_is_exposed, work_area_at, write_to_console,
+    window_is_exposed, work_area_at, write_std_error, write_to_console,
 };
 
 /// **The same doors, on a machine with no Win32** (M1-1).
@@ -10355,7 +10409,8 @@ pub use portable_impl::{
     hide_every_window_of_this_process, install_console_ctrl_handler, install_context_menu,
     is_window_cloaked, leave_process, read_context_menu, redirect_std_streams_to_file,
     register_clipboard_owner, remove_context_menu, set_system_backdrop, silence_std_streams,
-    system_backdrop_available, thread_mouse_capture, virtual_key_for_character, write_to_console,
+    system_backdrop_available, thread_mouse_capture, virtual_key_for_character, write_std_error,
+    write_to_console,
 };
 
 /// **The window's composition, on a platform that has none** (M4-1).
