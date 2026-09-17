@@ -36,7 +36,10 @@ All notable changes to Folio are recorded here. The format follows
   the picture there even though it does not read such a line as a formula at all. A
   moment later it took the picture off again, and drew it for real only once the
   formula had scrolled onto a line of its own. Replaying the owner's own scrolling
-  session, that was the last of its flicker.
+  session, that was the last of its flicker. A formula scrolling back onto a
+  bulleted line, a heading, or a line ending in a comma keeps its picture, and one
+  indented as code is left as code — Folio asks the same question there that it
+  asks everywhere else.
 - **Resizing the window while a program is drawing no longer loses a formula.** A
   redraw that was still in progress when the window changed size went on measuring
   against the old shape of the screen, so a formula could be drawn over the wrong

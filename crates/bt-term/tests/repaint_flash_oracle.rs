@@ -1187,6 +1187,122 @@ fn a_block_sharing_its_row_with_the_application_is_not_re_anchored_onto_it() {
     );
 }
 
+/// Prove one block of the caller's own source, then repaint it away so its record is waiting
+/// off-band. The generalised form of `session_with_one_off_band_block`.
+fn session_with_one_off_band_source(source: &str, start: std::time::Instant) -> DualPlaneSession {
+    let mut session = DualPlaneSession::new(nz(100), nz(12));
+    let mut first = b"\x1b[?1049h".to_vec();
+    first.extend_from_slice(&synchronized_repaint(&[
+        "header",
+        source,
+        "tail",
+        "",
+        "────────────────",
+        "prompt> ",
+    ]));
+    session.feed_at(&first, start).unwrap();
+    session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+    complete_live_math(&mut session);
+    let mut projection = session.new_projection(session.layout_key());
+    session.refresh_projection(&mut projection);
+    let frame = session.viewport_frame(&mut projection).unwrap();
+    assert!(
+        frame_row_text(&frame, 1).trim().is_empty(),
+        "the fixture never rendered {source:?}: {:?}",
+        (0..6)
+            .map(|row| frame_row_text(&frame, row))
+            .collect::<Vec<_>>()
+    );
+    session
+        .feed_at(
+            &synchronized_repaint(&scrolled_away_screen()),
+            start + Duration::from_millis(300),
+        )
+        .unwrap();
+    session
+}
+
+/// Scroll the block back in on `line`, and say whether the frame typeset it there.
+fn block_is_typeset_after_scrolling_back_onto(source: &str, line: &str) -> bool {
+    let start = std::time::Instant::now();
+    let mut session = session_with_one_off_band_source(source, start);
+    let back = start + Duration::from_millis(600);
+    session
+        .feed_at(
+            &synchronized_repaint(&[
+                "filler a",
+                "filler b",
+                "filler c",
+                "11. section",
+                line,
+                "",
+                "────────────────",
+                "prompt> ",
+            ]),
+            back,
+        )
+        .unwrap();
+    assert!(
+        session.held_unbacked_records().is_empty(),
+        "a raster was seated on a row the detector does not read as its block: {:?}",
+        session.held_unbacked_records()
+    );
+    let mut projection = session.new_projection(session.layout_key());
+    session.refresh_projection(&mut projection);
+    let frame = session.viewport_frame(&mut projection).unwrap();
+    frame_row_text(&frame, 4).trim().is_empty()
+}
+
+/// **One rule, one owner: the re-anchor asks the detector, it does not carry its own copy of the
+/// detector's rules.**
+///
+/// A whitespace test — "the match must cover the row apart from the space around it" — is a second
+/// copy of "the detector owns a display block only when its line is that block", and a copy drifts.
+/// These four are where it had already drifted. The detector skips a list marker and a heading
+/// before the delimiter (`delimiter_start`, and Codex's own reflow prints `# $$…$$`), and holds
+/// trailing prose punctuation out of a single-line environment (`complete_display_on_line`) — three
+/// lines it owns that a whitespace test refuses, each of them a formula going back to LaTeX for a
+/// repaint when it scrolls in. And it refuses a line indented four columns
+/// (`commonmark_indented_code`) — a line a whitespace test happily accepts, which is the original
+/// defect surviving inside indented code.
+///
+/// So the re-anchor runs the detector over the rows the match found and keeps the record only if it
+/// gets this block back, at these rows, from this source. Nothing to keep in step.
+#[test]
+fn the_re_anchor_keeps_every_line_the_detector_reads_as_a_block() {
+    const FORMULA: &str = r"$$e^{i\pi} + 1 = 0$$";
+    const ENVIRONMENT: &str = r"\begin{pmatrix} a & b \end{pmatrix}";
+
+    assert!(
+        block_is_typeset_after_scrolling_back_onto(FORMULA, &format!("• {FORMULA}")),
+        "a list item is a line the detector reads as a block"
+    );
+    assert!(
+        block_is_typeset_after_scrolling_back_onto(FORMULA, &format!("# {FORMULA}")),
+        "a heading is a line the detector reads as a block"
+    );
+    assert!(
+        block_is_typeset_after_scrolling_back_onto(ENVIRONMENT, &format!("{ENVIRONMENT},")),
+        "the detector holds trailing prose punctuation out of a single-line environment"
+    );
+}
+
+/// The other side of the same rule: a line the detector refuses must not be re-anchored onto either,
+/// and four columns of indentation is CommonMark's own way of saying "this is code, not prose".
+#[test]
+fn the_re_anchor_refuses_every_line_the_detector_reads_as_code() {
+    const FORMULA: &str = r"$$e^{i\pi} + 1 = 0$$";
+
+    assert!(
+        !block_is_typeset_after_scrolling_back_onto(FORMULA, &format!("    {FORMULA}")),
+        "four columns of indentation is an indented code block, not a formula"
+    );
+    assert!(
+        !block_is_typeset_after_scrolling_back_onto(FORMULA, &format!("\t{FORMULA}")),
+        "a tab is four columns of indentation"
+    );
+}
+
 /// The control: the same block, the same re-anchor, on a row it has to itself. It must come back
 /// without being detected again — tightening the re-anchor above must not cost the preservation it
 /// exists for.

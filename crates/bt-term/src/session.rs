@@ -6725,6 +6725,97 @@ impl DualPlaneSession {
         self.live_invalidation_count = self.live_invalidation_count.saturating_add(dropped);
     }
 
+    /// **Would the detector, reading these rows, give back this block here?**
+    ///
+    /// `exact_live_source_match` is a substring search: it says the bytes are on the grid and where
+    /// they are, and nothing at all about whether that makes a block. Something has to say the
+    /// second thing, and the only honest answer is the detector's own — a second copy of its rules
+    /// written here would drift, and had. A whitespace test ("the match must cover its rows apart
+    /// from the space around them") refuses three kinds of line the detector owns — a list item
+    /// (`• $$…$$`), a heading (`# $$…$$`, which is what a reflow of Codex's own output prints), and
+    /// a single-line environment with trailing prose punctuation (`\end{pmatrix},`, which
+    /// `complete_display_on_line` holds out of the occurrence) — and accepts one it refuses, a line
+    /// indented four columns, which is CommonMark's way of saying "code". Three transient flashes
+    /// and one surviving defect, from one copy of one rule.
+    ///
+    /// So the question goes to the detector, the way `try_handoff_live_artifact` and
+    /// `live_task_is_current` already ask it: re-run it and require *this* block, at exactly these
+    /// rows, from this source.
+    ///
+    /// **Over the match, never over the grid.** This door runs once per off-band record per close,
+    /// and the grid-wide scan `resolve_live_detection_task` would otherwise do is the expensive path
+    /// this pane already has too much of. The scan is given the rows the match found, widened to
+    /// whole logical lines — a row that wraps carries the rest of its line in the next row, and a
+    /// block followed by anything on the same line is not this block — and the detection context
+    /// that `live_grid_parser_prefixes` already computed for the first of them, which is what
+    /// carries the fence and parity state from everything above.
+    fn detector_owns_live_match(
+        &self,
+        inputs: &[LiveDetectionInput],
+        prefixes: &BTreeMap<u32, DetectionContext>,
+        record: &LiveDecorationRecord,
+        start: GridPoint,
+        end: GridPoint,
+    ) -> bool {
+        let mut first = start.row;
+        while let Some(previous) = first.checked_sub(1)
+            && live_grid_input(inputs, previous).is_some_and(|input| input.continues)
+        {
+            first = previous;
+        }
+        let mut last = end.row;
+        while live_grid_input(inputs, last).is_some_and(|input| input.continues) {
+            let Some(next) = last.checked_add(1) else {
+                break;
+            };
+            if live_grid_input(inputs, next).is_none() {
+                break;
+            }
+            last = next;
+        }
+        let Some(extent) = (first..=last)
+            .map(|row| live_grid_input(inputs, row).cloned())
+            .collect::<Option<Vec<_>>>()
+        else {
+            return false;
+        };
+        let mut task = LiveDetectionTask {
+            candidate_row: last,
+            screen: self.live_screen,
+            grid_generation: self.grid_generation,
+            detection_revision: self.detection_revision,
+            layout: self.layout_key,
+            cell_width_subpixels: self.cell_width_subpixels.get(),
+            cell_height_subpixels: self.cell_height_subpixels.get(),
+            ascii_baseline_subpixels: self.ascii_baseline_subpixels.map_or(0, NonZeroI64::get),
+            options: self.detection_options(),
+            initial_context: prefixes.get(&first).cloned().unwrap_or_default(),
+            inputs: Arc::from(extent),
+            start: GridPoint {
+                row: last,
+                column: 0,
+            },
+            end: GridPoint {
+                row: last,
+                column: 0,
+            },
+            band_start_row: last,
+            band_end_row: last,
+            span: empty_live_math_span(),
+            detection_complete: false,
+            resolved: false,
+            refused_table_rows: Vec::new(),
+        };
+        resolve_live_detection_task(&mut task)
+            && task.start.row == start.row
+            && task.end.row == end.row
+            && task.span.original_source == record.span.original_source
+            && task.span.render_source == record.span.render_source
+            && task.span.delimiter_kind == record.span.delimiter_kind
+            && task.span.mode == record.span.mode
+            && task.span.kind == record.span.kind
+    }
+
     fn restore_offscreen_decorations(&mut self) {
         if self.offscreen_decorations.is_empty() {
             return;
@@ -6740,19 +6831,21 @@ impl DualPlaneSession {
         let mut remaining = VecDeque::new();
         let mut relayout_tasks = Vec::new();
         while let Some(mut record) = self.offscreen_decorations.pop_front() {
-            let Some((start, end, segments)) = exact_live_source_match(
-                &record.span.original_source,
-                &inputs,
-                &occupied,
-                record.span.mode == MathMode::Display,
-            ) else {
+            let Some((start, end, segments)) =
+                exact_live_source_match(&record.span.original_source, &inputs, &occupied)
+            else {
                 remaining.push_back(record);
                 continue;
             };
+            // Cheap and first: a record inside a fenced code block is refused without a scan.
             if prefixes
                 .get(&start.row)
                 .is_some_and(DetectionContext::is_commonmark_code)
             {
+                remaining.push_back(record);
+                continue;
+            }
+            if !self.detector_owns_live_match(&inputs, &prefixes, &record, start, end) {
                 remaining.push_back(record);
                 continue;
             }
@@ -12757,27 +12850,12 @@ fn rebase_identity_onto_match(
 
 /// Find a record's proven source in the live grid, and say where.
 ///
-/// **`whole_rows` is what makes this the same answer the detector would give.** The search is a
-/// substring search over the grid's text, which is right for an inline run — an inline run *is* a
-/// substring of its line — and too generous by exactly one case for a display block, which the
-/// detector only ever owns when its lines are that block and nothing else.
-///
-/// The owner's scrolling session of 2026-09-17 is that case. A block scrolls back into view on the
-/// last content row, and that row is the one the application draws its "jump to bottom" chip on. The
-/// chip sits after the closing `$$`, so the detector does not read the row as a block at all — but
-/// the substring was there, this re-anchor seated the record on it, and the frame published a
-/// picture the detector disowns. The next pass over a byte-identical grid took it away again, and
-/// the block was drawn for real only once it had scrolled up onto a line of its own: one picture
-/// appearing, vanishing and returning while the text underneath it never moved.
-///
-/// So a display record matches only where every row the match touches is covered by it apart from
-/// the whitespace around it. That is not a rule invented here; it is the detector's own rule, asked
-/// at the one door that was not asking it.
+/// A substring search: it says the bytes are there and where they are, and nothing about whether
+/// this is a block. `DualPlaneSession::detector_owns_live_match` asks that, of the detector.
 fn exact_live_source_match(
     source: &str,
     inputs: &[LiveDetectionInput],
     occupied: &BTreeSet<u32>,
-    whole_rows: bool,
 ) -> Option<(GridPoint, GridPoint, Vec<MathCellSegment>)> {
     struct RowRange<'a> {
         row: u32,
@@ -12827,12 +12905,6 @@ fn exact_live_source_match(
             continue;
         }
         if occupied.contains(&range.row) {
-            return None;
-        }
-        if whole_rows
-            && !(text.get(range.start..segment_start)?.trim().is_empty()
-                && text.get(segment_end..range.end)?.trim().is_empty())
-        {
             return None;
         }
         let byte_start = u32::try_from(segment_start - range.start).ok()?;
@@ -19714,15 +19786,23 @@ mod tests {
         assert_eq!(before.math_blocks.len(), after.math_blocks.len());
     }
 
-    /// Batch ③ unbacked case (the audit's masking mechanism): a resize opens the preservation window,
-    /// then the reflow reprints the transcript with a stray unbalanced `$$` opener above the block —
-    /// the exact odd-parity poison the three audits name. The block's source `$$x$$` is still literally
-    /// on the grid, so the hold re-anchors and keeps rendering (display is UNCHANGED, the hold is
-    /// honest about the pixels), but the detector's global toggle is now off-phase and no longer PAIRS
-    /// it into a block. That divergence — a hold showing a formula the settled detector no longer
-    /// accounts — is reported exactly as `HeldUnbacked`, the observable the flash oracle cannot see.
+    /// Batch ③'s unbacked case, and **the answer to it has changed**: a resize opens the
+    /// preservation window, then the reflow reprints the transcript with a stray unbalanced `$$`
+    /// opener above the block — the exact odd-parity poison the three audits name. The block's
+    /// source is still literally on the grid, so the re-anchor's substring search still finds it;
+    /// but the detector's toggle is now off-phase and it no longer pairs those rows into a block at
+    /// all.
+    ///
+    /// This used to re-anchor anyway and go on painting, and the divergence was *reported* as
+    /// `HeldUnbacked` — a hold showing a formula the settled detector no longer accounts, named so
+    /// that an audit could see what the flash oracle cannot. The re-anchor now asks the detector
+    /// instead of a copy of its rules (`detector_owns_live_match`), and the detector, reading these
+    /// rows in the parity state the stray opener left, does not give the block back. So the hold is
+    /// refused, the rows show their source, and there is nothing left to report: a picture over
+    /// text the detector does not read as that block is the one thing this pane may not publish,
+    /// and reporting it was always second best to not doing it.
     #[test]
-    fn a_hold_over_a_parity_poisoned_block_is_reported_held_unbacked_without_changing_display() {
+    fn a_parity_poisoned_reprint_drops_the_hold_instead_of_masking_dead_detection() {
         let start = Instant::now();
         let mut session = DualPlaneSession::new(nz(40), nz(12));
         // A multi-line block whose opener and closer sit on separate rows — the shape a stray `$$`
@@ -19756,8 +19836,15 @@ mod tests {
             )
             .unwrap();
 
-        // Display behaviour is unchanged: the block's source `$$\ny=1\n$$` is still literally on the
-        // grid, so the hold re-anchors and keeps rendering its raster.
+        // The poison genuinely desynced the detector off the block the hold was showing.
+        assert!(
+            !session
+                .live_detection_ownership_ledger()
+                .owns_source(&held_source),
+            "the fixture did not poison the parity it set out to poison"
+        );
+
+        // So the re-anchor is refused and the rows show their source.
         let mut projection = session.new_projection(session.layout_key());
         session.refresh_projection(&mut projection);
         let frame = session.viewport_frame(&mut projection).unwrap();
@@ -19765,25 +19852,17 @@ mod tests {
             frame
                 .math_blocks
                 .iter()
-                .any(|block| block.display == MathBlockDisplay::Rendered),
-            "the hold must keep rendering the block — display is untouched by this batch"
+                .all(|block| block.display != MathBlockDisplay::Rendered),
+            "a hold was seated on rows the detector does not read as that block"
         );
 
-        // ...but the settled detector no longer Owns that block: reported as exactly one HeldUnbacked
-        // — a hold masking dead detection, the observable the flash oracle cannot see.
+        // And there is nothing left to report: the masking mechanism the audits named cannot arise
+        // through this door, because the hold never takes the rows.
         assert!(
-            !session
-                .live_detection_ownership_ledger()
-                .owns_source(&held_source),
-            "the poison genuinely desynced the detector off the block the hold is showing"
+            session.held_unbacked_records().is_empty(),
+            "a hold masking dead detection survived: {:?}",
+            session.held_unbacked_records()
         );
-        let unbacked = session.held_unbacked_records();
-        assert_eq!(
-            unbacked.len(),
-            1,
-            "the masked-dead-detection strand must surface exactly once"
-        );
-        assert_eq!(unbacked[0].original_source, held_source);
     }
 
     #[test]
