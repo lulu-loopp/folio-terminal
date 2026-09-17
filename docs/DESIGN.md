@@ -7740,6 +7740,28 @@ regions, and re-anchors the decorations projected across it. And because conhost
 PSReadLine's anchor is still the one it drew with: the unchanged-size ending records no repair debt
 and writes **no private bytes at all**.
 
+**A gesture no hand is reported to have let go of ends anyway** (Codex review 2026-09-17). A
+divider drag is torn down by the button coming up, by `Esc`, by a re-solve and by a blur, and
+capture loss is none of them: Windows announces it with `WM_CAPTURECHANGED`, winit 0.30.13 answers
+that message by zeroing its own capture count and emitting nothing, and a steal need not blur the
+window. `divider_drag` then stays `Some` for good, `flush_pending_pty_resize` reads it as a hand
+still on the geometry, and from that moment no pane of that window can release or settle another
+resize — the same permanent silence by another road. So the gesture carries the pointer it began
+with (`DividerDrag::capture`) and `flush_pending_pty_resize` re-reads it before it believes it,
+cancelling through the door `Esc` already uses. The predicate is *the same window still holds it*,
+not *we hold it*: on macOS both readings are `None`, because AppKit has no per-thread capture to
+report, and a rule phrased the other way would cancel every divider drag there on its first turn.
+
+**The macOS limit, stated as a limit.** `in_size_move` is always `false` on that platform
+(`bt-platform/src/portable_impl.rs`), and this winit gives no end-of-gesture boundary for a native
+live resize — its `windowDidEndLiveResize` only resets resize increments. On Windows the frame's
+own modal loop is read and a drag is one `ResizePseudoConsole`; on macOS the only thing that ends a
+gesture is the 200 ms quiet window, so **a live resize that pauses longer than that can notify the
+child twice** — at two *different* sizes, never the same size twice, because a release whose grid
+equals the child's own tells it nothing. One notification per physical drag therefore holds on
+Windows and is not established on macOS, which is a gap in the platform's signals rather than in
+this path.
+
 **What is queued is the end of a gesture, not a size the child is owed.** A solve that moved either
 grid queues a release; a solve that moved neither queues nothing but no longer cancels one that is
 already waiting, and always overwrites it with the last grid solved — which a pane behind another
@@ -7767,6 +7789,18 @@ transaction open does nothing, which is that hidden pane's ordinary answer.
   that says the fix is at the shape and not at the window edge: five entrances, each one shown and
   behind. The behind half is the other side of the sentence — a pane whose actor never followed the
   solve opens no transaction and is right to owe nothing.
+- `a_divider_drag_that_loses_its_pointer_stops_holding_the_resize` (bt-app) — capture taken away
+  with no blur and no button-up: the gesture ends, the release it was holding is delivered, and the
+  transaction closes. Mutation: delete the recovery call from `flush_pending_pty_resize`.
+- `a_repair_owed_before_a_wobble_is_still_owed_after_it_and_paid_once` (bt-app) — the wobble
+  arrives before the earlier real commit's quiescence, so its PSReadLine repair is still unpaid:
+  the wobble banks none of its own and the one that is owed is paid exactly once.
+- `a_wobble_settled_on_the_childs_own_size_leaves_a_reader_where_they_were` (bt-term) — the same
+  settlement under a view parked twenty rows up in scrollback: zero jump, and the hold clears.
+- `settling_a_gesture_over_a_long_history_stays_within_its_budget` (lifecycle matrix) — what one
+  ending costs over 3,971 resident entries, because `schedule_existing_artifacts` walks all of
+  them: 2,244,719 B / 71 allocations over prose, 3,261,024 B / 8,025 allocations over a history
+  half made of formulas, which queues the worker cap and no more.
 
 
 ### 7.54 一扇没人能看见的窗才需要一把不在任何窗里的钥匙:快捷终端(0.2 功能单,2026-09-02,已落地;`crates/bt-platform/src/hotkey.rs`(新)、`crates/bt-platform/src/lib.rs`、`crates/bt-app/src/quake.rs`(新)、`crates/bt-app/src/{main,settings,shortcuts,i18n,webhost}.rs`、`crates/bt-persist/src/{session,settings,migrate,lib}.rs`)

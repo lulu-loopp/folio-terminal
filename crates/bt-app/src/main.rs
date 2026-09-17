@@ -17775,6 +17775,23 @@ struct DividerDrag {
     /// split, and theorem N says every ratio outside a focus set is bit-identical
     /// before and after.
     grip: DividerGrip,
+    /// **Which window held the pointer when this gesture began** — the fact that ends it when the
+    /// system takes the pointer away (Codex review 2026-09-17; the same reading `DragGuard` makes
+    /// for a cross-window drag).
+    ///
+    /// A divider drag is torn down by the button coming up, by `Esc`, by the layout being
+    /// re-solved, and by the window losing focus. None of those is capture loss: Windows announces
+    /// it with `WM_CAPTURECHANGED`, winit 0.30.13 answers that message by zeroing its own capture
+    /// count and emitting nothing, and a steal need not blur this window. Left holding a button
+    /// nobody will report the release of, `divider_drag` stays `Some` forever —
+    /// `flush_pending_pty_resize` reads that as a hand still on the geometry, so from that moment
+    /// no resize of this window's panes can ever be released or settled. Sampled, not subscribed,
+    /// for `DragGuard`'s reason and at the one moment anybody asks.
+    ///
+    /// On macOS this is `None` at the press and `None` at every turn after it, which is the right
+    /// answer rather than a missing one: AppKit has no per-thread capture to lose, and the mouse-up
+    /// that ends a drag is delivered to the window that received the mouse-down.
+    capture: Option<bt_platform::NativeWindow>,
 }
 
 /// **What a divider drag is actually moving** — §3.4's two kinds of seam.
@@ -19019,6 +19036,28 @@ impl PtyInput {
     const fn queued(self) -> bool {
         matches!(self, Self::Queued)
     }
+}
+
+/// **Whether the hand that began a divider drag is still on it** (Codex review 2026-09-17).
+///
+/// Two samples of one platform fact — which window of this thread holds the pointer — taken at the
+/// press and now. Equality is the whole predicate, and it has to be equality rather than "this
+/// window holds it": on macOS the answer is `None` at both ends, because AppKit has no per-thread
+/// capture to report, and a rule phrased as "we hold it" would cancel every divider drag on that
+/// platform on its first turn. Two `None`s mean nothing was taken away, which is the truth there.
+///
+/// The gesture this ends is the one no event reports. Windows says capture loss with
+/// `WM_CAPTURECHANGED`; winit 0.30.13 answers it by zeroing its own capture count and emitting
+/// nothing, and a steal need not blur this window, so `Focused(false)` — the path that already
+/// ends a drag — may never come. What is left is a `divider_drag` that stays `Some` for the rest
+/// of the window's life, which `flush_pending_pty_resize` reads as a hand still on the geometry:
+/// after that no pane of this window can release a resize to its child or settle the transaction
+/// its own reflow opened.
+fn divider_drag_still_holds_its_pointer(
+    at_the_press: Option<bt_platform::NativeWindow>,
+    now: Option<bt_platform::NativeWindow>,
+) -> bool {
+    at_the_press == now
 }
 
 /// What one released resize actually moved, so the window can decide what it owes the screen.
@@ -85536,6 +85575,12 @@ impl Runtime<'_> {
     /// for", which is exactly true.
     fn flush_pending_pty_resize(&mut self, now: Instant) -> Result<Option<Instant>> {
         hang_watch::at(hang_watch::Station::PtyResize);
+        // **A gesture nobody is holding any more is over** (Codex review 2026-09-17). Read before
+        // the held-hand question below, because that question is the one a stale answer ruins: a
+        // divider drag whose capture was taken away with no blur and no button-up would otherwise
+        // read as a hand still on the geometry for the rest of this window's life, and no pane of
+        // it could release or settle another resize.
+        self.end_a_divider_drag_that_lost_its_pointer()?;
         let active = self.window.active_tab;
         let focused_seat = self.window.tabs[active].focused_leaf;
         // **Is a hand still on the geometry** — see [`service_pending_pty_resize`]. The two
@@ -88940,6 +88985,22 @@ impl Runtime<'_> {
     /// Zero side effects when there is nothing to undo: a press that never moved
     /// the ratio restores a value equal to the one already there, `drag_divider`
     /// reports no change, and no re-solve is asked for.
+    /// **End a divider drag the system has taken the pointer away from** (Codex review
+    /// 2026-09-17), through the same door `Esc` and a blur use — so it restores the one ratio it
+    /// was moving, exactly as an unfinished gesture must.
+    ///
+    /// The whole of the test is [`divider_drag_still_holds_its_pointer`]; what is here is the one
+    /// sample it is asked about, taken only while a drag is actually in the air.
+    fn end_a_divider_drag_that_lost_its_pointer(&mut self) -> Result<bool> {
+        let Some(drag) = self.window.divider_drag else {
+            return Ok(false);
+        };
+        if divider_drag_still_holds_its_pointer(drag.capture, bt_platform::thread_mouse_capture()) {
+            return Ok(false);
+        }
+        self.cancel_divider_drag()
+    }
+
     fn cancel_divider_drag(&mut self) -> Result<bool> {
         let Some(drag) = self.window.divider_drag.take() else {
             return Ok(false);
@@ -92949,6 +93010,7 @@ impl Runtime<'_> {
                     split,
                     dir: slot.dir,
                     grip,
+                    capture: bt_platform::thread_mouse_capture(),
                 });
                 self.window.seat_pointer.dragging = Some(split);
                 self.apply_pointer_cursor();
@@ -110327,9 +110389,10 @@ mod pty_drain_budget_tests {
         let call = ["commit_leaf_", "resize("].concat();
         assert_eq!(
             SOURCE.matches(call.as_str()).count(),
-            // Its declaration, the one production release, and four test callers
-            // (including the card's deferred resize fixture).
-            6,
+            // Its declaration, the one production release, and five test callers: the card's
+            // deferred resize fixture, the two anchor-debt fixtures, the leaf-dispatch one, and
+            // `ResizeGateHarness::tick`, which runs the production commit rather than modelling it.
+            7,
             "the commit has one caller in the product, and that caller is the release"
         );
         assert!(
@@ -140697,6 +140760,104 @@ mod tests {
         );
     }
 
+    /// RED — **a repair the gesture before it banked is paid once, by the settlement that finds
+    /// it** (Codex review 2026-09-17).
+    ///
+    /// The sibling of the test above, at the timing it deliberately leaves out: there the earlier
+    /// commit's anchor repair had already been paid before the wobble began, so nothing was owed
+    /// across it. Here the hand comes back before the first transaction has gone quiet, which
+    /// re-opens it — `resize_at` calls `ResizeEpoch::changed` — while the debt that first,
+    /// *real* `ResizePseudoConsole` banked is still unpaid. Two things have to hold at once: the
+    /// wobble banks none of its own, because its child was told nothing and conhost never
+    /// reflowed; and the one that is owed survives to the quiescence that finally arrives, and is
+    /// paid exactly once.
+    ///
+    /// Red gate: *clear* the debt on the unchanged ending — `*reanchor.pending = false` — and a
+    /// real reflow's repair is swallowed, which is the swallowed first character at the prompt.
+    /// The mutation in the other direction, recording a debt there, is caught by the test above:
+    /// its earlier repair is already paid, so a new one shows up as a chord sent for a gesture the
+    /// shell never heard about.
+    #[test]
+    fn a_repair_owed_before_a_wobble_is_still_owed_after_it_and_paid_once() {
+        let start = Instant::now();
+        let mut leaf = leaf_saying("one two three four");
+        leaf.integration = profiles::Integration::PowerShellOptIn;
+        leaf.session
+            .feed_at(b"\x1b]133;A\x07PS> \x1b]133;B\x07", start)
+            .unwrap();
+        assert!(leaf.session.shell_input_region_open());
+        let physical = PhysicalSize::new(400, 96);
+        let step = |leaf: &mut LeafSession, grid, at| {
+            schedule_leaf_grid_change(
+                leaf,
+                grid,
+                physical,
+                at,
+                LeafOnStage::Shown,
+                "drag",
+                card_trace::Pane::untraced(),
+            )
+            .unwrap()
+        };
+
+        // A real gesture onto a new width: the child is told and the repair is banked.
+        let settled = grid_of(44, 4);
+        assert!(step(&mut leaf, settled, start));
+        let at = start + WINDOW_RESIZE_QUIET;
+        let commit = release_due_leaf_resize(&mut leaf, at, false)
+            .unwrap()
+            .0
+            .expect("a drag onto a new width is released");
+        assert!(commit.told_the_child);
+        assert!(
+            leaf.pending_psreadline_resize_reanchor,
+            "conhost reflowed this shell's screen buffer, so a repair is owed"
+        );
+
+        // And the hand comes back before that transaction has gone quiet, ending on the width the
+        // child already holds. Nothing is paid in between.
+        let wobble_at = at + Duration::from_millis(50);
+        assert!(step(&mut leaf, grid_of(43, 4), wobble_at));
+        assert!(step(
+            &mut leaf,
+            settled,
+            wobble_at + Duration::from_millis(17)
+        ));
+        let released_at = wobble_at + Duration::from_millis(17) + WINDOW_RESIZE_QUIET;
+        let commit = release_due_leaf_resize(&mut leaf, released_at, false)
+            .unwrap()
+            .0
+            .expect("the end of the wobble is released");
+        assert!(!commit.told_the_child, "and tells the child nothing");
+        assert!(
+            leaf.pending_psreadline_resize_reanchor,
+            "so the repair the first gesture banked is still the only one owed"
+        );
+
+        let deadline = leaf
+            .session
+            .resize_finish_deadline()
+            .expect("the settlement arms the quiescence that pays it");
+        assert!(leaf.session.finish_resize_if_quiescent(deadline).unwrap());
+        let reanchor = |leaf: &mut LeafSession| {
+            let integration = leaf.integration;
+            let open = leaf.session.shell_input_region_open();
+            take_psreadline_resize_reanchor_input(
+                ResizeReanchor {
+                    pending: &mut leaf.pending_psreadline_resize_reanchor,
+                    integration,
+                },
+                open,
+            )
+        };
+        assert_eq!(
+            reanchor(&mut leaf),
+            Some(PSREADLINE_INVOKE_PROMPT_INPUT),
+            "one reflow of the child's screen buffer, one repair"
+        );
+        assert_eq!(reanchor(&mut leaf), None, "and it is paid exactly once");
+    }
+
     /// RED — **one shape, many entrances** (independent review 2026-09-17).
     ///
     /// The leak is never about window edges. It is `schedule_leaf_grid_change` reflowing a shown
@@ -141563,16 +141724,24 @@ mod tests {
     /// The scheduling half of `Runtime`, with no GPU in it.
     ///
     /// Every decision below is taken by the *production* functions — `plan_grid_change`,
-    /// `service_pending_pty_resize`, `pty_resize_wake_deadline` — driven against a real
-    /// `DualPlaneSession` fed real OSC 133 bytes. What the harness itself owns is only the
-    /// bookkeeping the runtime does around them: applying the reflow to the session, and recording
-    /// the ConPTY requests that were actually issued.
+    /// `service_pending_pty_resize`, `commit_leaf_resize`, `pty_resize_wake_deadline` — driven
+    /// against a real `DualPlaneSession` fed real OSC 133 bytes. What the harness itself owns is
+    /// only the bookkeeping the runtime does around them, and the fake ConPTY: this leaf has no
+    /// child, so the `PtySession::resize` call `commit_leaf_resize` makes is recorded from the
+    /// decision that makes it rather than from the call.
     struct ResizeGateHarness {
         session: DualPlaneSession,
         pending: Option<PendingPtyResize>,
         grid: GridSize,
         conpty: GridSize,
+        /// **What the child was actually told**, in order. A release is not a notification: a
+        /// gesture that ends on the grid the child already holds is released like any other and
+        /// tells it nothing, which is why this reads `commit_leaf_resize`'s own answer.
         requests: Vec<GridSize>,
+        /// Releases that ended the other way: the transaction was settled and the child was left
+        /// alone. Counted so a test can say the gesture *did* end, rather than only that the child
+        /// heard nothing about it.
+        settlements: usize,
         /// Whether a button is still held on the thing that is moving this rectangle — a
         /// divider, or the window's own frame in the OS's modal loop.
         hand_down: bool,
@@ -141590,6 +141759,7 @@ mod tests {
                 grid,
                 conpty: grid,
                 requests: Vec::new(),
+                settlements: 0,
                 hand_down: false,
             }
         }
@@ -141611,9 +141781,10 @@ mod tests {
                 at,
             ) {
                 self.session
-                    .resize(
+                    .resize_at(
                         NonZeroU32::from(reflow.columns),
                         NonZeroU32::from(reflow.rows),
+                        at,
                     )
                     .unwrap();
                 self.grid = reflow;
@@ -141648,17 +141819,36 @@ mod tests {
             let Some(pending) = pending else {
                 return;
             };
-            if pending.grid != self.grid {
-                self.session
-                    .resize(
-                        NonZeroU32::from(pending.grid.columns),
-                        NonZeroU32::from(pending.grid.rows),
-                    )
-                    .unwrap();
-                self.grid = pending.grid;
-            }
+            let mut reanchor_debt = false;
+            let commit = commit_leaf_resize(
+                &mut self.session,
+                None,
+                ResizeReanchor {
+                    pending: &mut reanchor_debt,
+                    integration: profiles::Integration::PowerShellOptIn,
+                },
+                ReleaseGrids {
+                    local: self.grid,
+                    conpty: self.conpty,
+                    next: pending.grid,
+                },
+                pending.physical,
+                at,
+            )
+            .unwrap();
+            // Exactly what `release_due_leaf_resize` writes back.
+            self.grid = pending.grid;
             self.conpty = pending.grid;
-            self.requests.push(pending.grid);
+            if commit.told_the_child {
+                self.requests.push(pending.grid);
+            } else if commit.reconciled {
+                self.settlements += 1;
+            }
+        }
+
+        /// One turn of `Runtime::finish_resize_if_quiescent`: whether this closed a transaction.
+        fn quiesce(&mut self, at: Instant) -> bool {
+            self.session.finish_resize_if_quiescent(at).unwrap()
         }
     }
 
@@ -141773,13 +141963,16 @@ mod tests {
     ///   left minimized). The narrow size is committed on the way down, so the sequence must end
     ///   with the wide one on the way back up.
     /// * **The gesture is over inside the quiet window** (a flick of the divider). Nothing was
-    ///   ever sent, and nothing must be: what the child holds is already right.
+    ///   ever sent, and nothing must be: what the child holds is already right. The gesture still
+    ///   *ends* — this pane's own actor followed the hand down to sixteen columns and back, and
+    ///   the transaction that reflow opened is closed by the release like any other (2026-09-17).
     ///
     /// Red gate: make `coalesce_pty_resize_on_grid_change` refuse to queue a grid wider than
     /// `conpty_grid` — the shape the report's own hypothesis describes — and the first case's
-    /// last element stays at 20 columns while the second case is untouched. Make it *not* cancel
-    /// a pending request that has come back to where the child already is, and the second case
-    /// grows an entry.
+    /// last element stays at 20 columns while the second case is untouched. Tell the child on the
+    /// unchanged ending — drop `commit_leaf_resize`'s `told_the_child` split — and the second case
+    /// grows an entry. Drop the release for that ending instead, and it settles nothing and its
+    /// transaction never closes.
     #[test]
     fn a_pane_squeezed_narrow_and_let_go_leaves_its_shell_wide() {
         let start = Instant::now();
@@ -141813,6 +142006,22 @@ mod tests {
         );
         assert_eq!(quick.conpty, grid_of(50, 50));
         assert_eq!(quick.grid, grid_of(50, 50));
+        // But it was a gesture, and it is over. The pane reflowed to sixteen columns and back on
+        // the way, and only this release can close the transaction that opened.
+        assert_eq!(
+            quick.settlements, 1,
+            "the end of the gesture is reported even though the child is not"
+        );
+        let deadline = quick
+            .session
+            .resize_finish_deadline()
+            .expect("the settlement arms the deadline that closes the transaction");
+        assert!(!quick.quiesce(deadline - Duration::from_millis(1)));
+        assert!(
+            quick.quiesce(deadline),
+            "and the transaction closes at its own deadline"
+        );
+        assert!(!quick.session.resize_transaction_open());
 
         // ③ And the drag that wanders: narrow, narrower, back out, all inside one quiet window,
         // then held wide past it. The child hears the last word and nothing else.
@@ -141898,6 +142107,95 @@ mod tests {
             "one gesture owes the shell exactly one size, and it is the last one"
         );
         assert_eq!(harness.conpty, grid_of(33, 50));
+    }
+
+    /// RED — **a divider drag the system takes the pointer away from is over, and the resize it
+    /// was holding is released** (Codex review 2026-09-17).
+    ///
+    /// The one way a gesture could still leave a pane unsettled. `divider_drag` is torn down by
+    /// the button coming up, by `Esc`, by a re-solve and by a blur, and capture loss is none of
+    /// them: Windows announces it with `WM_CAPTURECHANGED`, winit 0.30.13 answers that message by
+    /// zeroing its own capture count and emitting nothing, and a steal need not blur this window.
+    /// The flag then stays `Some` forever, `flush_pending_pty_resize` reads it as a hand still on
+    /// the geometry, and `service_pending_pty_resize` refuses both the release and a wake — so
+    /// every later resize of every pane of this window is held, unreleased and unsettled, for the
+    /// rest of its life.
+    ///
+    /// Red gate: delete the `end_a_divider_drag_that_lost_its_pointer` line from
+    /// `flush_pending_pty_resize` — the last assertion names the release that never came. Phrase
+    /// the predicate as "this window holds the capture" instead of "the same window holds it as
+    /// held it at the press" and the macOS case cancels every divider drag on its first turn.
+    #[test]
+    fn a_divider_drag_that_loses_its_pointer_stops_holding_the_resize() {
+        let held = Some(bt_platform::NativeWindow::stand_in(0x1234));
+        assert!(
+            divider_drag_still_holds_its_pointer(held, held),
+            "an untouched capture is a hand still on the divider"
+        );
+        assert!(
+            divider_drag_still_holds_its_pointer(None, None),
+            "and on a platform with no per-thread capture to lose, nothing was taken away"
+        );
+        assert!(!divider_drag_still_holds_its_pointer(
+            held,
+            Some(bt_platform::NativeWindow::stand_in(0x4321))
+        ));
+        assert!(
+            !divider_drag_still_holds_its_pointer(held, None),
+            "and the shape the report is about: the system took it and told nobody"
+        );
+
+        // The recovery is read before the held-hand question it exists to keep honest.
+        const SOURCE: &str = include_str!("main.rs");
+        let flush = SOURCE
+            .split_once("    fn flush_pending_pty_resize(&mut self, now: Instant)")
+            .expect("this file declares the release flush")
+            .1;
+        let recovery = flush
+            .find("end_a_divider_drag_that_lost_its_pointer")
+            .expect("the flush ends a gesture nobody is holding any more");
+        let hand = flush
+            .find("let hand_on_the_geometry")
+            .expect("and then asks whether a hand is on the geometry");
+        assert!(
+            recovery < hand,
+            "a stale divider drag has to be cleared before it is believed"
+        );
+
+        let start = Instant::now();
+        let mut harness = ResizeGateHarness::new(50, 50);
+        // A divider is being dragged, and this pane is being squeezed by it.
+        harness.hand_down = true;
+        harness.window_resized(PhysicalSize::new(1500, 1800), false, start);
+        harness.tick(start + Duration::from_secs(5));
+        assert_eq!(
+            harness.requests,
+            Vec::new(),
+            "while a hand is on the divider the child hears nothing, which is the rule"
+        );
+        assert!(
+            harness.session.resize_transaction_open(),
+            "and the reflow that followed the hand has a transaction open"
+        );
+
+        // The pointer is taken away. No blur, no button-up: the only thing that changes is the
+        // answer the recovery reads.
+        harness.hand_down = divider_drag_still_holds_its_pointer(held, None);
+        harness.tick(start + Duration::from_secs(5) + Duration::from_millis(1));
+        assert_eq!(
+            harness.requests,
+            vec![grid_of(26, 50)],
+            "the gesture is over, so the release it was holding is delivered"
+        );
+        let deadline = harness
+            .session
+            .resize_finish_deadline()
+            .expect("and that release settles the transaction");
+        assert!(harness.quiesce(deadline));
+        assert!(
+            !harness.session.resize_transaction_open(),
+            "which is what lets this pane scan for formulas again"
+        );
     }
 
     /// The other half of that rule: **letting go is what releases it, not a timer that outlives

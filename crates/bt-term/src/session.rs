@@ -22465,6 +22465,68 @@ mod tests {
         assert!(!projection.review_hold());
     }
 
+    /// RED — **a wobble settled where the child already was does not move a reader's place in
+    /// history** (Codex review 2026-09-17).
+    ///
+    /// The unchanged-size settlement does everything its sibling does — it installs the canonical
+    /// branch over the displayed one, re-seats every registered anchor and re-anchors the
+    /// decorations projected across it — and then `finish_resize_if_quiescent` clears the resize
+    /// hold. All of that happens under a view that is parked twenty rows up in scrollback, so all
+    /// of it has to leave that view exactly where it is.
+    ///
+    /// Red gate: settle the wobble with nothing. The hold never clears and the offset is pinned by
+    /// a transaction that is never going to end; re-anchor against the pre-wobble grid instead and
+    /// the reader is thrown to the bottom.
+    #[test]
+    fn a_wobble_settled_on_the_childs_own_size_leaves_a_reader_where_they_were() {
+        // The top presentation row, whichever plane it is drawn from -- a view parked in
+        // scrollback is looking at history, so `frame_row_text`'s live-row lookup cannot see it.
+        let top_row = |frame: &ViewportFrame| {
+            let columns = frame.columns.get() as usize;
+            (0..columns)
+                .map(|column| frame.cells[column].text.as_str())
+                .collect::<String>()
+        };
+        let (mut session, mut projection, _lines) = scrolled_review_session(10);
+        let before = session.viewport_frame(&mut projection).unwrap();
+        let top_line = top_row(&before);
+        assert_eq!(before.scroll_offset_rows, 20);
+
+        // One column out and back, which tells the child nothing: it is already at forty.
+        let at = Instant::now();
+        session.resize_at(nz(39), nz(10), at).unwrap();
+        session
+            .resize_at(nz(40), nz(10), at + Duration::from_millis(17))
+            .unwrap();
+        session.refresh_projection(&mut projection);
+        let during = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            during.scroll_offset_rows, 20,
+            "the reflow itself keeps the reader's place"
+        );
+
+        session.mark_resize_settled_unchanged_at(nz(40), nz(10), at + Duration::from_millis(217));
+        let deadline = session
+            .resize_finish_deadline()
+            .expect("the settlement arms the quiescence that ends the hold");
+        assert!(session.finish_resize_if_quiescent(deadline).unwrap());
+        session.refresh_projection(&mut projection);
+        let after = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            after.scroll_offset_rows, 20,
+            "and settling the gesture does not move it either"
+        );
+        assert_eq!(
+            top_row(&after),
+            top_line,
+            "the same line is under the reader's eye before and after"
+        );
+        assert!(
+            !projection.review_hold(),
+            "the transaction is over, so presentation is not holding anything for it"
+        );
+    }
+
     #[test]
     fn a_user_clear_without_a_resize_snaps_to_the_empty_bottom_without_holding() {
         let (mut session, mut projection, _lines) = scrolled_review_session(10);
