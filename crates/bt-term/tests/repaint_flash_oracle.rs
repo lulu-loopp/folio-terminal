@@ -1001,6 +1001,152 @@ fn a_formula_body_rewritten_by_a_repaint_is_typeset_again() {
     }
 }
 
+/// The two screens the bottom-edge fixtures repaint between: one where the block that scrolled away
+/// is nowhere, and one where it has scrolled back in on the last content row — the row the
+/// application also draws its own "jump to bottom" chip on, below a fixed separator and prompt.
+fn scrolled_away_screen() -> Vec<&'static str> {
+    vec![
+        "gone zero",
+        "gone one",
+        "gone two",
+        "gone three",
+        "",
+        "────────────────",
+        "prompt> ",
+    ]
+}
+
+fn bottom_edge_screen(chip: bool) -> Vec<&'static str> {
+    vec![
+        "filler a",
+        "filler b",
+        "filler c",
+        "11. section",
+        if chip {
+            r"$$e^{i\pi} + 1 = 0$$                 Jump to bottom (click)"
+        } else {
+            r"$$e^{i\pi} + 1 = 0$$"
+        },
+        "",
+        "────────────────",
+        "prompt> ",
+    ]
+}
+
+/// Prove one block, then repaint it off the screen so its record is waiting off-band, and return the
+/// session with the detector count taken at the moment it went.
+fn session_with_one_off_band_block(start: std::time::Instant) -> DualPlaneSession {
+    let mut session = DualPlaneSession::new(nz(100), nz(12));
+    let mut first = b"\x1b[?1049h".to_vec();
+    first.extend_from_slice(&synchronized_repaint(&[
+        "header",
+        r"$$e^{i\pi} + 1 = 0$$",
+        "tail",
+        "",
+        "────────────────",
+        "prompt> ",
+    ]));
+    session.feed_at(&first, start).unwrap();
+    session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+    complete_live_math(&mut session);
+    let mut projection = session.new_projection(session.layout_key());
+    session.refresh_projection(&mut projection);
+    let frame = session.viewport_frame(&mut projection).unwrap();
+    assert!(
+        frame_row_text(&frame, 1).trim().is_empty(),
+        "the fixture never rendered its block"
+    );
+    session
+        .feed_at(
+            &synchronized_repaint(&scrolled_away_screen()),
+            start + Duration::from_millis(300),
+        )
+        .unwrap();
+    session
+}
+
+fn rendered_sources(session: &mut DualPlaneSession) -> Vec<String> {
+    let mut projection = session.new_projection(session.layout_key());
+    session.refresh_projection(&mut projection);
+    let frame = session.viewport_frame(&mut projection).unwrap();
+    let mut sources = bt_term::observe_formula_frame(&frame).rendered_sources;
+    sources.sort();
+    sources
+}
+
+/// **A picture is never put on a row the detector would not read as that block.**
+///
+/// The owner's own scrolling session, 2026-wrapped: a block scrolls back into view on the last
+/// content row, and that row is the one the application draws its "jump to bottom" chip on. The
+/// chip sits after the closing `$$`, so the detector does not read the row as a display block at
+/// all — but the off-band re-anchor looked for the proven source as a *substring* of the grid, found
+/// it, and seated the record there. The frame published a picture the detector disowns; the very
+/// next pass over a byte-identical grid took it away again; and when the block finally scrolled up
+/// one more row, onto a line of its own, it was proven and drawn for real. Read by read, that is one
+/// picture appearing, vanishing and returning while the text underneath it never moved — which is
+/// what the owner sees, and it is the last two flicker events of his recording.
+///
+/// Mutation: letting the re-anchor match a display block anywhere inside a row, rather than only
+/// where the row is that block and nothing else, puts the raster back on the chip row and turns both
+/// assertions red.
+#[test]
+fn a_block_sharing_its_row_with_the_application_is_not_re_anchored_onto_it() {
+    let start = std::time::Instant::now();
+    let mut session = session_with_one_off_band_block(start);
+
+    let back = start + Duration::from_millis(600);
+    session
+        .feed_at(&synchronized_repaint(&bottom_edge_screen(true)), back)
+        .unwrap();
+    assert!(
+        session.held_unbacked_records().is_empty(),
+        "a raster was seated on a row the detector does not read as its block: {:?}",
+        session.held_unbacked_records()
+    );
+    let published = rendered_sources(&mut session);
+
+    // The same grid, one detection pass later. What a frame shows must not depend on which pass a
+    // reader happens to be looking at.
+    session.advance_live_stability(back + LIVE_MATH_STABLE_INTERVAL);
+    complete_live_math(&mut session);
+    assert_eq!(
+        rendered_sources(&mut session),
+        published,
+        "the frame changed its mind about an unchanged grid"
+    );
+}
+
+/// The control: the same block, the same re-anchor, on a row it has to itself. It must come back
+/// without being detected again — tightening the re-anchor above must not cost the preservation it
+/// exists for.
+#[test]
+fn a_block_scrolling_back_onto_a_row_of_its_own_is_re_anchored_without_re_detection() {
+    let start = std::time::Instant::now();
+    let mut session = session_with_one_off_band_block(start);
+    let detections = session.live_detection_count();
+
+    let back = start + Duration::from_millis(600);
+    session
+        .feed_at(&synchronized_repaint(&bottom_edge_screen(false)), back)
+        .unwrap();
+    let mut projection = session.new_projection(session.layout_key());
+    session.refresh_projection(&mut projection);
+    let frame = session.viewport_frame(&mut projection).unwrap();
+    assert!(
+        frame_row_text(&frame, 4).trim().is_empty(),
+        "the off-band block was not re-anchored onto the row it has to itself: {:?}",
+        (0..8)
+            .map(|row| frame_row_text(&frame, row))
+            .collect::<Vec<_>>()
+    );
+    assert!(session.held_unbacked_records().is_empty());
+    assert_eq!(
+        session.live_detection_count(),
+        detections,
+        "an exact re-anchor must not schedule detection again"
+    );
+}
+
 /// The control the two fixtures above are measured against: **a row rewritten with the bytes it
 /// already had did not change, whoever is looking at it.**
 ///

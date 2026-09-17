@@ -6702,9 +6702,12 @@ impl DualPlaneSession {
         let mut remaining = VecDeque::new();
         let mut relayout_tasks = Vec::new();
         while let Some(mut record) = self.offscreen_decorations.pop_front() {
-            let Some((start, end, segments)) =
-                exact_live_source_match(&record.span.original_source, &inputs, &occupied)
-            else {
+            let Some((start, end, segments)) = exact_live_source_match(
+                &record.span.original_source,
+                &inputs,
+                &occupied,
+                record.span.mode == MathMode::Display,
+            ) else {
                 remaining.push_back(record);
                 continue;
             };
@@ -12685,10 +12688,29 @@ fn rebase_identity_onto_match(
     true
 }
 
+/// Find a record's proven source in the live grid, and say where.
+///
+/// **`whole_rows` is what makes this the same answer the detector would give.** The search is a
+/// substring search over the grid's text, which is right for an inline run — an inline run *is* a
+/// substring of its line — and too generous by exactly one case for a display block, which the
+/// detector only ever owns when its lines are that block and nothing else.
+///
+/// The owner's scrolling session of 2026-09-17 is that case. A block scrolls back into view on the
+/// last content row, and that row is the one the application draws its "jump to bottom" chip on. The
+/// chip sits after the closing `$$`, so the detector does not read the row as a block at all — but
+/// the substring was there, this re-anchor seated the record on it, and the frame published a
+/// picture the detector disowns. The next pass over a byte-identical grid took it away again, and
+/// the block was drawn for real only once it had scrolled up onto a line of its own: one picture
+/// appearing, vanishing and returning while the text underneath it never moved.
+///
+/// So a display record matches only where every row the match touches is covered by it apart from
+/// the whitespace around it. That is not a rule invented here; it is the detector's own rule, asked
+/// at the one door that was not asking it.
 fn exact_live_source_match(
     source: &str,
     inputs: &[LiveDetectionInput],
     occupied: &BTreeSet<u32>,
+    whole_rows: bool,
 ) -> Option<(GridPoint, GridPoint, Vec<MathCellSegment>)> {
     struct RowRange<'a> {
         row: u32,
@@ -12738,6 +12760,12 @@ fn exact_live_source_match(
             continue;
         }
         if occupied.contains(&range.row) {
+            return None;
+        }
+        if whole_rows
+            && !(text.get(range.start..segment_start)?.trim().is_empty()
+                && text.get(segment_end..range.end)?.trim().is_empty())
+        {
             return None;
         }
         let byte_start = u32::try_from(segment_start - range.start).ok()?;
