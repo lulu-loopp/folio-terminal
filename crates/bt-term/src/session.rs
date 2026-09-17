@@ -11228,6 +11228,14 @@ impl DualPlaneSession {
     /// would see the closing fragment alone and could not join anything, and whether a formula
     /// renders would depend on where the last `$$` happened to be. One line, and only for a
     /// candidate whose own text says it could be a closing fragment at all.
+    ///
+    /// **And that last question is the detector's, not one of this file's own.** It is asked
+    /// through `bt_detect::may_close_row_split_inline_math`, which is the join's own closer test
+    /// with the row above left out, so a pair the worker would join is a pair this window always
+    /// reaches back for. Re-deriving it here once cost the reported sentence its own formula: a
+    /// narrower reading refused the closing row for carrying a second, whole formula behind the
+    /// closer, the window opened at the closing row, and the fragment above was never in it
+    /// (release review 2026-09-17, X-6).
     fn frozen_inline_join_window_start(&self, candidate: TranscriptId) -> Option<TranscriptId> {
         if !self.inline_math_bands {
             return None;
@@ -28509,6 +28517,107 @@ mod tests {
         assert_eq!(
             inline, 1,
             "the frozen scan must carry the captured OSC 133 site, not default to Ineligible"
+        );
+    }
+
+    /// T-MATH-INLINE-WRAP-FROZEN: a split formula whose closing row also carries a whole formula.
+    ///
+    /// The detector always joined this pair. Its closer is the closing row's **first** `$`, and
+    /// everything past that dollar re-pairs from a clean state — which is precisely how the second
+    /// formula of the reported sentence survives the first one's split. The frozen scheduler asked
+    /// a narrower question than the detector's own: it reached one line back only for a closing row
+    /// whose `$` was the *only* one on it, so the very sentence that reported the defect
+    /// (2026-09-15) lost its quadratic formula because the density followed it on the same row.
+    /// The scan window then opened at the closing row, the fragment above was never in it, and the
+    /// half formula stayed raw source between two pictures (release review 2026-09-17, X-6).
+    ///
+    /// Driven through freezing, because that is where the two rules meet: the live grid keeps both
+    /// rows in front of the scanner whatever a window says, and a direct scanner test always hands
+    /// the pair over itself. Only the frozen scheduler decides what the worker gets to read.
+    #[test]
+    fn a_frozen_split_formula_reaches_its_opening_row_when_another_formula_follows() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(100), nz(8));
+        seat_inline_metrics(&mut session);
+        let stream = concat!(
+            "\x1b]133;A\x07PS> \x1b]133;B\x07show\x1b]133;C\x07\r\n",
+            r"Use the quadratic formula $x",
+            "\r\n",
+            r"= \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}$, and the density $\varphi(x) = e^{-x^2/2}$.",
+            "\r\n",
+            r"The series $\sum_{n=1}^{\infty} \frac{1}{n^2}$ converges.",
+            "\r\n",
+        );
+        session.feed_at(stream.as_bytes(), started).unwrap();
+        session
+            .feed_at("\r\npad".repeat(10).as_bytes(), started)
+            .unwrap();
+        let row_of = |session: &DualPlaneSession, prefix: &str| {
+            session
+                .document
+                .entries()
+                .iter()
+                .find(|(_, entry)| entry.line.text.starts_with(prefix))
+                .map(|(id, _)| *id)
+                .unwrap_or_else(|| panic!("{prefix:?} must freeze into history"))
+        };
+        let opening = row_of(&session, "Use the quadratic");
+        let closing = row_of(&session, r"= \frac{-b");
+        assert!(
+            opening < closing,
+            "the two halves must be adjacent frozen rows in printed order"
+        );
+
+        assert!(complete_frozen_math_for_real(&mut session) >= 2);
+        let span = session
+            .decoration(closing)
+            .and_then(|record| record.span.clone())
+            .expect("the closing row must carry a proven inline span");
+        assert_eq!(
+            span.mode,
+            MathMode::Inline,
+            "a Display span carrying no runs is the scheduler's own placeholder: the scan \
+             resolved to nothing, which is what losing the opening row looks like from here"
+        );
+        assert_eq!(
+            span.inline_runs
+                .iter()
+                .map(|run| run.source.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                r"x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}",
+                r"\varphi(x) = e^{-x^2/2}",
+            ],
+            "the joined formula and the whole one after it are both runs of this row"
+        );
+        assert_eq!(
+            span.inline_joined_head
+                .as_ref()
+                .map(|head| head.text.as_str()),
+            Some("$x"),
+            "and the fragment left on the row above travels with them"
+        );
+
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_to_top();
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            rendered_inline_blocks(&frame)
+                .iter()
+                .filter(|block| block.start == closing)
+                .count(),
+            1,
+            "one placement carries this row's runs"
+        );
+        assert_eq!(
+            rendered_inline_blocks(&frame).len(),
+            2,
+            "the split formula and the series below it are both pictures"
+        );
+        assert!(
+            !frame.cells.iter().any(|cell| cell.text.contains('$')),
+            "and no delimiter of either is left on the grid as source"
         );
     }
 

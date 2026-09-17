@@ -12466,7 +12466,7 @@ struct WindowRuntime {
     /// The notches that have arrived since the loop last acted on one. See
     /// [`WheelBurst`].
     wheel_burst: Option<WheelBurst>,
-    /// **The paths one drop put on this window, waiting for the turn boundary**
+    /// **The drop this window is holding, waiting for the turn boundary**
     /// (GitHub issue #1 ②).
     ///
     /// winit reports a drop as one `WindowEvent::DroppedFile` per file with
@@ -12480,8 +12480,12 @@ struct WindowRuntime {
     /// [`Runtime::flush_dropped_files`] spends the batch as one paste: three
     /// files on one command line, not three command lines.
     ///
-    /// Empty on every turn but the one after a drop.
-    dropped_files: Vec<PathBuf>,
+    /// **And it carries the drop's point with it**, which is what the batch is a
+    /// [`DropBatch`] rather than a `Vec<PathBuf>` for — see that type for the
+    /// whole of why the point cannot be read at the flush.
+    ///
+    /// `None` on every turn but the one after a drop.
+    dropped_files: Option<DropBatch>,
     /// When the last present happened, so the trace can report the *interval*
     /// between two pictures rather than only the cost of making one. The cost of
     /// a frame is what a profiler measures; the gap between frames is what a
@@ -22104,6 +22108,67 @@ enum WheelBurst {
     Pixels { x: f64, y: f64 },
 }
 
+/// **One drop: the files it let go of, and where it let go of them** (GitHub
+/// issue #1 ②; release review 0.4.2 X-10).
+///
+/// [`WheelBurst`]'s neighbour and the same shape of problem — winit reports one
+/// `WindowEvent::DroppedFile` per file and marks neither end of the run, so
+/// "these three files arrived together" is a fact only the loop holds. What this
+/// carries that a list of paths does not is **the point**, and the point is the
+/// whole of X-10.
+///
+/// **Why the point belongs to the batch and not to the flush.** The paste
+/// happens at the turn boundary, which is later — and "later" is enough:
+/// reading the cursor then asks where the hand is *now*, and on a window that is
+/// busy (a drain turn, a page coming up) the hand has had time to travel to
+/// another pane. It also used to prefer `pointer_position`, the window's own
+/// cached pointer, which during a drag from another application is not merely
+/// old but *from before the drag began* — no pointer event is delivered while
+/// another program's drag is over this window, so the cache is whatever the hand
+/// was doing last time it was in here. Either reading can name a pane the file
+/// was never dropped on, which is exactly the promise the changelog made.
+///
+/// So the point is taken **once, when the first file of the drop arrives** —
+/// [`Runtime::collect_dropped_file`] — and nothing later may replace it. That is
+/// the earliest this process can ask: `IDropTarget::Drop` and
+/// `performDragOperation:` are the platform telling us about the release, and
+/// the arm that fills this runs out of that same delivery. Earlier still would
+/// mean carrying the `POINTL` and the `draggingLocation` out of winit's
+/// backends, which is upstream's to give.
+#[derive(Debug)]
+struct DropBatch {
+    /// Where the cursor stood when this drop opened, in this window's physical
+    /// pixels — [`bt_platform::pointer_position_in_window`]'s units, which are
+    /// `CursorMoved`'s. `None` when the platform would not say, which is the one
+    /// road left to the pane holding the keyboard.
+    point: Option<PhysicalPosition<f64>>,
+    /// Every file of this drop, in the order winit delivered them.
+    paths: Vec<PathBuf>,
+}
+
+impl DropBatch {
+    /// **Add one file to the drop that is standing, or open one at `point`.**
+    ///
+    /// `point` is read only on the arm that opens a batch, and that is stated
+    /// here rather than left to the caller: a second reading arriving mid-drop
+    /// is precisely the defect X-10 names, so the type refuses it even when it
+    /// is offered. The caller does not *take* a second reading either — see
+    /// [`Runtime::collect_dropped_file`] — and the two guards are not a
+    /// duplicate: one saves a call into the system, this one decides whose
+    /// answer wins.
+    fn collect(standing: &mut Option<Self>, path: PathBuf, point: Option<PhysicalPosition<f64>>) {
+        match standing {
+            Some(batch) => batch.paths.push(path),
+            None => {
+                *standing = Some(Self {
+                    point,
+                    paths: vec![path],
+                });
+            }
+        }
+    }
+}
+
 impl WheelBurst {
     fn of(delta: MouseScrollDelta) -> Self {
         match delta {
@@ -22230,21 +22295,35 @@ fn wheel_points_sideways(delta: MouseScrollDelta) -> bool {
 /// line on a Mac, where `wheel_columns` was taking a sideways `x` as it stood
 /// while Windows was negating a `y`.
 ///
-/// **Why the rule is safe to apply on every platform.** It asks for two facts at
-/// once: `Shift` is held *and* the report has no vertical component at all. On
-/// Windows and Linux `Shift`+wheel arrives vertical, so the second fact is false
-/// and the report is handed back untouched. A genuine sideways gesture — a tilt
-/// wheel, a trackpad's second finger — is made without `Shift`, so the first fact
-/// is false. What is left is the one report no platform produces except as this
-/// rewrite: a hand holding `Shift` and a wheel that claims to be moving only
-/// sideways.
+/// **It is macOS's rewrite, so it is asked of macOS and of nowhere else**
+/// (0.4.2 release review, X-5). The first landing applied the rule on every
+/// platform, on the reasoning that a genuine sideways gesture comes without
+/// `Shift` — and that is a guess about how a hand is held, not a fact about a
+/// desktop. **A tilt wheel and a trackpad's second finger exist on Windows and
+/// on Linux too**, and there a hand holding `Shift` over one of them is making a
+/// sideways gesture and means it: nothing rewrote it on the way in, and turning
+/// it into a vertical one would move the document under a reader who asked for
+/// the line. So the third fact is the platform, and only the desktop that
+/// actually performs the swap is allowed to have it undone.
+///
+/// `platform_swaps_shift_wheel` is that fact as a **value**, which is §4.3's
+/// rule for every platform decision in this window (`crumb_segments_on`,
+/// `input::effective_modifiers`): a `cfg!` asked inside the function would make
+/// the rule unreadable — and untestable — from any machine but the one it is
+/// about, and the interesting half of this rule is what it does *not* do
+/// elsewhere. The call site asks `bt_platform::host_platform()`, which is where
+/// this process reads a `cfg` once.
 ///
 /// Applied where the platform's report becomes this window's — before
 /// [`WheelBurst`] merges anything — so that every station downstream of the queue
 /// reads one upright currency and none of them has to know which desktop it is
 /// running on.
-fn upright_wheel(delta: MouseScrollDelta, shift: bool) -> MouseScrollDelta {
-    if !shift {
+fn upright_wheel(
+    delta: MouseScrollDelta,
+    shift: bool,
+    platform_swaps_shift_wheel: bool,
+) -> MouseScrollDelta {
+    if !shift || !platform_swaps_shift_wheel {
         return delta;
     }
     match delta {
@@ -36550,7 +36629,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         wheel_events: 0,
         wheel_routings: 0,
         wheel_burst: None,
-        dropped_files: Vec::new(),
+        dropped_files: None,
         last_present_at: None,
         perf_trace_us: 0,
         strip_animation_ticked_at: None,
@@ -95752,7 +95831,16 @@ impl Runtime<'_> {
         // Above the merge, so a burst is accumulated in one currency and every
         // station past it — the math block's pan, the local subpixels, the column
         // arithmetic — reads a report that means what the hand meant.
-        let delta = upright_wheel(reported, self.window.modifiers.shift_key());
+        //
+        // The desktop is asked of `host_platform()` and not of a `cfg!` here, for
+        // [`upright_wheel`]'s stated reason and for `first_run`'s: this window
+        // reads the `cfg` in one place, and a rule that turns on the platform
+        // stays a rule anybody can read from any machine.
+        let delta = upright_wheel(
+            reported,
+            self.window.modifiers.shift_key(),
+            bt_platform::host_platform() == bt_platform::HostPlatform::MacOs,
+        );
         match self.window.wheel_burst {
             Some(burst) => match burst.plus(delta) {
                 Some(merged) => self.window.wheel_burst = Some(merged),
@@ -95797,34 +95885,60 @@ impl Runtime<'_> {
     ///
     /// [`Self::flush_wheel`]'s twin, and called from the same two doors for the
     /// same reason: the top of `window_event` for every event that is not
-    /// another file of this drop, and the top of a turn. Free — one `is_empty`
-    /// — on every turn in which nobody dropped anything.
+    /// another file of this drop, and the top of a turn. Free — one `Option`
+    /// read — on every turn in which nobody dropped anything.
     ///
     /// **One paste, however many files.** The whole batch goes to
     /// [`Self::paste_paths_into`] as one list, which is what puts three files on
     /// one command line rather than running the first two.
+    ///
+    /// **And it asks nothing about where the pointer is** (release review 0.4.2
+    /// X-10). The point travelled here inside the batch, taken when the drop
+    /// opened; a reading made at this line would be a reading made *after* the
+    /// release, which on a busy window is long enough for the hand to have
+    /// reached another pane. See [`DropBatch`].
     ///
     /// The station is entered only when there is a drop to spend and is handed
     /// back on the way out, on [`hang_watch::enter`]'s own rule: this door
     /// stands inside two other functions, and a name it kept would be charged to
     /// the keystroke or the turn that came after it.
     fn flush_dropped_files(&mut self) -> Result<()> {
-        if self.window.dropped_files.is_empty() {
+        let Some(batch) = self.window.dropped_files.take() else {
             return Ok(());
-        }
-        let paths = std::mem::take(&mut self.window.dropped_files);
+        };
         let leaving = hang_watch::enter(hang_watch::Station::FileDrop);
-        // **The cursor is asked for here and exactly once**, for the batch and
-        // not for the file: the query crosses into Win32 or AppKit, and a drop
-        // of forty files would otherwise cross forty times to be told the same
-        // point. It is also the only moment at which the question is worth
-        // asking — the hand is still where it let go, and the flush's own rule
-        // guarantees no event has moved it since the drop.
-        let point = self.dropped_files_point();
-        let seat = self.dropped_files_seat(point);
-        let pasted = self.paste_paths_into(seat, paths, "write dropped paths to PTY");
+        let seat = self.dropped_files_seat(batch.point);
+        let pasted = self.paste_paths_into(seat, batch.paths, "write dropped paths to PTY");
         hang_watch::at(leaving);
         pasted
+    }
+
+    /// **One file of a drop, written down the moment the platform hands it
+    /// over** (release review 0.4.2 X-10).
+    ///
+    /// The dispatcher's `DroppedFile` arm, given a name because of the one thing
+    /// it does besides pushing a path: **on the file that opens the batch, and
+    /// only then, it asks the platform where the cursor is.** This call runs
+    /// inside the delivery of the release itself — `IDropTarget::Drop` on
+    /// Windows, `performDragOperation:` on macOS — so the hand is still where it
+    /// let go of the file, which is the one instant at which the question has a
+    /// true answer.
+    ///
+    /// **Two guards, one each.** The `is_none` here decides whether the *system*
+    /// is called at all, so a drop of forty files crosses into Win32 or AppKit
+    /// once rather than forty times; [`DropBatch::collect`]'s own match decides
+    /// whose answer the batch keeps, so a point offered later could not win even
+    /// if one were taken.
+    ///
+    /// **`pointer_position` is not consulted, deliberately.** The window's cached
+    /// pointer is not the drop point and is not even stale in the ordinary sense:
+    /// no pointer event is delivered while another application's drag is over
+    /// this window, so what is in it is from before the drag began — a different
+    /// gesture entirely, quite possibly over a different pane.
+    fn collect_dropped_file(&mut self, path: PathBuf) {
+        let opening = self.window.dropped_files.is_none();
+        let point = opening.then(|| self.dropped_point_now()).flatten();
+        DropBatch::collect(&mut self.window.dropped_files, path, point);
     }
 
     /// **Which pane a dropped path is typed into** (GitHub issue #1 ②).
@@ -95854,10 +95968,11 @@ impl Runtime<'_> {
     /// another application's drag is over the window either, so a drag that
     /// began in Explorer or the Finder arrives at a window whose pointer has
     /// already left it and `pointer_position` is `None` — which is *most*
-    /// drops. [`Self::dropped_files_point`] is what closes that: the cursor is
-    /// asked of the platform, once, at the moment of the flush. The keyboard's
-    /// pane is what is left when even that answers nothing, which is a window
-    /// on a session with no desktop to read.
+    /// drops. [`Self::dropped_point_now`] is what closes that: the cursor is
+    /// asked of the platform, once, **as the drop arrives** (release review
+    /// 0.4.2 X-10), and travels here inside the batch. The keyboard's pane is
+    /// what is left when even that answers nothing, which is a window on a
+    /// session with no desktop to read.
     fn dropped_files_seat(&mut self, position: Option<PhysicalPosition<f64>>) -> SeatId {
         let covered = position.is_some_and(|position| {
             matches!(
@@ -95868,44 +95983,36 @@ impl Runtime<'_> {
         dropped_files_seat_at(&self.seat_layout, position, covered, self.focused_leaf)
     }
 
-    /// **Where the hand let go**, in this window's own pixels (GitHub issue #1
-    /// ②, owner's ruling 2026-09-16: a drop lands in the pane under the cursor).
+    /// **Where the cursor is, this instant, in this window's own pixels**
+    /// (GitHub issue #1 ②, owner's ruling 2026-09-16: a drop lands in the pane
+    /// under the cursor).
     ///
-    /// The live pointer where there is one — a drag that began *inside* this
-    /// window leaves it standing — and otherwise the platform's own cursor,
-    /// which is the only witness left once winit has dropped the point and the
-    /// pointer events have stopped.
+    /// Read by [`Self::collect_dropped_file`] and by nothing else, because there
+    /// is only one instant at which "where is the cursor" and "where was the
+    /// file let go of" are the same question: the one this process is standing
+    /// in while the platform delivers the release.
     ///
-    /// **The two are the same units and no conversion happens here**, which was
-    /// checked rather than assumed. `pointer_position` is
-    /// `WindowEvent::CursorMoved`'s `PhysicalPosition` stored raw
-    /// ([`Self::pointer_moved`]). On Windows that is `WM_MOUSEMOVE`'s `lParam`:
-    /// physical pixels from the client area's top-left, which is precisely what
-    /// `GetCursorPos` put through `ScreenToClient` answers. On macOS winit takes
-    /// its view's point and multiplies by the window's backing scale, which is
-    /// precisely what the AppKit arm does with `NSEvent.mouseLocation` after the
-    /// same two conversions. So the platform's answer is already in the window's
-    /// physical pixels and is used as it stands; scaling it again here would
-    /// square the factor on every Retina and every 150% display.
+    /// **The units are `CursorMoved`'s and no conversion happens here**, which
+    /// was checked rather than assumed. On Windows a pointer event is
+    /// `WM_MOUSEMOVE`'s `lParam` — physical pixels from the client area's
+    /// top-left — which is precisely what `GetCursorPos` put through
+    /// `ScreenToClient` answers. On macOS winit takes its view's point and
+    /// multiplies by the window's backing scale, which is precisely what the
+    /// AppKit arm does with `NSEvent.mouseLocation` after the same two
+    /// conversions. So the platform's answer is already in the window's physical
+    /// pixels and is used as it stands; scaling it again here would square the
+    /// factor on every Retina and every 150% display.
     ///
-    /// [`WindowRuntime::pointer_last_seen`] is still deliberately not read: it
-    /// says where the hand was *before* the drag, which is not where this drop
-    /// landed, and a routing built on it would be a guess wearing a
-    /// measurement's clothes. The cursor query is the opposite of that — it is
-    /// the hand's position now, and now is when the file was let go of.
-    fn dropped_files_point(&self) -> Option<PhysicalPosition<f64>> {
-        let live = self.window.pointer_position;
-        let queried = match live {
-            // A window that already knows where its pointer is does not pay for
-            // the question. The query crosses into Win32 or AppKit, and this
-            // `match` is where "only when the batch has no pointer of its own"
-            // is actually enforced.
-            Some(_) => None,
-            None => native_window(&self.window.window)
+    /// Neither `pointer_position` nor [`WindowRuntime::pointer_last_seen`] is
+    /// read: both say where the hand was *before* the drag, which is not where
+    /// this drop landed, and a routing built on either would be a guess wearing
+    /// a measurement's clothes.
+    fn dropped_point_now(&self) -> Option<PhysicalPosition<f64>> {
+        dropped_point_of(
+            native_window(&self.window.window)
                 .ok()
                 .and_then(bt_platform::pointer_position_in_window),
-        };
-        dropped_files_point_from(live, queried)
+        )
     }
 
     fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {
@@ -113140,6 +113247,12 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // [`Runtime::flush_dropped_files`], and [`WheelBurst`]'s reasoning
             // one gesture over.
             //
+            // **And the cursor is read here too, on the file that opens the
+            // batch** (release review 0.4.2 X-10): this arm runs inside the
+            // platform's delivery of the release, which is the only instant at
+            // which where the cursor is and where the file was let go of are the
+            // same point. See [`Runtime::collect_dropped_file`].
+            //
             // `HoveredFile` and `HoveredFileCancelled` are not answered at all.
             // They would be the drop affordance, and a drag that lights
             // something up over the files column is a ruling nobody has made:
@@ -113148,7 +113261,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // thing, and inventing a highlight here would be this window
             // answering that question for itself.
             WindowEvent::DroppedFile(path) => {
-                runtime.window.dropped_files.push(path);
+                runtime.collect_dropped_file(path);
                 Ok(())
             }
             WindowEvent::Resized(size) => runtime.resized(size),
@@ -113687,23 +113800,17 @@ fn dropped_files_seat_at(
     }
 }
 
-/// **Which of the two witnesses a drop's point is**, with both already in hand
-/// (GitHub issue #1 ②).
+/// **The platform's cursor, in the units a pointer event would have arrived in**
+/// (GitHub issue #1 ②; release review 0.4.2 X-10).
 ///
-/// `live` is `WindowEvent::CursorMoved`'s last word and `queried` is what the
-/// platform's own cursor answered, in the window's physical pixels. The live one
-/// wins because it is free and cannot be stale — no event that could have moved
-/// it has run since the drop — and the query is what a drag from another
-/// application leaves as the only witness.
-///
-/// A free function so the choice and the unit conversion can be read without a
-/// window: the call underneath it is native on both platforms and is the one
-/// thing a test cannot reach.
-fn dropped_files_point_from(
-    live: Option<PhysicalPosition<f64>>,
-    queried: Option<(i32, i32)>,
-) -> Option<PhysicalPosition<f64>> {
-    live.or_else(|| queried.map(|(x, y)| PhysicalPosition::new(f64::from(x), f64::from(y))))
+/// [`bt_platform::pointer_position_in_window`] answers whole physical pixels
+/// because that is what both systems count in; `CursorMoved` carries `f64`
+/// because a trackpad can land between two of them. The widening is the whole of
+/// this function, and it is a free one so the units can be read — and pinned —
+/// without a window, the native call above it being the one thing a test cannot
+/// reach.
+fn dropped_point_of(queried: Option<(i32, i32)>) -> Option<PhysicalPosition<f64>> {
+    queried.map(|(x, y)| PhysicalPosition::new(f64::from(x), f64::from(y)))
 }
 
 /// **A dropped file's path is a copied file's path** (GitHub issue #1 ②).
@@ -124540,15 +124647,28 @@ mod tests {
     /// a dead gesture for a backwards one. [`upright_wheel`]'s own doc says why
     /// the swap is sign-preserving; this is that claim in a form that fails.
     ///
+    /// **And the platform is one of the facts** (0.4.2 release review, X-5). The
+    /// first landing of this rule ran it everywhere, which is why ⑥ is here and
+    /// why it is the half of the test that cannot be checked by using the
+    /// product: the desktop that needs the repair is not the desktop the
+    /// regression lands on. `platform_swaps_shift_wheel` is passed as a value for
+    /// exactly that reason, so both answers are reachable from one machine.
+    ///
     /// MUTATION: negate the copy in [`upright_wheel`] — `LineDelta(0.0, -x)`, the
     /// shape "macOS must surely have flipped it too" would take — and ① goes red
     /// on the equality rather than on the shape. Drop the `!shift` guard and ④
     /// goes red: an ordinary tilt wheel and a trackpad's second finger start
     /// scrolling the document up and down. Drop the `y == 0.0` guard and ⑤ goes
-    /// red, taking every diagonal trackpad flick with it.
+    /// red, taking every diagonal trackpad flick with it. Drop the
+    /// `!platform_swaps_shift_wheel` guard — the shipped shape the review caught
+    /// — and ⑥ goes red alone, with every other numbered block still green.
     #[test]
     fn a_mac_reports_shift_wheel_sideways_and_this_window_stands_it_back_up() {
         use bt_term::{MouseTracking, TerminalModes};
+        // The desktop, as the value [`upright_wheel`] takes it: the one that
+        // performs AppKit's swap, and every other one.
+        const MAC: bool = true;
+        const ELSEWHERE: bool = false;
         let rows_of = |delta: MouseScrollDelta| match delta {
             MouseScrollDelta::LineDelta(_, y) => f64::from(y),
             MouseScrollDelta::PixelDelta(at) => at.y,
@@ -124562,8 +124682,8 @@ mod tests {
         };
 
         // ① The rewrite undone, and the equality that is the whole of the fix.
-        let mac = upright_wheel(MouseScrollDelta::LineDelta(3.0, 0.0), true);
-        let windows = upright_wheel(MouseScrollDelta::LineDelta(0.0, 3.0), true);
+        let mac = upright_wheel(MouseScrollDelta::LineDelta(3.0, 0.0), true, MAC);
+        let windows = upright_wheel(MouseScrollDelta::LineDelta(0.0, 3.0), true, MAC);
         assert_eq!(
             mac, windows,
             "one hand movement, one queued report, whichever desktop reported it"
@@ -124575,13 +124695,14 @@ mod tests {
         );
         // The turn that goes back still goes back: a copy, never a negation.
         assert_eq!(
-            upright_wheel(MouseScrollDelta::LineDelta(-3.0, 0.0), true),
+            upright_wheel(MouseScrollDelta::LineDelta(-3.0, 0.0), true, MAC),
             MouseScrollDelta::LineDelta(0.0, -3.0)
         );
         assert_eq!(
             upright_wheel(
                 MouseScrollDelta::PixelDelta(PhysicalPosition::new(-48.0, 0.0)),
-                true
+                true,
+                MAC
             ),
             MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, -48.0)),
             "a trackpad's precise report is stood up by the same rule"
@@ -124619,7 +124740,7 @@ mod tests {
 
         // ④ A report that points sideways on its own is untouched and unrouted:
         // a tilt wheel and a trackpad's second finger come without the key.
-        let tilt = upright_wheel(MouseScrollDelta::LineDelta(3.0, 0.0), false);
+        let tilt = upright_wheel(MouseScrollDelta::LineDelta(3.0, 0.0), false, MAC);
         assert_eq!(
             tilt,
             MouseScrollDelta::LineDelta(3.0, 0.0),
@@ -124646,9 +124767,42 @@ mod tests {
             MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 0.0)),
         ] {
             assert_eq!(
-                upright_wheel(untouched, true),
+                upright_wheel(untouched, true, MAC),
                 untouched,
                 "only a report with no vertical component at all is a rewrite"
+            );
+        }
+
+        // ⑥ **And nowhere but a Mac is touched by any of it** (release review,
+        // X-5). A tilt wheel and a trackpad's second finger are sold on every
+        // desktop, and on the ones that do not perform AppKit's swap a hand
+        // holding `Shift` over one of them is going sideways and means it. The
+        // shipped rule rewrote exactly this report — the one shape no test then
+        // held — and turned a reader's sideways gesture into a vertical one.
+        for sideways in [
+            MouseScrollDelta::LineDelta(3.0, 0.0),
+            MouseScrollDelta::LineDelta(-3.0, 0.0),
+            MouseScrollDelta::PixelDelta(PhysicalPosition::new(48.0, 0.0)),
+        ] {
+            assert_eq!(
+                upright_wheel(sideways, true, ELSEWHERE),
+                sideways,
+                "a desktop that never swapped the axes has nothing to undo"
+            );
+            assert!(
+                wheel_points_sideways(upright_wheel(sideways, true, ELSEWHERE)),
+                "and the gesture reaches the column arithmetic still sideways"
+            );
+            assert_eq!(
+                wheel_zoom_notches(upright_wheel(sideways, true, ELSEWHERE)),
+                0.0,
+                "a sideways report carries no detent for the zoom chord to spend, \
+                 so Ctrl+Shift over a page still scrolls nothing and zooms nothing"
+            );
+            assert_ne!(
+                upright_wheel(sideways, true, MAC),
+                sideways,
+                "while the one desktop that does swap them still has it undone"
             );
         }
     }
@@ -159797,16 +159951,15 @@ mod tests {
         assert_eq!(
             dropped_files_seat_at(&layout, None, false, focused),
             focused,
-            "and so is a drop with no pointer of its own *and* no cursor the \
-             platform would answer with — the last resort and nothing less"
+            "and so is a drop the platform would give no cursor for — the last \
+             resort and nothing less"
         );
 
         // **The road a drag from another application really takes** (owner's
-        // ruling 2026-09-16). The window's own pointer left when the hand went
-        // to Explorer, so the point comes from the cursor query; the query
-        // itself is native, and what is read here is the plumbing under it —
-        // the choice between the two witnesses, the physical pixels they are
-        // both in, and the pane that arithmetic then names.
+        // ruling 2026-09-16; release review 0.4.2 X-10). The point is the
+        // cursor read as the drop arrived; the reading itself is native, and
+        // what is read here is the plumbing under it — the physical pixels it
+        // arrives in, and the pane that arithmetic then names.
         let (elsewhere_seat, elsewhere_rect) = *rects
             .iter()
             .find(|(seat, _)| *seat != focused)
@@ -159815,7 +159968,7 @@ mod tests {
             ((elsewhere_rect[0] + elsewhere_rect[2]) / 2.0) as i32,
             ((elsewhere_rect[1] + elsewhere_rect[3]) / 2.0) as i32,
         );
-        let point = dropped_files_point_from(None, Some(cursor));
+        let point = dropped_point_of(Some(cursor));
         assert_eq!(
             point,
             Some(PhysicalPosition::new(
@@ -159831,37 +159984,77 @@ mod tests {
             "a drop whose point came from the cursor lands in the pane under it, \
              not in the pane holding the keyboard"
         );
+        assert_eq!(
+            dropped_point_of(None),
+            None,
+            "and a platform that will not say is not turned into a point at (0, 0)"
+        );
     }
 
-    /// **The live pointer first, the platform's cursor second, nothing third**
-    /// (GitHub issue #1 ②, owner's ruling 2026-09-16).
+    /// **A drop keeps the point it opened with, however many files follow**
+    /// (release review 0.4.2 X-10).
     ///
-    /// The choice [`dropped_files_point_from`] is, read on its own. The first
-    /// row is a drag that began inside this window — there is a pointer, and
-    /// paying for a system call to be told what the window already knows would
-    /// be worse in both directions, cost and freshness. The second is every drag
-    /// that came from another application. The third is a machine that will not
-    /// say, which is the only road left to the keyboard's pane.
+    /// The defect this closes, stated as a sequence: the files of one drop
+    /// arrive one event at a time, and the point was read at the *end* of the
+    /// run — at the turn boundary, where the paste happens. On a window with
+    /// work to do that is late enough for the hand to have left the pane it
+    /// dropped on, and the file went somewhere it was never let go of. The point
+    /// is now read as the first file arrives, and the batch is what carries it.
     ///
-    /// MUTATION: put the query first and the first row goes red, which is a
-    /// window asking the system a question it has a better answer to.
+    /// Three claims: the first file's point is the batch's; every later file of
+    /// the same drop is added to it without disturbing that point, **even when a
+    /// later point is offered**, which is what makes this a property of the type
+    /// rather than of one caller's discipline; and a drop that follows a spent
+    /// one opens afresh.
+    ///
+    /// MUTATION: let the `Some` arm overwrite `point` and the second block goes
+    /// red — that arm is exactly what a flush-time reading would be, arriving
+    /// through the door the fix closed.
     #[test]
-    fn a_drops_point_is_the_live_pointer_or_the_platforms_cursor() {
-        let live = PhysicalPosition::new(640.0, 360.0);
+    fn a_drop_keeps_the_point_it_opened_with() {
+        let opened_at = PhysicalPosition::new(37.0, 41.0);
+        let later = PhysicalPosition::new(900.0, 12.0);
+        let mut standing: Option<DropBatch> = None;
+
+        DropBatch::collect(&mut standing, "/first".into(), Some(opened_at));
+        let batch = standing.as_ref().expect("the first file opens the drop");
+        assert_eq!(batch.point, Some(opened_at));
+        assert_eq!(batch.paths, [PathBuf::from("/first")]);
+
+        // The second and third files of the same drop. The point offered with
+        // them is where the hand has since travelled to, and it is refused.
+        DropBatch::collect(&mut standing, "/second file".into(), Some(later));
+        DropBatch::collect(&mut standing, "/third".into(), None);
+        let batch = standing.as_ref().expect("the drop is still standing");
         assert_eq!(
-            dropped_files_point_from(Some(live), Some((1, 2))),
-            Some(live),
-            "a window that knows where its pointer is uses that and asks nothing"
+            batch.point,
+            Some(opened_at),
+            "a point offered after the drop opened has replaced the one it \
+             opened with, which is the flush-time reading X-10 named"
         );
         assert_eq!(
-            dropped_files_point_from(None, Some((37, 41))),
-            Some(PhysicalPosition::new(37.0, 41.0)),
-            "and one that does not takes the cursor, in the pixels it arrives in"
+            batch.paths,
+            [
+                PathBuf::from("/first"),
+                PathBuf::from("/second file"),
+                PathBuf::from("/third"),
+            ],
+            "one drop, three events, one batch, in the order winit delivered them"
         );
+
+        // Spent, and then a second drop somewhere else entirely.
+        let spent = standing.take().expect("the flush takes the whole batch");
+        assert_eq!(spent.paths.len(), 3);
+        assert!(
+            standing.is_none(),
+            "nothing is left behind to be pasted twice"
+        );
+        DropBatch::collect(&mut standing, "/fourth".into(), Some(later));
         assert_eq!(
-            dropped_files_point_from(None, None),
-            None,
-            "and answers nothing when neither witness can speak"
+            standing.expect("the next drop opens").point,
+            Some(later),
+            "a new drop reads the cursor again; the point belongs to the drop \
+             and not to the window"
         );
     }
 
@@ -170081,18 +170274,18 @@ mod clipboard_path_tests {
     /// which run.
     #[test]
     fn three_files_of_one_drop_become_one_command_line() {
-        let mut batch: Vec<PathBuf> = Vec::new();
+        let mut standing: Option<DropBatch> = None;
         for path in ["/first", "/second file", "/third"] {
-            batch.push(path.into());
+            DropBatch::collect(&mut standing, path.into(), None);
         }
-        let paths = std::mem::take(&mut batch);
-        assert_eq!(paths.len(), 3, "one drop, three events, one batch");
+        let batch = standing.take().expect("three events, one batch");
+        assert_eq!(batch.paths.len(), 3, "one drop, three events, one batch");
         assert!(
-            batch.is_empty(),
+            standing.is_none(),
             "a batch the flush has taken is not left behind for the next turn to \
              paste again"
         );
-        let prepared = prepare_dropped_paste(paths, &recipient(), true);
+        let prepared = prepare_dropped_paste(batch.paths, &recipient(), true);
         assert!(prepared.notice.is_none());
         assert_eq!(
             prepared.text.as_deref(),
@@ -170101,37 +170294,49 @@ mod clipboard_path_tests {
         );
     }
 
-    /// **The drop is collected in the dispatcher and spent at the turn
-    /// boundary, and nowhere else** (GitHub issue #1 ②).
+    /// **The drop is collected in the dispatcher — cursor and all — and spent at
+    /// the turn boundary, and nowhere else** (GitHub issue #1 ②; release review
+    /// 0.4.2 X-10).
     ///
-    /// The shape [`three_files_of_one_drop_become_one_command_line`] depends on
-    /// and cannot itself reach: an event loop is not constructible in a test, so
-    /// what holds the wiring is which call stands where. The two doors are the
-    /// wheel's own two — the top of `window_event` for anything that is not
+    /// The shape [`three_files_of_one_drop_become_one_command_line`] and
+    /// `tests::a_drop_keeps_the_point_it_opened_with` depend on and
+    /// cannot themselves reach: an event loop is not constructible in a test, so
+    /// what holds the wiring is which call stands where. The two flush doors are
+    /// the wheel's own two — the top of `window_event` for anything that is not
     /// another file of this drop, and the top of a turn.
+    ///
+    /// **The load-bearing row is the last pair.** X-10 was not a wrong
+    /// calculation, it was a reading taken at the wrong moment: the query has to
+    /// stand on the arrival road and must not stand on the flush road, and
+    /// `pointer_position` must not be consulted for a drop at all. A source pin
+    /// is the only thing that can say *where* a call is.
     #[test]
     fn a_drop_is_collected_in_the_dispatcher_and_spent_at_the_turn_boundary() {
         let source = include_str!("main.rs");
         let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
         for (once, what) in [
             (
-                "runtime.window.dropped_files.push(path);",
+                "runtime.collect_dropped_file(path);",
                 "the arm writes the path down and pastes nothing itself",
             ),
             (
-                "std::mem::take(&mut self.window.dropped_files)",
+                "DropBatch::collect(&mut self.window.dropped_files, path, point);",
+                "one drop is assembled in one place",
+            ),
+            (
+                "self.window.dropped_files.take()",
                 "the batch has one reader, and it takes the whole of it",
             ),
             (
-                "self.paste_paths_into(seat, paths,",
+                "self.paste_paths_into(seat, batch.paths,",
                 "a dropped batch reaches a shell through one door",
             ),
             (
-                "self.dropped_files_point()",
-                "the cursor is asked for once per batch and not once per file",
+                "self.dropped_point_now()",
+                "the cursor is read once, on the file that opens the drop",
             ),
             (
-                "bt_platform::pointer_position_in_window",
+                ".and_then(bt_platform::pointer_position_in_window)",
                 "and there is one door onto the platform's cursor in this window",
             ),
             (
@@ -170160,5 +170365,47 @@ mod clipboard_path_tests {
             !arm.contains("paste"),
             "the arm collects; pasting from it would be one command line per file"
         );
+        // **The reading is on the arrival road and on no other** (X-10). The
+        // collector is what the arm calls, and it is the only thing in this file
+        // that asks the platform where the cursor is.
+        let collecting = method_text(before_this_fixture, "    fn collect_dropped_file(");
+        assert!(
+            collecting.contains("self.dropped_point_now()"),
+            "the file that opens a drop no longer reads the cursor as it arrives, \
+             so the point is taken later than the release:\n{collecting}"
+        );
+        let flushing = method_text(before_this_fixture, "    fn flush_dropped_files(");
+        for forbidden in ["dropped_point_now", "pointer_position"] {
+            assert!(
+                !flushing.contains(forbidden),
+                "`{forbidden}` is read at the flush, which is after the hand has \
+                 had a turn of the loop to move on:\n{flushing}"
+            );
+        }
+        // And the window's cached pointer is not the drop point anywhere on the
+        // drop's road, which is the half of X-10 that was not about lateness at
+        // all: during another application's drag no pointer event arrives, so
+        // that cache is from before the drag began.
+        assert!(
+            !collecting.contains("pointer_position"),
+            "a drop is routed by the window's cached pointer, which is a \
+             different gesture's:\n{collecting}"
+        );
+    }
+
+    /// The body of one method, from its signature to the brace that closes it at
+    /// the `impl`'s own indentation — `layer_shape_tests::fn_body`'s reader,
+    /// borrowed for one pin. The doc comment above the signature is deliberately
+    /// outside it: these pins are about calls, and prose that *names* a call is
+    /// not one.
+    fn method_text<'a>(source: &'a str, signature: &str) -> &'a str {
+        let start = source
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &source[start + signature.len()..];
+        let end = rest
+            .find("\n    }\n")
+            .expect("a method is closed by a `}` at the `impl`'s indentation");
+        &rest[..end]
     }
 }
