@@ -6,6 +6,28 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Fixed
+
+- **An inline formula in a command's output is typeset even when its picture is
+  ready only after the prompt has come back.** Printing a file of mathematics
+  hands Folio the whole file and the shell's "the command is done" mark in one
+  breath, so every picture in it is finished a moment later — and a `$…$` was
+  being judged, at that moment, against a command that had already ended. Some
+  of them typeset and some were left as raw text, the same file coming out
+  differently from one run to the next, and a line long enough to wrap tended to
+  lose both of its formulas at once. Where a line was printed is now something
+  the line keeps, settled as it arrives and carried across a window resize, so
+  the answer no longer depends on when the picture happens to be ready.
+  Displayed `$$` blocks were never affected: they carry their own proof.
+
+- **A formula is no longer taken down by its neighbour's result.** Folio looks
+  at every line that could be the start of something, and inside a block of
+  mathematics its own body lines look like that too. When one of those came back
+  as "nothing here", it took down whichever picture happened to be standing over
+  it — so a matrix could vanish the instant the formula above it finished, and
+  come back only when something else made Folio look again. An answer about one
+  line is now an answer about that line.
+
 ## 0.4.2-preview — 2026-09-17
 
 ### Added

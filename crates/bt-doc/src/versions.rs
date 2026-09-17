@@ -191,7 +191,10 @@ pub struct VersionStamp {
 /// protect is not present to be damaged. Extending eligibility there costs nothing the rule was
 /// buying and recovers the case users have already accepted for display math across many
 /// sessions (Claude Code renders in the alternate screen today).
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+/// The default is [`InlineMathSite::Ineligible`], and it is the default for the reason the type
+/// exists: a row nothing has yet claimed to have printed is a row no lone `$` may be read on. Every
+/// holder of a site starts there and is told otherwise, never the reverse.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum InlineMathSite {
     /// Between `133;C` and `133;D` — a line a command *printed*.
     CommandOutput,
@@ -211,6 +214,7 @@ pub enum InlineMathSite {
     /// is the ruling's price and it is worth naming: a `$…$` printed by an unintegrated session
     /// stays source text. The alternative is guessing which half of the screen is output, and a
     /// terminal that guesses wrong renders the user's literal text as mathematics.
+    #[default]
     Ineligible,
 }
 

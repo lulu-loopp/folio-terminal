@@ -545,6 +545,10 @@ struct LiveRowStability {
     settled_revision: Option<u64>,
     candidate_signature: Option<u64>,
     content_fingerprint: Option<CapturedRowFingerprint>,
+    /// Where this live row sat in the shell's command lifecycle, recorded when its bytes were
+    /// parsed — the live counterpart of [`bt_doc::HistoryEntry::inline_site`], and written for the
+    /// same reason. See [`DualPlaneSession::record_live_inline_sites`].
+    inline_site: InlineMathSite,
 }
 
 #[derive(Clone, Debug)]
@@ -3191,6 +3195,9 @@ impl DualPlaneSession {
         } else {
             ReflowSnapshot::default()
         };
+        // And, for the same reason and at the same moment, where each logical line was printed —
+        // see [`Self::reestablish_live_inline_sites`], which hands it back below.
+        let carried_sites = self.live_logical_line_sites();
         if plan.begin_transaction {
             self.cursor_logical_line_memory = None;
             if self.resize_epoch.is_active() {
@@ -3270,6 +3277,10 @@ impl DualPlaneSession {
         }
         self.reanchor_semantic_input_regions_after_resize();
         self.reanchor_semantic_output_regions_after_resize();
+        // The grid this rebuilt is not the grid the row records were written for, and the regions
+        // that prove them have just been re-seated onto it. Re-establish every row's site here,
+        // while that is true, rather than leaving it to whatever asks next.
+        self.reestablish_live_inline_sites(&carried_sites);
         let next_layout = LayoutKey {
             width_cells: columns,
             ..self.layout_key
@@ -3403,6 +3414,7 @@ impl DualPlaneSession {
         } else {
             ReflowSnapshot::default()
         };
+        let carried_sites = self.live_logical_line_sites();
         if reconciled {
             self.resume_resize_staging();
         }
@@ -3430,6 +3442,9 @@ impl DualPlaneSession {
             // marker decides whether its line-start coordinate is end-exclusive.
             self.reanchor_semantic_input_regions_after_resize();
             self.reanchor_semantic_output_regions_after_resize();
+            // The second reflow boundary re-establishes the row sites for the same reason the
+            // first does; the reconcile can shift rows under them.
+            self.reestablish_live_inline_sites(&carried_sites);
             // The vendor reconcile can shift rows and always bumps the grid generation, which
             // strands the formulas `restore_offscreen_decorations` re-anchored inside `resize_at`
             // one generation behind the frame the app is about to publish. Re-anchor them against
@@ -5816,13 +5831,11 @@ impl DualPlaneSession {
                 // text the logical line holds — a continuation keeps the space the wrap fell on.
                 let (text, cell_boundaries) = captured_row_logical_text_and_boundaries(&captured);
                 let row = row as u32;
-                // The row's own extent, from its first cell to one past its last. Asking about
-                // exactly the cells this input carries is what keeps the verdict per-row: a row is
-                // command output only if all of it is.
-                let extent_end = GridPoint {
-                    row,
-                    column: cell_boundaries.last().map_or(0, |(_, column)| *column),
-                };
+                // The site is read, not asked. It was settled when this row's bytes were parsed and
+                // is re-settled only when they change or a reflow rebuilds the grid — see
+                // [`Self::record_live_inline_sites`]. This context is rebuilt to check a returning
+                // raster against the source it was scanned from, and re-deriving the site here made
+                // that check depend on region bookkeeping that had moved on since the scan.
                 LiveDetectionInput {
                     source: LiveDetectionSource::Grid {
                         row,
@@ -5831,14 +5844,7 @@ impl DualPlaneSession {
                     text,
                     continues: captured.continues,
                     captured_columns: captured.captured_columns,
-                    site: inline_math_site(
-                        self.live_screen,
-                        self.command_output_covers_live(
-                            self.live_screen,
-                            GridPoint { row, column: 0 },
-                            extent_end,
-                        ),
-                    ),
+                    site: self.live_rows[row as usize].inline_site,
                     cell_boundaries,
                 }
             })
@@ -6746,6 +6752,10 @@ impl DualPlaneSession {
             TerminalDamage::Full => (0..self.live_rows.len() as u32).collect::<Vec<_>>(),
             TerminalDamage::Rows(rows) => rows,
         };
+        // Rows whose content genuinely changed, for the site record below. Collected rather than
+        // written inside the loop because a site is a fact about a *logical* line, and the row that
+        // completes one may be damaged later in this same batch than the row that begins it.
+        let mut changed = Vec::<u32>::new();
         for row in damaged {
             // Damage is "a cell was written", not "a cell changed": a TUI that repaints its whole
             // screen writes every row every frame, and the vendor reports every one of them. The
@@ -6774,6 +6784,7 @@ impl DualPlaneSession {
             state.last_damage_at = Some(observed_at);
             state.settled_revision = None;
             state.candidate_signature = None;
+            changed.push(row);
             // Suppression: inside a repaint window the proven raster keeps rendering over the rows
             // being rewritten instead of the record being torn down (and its source flashing
             // through). Alternate suppresses across a boundary repaint; primary suppresses across an
@@ -6793,6 +6804,196 @@ impl DualPlaneSession {
             }
             self.invalidate_live_row(row);
         }
+        self.record_live_inline_sites(&changed);
+    }
+
+    /// Record where each of these live rows sat in the shell's command lifecycle.
+    ///
+    /// **The live counterpart of [`Self::schedule_detection`]'s one write**, and it exists for the
+    /// same reason [`Self::history_inline_site`] gives: the OSC 133 bookkeeping is live state and a
+    /// row's provenance is not. A region is retired when the prompt line it starts on is evicted,
+    /// when a reflow declines to re-seat one of its anchors, or when the marks behind it go stale,
+    /// and every one of those leaves the rows below it on the grid, unchanged, and still carrying
+    /// formulas. Asking again would answer `Ineligible` for all of them.
+    ///
+    /// Asking again is what the grid used to do. `apply_live_worker_completion` rebuilds the whole
+    /// detection context to check a returning raster against the source it was scanned from, and
+    /// that rebuild carried a *fresh* site for every row — so a result was judged on regions that
+    /// had moved on since the scan. For a command whose output and whose `133;D` arrive in one PTY
+    /// burst, that is every result it produces, and it costs only the inline ones: a display
+    /// delimiter carries its own proof and no site gates it.
+    ///
+    /// **Called where the bytes are parsed**, from [`Self::observe_live_damage`], which the feed
+    /// loop runs after every parse quantum and at every shell-integration marker — so a row's site
+    /// is settled while the region that proves it is still the one the shell was describing, not at
+    /// whatever later moment something first asks the row for a formula.
+    ///
+    /// **One site per logical line.** The disambiguator judges a wrapped line as the one string its
+    /// fragments spell, so a line whose rows disagree is `Ineligible` in its entirety
+    /// ([`bt_detect`]'s unanimity fold). Its rows cannot disagree: they were printed by one command,
+    /// and the question is asked once, of the whole line's extent, rather than once per row and
+    /// reconciled afterwards. Coverage, not overlap, exactly as the per-row question was: a line
+    /// half of which is the prompt printed after `D` is not covered and stays ineligible.
+    ///
+    /// The alternate screen keeps its own rule unchanged — [`inline_math_site`] widens it
+    /// structurally and no coverage verdict is consulted there.
+    fn record_live_inline_sites(&mut self, rows: &[u32]) {
+        if rows.is_empty() {
+            return;
+        }
+        let screen = self.live_screen;
+        let mut recorded = BTreeSet::<u32>::new();
+        for row in rows.iter().copied().collect::<BTreeSet<_>>() {
+            if recorded.contains(&row) {
+                continue;
+            }
+            let (first, last) = self.live_logical_line_rows(row);
+            let site = inline_math_site(
+                screen,
+                self.live_logical_line_is_command_output(first, last),
+            );
+            for member in first..=last {
+                recorded.insert(member);
+                if let Some(state) = self.live_rows.get_mut(member as usize) {
+                    state.inline_site = site;
+                }
+            }
+        }
+    }
+
+    /// What each live logical line spells and the site it was printed at, top to bottom.
+    ///
+    /// Taken immediately before a reflow rebuilds the grid — beside [`Self::reflow_witnesses`],
+    /// and for its reason: that is the last moment the answer is still on the grid to be read.
+    fn live_logical_line_sites(&self) -> Vec<(String, InlineMathSite)> {
+        self.live_logical_line_spans()
+            .into_iter()
+            .map(|(first, _, text)| {
+                let site = self
+                    .live_rows
+                    .get(first as usize)
+                    .map_or(InlineMathSite::Ineligible, |state| state.inline_site);
+                (text, site)
+            })
+            .collect()
+    }
+
+    /// Re-establish every live row's site after a reflow, carrying across what can be carried.
+    ///
+    /// A reflow rewraps logical lines. It does not reorder them and it never takes one off the
+    /// bottom — rows leave at the top, into staging — so the *k*-th logical line from the bottom
+    /// before the reflow is the *k*-th from the bottom after it, and a line that still spells the
+    /// same string is that same line. Its provenance travels with it, exactly as a frozen line's
+    /// does: a command printed it, and a window being dragged does not unprint it.
+    ///
+    /// The walk stops at the first line whose text does not match, and everything above that is
+    /// asked of the regions instead — which the resize path has re-seated against the reflowed grid
+    /// on the line above this call, so it is the authority being read rather than a guess being
+    /// made. That is the one honest answer available for a line the reflow changed, and it is not a
+    /// fallback to a remembered site: a site is either carried because the line is provably the same
+    /// line, or established afresh.
+    fn reestablish_live_inline_sites(&mut self, carried: &[(String, InlineMathSite)]) {
+        let spans = self.live_logical_line_spans();
+        let mut proven_from = spans.len();
+        let mut carried_from = carried.len();
+        while proven_from > 0
+            && carried_from > 0
+            && spans[proven_from - 1].2 == carried[carried_from - 1].0
+        {
+            proven_from -= 1;
+            carried_from -= 1;
+        }
+        for (index, (first, last, _)) in spans.iter().enumerate() {
+            let site = if index >= proven_from {
+                carried[carried_from + (index - proven_from)].1
+            } else {
+                inline_math_site(
+                    self.live_screen,
+                    self.live_logical_line_is_command_output(*first, *last),
+                )
+            };
+            for row in *first..=*last {
+                if let Some(state) = self.live_rows.get_mut(row as usize) {
+                    state.inline_site = site;
+                }
+            }
+        }
+    }
+
+    /// Every live logical line as `(first row, last row, text)`, top to bottom.
+    fn live_logical_line_spans(&self) -> Vec<(u32, u32, String)> {
+        let mut spans = Vec::new();
+        let mut first = None;
+        let mut text = String::new();
+        for row in 0..u32::try_from(self.live_rows.len()).unwrap_or(u32::MAX) {
+            let Some(captured) = self.terminal.visible_row(row) else {
+                // A row the terminal has no capture for ends whatever was open above it rather than
+                // gluing the next captured row onto it across the gap.
+                if let Some(first_row) = first.take() {
+                    spans.push((first_row, row.saturating_sub(1), std::mem::take(&mut text)));
+                }
+                continue;
+            };
+            let first_row = *first.get_or_insert(row);
+            text.push_str(&captured_row_logical_text_and_boundaries(&captured).0);
+            if captured.continues {
+                continue;
+            }
+            spans.push((first_row, row, std::mem::take(&mut text)));
+            first = None;
+        }
+        if let Some(first_row) = first {
+            let last = u32::try_from(self.live_rows.len())
+                .unwrap_or(u32::MAX)
+                .saturating_sub(1);
+            spans.push((first_row, last, text));
+        }
+        spans
+    }
+
+    /// The inclusive grid-row span of the logical line `row` belongs to. A row the terminal has no
+    /// capture for is its own logical line, which is the conservative reading and the one the
+    /// caller's `Ineligible` default already assumes.
+    fn live_logical_line_rows(&self, row: u32) -> (u32, u32) {
+        let continues = |row: u32| {
+            self.terminal
+                .visible_row(row)
+                .is_some_and(|captured| captured.continues)
+        };
+        let mut first = row;
+        while first > 0 && continues(first - 1) {
+            first -= 1;
+        }
+        let last_row = u32::try_from(self.live_rows.len())
+            .unwrap_or(u32::MAX)
+            .saturating_sub(1);
+        let mut last = row;
+        while last < last_row && continues(last) {
+            last += 1;
+        }
+        (first, last)
+    }
+
+    /// Is this whole logical line inside one OSC 133 `C..D` region? The extent runs from the first
+    /// cell of its first row to one past the last cell of its last, which is the same half-open
+    /// extent the per-row question used and reduces to it exactly when the line occupies one row.
+    fn live_logical_line_is_command_output(&self, first: u32, last: u32) -> bool {
+        let Some(captured) = self.terminal.visible_row(last) else {
+            return false;
+        };
+        let (_, cell_boundaries) = captured_row_logical_text_and_boundaries(&captured);
+        let end = GridPoint {
+            row: last,
+            column: cell_boundaries.last().map_or(0, |(_, column)| *column),
+        };
+        self.command_output_covers_live(
+            self.live_screen,
+            GridPoint {
+                row: first,
+                column: 0,
+            },
+            end,
+        )
     }
 
     fn invalidate_live_row(&mut self, row: u32) {
@@ -6879,7 +7080,8 @@ impl DualPlaneSession {
                             if resolve_live_detection_task(&mut task) {
                                 let artifact = live_placeholder(&task);
                                 size_resolved_live_task_band(&mut task);
-                                self.apply_live_worker_completion(task, Some(artifact), None);
+                                let _ =
+                                    self.apply_live_worker_completion(task, Some(artifact), None);
                             }
                         }
                     },
@@ -7164,9 +7366,20 @@ impl DualPlaneSession {
             task.band_start_row = task.start.row;
             task.band_end_row = task.end.row;
         }
-        let accepted = self.apply_live_worker_completion(task.clone(), artifact, failure_reason);
-        if !accepted {
+        let outcome = self.apply_live_worker_completion(task.clone(), artifact, failure_reason);
+        let accepted = outcome.is_none();
+        if let Some(reason) = outcome {
             self.stale_results = self.stale_results.saturating_add(1);
+            // A refused completion used to leave nothing behind but a counter nobody prints, so a
+            // formula that stayed at source because its raster was thrown away looked in the trace
+            // exactly like a formula that was never scanned. It is the one outcome a recording of
+            // this defect needs to show, so it says so.
+            if switched_on("BT_PERF_TRACE") {
+                bt_viewport::trace::line(format!(
+                    "BT_PERF_TRACE live_math_result_dropped row={} candidate_row={} reason={reason}",
+                    task.start.row, task.candidate_row,
+                ));
+            }
         } else if switched_on("BT_PERF_TRACE")
             && let Some(elapsed) = render_time
         {
@@ -7207,45 +7420,60 @@ impl DualPlaneSession {
         }
     }
 
+    /// Apply one live completion, or say why it was refused. `None` is "applied".
     fn apply_live_worker_completion(
         &mut self,
         task: LiveDetectionTask,
         artifact: Option<PlaceholderArtifact>,
         failure_reason: Option<String>,
-    ) -> bool {
-        if task.screen != self.live_screen
-            || task.grid_generation != self.grid_generation
-            || task.detection_revision != self.detection_revision
-            || task.layout != self.layout_key
-        {
-            return false;
+    ) -> Option<LiveCompletionRefusal> {
+        if task.screen != self.live_screen {
+            return Some(LiveCompletionRefusal::Screen);
+        }
+        if task.grid_generation != self.grid_generation {
+            return Some(LiveCompletionRefusal::GridGeneration);
+        }
+        if task.detection_revision != self.detection_revision {
+            return Some(LiveCompletionRefusal::DetectionRevision);
+        }
+        if task.layout != self.layout_key {
+            return Some(LiveCompletionRefusal::Layout);
         }
         // Only the source rows and borrowed row band are byte/revision dependencies. The rest of
         // the 1,024-line detector snapshot is semantic context: rerunning detection below catches
         // fence/delimiter state changes without rejecting ordinary spinner or status-line churn.
         let current_inputs = self.live_detection_context();
-        if !live_task_is_current(&task, current_inputs) {
-            return false;
+        if let Some(refusal) = live_task_is_current(&task, current_inputs) {
+            return Some(refusal);
         }
         if !task.resolved {
-            self.live_decorations.retain(|_, record| {
-                !(record.start.row <= task.candidate_row && task.candidate_row <= record.end.row)
-            });
+            // **A candidate that merely falls inside another block's band proves nothing about that
+            // block.** A block is proven, and disproved, by the scan at the row that closes it —
+            // that row is `end.row`, set from the occurrence's last cell segment — so a candidate is
+            // a verdict on exactly the block that closes where it stands. Every delimiter-looking
+            // row arms, and a display block's own body rows look like delimiters
+            // (`\begin{pmatrix}...\end{pmatrix}` is an environment opener wherever it appears), so
+            // a rule phrased over the whole band let a body row's unresolved completion take the
+            // block above it down and made the block's survival a question of which completion
+            // landed last. A row whose *bytes* changed is a different matter and is torn down where
+            // that is known, in `invalidate_live_row`.
+            self.live_decorations
+                .retain(|_, record| record.end.row != task.candidate_row);
             // The live half of `retire_refused_table`, and for its reason: a table drawn from rows
             // that were on the grid before this one arrived stands above the candidate rather than
             // over it, so the retain above never reaches it.
             for row in &task.refused_table_rows {
                 self.live_decorations.remove(row);
             }
-            return true;
+            return None;
         }
         if self.semantic_input_overlaps_live(task.screen, task.start, task.end) {
             self.live_decorations.remove(&task.start.row);
-            return true;
+            return None;
         }
         if artifact.is_none() && failure_reason.is_none() {
             self.live_decorations.remove(&task.start.row);
-            return true;
+            return None;
         }
         if self.new_live_decoration_is_cursor_suppressed(&task) {
             if let Some(state) = self.live_rows.get_mut(task.candidate_row as usize) {
@@ -7254,7 +7482,7 @@ impl DualPlaneSession {
                 // leaves its WRAPLINE-linked logical line.
                 state.candidate_signature = None;
             }
-            return true;
+            return None;
         }
         // Instance state, carried across a re-detection of the block that is already standing on
         // this row: the same rows, the same source, the same mode is the same occurrence, and the
@@ -7282,7 +7510,7 @@ impl DualPlaneSession {
             remembered.unwrap_or((false, false, 0, 0));
         let occurrence_id = LiveMathOccurrenceId(self.next_live_occurrence_id);
         let Some(identity) = proven_live_occurrence(&task, occurrence_id) else {
-            return false;
+            return Some(LiveCompletionRefusal::Unproven);
         };
         let frozen_prefix = frozen_prefix_ids(&task.span);
         self.next_live_occurrence_id = self.next_live_occurrence_id.saturating_add(1);
@@ -7328,7 +7556,7 @@ impl DualPlaneSession {
                 failure_reason,
             },
         );
-        true
+        None
     }
 
     /// Take down a drawn table whose rows this scan has just proved are not a table after all.
@@ -13542,10 +13770,47 @@ fn insert_nonoverlapping_live_record(
     None
 }
 
+/// Why a live math completion was refused, in the words `BT_PERF_TRACE live_math_result_dropped`
+/// prints. A refusal is a normal outcome — the grid may have moved on while the raster was being
+/// made — but it is also how a formula silently stays at source, so each one is nameable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LiveCompletionRefusal {
+    /// The screen changed under the scan.
+    Screen,
+    /// The grid was reflowed or replaced.
+    GridGeneration,
+    /// Detection was invalidated wholesale.
+    DetectionRevision,
+    /// The font metrics or width changed, so the raster is the wrong size.
+    Layout,
+    /// One of the rows the block was proven from no longer holds the bytes it was scanned from.
+    SourceChanged,
+    /// The rows still hold their bytes, but the detector no longer finds this occurrence in them.
+    NoLongerDetected,
+    /// The occurrence could not be reduced to a proven placement on the grid.
+    Unproven,
+}
+
+impl std::fmt::Display for LiveCompletionRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let word = match self {
+            Self::Screen => "screen",
+            Self::GridGeneration => "grid-generation",
+            Self::DetectionRevision => "detection-revision",
+            Self::Layout => "layout",
+            Self::SourceChanged => "source-changed",
+            Self::NoLongerDetected => "no-longer-detected",
+            Self::Unproven => "unproven",
+        };
+        formatter.write_str(word)
+    }
+}
+
+/// `None` when the completion still describes the grid it was scanned from.
 fn live_task_is_current(
     task: &LiveDetectionTask,
     current_inputs: Arc<[LiveDetectionInput]>,
-) -> bool {
+) -> Option<LiveCompletionRefusal> {
     let dependency_start = if task.resolved {
         task.band_start_row
     } else {
@@ -13558,10 +13823,10 @@ fn live_task_is_current(
     };
     for row in dependency_start..=dependency_end {
         let Some(snapshot) = live_grid_input(&task.inputs, row) else {
-            return false;
+            return Some(LiveCompletionRefusal::SourceChanged);
         };
         let Some(current) = live_grid_input(&current_inputs, row) else {
-            return false;
+            return Some(LiveCompletionRefusal::SourceChanged);
         };
         let same_source = matches!(
             (snapshot.source, current.source),
@@ -13571,7 +13836,7 @@ fn live_task_is_current(
             ) if snapshot_row == current_row
         );
         if !same_source || snapshot.text != current.text {
-            return false;
+            return Some(LiveCompletionRefusal::SourceChanged);
         }
     }
 
@@ -13600,12 +13865,13 @@ fn live_task_is_current(
     current_task.resolved = false;
     let resolves_now = resolve_live_detection_task(&mut current_task);
     if !task.resolved {
-        return !resolves_now;
+        return resolves_now.then_some(LiveCompletionRefusal::NoLongerDetected);
     }
-    resolves_now
+    let same = resolves_now
         && current_task.start == task.start
         && current_task.end == task.end
-        && current_task.span == task.span
+        && current_task.span == task.span;
+    (!same).then_some(LiveCompletionRefusal::NoLongerDetected)
 }
 
 fn captured_row_text(row: &CapturedRow) -> String {
@@ -28517,6 +28783,255 @@ mod tests {
         assert_eq!(
             inline, 1,
             "the frozen scan must carry the captured OSC 133 site, not default to Ineligible"
+        );
+    }
+
+    /// The command output of the 2026-09-17 recording, in one burst: a short line whose formula
+    /// fits one grid row, and a long one the pane wraps into two. Both formulas of the wrapped line
+    /// sit on its first row, so what this fixture exercises is the *line* spanning two rows, not a
+    /// formula split across them (that is `a_formula_split_across_two_printed_rows_is_joined`).
+    const TWO_OUTPUT_LINES: &str = concat!(
+        "\x1b]133;A\x07PS> \x1b]133;B\x07show\x1b]133;C\x07\r\n",
+        "energy $E = mc^2$ here\r\n",
+        r"sums $\sum_{n=1}^{k} n$ and limits $\lim_{x \to 0} x$ hold for every one of the sequences that the table below prints",
+        "\r\n",
+    );
+
+    /// The prompt coming back: `D` closes the command's region and `A`/`B` open the next one.
+    const PROMPT_RETURNS: &str = "\x1b]133;D;0\x07\x1b]133;A\x07PS> \x1b]133;B\x07";
+
+    /// Everything the session has queued, taken in one go so the caller can act between the scan
+    /// and its completion — which is the whole point of the two tests below.
+    fn take_live_worker_tasks(session: &mut DualPlaneSession) -> Vec<LiveDetectionTask> {
+        let mut tasks = Vec::new();
+        while let Some(task) = session.take_live_worker_task() {
+            tasks.push(task);
+        }
+        tasks
+    }
+
+    /// T-LIVE-INLINE-SITE-IS-REMEMBERED: a late inline result is judged on the site its row was
+    /// printed at, not on the OSC 133 regions as they stand when the raster comes back.
+    ///
+    /// `cat` of a small file hands the terminal its whole output and its `133;D` in one PTY burst —
+    /// 0.88 ms apart in the owner's 2026-09-17 recording — so **every** math result for it is a
+    /// late result: the command's region is always already closed by the time the first raster
+    /// exists. Anything that moves the region between the scan and its completion used to change
+    /// the verdict, and only for inline runs: display delimiters carry their own proof and no site
+    /// gates them, which is why the owner kept both `$$` blocks and lost the formulas around them.
+    /// A region retired outright is the sharpest form of that movement and the one a test can state
+    /// exactly — and it is not a contrived one, since a region is retired whenever the prompt line
+    /// it starts on is evicted or a reflow declines to re-seat one of its anchors.
+    ///
+    /// Two lines, because the failure was not uniform. The wrapped one is the fragile half: its
+    /// rows have to agree on one site or the whole line reads `Ineligible`, and it is the line that
+    /// carries two formulas, which is why the owner lost both of them at once.
+    #[test]
+    fn a_live_inline_run_keeps_its_site_after_the_prompt_returns() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(10));
+        seat_inline_metrics(&mut session);
+        session
+            .feed_at(TWO_OUTPUT_LINES.as_bytes(), started)
+            .unwrap();
+        session.feed_at(PROMPT_RETURNS.as_bytes(), started).unwrap();
+        assert_eq!(
+            grid_site_of(&session, "energy"),
+            InlineMathSite::CommandOutput,
+            "the fixture must really put the short line inside C..D"
+        );
+        assert_eq!(
+            grid_site_of(&session, "sums "),
+            InlineMathSite::CommandOutput,
+            "and the first row of the wrapped line"
+        );
+        assert_eq!(
+            grid_site_of(&session, "the table below prints"),
+            InlineMathSite::CommandOutput,
+            "and its second row, which is a separate grid row — the fixture must really wrap"
+        );
+
+        assert_eq!(
+            session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL),
+            2,
+            "both output lines carry `$...$` and must arm"
+        );
+        let tasks = take_live_worker_tasks(&mut session);
+        assert_eq!(tasks.len(), 2, "one scan per armed line");
+
+        // The rasters are in flight and the command's region goes. Everything the tasks depend on —
+        // the rows, their bytes, the site they were printed at — is unchanged; only the bookkeeping
+        // that once answered the site question a second time is gone.
+        session.semantic_output_regions.clear();
+
+        let engine = MathEngine::new();
+        let mut accepted = 0;
+        for mut task in tasks {
+            let result = render_live_detection_task(&engine, &mut task, [220, 220, 220]);
+            if session.complete_live_worker_result(task, result) {
+                accepted += 1;
+            }
+        }
+        assert_eq!(
+            accepted, 2,
+            "a completion must be judged on the site its row was printed at, not on a region that \
+             has since been retired"
+        );
+
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let blocks = rendered_inline_blocks(&frame);
+        assert_eq!(
+            blocks.len(),
+            2,
+            "one picture per line: {:?}",
+            frame
+                .math_blocks
+                .iter()
+                .map(|block| (block.artifact.mode, block.display))
+                .collect::<Vec<_>>()
+        );
+        let runs = blocks
+            .iter()
+            .map(|block| block.artifact.inline_runs.len())
+            .sum::<usize>();
+        assert_eq!(
+            runs, 3,
+            "three formulas: one on the short line and both of the wrapped line's"
+        );
+    }
+
+    /// The same line, re-wrapped: a width change must not cost it its formulas.
+    ///
+    /// Frame 240 of the recording, where the owner's first resize took the wrapped line's picture
+    /// down and left every other block standing. A reflow rebuilds every live row, so the site has
+    /// to be re-established at that boundary — where the resize path has just re-seated the regions
+    /// that prove it — rather than left to whichever completion asks next.
+    #[test]
+    fn a_wrapped_output_line_keeps_its_formulas_across_a_width_change() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(10));
+        seat_inline_metrics(&mut session);
+        session
+            .feed_at(TWO_OUTPUT_LINES.as_bytes(), started)
+            .unwrap();
+        session.feed_at(PROMPT_RETURNS.as_bytes(), started).unwrap();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        let engine = MathEngine::new();
+        for mut task in take_live_worker_tasks(&mut session) {
+            let result = render_live_detection_task(&engine, &mut task, [220, 220, 220]);
+            session.complete_live_worker_result(task, result);
+        }
+
+        // The rows, their bytes and their rasters are untouched; only the bookkeeping a re-derived
+        // site would have been read from is gone. A reflow is exactly where that happens for real:
+        // a region whose anchors the reflow declines to re-seat is retired, and the rows it printed
+        // stay on the grid carrying their formulas.
+        session.semantic_output_regions.clear();
+
+        let resized_at = started + Duration::from_millis(210);
+        session.resize_at(nz(70), nz(10), resized_at).unwrap();
+        session.set_layout_key(LayoutKey {
+            width_cells: nz(70),
+            ..session.layout_key()
+        });
+        session.mark_pty_resize_requested_at(nz(70), nz(10), resized_at);
+        assert_eq!(
+            grid_site_of(&session, "sums "),
+            InlineMathSite::CommandOutput,
+            "the reflowed first row of the wrapped line still sits where a command printed it"
+        );
+        assert_eq!(
+            grid_site_of(&session, "the table below prints"),
+            InlineMathSite::CommandOutput,
+            "and so does the row the new width wrapped it onto"
+        );
+
+        let finished_at = resized_at + Duration::from_millis(400);
+        assert!(
+            session.finish_resize_if_quiescent(finished_at).unwrap(),
+            "the transaction must close, or nothing is scheduled and this proves nothing"
+        );
+        session.advance_live_stability(finished_at + LIVE_MATH_STABLE_INTERVAL);
+        for mut task in take_live_worker_tasks(&mut session) {
+            let result = render_live_detection_task(&engine, &mut task, [220, 220, 220]);
+            session.complete_live_worker_result(task, result);
+        }
+
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let runs = rendered_inline_blocks(&frame)
+            .iter()
+            .map(|block| block.artifact.inline_runs.len())
+            .sum::<usize>();
+        assert_eq!(
+            runs,
+            3,
+            "every formula comes back after the re-wrap: {:?}",
+            frame
+                .math_blocks
+                .iter()
+                .map(|block| (block.artifact.mode, block.display))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// A candidate that falls inside another block's band proves nothing about that block.
+    ///
+    /// Every delimiter-looking row arms, and a display block's own body rows look like delimiters:
+    /// `\begin{pmatrix}...\end{pmatrix}` is an environment opener wherever it appears. One `cat` of
+    /// the owner's test file arms ten candidates for five occurrences for exactly this reason. Each
+    /// body row resolves to nothing — it is inside a `$$` block, so the scanner emits no occurrence
+    /// there — and an unresolved completion used to take down every decoration whose band merely
+    /// covered its row. Whether the matrix survived was then a question of which completion landed
+    /// last, which is the `math_blocks` 4 -> 3 dip at stderr.log:1012 of the recording.
+    #[test]
+    fn an_unresolved_body_row_completion_does_not_retire_the_block_that_covers_it() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(10));
+        session
+            .feed_at(
+                b"$$\r\n\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}\r\n$$\r\nbarrier",
+                started,
+            )
+            .unwrap();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        let tasks = take_live_worker_tasks(&mut session);
+        let mut body_rows = Vec::new();
+        let mut resolved = 0;
+        for mut task in tasks {
+            if resolve_live_detection_task(&mut task) {
+                assert!(session.complete_live_worker_result(task, Ok(synthetic_raster(40, 40))));
+                resolved += 1;
+            } else {
+                body_rows.push(task);
+            }
+        }
+        assert_eq!(resolved, 1, "the `$$` block must be proven and standing");
+        assert_eq!(
+            session.live_decorations.len(),
+            1,
+            "and it must be the only live decoration"
+        );
+        let body = body_rows
+            .into_iter()
+            .find(|task| {
+                let row = task.candidate_row;
+                session
+                    .live_decorations
+                    .values()
+                    .any(|record| record.band_start_row < row && row < record.band_end_row)
+            })
+            .expect("the fixture must arm a body row inside the proven block's band");
+
+        assert!(
+            session.complete_live_worker_result(body, Err(MathRenderError::NotDetected)),
+            "the unresolved completion is still a current answer and is accepted as one"
+        );
+        assert_eq!(
+            session.live_decorations.len(),
+            1,
+            "a candidate inside the band is not a verdict on the block that spans it"
         );
     }
 
