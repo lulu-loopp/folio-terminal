@@ -692,12 +692,18 @@ Write-Host 'it closed when asked, and exited 0.'
 # report will actually arrive as.
 
 Remove-Item Env:BT_STARTUP_TRACE
+# The traced run above kept its console, and a console run writes exactly one
+# kind of line into `diagnostics.log`: its watchdog's, when a cold first turn on
+# a slow machine runs past the hang threshold. That line is that run's and not
+# this one's, so the file is taken away before the ordinary run is asked to
+# leave its own.
+$log = Join-Path $home_ 'Folio\diagnostics.log'
+Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
 $plain = Start-Process -FilePath $Exe -PassThru `
     -RedirectStandardOutput (Join-Path $Artifacts 'plain.out') `
     -RedirectStandardError (Join-Path $Artifacts 'plain.err')
 [void] $plain.Handle
 
-$log = Join-Path $home_ 'Folio\diagnostics.log'
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 while ((Get-Date) -lt $deadline -and -not (Test-Path -LiteralPath $log)) {
     if ($plain.HasExited) { break }
