@@ -6,30 +6,6 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
-### Fixed
-
-- **Losing the graphics device no longer closes Folio.** A power cut that
-  switches a laptop to battery, a graphics driver that updates itself, a machine
-  that changes which GPU it draws on: each of these takes the device away
-  underneath whatever is on screen at that instant. Folio already knew how to
-  ask the machine for another one and carry on, but a picture that was halfway
-  prepared when the device went reached a call that could only end the run —
-  the window closed, and every shell open in it closed with it. Nothing on
-  that path can end the run any more: the half-prepared picture is dropped, the
-  device is asked for again, and the window draws everything it was saying on
-  the new one.
-
-- **A dropped file now lands in the terminal you dropped it on even when Folio
-  is busy, or when you were last hovering somewhere else.** Where the file was
-  let go of was worked out after the fact — when Folio got round to typing the
-  path — and it preferred the last place it had seen your pointer, which during
-  a drag from another program is wherever your hand happened to be the previous
-  time it was over the window. On a split, either reading could name the wrong
-  terminal: the one you had been hovering before you went to fetch the file, or
-  whichever one your hand had moved on to while Folio was catching up with a
-  busy pane. The position is now read at the instant the file is released, and
-  nothing later can change it.
-
 ## 0.4.2-preview — 2026-09-17
 
 ### Added
@@ -72,6 +48,28 @@ All notable changes to Folio are recorded here. The format follows
   people actually notice live; a run started without it is unchanged.
 
 ### Fixed
+
+- **Losing the graphics device no longer closes Folio.** A power cut that
+  switches a laptop to battery, a graphics driver that updates itself, a machine
+  that changes which GPU it draws on: each of these takes the device away
+  underneath whatever is on screen at that instant. Folio already knew how to
+  ask the machine for another one and carry on, but a picture that was halfway
+  prepared when the device went reached a call that could only end the run —
+  the window closed, and every shell open in it closed with it. Nothing on
+  that path can end the run any more: the half-prepared picture is dropped, the
+  device is asked for again, and the window draws everything it was saying on
+  the new one.
+
+- **A dropped file now lands in the terminal you dropped it on even when Folio
+  is busy, or when you were last hovering somewhere else.** Where the file was
+  let go of was worked out after the fact — when Folio got round to typing the
+  path — and it preferred the last place it had seen your pointer, which during
+  a drag from another program is wherever your hand happened to be the previous
+  time it was over the window. On a split, either reading could name the wrong
+  terminal: the one you had been hovering before you went to fetch the file, or
+  whichever one your hand had moved on to while Folio was catching up with a
+  busy pane. The position is now read at the instant the file is released, and
+  nothing later can change it.
 
 - **Closing a pane or a tab no longer pauses the window while the program
   inside it winds down.** Shutting a shell down is several steps, and one of
