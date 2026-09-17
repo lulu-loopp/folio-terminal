@@ -821,13 +821,15 @@ impl TerminalAdapter {
                     // printed inside a block that ended after the prompt came back.
                     //
                     // Committing the block here is the commit its own deadline already makes,
-                    // taken at the one other point where the order is load-bearing. It costs a
-                    // block that contains a marker its atomicity, which is a block that spans a
-                    // prompt/command boundary — an atomic screen update of two different
-                    // moments. A block that draws a prompt and says so (`A`, `B`) crosses no
-                    // boundary and is committed whole, because those markers do not move the
-                    // provenance; what it loses is only the right to be told about the grid
-                    // late.
+                    // taken at the one other point where the order is load-bearing. **Every
+                    // recognised marker ends the block, `A` and `B` included**: what precedes the
+                    // first marker in it is committed whole and what follows draws
+                    // unsynchronised, so a producer that puts markers inside a block can be seen
+                    // drawing in pieces. None of the integrations this terminal ships, and none
+                    // of the prompt painters read for the 2026-09-17 review, does that — their
+                    // markers arrive with no block open, where this costs one stored `Option`
+                    // read. What it buys is that a marker never describes a grid the parser has
+                    // not reached.
                     events.extend(self.commit_synchronized_update_before_marker());
                     let cursor = self.cursor();
                     let screen = if self.modes().alternate_screen {
@@ -2925,6 +2927,74 @@ mod tests {
             } if rows == &[0]
         )));
         assert_eq!(terminal.visible_text()[0], "pre[image]post");
+    }
+
+    /// **Twelve grapheme families, each kept whole in the cell it opened, however its bytes are
+    /// cut** (review 2026-09-17 third pass).
+    ///
+    /// The retained cluster is checked against the cell it describes before it is extended
+    /// (`Term::cell_holds_cluster`), which is what stops an erase, a tab or a scroll under that
+    /// coordinate from resurrecting text the screen no longer holds. The other side of that check
+    /// is this: ordinary text must never trip it. These are the families the stock fixtures did not
+    /// cover — Devanagari, Thai and an ideographic variation sequence among them — driven whole, at
+    /// every byte boundary, and one byte at a time, which is how a cluster actually arrives from a
+    /// pipe.
+    ///
+    /// The width each family occupies is the oracle's business and is deliberately not asserted
+    /// here; what is asserted is that the cell holds the complete text, so nothing was dropped and
+    /// nothing was pushed into a cell of its own.
+    #[test]
+    fn every_grapheme_family_keeps_its_cluster_however_its_bytes_arrive() {
+        let clusters = [
+            (
+                "family with zero-width joiners",
+                "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466}",
+            ),
+            ("regional indicator flag", "\u{1f1ef}\u{1f1f5}"),
+            ("skin-tone modifier", "\u{1f44d}\u{1f3fd}"),
+            ("two stacked accents", "e\u{301}\u{327}"),
+            ("Devanagari vowel sign", "\u{915}\u{93f}"),
+            ("Devanagari conjunct", "\u{915}\u{94d}\u{937}"),
+            ("Thai tone mark", "\u{e01}\u{e49}"),
+            ("CJK with a text selector", "\u{6f22}\u{fe0e}"),
+            ("CJK with an emoji selector", "\u{6f22}\u{fe0f}"),
+            ("ideographic variation sequence", "\u{6f22}\u{e0100}"),
+            ("an arrow the selector widens", "\u{2194}\u{fe0f}"),
+            ("a watch the selector narrows", "\u{231a}\u{fe0e}"),
+        ];
+
+        for (name, cluster) in clusters {
+            let bytes = cluster.as_bytes();
+            let mut feeds = vec![vec![bytes.to_vec()]];
+            for split in 1..bytes.len() {
+                feeds.push(vec![bytes[..split].to_vec(), bytes[split..].to_vec()]);
+            }
+            feeds.push(bytes.iter().map(|byte| vec![*byte]).collect());
+
+            for pieces in feeds {
+                let mut terminal = TerminalAdapter::new(nz(10), nz(2));
+                terminal.feed(b"\x1b[?2027h");
+                for piece in &pieces {
+                    terminal.feed(piece);
+                }
+                let row = terminal.visible_row(0).expect("row 0 is on the grid");
+                assert_eq!(
+                    row.cells[0].text.as_str(),
+                    cluster,
+                    "{name}: the cell that opened the cluster holds all of it, fed as {pieces:?}"
+                );
+                assert_eq!(
+                    row.cells
+                        .iter()
+                        .skip(1)
+                        .map(|cell| cell.text.as_str())
+                        .collect::<String>()
+                        .trim(),
+                    "",
+                    "{name}: and no part of it was pushed into a cell of its own"
+                );
+            }
+        }
     }
 
     /// One base64 `image/png` payload: the smallest complete PNG there is, a single opaque pixel.

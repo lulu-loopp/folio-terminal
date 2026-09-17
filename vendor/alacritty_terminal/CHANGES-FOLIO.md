@@ -105,7 +105,12 @@ file produces the vendored file byte for byte. Upstream formats with its own
   expects it afterwards. Extending the stale copy wrote the old text again:
   erased characters came back on screen, and a cluster that had scrolled was
   duplicated a row below itself. `Term::cell_holds_cluster` now asks the cell,
-  and `reanchor_grapheme_after_resize` is written in terms of it.
+  and `reanchor_grapheme_after_resize` is written in terms of it. It is asked of
+  every candidate character while the mode is set — before the continuation
+  test, so of the character that starts the next cluster too — allocates
+  nothing, walks at most the `MAX_GRAPHEME_CLUSTER_CHARS` a retained cluster is
+  already capped at, and is not reached in the legacy mode, which retains no
+  cluster.
 - **A ceiling on one cluster.** `extend_grapheme` stops storing past
   `bt_unicode::MAX_GRAPHEME_CLUSTER_CHARS` code points, and `Cell::push_zerowidth`
   refuses the same. Every mark added to a cluster re-copies and re-measures the

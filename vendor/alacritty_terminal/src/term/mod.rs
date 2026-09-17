@@ -1867,6 +1867,12 @@ impl<T> Term<T> {
     /// are all about the cursor, so none of them can see that. Extending the cache then writes the
     /// *old* text again — which resurrects erased characters onto the screen, and, because the
     /// re-cut cluster is written through the printing path, dates them by whoever is printing now.
+    ///
+    /// It is asked of **every candidate character** while `DECSET 2027` is set — before the
+    /// Unicode continuation test, so also of the character that starts the next cluster — and not
+    /// only where an extension succeeds. It allocates nothing, walks at most the
+    /// [`MAX_GRAPHEME_CLUSTER_CHARS`] a retained cluster is already capped at, and is never
+    /// reached in the legacy single-codepoint mode, where no cluster is retained at all.
     fn cell_holds_cluster(&self, point: Point, cluster: &str) -> bool {
         let cell = &self.grid[point];
         std::iter::once(cell.c)
