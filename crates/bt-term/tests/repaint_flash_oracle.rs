@@ -1472,6 +1472,66 @@ fn the_re_anchor_refuses_every_line_the_detector_reads_as_code() {
     );
 }
 
+/// **And the detector's answer is the one the whole scan gives, not the one a line-at-a-time walk
+/// of the same rows arrives at.**
+///
+/// The scan reads the whole line list, and two of its decisions need that: a `$$` is consumed as a
+/// *clipped closer* when the opener it pairs with is above the window, and a phantom opener is
+/// abandoned when the blocks below re-synchronise without it. A walker that sees one line at a time
+/// can make neither, and it must stay that way — reading ahead is not its job and would cost it the
+/// property that makes it cheap for the job it does have.
+///
+/// These rows are where the two part, and they part in the direction that matters. Row 1's `$$` has
+/// no opener above it: the scan takes it as a clipped closer, moves on, meets the fence and disowns
+/// row 4 as code. The walker opens `Dollars` at row 1 instead and swallows the fence whole, so it
+/// hands the door a checkpoint that says "no fence here" — and the door seated a raster over
+/// `$$x^2$$` inside a code block, took it off on the pass after, and put it back on the pass after
+/// that.
+///
+/// Both fence variants, because a fence that is still open when the screen is read is the same
+/// question as one that has closed.
+#[test]
+fn a_block_inside_a_fence_below_a_clipped_closer_is_not_re_anchored() {
+    for closer in ["```", "more code"] {
+        let start = std::time::Instant::now();
+        let mut session = session_with_one_off_band_source(r"$$x^2$$", start);
+
+        let back = start + Duration::from_millis(600);
+        session
+            .feed_at(
+                &synchronized_repaint(&[
+                    "x=y", "$$", "```", "code", "$$x^2$$", closer, "tail", "prompt> ",
+                ]),
+                back,
+            )
+            .unwrap();
+        assert!(
+            session.held_unbacked_records().is_empty(),
+            "a raster was seated inside a code fence below a clipped closer ({closer:?}): {:?}",
+            session.held_unbacked_records()
+        );
+        let mut projection = session.new_projection(session.layout_key());
+        session.refresh_projection(&mut projection);
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            frame_row_text(&frame, 4).trim(),
+            "$$x^2$$",
+            "the fenced row must keep its text ({closer:?}): {:?}",
+            (0..8)
+                .map(|row| frame_row_text(&frame, row))
+                .collect::<Vec<_>>()
+        );
+
+        // And it stays text once the screen settles: the picture is not put back a pass later.
+        session.advance_live_stability(back + LIVE_MATH_STABLE_INTERVAL);
+        complete_live_math(&mut session);
+        session.refresh_projection(&mut projection);
+        let settled = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(frame_row_text(&settled, 4).trim(), "$$x^2$$");
+        assert!(session.held_unbacked_records().is_empty());
+    }
+}
+
 /// The control: the same block, the same re-anchor, on a row it has to itself. It must come back
 /// without being detected again — tightening the re-anchor above must not cost the preservation it
 /// exists for.

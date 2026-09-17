@@ -2425,7 +2425,10 @@ fn carried_formula_repaint_arm(columns: u32, rows: u32, off_band: bool) -> (u64,
 ///
 ///   the same repaint with no formulas at all       27 allocations,    42,384 B a cycle
 ///   three proven blocks carried through the close  644 allocations,  566,946 B a cycle
-///   and one off-band record underneath them      1,017 allocations,  761,621 B a cycle
+///   and one off-band record underneath them      1,011 allocations,  759,475 B a cycle
+///
+/// The last of those was 1,017 and 761,621 B until the off-band door stopped deriving its own
+/// parser checkpoints and started reading the whole-grid scan the close beside it already runs.
 ///
 /// Two things are worth reading off that. The close is nearly all of the cost, and its shape is the
 /// grid and not the records: it reads the whole grid into a fresh detection context, one `String`
@@ -2443,10 +2446,10 @@ fn a_repaint_carrying_proven_formulas_stays_within_its_close_budget() {
     const CYCLE_HEAP_ALLOCATIONS: u64 = 720;
     /// Measured 566,946 B.
     const CYCLE_HEAP_BYTES: u64 = 620 * 1024;
-    /// Measured 1,017.
-    const OFF_BAND_CYCLE_HEAP_ALLOCATIONS: u64 = 1140;
-    /// Measured 761,621 B.
-    const OFF_BAND_CYCLE_HEAP_BYTES: u64 = 832 * 1024;
+    /// Measured 1,011.
+    const OFF_BAND_CYCLE_HEAP_ALLOCATIONS: u64 = 1132;
+    /// Measured 759,475 B.
+    const OFF_BAND_CYCLE_HEAP_BYTES: u64 = 830 * 1024;
 
     let (allocations, bytes) = carried_formula_repaint_arm(120, 16, false);
     assert!(
@@ -2620,7 +2623,7 @@ fn restored_formula_screen(count: usize, present: bool) -> Vec<String> {
 
 /// The restore arm of the repaint pin: `RESTORED_FORMULA_CYCLES` cycles of "every block leaves the
 /// screen, every block comes back", so each cycle drains `count` records off-band and re-anchors all
-/// of them — the door `detector_owns_live_match` guards, which no other arm reaches, because their
+/// of them — the door the whole-grid scan guards, which no other arm reaches, because their
 /// off-band record's source is never on the screen again.
 ///
 /// Returns what one cycle drew from the heap, and proves along the way that the blocks came back by
@@ -2696,8 +2699,17 @@ fn assert_restored_blocks_are_pictures(session: &mut DualPlaneSession, count: us
 /// Measured 2026-09-17 on a 100x40 alternate screen, one cycle being every block leaving the screen
 /// and every block returning:
 ///
-///   1 block   2,984 allocations, 1,994,690 B a cycle
-///   8 blocks  3,477 allocations, 2,204,756 B a cycle
+///   1 block   2,974 allocations, 1,989,859 B a cycle
+///   8 blocks  3,467 allocations, 2,199,925 B a cycle
+///
+/// **What the door costs now.** It was 2,984 and 3,477 when ownership here was decided by a parser
+/// prefix walk over the grid plus a detection re-run over the rows the match found — a
+/// `BTreeMap<u32, DetectionContext>` for the whole grid and a bounded scan per record, per read.
+/// It is now decided by the same whole-grid scan the repaint window's close arms, asked once per
+/// grid and shared between the two (`live_grid_owned_blocks`), and the walk and the per-record
+/// re-run are gone. One scan of a grid is more work than one bounded scan of eight rows; it is less
+/// work than a walk of the grid plus one bounded scan per record, and it is the only answer that
+/// includes what the scanner decides by reading ahead.
 ///
 /// **These are whole-cycle costs and not the door's price**, and the difference between the arms is
 /// not the door's price either. A cycle is two synchronized repaints, two closes and a restore; the
@@ -2710,14 +2722,14 @@ fn assert_restored_blocks_are_pictures(session: &mut DualPlaneSession, count: us
 /// The budgets carry the same ~12% of slack the neighbouring arms use.
 #[test]
 fn a_repaint_that_gives_formulas_back_their_pictures_stays_within_its_restore_budget() {
-    /// Measured 2,984.
-    const ONE_BLOCK_ALLOCATIONS: u64 = 3340;
-    /// Measured 1,994,690 B.
-    const ONE_BLOCK_BYTES: u64 = 2180 * 1024;
-    /// Measured 3,477.
-    const EIGHT_BLOCK_ALLOCATIONS: u64 = 3890;
-    /// Measured 2,204,756 B.
-    const EIGHT_BLOCK_BYTES: u64 = 2410 * 1024;
+    /// Measured 2,974.
+    const ONE_BLOCK_ALLOCATIONS: u64 = 3330;
+    /// Measured 1,989,859 B.
+    const ONE_BLOCK_BYTES: u64 = 2176 * 1024;
+    /// Measured 3,467.
+    const EIGHT_BLOCK_ALLOCATIONS: u64 = 3880;
+    /// Measured 2,199,925 B.
+    const EIGHT_BLOCK_BYTES: u64 = 2404 * 1024;
 
     let (allocations, bytes) = restored_formula_arm(100, 40, 1);
     assert!(

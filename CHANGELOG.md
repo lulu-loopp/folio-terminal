@@ -8,6 +8,17 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **A formula scrolling back into view inside a code block stays code.** When a
+  formula came back onto the screen, Folio asked whether it still reads those
+  lines as a formula — but it worked out the answer for those lines on their
+  own, while reading the screen as a whole can reach a different one. On a
+  screen whose first `$$` belongs to a formula that began above the top of it,
+  the two disagree: reading the whole screen finds a code fence and leaves the
+  `$$x^2$$` below it as code, and the shorter reading did not see the fence at
+  all — so a picture appeared over a line inside a code block, went away on the
+  next redraw of the same screen, and came back on the one after. The question
+  is now answered once, by reading the whole screen, which is the same reading
+  everything else in Folio uses.
 - **Folio no longer looks for a formula it has already failed to find, over and
   over, on a screen that has not changed.** When a formula scrolls out of view,
   Folio keeps its picture aside so that it can be given straight back the moment

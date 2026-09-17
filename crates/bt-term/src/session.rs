@@ -6985,97 +6985,6 @@ impl DualPlaneSession {
         self.live_invalidation_count = self.live_invalidation_count.saturating_add(dropped);
     }
 
-    /// **Would the detector, reading these rows, give back this block here?**
-    ///
-    /// `exact_live_source_match` is a substring search: it says the bytes are on the grid and where
-    /// they are, and nothing at all about whether that makes a block. Something has to say the
-    /// second thing, and the only honest answer is the detector's own — a second copy of its rules
-    /// written here would drift, and had. A whitespace test ("the match must cover its rows apart
-    /// from the space around them") refuses three kinds of line the detector owns — a list item
-    /// (`• $$…$$`), a heading (`# $$…$$`, which is what a reflow of Codex's own output prints), and
-    /// a single-line environment with trailing prose punctuation (`\end{pmatrix},`, which
-    /// `complete_display_on_line` holds out of the occurrence) — and accepts one it refuses, a line
-    /// indented four columns, which is CommonMark's way of saying "code". Three transient flashes
-    /// and one surviving defect, from one copy of one rule.
-    ///
-    /// So the question goes to the detector, the way `try_handoff_live_artifact` and
-    /// `live_task_is_current` already ask it: re-run it and require *this* block, at exactly these
-    /// rows, from this source.
-    ///
-    /// **Over the match, never over the grid.** This door runs once per off-band record per close,
-    /// and the grid-wide scan `resolve_live_detection_task` would otherwise do is the expensive path
-    /// this pane already has too much of. The scan is given the rows the match found, widened to
-    /// whole logical lines — a row that wraps carries the rest of its line in the next row, and a
-    /// block followed by anything on the same line is not this block — and the detection context
-    /// that `live_grid_parser_prefixes` already computed for the first of them, which is what
-    /// carries the fence and parity state from everything above.
-    fn detector_owns_live_match(
-        &self,
-        inputs: &[LiveDetectionInput],
-        prefixes: &BTreeMap<u32, DetectionContext>,
-        record: &LiveDecorationRecord,
-        start: GridPoint,
-        end: GridPoint,
-    ) -> bool {
-        let mut first = start.row;
-        while let Some(previous) = first.checked_sub(1)
-            && live_grid_input(inputs, previous).is_some_and(|input| input.continues)
-        {
-            first = previous;
-        }
-        let mut last = end.row;
-        while live_grid_input(inputs, last).is_some_and(|input| input.continues) {
-            let Some(next) = last.checked_add(1) else {
-                break;
-            };
-            if live_grid_input(inputs, next).is_none() {
-                break;
-            }
-            last = next;
-        }
-        let Some(extent) = (first..=last)
-            .map(|row| live_grid_input(inputs, row).cloned())
-            .collect::<Option<Vec<_>>>()
-        else {
-            return false;
-        };
-        let mut task = LiveDetectionTask {
-            candidate_row: last,
-            screen: self.live_screen,
-            grid_generation: self.grid_generation,
-            detection_revision: self.detection_revision,
-            layout: self.layout_key,
-            cell_width_subpixels: self.cell_width_subpixels.get(),
-            cell_height_subpixels: self.cell_height_subpixels.get(),
-            ascii_baseline_subpixels: self.ascii_baseline_subpixels.map_or(0, NonZeroI64::get),
-            options: self.detection_options(),
-            initial_context: prefixes.get(&first).cloned().unwrap_or_default(),
-            inputs: Arc::from(extent),
-            start: GridPoint {
-                row: last,
-                column: 0,
-            },
-            end: GridPoint {
-                row: last,
-                column: 0,
-            },
-            band_start_row: last,
-            band_end_row: last,
-            span: empty_live_math_span(),
-            detection_complete: false,
-            resolved: false,
-            refused_table_rows: Vec::new(),
-        };
-        resolve_live_detection_task(&mut task)
-            && task.start.row == start.row
-            && task.end.row == end.row
-            && task.span.original_source == record.span.original_source
-            && task.span.render_source == record.span.render_source
-            && task.span.delimiter_kind == record.span.delimiter_kind
-            && task.span.mode == record.span.mode
-            && task.span.kind == record.span.kind
-    }
-
     /// **Ask the grid once, not once a read.**
     ///
     /// This runs from every feed turn, and whether a record can be re-anchored is a pure function
@@ -7092,6 +7001,27 @@ impl DualPlaneSession {
     /// what the grid's half of the question is made of, and the queue and the resident bands are
     /// the rest of it — a match is refused on a row another record holds, so a resident record
     /// leaving its rows can turn a "no" into a "yes" with no cell changing.
+    ///
+    /// **And the question the door asks is the detector's own whole-grid answer, because nothing
+    /// less is the detector's answer.** `exact_live_source_match` is a substring search: it says
+    /// the bytes are on the grid and where they are, and nothing about whether that makes a block.
+    /// Something has to say the second thing, and a second copy of the detector's rules written
+    /// here drifts — it did, as a whitespace test, which refused a list item, a heading and a
+    /// single-line environment with trailing punctuation, and accepted a line indented four columns
+    /// that CommonMark calls code. The repair after that asked the detector, but over the rows the
+    /// match had found and with a checkpoint from a prefix walker, and *that* is still not the
+    /// detector's answer: the real scan reads the whole line list, and the two decisions it makes
+    /// by reading ahead — a `$$` consumed as a clipped closer whose opener is above the window, and
+    /// a phantom opener abandoned when the blocks below re-synchronise — cannot be made by a walker
+    /// that sees one line at a time and must stay that way for its own job. Where they part, they
+    /// part in the direction that matters: rows `x=y`, `$$`, an opening fence, `code`, `$$x^2$$`
+    /// and a closing fence give a scan that disowns row 4 as fenced and a walker that opens
+    /// `Dollars` at row 1 and never sees the fence at all, so the door seated a picture over text
+    /// the detector does not read as that block. The whole-grid scan is what decides ownership
+    /// here now, with the rows it owns each block at, and the walker's checkpoint and the
+    /// extent-limited re-run are gone: one rule, one owner. Its cost is one scan per grid, shared
+    /// with the bounded re-detection through [`Self::live_grid_owned_blocks`], where before it was
+    /// a bounded scan per record per read.
     fn restore_offscreen_decorations(&mut self) {
         if self.offscreen_decorations.is_empty() {
             return;
@@ -7107,108 +7037,110 @@ impl DualPlaneSession {
         self.offscreen_restore_pass_count = self.offscreen_restore_pass_count.saturating_add(1);
         let inputs = self.live_detection_context();
         let initial_context = self.live_initial_detection_context(&inputs);
-        let prefixes = live_grid_parser_prefixes(&inputs, initial_context.clone());
-        let mut occupied = self
-            .live_decorations
-            .values()
-            .flat_map(|record| record.band_start_row..=record.band_end_row)
-            .collect::<BTreeSet<_>>();
-        let mut remaining = VecDeque::new();
-        let mut relayout_tasks = Vec::new();
-        while let Some(mut record) = self.offscreen_decorations.pop_front() {
-            let Some((start, end, segments)) =
-                exact_live_source_match(&record.span.original_source, &inputs, &occupied)
-            else {
-                remaining.push_back(record);
-                continue;
-            };
-            // Cheap and first: a record inside a fenced code block is refused without a scan.
-            if prefixes
-                .get(&start.row)
-                .is_some_and(DetectionContext::is_commonmark_code)
-            {
-                remaining.push_back(record);
-                continue;
-            }
-            if !self.detector_owns_live_match(&inputs, &prefixes, &record, start, end) {
-                remaining.push_back(record);
-                continue;
-            }
-            // **The band is the extent that was just matched, and the identity is re-based onto
-            // it.** `band_rows` and the two source offsets are physical row counts of the grid this
-            // occurrence was *proven* on, so a re-wrap makes every one of them stale together: the
-            // old length reached past the new closing row and blanked the ordinary text under the
-            // block, and an expression built from the offsets instead is the same staleness in a
-            // different digit. A fresh detection of this occurrence would own exactly its source
-            // extent (`size_resolved_live_task_band`), so that is what a restore installs.
-            //
-            // Re-basing the identity is the other half and not a tidy-up: `project_live_record`
-            // reads `source_rows[i].band_offset` and the span's live-grid rows as offsets from the
-            // band's top, so leaving them measured against a band that no longer exists would move
-            // every later projection of this record by the difference.
-            if !rebase_identity_onto_match(&mut record, start, end, &segments, &inputs) {
-                remaining.push_back(record);
-                continue;
-            }
-            let logical_band_start = i64::from(start.row);
-            record.start = start;
-            record.end = end;
-            record.band_start_row = start.row;
-            record.band_end_row = end.row;
-            record.clipped_top_rows = 0;
-            record.clipped_bottom_rows = 0;
-            // The re-anchor proved this occurrence's *complete* source inside the live grid, so no
-            // part of it is frozen any more: a prefix carried over from the anchor it lost would
-            // name history lines this placement does not span.
-            record.frozen_prefix.clear();
-            record.staging_prefix.clear();
-            record.placement.logical_band_start = logical_band_start;
-            record.placement.occluded_source_rows = 0;
-            record.placement.occluded_visible_rows.clear();
-            record.generation = self.grid_generation;
-            record.detection_revision = self.detection_revision;
-            if record.rendered_layout != self.layout_key
-                && let Some(artifact) = record.artifact.take()
-            {
-                record.stale_artifact = Some(StaleArtifact {
-                    artifact,
-                    rendered_layout: record.rendered_layout,
-                });
-            }
-            record.layout = self.layout_key;
-            record.initial_context = initial_context.clone();
-            record.inputs = Arc::clone(&inputs);
-            record.span = record.identity.span.clone();
-            record.span.cell_segments = segments;
-            if record.artifact.is_none() && record.stale_artifact.is_some() {
-                relayout_tasks.push(LiveDetectionTask {
-                    candidate_row: record.end.row,
-                    screen: record.screen,
-                    grid_generation: record.generation,
-                    detection_revision: record.detection_revision,
-                    layout: record.layout,
-                    cell_width_subpixels: self.cell_width_subpixels.get(),
-                    cell_height_subpixels: self.cell_height_subpixels.get(),
-                    ascii_baseline_subpixels: self
-                        .ascii_baseline_subpixels
-                        .map_or(0, NonZeroI64::get),
-                    options: self.detection_options(),
-                    initial_context: record.initial_context.clone(),
-                    inputs: Arc::clone(&record.inputs),
-                    start: record.start,
-                    end: record.end,
-                    band_start_row: record.band_start_row,
-                    band_end_row: record.band_end_row,
-                    span: record.span.clone(),
-                    detection_complete: true,
-                    resolved: true,
-                    refused_table_rows: Vec::new(),
-                });
-            }
-            occupied.extend(record.band_start_row..=record.band_end_row);
-            self.live_decorations.insert(record.start.row, record);
-        }
-        self.offscreen_decorations = remaining;
+        let relayout_tasks =
+            self.live_grid_owned_blocks(&inputs, &initial_context, |session, owned| {
+                let mut occupied = session
+                    .live_decorations
+                    .values()
+                    .flat_map(|record| record.band_start_row..=record.band_end_row)
+                    .collect::<BTreeSet<_>>();
+                let mut remaining = VecDeque::new();
+                let mut relayout_tasks = Vec::new();
+                while let Some(mut record) = session.offscreen_decorations.pop_front() {
+                    let Some((start, end, segments)) =
+                        exact_live_source_match(&record.span.original_source, &inputs, &occupied)
+                    else {
+                        remaining.push_back(record);
+                        continue;
+                    };
+                    // The scan owns this block, at these rows, from this source — or the match the
+                    // substring search found is not this block and no picture goes on it.
+                    if !owned
+                        .iter()
+                        .any(|task| live_scan_owns_record_at(task, &record, start, end))
+                    {
+                        remaining.push_back(record);
+                        continue;
+                    }
+                    // **The band is the extent that was just matched, and the identity is re-based
+                    // onto it.** `band_rows` and the two source offsets are physical row counts of
+                    // the grid this occurrence was *proven* on, so a re-wrap makes every one of
+                    // them stale together: the old length reached past the new closing row and
+                    // blanked the ordinary text under the block, and an expression built from the
+                    // offsets instead is the same staleness in a different digit. A fresh detection
+                    // of this occurrence would own exactly its source extent
+                    // (`size_resolved_live_task_band`), so that is what a restore installs.
+                    //
+                    // Re-basing the identity is the other half and not a tidy-up:
+                    // `project_live_record` reads `source_rows[i].band_offset` and the span's
+                    // live-grid rows as offsets from the band's top, so leaving them measured
+                    // against a band that no longer exists would move every later projection of
+                    // this record by the difference.
+                    if !rebase_identity_onto_match(&mut record, start, end, &segments, &inputs) {
+                        remaining.push_back(record);
+                        continue;
+                    }
+                    let logical_band_start = i64::from(start.row);
+                    record.start = start;
+                    record.end = end;
+                    record.band_start_row = start.row;
+                    record.band_end_row = end.row;
+                    record.clipped_top_rows = 0;
+                    record.clipped_bottom_rows = 0;
+                    // The re-anchor proved this occurrence's *complete* source inside the live
+                    // grid, so no part of it is frozen any more: a prefix carried over from the
+                    // anchor it lost would name history lines this placement does not span.
+                    record.frozen_prefix.clear();
+                    record.staging_prefix.clear();
+                    record.placement.logical_band_start = logical_band_start;
+                    record.placement.occluded_source_rows = 0;
+                    record.placement.occluded_visible_rows.clear();
+                    record.generation = session.grid_generation;
+                    record.detection_revision = session.detection_revision;
+                    if record.rendered_layout != session.layout_key
+                        && let Some(artifact) = record.artifact.take()
+                    {
+                        record.stale_artifact = Some(StaleArtifact {
+                            artifact,
+                            rendered_layout: record.rendered_layout,
+                        });
+                    }
+                    record.layout = session.layout_key;
+                    record.initial_context = initial_context.clone();
+                    record.inputs = Arc::clone(&inputs);
+                    record.span = record.identity.span.clone();
+                    record.span.cell_segments = segments;
+                    if record.artifact.is_none() && record.stale_artifact.is_some() {
+                        relayout_tasks.push(LiveDetectionTask {
+                            candidate_row: record.end.row,
+                            screen: record.screen,
+                            grid_generation: record.generation,
+                            detection_revision: record.detection_revision,
+                            layout: record.layout,
+                            cell_width_subpixels: session.cell_width_subpixels.get(),
+                            cell_height_subpixels: session.cell_height_subpixels.get(),
+                            ascii_baseline_subpixels: session
+                                .ascii_baseline_subpixels
+                                .map_or(0, NonZeroI64::get),
+                            options: session.detection_options(),
+                            initial_context: record.initial_context.clone(),
+                            inputs: Arc::clone(&record.inputs),
+                            start: record.start,
+                            end: record.end,
+                            band_start_row: record.band_start_row,
+                            band_end_row: record.band_end_row,
+                            span: record.span.clone(),
+                            detection_complete: true,
+                            resolved: true,
+                            refused_table_rows: Vec::new(),
+                        });
+                    }
+                    occupied.extend(record.band_start_row..=record.band_end_row);
+                    session.live_decorations.insert(record.start.row, record);
+                }
+                session.offscreen_decorations = remaining;
+                relayout_tasks
+            });
         // Remember what was asked. The two lists are refilled in the buffers the last pass left
         // behind rather than collected afresh, so a pane sitting on an unresolvable record asks for
         // no memory at all after its first pass.
@@ -13232,7 +13164,8 @@ fn rebase_identity_onto_match(
 /// Find a record's proven source in the live grid, and say where.
 ///
 /// A substring search: it says the bytes are there and where they are, and nothing about whether
-/// this is a block. `DualPlaneSession::detector_owns_live_match` asks that, of the detector.
+/// this is a block. The whole-grid scan `DualPlaneSession::live_grid_owned_blocks` asks that, of
+/// the detector.
 fn exact_live_source_match(
     source: &str,
     inputs: &[LiveDetectionInput],
@@ -13708,6 +13641,31 @@ fn may_arm_table(text: &str, previous_continues_paragraph: impl FnOnce() -> bool
     bt_detect::table::is_row_shaped(text) && previous_continues_paragraph()
 }
 
+/// **Does this block the live scan owns *is* the record the re-anchor is holding, here?**
+///
+/// The five span fields are the ones a live occurrence is identified by everywhere else in this
+/// file — the bytes the renderer was given, the bytes the user typed, which delimiter opened it,
+/// display or inline, and math or table — and the rows are the rows: a scan that owns the same
+/// source somewhere else on the grid says nothing about the place the substring search found.
+/// Inline records go through the same test as display ones and always did: an inline line is one
+/// occurrence with its runs inside it, so there is one owned block per line either way, and the
+/// drift this test replaces is the scanner's whole-list reading, which decides a line's ownership
+/// whatever mode it is in.
+fn live_scan_owns_record_at(
+    task: &LiveDetectionTask,
+    record: &LiveDecorationRecord,
+    start: GridPoint,
+    end: GridPoint,
+) -> bool {
+    task.start.row == start.row
+        && task.end.row == end.row
+        && task.span.original_source == record.span.original_source
+        && task.span.render_source == record.span.render_source
+        && task.span.delimiter_kind == record.span.delimiter_kind
+        && task.span.mode == record.span.mode
+        && task.span.kind == record.span.kind
+}
+
 fn empty_live_math_span() -> MathSpan {
     MathSpan {
         byte_start: 0,
@@ -13721,49 +13679,6 @@ fn empty_live_math_span() -> MathSpan {
         inline_runs: Vec::new(),
         inline_joined_head: None,
     }
-}
-
-fn live_grid_parser_prefixes(
-    inputs: &[LiveDetectionInput],
-    mut context: DetectionContext,
-) -> BTreeMap<u32, DetectionContext> {
-    let mut prefixes = BTreeMap::new();
-    let mut logical_text = String::new();
-    let mut logical_rows = Vec::new();
-    let mut logical_prefix = context.clone();
-    let mut logical_id = 1_u64;
-    let mut active = false;
-
-    for input in inputs {
-        if !active {
-            logical_prefix = context.clone();
-            active = true;
-        }
-        logical_text.push_str(&input.text);
-        if let LiveDetectionSource::Grid { row, .. } = input.source {
-            logical_rows.push(row);
-        }
-        if input.continues {
-            continue;
-        }
-        for row in logical_rows.drain(..) {
-            prefixes.insert(row, logical_prefix.clone());
-        }
-        advance_detection_context(
-            &mut context,
-            TranscriptId(logical_id),
-            logical_text.as_str(),
-        );
-        logical_id = logical_id.saturating_add(1);
-        logical_text.clear();
-        active = false;
-    }
-    if active {
-        for row in logical_rows {
-            prefixes.insert(row, logical_prefix.clone());
-        }
-    }
-    prefixes
 }
 
 fn exact_row_content(left: &LiveDetectionInput, right: &LiveDetectionInput) -> bool {
@@ -19035,10 +18950,9 @@ mod tests {
             .unwrap();
         let detections = session.live_detection_count();
         let before_inputs = session.live_detection_context();
-        let before_prefixes = live_grid_parser_prefixes(
-            &before_inputs,
-            session.live_initial_detection_context(&before_inputs),
-        );
+        // The checkpoint the scan of the first grid row starts from, which is what the two sides of
+        // this fixture have to disagree about for it to be measuring anything.
+        let before_prefix = session.live_initial_detection_context(&before_inputs);
 
         // Clear/home establishes a fresh Known prefix, while the original directional occurrence
         // was proven under an Ambiguous prefix. Exact prefix preservation therefore cannot prove
@@ -19051,11 +18965,8 @@ mod tests {
             )
             .unwrap();
         let after_inputs = session.live_detection_context();
-        let after_prefixes = live_grid_parser_prefixes(
-            &after_inputs,
-            session.live_initial_detection_context(&after_inputs),
-        );
-        assert_ne!(before_prefixes.get(&0), after_prefixes.get(&0));
+        let after_prefix = session.live_initial_detection_context(&after_inputs);
+        assert_ne!(before_prefix, after_prefix);
         let record = session.live_decorations.get(&0).unwrap();
         assert_eq!((record.band_start_row, record.band_end_row), (0, 0));
         assert_eq!(
@@ -20333,7 +20244,7 @@ mod tests {
     /// This used to re-anchor anyway and go on painting, and the divergence was *reported* as
     /// `HeldUnbacked` — a hold showing a formula the settled detector no longer accounts, named so
     /// that an audit could see what the flash oracle cannot. The re-anchor now asks the detector
-    /// instead of a copy of its rules (`detector_owns_live_match`), and the detector, reading these
+    /// instead of a copy of its rules (`live_grid_owned_blocks`), and the detector, reading these
     /// rows in the parity state the stray opener left, does not give the block back. So the hold is
     /// refused, the rows show their source, and there is nothing left to report: a picture over
     /// text the detector does not read as that block is the one thing this pane may not publish,
