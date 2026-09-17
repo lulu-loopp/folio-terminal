@@ -172199,6 +172199,36 @@ mod clipboard_path_tests {
             "a release wrote a path the box never promised"
         );
     }
+    /// One row of [`a_dropped_path_takes_the_keyboard_and_is_refused_under_a_card`]'s
+    /// two tables: a surface, and the bit of [`KeyboardOwner`] that is it.
+    ///
+    /// A named pair rather than a tuple because the tuple had grown a function
+    /// pointer in it and stopped reading as a table — which is what clippy's
+    /// `type_complexity` is about, and it was right: `what` and `set` say what
+    /// the two halves are for, and [`Self::owner`] is the third thing that used
+    /// to be a closure standing beside the tables.
+    struct KeyboardOwnerCase {
+        /// How the row is named in the failure, in the reader's words.
+        what: &'static str,
+        /// The one bit that makes this surface the keyboard's owner.
+        set: fn(&mut KeyboardOwner),
+    }
+
+    impl KeyboardOwnerCase {
+        const fn new(what: &'static str, set: fn(&mut KeyboardOwner)) -> Self {
+            Self { what, set }
+        }
+
+        /// The owner as the window would report it with this surface holding the
+        /// keys and every other bit false — which is what makes each row about
+        /// one surface.
+        fn owner(&self) -> KeyboardOwner {
+            let mut owner = KeyboardOwner::default();
+            (self.set)(&mut owner);
+            owner
+        }
+    }
+
     /// **A dropped path takes the keyboard from every surface that was holding
     /// it, and is refused under every surface that must be answered** (review
     /// 2026-09-17 P1-a and P1-b).
@@ -172227,11 +172257,6 @@ mod clipboard_path_tests {
     /// under a card and the `Enter` answers the card.
     #[test]
     fn a_dropped_path_takes_the_keyboard_and_is_refused_under_a_card() {
-        let holding = |set: fn(&mut KeyboardOwner)| {
-            let mut owner = KeyboardOwner::default();
-            set(&mut owner);
-            owner
-        };
         // The shell's turn, which is what every borrower below is released
         // *into* — asserted once so the rows can be about the release alone.
         assert!(keyboard_owner_is_a_shell(KeyboardOwner::default()));
@@ -172243,14 +172268,13 @@ mod clipboard_path_tests {
         // (i)-(iii) **The borrowers.** Each is a surface the next `Enter` would
         // have gone to, and each is released by a line of
         // `focus_the_pane_a_path_landed_in`.
-        let borrowers: [(&str, fn(&mut KeyboardOwner)); 4] = [
-            ("a files column", |o| o.files_tree = true),
-            ("a preview float or a live editor", |o| o.preview = true),
-            ("the graph's search field", |o| o.graph_search = true),
-            ("the in-pane search capsule", |o| o.search = true),
-        ];
-        for (what, set) in borrowers {
-            let owner = holding(set);
+        for row in [
+            KeyboardOwnerCase::new("a files column", |o| o.files_tree = true),
+            KeyboardOwnerCase::new("a preview float or a live editor", |o| o.preview = true),
+            KeyboardOwnerCase::new("the graph's search field", |o| o.graph_search = true),
+            KeyboardOwnerCase::new("the in-pane search capsule", |o| o.search = true),
+        ] {
+            let (what, owner) = (row.what, row.owner());
             assert!(
                 !keyboard_owner_is_a_shell(owner),
                 "{what} has to be holding the keyboard for this row to be about \
@@ -172271,17 +172295,17 @@ mod clipboard_path_tests {
 
         // (iv) **The answered.** None of these is released by anything; the drop
         // itself is refused instead, on both roads.
-        let answered: [(&str, fn(&mut KeyboardOwner)); 4] = [
-            ("a menu or a modal", |o| o.menu_or_dialog = true),
-            ("the tab-name box", |o| o.rename = true),
-            ("a git prompt", |o| o.git_prompt = true),
-            ("the command palette", |o| o.palette = true),
-        ];
-        for (what, set) in answered {
+        for row in [
+            KeyboardOwnerCase::new("a menu or a modal", |o| o.menu_or_dialog = true),
+            KeyboardOwnerCase::new("the tab-name box", |o| o.rename = true),
+            KeyboardOwnerCase::new("a git prompt", |o| o.git_prompt = true),
+            KeyboardOwnerCase::new("the command palette", |o| o.palette = true),
+        ] {
             assert!(
-                holding(set).is_modal(),
-                "{what} is answered with a keystroke, so a path written \
-                 underneath it would be followed by an `Enter` that answers it"
+                row.owner().is_modal(),
+                "{} is answered with a keystroke, so a path written underneath it \
+                 would be followed by an `Enter` that answers it",
+                row.what
             );
         }
 
