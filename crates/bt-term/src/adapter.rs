@@ -781,6 +781,16 @@ impl TerminalAdapter {
                     events.extend(self.drain_grid_write_events());
                 }
                 InlineImageStreamAction::Image(encoded) => {
+                    // **An image names a cell too, and for the same reason it has to be read
+                    // against a grid the bytes before it have reached.** Everything the block was
+                    // holding — the `CUP` that put the cursor where the image belongs, the swap
+                    // that changed which screen it belongs to — is parsed first; without it an
+                    // image drawn inside a synchronized update was filed at the cursor from before
+                    // the block, on the screen from before the block, and its placeholder was
+                    // measured against a column it was not written at. The placeholder itself was
+                    // never misplaced: it goes through the same parser, so it landed correctly and
+                    // the record pointed somewhere else.
+                    events.extend(self.commit_synchronized_update_before_marker());
                     let cursor = self.cursor();
                     let screen = if self.modes().alternate_screen {
                         RemovalScreen::Alternate
@@ -862,13 +872,14 @@ impl TerminalAdapter {
         events
     }
 
-    /// Write out a DEC 2026 block that is still holding bytes back, so that the marker about to be
-    /// reported is read against a grid those bytes have reached.
+    /// Write out a DEC 2026 block that is still holding bytes back, so that the fact about to be
+    /// reported — a shell marker, an inline image — is read against a grid those bytes have
+    /// reached.
     ///
     /// The same commit [`Self::finish_synchronized_update`] makes when the block's own deadline
     /// passes, and it reports the same events — with this one's grid writes as well, because the
     /// session records which rows a command line was typed on and those rows are written here.
-    /// Silent, and free, when no block is open.
+    /// Silent, and free, when no block is open: one stored `Option` read and an empty vector.
     fn commit_synchronized_update_before_marker(&mut self) -> Vec<AdapterEvent> {
         if self.synchronized_update_deadline().is_none() {
             return Vec::new();
@@ -2914,6 +2925,133 @@ mod tests {
             } if rows == &[0]
         )));
         assert_eq!(terminal.visible_text()[0], "pre[image]post");
+    }
+
+    /// One base64 `image/png` payload: the smallest complete PNG there is, a single opaque pixel.
+    /// Built rather than pasted so that what it is stays readable — the eight-byte signature, the
+    /// header, one zlib-stored scanline and the end marker, each with its own CRC.
+    fn one_pixel_png() -> String {
+        use base64::Engine as _;
+
+        fn chunk(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+            let crc = crc32(&[kind.as_slice(), payload].concat());
+            let mut bytes = (payload.len() as u32).to_be_bytes().to_vec();
+            bytes.extend_from_slice(kind);
+            bytes.extend_from_slice(payload);
+            bytes.extend_from_slice(&crc.to_be_bytes());
+            bytes
+        }
+
+        fn crc32(bytes: &[u8]) -> u32 {
+            let mut crc = u32::MAX;
+            for byte in bytes {
+                crc ^= u32::from(*byte);
+                for _ in 0..8 {
+                    crc = if crc & 1 == 1 {
+                        (crc >> 1) ^ 0xEDB8_8320
+                    } else {
+                        crc >> 1
+                    };
+                }
+            }
+            !crc
+        }
+
+        // One stored-mode deflate block holding the single scanline `00 ff ff ff` (filter 0, then
+        // one opaque white pixel), wrapped in the zlib header and Adler-32 the format asks for.
+        let scanline = [0u8, 0xff, 0xff, 0xff];
+        let mut deflate = vec![0x78, 0x01, 0x01, 0x04, 0x00, 0xfb, 0xff];
+        deflate.extend_from_slice(&scanline);
+        let (mut a, mut b) = (1u32, 0u32);
+        for byte in scanline {
+            a = (a + u32::from(byte)) % 65521;
+            b = (b + a) % 65521;
+        }
+        deflate.extend_from_slice(&((b << 16) | a).to_be_bytes());
+
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        png.extend(chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0]));
+        png.extend(chunk(b"IDAT", &deflate));
+        png.extend(chunk(b"IEND", &[]));
+        base64::engine::general_purpose::STANDARD.encode(png)
+    }
+
+    /// **An image is a fact about the grid, so it is read against a grid the bytes before it have
+    /// reached** (review 2026-09-17 third pass).
+    ///
+    /// DEC 2026 holds a block of writes back and applies them at the terminator, and the image's
+    /// own position was read while they were still held: the `CUP` that put the cursor where the
+    /// image belongs had not been parsed, nor had the swap that decides which screen it is on. So
+    /// an image drawn inside a synchronized update was filed at the cursor from before the block,
+    /// on the screen from before it, while its placeholder — which goes through the same parser —
+    /// landed in the right place. The record pointed at a cell that held something else, which is
+    /// where a reader's hover and peek look.
+    ///
+    /// Every byte split of each sequence, because the defect is about when a fact is read and a
+    /// read that happens to fall on a feed boundary is not a different rule.
+    #[test]
+    fn an_image_inside_a_synchronized_update_is_filed_where_its_placeholder_lands() {
+        let payload = one_pixel_png();
+        let held = format!("\x1b[?2026h\x1b[3;5H\x1b]1337;File=inline=1:{payload}\x07\x1b[?2026l");
+        let swapped = format!(
+            "\x1b[?2026h\x1b[?1049h\x1b[3;5H\x1b]1337;File=inline=1:{payload}\x07\x1b[?2026l"
+        );
+        // The right margin, where the placeholder is measured rather than simply counted: seven
+        // columns of `[image]` do not fit in the three left at column 37 of a 40-column grid.
+        let margin =
+            format!("\x1b[?2026h\x1b[1;38H\x1b]1337;File=inline=1:{payload}\x07\x1b[?2026l");
+
+        for (name, stream, expected) in [
+            (
+                "a held update",
+                held,
+                AdapterEvent::InlineImage {
+                    screen: RemovalScreen::Primary,
+                    row: 2,
+                    column: 4,
+                    placeholder_columns: 7,
+                    encoded: payload.clone().into_bytes(),
+                },
+            ),
+            (
+                "a held update that took the alternate screen first",
+                swapped,
+                AdapterEvent::InlineImage {
+                    screen: RemovalScreen::Alternate,
+                    row: 2,
+                    column: 4,
+                    placeholder_columns: 7,
+                    encoded: payload.clone().into_bytes(),
+                },
+            ),
+            (
+                "a held update at the right margin",
+                margin,
+                AdapterEvent::InlineImage {
+                    screen: RemovalScreen::Primary,
+                    row: 0,
+                    column: 37,
+                    placeholder_columns: 3,
+                    encoded: payload.clone().into_bytes(),
+                },
+            ),
+        ] {
+            let bytes = stream.as_bytes();
+            for split in 0..=bytes.len() {
+                let mut terminal = TerminalAdapter::new(nz(40), nz(4));
+                let mut events = terminal.feed(&bytes[..split]);
+                events.extend(terminal.feed(&bytes[split..]));
+                let images = events
+                    .iter()
+                    .filter(|event| matches!(event, AdapterEvent::InlineImage { .. }))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    images,
+                    vec![&expected],
+                    "{name}, split={split}: the image is filed where its placeholder is written"
+                );
+            }
+        }
     }
 
     #[test]
