@@ -32,10 +32,11 @@ The LaTeX a command prints is typeset where it was printed.
   Without it inline formulas stay as source, and `$$…$$` blocks still typeset.
 - A formula an agent prints can reach the terminal twice: once as the answer
   streams, and once more when the tool redraws its finished answer through its
-  own markdown renderer. The streamed bytes typeset. Claude Code's final
-  redraw changes them: `\\` becomes `\`, `\[` and `\]` become `[` and `]`,
-  `\!` becomes `!`, and a line holding only `=` turns the line above it into a
-  heading — so a matrix, a bracketed display or a spaced integral that was
+  own markdown renderer. The streamed bytes typeset. The final redraw changes
+  them — Claude Code's and Codex's alike: `\\` becomes `\`, `\,` becomes `,`,
+  `\[` and `\]` become `[` and `]`, `\!` becomes `!`, a line holding only `=`
+  turns the line above it into a heading, and a `$$` line can come back as
+  `# $$` — so a matrix, a bracketed display or a spaced integral that was
   typeset a moment ago falls back to whatever text survived. That is the
   renderer's doing, not the terminal's; a formula the agent writes to a
   markdown file arrives whole, and the preview pane typesets it.
