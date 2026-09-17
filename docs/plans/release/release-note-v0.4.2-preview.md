@@ -19,6 +19,9 @@
 - Reordering or deleting a profile no longer closes the window or starts the
   wrong shell, and an agent's configuration file Folio cannot read is left
   exactly as you wrote it instead of being written over.
+- Losing the graphics device — a power cut that puts a laptop on battery, a
+  driver updating itself — no longer closes Folio and every shell in it; the
+  window asks for the device again and draws on the new one.
 - On a Mac, a tab can be dragged to reorder it or out into its own window again,
   and Shift+wheel reads the rows a formula pushed above the pane; on both
   systems, quitting no longer waits for ever on a disk that has stopped
@@ -41,6 +44,14 @@
 
 ### Fixed
 
+- **Losing the graphics device no longer closes Folio.** The half-prepared
+  picture is dropped, the device is asked for again, and the window draws
+  everything it was saying on the new one.
+- **A dropped file lands in the terminal you dropped it on**, even when Folio
+  is busy or you were last hovering somewhere else: the position is read at the
+  instant the file is released.
+- **Closing a pane or a tab no longer pauses the window** while the program in
+  it is being shut down.
 - **On a Mac, Shift+wheel scrolls the rows a typeset formula pushed above the
   pane**, and scrolls sideways the way it has always gone on Windows.
 - **Closing Folio no longer waits for ever on a disk that has stopped

@@ -2790,13 +2790,10 @@ impl Text {
                 "The clipboard could not be read. Copy again and retry.",
                 "剪贴板无法读取。重新复制后再试。",
             ),
-            // CHINESE_PENDING: both columns, written 2026-09-16. The English is
-            // the sentence above it with one word changed, and the Chinese owed
-            // is the same change to the Chinese above it.
             Self::PasteClipboardPicture => pick(
                 lang,
                 "The clipboard picture could not be saved. Copy again and retry.",
-                "The clipboard picture could not be saved. Copy again and retry.",
+                "剪贴板图片无法保存。重新复制后再试。",
             ),
             Self::PasteProfileOverride => pick(
                 lang,
@@ -4580,7 +4577,7 @@ impl Text {
                 "This version of the web engine cannot enforce this window's rules for a page, so the file was not opened.",
                 "当前网页引擎无法执行这个窗口对页面设定的规则，文件没有打开。",
                 "The web engine would not take this window's rules for a page, so the file was not opened.",
-                "The web engine would not take this window's rules for a page, so the file was not opened.", // zh: pending opus46
+                "网页引擎拒绝了这个窗口对页面设定的规则，文件没有打开。",
             ),
             Self::WebDialogDismissed => pick(
                 lang,
@@ -5820,19 +5817,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 3] = [
-        // zh: pending opus46 — the card raised when a picture on the clipboard
-        // could not be written to a file (§7.61). Both columns, because the
-        // sentence says nothing about the machine: the same file, the same
-        // refusal and the same two words of advice on either platform.
-        (Self::PasteClipboardPicture, HostPlatform::Windows),
-        (Self::PasteClipboardPicture, HostPlatform::MacOs),
-        // zh: pending opus46 — the macOS column of the card a local file raises
-        // when the engine would not take this window's rules (M4-3, §13.38 ②).
-        // The Windows column beside it has had its Chinese since W2; what is
-        // owed is the same sentence about an engine that has no version to be
-        // behind.
-        (Self::WebFailGuardsSay, HostPlatform::MacOs),
+    const CHINESE_PENDING: [(Self, HostPlatform); 0] = [
         // The hovered link's two macOS clauses (T-MAC-CMDCLICK, §13.45 ②) were
         // written on 2026-09-13 and left this table then. Their Windows columns
         // had carried Chinese since the overlay was written; what was owed was
@@ -9641,11 +9626,15 @@ mod tests {
             Text::WebFailGuardsSay.on(Lang::English, HostPlatform::OtherUnix),
             mac
         );
-        // And the Chinese slot really is the English one, which is what files it
-        // in `CHINESE_PENDING` rather than leaving it to be discovered.
-        assert_eq!(
-            Text::WebFailGuardsSay.on(Lang::Chinese, HostPlatform::MacOs),
-            mac
+        // Both platform columns now carry their own Chinese.
+        let chinese_mac = Text::WebFailGuardsSay.on(Lang::Chinese, HostPlatform::MacOs);
+        assert_ne!(
+            chinese_mac, mac,
+            "the Mac column's Chinese was filled and is no longer the English placeholder"
+        );
+        assert!(
+            !chinese_mac.contains("版本"),
+            "a Mac's engine has no version to be behind, in either language: {chinese_mac}"
         );
         assert_ne!(
             Text::WebFailGuardsSay.on(Lang::Chinese, HostPlatform::Windows),
