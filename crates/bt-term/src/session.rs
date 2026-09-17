@@ -29451,6 +29451,154 @@ mod tests {
         (eligible, drawn)
     }
 
+    /// Drive a session's live math to the glass and count the inline pictures that reached it.
+    fn rendered_inline_block_count(session: &mut DualPlaneSession, started: Instant) -> usize {
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        complete_live_math_for_real(session);
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        rendered_inline_blocks(&frame).len()
+    }
+
+    /// Everything one stream leaves in history, once every row of it has scrolled off.
+    fn frozen_text(stream: &str) -> String {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut session);
+        session.feed_at(stream.as_bytes(), started).unwrap();
+        session
+            .feed_at(
+                b"\r\npad\r\npad\r\npad\r\npad\r\npad\r\npad\r\npad\r\npad\r\npad\r\npad\r\n\
+                  pad\r\npad\r\n",
+                started,
+            )
+            .unwrap();
+        session
+            .document
+            .entries()
+            .values()
+            .map(|entry| entry.line.text.as_str())
+            .collect()
+    }
+
+    /// Everything the terminal is showing, row by row.
+    fn grid_text(session: &DualPlaneSession) -> String {
+        (0..session.live_rows.len() as u32)
+            .map(|row| grid_row_text(session, row))
+            .collect()
+    }
+
+    /// The text the terminal is showing on one grid row, cell by cell.
+    fn grid_row_text(session: &DualPlaneSession, row: u32) -> String {
+        session
+            .terminal
+            .visible_row(row)
+            .expect("the fixture's row is on the grid")
+            .cells
+            .iter()
+            .map(|cell| cell.text.as_str())
+            .collect()
+    }
+
+    /// **A cluster the terminal is still collecting is a copy of text on the grid, and the grid can
+    /// be rewritten under it** (review 2026-09-17 second pass, F1 P1).
+    ///
+    /// Under `DECSET 2027` the terminal keeps the cluster it is building so that the next mark can
+    /// extend it, and it checked the cursor, the pending wrap, the screen and Unicode continuation
+    /// before doing so — everything except whether the cell it remembers still holds that text.
+    /// `ECH` blanks a cell, a tab walks over one, `CSI S` scrolls the row out from under the
+    /// coordinate, and `DECSC`/`DECRC` puts the cursor back exactly where the cache expects it
+    /// afterwards. Extending the stale copy then wrote the old text again.
+    ///
+    /// That is two faults in one. **Erased text came back**, which is a terminal reading its own
+    /// screen wrong and is worth refusing on its own; and because a re-cut cluster is written
+    /// through the printing path, the resurrected text was dated by whoever was printing now — so
+    /// a command could restore a glyph the prompt had written, and be handed it.
+    #[test]
+    fn a_retained_cluster_is_not_written_again_over_the_text_that_replaced_it() {
+        let started = Instant::now();
+        // 59 columns of output put the prompt's glyph on the last column, which is where a width
+        // change has to relocate it and therefore where it is rebuilt from the cache.
+        let margin = "o".repeat(59);
+        // A save, the command reaching over to the cached cell to erase it and walk a tab across
+        // it, and the restore that puts the cursor back exactly where the cache is waiting. None of
+        // those three writes goes through the printing path, which is why the cache never noticed.
+        let reach = |cell: &str| format!("\x1b7{OUTPUT_C}\x1b[{cell}\x1b[X\t\x1b8");
+
+        // Codex's first reproduction, widening: the prompt's arrow in the last column, erased by
+        // the command and walked over by its tab, then asked to become two cells wide by the
+        // command's `U+FE0F`. It used to be rebuilt on the next row, wearing the claim of the
+        // blank the tab had just taken.
+        let mut erased = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut erased);
+        let widened = format!(
+            "\x1b[?2027h{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\n{margin}{OUTPUT_D}\
+             {PROMPT_A}\u{2194}{reach}\u{fe0f}energy $x^2$ here\r\n{OUTPUT_D}",
+            reach = reach("2;60H")
+        );
+        erased.feed_at(widened.as_bytes(), started).unwrap();
+        assert!(
+            !grid_text(&erased).contains('\u{2194}'),
+            "the erase removed that glyph, so nothing may put it back anywhere on the screen: {:?}",
+            grid_text(&erased)
+        );
+        assert_eq!(
+            rendered_inline_block_count(&mut erased, started),
+            1,
+            "and with the prompt's glyph gone for good this line really is the command's, so the \
+             fixture reaches a picture instead of proving its point by refusing everything"
+        );
+        assert!(
+            !frozen_text(&widened).contains('\u{2194}'),
+            "nor may it come back on the way into history, which folds the same cells"
+        );
+
+        // Codex's second reproduction, shrinking: the same reach, but the prompt's glyph is a wide
+        // watch that wrapped to the next row, so narrowing it relocates it *back* to the
+        // placeholder at the end of the row above.
+        let mut narrowed = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut narrowed);
+        let shrunk = format!(
+            "\x1b[?2027h{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\n{margin}{OUTPUT_D}\
+             {PROMPT_A}\u{231a}{reach}\u{fe0e}energy $x^2$ here\r\n{OUTPUT_D}",
+            reach = reach("3;1H")
+        );
+        narrowed.feed_at(shrunk.as_bytes(), started).unwrap();
+        assert!(
+            !grid_text(&narrowed).contains('\u{231a}'),
+            "a narrowing mark rebuilds the cluster in the other direction, and it may not bring \
+             the erased watch back with it: {:?}",
+            grid_text(&narrowed)
+        );
+        assert!(
+            !frozen_text(&shrunk).contains('\u{231a}'),
+            "nor into history"
+        );
+
+        // A scroll is the same staleness without an erase: `CSI S` moves every cell and leaves the
+        // cursor where it was, so the cached coordinate names another row's text. Rebuilding from
+        // the cache there does not resurrect a glyph — it *duplicates* one, because the real arrow
+        // is still on the screen, one row up.
+        let mut scrolled = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut scrolled);
+        scrolled
+            .feed_at(
+                format!(
+                    "\x1b[?2027h{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\n{margin}{OUTPUT_D}\
+                     {PROMPT_A}\u{2194}{OUTPUT_C}\x1b[S\u{fe0f}energy $x^2$ here\r\n{OUTPUT_D}"
+                )
+                .as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert_eq!(
+            grid_text(&scrolled).matches('\u{2194}').count(),
+            1,
+            "one arrow was written and one arrow is on the screen: {:?}",
+            grid_text(&scrolled)
+        );
+    }
+
     /// **A cell's claim is the conjunction over every piece of text in it, and moving that text
     /// does not re-date it** (review 2026-09-17, F1).
     ///

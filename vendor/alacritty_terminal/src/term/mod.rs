@@ -1849,11 +1849,29 @@ impl<T> Term<T> {
         };
     }
 
+    /// Does this cell still hold exactly the text of the retained cluster?
+    ///
+    /// **Change from upstream, and the whole of what makes the retained cluster safe to write
+    /// again.** `self.grapheme` is a copy of text that is on the grid, and the grid can be
+    /// rewritten under it by anything that does not move the cursor: `ECH` blanks the cell, a tab
+    /// walks over it, `CSI S` scrolls the row out from under the coordinate, and `DECSC`/`DECRC`
+    /// puts the cursor back exactly where the cache expects it afterwards. The other three checks
+    /// are all about the cursor, so none of them can see that. Extending the cache then writes the
+    /// *old* text again — which resurrects erased characters onto the screen, and, because the
+    /// re-cut cluster is written through the printing path, dates them by whoever is printing now.
+    fn cell_holds_cluster(&self, point: Point, cluster: &str) -> bool {
+        let cell = &self.grid[point];
+        std::iter::once(cell.c)
+            .chain(cell.zerowidth().into_iter().flatten().copied())
+            .eq(cluster.chars())
+    }
+
     fn can_extend_grapheme(&self, character: char) -> bool {
         !self.grapheme.cluster.is_empty()
             && self.grapheme.expected_cursor == self.grid.cursor.point
             && self.grapheme.expected_wrap == self.grid.cursor.input_needs_wrap
             && self.grapheme.alternate_screen == self.mode.contains(TermMode::ALT_SCREEN)
+            && self.cell_holds_cluster(self.grapheme.lead, &self.grapheme.cluster)
             && extends_grapheme_cluster(&self.grapheme.cluster, character)
     }
 
@@ -1872,11 +1890,7 @@ impl<T> Term<T> {
         for line in self.topmost_line().0..=self.bottommost_line().0 {
             for column in 0..self.columns() {
                 let point = Point::new(Line(line), Column(column));
-                let cell = &self.grid[point];
-                let matches = std::iter::once(cell.c)
-                    .chain(cell.zerowidth().into_iter().flatten().copied())
-                    .eq(self.grapheme.cluster.chars());
-                if matches {
+                if self.cell_holds_cluster(point, &self.grapheme.cluster) {
                     let index = line as i64 * columns + column as i64;
                     let distance = cursor_index.abs_diff(index);
                     if best.is_none_or(|(_, best_distance)| distance < best_distance) {

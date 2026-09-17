@@ -95,6 +95,17 @@ file produces the vendored file byte for byte. Upstream formats with its own
   that a `U+FE0F` variation selector now widens the preceding
   emoji-presentation base to two cells, which is what `wcwidth`-plus-emoji and
   `string-width` conventions expect. `U+FE0E` deliberately does not narrow.
+- **The retained cluster is checked against the cell it describes.**
+  `can_extend_grapheme` compares the cursor, the pending wrap, the screen and
+  Unicode continuation; upstream stops there, and so did this copy. But the
+  retained cluster is a *copy* of text on the grid, and the grid can be
+  rewritten under it by anything that does not move the cursor — `ECH` blanks
+  the cell, a tab walks over it, `CSI S` scrolls the row out from under the
+  coordinate, and `DECSC`/`DECRC` puts the cursor back exactly where the cache
+  expects it afterwards. Extending the stale copy wrote the old text again:
+  erased characters came back on screen, and a cluster that had scrolled was
+  duplicated a row below itself. `Term::cell_holds_cluster` now asks the cell,
+  and `reanchor_grapheme_after_resize` is written in terms of it.
 - **A ceiling on one cluster.** `extend_grapheme` stops storing past
   `bt_unicode::MAX_GRAPHEME_CLUSTER_CHARS` code points, and `Cell::push_zerowidth`
   refuses the same. Every mark added to a cluster re-copies and re-measures the
