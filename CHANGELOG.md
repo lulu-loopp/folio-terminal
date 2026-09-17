@@ -6,6 +6,16 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Fixed
+
+- **Programs that ask which terminal they are running in now get an answer.**
+  Folio was silent when a program asked, and a terminal that says nothing is
+  treated as one that can do nothing — so full-screen programs such as Claude
+  Code never went on to ask whether Folio can update the screen in one piece,
+  and drew their frames the old way instead. Folio now answers with its own name
+  and version, the second question gets asked, and those programs switch to
+  updating the whole screen at once.
+
 ## 0.4.2-preview — 2026-09-17
 
 ### Added

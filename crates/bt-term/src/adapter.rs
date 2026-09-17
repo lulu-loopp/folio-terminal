@@ -40,6 +40,12 @@ pub const SCROLLBACK_LINES: usize = 0;
 /// is the same conclusion the parser behind it has already come to.
 const PARSER_TAIL_MAX_BYTES: usize = 2 * 1024 * 1024;
 
+/// This window's answer to XTVERSION: `DCS > | Folio(<version>) ST`, in the shape xterm defined and
+/// every terminal that answers at all uses. The version is the one the product ships under and
+/// nothing else — no commit, no build host, no operating system. A program asking this is asking
+/// what it may speak, not who built it.
+const XTVERSION_REPLY: &str = concat!("\x1bP>|Folio(", env!("CARGO_PKG_VERSION"), ")\x1b\\");
+
 #[derive(Clone, Copy)]
 struct GridSize {
     columns: NonZeroU32,
@@ -325,6 +331,9 @@ pub struct TerminalAdapter {
     /// A resize replays exactly this into the canonical fork's parser.
     ///
     /// Bounded by [`PARSER_TAIL_MAX_BYTES`], because what goes in it is chosen by the child.
+    /// XTVERSION queries heard but not yet answered, because a DEC 2026 block is still buffering
+    /// the bytes that carried them. See [`TerminalAdapter::answer_xtversion_if_not_buffering`].
+    xtversion_replies_owed: usize,
     parser_tail: Vec<u8>,
     /// Where in [`Self::parser_tail`] the sequence that is still open begins — the tail's own
     /// length when nothing is open.
@@ -476,6 +485,8 @@ struct BoundaryPerformer {
     /// this bit is the fix.
     focus_reports_requested: bool,
     cursor_row_positioned_explicitly: Option<bool>,
+    /// **Somebody asked which terminal this is** — XTVERSION, `CSI > q` or `CSI > 0 q`.
+    xtversion_queried: bool,
 }
 
 impl Perform for BoundaryPerformer {
@@ -529,6 +540,17 @@ impl Perform for BoundaryPerformer {
                 .is_some_and(|parameter| parameter == [2026]);
         self.sync_start = sync_mode && action == 'h';
         self.sync_end = sync_mode && action == 'l';
+        // **XTVERSION, and only XTVERSION.** `CSI > q` and its explicit spelling `CSI > 0 q` are the
+        // question "which terminal am I talking to"; every other parameter after `CSI >` is a
+        // different question this window has no answer for, and `CSI Ps SP q` (DECSCUSR, the cursor
+        // shape a shell sets on every prompt) is not this sequence at all — it has an intermediate
+        // of its own and no `>`.
+        self.xtversion_queried = action == 'q'
+            && intermediates == b">"
+            && params
+                .iter()
+                .next()
+                .is_none_or(|parameter| parameter == [0] && params.len() == 1);
         // **Every parameter, not just the first** — `CSI ? 1004 ; 1006 h` is one
         // program asking for two things, and a reader that looked only at the
         // head of the list would hear half of it.
@@ -602,6 +624,7 @@ impl TerminalAdapter {
             processor: Processor::new(),
             listener,
             parser_boundary: Parser::new(),
+            xtversion_replies_owed: 0,
             parser_tail: Vec::new(),
             parser_tail_open_start: 0,
             parser_sync_active: false,
@@ -987,6 +1010,7 @@ impl TerminalAdapter {
             // because its own buffer overflowed and it gave up. Either way this side stops
             // retaining bytes for it.
             self.release_synchronized_update_retention();
+            self.answer_xtversion_if_not_buffering();
             return Vec::new();
         }
         self.processor.stop_sync(&mut self.term);
@@ -999,6 +1023,8 @@ impl TerminalAdapter {
         self.parser_tail.clear();
         self.parser_tail.shrink_to_fit();
         self.parser_tail_open_start = 0;
+        // The block's bytes are on the grid now, so a question they carried is answered now.
+        self.answer_xtversion_if_not_buffering();
         let mut events = self.drain_transcript_events();
         events.extend(self.drain_adapter_events());
         events
@@ -1485,6 +1511,9 @@ impl TerminalAdapter {
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .push(AdapterEvent::Bell);
             }
+            if performer.xtversion_queried {
+                self.xtversion_replies_owed = self.xtversion_replies_owed.saturating_add(1);
+            }
             if performer.focus_reports_requested {
                 // A new subscriber has nothing to inherit: whatever was last
                 // said was said to whoever asked before it. See
@@ -1548,6 +1577,43 @@ impl TerminalAdapter {
         // the flag follows the parser rather than only the bytes.
         if self.parser_sync_active && self.processor.sync_timeout().sync_timeout().is_none() {
             self.release_synchronized_update_retention();
+        }
+        self.answer_xtversion_if_not_buffering();
+    }
+
+    /// **What this window answers to XTVERSION** — `DCS > | Folio(<version>) ST`, and nothing else.
+    ///
+    /// Why here and not in the vendored handler: `vte` 0.15 has no arm for `q` with a `>`
+    /// intermediate (`ansi.rs` dispatches `('q', [b' '])` for DECSCUSR and falls through to its
+    /// `unhandled!` log for everything else), so the sequence never reaches `Term`, and `vte` is a
+    /// registry dependency rather than one of this repository's vendored crates. The boundary
+    /// parser is the right place regardless of that: it is a real `Perform`, so the question is
+    /// *parsed* rather than matched against bytes — a query split across two pty reads is held by
+    /// the parser's own state, exactly like every other sequence — and it runs once per byte on the
+    /// real stream only, never on the resize canonical fork whose replies `discard_listener_output`
+    /// throws away. The reply joins the same queue DA1 and DSR use, so it is drained in order with
+    /// them and inherits the same "no PTY writer, no reply" behaviour from the caller.
+    ///
+    /// The string is fixed. Nothing from the query is echoed back, and a flood of queries costs one
+    /// short reply each, which is what DA1 costs.
+    ///
+    /// **The name is this product's own.** A program that allow-lists terminal names will simply not
+    /// match it, which is the honest outcome; pretending to be another terminal would claim its
+    /// bugs and its capabilities alike.
+    fn answer_xtversion_if_not_buffering(&mut self) {
+        // A query inside a DEC 2026 block is answered when that block's bytes are parsed, the same
+        // moment the grid they describe appears, so the child never hears from inside a frame that
+        // is not on the screen yet.
+        if self.xtversion_replies_owed == 0 || self.synchronized_update_deadline().is_some() {
+            return;
+        }
+        let mut writes = self
+            .listener
+            .pty_writes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for _ in 0..std::mem::take(&mut self.xtversion_replies_owed) {
+            writes.push(PendingReply::Bytes(XTVERSION_REPLY.as_bytes().to_vec()));
         }
     }
 
@@ -2652,6 +2718,151 @@ mod tests {
         terminal.feed(b"\x1b[?1000;1006h");
         terminal.set_keyboard_focus(false);
         assert!(terminal.take_pty_writes().is_empty());
+    }
+
+    /// **What a program asking "which terminal is this?" hears back.**
+    ///
+    /// XTVERSION is `CSI > q`, and `CSI > 0 q` is the same question spelled with its default
+    /// parameter. Both are answered with this window's own name and shipping version, and nothing
+    /// else; a terminal that answers nothing at all is indistinguishable from one that cannot do
+    /// anything, which is how the flicker of 2026-09-17 came about (Claude Code asks this first,
+    /// and only asks about synchronised output at all when something answered).
+    #[test]
+    fn xtversion_is_answered_with_this_terminals_own_name() {
+        for query in [b"\x1b[>q".as_slice(), b"\x1b[>0q"] {
+            let mut terminal = TerminalAdapter::new(nz(20), nz(3));
+            terminal.feed(query);
+            assert_eq!(
+                terminal.take_pty_writes(),
+                vec![XTVERSION_REPLY.as_bytes().to_vec()],
+                "{query:?} went unanswered"
+            );
+            assert!(
+                terminal.take_pty_writes().is_empty(),
+                "{query:?} was answered twice"
+            );
+        }
+        assert_eq!(
+            XTVERSION_REPLY,
+            format!("\x1bP>|Folio({})\x1b\\", env!("CARGO_PKG_VERSION")),
+            "the reply is the product's own name and its shipping version, and carries nothing else"
+        );
+    }
+
+    /// The question is parsed, not matched: the parser holds its own state between reads, so a
+    /// query the operating system splits — macOS caps a pty read at 1 KiB and a query can land on
+    /// that boundary like anything else — is still one question with one answer.
+    #[test]
+    fn a_split_xtversion_query_is_still_one_question() {
+        let query = b"\x1b[>0q";
+        for split in 1..query.len() {
+            let mut terminal = TerminalAdapter::new(nz(20), nz(3));
+            terminal.feed(&query[..split]);
+            assert!(
+                terminal.take_pty_writes().is_empty(),
+                "half a query at {split} was answered"
+            );
+            terminal.feed(&query[split..]);
+            assert_eq!(
+                terminal.take_pty_writes(),
+                vec![XTVERSION_REPLY.as_bytes().to_vec()],
+                "a query split at {split} went unanswered"
+            );
+        }
+    }
+
+    /// Everything else after `CSI >` is a different question, and DECSCUSR — which a shell sets on
+    /// every prompt — only looks like this one if you are matching bytes instead of parsing them.
+    #[test]
+    fn only_xtversion_is_answered() {
+        for quiet in [
+            b"\x1b[>1q".as_slice(),
+            b"\x1b[>2q",
+            b"\x1b[>0;1q",
+            // DECSCUSR: `CSI Ps SP q`, a cursor shape, with its own intermediate and no `>`.
+            b"\x1b[2 q",
+            b"\x1b[0 q",
+            b"\x1b[q",
+        ] {
+            let mut terminal = TerminalAdapter::new(nz(20), nz(3));
+            terminal.feed(quiet);
+            assert!(
+                terminal.take_pty_writes().is_empty(),
+                "{quiet:?} is not XTVERSION and must not be answered"
+            );
+        }
+    }
+
+    /// A question asked inside a synchronised update is answered when that update's bytes reach the
+    /// grid, not while they are still being held back — the child never hears from inside a frame
+    /// that is not on the screen yet. One answer, at the commit.
+    #[test]
+    fn a_query_inside_a_synchronized_update_is_answered_at_its_commit() {
+        let mut terminal = TerminalAdapter::new(nz(20), nz(3));
+        terminal.feed(b"\x1b[?2026h\x1b[>0q");
+        assert!(
+            terminal.take_pty_writes().is_empty(),
+            "the update is still buffering, so its bytes have not been read out yet"
+        );
+        terminal.feed(b"\x1b[?2026l");
+        assert_eq!(
+            terminal.take_pty_writes(),
+            vec![XTVERSION_REPLY.as_bytes().to_vec()]
+        );
+    }
+
+    /// A resize transaction runs a second, canonical parser over the same bytes so the reflow can be
+    /// measured; its replies are thrown away. The question must be answered once, by the stream the
+    /// child is actually talking to.
+    #[test]
+    fn a_query_during_a_resize_transaction_is_answered_once() {
+        let mut terminal = TerminalAdapter::new(nz(20), nz(3));
+        terminal.begin_resize_transaction();
+        terminal.feed(b"\x1b[>0q");
+        let replies = terminal.take_pty_writes();
+        terminal.resize(nz(16), nz(3));
+        let _ = terminal.finish_resize_transaction();
+        assert_eq!(replies, vec![XTVERSION_REPLY.as_bytes().to_vec()]);
+        assert!(terminal.take_pty_writes().is_empty());
+    }
+
+    /// The alternate screen is where the programs that ask this question live.
+    #[test]
+    fn xtversion_is_answered_on_the_alternate_screen() {
+        let mut terminal = TerminalAdapter::new(nz(20), nz(3));
+        terminal.feed(b"\x1b[?1049h");
+        let _ = terminal.take_pty_writes();
+        terminal.feed(b"\x1b[>0q");
+        assert_eq!(
+            terminal.take_pty_writes(),
+            vec![XTVERSION_REPLY.as_bytes().to_vec()]
+        );
+    }
+
+    /// **The whole point of the answer, end to end.**
+    ///
+    /// This is Claude Code's capability probe, in its order (verified against 2.1.274): it asks
+    /// XTVERSION, and only if something answered does it go on to ask whether this terminal does
+    /// synchronised output. Folio has always answered the second question correctly — `2` is
+    /// DECRPM's "reset", which means "the mode exists and is currently off" and is one of the three
+    /// statuses the probe accepts — but the first went unanswered, so the second was never asked and
+    /// full-screen programs fell back to repainting without a synchronised update. Every formula
+    /// that flashed back to LaTeX while the owner scrolled Claude Code on macOS came from that
+    /// silence.
+    #[test]
+    fn the_capability_probe_gets_both_answers_in_order() {
+        let mut terminal = TerminalAdapter::new(nz(40), nz(6));
+        terminal.feed(b"\x1b[>0q");
+        assert_eq!(
+            terminal.take_pty_writes(),
+            vec![XTVERSION_REPLY.as_bytes().to_vec()]
+        );
+        terminal.feed(b"\x1b[?2026$p");
+        assert_eq!(
+            terminal.take_pty_writes(),
+            vec![b"\x1b[?2026;2$y".to_vec()],
+            "the mode must be reported as a mode this terminal has"
+        );
     }
 
     #[test]
