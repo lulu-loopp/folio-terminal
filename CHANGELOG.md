@@ -21,6 +21,17 @@ All notable changes to Folio are recorded here. The format follows
   now, whether or not the size changed; the shell in that pane is still told
   only when its size actually moved, so nothing is sent to it that it does not
   need.
+- **A formula whose source was too long for the pane was read and typeset all
+  over again when it scrolled up into the history, instead of taking the
+  picture it already had with it.** A formula is proven on the rows of the
+  screen it stands on; history is kept in lines, and a line too long for the
+  pane takes two rows and is still one line. The handover counted rows and
+  looked for the end of the block one line too far down, found nothing there,
+  and let go of the picture — so the same formula was found and drawn a second
+  time, for nothing. Nothing of this was ever on the screen: the last row of a
+  block leaves the window in the same instant it leaves the live screen, so
+  what came back was already out of sight. It is work that is no longer done,
+  not a flicker that has stopped.
 
 ## 0.4.2-preview — 2026-09-17
 
