@@ -73,30 +73,37 @@ conversion tests still pass unmodified, `\iftypst` snapshots included.
 out under a name for the same reason the depth refusal is: the reader is owed the
 source text, not a diagnostic about their own formula.
 
-## `src/converter.rs` — a budget on the rectangle an environment asks for
+## `src/converter.rs` — a budget on the rectangle the *output* asks for
 
-An environment with rows is laid out as a *rectangle*: MiTeX's own `array` pads
-every row out to the widest one, and Typst's `mat` does the same. So a source
-that writes one wide row and a column of empty ones asks for their product.
-`\begin{array}{l}x` followed by N `&` and N `\\` is `3N+29` bytes at constant
-nesting and `(N+1)²` cells — at Folio's 8 KiB source budget, more than seven
-million of them. Neither the byte budget nor the depth bound sees it: the bytes
-are few and the nesting is constant.
+Math with rows in it is laid out as a *rectangle*: MiTeX's own `array` pads every
+row out to the widest one, Typst's `mat` does the same, and so does any math
+sequence containing a line break. So a source that writes one wide row and a
+column of empty ones asks for their product — about `3N` bytes at constant
+nesting for `(N+1)²` cells, which inside Folio's 8 KiB source budget is more than
+four million. Neither the byte budget nor the depth bound sees it: the bytes are
+few and the nesting is constant.
 
-`charge_cells` counts the rectangle off the separators `convert_env` is already
-walking — `&` opens a column, `\\` opens a row, at that environment's own level —
-and charges it against `MAX_LAYOUT_CELLS` before a single cell is written. The
-budget belongs to the conversion rather than to one environment, so several of
-them in a formula add up, and a matrix inside a matrix is charged for each
-rectangle. It is charged for every environment kind whose rows become a laid-out
-block: `is-matrix` (`matrix`, `pmatrix`, `bmatrix`, `Bmatrix`, `vmatrix`,
-`Vmatrix`, `smallmatrix`, `array`, `subarray`), `is-math` (`aligned`, `align`,
-`gather`, `gathered`, `split`, `equation`, `alignedat`) and `is-cases` (`cases`,
-`rcases`). Only the first family actually pads, but the other two are free to
-count and the rule is then one rule.
+`layout_cells` reads the converted text, which is exactly what Typst will parse.
+A *scope* is a run of Typst math laid out as one sequence — the whole formula,
+and whatever a `(`, `[` or `{` this converter wrote opens. Inside one, `&` and `,`
+each open a column, a Typst line break (`\ `) and `;` each open a row, a scope
+costs its rows times its widest row, and a formula costs the sum, charged against
+`MAX_LAYOUT_CELLS` before the string is returned. Escapes are honoured, which is
+why it reads characters: `\,` is a drawn comma, not a separator.
 
-Like the refusal above it is a mode, so upstream is unchanged, and
-`ConvertError`/`BoundedConvertError` gain a `TooManyCells` variant.
+**This replaces a first attempt that counted an environment's own children, and
+the reason it replaces it is worth writing down.** That version was wrong twice:
+`&` and line breaks are emitted outside environments too — a bare row of
+alignment points with a column of line breaks is a rectangle at the root of the
+formula, with no environment anywhere — and a `{…}` group is *flattened* into the
+text around it, so its ampersands belong to the enclosing scope while a source
+counter attributes them to the group. Both were measured passing that counter
+untouched at eight hundred columns. Reading the output cannot be fooled by LaTeX
+grouping, by an environment name or by a macro, because none of those survive
+into the text being read.
+
+Like the refusal above it is a mode, so upstream is unchanged.
+`BoundedConvertError` gains a `TooManyCells` variant.
 
 ## The manifest
 

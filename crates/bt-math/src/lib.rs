@@ -1752,6 +1752,10 @@ mod tests {
                     .join(r" \\ ");
                 format!(r"f(x) = \begin{{cases}}{rows}\end{{cases}}")
             }),
+            (
+                "a multi-line derivation with no environment at all",
+                r"a &= b + c \\ &= d + e \\ &= f".to_owned(),
+            ),
         ] {
             assert_eq!(validate_source(&source), Ok(()), "{name}");
             assert!(engine.render(&source, key()).is_ok(), "{name}");
@@ -2025,80 +2029,165 @@ mod tests {
         }
     }
 
-    /// One wide row and a column of empty ones: a rectangle, from almost no bytes.
+    /// Three ways to write one wide row and a column of empty ones, which is a rectangle out of
+    /// almost no bytes: `(n+1)²` cells from about `3n` of them.
     ///
-    /// `rows` separators and `rows` columns, so `(rows+1)²` cells out of `3*rows+29` bytes.
-    fn sparse_array(rows: usize) -> String {
-        format!(
-            r"\begin{{array}}{{l}}x{}{}x\end{{array}}",
-            "&".repeat(rows),
-            r"\\".repeat(rows)
-        )
+    /// The first is an environment that pads. **The second has no environment at all** — a bare
+    /// row of alignment points and a column of line breaks is a rectangle at the root of the
+    /// formula — and **the third hides the wide row's alignment points inside a `{…}` group**,
+    /// which the converter flattens into the text around it, so an environment's own children never
+    /// see them. A budget that counted source constructs missed the second and the third; one that
+    /// reads the converted text cannot, because the converted text is what Typst parses.
+    fn rectangles(n: usize) -> Vec<(&'static str, String)> {
+        vec![
+            (
+                "an environment that pads",
+                format!(
+                    r"\begin{{array}}{{l}}x{}{}x\end{{array}}",
+                    "&".repeat(n),
+                    r"\\".repeat(n)
+                ),
+            ),
+            (
+                "no environment at all",
+                format!("x{}{}", "&".repeat(n), r"\\x".repeat(n)),
+            ),
+            (
+                "alignment points hidden in a group",
+                format!(
+                    r"\begin{{aligned}}x{{{}}}{}\end{{aligned}}",
+                    "&".repeat(n),
+                    r"\\x".repeat(n)
+                ),
+            ),
+        ]
+    }
+
+    /// The largest `n` this shape of rectangle is accepted at, found rather than assumed.
+    fn widest_accepted(build: impl Fn(usize) -> String) -> usize {
+        let accepted = |n: usize| convert_math(&build(n)).is_ok();
+        let (mut fits, mut refused) = (1usize, 4096usize);
+        assert!(accepted(fits), "one column must fit");
+        assert!(!accepted(refused), "four thousand must not");
+        while refused - fits > 1 {
+            let middle = fits + (refused - fits) / 2;
+            if accepted(middle) {
+                fits = middle;
+            } else {
+                refused = middle;
+            }
+        }
+        fits
     }
 
     /// **The third budget: what a formula asks to have *laid out*, which its bytes and its nesting
     /// both fail to bound.**
     ///
-    /// An environment with rows becomes a rectangle — MiTeX's `array` pads every row out to the
-    /// widest one, and Typst's `mat` does the same — so a source that writes one wide row and a
-    /// column of empty ones asks for their product. [`sparse_array`] is 3N+29 bytes at constant
-    /// nesting: at the 8 KiB source budget it asks for more than seven million cells, which is
-    /// minutes of the one math worker and gigabytes of a process whose allocation failure is an
-    /// abort rather than an unwind. Measured on the worker's own thread, the cost is *linear* in
-    /// cells — 81 in 13ms, 1089 in 55ms, 2401 in 121ms, 4225 in 254ms, about 60µs each — so a
-    /// budget on cells is a budget on the time and the memory, and
-    /// [`mitex::MAX_LAYOUT_CELLS`] of them is a 64x64 matrix.
+    /// A rectangle is what the *emitted Typst* asks for, whichever way it was written. MiTeX's
+    /// `array` pads every row out to the widest one and Typst's `mat` does the same; so does any
+    /// math sequence with a line break in it, which needs no environment at all. Each shape in
+    /// [`rectangles`] is `(n+1)²` cells out of about `3n` bytes at constant nesting, which is more
+    /// than four million cells inside the 8 KiB source budget.
     ///
-    /// The refusal is at the conversion, so nothing is ever laid out to find out: 4225 cells come
-    /// back refused in 77µs.
+    /// Measured on the worker's own thread. The `array` shape costs about 60µs a cell — 1089 cells
+    /// in 55ms, 4225 in 254ms — so the budget bounds time and memory and not merely a count. The
+    /// two alignment shapes turn out to be far cheaper in the pinned Typst, which pads them
+    /// virtually: four million cells came back in 547ms, refused for raster size. They are budgeted
+    /// at the same rate anyway, because what makes them safe today is an implementation detail of
+    /// somebody else's layout engine, and because the rule is then one rule.
+    ///
+    /// The refusal is at the conversion, so nothing is laid out to find out: all three shapes at
+    /// four million cells now come back in about a millisecond.
     #[test]
     fn a_formula_may_not_ask_for_more_cells_than_it_can_be_drawn_with() {
         let engine = MathEngine::with_system_fonts(false);
-        let side = |cells: usize| (cells as f64).sqrt() as usize - 1;
-        let under = sparse_array(side(mitex::MAX_LAYOUT_CELLS));
-        let over = sparse_array(side(mitex::MAX_LAYOUT_CELLS) + 1);
-        assert!(under.len() < 300 && over.len() < 300, "almost no bytes");
-        assert!(convert_math(&under).is_ok(), "the budget itself is allowed");
-        let started = std::time::Instant::now();
-        let drawn = engine.render(&under, key()).expect("and it draws");
-        eprintln!(
-            "at the budget: {} cells, {}x{} pixels, {} bytes, {:?}",
-            mitex::MAX_LAYOUT_CELLS,
-            drawn.width_px,
-            drawn.height_px,
-            drawn.resident_bytes(),
-            started.elapsed()
-        );
-        assert!(
-            drawn.resident_bytes() < MAX_RASTER_BYTES / 8,
-            "and the picture it draws is a small part of the raster budget: {} bytes",
-            drawn.resident_bytes()
-        );
-        assert_eq!(
-            convert_math(&over),
-            Err(MathRenderError::TooManyLayoutCells),
-            "one cell more is refused, at the conversion, before anything is laid out"
-        );
-        assert_eq!(
-            engine.render(&over, key()),
-            Err(MathRenderError::TooManyLayoutCells)
-        );
+        for (shape, _) in rectangles(1) {
+            let build = move |n: usize| {
+                rectangles(n)
+                    .into_iter()
+                    .find(|(name, _)| *name == shape)
+                    .expect("the same shape")
+                    .1
+            };
+            let widest = widest_accepted(build);
+            let under = build(widest);
+            let over = build(widest + 1);
+            assert!(
+                widest >= 32,
+                "{shape}: the budget must admit a real table, not {widest} columns"
+            );
+            assert!(under.len() < 400 && over.len() < 400, "{shape}: few bytes");
+
+            let started = std::time::Instant::now();
+            let drawn = engine.render(&under, key()).expect("the widest one draws");
+            eprintln!(
+                "{shape}: {widest} columns accepted, {}x{} pixels, {} bytes, {:?}",
+                drawn.width_px,
+                drawn.height_px,
+                drawn.resident_bytes(),
+                started.elapsed()
+            );
+            assert!(
+                drawn.resident_bytes() < MAX_RASTER_BYTES / 8,
+                "{shape}: and its picture is a small part of the raster budget: {} bytes",
+                drawn.resident_bytes()
+            );
+            assert_eq!(
+                convert_math(&over),
+                Err(MathRenderError::TooManyLayoutCells),
+                "{shape}: one column more is refused, at the conversion"
+            );
+            assert_eq!(
+                engine.render(&over, key()),
+                Err(MathRenderError::TooManyLayoutCells),
+                "{shape}"
+            );
+            // And at the size the byte budget allows, which is where the harm was.
+            assert_eq!(
+                convert_math(&build(2000)),
+                Err(MathRenderError::TooManyLayoutCells),
+                "{shape}: four million cells"
+            );
+        }
         assert_eq!(
             MathRenderError::TooManyLayoutCells.failure_stage(),
             Some(MathFailureStage::Convert)
         );
 
-        // The same rectangle, assembled by macros the guard sees expanded.
-        let through_macros = format!(
-            r"\newcommand{{\c}}{{{}}}\newcommand{{\r}}{{{}}}\begin{{array}}{{l}}x{}{}x\end{{array}}",
-            "&".repeat(10),
-            r"\\".repeat(10),
-            r"\c".repeat(7),
-            r"\r".repeat(7),
+        // The same rectangles, assembled by macros — the guard reads what they expand to.
+        for shape in [
+            format!(
+                r"\newcommand{{\c}}{{{}}}\newcommand{{\r}}{{{}}}\begin{{array}}{{l}}x{}{}x\end{{array}}",
+                "&".repeat(10),
+                r"\\".repeat(10),
+                r"\c".repeat(7),
+                r"\r ".repeat(7),
+            ),
+            format!(
+                r"\newcommand{{\c}}{{&}}\newcommand{{\r}}{{\\x}}x{}{}",
+                r"\c".repeat(70),
+                r"\r".repeat(70),
+            ),
+        ] {
+            assert_eq!(
+                convert_math(&shape),
+                Err(MathRenderError::TooManyLayoutCells),
+                "{shape}"
+            );
+        }
+
+        // Root-level alignment and a matrix in one formula, spending one budget between them.
+        let row = ["x"; 40].join("&");
+        let matrix = format!(
+            r"\begin{{pmatrix}}{}\end{{pmatrix}}",
+            vec![row; 40].join(r"\\")
         );
+        assert!(convert_math(&matrix).is_ok(), "1600 cells on their own");
+        let mixed = format!("{matrix}{}{}", "&".repeat(50), r"\\y".repeat(50));
         assert_eq!(
-            convert_math(&through_macros),
-            Err(MathRenderError::TooManyLayoutCells)
+            convert_math(&mixed),
+            Err(MathRenderError::TooManyLayoutCells),
+            "with a 51 by 51 alignment around it, they are five thousand"
         );
 
         // The budget belongs to the formula, not to one environment, so several of them add up.

@@ -62,9 +62,12 @@ All notable changes to Folio are recorded here. The format follows
   handful of characters, and it asks for a grid as wide and as tall as both —
   eight thousand characters could have asked for seven million cells, which is
   minutes of work and more memory than Folio has. It now works that out from the
-  formula itself and leaves anything past its limit as the text you printed. The
-  limit is a sixty-four by sixty-four grid; an ordinary matrix, a long alignment
-  or a definition with thirty cases is nowhere near it.
+  formula itself and leaves anything past its limit as the text you printed. It
+  works it out from what the formula becomes rather than from how it was written,
+  so putting the markers in a group, or behind an abbreviation, or in no table at
+  all, makes no difference. The limit is a sixty-four by sixty-four grid; an
+  ordinary matrix, a long alignment, a definition with thirty cases and a
+  multi-line derivation are all nowhere near it.
 
 - **A formula cannot run a program.** Mathematics written for TeX has a corner
   of its notation that says "and here is some Typst" — Folio passed that through
