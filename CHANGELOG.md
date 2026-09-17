@@ -8,6 +8,14 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **Dragging a window edge no longer lets a formula swallow the line under
+  it.** A formula kept while you resize is put back where its source now sits,
+  but it went on claiming as many rows as it used to occupy — so widening the
+  window, which lets a long formula fit in fewer lines, left it covering the
+  text underneath, and narrowing it left the formula showing its source until
+  the next redraw. Both lasted as long as the drag. A formula now occupies
+  exactly the lines its own source occupies at the width you are at.
+
 - **Two lines with the same formulas in them no longer show each other's
   picture.** Where a line has more than one `$…$` in it, Folio draws the whole
   line's formulas as one picture, and it was filing that picture under the

@@ -6615,30 +6615,27 @@ impl DualPlaneSession {
                 remaining.push_back(record);
                 continue;
             }
-            let Some(logical_band_start) =
-                i64::from(start.row).checked_sub(i64::from(record.identity.source_start_offset))
-            else {
+            // **The band is the extent that was just matched, and the identity is re-based onto
+            // it.** `band_rows` and the two source offsets are physical row counts of the grid this
+            // occurrence was *proven* on, so a re-wrap makes every one of them stale together: the
+            // old length reached past the new closing row and blanked the ordinary text under the
+            // block, and an expression built from the offsets instead is the same staleness in a
+            // different digit. A fresh detection of this occurrence would own exactly its source
+            // extent (`size_resolved_live_task_band`), so that is what a restore installs.
+            //
+            // Re-basing the identity is the other half and not a tidy-up: `project_live_record`
+            // reads `source_rows[i].band_offset` and the span's live-grid rows as offsets from the
+            // band's top, so leaving them measured against a band that no longer exists would move
+            // every later projection of this record by the difference.
+            if !rebase_identity_onto_match(&mut record, start, end, &segments, &inputs) {
                 remaining.push_back(record);
                 continue;
-            };
-            let Some(logical_band_end) = logical_band_start
-                .checked_add(i64::from(record.identity.band_rows.saturating_sub(1)))
-            else {
-                remaining.push_back(record);
-                continue;
-            };
-            let Ok(band_start_row) = u32::try_from(logical_band_start) else {
-                remaining.push_back(record);
-                continue;
-            };
-            let Ok(band_end_row) = u32::try_from(logical_band_end) else {
-                remaining.push_back(record);
-                continue;
-            };
+            }
+            let logical_band_start = i64::from(start.row);
             record.start = start;
             record.end = end;
-            record.band_start_row = band_start_row;
-            record.band_end_row = band_end_row;
+            record.band_start_row = start.row;
+            record.band_end_row = end.row;
             record.clipped_top_rows = 0;
             record.clipped_bottom_rows = 0;
             // The re-anchor proved this occurrence's *complete* source inside the live grid, so no
@@ -12460,6 +12457,64 @@ fn proven_live_occurrence(
         source_rows,
         span,
     })
+}
+
+/// Re-base a preserved occurrence's identity onto the extent it has just been matched at.
+///
+/// Every number in [`ProvenLiveOccurrence`] that is measured in rows is measured **relative to the
+/// band**, and a re-wrap gives the same source a different number of physical rows — so after a
+/// match at a new width, `band_rows`, both source offsets, each proven row's `band_offset` and each
+/// live-grid segment row are all describing a band that no longer exists. They are rebuilt here
+/// from the match itself: the rows are the ones the grid holds now, and the band is their extent.
+///
+/// What is deliberately *not* touched is the occurrence's birth — `occurrence_id`,
+/// `created_generation` and `created_start`. That is what makes two identical formulas two
+/// occurrences, and a reflow does not give a block a new identity, only new coordinates.
+///
+/// `false` when the grid cannot answer for one of the matched rows, which leaves the record parked
+/// rather than re-anchored on a half-rebuilt identity.
+fn rebase_identity_onto_match(
+    record: &mut LiveDecorationRecord,
+    start: GridPoint,
+    end: GridPoint,
+    segments: &[MathCellSegment],
+    inputs: &[LiveDetectionInput],
+) -> bool {
+    let Some(band_rows) = end
+        .row
+        .checked_sub(start.row)
+        .and_then(|rows| rows.checked_add(1))
+    else {
+        return false;
+    };
+    let mut source_rows = Vec::with_capacity(band_rows as usize);
+    for row in start.row..=end.row {
+        let Some(input) = live_grid_input(inputs, row) else {
+            return false;
+        };
+        source_rows.push(ProvenLiveRow {
+            band_offset: row - start.row,
+            text: input.text.clone(),
+            continues: input.continues,
+            cell_boundaries: input.cell_boundaries.clone(),
+        });
+    }
+    let mut span = record.identity.span.clone();
+    span.cell_segments = segments.to_vec();
+    for segment in &mut span.cell_segments {
+        if let MathSourceLine::LiveGrid(row) = &mut segment.source_line {
+            let Some(offset) = row.checked_sub(start.row) else {
+                return false;
+            };
+            *row = offset;
+        }
+    }
+    record.identity.band_rows = band_rows;
+    record.identity.source_start_offset = 0;
+    record.identity.source_end_offset = band_rows - 1;
+    record.identity.source_rows = source_rows;
+    record.identity.span = span;
+    true
 }
 
 fn exact_live_source_match(
@@ -28756,6 +28811,145 @@ mod tests {
             artifacts[0].key, artifacts[1].key,
             "two pictures that differ must not be one texture"
         );
+    }
+
+    /// A display block that soft-wraps, with an ordinary row right under it.
+    ///
+    /// The body is long enough to need two rows at 20 columns and one at 40, so a width change
+    /// really does change how many physical rows the same source occupies — which is the whole
+    /// subject. The sentinel is the row the band must never reach.
+    const WRAPPING_BLOCK: &str = "$$\r\nx + y + z = a + b + c + d\r\n$$\r\nSENTINEL\r\n";
+
+    /// The one restored record, and what it now claims to own.
+    fn restored_band(session: &DualPlaneSession) -> (GridPoint, GridPoint, u32, u32) {
+        let record = session
+            .live_decorations
+            .values()
+            .next()
+            .expect("the preserved record is restored onto the reflowed grid");
+        (
+            record.start,
+            record.end,
+            record.band_start_row,
+            record.band_end_row,
+        )
+    }
+
+    /// The live row the sentinel is on, read off the grid rather than counted.
+    fn sentinel_row(session: &DualPlaneSession) -> u32 {
+        let inputs = session.live_detection_context();
+        (0..session.live_rows.len() as u32)
+            .find(|row| {
+                live_grid_input(&inputs, *row).is_some_and(|input| input.text.contains("SENTINEL"))
+            })
+            .expect("the sentinel is on the grid")
+    }
+
+    /// **A preserved band owns the rows it was just matched at, never the rows it used to have.**
+    ///
+    /// A resize parks proven records off-band and `restore_offscreen_decorations` re-anchors each by
+    /// finding its complete source in the reflowed grid. It installed `start`/`end` from that new
+    /// match and then computed the band from `identity.band_rows` — a physical row count measured on
+    /// the grid the occurrence was *proven* on. Widening a soft-wrapped block shrinks its extent, so
+    /// the old length reached past the new closing delimiter and the viewport blanked the ordinary
+    /// rows under it; narrowing made `end.row` overshoot `band_end_row`, which the viewport refuses,
+    /// and the block showed source until a fresh result arrived. Both are published frames — the
+    /// record is back in `live_decorations` before `resize_at` returns — so a drag shows them.
+    ///
+    /// The two stored offsets are no better than the length: `band_rows`, `source_start_offset` and
+    /// `source_end_offset` are all measured in the old wrapping's rows, so an expression built from
+    /// them is stale in a different digit. The extent that was just matched is the only physical
+    /// ownership in the room, and it is what a fresh detection of this occurrence would install.
+    #[test]
+    fn a_preserved_band_owns_the_extent_it_was_matched_at_and_not_its_old_length() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(20), nz(10));
+        session.feed_at(WRAPPING_BLOCK.as_bytes(), started).unwrap();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 40)),
+            1,
+            "the fixture must prove the block before anything is resized"
+        );
+        let (_, end, _, band_end) = restored_band(&session);
+        assert_eq!(
+            band_end, end.row,
+            "and it must start out owning exactly its own source"
+        );
+
+        // Widen, then narrow, then come back — with no completion delivered in between, so every
+        // assertion below is about a frame the drag really publishes.
+        for (step, columns) in [40u32, 20, 40, 20].into_iter().enumerate() {
+            let at = started + Duration::from_millis(210 * (step as u64 + 1));
+            session.resize_at(nz(columns), nz(10), at).unwrap();
+            session.set_layout_key(LayoutKey {
+                width_cells: nz(columns),
+                ..session.layout_key()
+            });
+            session.mark_pty_resize_requested_at(nz(columns), nz(10), at);
+
+            let (start, end, band_start, band_end) = restored_band(&session);
+            assert!(
+                band_end >= end.row,
+                "at {columns} columns the band must reach its own closing row: \
+                 band {band_start}..={band_end}, source {}..={}",
+                start.row,
+                end.row
+            );
+            assert_eq!(
+                (band_start, band_end),
+                (start.row, end.row),
+                "at {columns} columns the band is the extent that was matched"
+            );
+            let sentinel = sentinel_row(&session);
+            assert!(
+                sentinel > band_end,
+                "at {columns} columns the row under the block is not inside the band: \
+                 sentinel {sentinel}, band {band_start}..={band_end}"
+            );
+        }
+
+        // The last word goes to a result from the first width, delivered now. A stale answer is
+        // refused on its layout, and refusing it must not leave the band it was refused for behind.
+        let stale = LiveDetectionTask {
+            layout: LayoutKey {
+                width_cells: nz(40),
+                ..session.layout_key()
+            },
+            ..session
+                .live_decorations
+                .values()
+                .next()
+                .map(|record| LiveDetectionTask {
+                    candidate_row: record.end.row,
+                    screen: record.screen,
+                    grid_generation: record.generation,
+                    detection_revision: record.detection_revision,
+                    layout: record.layout,
+                    cell_width_subpixels: 0,
+                    cell_height_subpixels: 0,
+                    ascii_baseline_subpixels: 0,
+                    options: session.detection_options(),
+                    initial_context: record.initial_context.clone(),
+                    inputs: Arc::clone(&record.inputs),
+                    start: record.start,
+                    end: record.end,
+                    band_start_row: record.band_start_row,
+                    band_end_row: record.band_end_row,
+                    span: record.span.clone(),
+                    detection_complete: true,
+                    resolved: true,
+                    refused_table_rows: Vec::new(),
+                })
+                .expect("a record is standing")
+        };
+        assert!(
+            !session.complete_live_worker_result(stale, Ok(synthetic_raster(40, 40))),
+            "a result from the other width is refused"
+        );
+        let (start, end, band_start, band_end) = restored_band(&session);
+        assert_eq!((band_start, band_end), (start.row, end.row));
+        assert!(sentinel_row(&session) > band_end);
     }
 
     /// The site of one grid row, as the live scan sees it.
