@@ -1762,6 +1762,48 @@ fn centered_content_offset(
         .saturating_add(vertical_padding_subpixels)
 }
 
+/// **How much of one live block's raster its own live band has to carry.**
+///
+/// Every plane sizes a block by its raster: an all-live band takes free height from the live
+/// prefix map, a finalized block sets its history line's height to the image. A boundary-split
+/// bridge is the same rule read across a seam. The finalized and staged source rows above its band
+/// stand at plain cell height and can never grow — that is what being frozen means — so what is
+/// left of the picture is the live band's to carry. Sizing that band by its source rows instead
+/// (which is what excluding bridges from the prefix map amounted to) clips a tall bridge to its
+/// own source height and leaves the line underneath standing on the part that was cut off.
+///
+/// Floored at the plain band, so a raster **shorter** than the rows it spans changes nothing: the
+/// bridge keeps its source rows and centres inside them, and no live terminal row is ever squeezed
+/// below cell height by a small picture.
+///
+/// The alternate screen has neither history nor staging, so nothing above the band carries any of
+/// the raster there and the band owes all of it; `project` builds a bridge on the primary screen
+/// only, and alternate stays expand-only exactly as it is everywhere else in this file.
+fn live_band_share(
+    artifact: &ProjectedLiveMathArtifact,
+    screen: ScreenId,
+    cell_height_subpixels: i64,
+    source_band_height_subpixels: i64,
+) -> i64 {
+    let raster = artifact.artifact.height_subpixels;
+    if screen == ScreenId::Alternate {
+        return raster.max(source_band_height_subpixels);
+    }
+    let prefix_rows = artifact
+        .frozen_prefix
+        .len()
+        .saturating_add(artifact.staging_prefix.len());
+    if prefix_rows == 0 {
+        return raster;
+    }
+    let prefix_height = i64::try_from(prefix_rows)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(cell_height_subpixels);
+    raster
+        .saturating_sub(prefix_height)
+        .max(source_band_height_subpixels)
+}
+
 fn distributed_row_heights(total_height_subpixels: i64, rows: usize) -> Vec<i64> {
     if rows == 0 {
         return Vec::new();
@@ -4180,21 +4222,24 @@ impl ViewportProjection {
                 ) {
                     return true;
                 }
-                // A boundary-split block occupies only its live band on the grid; the bulk of its
-                // height is carried by the frozen scrollback rows it already owns above. It is
-                // measured by its live-band height (never the full image).
-                let box_height = if artifact.frozen_prefix.is_empty() {
-                    artifact.artifact.height_subpixels.max(1)
-                } else {
+                // A boundary-split block occupies only its live band on the grid; the part of its
+                // height that the frozen and staged rows above already carry is not asked of the
+                // live grid at all. It is measured by the share of the raster its live band owes —
+                // the same number the prefix map below hands that band, so the floor and the
+                // geometry cannot disagree about how much grid this block wants.
+                let box_height = live_band_share(
+                    artifact,
+                    screen,
+                    self.cell_height_subpixels.get(),
                     i64::from(
                         artifact
                             .band_end_row
                             .saturating_sub(artifact.band_start_row)
                             .saturating_add(1),
                     )
-                    .saturating_mul(self.cell_height_subpixels.get())
-                    .max(1)
-                };
+                    .saturating_mul(self.cell_height_subpixels.get()),
+                )
+                .max(1);
                 // A scaled stale raster (render_scale_milli != readable) is a proven block whose
                 // layout changed under a zoom; it stays pinned (scaled to approximate the new size)
                 // rather than flashing to source while its fresh relayout is off-thread. Its box
@@ -4228,12 +4273,6 @@ impl ViewportProjection {
                 }
                 continue;
             }
-            // A boundary-split block never expands its live rows: its rendered image spans the
-            // frozen scrollback rows above plus its live band, and projection sizes that bridged
-            // span directly. Its live band keeps natural row heights here.
-            if !artifact.frozen_prefix.is_empty() {
-                continue;
-            }
             let visible_rows = artifact
                 .band_end_row
                 .saturating_sub(artifact.band_start_row)
@@ -4250,10 +4289,9 @@ impl ViewportProjection {
             // sizes the band from the visible rows alone, flooring it to the artifact height exactly
             // as the alternate screen already does. Whenever a genuine edge clip (M1.9v top reveal,
             // bottom-edge run-off) or a fresh artifact's occlusion is present the reduced band is
-            // legitimate and the HEAD sizing is kept to the subpixel; boundary-split bridges never
-            // reach this loop. A transition-stale primary raster is the exception: its occluded rows
-            // are the still-exact remainder of the old layout, so the preview must retain them until
-            // the replacement artifact arrives.
+            // legitimate and the HEAD sizing is kept to the subpixel. A transition-stale primary
+            // raster is the exception: its occluded rows are the still-exact remainder of the old
+            // layout, so the preview must retain them until the replacement artifact arrives.
             let last_live_row = self.live_rows.get().saturating_sub(1);
             let full_clipped_rows = artifact
                 .clipped_top_rows
@@ -4276,8 +4314,9 @@ impl ViewportProjection {
                 // pinned to live row zero does not prove the occurrence extends above it: a primary
                 // block reaching this loop owns every source row inside the live grid, because
                 // genuine upward extension into scrollback is projected as a boundary-split bridge
-                // (skipped above) and a top hidden behind fixed chrome surfaces as occlusion (kept
-                // below). So a reported clipped-top on such a block is never a genuine top reveal —
+                // (whose rows above the grid are counted by `live_band_share`, not as a clip) and a
+                // top hidden behind fixed chrome surfaces as occlusion (kept below). So a reported
+                // clipped-top on such a block is never a genuine top reveal —
                 // it is a reprojection transient during a reprint/reflow/zoom whose stale identity
                 // out-counts the reflowed occurrence's rows. Spreading the artifact across those
                 // phantom top rows and taking the middle slice is exactly what clipped the integral
@@ -4295,14 +4334,18 @@ impl ViewportProjection {
             };
             let source_band_height =
                 i64::from(rows).saturating_mul(self.cell_height_subpixels.get());
-            let presentation_height = if screen == ScreenId::Alternate {
-                artifact.artifact.height_subpixels.max(source_band_height)
-            } else {
-                artifact.artifact.height_subpixels
-            };
+            let presentation_height = live_band_share(
+                artifact,
+                screen,
+                self.cell_height_subpixels.get(),
+                source_band_height,
+            );
             let heights = distributed_row_heights(presentation_height, rows.max(1) as usize);
             // Primary retains free height. Alternate is expand-only: a short formula keeps the
             // complete source-row band and centers inside it; a tall formula expands above it.
+            // A boundary-split bridge takes free height for the share of the raster its own live
+            // rows owe — the frozen and staged rows above it cannot grow, so the remainder is the
+            // band's, and `project` reads that band back out of this very map.
             for offset in 0..visible_rows {
                 if let Some(height) =
                     per_row_height.get_mut(artifact.band_start_row.saturating_add(offset) as usize)
@@ -9417,6 +9460,153 @@ mod tests {
                 .collect::<String>()
                 .contains("$$")),
             "an unrelated staged row must not stop the exact frozen source prefix from being swallowed"
+        );
+    }
+
+    /// The same bridge, with a raster **taller** than the source rows it spans: three source rows
+    /// (finalized opener, staged body, live closer) of eighteen pixels each carrying a 96-pixel
+    /// image.
+    ///
+    /// A block is sized by its raster on both of the other two planes — all-live takes free height
+    /// from the live prefix map, all-frozen sets the history line's own height — and a bridge was
+    /// the one shape that was sized by its *source rows* instead, because the live prefix map
+    /// skipped every block with a frozen prefix. The rows above the live band are frozen at plain
+    /// cell height and can never grow, so the live band must carry the remainder of the raster; the
+    /// bridge was clipped to 54 pixels of a 96-pixel picture and the next line stood on top of what
+    /// was cut. This is the display block cut off at the bottom from the second `cat` onwards
+    /// (2026-09-17 recording).
+    ///
+    /// MUTATIONS:
+    /// ① clamp the bridge's `combined_height` up to the artifact height in `project` instead of
+    ///    distributing the residual over the live band: ① and ② pass, ③ goes red — the picture
+    ///    would be painted over the line below it;
+    /// ② drop the floor on the live share: the shorter raster of the test above collapses its own
+    ///    closer row, and `boundary_split_block_renders_as_one_bridge_across_frozen_and_live` goes
+    ///    red.
+    #[test]
+    fn a_bridged_block_taller_than_its_source_rows_keeps_its_whole_raster() {
+        let width = 32;
+        let mut store = TranscriptStore::new(NonZeroUsize::new(64).unwrap());
+        let opener = store.capture(fixture_row("$$", false)).finalized.remove(0);
+        let mut document = HistoryDocument::default();
+        document.finalize_transaction(opener);
+        let frozen_prefix = document.entries().keys().copied().collect::<Vec<_>>();
+        let staging_id = StagingId(77);
+        let staged_body = format!("{:<width$}", "A=", width = width as usize);
+        let staged = [StagedRow {
+            id: staging_id,
+            row: fixture_row(&staged_body, true),
+        }];
+
+        let mut projection = ViewportProjection::new(
+            key(width),
+            DetectionRevision(1),
+            nz32(12),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        projection.relayout(key(width), &document);
+        // Three source rows of eighteen pixels; the raster is ninety-six.
+        let artifact_height = 96 * SUBPIXELS_PER_PX;
+        projection.sync_live_math_artifacts(
+            ScreenId::Primary,
+            [ProjectedLiveMathArtifact {
+                occurrence_id: LiveMathOccurrenceId(9),
+                screen: ScreenId::Primary,
+                start: GridPoint { row: 0, column: 0 },
+                end: GridPoint { row: 0, column: 2 },
+                band_start_row: 0,
+                band_end_row: 0,
+                clipped_top_rows: 0,
+                clipped_bottom_rows: 0,
+                occluded_source_rows: 0,
+                occluded_visible_rows: Vec::new(),
+                transition_stale: false,
+                frozen_prefix: frozen_prefix.clone(),
+                staging_prefix: vec![staging_id],
+                generation: GridGeneration(1),
+                artifact: ProjectedMathArtifact {
+                    inline_runs: Vec::new(),
+                    key: "gaussian".to_owned(),
+                    end: TranscriptId(0),
+                    rgba: Arc::from(vec![255; 96 * 4]),
+                    width_px: 1,
+                    height_px: 96,
+                    height_subpixels: artifact_height,
+                    baseline_subpixels: 0,
+                    mode: MathMode::Display,
+                    kind: RgbaArtifactKind::Math,
+                    vertical_padding_subpixels: 0,
+                    render_scale_milli: 1000,
+                    source: r"\int_{-\infty}^{\infty}e^{-x^2}dx=\sqrt{\pi}".to_owned(),
+                },
+            }],
+        );
+        projection.project(&document);
+        projection.scroll_to_top();
+
+        let closer = format!("{:<width$}", "$$", width = width as usize);
+        let next_line = format!("{:<width$}", "done", width = width as usize);
+        let blank = " ".repeat(width as usize);
+        let mut live_rows = vec![fixture_row(&closer, false), fixture_row(&next_line, false)];
+        live_rows.extend(vec![fixture_row(&blank, false); 10]);
+        let frame = projection
+            .continuous_frame(
+                &document,
+                &staged,
+                live_rows,
+                GridCursor {
+                    row: 1,
+                    column: 0,
+                    visible: true,
+                },
+                ScreenId::Primary,
+            )
+            .unwrap();
+        frame.validate_shape().unwrap();
+
+        let bridge = frame
+            .math_blocks
+            .iter()
+            .find(|block| block.display == MathBlockDisplay::Rendered)
+            .expect("boundary-split block renders");
+        assert_eq!(bridge.live_occurrence_id, Some(LiveMathOccurrenceId(9)));
+        // ① The band the bridge is clipped to is at least its own raster.
+        assert!(
+            bridge.clip_height_subpixels >= bridge.artifact.height_subpixels,
+            "bridge band {} must hold the whole raster {}",
+            bridge.clip_height_subpixels,
+            bridge.artifact.height_subpixels
+        );
+        // ② And the raster stands inside that band rather than running out of its bottom.
+        assert!(
+            bridge
+                .content_offset_subpixels
+                .saturating_add(bridge.artifact.height_subpixels)
+                <= bridge.clip_height_subpixels,
+            "raster at offset {} plus height {} must fit the band {}",
+            bridge.content_offset_subpixels,
+            bridge.artifact.height_subpixels,
+            bridge.clip_height_subpixels
+        );
+        // ③ And the line after the band stands below it: the band really grew, it was not clamped
+        //    into the row underneath it.
+        let next_row = frame
+            .row_map
+            .iter()
+            .find(|row| row.live_grid_row == Some(1))
+            .expect("the line after the bridge is on the grid");
+        assert!(
+            next_row.top_subpixels
+                >= bridge
+                    .top_subpixels
+                    .saturating_add(bridge.clip_height_subpixels),
+            "the row after the band starts at {} and the band ends at {}",
+            next_row.top_subpixels,
+            bridge
+                .top_subpixels
+                .saturating_add(bridge.clip_height_subpixels)
         );
     }
 

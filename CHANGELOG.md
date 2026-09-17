@@ -6,6 +6,20 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Fixed
+
+- **A formula block that had partly scrolled into the history is no longer cut
+  off at the bottom by the line after it.** Print the same file twice and the
+  second printing pushed the first one's `$$` block up until its opening line
+  had already settled into the history while its closing line was still on the
+  live screen. A block standing across that join was drawn at the height of the
+  three lines it was written on rather than at the height of the picture it had
+  become, so a tall formula — an integral, a fraction, anything with something
+  above and below the line — lost its bottom edge under the next line of
+  output. The lines the block spans now make room for the whole of it wherever
+  it stands, and a block shorter than its own lines is placed exactly as
+  before.
+
 ## 0.4.2-preview — 2026-09-17
 
 ### Added
