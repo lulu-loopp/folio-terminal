@@ -1762,48 +1762,6 @@ fn centered_content_offset(
         .saturating_add(vertical_padding_subpixels)
 }
 
-/// **How much of one live block's raster its own live band has to carry.**
-///
-/// Every plane sizes a block by its raster: an all-live band takes free height from the live
-/// prefix map, a finalized block sets its history line's height to the image. A boundary-split
-/// bridge is the same rule read across a seam. The finalized and staged source rows above its band
-/// stand at plain cell height and can never grow — that is what being frozen means — so what is
-/// left of the picture is the live band's to carry. Sizing that band by its source rows instead
-/// (which is what excluding bridges from the prefix map amounted to) clips a tall bridge to its
-/// own source height and leaves the line underneath standing on the part that was cut off.
-///
-/// Floored at the plain band, so a raster **shorter** than the rows it spans changes nothing: the
-/// bridge keeps its source rows and centres inside them, and no live terminal row is ever squeezed
-/// below cell height by a small picture.
-///
-/// The alternate screen has neither history nor staging, so nothing above the band carries any of
-/// the raster there and the band owes all of it; `project` builds a bridge on the primary screen
-/// only, and alternate stays expand-only exactly as it is everywhere else in this file.
-fn live_band_share(
-    artifact: &ProjectedLiveMathArtifact,
-    screen: ScreenId,
-    cell_height_subpixels: i64,
-    source_band_height_subpixels: i64,
-) -> i64 {
-    let raster = artifact.artifact.height_subpixels;
-    if screen == ScreenId::Alternate {
-        return raster.max(source_band_height_subpixels);
-    }
-    let prefix_rows = artifact
-        .frozen_prefix
-        .len()
-        .saturating_add(artifact.staging_prefix.len());
-    if prefix_rows == 0 {
-        return raster;
-    }
-    let prefix_height = i64::try_from(prefix_rows)
-        .unwrap_or(i64::MAX)
-        .saturating_mul(cell_height_subpixels);
-    raster
-        .saturating_sub(prefix_height)
-        .max(source_band_height_subpixels)
-}
-
 fn distributed_row_heights(total_height_subpixels: i64, rows: usize) -> Vec<i64> {
     if rows == 0 {
         return Vec::new();
@@ -3008,7 +2966,6 @@ impl ViewportProjection {
         let mut bridge_geometry: HashMap<LiveMathOccurrenceId, (usize, u32)> = HashMap::new();
         let mut frozen_prefix_geometry: HashMap<LiveMathOccurrenceId, usize> = HashMap::new();
         if primary {
-            let ordered = self.ordered_ids.len();
             for live_math in &self.live_math_artifacts {
                 if (live_math.frozen_prefix.is_empty() && live_math.staging_prefix.is_empty())
                     || live_math.screen != screen
@@ -3017,30 +2974,17 @@ impl ViewportProjection {
                 {
                     continue;
                 }
-                let abs_top = if live_math.frozen_prefix.is_empty() {
-                    history_rows
-                } else {
-                    let prefix = live_math.frozen_prefix.len();
-                    if prefix > ordered
-                        || self.ordered_ids[ordered - prefix..] != live_math.frozen_prefix[..]
-                    {
-                        continue;
-                    }
-                    // A finalized prefix must be plain source. A rendered history artifact means
-                    // frozen and live detection paired differently and cannot share one band.
-                    if live_math
-                        .frozen_prefix
-                        .iter()
-                        .any(|id| self.math_artifacts.contains_key(id))
-                    {
-                        continue;
-                    }
-                    let first_index = ordered - prefix;
-                    let abs_top = usize::try_from(self.visual_row_heights.prefix_sum(first_index))
-                        .unwrap_or(0);
-                    frozen_prefix_geometry.insert(live_math.occurrence_id, abs_top);
-                    abs_top
+                // The rows above the grid, measured by the one function the live prefix map sized
+                // this block's band with. Asking it again here rather than counting the ids a
+                // second way is what keeps the band's height and the picture's top two readings of
+                // one number: a wrapped or decorated prefix answers `None` in both places.
+                let Some(frozen_rows) = self.bridge_frozen_prefix_rows(live_math) else {
+                    continue;
                 };
+                let abs_top = history_rows.saturating_sub(frozen_rows as usize);
+                if !live_math.frozen_prefix.is_empty() {
+                    frozen_prefix_geometry.insert(live_math.occurrence_id, abs_top);
+                }
                 // Staging may hold an unrelated in-progress logical line. It is not part of this
                 // occurrence and must neither be swallowed nor prevent the exact frozen prefix
                 // above it from being occluded. Only make one geometrically continuous bridge when
@@ -4203,6 +4147,100 @@ impl ViewportProjection {
         self.inline_path_artifacts = next;
     }
 
+    /// **The plain source rows a boundary-split block owns above the live grid** — measured, never
+    /// counted from its ids.
+    ///
+    /// A finalized prefix element is a transcript id, and a transcript line is not a row: it wraps
+    /// into several of them when the pane narrows, and it can carry a picture of its own appended
+    /// under it. Charging the live band `ids × cell_height` is therefore a guess, and it is wrong
+    /// in both directions — it overcharges a wrapped prefix (the band grows into whitespace and
+    /// pushes the text below it down) and it can put a block over the visible-text floor that its
+    /// real share fits inside (a ready bridge falls back to source).
+    ///
+    /// So the prefix is measured, and only when this projection can prove it is a prefix a bridge
+    /// may stand on: the ids are the contiguous tail of the projected document, so the heights read
+    /// here are theirs; none of them wears a picture, so the rows can be swallowed by the one the
+    /// bridge paints across them; and every line stands at exactly its own row count times the cell,
+    /// which is what makes the bridge's upward extrapolation at cell pitch exact and "the rows above
+    /// cannot grow" a fact rather than an assumption.
+    ///
+    /// `None` means one thing at every caller: this is not a bridge this layer can place. The block
+    /// is refused and renders as source, like every other block whose geometry cannot be proven,
+    /// rather than being placed against a prefix height nobody measured.
+    fn bridge_frozen_prefix_rows(&self, live_math: &ProjectedLiveMathArtifact) -> Option<u32> {
+        let prefix = live_math.frozen_prefix.len();
+        let ordered = self.ordered_ids.len();
+        if prefix > ordered || self.ordered_ids[ordered - prefix..] != live_math.frozen_prefix[..] {
+            return None;
+        }
+        let cell = self.cell_height_subpixels.get();
+        let first_index = ordered - prefix;
+        let mut rows = 0_u32;
+        for (offset, id) in live_math.frozen_prefix.iter().enumerate() {
+            let index = first_index + offset;
+            if self.math_artifacts.contains_key(id) || self.inline_path_artifacts.contains_key(id) {
+                return None;
+            }
+            let line_rows = u32::try_from(*self.visual_rows.get(index)?).ok()?;
+            if self.heights.get(index)? != i64::from(line_rows).saturating_mul(cell) {
+                return None;
+            }
+            rows = rows.checked_add(line_rows)?;
+        }
+        Some(rows)
+    }
+
+    /// The same count with the staged rows above the band added to it. The staging plane is one
+    /// cell per row by construction — `continuous_frame` measures it as `rows × cell_height` — so
+    /// there its own length *is* its height.
+    fn bridge_prefix_rows(&self, live_math: &ProjectedLiveMathArtifact) -> Option<u32> {
+        let staged = u32::try_from(live_math.staging_prefix.len()).ok()?;
+        self.bridge_frozen_prefix_rows(live_math)?
+            .checked_add(staged)
+    }
+
+    /// **How much of one live block's raster its own live band has to carry.**
+    ///
+    /// Every plane sizes a block by its raster: an all-live band takes free height from the live
+    /// prefix map, a finalized block sets its history line's height to the image. A boundary-split
+    /// bridge is the same rule read across a seam. The rows above its band are frozen at plain cell
+    /// height and can never grow — that is what being frozen means — so what is left of the picture
+    /// is the live band's to carry. Sizing that band by its source rows instead (which is what
+    /// excluding bridges from the prefix map amounted to) clips a tall bridge to its own source
+    /// height and leaves the line underneath standing on the part that was cut off.
+    ///
+    /// Floored at the plain band, so a raster **shorter** than the rows it spans changes nothing:
+    /// the bridge keeps its source rows and centres inside them, and no live terminal row is ever
+    /// squeezed below cell height by a small picture.
+    ///
+    /// The alternate screen has neither history nor staging, so nothing above the band carries any
+    /// of the raster there and the band owes all of it; `project` builds a bridge on the primary
+    /// screen only, and alternate stays expand-only exactly as it is everywhere else in this file.
+    ///
+    /// `None` is [`Self::bridge_prefix_rows`]'s unplaceable prefix, and it is the one answer that
+    /// admission, row allocation and the bridge's own geometry all read from this single place.
+    fn live_band_share(
+        &self,
+        live_math: &ProjectedLiveMathArtifact,
+        screen: ScreenId,
+        source_band_height_subpixels: i64,
+    ) -> Option<i64> {
+        let raster = live_math.artifact.height_subpixels;
+        if screen == ScreenId::Alternate {
+            return Some(raster.max(source_band_height_subpixels));
+        }
+        if live_math.frozen_prefix.is_empty() && live_math.staging_prefix.is_empty() {
+            return Some(raster);
+        }
+        let prefix_height = i64::from(self.bridge_prefix_rows(live_math)?)
+            .saturating_mul(self.cell_height_subpixels.get());
+        Some(
+            raster
+                .saturating_sub(prefix_height)
+                .max(source_band_height_subpixels),
+        )
+    }
+
     pub fn sync_live_math_artifacts(
         &mut self,
         screen: ScreenId,
@@ -4245,10 +4283,9 @@ impl ViewportProjection {
                 // live grid at all. It is measured by the share of the raster its live band owes —
                 // the same number the prefix map below hands that band, so the floor and the
                 // geometry cannot disagree about how much grid this block wants.
-                let box_height = live_band_share(
+                let share = self.live_band_share(
                     artifact,
                     screen,
-                    self.cell_height_subpixels.get(),
                     i64::from(
                         artifact
                             .band_end_row
@@ -4256,8 +4293,22 @@ impl ViewportProjection {
                             .saturating_add(1),
                     )
                     .saturating_mul(self.cell_height_subpixels.get()),
-                )
-                .max(1);
+                );
+                // A prefix this projection cannot measure is not a bridge it can place. Refusing
+                // admission is what sends the block back to its source rows — the same answer every
+                // unproven block gets — and it is refused *here*, so that nothing downstream ever
+                // sees a bridge whose rows above the grid were guessed at.
+                let Some(box_height) = share.map(|share| share.max(1)) else {
+                    if std::env::var_os("BT_PERF_TRACE").is_some_and(|value| !value.is_empty()) {
+                        crate::trace::line(format!(
+                            "BT_PERF_TRACE live_math_event=source-fallback row={} frozen_prefix={} staging_prefix={} reason=bridge-prefix-not-measurable",
+                            artifact.start.row,
+                            artifact.frozen_prefix.len(),
+                            artifact.staging_prefix.len(),
+                        ));
+                    }
+                    return false;
+                };
                 // A scaled stale raster (render_scale_milli != readable) is a proven block whose
                 // layout changed under a zoom; it stays pinned (scaled to approximate the new size)
                 // rather than flashing to source while its fresh relayout is off-thread. Its box
@@ -4352,12 +4403,13 @@ impl ViewportProjection {
             };
             let source_band_height =
                 i64::from(rows).saturating_mul(self.cell_height_subpixels.get());
-            let presentation_height = live_band_share(
-                artifact,
-                screen,
-                self.cell_height_subpixels.get(),
-                source_band_height,
-            );
+            // The same share the floor above admitted this block on: a prefix that could not be
+            // measured was refused there, so a block standing here has one.
+            let Some(presentation_height) =
+                self.live_band_share(artifact, screen, source_band_height)
+            else {
+                continue;
+            };
             let heights = distributed_row_heights(presentation_height, rows.max(1) as usize);
             // Primary retains free height. Alternate is expand-only: a short formula keeps the
             // complete source-row band and centers inside it; a tall formula expands above it.
@@ -9330,6 +9382,11 @@ mod tests {
             GridGeneration(1),
         );
         projection.relayout(key(width), &document);
+        // The session projects the document and then syncs the live plane immediately
+        // before composing a frame (`Session::viewport_frame`), so the live prefix map is
+        // always measured against the history it is about to be drawn beside. The fixture
+        // drives the two in that order for the same reason.
+        projection.project(&document);
         projection.sync_live_math_artifacts(
             ScreenId::Primary,
             [ProjectedLiveMathArtifact {
@@ -9364,7 +9421,6 @@ mod tests {
                 },
             }],
         );
-        projection.project(&document);
         projection.scroll_to_top();
 
         let closer = format!("{:<width$}", "$$", width = width as usize);
@@ -9525,6 +9581,11 @@ mod tests {
             GridGeneration(1),
         );
         projection.relayout(key(width), &document);
+        // The session projects the document and then syncs the live plane immediately
+        // before composing a frame (`Session::viewport_frame`), so the live prefix map is
+        // always measured against the history it is about to be drawn beside. The fixture
+        // drives the two in that order for the same reason.
+        projection.project(&document);
         // Three source rows of eighteen pixels; the raster is ninety-six.
         let artifact_height = 96 * SUBPIXELS_PER_PX;
         projection.sync_live_math_artifacts(
@@ -9561,7 +9622,6 @@ mod tests {
                 },
             }],
         );
-        projection.project(&document);
         projection.scroll_to_top();
 
         let closer = format!("{:<width$}", "$$", width = width as usize);
@@ -9625,6 +9685,156 @@ mod tests {
             bridge
                 .top_subpixels
                 .saturating_add(bridge.clip_height_subpixels)
+        );
+    }
+
+    /// The same bridge with a **wrapped** line in its finalized prefix: an opener, a 48-character
+    /// body line that takes two rows at this pane's width, one staged row and the live closer —
+    /// four rows above the live band, not three ids' worth.
+    fn wrapped_prefix_bridge_frame(raster_px: u32) -> ViewportFrame {
+        let width = 32_u32;
+        let mut store = TranscriptStore::new(NonZeroUsize::new(64).unwrap());
+        let mut document = HistoryDocument::default();
+        for text in ["$$", &"a".repeat(48)] {
+            let line = store.capture(fixture_row(text, false)).finalized.remove(0);
+            document.finalize_transaction(line);
+        }
+        let frozen_prefix = document.entries().keys().copied().collect::<Vec<_>>();
+        assert_eq!(frozen_prefix.len(), 2);
+        let staging_id = StagingId(77);
+        let staged = [StagedRow {
+            id: staging_id,
+            row: fixture_row(&format!("{:<32}", "b="), true),
+        }];
+
+        let mut projection = ViewportProjection::new(
+            key(width),
+            DetectionRevision(1),
+            nz32(12),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        projection.project(&document);
+        assert_eq!(
+            projection.visual_rows,
+            vec![1, 2],
+            "the second finalized line must wrap, or this fixture is not testing anything"
+        );
+        projection.sync_live_math_artifacts(
+            ScreenId::Primary,
+            [ProjectedLiveMathArtifact {
+                occurrence_id: LiveMathOccurrenceId(11),
+                screen: ScreenId::Primary,
+                start: GridPoint { row: 0, column: 0 },
+                end: GridPoint { row: 0, column: 2 },
+                band_start_row: 0,
+                band_end_row: 0,
+                clipped_top_rows: 0,
+                clipped_bottom_rows: 0,
+                occluded_source_rows: 0,
+                occluded_visible_rows: Vec::new(),
+                transition_stale: false,
+                frozen_prefix,
+                staging_prefix: vec![staging_id],
+                generation: GridGeneration(1),
+                artifact: ProjectedMathArtifact {
+                    inline_runs: Vec::new(),
+                    key: "wrapped".to_owned(),
+                    end: TranscriptId(0),
+                    rgba: Arc::from(vec![255; raster_px as usize * 4]),
+                    width_px: 1,
+                    height_px: raster_px,
+                    height_subpixels: i64::from(raster_px) * SUBPIXELS_PER_PX,
+                    baseline_subpixels: 0,
+                    mode: MathMode::Display,
+                    kind: RgbaArtifactKind::Math,
+                    vertical_padding_subpixels: 0,
+                    render_scale_milli: 1000,
+                    source: r"\sum a_k".to_owned(),
+                },
+            }],
+        );
+        projection.scroll_to_top();
+
+        let mut live_rows = vec![
+            fixture_row(&format!("{:<32}", "$$"), false),
+            fixture_row(&format!("{:<32}", "done"), false),
+        ];
+        live_rows.extend(vec![fixture_row(&" ".repeat(32), false); 10]);
+        let frame = projection
+            .continuous_frame(
+                &document,
+                &staged,
+                live_rows,
+                GridCursor {
+                    row: 1,
+                    column: 0,
+                    visible: true,
+                },
+                ScreenId::Primary,
+            )
+            .unwrap();
+        frame.validate_shape().unwrap();
+        frame
+    }
+
+    /// **A prefix element is a transcript line, and a line is not a row.** It wraps when the pane
+    /// narrows, so charging the live band `ids × cell_height` is a guess — and a guess in the
+    /// expensive direction: the band is handed height the rows above are already carrying, grows
+    /// into whitespace and pushes the text under it down. Four rows of prefix (opener, a wrapped
+    /// body, one staged row) charged as three left an 18-pixel surplus on a 96-pixel picture.
+    ///
+    /// MUTATION: count `frozen_prefix.len()` instead of the rows those lines were measured at —
+    /// the bridge is 114 pixels tall again for a 96-pixel raster.
+    #[test]
+    fn a_bridge_is_charged_the_rows_its_frozen_prefix_really_stands_on() {
+        let frame = wrapped_prefix_bridge_frame(96);
+        let bridge = frame
+            .math_blocks
+            .iter()
+            .find(|block| block.display == MathBlockDisplay::Rendered)
+            .expect("boundary-split block renders");
+        assert_eq!(
+            bridge.frozen_prefix_rows, 4,
+            "one opener row, two wrapped body rows and one staged row stand above the band"
+        );
+        assert_eq!(
+            bridge.clip_height_subpixels, bridge.artifact.height_subpixels,
+            "a bridge taller than its source rows is exactly its raster, with no surplus"
+        );
+        let next_row = frame
+            .row_map
+            .iter()
+            .find(|row| row.live_grid_row == Some(1))
+            .expect("the line after the bridge is on the grid");
+        assert_eq!(
+            next_row.top_subpixels,
+            bridge
+                .top_subpixels
+                .saturating_add(bridge.clip_height_subpixels),
+            "and the line after it stands exactly under it"
+        );
+    }
+
+    /// The other end of the same guess: it also refuses blocks that fit. The visible-text floor
+    /// keeps a live block from eating the pane — with twelve rows it may ask for four of them, 72
+    /// pixels. This block's live band really asks for 68 (140 less the 72 its four prefix rows
+    /// carry), but the band was measured as 86 and a ready bridge fell back to source.
+    ///
+    /// MUTATION: count ids again — the block renders as source and `expect` below fails.
+    #[test]
+    fn a_bridge_whose_live_share_fits_the_visible_text_floor_is_not_refused() {
+        let frame = wrapped_prefix_bridge_frame(140);
+        let bridge = frame
+            .math_blocks
+            .iter()
+            .find(|block| block.display == MathBlockDisplay::Rendered)
+            .expect("a bridge whose live share fits the floor must be admitted");
+        assert_eq!(
+            bridge.clip_height_subpixels,
+            140 * SUBPIXELS_PER_PX,
+            "and it stands at its whole raster"
         );
     }
 
