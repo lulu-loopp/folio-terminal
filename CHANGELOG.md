@@ -8,6 +8,37 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **After dragging a window's edge back to where it started, formulas in that
+  pane are typeset again — they used to stop for good.** If a drag, a divider,
+  a zoom or a move between monitors ended on the same size it began on, the
+  pane it happened to was left believing the gesture had never finished. Nothing
+  looked wrong at the time, and nothing ever came back: from that moment on
+  that pane typeset no formula, drew no table, and showed no picture for an
+  image path you printed — the ones already on the screen stayed, so the change
+  was easy to miss until the next thing you ran came out as source text and
+  stayed that way. Anything else Folio waits for a quiet screen to do was
+  waiting on the same signal, so it stopped too. It is over when the gesture is,
+  now, whether or not the size changed; the shell in that pane is still told
+  only when its size actually moved, so nothing is sent to it that it does not
+  need.
+- **Programs that ask which terminal they are running in now get an answer.**
+  Folio was silent when a program asked, and a terminal that says nothing is
+  treated as one that can do nothing — so full-screen programs such as Claude
+  Code never went on to ask whether Folio can update the screen in one piece,
+  and drew their frames the old way instead. Folio now answers with its own name
+  and version, the second question gets asked, and those programs switch to
+  updating the whole screen at once.
+- **A formula whose source was too long for the pane was read and typeset all
+  over again when it scrolled up into the history, instead of taking the
+  picture it already had with it.** A formula is proven on the rows of the
+  screen it stands on; history is kept in lines, and a line too long for the
+  pane takes two rows and is still one line. The handover counted rows and
+  looked for the end of the block one line too far down, found nothing there,
+  and let go of the picture — so the same formula was found and drawn a second
+  time, for nothing. Nothing of this was ever on the screen: the last row of a
+  block leaves the window in the same instant it leaves the live screen, so
+  what came back was already out of sight. It is work that is no longer done,
+  not a flicker that has stopped.
 - **A formula typeset while a full-screen program was redrawing no longer
   disappears the moment that redraw finishes.** Folio holds its formulas steady
   across a redraw by remembering them when one starts — but a formula Folio

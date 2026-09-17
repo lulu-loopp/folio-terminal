@@ -830,7 +830,12 @@ struct PendingLiveArtifactHandoff {
     detection_revision: DetectionRevision,
     candidate_staging: StagingId,
     candidate_start: Option<TranscriptId>,
-    expected_frozen_lines: u64,
+    /// How many **grid rows** the live detector proved this occurrence on. It is not a count of the
+    /// transcript lines they freeze into and must never be used as one: a source row too long for
+    /// the pane spends two grid rows and still freezes as a single line. It says when every proven
+    /// row has been captured, and — because a line takes at least one row — how far ahead of the
+    /// first frozen line the last one could conceivably be.
+    expected_source_rows: usize,
     /// The face the live occurrence is wearing, re-read at every capture — the last capture is
     /// the one that freezes its final row, so there is no frame on which the reader could turn the
     /// block over after this was last refreshed.
@@ -870,6 +875,13 @@ pub enum ResizeTraceKind {
         rows: u32,
     },
     PtyResizeRequest {
+        columns: u32,
+        rows: u32,
+    },
+    /// The gesture settled on the size the child already holds, so the child was told nothing.
+    /// The displayed grid still reflowed through every width the hand passed through, so this
+    /// closes a real transaction — see [`DualPlaneSession::mark_resize_settled_unchanged_at`].
+    ChildSizeUnchanged {
         columns: u32,
         rows: u32,
     },
@@ -921,6 +933,21 @@ pub struct ResizeTraceEvent {
     pub ordinal: u64,
     pub elapsed_micros: u64,
     pub kind: ResizeTraceKind,
+}
+
+/// How a settled gesture ended: whether the child was given a new size.
+///
+/// **Stated by the window, never inferred here.** A session has no idea what size the child holds
+/// — `conpty_grid` is the window's own record of what it last told it — so the two endings arrive
+/// through two named doors ([`DualPlaneSession::mark_pty_resize_requested_at`] and
+/// [`DualPlaneSession::mark_resize_settled_unchanged_at`]) rather than as a guess made from the
+/// numbers. Both close the transaction; they differ only in the line they leave in
+/// `BT_RESIZE_TRACE`, because everything else a settlement does is about this session's own grid,
+/// which reflowed either way.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResizeEnding {
+    ChildResized,
+    ChildSizeUnchanged,
 }
 
 impl fmt::Display for SessionError {
@@ -3524,11 +3551,63 @@ impl DualPlaneSession {
         Ok(true)
     }
 
+    /// Whether a resize transaction is open, and therefore still owes one of the two settlements.
+    ///
+    /// The window asks this rather than working it out from grid numbers, because the transaction
+    /// is opened by [`Self::resize_at`] and lives here. A release that finds it open must settle,
+    /// even when nothing about that release moved a grid: the wobble it is ending reflowed this
+    /// pane through widths it no longer wears, and only a settlement closes what that opened.
+    pub fn resize_transaction_open(&self) -> bool {
+        self.resize_epoch.is_active()
+    }
+
+    /// **The gesture ended, and the child was told a new size.** One of the two endings a resize
+    /// transaction has; the other is [`Self::mark_resize_settled_unchanged_at`].
     pub fn mark_pty_resize_requested_at(
         &mut self,
         columns: NonZeroU32,
         rows: NonZeroU32,
         observed_at: Instant,
+    ) -> bool {
+        self.settle_resize_transaction(columns, rows, observed_at, ResizeEnding::ChildResized)
+    }
+
+    /// **The gesture ended on the size the child already holds, so it was told nothing.**
+    ///
+    /// The other ending, and it had none until 2026-09-17. A drag whose last wobble comes back to
+    /// the width ConPTY already has is an ordinary gesture — the hand moved, so
+    /// [`Self::resize_at`] reflowed this pane's grid through every width it passed and opened a
+    /// resize transaction for them — and yet no `ResizePseudoConsole` (no `TIOCSWINSZ` on Unix) is
+    /// owed at the end of it, because the child's size never moved. The window used to have
+    /// nowhere to say that, so it said nothing at all: `ResizeEpoch::final_request_sent` was never
+    /// called, `quiescence_deadline` stayed `None`, `is_quiescent_at` was false at every instant
+    /// there is, and the transaction could not be closed by anything. An open transaction withholds
+    /// every decoration scan there is (`ResizeEpoch::decorations_allowed`), so that pane never
+    /// typeset another formula for the rest of its life.
+    ///
+    /// **What it does is what the other door does, minus the child.** Everything below the two
+    /// trace lines is about this session's own grid, which reflowed: the canonical branch — the
+    /// fork that has only ever been given sizes the child was actually told, and is therefore
+    /// already at exactly this size — is installed over the path-dependent displayed branch,
+    /// anchors and semantic regions are re-seated against it, and the decorations projected across
+    /// it are re-anchored. The child is not written to here and is not written to by the window
+    /// for this ending either: conhost did not reflow, so PSReadLine's anchor is still the one it
+    /// drew with and no repair is owed (`commit_leaf_resize` records no debt for it).
+    pub fn mark_resize_settled_unchanged_at(
+        &mut self,
+        columns: NonZeroU32,
+        rows: NonZeroU32,
+        observed_at: Instant,
+    ) -> bool {
+        self.settle_resize_transaction(columns, rows, observed_at, ResizeEnding::ChildSizeUnchanged)
+    }
+
+    fn settle_resize_transaction(
+        &mut self,
+        columns: NonZeroU32,
+        rows: NonZeroU32,
+        observed_at: Instant,
+        ending: ResizeEnding,
     ) -> bool {
         let reconciled = self.resize_epoch.is_active();
         let reflow = if reconciled {
@@ -3545,9 +3624,15 @@ impl DualPlaneSession {
         self.resize_epoch.final_request_sent(observed_at);
         self.trace_resize_event(
             observed_at,
-            ResizeTraceKind::PtyResizeRequest {
-                columns: columns.get(),
-                rows: rows.get(),
+            match ending {
+                ResizeEnding::ChildResized => ResizeTraceKind::PtyResizeRequest {
+                    columns: columns.get(),
+                    rows: rows.get(),
+                },
+                ResizeEnding::ChildSizeUnchanged => ResizeTraceKind::ChildSizeUnchanged {
+                    columns: columns.get(),
+                    rows: rows.get(),
+                },
             },
         );
         let (history_before, history_after) =
@@ -10914,8 +10999,7 @@ impl DualPlaneSession {
                 detection_revision: record.detection_revision,
                 candidate_staging,
                 candidate_start: None,
-                expected_frozen_lines: u64::try_from(record.identity.source_rows.len())
-                    .unwrap_or(u64::MAX),
+                expected_source_rows: record.identity.source_rows.len(),
                 show_source: record.show_source,
                 prefix_staging: captured_source
                     .iter()
@@ -11028,20 +11112,31 @@ impl DualPlaneSession {
                     return None;
                 }
                 let start = pending.candidate_start?;
-                let expected_end = start
-                    .0
-                    .checked_add(pending.expected_frozen_lines.saturating_sub(1))?;
-                (expected_end <= closing_id.0).then_some((index, start, expected_end))
+                // The occurrence is ready to cross when every row it was proven on has been
+                // captured and every captured row has frozen. Where it ends in history is then the
+                // line the last of those rows landed in — read off the lines that actually closed,
+                // never counted forward from the first, because rows and lines are not the same
+                // unit and a wrapped source row makes them differ.
+                if pending.prefix_staging.len() != pending.expected_source_rows
+                    || pending.finalized_prefix_staging != pending.prefix_staging.len()
+                {
+                    return None;
+                }
+                Some((index, start, pending.frozen_prefix.last()?.0))
             })
             .next();
         let Some((pending_index, candidate_start, expected_end)) = matured else {
+            self.expire_unreachable_live_handoffs(closing_id);
             return;
         };
 
-        // The live detector already proved that this artifact begins at candidate_start and spans
-        // exactly expected_frozen_lines detector inputs. Re-run the authoritative detector only
-        // over that closed candidate, never over unrelated frozen history. A mismatch expires the
-        // handoff; the normal frozen worker remains the source of truth.
+        // The live detector already proved that this artifact begins at candidate_start and that
+        // every row it was proven on has now frozen into the lines up to expected_end. Re-run the
+        // authoritative detector only over that closed candidate, never over unrelated frozen
+        // history. A mismatch expires the handoff; the normal frozen worker remains the source of
+        // truth. The equality below is not redundant: a candidate that completed while the layout
+        // or the detection revision had moved on is only looked at again once they match, and by
+        // then its last line is behind the one closing now.
         let block = (expected_end == closing_id.0)
             .then(|| {
                 detect_math_blocks_with_sites(
@@ -11121,6 +11216,25 @@ impl DualPlaneSession {
         }
         self.scheduler.remove_sources(&BTreeSet::from([closing_id]));
         self.retire_offscreen_records_replaced_by_frozen();
+    }
+
+    /// **A candidate that did not finish freezing where it still could is not this occurrence.**
+    /// Its rows stopped arriving, or the text under them changed, and a pending kept past that point
+    /// would let some much later line that happens to read the same way prove a block it never was.
+    /// The bound is the occurrence's own proven row count, because a line occupies at least one grid
+    /// row: an occurrence proven on N rows cannot end more than N-1 lines after the one it starts
+    /// in. It is only ever a bound — [`Self::try_handoff_live_artifact`] takes the end from the
+    /// lines that actually closed.
+    fn expire_unreachable_live_handoffs(&mut self, closing_id: TranscriptId) {
+        self.pending_live_handoffs.retain(|pending| {
+            let Some(start) = pending.candidate_start else {
+                return true;
+            };
+            let furthest = start.0.saturating_add(
+                u64::try_from(pending.expected_source_rows.saturating_sub(1)).unwrap_or(u64::MAX),
+            );
+            closing_id.0 <= furthest
+        });
     }
 
     fn schedule_detection(&mut self, id: TranscriptId) {
@@ -18192,6 +18306,114 @@ mod tests {
         }
     }
 
+    /// RED — **a gesture that ends on the width the child already has still closes its
+    /// transaction, and writes the child nothing** (user report 2026-09-17).
+    ///
+    /// A drag whose last wobble comes back to the size ConPTY was told is an ordinary gesture: the
+    /// hand moved, so `resize_at` reflowed this pane's grid through every width it passed and
+    /// opened a resize transaction for them. What it is not is a size the child is owed, and the
+    /// window used to have no way to say that — so it said nothing, `final_request_sent` was never
+    /// called, `quiescence_deadline` stayed `None`, and `is_quiescent_at` was false at every
+    /// instant there is. The transaction never closed, `decorations_allowed` stayed false, and the
+    /// pane stopped scanning for formulas for the rest of its life: the reporter's two inline
+    /// formulas went back to source text and never came back, while every formula whose own row
+    /// the reflow left alone kept its picture.
+    ///
+    /// Math-free on purpose — the defect is the transaction, not the formula. `decorations_allowed`
+    /// is the one bit every decoration scan in this file is gated on.
+    ///
+    /// Red gate: delete `mark_resize_settled_unchanged_at`'s call and settle the second gesture
+    /// with nothing, which is what the window did. An hour later the transaction is still open.
+    #[test]
+    fn a_gesture_that_ends_on_the_childs_own_size_closes_its_transaction_in_silence() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(4));
+        session.feed_at(b"one two three four", start).unwrap();
+        let _ = session.take_pty_writes();
+
+        // One ordinary gesture: the hand moves, the child is told, the transaction closes.
+        let told_at = start + Duration::from_millis(100);
+        session.resize_at(nz(44), nz(4), told_at).unwrap();
+        session.mark_pty_resize_requested_at(nz(44), nz(4), told_at);
+        let deadline = session
+            .resize_finish_deadline()
+            .expect("a settled gesture arms a quiescence deadline");
+        assert!(session.finish_resize_if_quiescent(deadline).unwrap());
+        assert!(session.resize_epoch.decorations_allowed());
+
+        // The wobble: away from the child's width and straight back to it.
+        let wobbled_at = deadline + Duration::from_millis(100);
+        session.resize_at(nz(43), nz(4), wobbled_at).unwrap();
+        session
+            .resize_at(nz(44), nz(4), wobbled_at + Duration::from_millis(17))
+            .unwrap();
+        assert!(
+            !session.resize_epoch.decorations_allowed(),
+            "the hand is mid-gesture, so the pane is right to withhold its scans"
+        );
+        assert_eq!(
+            session.resize_finish_deadline(),
+            None,
+            "and an unsettled gesture has no deadline at all -- which is what made this permanent"
+        );
+        assert!(
+            !session
+                .finish_resize_if_quiescent(wobbled_at + Duration::from_secs(3600))
+                .unwrap(),
+            "an hour of silence cannot close a gesture nobody has said has ended"
+        );
+
+        // The window says which ending it is: the child's size never moved.
+        let settled_at = wobbled_at + Duration::from_millis(217);
+        assert!(session.mark_resize_settled_unchanged_at(nz(44), nz(4), settled_at));
+        let deadline = session
+            .resize_finish_deadline()
+            .expect("this ending arms the same quiescence deadline the other one does");
+        assert!(
+            !session
+                .finish_resize_if_quiescent(deadline - Duration::from_millis(1))
+                .unwrap(),
+            "and waits out the same silence"
+        );
+        assert!(session.finish_resize_if_quiescent(deadline).unwrap());
+        assert!(
+            session.resize_epoch.decorations_allowed(),
+            "the transaction is over, so this pane scans for formulas again"
+        );
+        assert_eq!(
+            session.take_pty_writes(),
+            Vec::<Vec<u8>>::new(),
+            "the child was told nothing and asked nothing: settling is not a byte"
+        );
+        // `BT_RESIZE_TRACE` is read by a person answering "what did this window tell that shell",
+        // and each transaction's trace stands alone. This one told it nothing.
+        assert_eq!(
+            session
+                .resize_trace()
+                .iter()
+                .filter(|event| matches!(event.kind, ResizeTraceKind::PtyResizeRequest { .. }))
+                .count(),
+            0,
+            "a request nobody sent must not appear in the file as one"
+        );
+        assert_eq!(
+            session
+                .resize_trace()
+                .iter()
+                .filter(|event| matches!(event.kind, ResizeTraceKind::ChildSizeUnchanged { .. }))
+                .count(),
+            1,
+            "the ending this gesture had is named as itself"
+        );
+        assert!(
+            session
+                .resize_trace()
+                .iter()
+                .any(|event| event.kind == ResizeTraceKind::TransactionEnd),
+            "and the transaction is closed in the file as well as in the epoch"
+        );
+    }
+
     #[test]
     fn active_resize_epoch_never_exports_a_past_live_wake_deadline() {
         let start = Instant::now();
@@ -21088,6 +21310,129 @@ mod tests {
         assert_eq!(session.live_invalidation_count, invalidations);
     }
 
+    /// What a whole occurrence scrolled into history left behind: the raster it held while it was
+    /// live, the one its frozen record carries now, and the detection counter either side of
+    /// running every task the scheduler still holds for those lines.
+    struct ScrolledIntoHistory {
+        live: Arc<[u8]>,
+        frozen: Option<Arc<[u8]>>,
+        detections_before: u64,
+        detections_after: u64,
+    }
+
+    /// Scroll a whole occurrence into history and report what it left behind. `rows_after` is how
+    /// many lines of ordinary output are printed to push every source row off the top of the grid.
+    fn hand_off_by_scrolling(
+        columns: u32,
+        rows: u32,
+        printed: &str,
+        rows_after: usize,
+    ) -> ScrolledIntoHistory {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(columns), nz(rows));
+        session.feed_at(printed.as_bytes(), start).unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 54)),
+            1,
+            "the fixture must typeset its block live before anything scrolls"
+        );
+        let live_artifact = session
+            .live_decorations
+            .values()
+            .find_map(|record| record.artifact.clone())
+            .expect("the live occurrence holds its own raster");
+
+        let mut tail = String::new();
+        for line in 0..rows_after {
+            tail.push_str(&format!("\r\nmore-{line}"));
+        }
+        session
+            .feed_at(tail.as_bytes(), start + Duration::from_millis(210))
+            .unwrap();
+        assert!(
+            session.live_decorations.is_empty(),
+            "the fixture must push every source row off the live grid"
+        );
+
+        // Whatever the scheduler still holds for these lines runs now, so a raster that only
+        // survived because nothing else had a chance to land is not mistaken for a handoff.
+        let frozen_detections = session.frozen_detection_count;
+        session.run_workers();
+        let frozen_artifact = session.decorations.values().find_map(|record| {
+            record
+                .artifact
+                .as_ref()
+                .map(|artifact| artifact.rgba.clone())
+        });
+        ScrolledIntoHistory {
+            live: live_artifact.rgba,
+            frozen: frozen_artifact,
+            detections_before: frozen_detections,
+            detections_after: session.frozen_detection_count,
+        }
+    }
+
+    /// **A wrapped source row costs the occurrence its handoff (owner's replay 2026-09-17).** The
+    /// live detector proves an occurrence on *grid rows*; history is made of *transcript lines*, and
+    /// a line too long for the pane spends two grid rows and freezes as one line. The handoff waited
+    /// for a closing id counted in rows, which for a wrapped occurrence names a line past the end of
+    /// the block, so the proof re-ran the detector over one line too many, found no block ending
+    /// there, and threw the raster away. Nothing is visible when it happens — a block's last row
+    /// leaves the viewport in the same event it leaves the live grid — but the picture is then
+    /// detected and rasterised a second time for no reason.
+    #[test]
+    fn a_block_whose_body_row_wraps_still_hands_its_raster_to_history() {
+        // Twelve columns, a sixteen-cell body: four proven grid rows, three transcript lines.
+        let scrolled = hand_off_by_scrolling(12, 8, "$$\r\ne^{i\\pi} + 1 = 0\r\n$$\r\ntail", 9);
+        let frozen = scrolled
+            .frozen
+            .expect("the frozen block must be born typeset");
+        assert!(
+            Arc::ptr_eq(&frozen, &scrolled.live),
+            "the frozen record must take over the live raster, not a fresh one"
+        );
+        assert_eq!(
+            scrolled.detections_after, scrolled.detections_before,
+            "a handed-off block owes history no detection of its own"
+        );
+    }
+
+    /// The control the wrapped case is measured against: the same block, the same scroll, at a width
+    /// that fits it. This one has always passed, and it is here so that a change which breaks the
+    /// handoff outright cannot be read as the wrapping fix working.
+    #[test]
+    fn a_block_that_fits_the_pane_hands_its_raster_to_history() {
+        let scrolled = hand_off_by_scrolling(40, 8, "$$\r\ne^{i\\pi} + 1 = 0\r\n$$\r\ntail", 9);
+        let frozen = scrolled
+            .frozen
+            .expect("the frozen block must be born typeset");
+        assert!(Arc::ptr_eq(&frozen, &scrolled.live));
+        assert_eq!(scrolled.detections_after, scrolled.detections_before);
+    }
+
+    /// Every wrapped line is one line, however many rows it took: a block with two long body lines
+    /// is off by two, not by one, so the arithmetic has to count what froze rather than subtract a
+    /// constant.
+    #[test]
+    fn a_block_whose_every_body_line_wraps_still_hands_its_raster_to_history() {
+        // Six proven grid rows, four transcript lines.
+        let scrolled = hand_off_by_scrolling(
+            12,
+            10,
+            "$$\r\ne^{i\\pi} + 1 = 0\r\n\\quad e^{i\\pi} + 1 = 0\r\n$$\r\ntail",
+            11,
+        );
+        let frozen = scrolled
+            .frozen
+            .expect("the frozen block must be born typeset");
+        assert!(
+            Arc::ptr_eq(&frozen, &scrolled.live),
+            "two wrapped body lines must not push the proof two lines past the block"
+        );
+        assert_eq!(scrolled.detections_after, scrolled.detections_before);
+    }
+
     #[test]
     fn primary_live_scroll_bridges_every_frozen_source_prefix_row_before_full_handoff() {
         let start = Instant::now();
@@ -22593,6 +22938,68 @@ mod tests {
         let bottom = session.viewport_frame(&mut projection).unwrap();
         assert_eq!(bottom.scroll_offset_rows, 0);
         assert!(!projection.review_hold());
+    }
+
+    /// RED — **a wobble settled where the child already was does not move a reader's place in
+    /// history** (Codex review 2026-09-17).
+    ///
+    /// The unchanged-size settlement does everything its sibling does — it installs the canonical
+    /// branch over the displayed one, re-seats every registered anchor and re-anchors the
+    /// decorations projected across it — and then `finish_resize_if_quiescent` clears the resize
+    /// hold. All of that happens under a view that is parked twenty rows up in scrollback, so all
+    /// of it has to leave that view exactly where it is.
+    ///
+    /// Red gate: settle the wobble with nothing. The hold never clears and the offset is pinned by
+    /// a transaction that is never going to end; re-anchor against the pre-wobble grid instead and
+    /// the reader is thrown to the bottom.
+    #[test]
+    fn a_wobble_settled_on_the_childs_own_size_leaves_a_reader_where_they_were() {
+        // The top presentation row, whichever plane it is drawn from -- a view parked in
+        // scrollback is looking at history, so `frame_row_text`'s live-row lookup cannot see it.
+        let top_row = |frame: &ViewportFrame| {
+            let columns = frame.columns.get() as usize;
+            (0..columns)
+                .map(|column| frame.cells[column].text.as_str())
+                .collect::<String>()
+        };
+        let (mut session, mut projection, _lines) = scrolled_review_session(10);
+        let before = session.viewport_frame(&mut projection).unwrap();
+        let top_line = top_row(&before);
+        assert_eq!(before.scroll_offset_rows, 20);
+
+        // One column out and back, which tells the child nothing: it is already at forty.
+        let at = Instant::now();
+        session.resize_at(nz(39), nz(10), at).unwrap();
+        session
+            .resize_at(nz(40), nz(10), at + Duration::from_millis(17))
+            .unwrap();
+        session.refresh_projection(&mut projection);
+        let during = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            during.scroll_offset_rows, 20,
+            "the reflow itself keeps the reader's place"
+        );
+
+        session.mark_resize_settled_unchanged_at(nz(40), nz(10), at + Duration::from_millis(217));
+        let deadline = session
+            .resize_finish_deadline()
+            .expect("the settlement arms the quiescence that ends the hold");
+        assert!(session.finish_resize_if_quiescent(deadline).unwrap());
+        session.refresh_projection(&mut projection);
+        let after = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            after.scroll_offset_rows, 20,
+            "and settling the gesture does not move it either"
+        );
+        assert_eq!(
+            top_row(&after),
+            top_line,
+            "the same line is under the reader's eye before and after"
+        );
+        assert!(
+            !projection.review_hold(),
+            "the transaction is over, so presentation is not holding anything for it"
+        );
     }
 
     #[test]
@@ -31170,6 +31577,109 @@ mod tests {
         session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
         complete_live_math_for_real(&mut session);
         session
+    }
+
+    /// What the line reads as on the grid, row by row, with the blank tail cut off.
+    fn two_run_rows(session: &DualPlaneSession) -> Vec<String> {
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let columns = frame.columns.get() as usize;
+        (0..frame.row_map.len())
+            .map(|row| {
+                (0..columns)
+                    .map(|column| frame.cells[row * columns + column].text.as_str())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .filter(|row| !row.is_empty())
+            .collect()
+    }
+
+    /// RED — **a gesture that wobbles back to the width the child already has must not cost a pane
+    /// its formulas** (user report 2026-09-17).
+    ///
+    /// The witness at the height this defect was reported from. A reflow moves the fold through a
+    /// line's runs, which is exactly the case a record cannot be re-anchored across: the sentence
+    /// drops to source for as long as the gesture lasts, which is right, and comes back when the
+    /// pane is allowed to scan again, which is the part that broke. A drag that ends one column
+    /// back where it started tells the child nothing — it is already at that width — and before
+    /// this fix the window had no way to say so, so the transaction that reflow opened was never
+    /// closed, `ResizeEpoch::decorations_allowed` stayed false, and this pane scanned for nothing
+    /// ever again. Both of the line's formulas sat as source text for the rest of its life, while
+    /// every formula whose own row the reflow left alone kept the picture it already had.
+    ///
+    /// Red gate: settle the wobble with nothing, the way the window used to. The last assertion
+    /// then reads `$x$ a-b-$` / `y$` however long the clock is run afterwards.
+    #[test]
+    fn a_gesture_that_wobbles_back_to_the_childs_width_keeps_the_lines_pictures() {
+        for alternate in [false, true] {
+            let mut session = two_run_session(9, alternate);
+            let pictures = |session: &DualPlaneSession| {
+                let mut projection = session.new_projection(session.layout_key());
+                let frame = session.viewport_frame(&mut projection).unwrap();
+                (
+                    rendered_inline_blocks(&frame).len(),
+                    frame.cells.iter().filter(|cell| cell.text == "$").count(),
+                )
+            };
+            assert_eq!(
+                pictures(&session),
+                (1, 0),
+                "alternate={alternate}: both runs are pictures at nine columns"
+            );
+            if !alternate {
+                assert_eq!(
+                    two_run_rows(&session),
+                    vec![">s".to_owned(), " a-b-".to_owned(), ">".to_owned()],
+                    "and this is the sentence the reader is looking at"
+                );
+            }
+
+            let at = Instant::now();
+            session.resize_at(nz(8), nz(20), at).unwrap();
+            session
+                .resize_at(nz(9), nz(20), at + Duration::from_millis(17))
+                .unwrap();
+            assert!(
+                !session.resize_epoch.decorations_allowed(),
+                "alternate={alternate}: a gesture is in progress, so withholding scans is right"
+            );
+            if !alternate {
+                assert_eq!(
+                    pictures(&session),
+                    (0, 4),
+                    "the fold moved through the runs, so the record is dropped while it lasts"
+                );
+                assert_eq!(
+                    two_run_rows(&session),
+                    vec![
+                        ">s".to_owned(),
+                        "$x$ a-b-$".to_owned(),
+                        "y$".to_owned(),
+                        ">".to_owned(),
+                    ],
+                    "which is the source text the reporter was left looking at"
+                );
+            }
+
+            // The window's word for this ending: the hand stopped on the width the child has.
+            let settled_at = at + Duration::from_millis(217);
+            session.mark_resize_settled_unchanged_at(nz(9), nz(20), settled_at);
+            let deadline = session
+                .resize_finish_deadline()
+                .expect("this ending arms a quiescence deadline like any other");
+            assert!(session.finish_resize_if_quiescent(deadline).unwrap());
+            assert!(session.resize_epoch.decorations_allowed());
+
+            session.advance_live_stability(deadline + LIVE_MATH_STABLE_INTERVAL);
+            complete_live_math_for_real(&mut session);
+            assert_eq!(
+                pictures(&session),
+                (1, 0),
+                "alternate={alternate}: and the line reads what it read before the hand moved"
+            );
+        }
     }
 
     /// The rendered inline blocks of a frame, as `(presentation row, run indices)`.

@@ -6,7 +6,7 @@ use std::{
 use bt_detect::resolve_detection_task;
 use bt_doc::{ContentAnchor, DecorationIntent, DecorationLifecycle};
 use bt_math::{MathRaster, MathRenderError};
-use bt_term::{DualPlaneSession, LIVE_MATH_STABLE_INTERVAL, SessionMathTask};
+use bt_term::{DualPlaneSession, LIVE_MATH_STABLE_INTERVAL, SessionMathTask, WORKER_QUEUE_CAP};
 use bt_transcript::{CellFlags, TerminalColor};
 use bt_viewport::{FrameViewportOrigin, ViewportFrame};
 use proptest::prelude::*;
@@ -939,6 +939,141 @@ fn resize_drag_200_frames_stays_within_the_sparse_and_full_budget() {
     assert!(
         full_shrink <= FULL_SHRINK_CEILING,
         "the median full shrink frame is {full_shrink:?}, ceiling {FULL_SHRINK_CEILING:?}",
+    );
+}
+
+/// **What one gesture's ending costs, over a history long enough for it to matter.**
+///
+/// The 200-frame drag above measures `resize` and nothing else: the reflow the hand causes. The
+/// end of the gesture is a different piece of work and until 2026-09-17 there was no gesture
+/// ending that did not also notify a child, so nothing measured it on its own. Now there is one --
+/// a wobble that comes back to the width the child already holds settles without telling it -- and
+/// what a settlement does is unbounded in a way a reflow is not: `finish_resize_if_quiescent`
+/// calls `schedule_existing_artifacts`, which walks **every resident history entry** and arms the
+/// ones that could carry a formula or a table. The worker queue caps what is queued, not that walk.
+///
+/// Measured rather than assumed, on the two shapes of that walk: a history of plain prose, which
+/// the arming prefilter rejects line by line, and a history where every other line opens a formula,
+/// which is the walk at its most expensive because each of those lines becomes a scan. Both over a
+/// full resident transcript.
+///
+/// **What was measured, so the budget is a reading and not a wish.** Over 3,971 resident entries,
+/// four runs, identical to the byte in every one of them: a prose history costs the settlement
+/// **2,244,719 B in 71 allocations** and arms nothing; a history whose every other line is a
+/// display formula costs **3,261,024 B in 8,025 allocations** and arms 64 — the whole worker
+/// queue, which is the one bound this path does have. The extra megabyte and eight thousand
+/// allocations are the walk, and they are what would grow if the walk ever became more than a
+/// walk. Wall clock on an idle 24-core machine: prose 1.4-1.5 ms, formulas 3.2-5.2 ms.
+///
+/// The heap figures are the budget, held with about 13% of slack, because they are exact under
+/// every load. The time is a **ceiling and not a budget**, in the drag benchmark's sense — the
+/// line past which a machine is broken rather than slow — and unlike that benchmark's it was not
+/// derived from a saturated machine: it is ten times the worst idle reading, which is stated here
+/// rather than dressed up.
+#[test]
+fn settling_a_gesture_over_a_long_history_stays_within_its_budget() {
+    // Measured 2026-09-17; see this test's own documentation for the readings behind them.
+    const PROSE_HEAP_BYTES: u64 = 2_560_000;
+    const PROSE_HEAP_ALLOCATIONS: u64 = 96;
+    const FORMULA_HEAP_BYTES: u64 = 3_700_000;
+    const FORMULA_HEAP_ALLOCATIONS: u64 = 9_000;
+    const SETTLE_CEILING: Duration = Duration::from_millis(50);
+
+    let measure = |name: &str, formulas: bool| -> (u64, u64, Duration, usize) {
+        let mut session = DualPlaneSession::new(nz32(100), nz32(30));
+        for index in 0..4_000u32 {
+            let line = if formulas && index.is_multiple_of(2) {
+                format!("$$x_{{{index}}}^2 + y$$\r\n")
+            } else {
+                format!("row {index:04} is ordinary prose with nothing to arm in it\r\n")
+            };
+            session.feed(line.as_bytes()).unwrap();
+        }
+        // Settle the history the feed armed, so the walk at the settlement below meets a
+        // transcript in its resting state rather than one still full of in-flight scans.
+        for _ in 0..64 {
+            let Some(task) = session.take_worker_task() else {
+                break;
+            };
+            session.complete_worker_task(task);
+            while let Some(task) = session.take_worker_task() {
+                session.complete_worker_task(task);
+            }
+        }
+        let armed_before = session.pending_tasks();
+        let resident = session.document().entries().len();
+        assert!(
+            resident >= 500,
+            "{name}: the fixture has to fill history, or this measures nothing: {resident}"
+        );
+
+        // One wobble: out a column and back to the width the child already holds.
+        let at = Instant::now();
+        session.resize_at(nz32(99), nz32(30), at).unwrap();
+        session
+            .resize_at(nz32(100), nz32(30), at + Duration::from_millis(17))
+            .unwrap();
+
+        let bytes_before = HEAP_BYTES.with(std::cell::Cell::get);
+        let allocations_before = HEAP_ALLOCATIONS.with(std::cell::Cell::get);
+        let started = Instant::now();
+        session.mark_resize_settled_unchanged_at(
+            nz32(100),
+            nz32(30),
+            at + Duration::from_millis(217),
+        );
+        let deadline = session
+            .resize_finish_deadline()
+            .expect("a settled gesture arms the quiescence that closes it");
+        assert!(session.finish_resize_if_quiescent(deadline).unwrap());
+        let elapsed = started.elapsed();
+        let bytes = HEAP_BYTES.with(std::cell::Cell::get) - bytes_before;
+        let allocations = HEAP_ALLOCATIONS.with(std::cell::Cell::get) - allocations_before;
+        eprintln!(
+            "BT_SETTLE_BENCH {name} history={resident} armed_before={armed_before} armed_after={} heap_bytes={bytes} heap_allocations={allocations} us={}",
+            session.pending_tasks(),
+            elapsed.as_micros(),
+        );
+        (bytes, allocations, elapsed, session.pending_tasks())
+    };
+
+    let (prose_bytes, prose_allocations, prose_elapsed, prose_armed) = measure("prose", false);
+    let (formula_bytes, formula_allocations, formula_elapsed, formula_armed) =
+        measure("formulas", true);
+
+    assert_eq!(
+        prose_armed, 0,
+        "the prefilter rejects a prose history line by line, so the walk queues no scan"
+    );
+    assert_eq!(
+        formula_armed, WORKER_QUEUE_CAP,
+        "and a history full of formulas queues the whole worker queue and no more: the walk is \
+         over every resident entry, but what it can hand the worker is capped"
+    );
+
+    assert!(
+        prose_bytes <= PROSE_HEAP_BYTES,
+        "settling over a prose history asked for {prose_bytes} B, budget {PROSE_HEAP_BYTES} B"
+    );
+    assert!(
+        prose_allocations <= PROSE_HEAP_ALLOCATIONS,
+        "settling over a prose history made {prose_allocations} allocations, budget          {PROSE_HEAP_ALLOCATIONS}"
+    );
+    assert!(
+        formula_bytes <= FORMULA_HEAP_BYTES,
+        "settling over a formula history asked for {formula_bytes} B, budget          {FORMULA_HEAP_BYTES} B"
+    );
+    assert!(
+        formula_allocations <= FORMULA_HEAP_ALLOCATIONS,
+        "settling over a formula history made {formula_allocations} allocations, budget          {FORMULA_HEAP_ALLOCATIONS}"
+    );
+    assert!(
+        prose_elapsed <= SETTLE_CEILING,
+        "settling over a prose history took {prose_elapsed:?}, ceiling {SETTLE_CEILING:?}"
+    );
+    assert!(
+        formula_elapsed <= SETTLE_CEILING,
+        "settling over a formula history took {formula_elapsed:?}, ceiling {SETTLE_CEILING:?}"
     );
 }
 

@@ -17,6 +17,18 @@ pub const RESIZE_REQUEST_QUIET: Duration = Duration::from_millis(200);
 /// Keep vendor ownership open after the final ConPTY resize until its output pipe is quiet.
 pub const RESIZE_IDLE_AFTER_OUTPUT: Duration = Duration::from_millis(200);
 
+/// The life of one resize transaction: opened by a reflow, closed only by a settlement.
+///
+/// **The invariant, and it is the whole of it: every gesture that calls [`Self::changed`] must
+/// reach [`Self::final_request_sent`].** `changed` is what `DualPlaneSession::resize_at` calls, so
+/// the epoch opens the instant this pane's own grid follows the hand; `final_request_sent` has
+/// exactly two callers, the two doors a settled gesture comes through
+/// (`mark_pty_resize_requested_at` and `mark_resize_settled_unchanged_at`), and without it
+/// [`Self::quiescence_deadline`] is `None`, [`Self::is_quiescent_at`] is false at every instant
+/// there is, and [`Self::decorations_allowed`] is false for the rest of the pane's life — no
+/// formula is ever scanned for again, silently. That is the shape of two shipped defects: an
+/// unfocused pane that was never reconciled (2026-08-24), and a drag whose last wobble returned to
+/// the width the child already had, which the window had no way to report at all (2026-09-17).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ResizeEpoch {
     current: u64,

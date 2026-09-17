@@ -97,6 +97,78 @@ drain 按轮询方式逐 pane 读 8 KiB 切片，每 pane 每轮上限 256 KiB �
 
 **One rule, one owner: the re-anchor asks the detector rather than carrying a copy of its rules (review round 3).** The first repair here was a whitespace test — the match must cover its rows apart from the space around them — and that is a second copy of "the detector owns a display block only when its line is that block", which drifted at once. It refuses three kinds of line the detector owns (`delimiter_start` skips a list marker and a heading before the delimiter, and `complete_display_on_line` holds trailing prose punctuation out of a single-line environment), each of them a formula going back to LaTeX for a repaint as it scrolls in; and it accepts one the detector refuses, a line indented four columns, which is `commonmark_indented_code` — the original defect surviving inside indented code. `detector_owns_live_match` asks the detector instead, the way `try_handoff_live_artifact` and `live_task_is_current` already do: re-run it and require this block, at exactly these rows, from this source. It is given the rows the match found, widened to whole logical lines, and the detection context `live_grid_parser_prefixes` already computed for the first of them — never the grid, because this door runs once per off-band record per close. **A behaviour change follows and is meant:** a hold over a block the detector no longer pairs (the odd-parity poison the audits named, `a_parity_poisoned_reprint_drops_the_hold_instead_of_masking_dead_detection`) is now refused rather than painted and reported as `HeldUnbacked`. Reporting a picture over text the detector does not read as that block was always second best to not publishing it.
 
+**What this window says when a program asks what it is.** Three questions get asked at the top of
+almost every full-screen program, and what is answered to them decides how that program will draw.
+DA1 (`CSI c`) is answered `CSI ? 6 c` — a VT102 — which is the vendored parser's own answer and
+deliberately conservative: it claims a level of service this window certainly meets, and every
+capability worth having is negotiated by its own query rather than inferred from a number here.
+DECRQM for mode 2026 (`CSI ? 2026 $ p`) is answered `CSI ? 2026 ; 2 $ y`, DECRPM's "reset": the mode
+exists here and is currently off, which is the truthful answer and one of the statuses a prober
+accepts. XTVERSION (`CSI > q`, or `CSI > 0 q` with its default parameter spelled out) is answered
+`DCS > | Folio(<version>) ST` — the product's own name and its shipping version, with no commit, no
+build host and no operating system in it, because a program asking this is asking what it may speak
+and not who built it. Other parameters after `CSI >` are different questions and go unanswered, and
+DECSCUSR (`CSI Ps SP q`), which a shell sets on every prompt, is a different sequence entirely.
+
+Answering XTVERSION at all is the point of it. Claude Code 2.1.274 asks XTVERSION first and only
+asks the DECRQM question when something replied; silence here meant this window's correct answer to
+the second question was never heard, and the program drew its frames without a synchronized update.
+The reply is produced from the adapter's boundary parser rather than from the vendored handler,
+because `vte` 0.15 has no arm for `q` with a `>` intermediate — the sequence never reaches `Term`,
+and `vte` is a registry dependency rather than one of this repository's vendored crates. The
+boundary parser is where it belongs regardless: it is a real `Perform`, so the question is parsed —
+a query split across two pty reads is held by the parser's own state, and no run of bytes is matched
+as a substring, so text a program prints or pastes is never mistaken for the question. That is a
+claim about matching and not about what may appear inside a string: an ESC ends an OSC, DCS or APC
+payload in `vte`, so a query written after one in the same read is a query and is answered, which is
+the parser's answer rather than a guess about quoting. It runs once per byte on the real stream and
+never on the resize canonical fork, whose
+replies are thrown away; and the reply joins the same queue DA1 and DSR are drained from, so it goes
+out in order with them. A query inside a synchronized update is answered when that block's bytes
+reach the grid, so the child never hears from inside a frame that is not on the screen yet.
+
+**The order the answers leave in is itself an answer.** A program writes XTVERSION and then DA1 as a
+sentinel — DA1 is answered by every terminal ever made — reads until the sentinel arrives, and
+concludes from "DA1 came first" that this terminal does not answer XTVERSION at all. So answering
+both in the wrong order is the same as answering neither. DA1, DSR and DECRQM are answered by the
+vendored processor as it reaches them and XTVERSION is answered beside it, which means the two have
+to be made to meet: `advance_terminal_bytes` cuts the feed at the end of each completed XTVERSION
+query, advances the processor segment by segment, and pushes that query's answer between the
+segments. The queue is then the stream's own order by construction — in either direction, for any
+interleaving, and wherever a pty read happens to have been cut — rather than one kind of answer
+being moved to the front or held to the back. An answer owed from inside a synchronized block
+becomes due at that block's commit, and the byte that commits it is cut at the same way and for the
+same reason; waiting instead for a moment when no block happens to be open is a different rule and
+an insufficient one, because a program repainting in synchronized frames opens the next block in the
+write that closed the last. A block ends two ways and both are cut at. Its ESU is a sequence, so the
+boundary parser finds it. Its other ending is not a sequence but a rule about size — `vte` gives up
+on a block when what it is holding plus the slice it has just been handed would reach its 2 MiB
+buffer, and then commits the block *and parses the rest of that slice* in the same call — and that
+rule is arithmetic whose two terms are both visible from this side, so the byte the block will end
+on is worked out and the segment is handed over in three pieces: the largest prefix that does not
+reach the rule, the single byte that does, and then the rest, after the answer has left. The commit
+is observed rather than assumed (the vendored buffer is empty afterwards exactly when the block was
+given up on), so if that rule ever stops working out this way the segment simply goes over whole, as
+it did before. A feed that carries no query and owes no answer, which is every feed in ordinary use,
+is one segment, and what it costs is what it cost before: one `advance` over the whole slice, the
+per-byte boundary pass the adapter has always made, and no allocation added by any of this.
+
+**The limit is one block wide.** Nothing outside a synchronized block is ever overtaken — everything
+asked before it is answered before it, everything asked after it is answered after it. What is not
+the stream's order is the inside: the vendored processor buffers the block's bytes and replays them
+all at once, so this side cannot stand between two of them, and the block's own replies leave ahead
+of the XTVERSION answer however the two were interleaved within the block. Cutting the replay the
+way the feed is cut would mean changing `vte`, a registry dependency rather than one of this
+repository's vendored crates, and no rule of thumb applied on this side would be the stream's order
+— it would only look like it. A question the block asked that the byte it ended on finished, a DA1
+whose `CSI` was inside the frame, is one of the block's own and is answered with them, ahead of the
+answer the block owed. What holds in every case is what a child can act on: exactly one answer per
+question, never from inside a frame that is not on the screen yet. And a reset does not un-ask a
+question — a
+RIS arriving while the block still buffers clears the screen and the modes, and the answer owed from
+inside the block still goes out at the commit, because the child is blocked on an answer it asked
+for before the reset.
+
 - **冻结历史有两个限额，先到的那个说话（用户报告，2026-08-24，已修）**：每个 pane 的冻结转录除读者选的 `Scrollback` 行数外，还受一个**由该行数推导**的内存顶——`scrollback_lines × FROZEN_BYTES_PER_LINE`（2 KiB），出厂 100,000 行即 195.3 MiB。超出时从最老一端按行淘汰，走的正是行数溢出那一条 `evict_oldest`（**不造第二套淘汰**），且**永不淘汰最新那一行**。设置面不因此多一行：行数是读者的答案，字节是工程的护栏。理由、算术与红证见 §7.1.6g ③。
 - **每一次 ConPTY 通知都过同一扇 200 ms 静默门，包括没拿键盘的那些 pane（窗口线程无界调用清缴，2026-08-24，已修）**：焦点叶从来就有 `WINDOW_RESIZE_QUIET` 合流，兄弟叶一个都没有——`resize_leaves_to_layout` 对每个非焦点 pane、每个 `Resized` 直接调 `ResizePseudoConsole`，不合并。四分屏拖一秒窗 = 3×60 次同步进 conhost，每一次都重排子进程的屏幕缓冲、作废一次 PSReadLine 锚点，全发生在窗口线程上；「兄弟没有拖拽可合流」这句旧注释根本不成立，被拖的是**窗口**，它一次移动每个 pane 的矩形。**修法**：`schedule_leaf_grid_change` 是每个叶唯一的入口（焦点叶经 `schedule_grid_change` 走同一个），`plan_grid_change` 照旧一句话分两半，`flush_pending_pty_resize` 从「只问拿键盘那个叶」改成走每 tab 每叶、取最早的醒来时刻——队列本来就长在 `LeafSession` 上，缺的只是有人去抽。**被去抖的是通知，不是画面**（用户裁决 2026-08-06「实时放行 resize」）：`leaf.grid` 当轮就动，玻璃跟着手；`conpty_grid` 到静默边界才动。红证：`a_pane_without_the_keyboard_coalesces_a_drag_into_one_conpty_notification`——把入口换回立即提交，六十个事件里第一个就把 `conpty_grid` 推到 41 列（应当仍是 40），结构钉 `the_only_road_from_a_solved_rectangle_to_conpty_is_the_quiet_window` 同时红。**明账**：这条封的是**频率**不是**时长**——`ResizePseudoConsole` 本身仍是窗口线程上一次同步进 conhost 的往返，现在每 pane 每 200 ms 至多一次；它自己有没有上限还没有人量过，要清就得像写侧那样把它也搬到线程上，那是另一张单子。
 - **写侧也要有界，而且界在环上、等在线程上（窗口线程无界调用清缴，2026-08-24，已修）**：读侧一直是「1 MiB 环 + 读线程满则阻塞」，写侧却**连线程都没有**——`PtySession::write` 就是往 ConPTY 输入管道上 `write_all` + `flush`，而每一次按键、鼠标上报、IME 提交、终端应答（DA/DSR）、粘贴、PSReadLine 重锚和弦，全都是窗口线程直接调它。管道满时这一句就阻塞，而管道满恰恰是「conhost 不抽」的时候：洪水 pane 让我们的读线程睡在满 `OutputRing` 上等窗口线程来抽，conhost 的输入泵等的是它自己输出线程持着的 console 锁，而那个输出线程正堵在我们的输出管道上——**这是一个圈，圈里没有界**。**修法**：加 `bt_pty::InputRing`（读侧 `OutputRing` 的镜像）+ 每会话一条写线程，等改由写线程去等；`PtySession::write` 改成 `&self`，只进一次锁就返回。两条边界规矩：①**一次写要么整笔进要么一个字节都不进**（`PtyError::InputRefused` 报出 offered/queued/capacity），②**给一笔留门、给累积设顶**——队列为空时任意大小的单笔都收（一次粘贴是读者明确要的一件事，剪贴板再大也不许被切成半条命令行），顶 `PTY_INPUT_RING_BYTES` = 1 MiB 只挡**累积**（比如程序自己刷 `CSI 6 n` 又不读回答）。窗口线程这侧收敛到唯一入口 `write_pty_input`：**拒绝不是本窗的错误**，`?` 出去会走到 `App::fail`，为一个卡死的 shell 陪葬整扇窗，所以它就地报告、窗口照常。粘贴不再切 16 KiB——切块的旧理由（让同步写分段承压）随着等待搬走而消失，而切块反倒给了子进程在两块之间停读的机会。红证：`a_write_returns_to_the_caller_even_though_nothing_is_taking_it`——把 `try_push` 的拒绝换回条件变量 `wait`，180 秒天花板到点、第五笔写再没回来。
@@ -836,6 +908,8 @@ Pane/PTY 所有权同 v3：一 session 一可输入 live viewport（owner 决定
 - **前缀元素是一行，一行不是一个 row（审查发现，同日）。**此修复的第一版按 `(finalized ids + staged rows) × cell_height` 给 band 计费，是一个穿着测量外衣的猜测：一条冻结行在窗格变窄时折成多个 row，且它可以携带附在下方的图片。两个方向都错了——折行的前缀在一张 96 像素的图片上给 band 留了 18 像素的盈余并把下面那行推下去，同一个多算量把一个活 band 真正只需要 68 像素的块推过了 72 像素的可见文本下限，于是一个就绪的桥退回了源码。前缀现在通过 `bridge_frozen_prefix_rows` **量出来**：id 必须是投影文档的连续尾部，没有一个可以携带自己的图片（`math_artifacts` 或附加的 `inline_path_artifacts` 图像），且每行必须恰好站在自身行数乘以格高的位置——正是这使得桥按格高向上外推是精确的，且「上面的行不会长高」成为事实。其他任何情况都答 `None`，`None` 在所有地方只意味着一件事：这不是本层可以放置的桥，块被拒绝准入并像任何几何无法被证明的块一样渲染为源码。准入、行分配和桥自身的 `frozen_prefix_geometry` 都读同一个函数，因此 band 被给予的高度和图片被绘制起始的顶部不可能不一致。测量针对的是即将绘制的帧所依据的投影文档：session 先投影，再同步活面，再合成（`Session::viewport_frame`），bt-viewport 夹具以同样的原因按同样的顺序驱动这三步。
 - **对应的红门**：`a_bridge_is_charged_the_rows_its_frozen_prefix_really_stands_on`（一条 48 字符的 body 行在 32 列窗格中折成两个 row：四个前缀 row，桥精确等于其光栅，下一行紧接其后）和 `a_bridge_whose_live_share_fits_the_visible_text_floor_is_not_refused`（同一个夹具在 140 像素下：被准入，站在完整光栅上）。
 - **Red gate** (`bt-viewport`): `a_bridged_block_taller_than_its_source_rows_keeps_its_whole_raster` — the band holds the whole raster, the raster stands inside the band, and the row after the band begins at or below the band's bottom (the third is the mutation guard against a clamp-only fix). `boundary_split_block_renders_as_one_bridge_across_frozen_and_live`, whose raster is shorter than its three rows, is the unchanged-geometry half of the same pair.
+- **The same unit read wrongly on the session's side of the seam (owner's replay 2026-09-17; `crates/bt-term/src/session.rs`).** A block leaves the live plane row by row and arrives in history line by line, and the handover that gives the frozen record the live raster — `try_handoff_live_artifact` — decided where the block had arrived by counting the rows it was proven on forward from the line its first row froze into. A source row too long for the pane spends two rows and still freezes as one line, so for a wrapped occurrence that count named a line past the end of the block: the proof re-ran the detector over one line too many, found no block ending there, and let the raster go, after which the same formula was detected and rasterised a second time for nothing. None of it is ever seen, because a block's last row leaves the viewport in the same event it leaves the live grid; it is work, not a flash. The end is now read off `frozen_prefix` — the lines the proven rows actually closed — and the row count is kept for the two things it honestly answers: whether every proven row has been captured, and the furthest line the occurrence could possibly reach, which is what retires a candidate whose rows stopped arriving.
+- **Red gates** (`bt-term`): `a_block_whose_body_row_wraps_still_hands_its_raster_to_history` (four proven rows, three lines) and `a_block_whose_every_body_line_wraps_still_hands_its_raster_to_history` (six rows, four lines) — each asserts the frozen block carries the very raster the live one held and owes history no detection of its own — against the control `a_block_that_fits_the_pane_hands_its_raster_to_history`, the same block at a width that fits it, which has always passed.
 
 ### 3.4 块来源抽象（v3.1 定策略）
 
@@ -7709,6 +7783,110 @@ BT_DPI stage=resized ... rect=-13,-13,2893,1813     swapchain_size=2880x1800 inn
 **存盘那一侧这次是被证伪的,如实写。** 怀疑 A(最小化时把 `-32000` 或它派生的 314x50 存了盘)在这份代码上**不成立**:`window_snapshot` 先问姿态,`WindowPosture::Minimized` 根本不去读 `GetWindowRect`,而 `recorded_window_placement` 把上一次的真矩形交回去;`quitting_while_minimized_starts_again_at_the_rectangle_the_user_chose` 从 2026-08-10 起就按着这一条。第一扇窗的 `window_pictures` 在开窗处就用恢复出来的 `SessionWindowV1` 播过种,所以「一扇恢复出来的窗还没来得及照第一张相就被最小化」也拿不到占位。
 
 **但顺着那条 fallback 链往下查,尽头上还有一个洞,一并补了。** 「上一次说过的话」的兜底是 `WindowStateV1::default()`——100,100,1280,800——而那是「**根本没有上一次会话**」的答案,不是「**这扇窗还没照过相**」的答案。**第二扇窗恰好就是后者**:`Runtime::open_window` 从不播种,而一扇从文件里恢复出来、一出生就是 maximized 的第二扇窗,它的第一张相没有可量的 normal 矩形,于是文件里为它记的角与尺寸在**它之后的第一次启动**就被换成了那个占位。`resumed` 那一句 `window_pictures: vec![(window.id(), opening.clone())]` 就是第一扇窗从没中招的原因;现在另一扇门也说同一句话,用它唯一能说的形式——**它正站着的那个矩形**,而对一扇恢复出来的窗,那正是存下来的那个。三行的先后就是全部:先入库、再造 runtime、再在**还没 `SW_MAXIMIZE`** 之前照第一张全相。红门 `a_window_is_in_the_vault_before_it_is_asked_what_it_looks_like` 按住这个先后(变异:删掉 `record_window`,或把它挪到 `new_window_runtime` 之后;把第一张相挪到 `show_new_window` 之后则第二条断言红)。**明账**:这一条只在多窗下才伤人,而它是照着「一个没有自己矩形的姿态,兜底应当是这扇窗开在哪里,而不是产品的占位」这句话修的——这句话现在两扇门都遵守。
+
+#### 7.53a A resize transaction is opened by a reflow and can only be closed by a settlement (user report 2026-09-17; `crates/bt-term/src/{scheduling,session}.rs`, `crates/bt-app/src/main.rs`)
+
+**The invariant, in one sentence: every gesture that reflows a pane must end at one of exactly two
+doors.** `DualPlaneSession::resize_at` calls `ResizeEpoch::changed`, which opens a transaction the
+moment this pane's own grid follows the hand. Only `ResizeEpoch::final_request_sent` arms
+`quiescence_deadline`, only a deadline makes `is_quiescent_at` true, and only that lets
+`finish_resize_if_quiescent` close the transaction. An unclosed transaction is not a slow pane; it
+is a permanent one.
+
+**The two doors, and why the second one had to exist.** A gesture either gives the child a new size
+or it does not. `mark_pty_resize_requested_at` was the only door, so a drag whose last wobble came
+back to the width ConPTY already held — one column out and one back, a divider let go where it
+started, a zoom stepped up and down, a monitor change that netted out, a window minimised mid-drag
+and restored, or any of the active tab's unfocused panes following the same solve — reflowed the
+pane through widths it no longer wore and then had nothing to report. The window said nothing at
+all, and the transaction stayed open for the rest of that pane's life.
+`mark_resize_settled_unchanged_at` is that missing sentence. The window states which ending it is;
+the session never infers it, because a session has no idea what size the child holds.
+
+**What an open transaction withholds** — all of it silently, none of it self-healing:
+
+- `ResizeEpoch::decorations_allowed` gates every decoration scan there is: live math
+  (`schedule_live_artifacts`), frozen math and table arming, `schedule_existing_artifacts`,
+  `schedule_retry_artifacts` and `rearm_stranded_pending`. No formula is ever typeset again.
+- `ResizeEpoch::is_active` stops the stability clock itself: `live_stability_deadline` answers
+  `None` and `advance_live_stability` answers `0`, so no row ever settles.
+- New inline image paths are neither detected nor retired, because `reconcile_live_image_paths` is
+  only asked to create and retire from inside `schedule_live_artifacts`.
+- `ViewportProjection::set_resize_reflow_active` stays true, holding the review-hold and
+  scroll-anchor gate in its resize mode.
+
+**The child keeps its guard, and it is the same guard.** A `ResizePseudoConsole` — `TIOCSWINSZ` on
+Unix, same rule — is still sent only when the grid the child holds actually moves, so the sidecar
+ruling pinned at cc37d01 is untouched and a clean same-DPI restore still reaches zero of them after
+spawn. The settlement that closes the transaction is not a call to the child: it installs the
+canonical branch (the fork that has only ever been given sizes the child was told, and is therefore
+already at this one) over the path-dependent displayed branch, re-seats anchors and semantic
+regions, and re-anchors the decorations projected across it. And because conhost did not reflow,
+PSReadLine's anchor is still the one it drew with: the unchanged-size ending records no repair debt
+and writes **no private bytes at all**.
+
+**A gesture no hand is reported to have let go of ends anyway** (Codex review 2026-09-17). A
+divider drag is torn down by the button coming up, by `Esc`, by a re-solve and by a blur, and
+capture loss is none of them: Windows announces it with `WM_CAPTURECHANGED`, winit 0.30.13 answers
+that message by zeroing its own capture count and emitting nothing, and a steal need not blur the
+window. `divider_drag` then stays `Some` for good, `flush_pending_pty_resize` reads it as a hand
+still on the geometry, and from that moment no pane of that window can release or settle another
+resize — the same permanent silence by another road. So the gesture carries the pointer it began
+with (`DividerDrag::capture`) and `flush_pending_pty_resize` re-reads it before it believes it,
+cancelling through the door `Esc` already uses. The predicate is *the same window still holds it*,
+not *we hold it*: on macOS both readings are `None`, because AppKit has no per-thread capture to
+report, and a rule phrased the other way would cancel every divider drag there on its first turn.
+
+**The macOS limit, stated as a limit.** `in_size_move` is always `false` on that platform
+(`bt-platform/src/portable_impl.rs`), and this winit gives no end-of-gesture boundary for a native
+live resize — its `windowDidEndLiveResize` only resets resize increments. On Windows the frame's
+own modal loop is read and a drag is one `ResizePseudoConsole`; on macOS the only thing that ends a
+gesture is the 200 ms quiet window, so **a live resize that pauses longer than that can notify the
+child twice** — at two *different* sizes, never the same size twice, because a release whose grid
+equals the child's own tells it nothing. One notification per physical drag therefore holds on
+Windows and is not established on macOS, which is a gap in the platform's signals rather than in
+this path.
+
+**What is queued is the end of a gesture, not a size the child is owed.** A solve that moved either
+grid queues a release; a solve that moved neither queues nothing but no longer cancels one that is
+already waiting, and always overwrites it with the last grid solved — which a pane behind another
+tab needs said out loud, since its actor does not follow the solve and `local_grid` cannot stand in
+for "the last thing we were asked for". A release that finds neither the child's grid moved nor a
+transaction open does nothing, which is that hidden pane's ordinary answer.
+
+**Red gates.**
+
+- `a_gesture_that_ends_on_the_childs_own_size_closes_its_transaction_in_silence` (bt-term,
+  math-free) — commit one gesture, wobble away and back, settle through the unchanged-size door:
+  the transaction closes at its deadline, `decorations_allowed` comes back, `take_pty_writes` is
+  empty, and the trace names the ending as itself rather than as a request nobody sent. Mutation:
+  settle with nothing, as the window used to — an hour of silence cannot close it.
+- `a_gesture_that_wobbles_back_to_the_childs_width_keeps_the_lines_pictures` (bt-term, primary and
+  alternate) — the witness at the height it was reported from: the sentence drops to source while
+  the fold moves through its runs, which is right, and comes back the moment the pane may scan
+  again. Same mutation.
+- `a_gesture_that_returns_to_the_childs_own_width_still_queues_its_release` and
+  `a_drag_that_ends_where_the_child_already_is_settles_without_telling_it` (bt-app) — the queue
+  carries the gesture's end and never an intermediate size; the release tells the child nothing,
+  settles anyway, and sends no anchor chord. Mutation: restore `*pending = None` in
+  `coalesce_pty_resize_on_grid_change`'s `else`.
+- `every_gesture_that_lands_back_on_the_childs_grid_settles_whatever_moved_it` (bt-app) — the sweep
+  that says the fix is at the shape and not at the window edge: five entrances, each one shown and
+  behind. The behind half is the other side of the sentence — a pane whose actor never followed the
+  solve opens no transaction and is right to owe nothing.
+- `a_divider_drag_that_loses_its_pointer_stops_holding_the_resize` (bt-app) — capture taken away
+  with no blur and no button-up: the gesture ends, the release it was holding is delivered, and the
+  transaction closes. Mutation: delete the recovery call from `flush_pending_pty_resize`.
+- `a_repair_owed_before_a_wobble_is_still_owed_after_it_and_paid_once` (bt-app) — the wobble
+  arrives before the earlier real commit's quiescence, so its PSReadLine repair is still unpaid:
+  the wobble banks none of its own and the one that is owed is paid exactly once.
+- `a_wobble_settled_on_the_childs_own_size_leaves_a_reader_where_they_were` (bt-term) — the same
+  settlement under a view parked twenty rows up in scrollback: zero jump, and the hold clears.
+- `settling_a_gesture_over_a_long_history_stays_within_its_budget` (lifecycle matrix) — what one
+  ending costs over 3,971 resident entries, because `schedule_existing_artifacts` walks all of
+  them: 2,244,719 B / 71 allocations over prose, 3,261,024 B / 8,025 allocations over a history
+  half made of formulas, which queues the worker cap and no more.
+
 
 ### 7.54 一扇没人能看见的窗才需要一把不在任何窗里的钥匙:快捷终端(0.2 功能单,2026-09-02,已落地;`crates/bt-platform/src/hotkey.rs`(新)、`crates/bt-platform/src/lib.rs`、`crates/bt-app/src/quake.rs`(新)、`crates/bt-app/src/{main,settings,shortcuts,i18n,webhost}.rs`、`crates/bt-persist/src/{session,settings,migrate,lib}.rs`)
 
