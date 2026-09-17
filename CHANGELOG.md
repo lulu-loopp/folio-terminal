@@ -31,7 +31,9 @@ All notable changes to Folio are recorded here. The format follows
   was shown for both. On the other line the second formula appeared in the wrong
   place, over the words beside it. The picture is now filed under where its
   formulas actually sit as well, and lines that really do match go on sharing
-  one.
+  one. The same is true of a line whose formulas are spread over more than one
+  row: each row's picture is now filed under the part of the image it shows,
+  rather than only under where that part begins.
 
 - **Right-clicking a formula copies that formula, not one from the pane you
   last typed in.** Copy LaTeX asked whichever pane held the keyboard, and a

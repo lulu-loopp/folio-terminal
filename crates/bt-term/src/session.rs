@@ -11994,6 +11994,11 @@ fn artifact_from_raster(task: &DetectionTask, raster: MathRaster) -> Placeholder
             &task.span.render_source,
             task.versions.layout,
             task.versions.detection,
+            [
+                task.cell_width_subpixels,
+                task.cell_height_subpixels,
+                task.ascii_baseline_subpixels,
+            ],
             &raster.inline_runs,
         ),
         kind: task.span.kind,
@@ -12018,6 +12023,11 @@ fn artifact_from_live_raster(task: &LiveDetectionTask, raster: MathRaster) -> Pl
             &task.span.render_source,
             task.layout,
             task.detection_revision,
+            [
+                task.cell_width_subpixels,
+                task.cell_height_subpixels,
+                task.ascii_baseline_subpixels,
+            ],
             &raster.inline_runs,
         ),
         kind: task.span.kind,
@@ -12048,12 +12058,19 @@ fn artifact_from_live_raster(task: &LiveDetectionTask, raster: MathRaster) -> Pl
 /// part of the recipe the source cannot imply, and it is deliberately the *geometry* rather than
 /// the prose — two lines whose prose differs but whose runs land in the same cells really are the
 /// same picture, and should go on sharing one.
+///
+/// `metrics` is the cell box the raster was fitted to — width, height and ASCII baseline in
+/// subpixels. They are the task's and not the layout's: a `LayoutKey` carries the font size, the
+/// DPI and the theme, and a caller may hand the session a different row height or baseline under
+/// one of those. The raster's own vertical placement follows from them, so they belong to the
+/// recipe.
 fn shared_math_artifact_key(
     kind: BlockKind,
     mode: MathMode,
     source: &str,
     layout: LayoutKey,
     detection: DetectionRevision,
+    metrics: [i64; 3],
     inline_runs: &[InlineRunPlacement],
 ) -> String {
     let mut hasher = DefaultHasher::new();
@@ -12062,6 +12079,7 @@ fn shared_math_artifact_key(
     source.hash(&mut hasher);
     layout.hash(&mut hasher);
     detection.hash(&mut hasher);
+    metrics.hash(&mut hasher);
     for run in inline_runs {
         run.run.hash(&mut hasher);
         run.x_px.hash(&mut hasher);
@@ -12078,6 +12096,11 @@ fn live_placeholder(task: &LiveDetectionTask) -> PlaceholderArtifact {
             &task.span.render_source,
             task.layout,
             task.detection_revision,
+            [
+                task.cell_width_subpixels,
+                task.cell_height_subpixels,
+                task.ascii_baseline_subpixels,
+            ],
             // A placeholder is one grey pixel and has no runs in it yet; its name is its own and is
             // replaced whole by the raster's when the raster lands.
             &[],
@@ -14464,7 +14487,13 @@ fn cropped_inline_artifact(
             None => rgba.resize(rgba.len() + width * 4, 0),
         }
     }
-    artifact.key = format!("{}#x{x0}", artifact.key);
+    // **Both edges, because a crop is named by the pixels it contains and not by where it starts.**
+    // The right edge comes from the runs this row actually carries, so two crops of one composite
+    // that begin at the same pixel can still hold different numbers of runs — a first row whose
+    // leading prose is one character wide and one whose is ten both start at zero and end
+    // elsewhere. The renderer uploads by name and never compares the tiles it holds against what
+    // the placement carries, so a name that leaves out the width is a name two pictures share.
+    artifact.key = format!("{}#x{x0}-{x1}", artifact.key);
     artifact.rgba = Arc::from(rgba);
     artifact.width_px = x1 - x0;
     artifact
@@ -15756,6 +15785,7 @@ mod tests {
                 "x",
                 layout,
                 DetectionRevision(1),
+                [12, 24, 19],
                 &[]
             ),
             shared_math_artifact_key(
@@ -15764,6 +15794,7 @@ mod tests {
                 "x",
                 layout,
                 DetectionRevision(1),
+                [12, 24, 19],
                 &[]
             ),
         );
@@ -15774,6 +15805,7 @@ mod tests {
                 "x",
                 layout,
                 DetectionRevision(1),
+                [12, 24, 19],
                 &[]
             ),
             shared_math_artifact_key(
@@ -15782,6 +15814,7 @@ mod tests {
                 "x",
                 layout,
                 DetectionRevision(1),
+                [12, 24, 19],
                 &[]
             ),
             "two renderers reading the same bytes are two artifacts, not one cache entry"
@@ -28690,6 +28723,62 @@ mod tests {
     /// fits one grid row, and a long one the pane wraps into two. Both formulas of the wrapped line
     /// sit on its first row, so what this fixture exercises is the *line* spanning two rows, not a
     /// formula split across them (that is `a_formula_split_across_two_printed_rows_is_joined`).
+    /// **A crop is named by the pixels it contains, not by where it starts.**
+    ///
+    /// A composite the fold spreads over several rows is uploaded per row, cropped to the runs that
+    /// row carries, and the crop's name was the base key plus its left edge alone. The right edge
+    /// comes from those runs, so two rows of one composite that begin at the same pixel can hold
+    /// different numbers of runs and different widths — a first row whose leading prose is one
+    /// character wide and one whose is ten both begin at zero. They named one texture, and the
+    /// renderer uploads by name without comparing the tiles it already holds against the pixels the
+    /// placement is carrying (the reviewer measured 264 against 139 pixels under one key).
+    #[test]
+    fn two_crops_of_one_composite_are_two_textures_unless_they_are_the_same_pixels() {
+        let artifact = bt_viewport::ProjectedMathArtifact {
+            key: "math:0000000000000000".to_owned(),
+            end: TranscriptId(0),
+            rgba: Arc::from(vec![255_u8; 400 * 4]),
+            width_px: 400,
+            height_px: 1,
+            height_subpixels: SUBPIXELS_PER_PX,
+            baseline_subpixels: 0,
+            mode: MathMode::Inline,
+            kind: bt_viewport::RgbaArtifactKind::Math,
+            vertical_padding_subpixels: 0,
+            render_scale_milli: 1000,
+            source: String::new(),
+            inline_runs: Vec::new(),
+        };
+        let crop = |bounds: Option<(u32, u32)>| {
+            cropped_inline_artifact(
+                &artifact,
+                &InlineRowPlacement {
+                    row: 0,
+                    left_column: 0,
+                    cells: Vec::new(),
+                    crop_px: bounds,
+                    runs: Vec::new(),
+                },
+            )
+            .key
+        };
+        assert_ne!(
+            crop(Some((0, 264))),
+            crop(Some((0, 139))),
+            "two crops from the same left edge holding different pixels are two textures"
+        );
+        assert_eq!(
+            crop(Some((0, 264))),
+            crop(Some((0, 264))),
+            "and the same crop is the same texture"
+        );
+        assert_eq!(
+            crop(None),
+            artifact.key,
+            "an uncropped composite keeps the base name byte for byte"
+        );
+    }
+
     /// **Two composites that are not the same picture may not be the same texture.**
     ///
     /// An inline composite is one raster per logical line, with each run blitted at an x that
