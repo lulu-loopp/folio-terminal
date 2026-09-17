@@ -46,6 +46,18 @@ const PARSER_TAIL_MAX_BYTES: usize = 2 * 1024 * 1024;
 /// what it may speak, not who built it.
 const XTVERSION_REPLY: &str = concat!("\x1bP>|Folio(", env!("CARGO_PKG_VERSION"), ")\x1b\\");
 
+/// The buffer size `vte` 0.15 will not let a synchronized update reach — `SYNC_BUFFER_SIZE` in
+/// `vte-0.15.0/src/ansi.rs`.
+///
+/// It is written down here because the rule built on it is arithmetic this side can do for itself:
+/// `advance_sync` gives up on a block when what it is already holding plus *the whole slice it has
+/// just been handed* would reach `SYNC_BUFFER_SIZE - 1`, and then commits the block and parses that
+/// slice in the same call. Both terms of that sum are things the adapter knows —
+/// [`TerminalAdapter::synchronized_update_pending_bytes`] is the vendored buffer's own length, and
+/// the other is the length of the segment about to be handed over — so the byte the block ends on
+/// can be found rather than waited for. See [`TerminalAdapter::advance_parsers_through_any_overflow`].
+const VENDOR_SYNC_BUFFER_SIZE: usize = 0x20_0000;
+
 #[derive(Clone, Copy)]
 struct GridSize {
     columns: NonZeroU32,
@@ -956,9 +968,11 @@ impl TerminalAdapter {
     /// the boundary parser's reading of the terminator, so a terminator this side recognises and
     /// the vendored parser does not simply cuts a segment and changes nothing.
     ///
-    /// **A feed carrying no query is one segment**, which is every feed in ordinary use: the
-    /// processor sees the whole slice in a single `advance`, the boundary parser makes the per-byte
-    /// pass it has always made, and this adds no allocation of its own.
+    /// **A feed that carries no query and owes no answer is one segment**, which is every feed in
+    /// ordinary use: the processor sees the whole slice in a single `advance`, the boundary parser
+    /// makes the per-byte pass it has always made, and this adds no allocation of its own. A feed
+    /// asking nothing while an earlier answer is still owed by an open block may be cut — at that
+    /// block's ending, which is the point.
     ///
     /// Finding where a segment ends means the boundary parser runs ahead of the processor over that
     /// segment, which is safe because nothing it does per byte reads the processor or the grid: it
@@ -980,7 +994,10 @@ impl TerminalAdapter {
             // cut, made for the same reason.
             let commits_a_debt = step.sync_ended && self.xtversion_replies_owed > 0;
             if step.xtversion_queried || commits_a_debt {
-                self.advance_parsers(&bytes[segment_start..=index], &mut bells);
+                self.advance_parsers_through_any_overflow(
+                    &bytes[segment_start..=index],
+                    &mut bells,
+                );
                 segment_start = index + 1;
                 if step.xtversion_queried {
                     self.xtversion_replies_owed = self.xtversion_replies_owed.saturating_add(1);
@@ -988,8 +1005,61 @@ impl TerminalAdapter {
                 self.answer_xtversion_if_not_buffering();
             }
         }
-        self.advance_parsers(&bytes[segment_start..], &mut bells);
+        self.advance_parsers_through_any_overflow(&bytes[segment_start..], &mut bells);
         self.settle_parser_boundary();
+    }
+
+    /// Advance over one segment, cutting it at the byte a synchronized update the answer is owed by
+    /// will end on, when the vendored parser is about to give that block up.
+    ///
+    /// The other way a block ends — its ESU — is a sequence, so the boundary parser finds it and
+    /// [`Self::advance_terminal_bytes`] cuts there. This ending is not a sequence but a rule about
+    /// size: `vte` gives up on a block when what it holds plus the slice it is handed would reach
+    /// [`VENDOR_SYNC_BUFFER_SIZE`] `- 1`, and it then commits the block *and parses the rest of that
+    /// slice* in the one call — so if the slice went over whole, the block's answer was left behind
+    /// every reply the rest of the slice asked for, and behind a new block if the rest opened one,
+    /// which put it back where this feed cut started: owed, with no block of its own left to end.
+    ///
+    /// The rule is arithmetic and both of its terms are visible from here, so the block's last byte
+    /// is found instead. The segment goes over in three pieces: the largest prefix that does *not*
+    /// reach the rule, then the single byte that does — which commits the block with a one-byte
+    /// remainder — and then the rest, after the answer has left. Where those cuts fall inside a
+    /// sequence does not matter to either parser: both are byte-stream state machines that hold a
+    /// half-read sequence across calls, which is the same thing that makes a pty read boundary
+    /// harmless.
+    ///
+    /// **The commit is observed, not assumed.** The vendored buffer is empty afterwards exactly
+    /// when the block was given up on, so that is what the answer waits for; if the vendored rule
+    /// ever stops working out this way the segment simply goes over as one piece, which is what it
+    /// did before. And a reply produced by the one tripping byte comes out *ahead* of the answer:
+    /// such a byte can only complete a sequence that began among the bytes the block was holding —
+    /// a DA1 whose `CSI` was inside the frame — which makes it one of the block's own replies, on
+    /// the block's side of the limit, exactly where the ordinary commit puts it.
+    ///
+    /// **Nothing here happens unless an answer is owed by a block that is still buffering.** A feed
+    /// that owes nothing costs one comparison against zero.
+    fn advance_parsers_through_any_overflow(&mut self, segment: &[u8], bells: &mut usize) {
+        if self.xtversion_replies_owed == 0 || self.synchronized_update_deadline().is_none() {
+            self.advance_parsers(segment, bells);
+            return;
+        }
+        // How many more bytes this block can be handed at once before the vendored parser gives up
+        // on it. `vte`'s own invariant keeps the buffer below the size it gives up at, so there is
+        // always at least one; a zero would mean that no longer holds, and the segment goes over
+        // whole rather than on arithmetic that has stopped describing anything.
+        let trips_at =
+            (VENDOR_SYNC_BUFFER_SIZE - 1).saturating_sub(self.synchronized_update_pending_bytes());
+        if trips_at == 0 || segment.len() < trips_at {
+            self.advance_parsers(segment, bells);
+            return;
+        }
+        let held = trips_at - 1;
+        self.advance_parsers(&segment[..held], bells);
+        self.advance_parsers(&segment[held..=held], bells);
+        if self.synchronized_update_pending_bytes() == 0 {
+            self.push_xtversion_replies();
+        }
+        self.advance_parsers(&segment[held + 1..], bells);
     }
 
     /// Advance both terminal parsers over one segment of a feed, then report the bells the boundary
@@ -1699,19 +1769,19 @@ impl TerminalAdapter {
     /// short reply each, which is what DA1 costs.
     ///
     /// **The limit, stated, and it is the width of one block.** A query inside a DEC 2026 block is
-    /// answered at that block's commit, so nothing outside the block is ever overtaken: everything
-    /// asked before the block is answered before it, and everything asked after the block is
-    /// answered after it. What is not the stream's order is the inside: the vendored processor
-    /// buffers the block's bytes and replays them all at once, so this side cannot stand between two
-    /// of them, and the block's own replies come out of that replay ahead of the XTVERSION answer
-    /// however the two were interleaved within the block. Getting that right would mean cutting the
-    /// replay the way the feed is cut here, which is inside `vte` — a registry dependency, not one
-    /// of this repository's vendored crates. One more block ending is outside this rule by nature:
-    /// when `vte` gives up on a block because its own 2 MiB buffer would overflow, it commits and
-    /// parses the rest of the slice in the same `advance`, with no offset for this side to cut at,
-    /// so an answer owed from such a block leaves at the end of that feed. What holds in every case
-    /// is what a child can act on: exactly one answer per question, and never from inside a frame
-    /// that is not on the screen yet.
+    /// answered at that block's commit — at its ESU, at its deadline, or at the byte the vendored
+    /// parser gives up on it at, whichever of the three the block ends by. So **nothing outside the
+    /// block is ever overtaken**: everything asked before the block is answered before it, and
+    /// everything asked after the block is answered after it. What is not the stream's order is the
+    /// inside: the vendored processor buffers the block's bytes and replays them all at once, so
+    /// this side cannot stand between two of them, and the block's own replies come out of that
+    /// replay ahead of the XTVERSION answer however the two were interleaved within the block.
+    /// Getting *that* right would mean cutting the replay the way the feed is cut here, which is
+    /// inside `vte` — a registry dependency, not one of this repository's vendored crates. A
+    /// question the block asked and the byte it ended on finished — a DA1 whose `CSI` was inside the
+    /// frame — is one of the block's own, and is answered with them, ahead of the answer the block
+    /// owed. What holds in every case is what a child can act on: exactly one answer per question,
+    /// and never from inside a frame that is not on the screen yet.
     ///
     /// **A reset does not un-ask a question.** A RIS that arrives while a block is still buffering
     /// clears the screen and the modes, and the reply owed from inside that block still goes out at
@@ -1725,7 +1795,19 @@ impl TerminalAdapter {
         // A query inside a DEC 2026 block is answered when that block's bytes are parsed, the same
         // moment the grid they describe appears, so the child never hears from inside a frame that
         // is not on the screen yet.
-        if self.xtversion_replies_owed == 0 || self.synchronized_update_deadline().is_some() {
+        if self.synchronized_update_deadline().is_some() {
+            return;
+        }
+        self.push_xtversion_replies();
+    }
+
+    /// Push every answer still owed. The one caller that does not go through
+    /// [`Self::answer_xtversion_if_not_buffering`] is
+    /// [`Self::advance_parsers_through_any_overflow`], which has just watched the block that owed
+    /// them commit and must not ask again whether a block is open — by then the remainder of the
+    /// same slice may have opened the next one, which is the bug this whole path exists to close.
+    fn push_xtversion_replies(&mut self) {
+        if self.xtversion_replies_owed == 0 {
             return;
         }
         let mut writes = self
@@ -3239,6 +3321,94 @@ mod tests {
         );
         assert_eq!(segmented.visible_text()[0].trim_end(), "TOP");
         assert_eq!(segmented.visible_text()[1].trim_end(), "END");
+    }
+
+    /// A synchronized block big enough for the vendored parser to give up on, with an answer owed
+    /// from inside it. The filler is NUL, which both parsers ignore and which never leaves the
+    /// ground state, so the block is size and nothing else.
+    fn an_overflowing_block_owing_one_answer(tail: &[u8]) -> Vec<u8> {
+        [
+            b"\x1b[?2026h\x1b[>q".as_slice(),
+            &vec![0u8; VENDOR_SYNC_BUFFER_SIZE],
+            tail,
+        ]
+        .concat()
+    }
+
+    /// **The other way a block ends, and the answer leaves there too.** A block whose bytes would
+    /// overflow the vendored parser's buffer is given up on mid-slice, and the rest of that slice is
+    /// then parsed as ordinary output — so a DA1 after it was answered first, and a `BSU` after it
+    /// opened a new block that went on holding the old block's answer until some later frame ended.
+    /// The size rule is arithmetic and both its terms are visible from here, so the byte the block
+    /// ends on is found and cut at, exactly as its ESU would be.
+    #[test]
+    fn an_answer_owed_by_an_overflowing_block_leaves_where_that_block_ends() {
+        for tail in [b"\x1b[c\x1b[?2026h".as_slice(), b"\x1b[c"] {
+            let mut terminal = TerminalAdapter::new(nz(20), nz(3));
+            terminal.feed(b"\x1b[?2026h\x1b[>q");
+            assert!(
+                terminal.take_pty_writes().is_empty(),
+                "the block is still holding the question"
+            );
+            terminal.feed(&[vec![0u8; VENDOR_SYNC_BUFFER_SIZE], tail.to_vec()].concat());
+            assert_eq!(
+                terminal.take_pty_writes(),
+                vec![XTVERSION_REPLY.as_bytes().to_vec(), b"\x1b[?6c".to_vec()],
+                "with {} bytes of tail, the answer must leave where its block ended",
+                tail.len()
+            );
+        }
+    }
+
+    /// The same stream cut across two feeds: at each seam byte by byte, on both sides of the byte
+    /// the size rule trips at, and in the middle of the block. Where a pty read ended decides which
+    /// feed carries the overflow, and must decide nothing else.
+    #[test]
+    fn cutting_an_overflowing_block_changes_neither_its_answer_nor_its_place() {
+        let stream = an_overflowing_block_owing_one_answer(b"\x1b[c\x1b[?2026h");
+        let expected = vec![XTVERSION_REPLY.as_bytes().to_vec(), b"\x1b[?6c".to_vec()];
+        // Fed whole, the block is handed `\x1b[>q` first, so the rule trips this far into the rest.
+        let trips_at = b"\x1b[?2026h\x1b[>q".len() + (VENDOR_SYNC_BUFFER_SIZE - 1) - 4 - 1;
+        let seams = (0..=16)
+            .chain([trips_at - 1, trips_at, trips_at + 1, stream.len() / 2])
+            .chain(stream.len() - 16..=stream.len());
+        for split in seams {
+            let mut terminal = TerminalAdapter::new(nz(20), nz(3));
+            terminal.feed(&stream[..split]);
+            let mut replies = terminal.take_pty_writes();
+            terminal.feed(&stream[split..]);
+            replies.extend(terminal.take_pty_writes());
+            assert_eq!(replies, expected, "cut at {split} was answered differently");
+        }
+    }
+
+    /// **Which side of the limit the byte that ends the block is on.** The block ends on one byte,
+    /// and that byte is parsed as ordinary output right after the commit — so it can complete a
+    /// sequence, but only one whose `CSI` was among the bytes the block was holding. A DA1 written
+    /// inside the frame and finished by that byte is the frame's own question, so its answer belongs
+    /// where every other reply the block produced belongs: ahead of the answer the block owed. A DA1
+    /// written after the block is answered after it, like anything else outside.
+    #[test]
+    fn a_reply_the_overflowing_block_asked_for_itself_stays_on_the_blocks_side() {
+        // Sized so that the byte the rule trips on is the `c` of the first DA1: the vendored buffer
+        // already holds the four bytes of the query, so it can take `SYNC_BUFFER_SIZE - 1 - 4 - 1`
+        // more, and the `\x1b[` must be the last two of those.
+        let held = (VENDOR_SYNC_BUFFER_SIZE - 1) - b"\x1b[>q".len() - 1;
+        let inside: Vec<u8> =
+            [vec![0u8; held - 2], b"\x1b[c".to_vec(), b"\x1b[c".to_vec()].concat();
+        let mut terminal = TerminalAdapter::new(nz(20), nz(3));
+        terminal.feed(b"\x1b[?2026h\x1b[>q");
+        assert!(terminal.take_pty_writes().is_empty());
+        terminal.feed(&inside);
+        assert_eq!(
+            terminal.take_pty_writes(),
+            vec![
+                b"\x1b[?6c".to_vec(),
+                XTVERSION_REPLY.as_bytes().to_vec(),
+                b"\x1b[?6c".to_vec(),
+            ],
+            "the DA1 the block itself asked for comes first, the one after the block comes last"
+        );
     }
 
     /// **A feed that asks nothing reports its events in the order it always did.** Cutting the feed

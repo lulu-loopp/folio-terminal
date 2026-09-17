@@ -125,12 +125,21 @@ query, advances the processor segment by segment, and pushes that query's answer
 segments. The queue is then the stream's own order by construction — in either direction, for any
 interleaving, and wherever a pty read happens to have been cut — rather than one kind of answer
 being moved to the front or held to the back. An answer owed from inside a synchronized block
-becomes due at that block's commit, and the ESU that commits it is cut at the same way and for the
+becomes due at that block's commit, and the byte that commits it is cut at the same way and for the
 same reason; waiting instead for a moment when no block happens to be open is a different rule and
 an insufficient one, because a program repainting in synchronized frames opens the next block in the
-write that closed the last. A feed carrying no query, which is every feed in ordinary use, is one
-segment, and what it costs is what it cost before: one `advance` over the whole slice, the per-byte
-boundary pass the adapter has always made, and no allocation added by any of this.
+write that closed the last. A block ends two ways and both are cut at. Its ESU is a sequence, so the
+boundary parser finds it. Its other ending is not a sequence but a rule about size — `vte` gives up
+on a block when what it is holding plus the slice it has just been handed would reach its 2 MiB
+buffer, and then commits the block *and parses the rest of that slice* in the same call — and that
+rule is arithmetic whose two terms are both visible from this side, so the byte the block will end
+on is worked out and the segment is handed over in three pieces: the largest prefix that does not
+reach the rule, the single byte that does, and then the rest, after the answer has left. The commit
+is observed rather than assumed (the vendored buffer is empty afterwards exactly when the block was
+given up on), so if that rule ever stops working out this way the segment simply goes over whole, as
+it did before. A feed that carries no query and owes no answer, which is every feed in ordinary use,
+is one segment, and what it costs is what it cost before: one `advance` over the whole slice, the
+per-byte boundary pass the adapter has always made, and no allocation added by any of this.
 
 **The limit is one block wide.** Nothing outside a synchronized block is ever overtaken — everything
 asked before it is answered before it, everything asked after it is answered after it. What is not
@@ -139,11 +148,11 @@ all at once, so this side cannot stand between two of them, and the block's own 
 of the XTVERSION answer however the two were interleaved within the block. Cutting the replay the
 way the feed is cut would mean changing `vte`, a registry dependency rather than one of this
 repository's vendored crates, and no rule of thumb applied on this side would be the stream's order
-— it would only look like it. One block ending is outside the rule by nature: when `vte` gives up on
-a block because its own 2 MiB buffer would overflow, it commits and parses the rest of the slice in
-the same call, leaving no offset to cut at, so an answer owed from such a block leaves at the end of
-that feed. What holds in every case is what a child can act on: exactly one answer per question,
-never from inside a frame that is not on the screen yet. And a reset does not un-ask a question — a
+— it would only look like it. A question the block asked that the byte it ended on finished, a DA1
+whose `CSI` was inside the frame, is one of the block's own and is answered with them, ahead of the
+answer the block owed. What holds in every case is what a child can act on: exactly one answer per
+question, never from inside a frame that is not on the screen yet. And a reset does not un-ask a
+question — a
 RIS arriving while the block still buffers clears the screen and the modes, and the answer owed from
 inside the block still goes out at the commit, because the child is blocked on an answer it asked
 for before the reset.
