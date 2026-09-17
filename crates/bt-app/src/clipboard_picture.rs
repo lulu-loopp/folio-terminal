@@ -34,12 +34,13 @@
 
 use std::{
     fs,
-    io::Cursor,
+    io::{Cursor, Write},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use bt_platform::{PictureBytes, PictureEncoding};
+use image::ImageDecoder;
 
 /// **How many pasted pictures the folder keeps.**
 ///
@@ -50,6 +51,42 @@ use bt_platform::{PictureBytes, PictureEncoding};
 /// "how many screenshots do you want to keep in a temporary folder" — is one
 /// nobody has an answer to.
 pub const KEPT: usize = 20;
+
+/// **The widest and tallest picture this paste will decode** (review X-4).
+///
+/// A device-independent bitmap is a header and then pixels, and the header is
+/// believed by every decoder before the pixels are read: `image`'s own BMP
+/// decoder accepts dimensions up to 65,535 a side and `DynamicImage` allocates
+/// the whole output before the body is parsed, so a clipboard provider offering
+/// a fifty-byte header claiming 32,768 x 32,768 asks this process for about
+/// three gigabytes and gets an abort rather than an error. The header is
+/// arithmetic; believing it is the defect.
+///
+/// 16,384 is above every display and every screenshot a person takes — an
+/// 8K screen is 7,680 across — and it is the number a real picture stays under.
+pub const MAX_SIDE: u32 = 16_384;
+
+/// **And the decoded size, which is the number that actually costs memory.**
+///
+/// A picture can be inside [`MAX_SIDE`] on both axes and still be enormous:
+/// 16,384 square at four bytes a pixel is a gigabyte. This is the bound that
+/// matters, and it is checked against the decoder's own `total_bytes` — its
+/// arithmetic over the dimensions and the colour type it is about to allocate
+/// for — rather than against a number this module derives a second time.
+///
+/// 256 MiB decodes a picture of about 67 megapixels in RGBA, which is far above
+/// any screen and far below the point where a refusal is worse than an abort.
+pub const MAX_DECODED_BYTES: u64 = 256 * 1024 * 1024;
+
+/// **How many bytes of one encoding are worth copying off the clipboard at
+/// all.**
+///
+/// The acquisition copies what the source offers before anything has looked at
+/// it, so the ceiling has to exist on that side too — see
+/// `bt_platform::clipboard::MAX_PICTURE_BYTES`, which is this number and is
+/// where it is enforced. Re-stated here as the one this module refuses at,
+/// because a clipboard reader is not the only way bytes could ever arrive.
+pub const MAX_ENCODED_BYTES: usize = 256 * 1024 * 1024;
 
 /// The folder's own name inside Folio's temporary directory.
 const FOLDER: &str = "clipboard";
@@ -133,29 +170,44 @@ fn ours(name: &str) -> Option<(&str, u32)> {
     Some((stamp, index.parse().ok()?))
 }
 
-/// What one write does to the folder: the name it takes, and the names it
-/// retires to make room for itself.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct WritePlan {
-    pub name: String,
-    pub delete: Vec<String>,
+/// **Where in this second to start looking for a free name.**
+///
+/// A *guess*, and saying so is the whole of review X-2. This used to be the
+/// answer: the worker read the folder, computed the next suffix and wrote it.
+/// Two windows pasting inside one second read the same folder, computed the
+/// same suffix and wrote the same path, so one reader was handed the other
+/// reader's picture and an overlapping write could leave a torn file. A
+/// listing taken now is a statement about the past the instant it is taken, and
+/// no amount of care here can change that.
+///
+/// So this only says where to *begin*; [`reserve`] is what actually takes a
+/// name, and it takes it from the filesystem rather than from this.
+#[must_use]
+pub fn first_free_index(existing: &[String], stamp: &str) -> u32 {
+    existing
+        .iter()
+        .filter_map(|name| ours(name))
+        .filter(|(at, _)| *at == stamp)
+        .map(|(_, index)| index)
+        .max()
+        .map_or(1, |taken| taken.saturating_add(1))
 }
 
-/// **The whole of the naming and the sweep, as a function of a listing.**
+/// **Which of this module's own files the cap retires**, given everything in
+/// the folder *including* the file just written.
 ///
 /// Pure, and that is the point: "the twenty newest survive" is a claim about a
 /// folder, and a claim about a folder that can only be checked by making one is
 /// a claim that gets checked once.
 ///
-/// * The **index** is the first one free in this second, so two pastes inside
-///   one second are two files rather than one overwritten twice.
 /// * The **order** is `(stamp, index)` and not the filesystem's: a directory
 ///   listing has no order, and a modification time is a thing anything on the
 ///   machine can change.
-/// * The new file **counts against the cap**, so the folder holds `kept` files
-///   after the write rather than `kept + 1`.
+/// * The listing is taken **after** the write, so the new file counts against
+///   the cap and the folder holds `kept` files rather than `kept + 1`.
+/// * A file this module did not write is neither counted nor deleted.
 #[must_use]
-pub fn plan(existing: &[String], stamp: &str, kept: usize) -> WritePlan {
+pub fn retire(existing: &[String], kept: usize) -> Vec<String> {
     let mut mine: Vec<(&str, u32, &String)> = existing
         .iter()
         .filter_map(|name| ours(name).map(|(at, index)| (at, index, name)))
@@ -163,22 +215,53 @@ pub fn plan(existing: &[String], stamp: &str, kept: usize) -> WritePlan {
     // Explicit and not `sort_by_key`: the key is borrowed out of the listing, which
     // is a key a sort-by-key closure cannot hand back.
     mine.sort_by(|left, right| left.0.cmp(right.0).then(left.1.cmp(&right.1)));
-    let index = mine
-        .iter()
-        .filter(|(at, _, _)| *at == stamp)
-        .map(|(_, index, _)| *index)
-        .max()
-        .map_or(1, |taken| taken.saturating_add(1));
-    let over = mine.len().saturating_add(1).saturating_sub(kept);
-    let delete = mine
-        .into_iter()
+    let over = mine.len().saturating_sub(kept);
+    mine.into_iter()
         .take(over)
         .map(|(_, _, name)| name.clone())
-        .collect();
-    WritePlan {
-        name: format!("{stamp}-{index}{EXTENSION}"),
-        delete,
+        .collect()
+}
+
+/// How many names one write will try before giving up.
+///
+/// The loop ends because each turn takes one name that is now certainly taken,
+/// so a folder can only push it round as many times as it has files in this
+/// second. The bound exists so that a folder somebody has filled with
+/// `<this second>-<n>.png` cannot spin the worker for ever, and it is far above
+/// [`KEPT`] because the names in the way need not be ours to count.
+const NAME_ATTEMPTS: u32 = 4_096;
+
+/// **Take a name, by creating the file** (review X-2).
+///
+/// `create_new` is the whole fix: it is one filesystem operation that both
+/// tests for the name and takes it, so two workers — in this process or in
+/// another Folio, on this machine — cannot both believe a name is free. The one
+/// that loses gets `AlreadyExists` and moves to the next index. Nothing here
+/// trusts the listing; the listing only says where to start looking.
+///
+/// The file comes back **open and empty**, and the bytes go into it under the
+/// name it will keep. There is no temporary name and no rename, because a
+/// rename would take the name a second time and hand the race back: the
+/// reservation *is* the final path. What can see the empty file in between is
+/// only another Folio's own sweep, and a file stamped now is the newest in the
+/// folder and is never what a cap retires.
+fn reserve(folder: &Path, stamp: &str) -> Result<(PathBuf, fs::File), String> {
+    let mut index = first_free_index(&names_in(folder), stamp);
+    for _ in 0..NAME_ATTEMPTS {
+        let path = folder.join(format!("{stamp}-{index}{EXTENSION}"));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                index = index.saturating_add(1);
+            }
+            Err(error) => return Err(format!("the file could not be made: {error}")),
+        }
     }
+    Err("no name in this second was free".to_owned())
 }
 
 /// **PNG bytes out of whatever the clipboard offered**, taking the first
@@ -200,22 +283,74 @@ pub fn png_bytes(offered: &[PictureBytes]) -> Result<Vec<u8>, String> {
     Err(refused.unwrap_or_else(|| "the clipboard offered no picture".to_owned()))
 }
 
-/// The eight bytes every PNG file starts with (PNG specification §5.2).
-const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+/// **Is a picture of this shape one this paste will decode?** (review X-4).
+///
+/// Pure, over the three numbers a decoder can be asked for *before* it
+/// allocates anything — which is what makes the ceiling checkable without
+/// building the picture that would prove it. `decoded` is the decoder's own
+/// `total_bytes`, so what is bounded is the allocation that is actually about
+/// to be made rather than a second guess at it.
+#[must_use]
+pub fn fits(width: u32, height: u32, decoded: u64) -> bool {
+    width > 0
+        && height > 0
+        && width <= MAX_SIDE
+        && height <= MAX_SIDE
+        && decoded <= MAX_DECODED_BYTES
+}
+
+/// The ceiling, said once, in the words the card will carry.
+fn refuse_oversize(width: u32, height: u32, decoded: u64) -> Result<(), String> {
+    if fits(width, height, decoded) {
+        Ok(())
+    } else {
+        // The shape and never the picture: these three numbers are the header's,
+        // and the header is the part that was not believed.
+        Err(format!(
+            "the clipboard picture is {width}x{height} and would decode to \
+             {decoded} bytes, which is past this paste's ceiling"
+        ))
+    }
+}
+
+/// What every decoder on this path is told before it is asked for pixels.
+///
+/// Belt beside the explicit check above rather than instead of it: `set_limits`
+/// is honoured by the decoders that implement it, and `image`'s BMP decoder does
+/// not — it inherits the default, which checks the dimensions and lets the
+/// allocation through. The refusal that actually holds is [`refuse_oversize`].
+fn decoder_limits() -> image::Limits {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_SIDE);
+    limits.max_image_height = Some(MAX_SIDE);
+    limits.max_alloc = Some(MAX_DECODED_BYTES);
+    limits
+}
 
 fn png_from(picture: &PictureBytes) -> Result<Vec<u8>, String> {
+    // Before the encoding is even looked at: bytes this large are not a paste,
+    // and the copy that produced them is the one the platform arm already
+    // refuses (review X-4).
+    if picture.bytes.len() > MAX_ENCODED_BYTES {
+        return Err("the clipboard picture is too large to save".to_owned());
+    }
     match picture.encoding {
-        // **Handed straight through, after one question.** Re-encoding bytes that
-        // are already PNG would cost a decode and an encode to arrive at the same
-        // picture. The question is whether they really are PNG: a source may
-        // advertise the format and render something else, and a path pasted to a
-        // file with junk in it is worse than no paste at all.
+        // **Handed straight through, after its header is read.** Re-encoding
+        // bytes that are already PNG would cost a decode and an encode to arrive
+        // at the same picture, so the bytes are kept — but they are kept only
+        // once a PNG decoder has read their header and agreed.
+        //
+        // Eight bytes used to be the whole question, and review X-4 is right that
+        // it is not one: a source that advertises PNG and renders eight bytes
+        // passed, and *won*, so a `CF_DIB` sitting behind it that would have
+        // decoded perfectly was never tried. Reading the header both refuses that
+        // and is where this rung's ceiling is applied.
         PictureEncoding::Png => {
-            if picture.bytes.starts_with(&PNG_SIGNATURE) {
-                Ok(picture.bytes.clone())
-            } else {
-                Err("the clipboard's PNG does not start like one".to_owned())
-            }
+            let decoder = image::codecs::png::PngDecoder::new(Cursor::new(&picture.bytes))
+                .map_err(|_| "the clipboard's PNG could not be read".to_owned())?;
+            let (width, height) = decoder.dimensions();
+            refuse_oversize(width, height, decoder.total_bytes())?;
+            Ok(picture.bytes.clone())
         }
         PictureEncoding::DibV5 | PictureEncoding::Dib => png_from_dib(&picture.bytes),
         PictureEncoding::Tiff => bt_platform::png_from_tiff(&picture.bytes),
@@ -228,9 +363,20 @@ fn png_from(picture: &PictureBytes) -> Result<Vec<u8>, String> {
 /// `new_without_file_header` is the decoder's own entry point for exactly this —
 /// its documentation names `CF_DIB` — so the fourteen bytes are not invented
 /// here and the V4 and V5 headers `CF_DIBV5` carries are read by the same call.
+///
+/// **The dimensions are refused before the picture is built** (review X-4).
+/// `BmpDecoder::new_without_file_header` parses the header and nothing else, so
+/// between it and `from_decoder` there is exactly one moment at which the shape
+/// is known and no memory has been asked for. That moment is where the ceiling
+/// goes; after it, the allocation has already happened or failed.
 fn png_from_dib(dib: &[u8]) -> Result<Vec<u8>, String> {
-    let decoder = image::codecs::bmp::BmpDecoder::new_without_file_header(Cursor::new(dib))
+    let mut decoder = image::codecs::bmp::BmpDecoder::new_without_file_header(Cursor::new(dib))
         .map_err(|_| "the clipboard bitmap could not be read".to_owned())?;
+    let (width, height) = decoder.dimensions();
+    refuse_oversize(width, height, decoder.total_bytes())?;
+    decoder
+        .set_limits(decoder_limits())
+        .map_err(|_| "the clipboard bitmap is past this paste's ceiling".to_owned())?;
     let picture = image::DynamicImage::from_decoder(decoder)
         .map_err(|_| "the clipboard bitmap could not be read".to_owned())?;
     let mut bytes = Vec::new();
@@ -256,10 +402,17 @@ pub fn save(folder: &Path, offered: &[PictureBytes], at: SystemTime) -> Result<P
     // Folio's and carries no name of the reader's, but what is written into it is
     // their screenshot, and a diagnostic is not the place for either.
     fs::create_dir_all(folder).map_err(|error| format!("the folder could not be made: {error}"))?;
-    let plan = plan(&names_in(folder), &stamp(at), KEPT);
-    let path = folder.join(&plan.name);
-    fs::write(&path, &bytes).map_err(|error| format!("the file could not be written: {error}"))?;
-    for name in plan.delete {
+    let (path, mut file) = reserve(folder, &stamp(at))?;
+    file.write_all(&bytes)
+        .map_err(|error| format!("the file could not be written: {error}"))?;
+    // Closed before the folder is read again, so the listing the cap is taken over
+    // is one this file is finished in.
+    drop(file);
+    // **Read again rather than reusing the listing `reserve` started from**: that
+    // one is older than this write, and on a machine with two Folios on it the
+    // folder has moved since. The name just taken is in this listing, which is
+    // what makes it count against the cap.
+    for name in retire(&names_in(folder), KEPT) {
         let _ = fs::remove_file(folder.join(name));
     }
     Ok(path)
@@ -289,6 +442,14 @@ mod tests {
     fn at(seconds: u64) -> SystemTime {
         UNIX_EPOCH + Duration::from_secs(seconds)
     }
+
+    /// The eight bytes every PNG file starts with (PNG specification §5.2).
+    ///
+    /// A test's constant and no longer the module's: eight bytes used to be the
+    /// whole of what `png_from` asked of a PNG, and review X-4 is why they are
+    /// not — what production reads now is the header, through a decoder. Here
+    /// they are only how a test recognises the answer it was handed.
+    const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
 
     /// PIN — the name is a date a person can read, and it sorts the way the
     /// files were written.
@@ -330,53 +491,45 @@ mod tests {
         let full: Vec<String> = (0..KEPT)
             .map(|index| format!("20260916-1430{index:02}-1.png"))
             .collect();
-        let at_the_cap = plan(&full, "20260916-150000", KEPT);
-        assert_eq!(at_the_cap.name, "20260916-150000-1.png");
-        assert_eq!(at_the_cap.delete, ["20260916-143000-1.png"]);
+        // The sweep is taken over the folder as it stands *after* the write, so
+        // the written file is in the listing it is counted in.
+        let mut at_the_cap = full.clone();
+        at_the_cap.push("20260916-150000-1.png".to_owned());
+        assert_eq!(retire(&at_the_cap, KEPT), ["20260916-143000-1.png"]);
 
         // One short of the cap: the write fits and nothing is retired.
-        let with_room = plan(&full[1..], "20260916-150000", KEPT);
-        assert!(with_room.delete.is_empty());
+        let mut with_room: Vec<String> = full[1..].to_vec();
+        with_room.push("20260916-150000-1.png".to_owned());
+        assert!(retire(&with_room, KEPT).is_empty());
 
         // Far over the cap — a folder that was written to by an older build, or
         // by a Folio that was killed between the write and the sweep.
-        let mut many = full.clone();
+        let mut many = at_the_cap.clone();
         many.extend((0..5).map(|index| format!("20260915-0000{index:02}-1.png")));
-        let over = plan(&many, "20260916-150000", KEPT);
-        assert_eq!(over.delete.len(), 6);
-        assert!(over.delete.contains(&"20260915-000004-1.png".to_owned()));
-        assert!(over.delete.contains(&"20260916-143000-1.png".to_owned()));
-        assert!(!over.delete.contains(&"20260916-143001-1.png".to_owned()));
+        let over = retire(&many, KEPT);
+        assert_eq!(over.len(), 6);
+        assert!(over.contains(&"20260915-000004-1.png".to_owned()));
+        assert!(over.contains(&"20260916-143000-1.png".to_owned()));
+        assert!(!over.contains(&"20260916-143001-1.png".to_owned()));
     }
 
-    /// PIN — **two pastes in one second are two files**, and the index is the
-    /// first one free rather than the count of what is there.
+    /// PIN — **two pastes in one second are two files**, and the index the
+    /// search starts at is the first one free rather than the count of what is
+    /// there.
     #[test]
     fn a_second_paste_in_the_same_second_takes_the_next_index() {
-        assert_eq!(
-            plan(&[], "20260916-143012", KEPT).name,
-            "20260916-143012-1.png"
-        );
+        assert_eq!(first_free_index(&[], "20260916-143012"), 1);
         let one = vec!["20260916-143012-1.png".to_owned()];
-        assert_eq!(
-            plan(&one, "20260916-143012", KEPT).name,
-            "20260916-143012-2.png"
-        );
+        assert_eq!(first_free_index(&one, "20260916-143012"), 2);
         // A gap left by a file somebody deleted by hand is not filled in: the
         // index has to keep rising or the name stops sorting.
         let gap = vec![
             "20260916-143012-1.png".to_owned(),
             "20260916-143012-7.png".to_owned(),
         ];
-        assert_eq!(
-            plan(&gap, "20260916-143012", KEPT).name,
-            "20260916-143012-8.png"
-        );
+        assert_eq!(first_free_index(&gap, "20260916-143012"), 8);
         // Another second entirely starts again at one.
-        assert_eq!(
-            plan(&gap, "20260916-143013", KEPT).name,
-            "20260916-143013-1.png"
-        );
+        assert_eq!(first_free_index(&gap, "20260916-143013"), 1);
     }
 
     /// PIN — **a file this module did not write is never deleted and never
@@ -403,9 +556,177 @@ mod tests {
         }
         let mut folder: Vec<String> = strangers.iter().map(|name| (*name).to_owned()).collect();
         folder.extend((0..KEPT).map(|index| format!("20260916-1430{index:02}-1.png")));
-        let swept = plan(&folder, "20260916-150000", KEPT);
-        assert_eq!(swept.delete, ["20260916-143000-1.png"]);
+        folder.push("20260916-150000-1.png".to_owned());
+        assert_eq!(retire(&folder, KEPT), ["20260916-143000-1.png"]);
         assert_eq!(ours("20260916-143012-1.png"), Some(("20260916-143012", 1)));
+    }
+
+    /// A folder of this test's own, under the machine's temporary directory.
+    fn scratch(tag: &str) -> PathBuf {
+        let folder = std::env::temp_dir().join(format!(
+            "folio-clipboard-picture-test-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&folder);
+        fs::create_dir_all(&folder).expect("a scratch folder");
+        folder
+    }
+
+    /// RED GATE (review X-2) — **two writes in one second never take one
+    /// name**, and neither of them is the other's picture.
+    ///
+    /// The old arrangement read the folder, computed the next suffix and wrote
+    /// it, which is safe only for as long as one worker exists. Two windows
+    /// pasting in the same second read the same folder, computed the same
+    /// suffix and truncated each other. This is that scenario with the listing
+    /// frozen at its worst: both writers start from the *same* stale view, which
+    /// is exactly what the filesystem has to break the tie for.
+    ///
+    /// MUTATION: put `create(true)` back in place of `create_new(true)` and the
+    /// second reservation hands back the first one's path, so the two are equal
+    /// and this goes red on the first assertion.
+    #[test]
+    fn two_writes_in_one_second_never_reserve_the_same_name() {
+        let folder = scratch("reserve");
+        let stamp = "20260916-143012";
+        let mut taken = Vec::new();
+        for _ in 0..5 {
+            let (path, file) = reserve(&folder, stamp).expect("a free name");
+            drop(file);
+            assert!(path.exists(), "the reservation is the file");
+            taken.push(path);
+        }
+        for (index, path) in taken.iter().enumerate() {
+            for other in &taken[index + 1..] {
+                assert_ne!(path, other, "two reservations took one name");
+            }
+        }
+        // And the names really are this module's own, in order.
+        let names: Vec<String> = taken
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names[0], "20260916-143012-1.png");
+        assert_eq!(names[4], "20260916-143012-5.png");
+
+        // A name that is already standing — left by another Folio, or by a
+        // build that died between the reservation and the write — is stepped
+        // over rather than truncated.
+        let squatter = folder.join("20260916-143013-1.png");
+        fs::write(&squatter, b"not ours to overwrite").expect("a squatting file");
+        let (stepped, file) = reserve(&folder, "20260916-143013").expect("a free name");
+        drop(file);
+        assert_ne!(stepped, squatter);
+        assert_eq!(
+            fs::read(&squatter).expect("the squatter survives"),
+            b"not ours to overwrite"
+        );
+        let _ = fs::remove_dir_all(&folder);
+    }
+
+    /// **A whole write, end to end**, which is what says the reservation and
+    /// the sweep still add up to the rule.
+    #[test]
+    fn a_saved_picture_lands_under_the_cap_with_its_bytes_in_it() {
+        let folder = scratch("save");
+        let mut written = Vec::new();
+        for second in 0..(KEPT + 2) {
+            let at = UNIX_EPOCH + Duration::from_secs(1_789_569_012 + second as u64);
+            written.push(save(&folder, &[a_png()], at).expect("a picture saves"));
+        }
+        let left = names_in(&folder);
+        assert_eq!(left.len(), KEPT, "the folder settles at the cap");
+        assert!(
+            !left.contains(&"20260916-143012-1.png".to_owned()),
+            "the oldest two were retired"
+        );
+        let last = written.last().expect("a last write");
+        assert_eq!(
+            fs::read(last).expect("the newest file reads back"),
+            a_png().bytes,
+            "the bytes in the file are the bytes that were pasted"
+        );
+        let _ = fs::remove_dir_all(&folder);
+    }
+
+    /// RED GATE (review X-4) — **a header claiming an enormous picture is
+    /// refused before anything is allocated for it.**
+    ///
+    /// The fixture is a header and nothing else: forty bytes saying 32,768 by
+    /// 32,768 at 24 bits, with no pixels behind them at all. That is the whole
+    /// attack — `DynamicImage::from_decoder` allocates the output before it
+    /// reads the body, so three gigabytes are asked for and the process is
+    /// aborted rather than told no. **No giant allocation is attempted here**,
+    /// which is the point: the refusal arrives from the header.
+    ///
+    /// MUTATION: take `refuse_oversize` out of `png_from_dib` and this test
+    /// stops being a test and starts being an out-of-memory probe.
+    #[test]
+    fn a_header_claiming_an_enormous_picture_is_refused_before_it_is_decoded() {
+        assert!(fits(2, 2, 16));
+        assert!(fits(MAX_SIDE, 1, MAX_DECODED_BYTES));
+        assert!(!fits(MAX_SIDE + 1, 1, 16));
+        assert!(!fits(1, MAX_SIDE + 1, 16));
+        assert!(!fits(0, 1, 0), "a picture with no pixels is not a picture");
+        assert!(
+            !fits(MAX_SIDE, MAX_SIDE, MAX_DECODED_BYTES + 1),
+            "inside both sides and still too much memory"
+        );
+
+        for (width, height) in [(32_768_i32, 32_768_i32), (40_000, 2), (2, 40_000)] {
+            let refusal = png_bytes(&[PictureBytes {
+                encoding: PictureEncoding::Dib,
+                bytes: header_only_dib(width, height),
+            }])
+            .expect_err("a header past the ceiling is refused");
+            assert!(
+                refusal.contains("ceiling"),
+                "the refusal says what was wrong: {refusal}"
+            );
+        }
+
+        // And a header inside the ceiling is refused for the honest reason
+        // instead — there are no pixels behind it — rather than being waved
+        // through by the size check.
+        let truncated = png_bytes(&[PictureBytes {
+            encoding: PictureEncoding::Dib,
+            bytes: header_only_dib(8, 8),
+        }])
+        .expect_err("a truncated body is still refused");
+        assert!(!truncated.contains("ceiling"), "{truncated}");
+    }
+
+    /// A `BITMAPINFOHEADER` with the given shape and not one pixel behind it.
+    fn header_only_dib(width: i32, height: i32) -> Vec<u8> {
+        let mut dib: Vec<u8> = Vec::new();
+        dib.extend(40_u32.to_le_bytes());
+        dib.extend(width.to_le_bytes());
+        dib.extend(height.to_le_bytes());
+        dib.extend(1_u16.to_le_bytes());
+        dib.extend(24_u16.to_le_bytes());
+        dib.extend(0_u32.to_le_bytes());
+        dib.extend(0_u32.to_le_bytes());
+        dib.extend(2835_i32.to_le_bytes());
+        dib.extend(2835_i32.to_le_bytes());
+        dib.extend(0_u32.to_le_bytes());
+        dib.extend(0_u32.to_le_bytes());
+        dib
+    }
+
+    /// One real one-pixel PNG, as a clipboard would offer it.
+    fn a_png() -> PictureBytes {
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            1,
+            1,
+            image::Rgba([1, 2, 3, 255]),
+        ))
+        .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+        .expect("a one-pixel PNG encodes");
+        PictureBytes {
+            encoding: PictureEncoding::Png,
+            bytes,
+        }
     }
 
     /// **A device-independent bitmap becomes PNG bytes** — the decode the
@@ -469,20 +790,18 @@ mod tests {
         assert!(png_bytes(std::slice::from_ref(&liar)).is_err());
         assert!(png_bytes(&[]).is_err());
 
-        let real = PictureBytes {
+        // **Eight bytes are not a PNG** (review X-4's last paragraph). This used
+        // to pass, and passing is worse than failing: a source that advertises
+        // PNG and renders only the signature won the rung outright, so the
+        // `CF_DIB` behind it — which would have decoded perfectly — was never
+        // tried, and the file written was eight bytes long.
+        let signature = PictureBytes {
             encoding: PictureEncoding::Png,
-            bytes: {
-                let mut bytes = Vec::new();
-                image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
-                    1,
-                    1,
-                    image::Rgba([1, 2, 3, 255]),
-                ))
-                .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
-                .expect("a one-pixel PNG encodes");
-                bytes
-            },
+            bytes: vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a],
         };
+        assert!(png_bytes(std::slice::from_ref(&signature)).is_err());
+
+        let real = a_png();
         // The liar first: the second rung is what the paste ends up with.
         let chosen = png_bytes(&[liar, real.clone()]).expect("the second rung answers");
         assert_eq!(

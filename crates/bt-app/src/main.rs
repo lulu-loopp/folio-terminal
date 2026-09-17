@@ -714,11 +714,70 @@ impl BackgroundDecodeMailbox {
 #[derive(Debug)]
 struct ClipboardPictureAnswer {
     generation: u64,
-    seat: SeatId,
+    target: PasteTarget,
     /// The file, or the sentence saying which half of the job refused. A reason
     /// and never a picture: a diagnostic that carried what was on the clipboard
     /// would be this process writing the reader's own screenshot into a log.
     result: std::result::Result<PathBuf, String>,
+}
+
+/// **The next shell's [`LeafSession::incarnation`]**, and the counter behind it.
+///
+/// Process-wide rather than per-window for the reason `TabId`'s counter is: a
+/// pane can be dragged from one window into another, and two counters would
+/// hand the same number to two shells that can meet.
+fn next_incarnation() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// **The rule [`Runtime::live_paste_target`] turns on**, as a function of the
+/// two facts it reads and nothing else (review X-1).
+///
+/// A named function rather than a run of `if`s inside the method, on the wheel
+/// ruling's own footing: this is a claim about a decision, and a decision that
+/// cannot be named cannot be pinned. Everything the method needs a window for —
+/// the tab list, the session map — happens before this is called, so the part
+/// that is a rule is testable and the part that is a lookup is not asked to be.
+///
+/// `standing` is the incarnation of whatever shell is in that seat now, and
+/// `None` is "no shell there at all" — a pane that was closed, or a seat that
+/// was never a terminal. Both answer the same way, because both mean the
+/// address names nothing.
+const fn paste_target_is_live(on_top: TabId, standing: Option<u64>, target: PasteTarget) -> bool {
+    on_top.0 == target.tab.0
+        && match standing {
+            Some(incarnation) => incarnation == target.incarnation,
+            None => false,
+        }
+}
+
+/// **Which shell a paste was promised to** (review X-1).
+///
+/// A `SeatId` on its own is not an address. Seats are numbered inside their tab
+/// and every new single-pane tab starts at `SeatId(1)`, so a delayed answer
+/// carrying only a seat and resolved against whichever tab is on top lands in
+/// whatever pane happens to be wearing that number now. Paste a screenshot in
+/// one tab, switch to another before the encode finishes, and the path is typed
+/// into the wrong shell.
+///
+/// Three facts, because it takes three to name a shell:
+///
+/// * the **tab**, by its own id and never by its position, which changes when
+///   tabs are dragged;
+/// * the **seat** inside it;
+/// * the **incarnation** of the shell standing in that seat, because a pane
+///   whose shell has been restarted is a different shell in the same hole and
+///   must not be handed input the reader gave to its predecessor.
+///
+/// A synchronous paste builds one of these and spends it in the same statement,
+/// which costs nothing and means there is one way of naming a paste's
+/// destination rather than two.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PasteTarget {
+    tab: TabId,
+    seat: SeatId,
+    incarnation: u64,
 }
 
 /// The clipboard picture worker's one-slot mailbox, on
@@ -731,34 +790,125 @@ struct ClipboardPictureAnswer {
 /// it.
 #[derive(Debug, Default)]
 struct ClipboardPictureMailbox {
-    generation: u64,
-    slot: Arc<std::sync::Mutex<Option<ClipboardPictureAnswer>>>,
+    inbox: Arc<std::sync::Mutex<ClipboardPictureInbox>>,
+}
+
+/// **The generation and the slot behind one lock** (review X-3).
+///
+/// They were two fields with the generation outside the mutex, and that is a
+/// race rather than an oversight: a slow request A and a fast request B, with B
+/// storing its answer and A then overwriting the slot unconditionally. The
+/// window's next look took A out, rejected it by generation, and B — the paste
+/// the reader actually made — was gone, with its notification finding an empty
+/// slot. Generation checks that only run on the *reading* side cannot see a
+/// write that has already happened.
+///
+/// Under one lock the check moves to where the decision is: a worker may only
+/// put its answer down if it is still the answer being waited for.
+#[derive(Debug, Default)]
+struct ClipboardPictureInbox {
+    /// The generation the window is waiting for. Bumped by every new paste.
+    wanted: u64,
+    landed: Option<ClipboardPictureAnswer>,
 }
 
 impl ClipboardPictureMailbox {
     /// Withdraw whatever the last paste asked for, and hand back the generation
     /// the next answer must carry to be delivered.
+    ///
+    /// The slot is emptied in the same breath: an answer to the paste that has
+    /// just been superseded is not going to be delivered, and leaving it there
+    /// would only give the next look something to reject.
     fn withdraw(&mut self) -> u64 {
-        self.generation += 1;
-        self.generation
+        let mut inbox = self
+            .inbox
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        inbox.wanted += 1;
+        inbox.landed = None;
+        inbox.wanted
     }
 
-    /// The slot itself, for the worker to leave its answer in.
-    fn slot(&self) -> Arc<std::sync::Mutex<Option<ClipboardPictureAnswer>>> {
-        Arc::clone(&self.slot)
+    /// The inbox itself, for the worker to leave its answer in.
+    fn inbox(&self) -> Arc<std::sync::Mutex<ClipboardPictureInbox>> {
+        Arc::clone(&self.inbox)
     }
 
     /// Take whatever landed, and answer with it only if it is still an answer to
-    /// the paste being waited for. A superseded answer is taken out and dropped
-    /// in the same move, so the next wake does not find it standing in front of
-    /// its own.
+    /// the paste being waited for.
     fn take_current(&mut self) -> Option<ClipboardPictureAnswer> {
-        let landed = self
-            .slot
+        let mut inbox = self
+            .inbox
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()?;
-        (landed.generation == self.generation).then_some(landed)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let wanted = inbox.wanted;
+        inbox
+            .landed
+            .take()
+            .filter(|landed| landed.generation == wanted)
+    }
+}
+
+/// **Put an answer down, but only if it is the one being waited for**
+/// (review X-3).
+///
+/// Free rather than a method because the caller is a worker thread holding
+/// nothing but the `Arc` — there is no mailbox on that side, and there must not
+/// be: the whole point is that the generation it is compared against is read
+/// under the same lock the write takes, not carried over from when the job
+/// started.
+fn deliver_clipboard_picture(
+    inbox: &std::sync::Mutex<ClipboardPictureInbox>,
+    answer: ClipboardPictureAnswer,
+) {
+    let mut inbox = inbox
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if inbox.wanted == answer.generation {
+        inbox.landed = Some(answer);
+    }
+}
+
+/// **How many picture encodes may be in flight at once** (review X-3, X-4).
+///
+/// A superseded worker is not cancellable — it is inside a decode — so holding
+/// `Ctrl+V` down starts one per press, each of them allowed a decoded picture
+/// under `clipboard_picture::MAX_DECODED_BYTES`. The ceiling on one job is not a
+/// ceiling on the process without this.
+///
+/// Four rather than one, because superseding a job must not mean waiting for it:
+/// the reader's newest paste is the one that matters and it should start now.
+/// Four of them at the per-job ceiling is a bound this machine can hold.
+const CLIPBOARD_PICTURE_JOBS: usize = 4;
+
+/// The count of them, and the only thing in this file that is process-wide
+/// rather than per-window: the memory they hold is the process's.
+static CLIPBOARD_PICTURE_JOBS_RUNNING: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// **A place in the queue, given up when the worker ends however it ends.**
+///
+/// A guard and not a pair of calls, because the worker can return from several
+/// places and a decrement that is written at each of them is a decrement that
+/// will be forgotten at the next one.
+struct ClipboardPictureJob;
+
+impl ClipboardPictureJob {
+    /// `None` when there are already [`CLIPBOARD_PICTURE_JOBS`] running.
+    fn take() -> Option<Self> {
+        use std::sync::atomic::Ordering;
+        CLIPBOARD_PICTURE_JOBS_RUNNING
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |running| {
+                (running < CLIPBOARD_PICTURE_JOBS).then_some(running + 1)
+            })
+            .ok()
+            .map(|_| Self)
+    }
+}
+
+impl Drop for ClipboardPictureJob {
+    fn drop(&mut self) {
+        CLIPBOARD_PICTURE_JOBS_RUNNING.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
     }
 }
 
@@ -10358,6 +10508,24 @@ struct DpiSnapshot {
 /// seat, and `bt-app` — the one crate allowed to know both — holds the pairing.
 struct LeafSession {
     pty: Option<PtySession>,
+    /// **Which shell this is, told apart from the one that stood here before**
+    /// (review X-1).
+    ///
+    /// A number from a process-wide counter, minted when this struct is built
+    /// and never again. It exists because a `SeatId` names a *hole* in a layout
+    /// and not what is in it: closing a pane's shell and starting another in the
+    /// same seat leaves every id in the window unchanged, so anything that
+    /// promised input to the first shell and delivered it on a later turn would
+    /// put it into the second.
+    ///
+    /// **A counter and not the process id**, because a pane may have no ConPTY
+    /// at all — `BT_PROBE_INPUT` panes and the no-program banner both — and a
+    /// shell that cannot be told apart is the whole defect said again.
+    ///
+    /// It travels with the struct, so tearing a pane out into its own tab or
+    /// merging it into another does *not* change it: those move a running shell,
+    /// and a running shell is the thing this names.
+    incarnation: u64,
     /// **Which window this shell nudges when it has spoken** — see [`LeafWake`].
     ///
     /// Held here rather than only inside the reader thread's closure because it
@@ -34435,6 +34603,7 @@ fn create_leaf_session(
     ));
     let projection = session.new_projection(session.layout_key());
     Ok(LeafSession {
+        incarnation: next_incarnation(),
         // A wake-up is the other end of a reader thread, and there is no thread
         // when there is no ConPTY — see the field.
         wake: pty.is_some().then_some(wake),
@@ -95822,7 +95991,10 @@ impl Runtime<'_> {
         // guarantees no event has moved it since the drop.
         let point = self.dropped_files_point();
         let seat = self.dropped_files_seat(point);
-        let pasted = self.paste_paths_into(seat, paths, "write dropped paths to PTY");
+        let pasted = match self.paste_target(seat) {
+            Some(target) => self.paste_paths_into(target, paths, "write dropped paths to PTY"),
+            None => Ok(()),
+        };
         hang_watch::at(leaving);
         pasted
     }
@@ -97648,6 +97820,13 @@ impl Runtime<'_> {
         let Some(leaf) = self.window.tabs[active].sessions.get(&seat) else {
             return Ok(());
         };
+        // Named now, while the gesture is happening, because the picture rung
+        // below spends it on a later turn (review X-1).
+        let target = PasteTarget {
+            tab: self.window.tabs[active].id,
+            seat,
+            incarnation: leaf.incarnation,
+        };
         let recipient = leaf.paste_recipient.clone();
         let leading_space = input_line_needs_a_space_first(&leaf.session);
         let leaving = hang_watch::enter(hang_watch::Station::ClipboardRead);
@@ -97661,11 +97840,11 @@ impl Runtime<'_> {
         // refusal notice still leaves by the one door every paste's notices leave by
         // — and the line below is then an ordinary paste with nothing in it.
         let offered = std::mem::take(&mut prepared.picture);
-        self.deliver_paste(seat, prepared, "write clipboard paste to PTY")?;
+        self.deliver_paste(target, prepared, "write clipboard paste to PTY")?;
         if offered.is_empty() {
             return Ok(());
         }
-        self.save_clipboard_picture(seat, offered)
+        self.save_clipboard_picture(target, offered)
     }
 
     /// **The same paste, with the paths already in hand** — what a drop onto a
@@ -97693,18 +97872,60 @@ impl Runtime<'_> {
     /// not a drop that could not.
     fn paste_paths_into(
         &mut self,
-        seat: SeatId,
+        target: PasteTarget,
         paths: Vec<PathBuf>,
         context: &'static str,
     ) -> Result<()> {
-        let active = self.window.active_tab;
-        let Some(leaf) = self.window.tabs[active].sessions.get(&seat) else {
+        let Some(index) = self.live_paste_target(target) else {
             return Ok(());
         };
+        let leaf = &self.window.tabs[index].sessions[&target.seat];
         let recipient = leaf.paste_recipient.clone();
         let leading_space = input_line_needs_a_space_first(&leaf.session);
         let prepared = prepare_dropped_paste(paths, &recipient, leading_space);
-        self.deliver_paste(seat, prepared, context)
+        self.deliver_paste(target, prepared, context)
+    }
+
+    /// **Name the shell in one of this window's seats**, as a paste's
+    /// destination (review X-1).
+    ///
+    /// `None` when there is no shell in that seat, which is the same answer
+    /// every paste road already gave for that case. Built at the moment of the
+    /// gesture, so that a road which spends it later spends an address rather
+    /// than a guess.
+    fn paste_target(&self, seat: SeatId) -> Option<PasteTarget> {
+        let tab = self.window.tabs.get(self.window.active_tab)?;
+        let leaf = tab.sessions.get(&seat)?;
+        Some(PasteTarget {
+            tab: tab.id,
+            seat,
+            incarnation: leaf.incarnation,
+        })
+    }
+
+    /// **Is the shell this paste was promised to still the shell on top?**
+    /// (review X-1) — the tab's index if so, and `None` if the paste has
+    /// nowhere left to land.
+    ///
+    /// Three questions and all three are load-bearing. The **tab** is found by
+    /// its id, never by the position it had, because tabs move. The **seat** has
+    /// to still be in it. And the **incarnation** has to match, because a seat
+    /// whose shell was restarted is a hole with a different program in it, and
+    /// typing a path into it is typing into something the reader never addressed.
+    ///
+    /// **And that tab has to be the one on top**, which is the conservative arm
+    /// and is stated rather than implied. The bookkeeping a delivered paste owes
+    /// — the attention answer, the typing note, the frame — is written against
+    /// the active tab throughout this file, so a paste into a background tab
+    /// would be bytes sent with none of it done. A reader who pressed `Ctrl+V`
+    /// and left for another tab before the encode finished gets nothing, which
+    /// is the honest half of that: the file is still on disk, the newest twenty
+    /// are kept, and no shell they were not looking at was typed into.
+    fn live_paste_target(&self, target: PasteTarget) -> Option<usize> {
+        let index = self.window.active_tab;
+        let tab = self.window.tabs.get(index)?;
+        let standing = tab.sessions.get(&target.seat).map(|leaf| leaf.incarnation);
+        paste_target_is_live(tab.id, standing, target).then_some(index)
     }
 
     /// **What a prepared paste does to one named pane**, whichever road
@@ -97716,11 +97937,18 @@ impl Runtime<'_> {
     /// drop that could not reach a shell is not a clipboard that could not.
     fn deliver_paste(
         &mut self,
-        seat: SeatId,
+        target: PasteTarget,
         prepared: PreparedClipboardPaste,
         context: &'static str,
     ) -> Result<()> {
-        let active = self.window.active_tab;
+        // **The address is checked before anything is said**, which is why this
+        // stands above the notice rather than beside the write (review X-1): a
+        // card about a path that could not be spelled for a shell that is no
+        // longer there is a card about nothing.
+        let Some(active) = self.live_paste_target(target) else {
+            return Ok(());
+        };
+        let seat = target.seat;
         if let Some(notice) = prepared.notice {
             self.toast(
                 toast::ToastKind::Error,
@@ -97782,26 +98010,46 @@ impl Runtime<'_> {
     /// waiting for this, with their hand still on the keyboard.
     fn save_clipboard_picture(
         &mut self,
-        seat: SeatId,
+        target: PasteTarget,
         offered: Vec<bt_platform::PictureBytes>,
     ) -> Result<()> {
+        // **A place in the queue before a thread is asked for** (review X-3/X-4).
+        // Superseding a job does not stop it — it is inside a decode — so a held
+        // `Ctrl+V` starts one per press, each entitled to a picture of its own.
+        // The guard is what makes the ceiling on one job a ceiling on the
+        // process; it is given up when the worker ends, however it ends.
+        let Some(place) = ClipboardPictureJob::take() else {
+            eprintln!("clipboard picture workers are all busy; paste ignored");
+            return self.toast(
+                toast::ToastKind::Error,
+                toast::ToastAnchor::Window,
+                None,
+                i18n::Text::PasteClipboardPicture.text().to_owned(),
+            );
+        };
         let generation = self.window.clipboard_picture.withdraw();
-        let slot = self.window.clipboard_picture.slot();
+        let inbox = self.window.clipboard_picture.inbox();
         let proxy = self.app.event_proxy.clone();
         let folder = clipboard_picture::directory();
         let started = bt_platform::spawn_at_priority(
             "clipboard-picture",
             bt_platform::ThreadPriority::Normal,
             move || {
+                // Held for the whole body and dropped with it, on every road out.
+                let _place = place;
                 let result = clipboard_picture::save(&folder, &offered, SystemTime::now());
-                *slot
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                    Some(ClipboardPictureAnswer {
+                // The generation is compared under the inbox's own lock, so an
+                // answer that has been superseded while it was being made is
+                // dropped rather than laid on top of the answer that supersedes
+                // it (review X-3).
+                deliver_clipboard_picture(
+                    &inbox,
+                    ClipboardPictureAnswer {
                         generation,
-                        seat,
+                        target,
                         result,
-                    });
+                    },
+                );
                 // After the answer is in the slot, never before.
                 let _ = proxy.send_event(AppEvent::ClipboardPictureReady);
             },
@@ -97809,7 +98057,7 @@ impl Runtime<'_> {
         if started.is_err() {
             // A machine that will not start a thread is a machine that cannot do
             // this paste, and saying nothing would look like a key that did not
-            // register.
+            // register. The place goes back with the closure that was never run.
             eprintln!("clipboard picture worker could not be started; paste ignored");
             return self.toast(
                 toast::ToastKind::Error,
@@ -97837,10 +98085,17 @@ impl Runtime<'_> {
     /// facts about the line the bytes are about to land on, and that line has had
     /// the whole of the encode to change.
     ///
-    /// A seat that is no longer in the tab on top is dropped in silence, on
-    /// [`Self::adopt_background_picture`]'s footing: it answers a gesture that
-    /// has been superseded, and the file it wrote is swept by the cap the next
-    /// paste applies.
+    /// **The address is the one the gesture was made at** (review X-1), carried
+    /// on the answer rather than re-derived here: a seat is numbered inside its
+    /// tab, every new single-pane tab starts at `SeatId(1)`, and resolving a
+    /// delayed answer against whichever tab is on top put one tab's screenshot
+    /// on another tab's command line. [`Self::live_paste_target`] is where the
+    /// three facts are checked.
+    ///
+    /// A shell that is gone, restarted, or in a tab the reader has left is
+    /// dropped in silence, on [`Self::adopt_background_picture`]'s footing: it
+    /// answers a gesture that has been superseded, and the file it wrote is
+    /// swept by the cap the next paste applies.
     fn adopt_clipboard_picture(&mut self) -> Result<()> {
         let Some(landed) = self.window.clipboard_picture.take_current() else {
             return Ok(());
@@ -97858,7 +98113,7 @@ impl Runtime<'_> {
             }
         };
         self.paste_paths_into(
-            landed.seat,
+            landed.target,
             vec![path],
             "write clipboard picture path to PTY",
         )
@@ -117171,6 +117426,122 @@ mod opening_window_tests {
         assert_eq!(
             attributes.inner_size,
             Some(LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT).into())
+        );
+    }
+}
+
+/// Review X-1 and X-3: the two races a delayed picture paste can lose.
+#[cfg(test)]
+mod clipboard_picture_race_tests {
+    use super::{
+        ClipboardPictureAnswer, ClipboardPictureMailbox, PasteTarget, SeatId, TabId,
+        deliver_clipboard_picture, paste_target_is_live,
+    };
+
+    fn target(tab: u64, seat: u64, incarnation: u64) -> PasteTarget {
+        PasteTarget {
+            tab: TabId(tab),
+            seat: SeatId(seat),
+            incarnation,
+        }
+    }
+
+    fn answer(generation: u64, target: PasteTarget) -> ClipboardPictureAnswer {
+        ClipboardPictureAnswer {
+            generation,
+            target,
+            result: Ok(std::path::PathBuf::from("/tmp/folio/clipboard/shot.png")),
+        }
+    }
+
+    /// RED GATE (review X-1) — **a picture pasted in one tab never lands in
+    /// another**, and never in a shell that has been restarted since.
+    ///
+    /// The defect this closes is not hypothetical arithmetic: seats are numbered
+    /// inside their tab and every new single-pane tab starts at `SeatId(1)`, so
+    /// the *first pane of any tab* wears the number the first pane of every
+    /// other tab wears. Paste a screenshot in tab A, switch to B while the
+    /// encode runs, and a delivery addressed by seat alone and resolved against
+    /// whichever tab is on top typed A's path into B's shell.
+    ///
+    /// MUTATION: drop the tab from the comparison and the second case passes,
+    /// which is the shipped defect exactly; drop the incarnation and the fourth
+    /// does, which is the same mistake one level down.
+    #[test]
+    fn a_delayed_paste_lands_only_in_the_tab_and_the_shell_it_was_promised_to() {
+        let promised = target(7, 1, 42);
+        assert!(
+            paste_target_is_live(TabId(7), Some(42), promised),
+            "the same tab and the same shell is the whole of the happy case"
+        );
+        assert!(
+            !paste_target_is_live(TabId(8), Some(42), promised),
+            "another tab's first pane wears the same seat number and must not take it"
+        );
+        assert!(
+            !paste_target_is_live(TabId(7), None, promised),
+            "a pane that was closed has nothing to be pasted into"
+        );
+        assert!(
+            !paste_target_is_live(TabId(7), Some(43), promised),
+            "a restarted shell is a different program in the same hole"
+        );
+        // And the seat is still part of the address: two panes of one tab are
+        // two destinations, which is what `sessions.get(&target.seat)` answers
+        // and what `standing` is read through.
+        assert_ne!(target(7, 1, 42), target(7, 2, 42));
+    }
+
+    /// RED GATE (review X-3) — **a slow answer that arrives after a fast one
+    /// cannot erase it.**
+    ///
+    /// The shipped order: request A (slow) starts, request B (fast) supersedes
+    /// it and lands, and *then* A finishes and writes the one slot anyway. The
+    /// window's next look took A out, rejected it by generation, and B — the
+    /// paste the reader actually made — was gone with its wake finding nothing.
+    /// Generation checks on the reading side alone cannot see a write that has
+    /// already happened, which is why the check moved under the same lock as the
+    /// write.
+    ///
+    /// MUTATION: store unconditionally in `deliver_clipboard_picture` and the
+    /// last assertion hands back A's path, or nothing at all.
+    #[test]
+    fn a_stale_answer_landing_after_a_newer_one_is_dropped_rather_than_stored() {
+        let mut mailbox = ClipboardPictureMailbox::default();
+        let slow = mailbox.withdraw();
+        let fast = mailbox.withdraw();
+        assert_ne!(slow, fast, "each paste withdraws the last one's question");
+
+        let inbox = mailbox.inbox();
+        // B lands first...
+        deliver_clipboard_picture(&inbox, answer(fast, target(1, 1, 1)));
+        // ...and A, still running, finishes afterwards and tries to put its own
+        // answer down on top of it.
+        deliver_clipboard_picture(&inbox, answer(slow, target(2, 2, 2)));
+
+        let landed = mailbox.take_current().expect("the newest paste survives");
+        assert_eq!(landed.generation, fast);
+        assert_eq!(landed.target, target(1, 1, 1));
+        assert!(
+            mailbox.take_current().is_none(),
+            "and the slot is spent by the one look that took it"
+        );
+
+        // A lone stale answer is not stored either, so a wake it raises finds an
+        // empty slot rather than a paste the reader has already replaced.
+        let stale = ClipboardPictureMailbox::default();
+        let first = {
+            let mut fresh = stale;
+            let first = fresh.withdraw();
+            fresh.withdraw();
+            let inbox = fresh.inbox();
+            deliver_clipboard_picture(&inbox, answer(first, target(3, 3, 3)));
+            assert!(fresh.take_current().is_none());
+            first
+        };
+        assert_eq!(
+            first, 1,
+            "the first question a mailbox asks is generation 1"
         );
     }
 }
@@ -159061,6 +159432,10 @@ mod tests {
             rows: std::num::NonZeroU16::new(4).unwrap(),
         };
         LeafSession {
+            // A fixture is a shell for the purposes of being told apart from the
+            // next one, so it takes a number from the same counter production
+            // takes one from.
+            incarnation: next_incarnation(),
             pty: None,
             // No ConPTY, so no reader thread, so nothing to wake — see the field.
             wake: None,
@@ -170108,8 +170483,12 @@ mod clipboard_path_tests {
                 "the batch has one reader, and it takes the whole of it",
             ),
             (
-                "self.paste_paths_into(seat, paths,",
+                "self.paste_paths_into(target, paths,",
                 "a dropped batch reaches a shell through one door",
+            ),
+            (
+                "self.paste_target(seat)",
+                "and it is addressed — tab, seat and shell — before it is sent (X-1)",
             ),
             (
                 "self.dropped_files_point()",
