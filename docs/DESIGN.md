@@ -85,6 +85,78 @@
 
 drain 按轮询方式逐 pane 读 8 KiB 切片，每 pane 每轮上限 256 KiB 或 8 ms 时间预算。`begin_feed_turn` / `end_feed_turn` 把会话的重绘窗口作用于整个 drain 轮次：clear+home、erase-storm 与 synchronized-update 快照在每个切片之间保护已验证的装饰，轮次结束再统一投影一次后才发布。单独的 `feed_at` 调用仍为单次读取轮次。一个未关闭的 DEC 2026 update 可以跨越轮次：vte 0.15 在 `advance` 调用之间（包括拆分的 ESU）保留其同步缓冲区，在 ESU、150 ms 超时或现有 2 MiB 缓冲区上限时提交。结束一个 feed turn 不强制提交。
 
+**What this window says when a program asks what it is.** Three questions get asked at the top of
+almost every full-screen program, and what is answered to them decides how that program will draw.
+DA1 (`CSI c`) is answered `CSI ? 6 c` — a VT102 — which is the vendored parser's own answer and
+deliberately conservative: it claims a level of service this window certainly meets, and every
+capability worth having is negotiated by its own query rather than inferred from a number here.
+DECRQM for mode 2026 (`CSI ? 2026 $ p`) is answered `CSI ? 2026 ; 2 $ y`, DECRPM's "reset": the mode
+exists here and is currently off, which is the truthful answer and one of the statuses a prober
+accepts. XTVERSION (`CSI > q`, or `CSI > 0 q` with its default parameter spelled out) is answered
+`DCS > | Folio(<version>) ST` — the product's own name and its shipping version, with no commit, no
+build host and no operating system in it, because a program asking this is asking what it may speak
+and not who built it. Other parameters after `CSI >` are different questions and go unanswered, and
+DECSCUSR (`CSI Ps SP q`), which a shell sets on every prompt, is a different sequence entirely.
+
+Answering XTVERSION at all is the point of it. Claude Code 2.1.274 asks XTVERSION first and only
+asks the DECRQM question when something replied; silence here meant this window's correct answer to
+the second question was never heard, and the program drew its frames without a synchronized update.
+The reply is produced from the adapter's boundary parser rather than from the vendored handler,
+because `vte` 0.15 has no arm for `q` with a `>` intermediate — the sequence never reaches `Term`,
+and `vte` is a registry dependency rather than one of this repository's vendored crates. The
+boundary parser is where it belongs regardless: it is a real `Perform`, so the question is parsed —
+a query split across two pty reads is held by the parser's own state, and no run of bytes is matched
+as a substring, so text a program prints or pastes is never mistaken for the question. That is a
+claim about matching and not about what may appear inside a string: an ESC ends an OSC, DCS or APC
+payload in `vte`, so a query written after one in the same read is a query and is answered, which is
+the parser's answer rather than a guess about quoting. It runs once per byte on the real stream and
+never on the resize canonical fork, whose
+replies are thrown away; and the reply joins the same queue DA1 and DSR are drained from, so it goes
+out in order with them. A query inside a synchronized update is answered when that block's bytes
+reach the grid, so the child never hears from inside a frame that is not on the screen yet.
+
+**The order the answers leave in is itself an answer.** A program writes XTVERSION and then DA1 as a
+sentinel — DA1 is answered by every terminal ever made — reads until the sentinel arrives, and
+concludes from "DA1 came first" that this terminal does not answer XTVERSION at all. So answering
+both in the wrong order is the same as answering neither. DA1, DSR and DECRQM are answered by the
+vendored processor as it reaches them and XTVERSION is answered beside it, which means the two have
+to be made to meet: `advance_terminal_bytes` cuts the feed at the end of each completed XTVERSION
+query, advances the processor segment by segment, and pushes that query's answer between the
+segments. The queue is then the stream's own order by construction — in either direction, for any
+interleaving, and wherever a pty read happens to have been cut — rather than one kind of answer
+being moved to the front or held to the back. An answer owed from inside a synchronized block
+becomes due at that block's commit, and the byte that commits it is cut at the same way and for the
+same reason; waiting instead for a moment when no block happens to be open is a different rule and
+an insufficient one, because a program repainting in synchronized frames opens the next block in the
+write that closed the last. A block ends two ways and both are cut at. Its ESU is a sequence, so the
+boundary parser finds it. Its other ending is not a sequence but a rule about size — `vte` gives up
+on a block when what it is holding plus the slice it has just been handed would reach its 2 MiB
+buffer, and then commits the block *and parses the rest of that slice* in the same call — and that
+rule is arithmetic whose two terms are both visible from this side, so the byte the block will end
+on is worked out and the segment is handed over in three pieces: the largest prefix that does not
+reach the rule, the single byte that does, and then the rest, after the answer has left. The commit
+is observed rather than assumed (the vendored buffer is empty afterwards exactly when the block was
+given up on), so if that rule ever stops working out this way the segment simply goes over whole, as
+it did before. A feed that carries no query and owes no answer, which is every feed in ordinary use,
+is one segment, and what it costs is what it cost before: one `advance` over the whole slice, the
+per-byte boundary pass the adapter has always made, and no allocation added by any of this.
+
+**The limit is one block wide.** Nothing outside a synchronized block is ever overtaken — everything
+asked before it is answered before it, everything asked after it is answered after it. What is not
+the stream's order is the inside: the vendored processor buffers the block's bytes and replays them
+all at once, so this side cannot stand between two of them, and the block's own replies leave ahead
+of the XTVERSION answer however the two were interleaved within the block. Cutting the replay the
+way the feed is cut would mean changing `vte`, a registry dependency rather than one of this
+repository's vendored crates, and no rule of thumb applied on this side would be the stream's order
+— it would only look like it. A question the block asked that the byte it ended on finished, a DA1
+whose `CSI` was inside the frame, is one of the block's own and is answered with them, ahead of the
+answer the block owed. What holds in every case is what a child can act on: exactly one answer per
+question, never from inside a frame that is not on the screen yet. And a reset does not un-ask a
+question — a
+RIS arriving while the block still buffers clears the screen and the modes, and the answer owed from
+inside the block still goes out at the commit, because the child is blocked on an answer it asked
+for before the reset.
+
 - **冻结历史有两个限额，先到的那个说话（用户报告，2026-08-24，已修）**：每个 pane 的冻结转录除读者选的 `Scrollback` 行数外，还受一个**由该行数推导**的内存顶——`scrollback_lines × FROZEN_BYTES_PER_LINE`（2 KiB），出厂 100,000 行即 195.3 MiB。超出时从最老一端按行淘汰，走的正是行数溢出那一条 `evict_oldest`（**不造第二套淘汰**），且**永不淘汰最新那一行**。设置面不因此多一行：行数是读者的答案，字节是工程的护栏。理由、算术与红证见 §7.1.6g ③。
 - **每一次 ConPTY 通知都过同一扇 200 ms 静默门，包括没拿键盘的那些 pane（窗口线程无界调用清缴，2026-08-24，已修）**：焦点叶从来就有 `WINDOW_RESIZE_QUIET` 合流，兄弟叶一个都没有——`resize_leaves_to_layout` 对每个非焦点 pane、每个 `Resized` 直接调 `ResizePseudoConsole`，不合并。四分屏拖一秒窗 = 3×60 次同步进 conhost，每一次都重排子进程的屏幕缓冲、作废一次 PSReadLine 锚点，全发生在窗口线程上；「兄弟没有拖拽可合流」这句旧注释根本不成立，被拖的是**窗口**，它一次移动每个 pane 的矩形。**修法**：`schedule_leaf_grid_change` 是每个叶唯一的入口（焦点叶经 `schedule_grid_change` 走同一个），`plan_grid_change` 照旧一句话分两半，`flush_pending_pty_resize` 从「只问拿键盘那个叶」改成走每 tab 每叶、取最早的醒来时刻——队列本来就长在 `LeafSession` 上，缺的只是有人去抽。**被去抖的是通知，不是画面**（用户裁决 2026-08-06「实时放行 resize」）：`leaf.grid` 当轮就动，玻璃跟着手；`conpty_grid` 到静默边界才动。红证：`a_pane_without_the_keyboard_coalesces_a_drag_into_one_conpty_notification`——把入口换回立即提交，六十个事件里第一个就把 `conpty_grid` 推到 41 列（应当仍是 40），结构钉 `the_only_road_from_a_solved_rectangle_to_conpty_is_the_quiet_window` 同时红。**明账**：这条封的是**频率**不是**时长**——`ResizePseudoConsole` 本身仍是窗口线程上一次同步进 conhost 的往返，现在每 pane 每 200 ms 至多一次；它自己有没有上限还没有人量过，要清就得像写侧那样把它也搬到线程上，那是另一张单子。
 - **写侧也要有界，而且界在环上、等在线程上（窗口线程无界调用清缴，2026-08-24，已修）**：读侧一直是「1 MiB 环 + 读线程满则阻塞」，写侧却**连线程都没有**——`PtySession::write` 就是往 ConPTY 输入管道上 `write_all` + `flush`，而每一次按键、鼠标上报、IME 提交、终端应答（DA/DSR）、粘贴、PSReadLine 重锚和弦，全都是窗口线程直接调它。管道满时这一句就阻塞，而管道满恰恰是「conhost 不抽」的时候：洪水 pane 让我们的读线程睡在满 `OutputRing` 上等窗口线程来抽，conhost 的输入泵等的是它自己输出线程持着的 console 锁，而那个输出线程正堵在我们的输出管道上——**这是一个圈，圈里没有界**。**修法**：加 `bt_pty::InputRing`（读侧 `OutputRing` 的镜像）+ 每会话一条写线程，等改由写线程去等；`PtySession::write` 改成 `&self`，只进一次锁就返回。两条边界规矩：①**一次写要么整笔进要么一个字节都不进**（`PtyError::InputRefused` 报出 offered/queued/capacity），②**给一笔留门、给累积设顶**——队列为空时任意大小的单笔都收（一次粘贴是读者明确要的一件事，剪贴板再大也不许被切成半条命令行），顶 `PTY_INPUT_RING_BYTES` = 1 MiB 只挡**累积**（比如程序自己刷 `CSI 6 n` 又不读回答）。窗口线程这侧收敛到唯一入口 `write_pty_input`：**拒绝不是本窗的错误**，`?` 出去会走到 `App::fail`，为一个卡死的 shell 陪葬整扇窗，所以它就地报告、窗口照常。粘贴不再切 16 KiB——切块的旧理由（让同步写分段承压）随着等待搬走而消失，而切块反倒给了子进程在两块之间停读的机会。红证：`a_write_returns_to_the_caller_even_though_nothing_is_taking_it`——把 `try_push` 的拒绝换回条件变量 `wait`，180 秒天花板到点、第五笔写再没回来。
