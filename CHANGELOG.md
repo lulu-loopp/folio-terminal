@@ -6,6 +6,24 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Fixed
+
+- **Typeset formulas no longer flash back to their LaTeX for a moment while you
+  scroll inside a program that repaints the whole screen.** It was most of the
+  time on a Mac and now and then on Windows, and the reason for the difference
+  turns out to be nothing about the two terminals: macOS hands a program's
+  output over 1,024 bytes at a time, so a repaint of a few kilobytes reaches
+  Folio in two or three pieces, and Folio was making up its mind about where
+  each formula had moved to after the first piece — with half the old screen and
+  half the new one in front of it, and a formula's own text either on the screen
+  twice or not yet at all. It now waits for the program to say it has finished
+  redrawing, which every full-screen program says, either with a synchronised
+  update or by hiding the cursor while it draws and showing it again at the end;
+  until then the picture you were already looking at stays on the glass. A
+  formula that really did change still changes, one whose text has left the
+  screen still goes, and a program that says it is redrawing and then stops
+  talking is waited on for a tenth of a second and no longer.
+
 ## 0.4.2-preview — 2026-09-17
 
 ### Added
