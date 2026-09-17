@@ -112338,7 +112338,10 @@ impl FolioApp {
                             // On the window thread and on the way out, so it goes to
                             // the log by its own road (X-7) rather than queueing
                             // behind a stalled console.
-                            diagnostics::note(&format!("{APP_NAME} did not quit: {}", refusal.message()));
+                            diagnostics::note(&format!(
+                                "{APP_NAME} did not quit: {}",
+                                refusal.message()
+                            ));
                             // Said on every window, because the failure is the
                             // process's and the reader is looking at one of them.
                             self.for_each_window(|runtime| {
