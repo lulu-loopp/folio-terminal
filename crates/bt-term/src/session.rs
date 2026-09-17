@@ -3040,13 +3040,29 @@ impl DualPlaneSession {
     ///
     /// Said before every segment rather than only when it changes, because the cost is a field
     /// store and the failure of forgetting is a prompt wearing a retired command's eligibility.
+    ///
+    /// **Both screens are stated, because a segment can change screens inside itself.** A marker
+    /// ends a segment; `ESC[?1049l` does not, and it is how a pager or an editor hands the screen
+    /// back in the middle of the command that ran it. The answer for the screen that comes back is
+    /// this session's answer *for that screen* — the command is still running, so the primary
+    /// screen's output after the swap is that command's output — and the two values are already
+    /// kept apart here, one phase per screen. The terminal holds them the same way and takes up
+    /// the one belonging to the screen that is showing; nothing has to be restated at the swap,
+    /// which is the only form of this rule that cannot miss a road into one.
     fn state_write_provenance(&mut self) {
-        let is_command_output = self.shell_integration_is_authoritative(self.live_screen)
+        self.terminal.set_write_provenance(
+            self.screen_is_inside_command_output(ScreenId::Primary),
+            self.screen_is_inside_command_output(ScreenId::Alternate),
+        );
+    }
+
+    /// Is this screen, right now, inside an output region that a shell this session trusts opened?
+    fn screen_is_inside_command_output(&self, screen: ScreenId) -> bool {
+        self.shell_integration_is_authoritative(screen)
             && matches!(
-                self.shell_phases.get(&self.live_screen),
+                self.shell_phases.get(&screen),
                 Some(ShellIntegrationPhase::Output(_))
-            );
-        self.terminal.set_write_provenance(is_command_output);
+            )
     }
 
     fn settle_feed_turn(&mut self, turn: FeedTurn) {
@@ -31606,6 +31622,203 @@ mod tests {
         assert!(
             !text.contains('$'),
             "the rendered run's source delimiters must be cleared from the grid: {text:?}"
+        );
+    }
+
+    /// Does the one row carrying this text hold any cell no command's output claims?
+    fn row_carries_unclaimed_text(session: &DualPlaneSession, needle: &str) -> bool {
+        let inputs = session.live_detection_context();
+        let rows = (0..session.live_rows.len() as u32)
+            .filter(|row| {
+                live_grid_input(&inputs, *row).is_some_and(|input| input.text.contains(needle))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rows.len(),
+            1,
+            "the fixture must put {needle:?} on exactly one grid row: {:?}",
+            inputs.iter().map(|input| &input.text).collect::<Vec<_>>()
+        );
+        session
+            .terminal
+            .visible_row(rows[0])
+            .expect("the fixture's row is on the grid")
+            .cells
+            .iter()
+            .any(bt_transcript::CapturedCell::carries_unclaimed_text)
+    }
+
+    /// The whole of one command that runs a full-screen program: output, the swap out to the
+    /// program's own canvas, and output again after the program hands the screen back.
+    ///
+    /// ASCII throughout, so that every byte index in it is a place the stream may be cut.
+    fn pager_command_stream() -> String {
+        format!(
+            "{PROMPT_A}PS> {PROMPT_B}less{OUTPUT_C}\r\nfirst $x^2$ here\r\n\x1b[?1049h\
+             during $y^2$ here\r\n\x1b[?1049lafter $z^2$ here\r\n{OUTPUT_D}"
+        )
+    }
+
+    /// **A screen swap is a change of provenance, and it happens in the middle of a segment**
+    /// (review 2026-09-17, F3 — a false refusal in ordinary use).
+    ///
+    /// A segment ends at every shell-integration marker, so no *phase* can change inside one. A
+    /// screen can: `ESC[?1049l` is how a pager or an editor hands the screen back, and it carries
+    /// no marker, because the command that ran the program has not finished. One provenance value
+    /// therefore spanned the swap — the alternate screen's, where this session holds no output
+    /// state of its own — and everything the command printed after the program exited landed on
+    /// cells that claimed nothing. Inline formulas in a `git log` paged by `less`, in a build's
+    /// summary after `$EDITOR` closed: all of them stayed as source, for as long as this rule was
+    /// stated once per segment.
+    ///
+    /// The answer is kept per screen on both sides — one phase per screen here, one provenance per
+    /// screen in the terminal — so the swap exchanges them with the grids and nothing has to be
+    /// restated at a boundary somebody has to remember to find.
+    #[test]
+    fn output_printed_after_a_full_screen_program_exits_is_still_the_commands() {
+        let stream = pager_command_stream();
+        let bytes = stream.as_bytes();
+        // Every cut, including the two that are no cut at all: the defect was first seen with the
+        // swap and the output after it arriving in feeds of their own, and a rule about *when* an
+        // answer is stated has to hold however the reads happen to fall.
+        for split in 0..=bytes.len() {
+            let started = Instant::now();
+            let mut session = DualPlaneSession::new(nz(60), nz(8));
+            seat_inline_metrics(&mut session);
+            session.feed_at(&bytes[..split], started).unwrap();
+            session.feed_at(&bytes[split..], started).unwrap();
+
+            assert_eq!(
+                grid_site_of(&session, "first"),
+                InlineMathSite::CommandOutput,
+                "split={split}: output printed before the program started is the command's"
+            );
+            assert_eq!(
+                grid_site_of(&session, "after"),
+                InlineMathSite::CommandOutput,
+                "split={split}: the command is still running, so what it prints on the screen it \
+                 has just been handed back is still its output"
+            );
+            assert!(
+                !row_carries_unclaimed_text(&session, "after"),
+                "split={split}: and the claim is on the cells themselves"
+            );
+        }
+    }
+
+    /// The same command, stopped while the program still owns the screen: its canvas is eligible by
+    /// the alternate-screen policy and by nothing else, and the claim is not on those cells.
+    #[test]
+    fn the_canvas_a_program_owns_carries_no_command_of_its_own() {
+        let started = Instant::now();
+        let stream = pager_command_stream();
+        let head = stream
+            .split_once("\x1b[?1049l")
+            .expect("the fixture leaves the alternate screen exactly once")
+            .0;
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut session);
+        session.feed_at(head.as_bytes(), started).unwrap();
+
+        assert_eq!(
+            grid_site_of(&session, "during"),
+            InlineMathSite::AltScreenContent,
+            "a surface a full-screen program owns is eligible structurally, which this change \
+             leaves exactly where it found it"
+        );
+        assert!(
+            row_carries_unclaimed_text(&session, "during"),
+            "and it is eligible *without* the claim: this session knows nothing about who printed \
+             on a canvas it was told nothing about"
+        );
+    }
+
+    /// A program that crashes without restoring the screen, and a shell that prints its next
+    /// prompt onto the canvas the program left behind.
+    ///
+    /// The tempting reading of F3 is that the command is still running, so everything is its
+    /// output until `D` — and under that reading the prompt below, and whatever the reader then
+    /// types at it, would carry the command's claim. The claim is per screen precisely because it
+    /// must not: what this session was told about the primary screen says nothing about a canvas
+    /// it was never told about. The row stays eligible by the alternate-screen policy, which is a
+    /// separate and structural answer, and the claim stays off it.
+    #[test]
+    fn a_prompt_that_returns_on_a_crashed_programs_canvas_claims_nothing() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut session);
+        session
+            .feed_at(
+                format!(
+                    "{PROMPT_A}PS> {PROMPT_B}tui{OUTPUT_C}\r\n\x1b[?1049h{PROMPT_A}PS> \
+                     {PROMPT_B}energy $x^2$ here"
+                )
+                .as_bytes(),
+                started,
+            )
+            .unwrap();
+
+        assert_eq!(
+            grid_site_of(&session, "energy"),
+            InlineMathSite::AltScreenContent,
+            "the canvas is eligible by policy, and the command's own region cannot reach it"
+        );
+        assert!(
+            row_carries_unclaimed_text(&session, "energy"),
+            "a command running on the primary screen claims nothing a shell writes on the \
+             alternate one"
+        );
+    }
+
+    /// Nested swaps, and the two modes this emulator does not implement.
+    ///
+    /// `1049` set twice is one swap and `1049` unset twice is one return, so the answer has to
+    /// come back on the first of the two — a count kept anywhere else would need a stack. `47` and
+    /// `1047` reach the unknown-mode branch in this vendored terminal (upstream implements neither)
+    /// and therefore move no screen at all, which is worth pinning: a rule that split the stream on
+    /// the bytes of a mode sequence rather than on the swap itself would answer differently here.
+    #[test]
+    fn nested_and_unimplemented_screen_modes_leave_the_claim_where_the_screen_is() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut session);
+        session
+            .feed_at(
+                format!(
+                    "{PROMPT_A}PS> {PROMPT_B}pager{OUTPUT_C}\r\n\x1b[?1049h\x1b[?1049h\
+                     \x1b[?1049l\x1b[?1049lafter $z^2$ here\r\n{OUTPUT_D}"
+                )
+                .as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert_eq!(
+            grid_site_of(&session, "after"),
+            InlineMathSite::CommandOutput,
+            "the second set and the second unset are no-ops, and the answer came back with the \
+             first unset"
+        );
+
+        let mut plain = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut plain);
+        plain
+            .feed_at(
+                format!(
+                    "{PROMPT_A}PS> {PROMPT_B}pager{OUTPUT_C}\r\n\x1b[?47h\x1b[?1047h\
+                     still $z^2$ here\r\n{OUTPUT_D}"
+                )
+                .as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert!(
+            !plain.terminal.modes().alternate_screen,
+            "the fixture must really exercise modes this terminal does not implement"
+        );
+        assert_eq!(
+            grid_site_of(&plain, "still"),
+            InlineMathSite::CommandOutput,
+            "a mode that swaps no screen changes no answer"
         );
     }
 

@@ -125,8 +125,12 @@ file produces the vendored file byte for byte. Upstream formats with its own
   received printable input since the last drain — distinct from render damage,
   which is about what must be repainted.
 - **Write provenance.** `set_write_provenance` says whether the bytes fed from
-  here on are a shell command's output, and every cell whose text the terminal
-  *replaces* from then on carries the answer as `Flags::COMMAND_OUTPUT_WRITE`
+  here on are a shell command's output — once for each screen, because a screen
+  swap happens mid-stream and is itself a change of answer: `swap_alt` and a
+  reset exchange the two along with the grids they belong to, and every print
+  reads the one belonging to the screen that is showing. Every cell whose text
+  the terminal *replaces* from then on carries that answer as
+  `Flags::COMMAND_OUTPUT_WRITE`
   (see that flag's own documentation). It is there because the answer is a fact
   about a *write* and the cell is the thing that moves: a scroll, a scroll
   region, `IL`/`DL`, `RI`, `CSI S`/`T`, a resize reflow that re-cuts a row and an

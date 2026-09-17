@@ -353,6 +353,15 @@ fn character_tail(text: &str) -> char {
         .expect("grapheme state is never empty")
 }
 
+/// One screen's write provenance as the flags a print stamps: the claim, or nothing at all.
+fn write_provenance_flags(is_command_output: bool) -> Flags {
+    if is_command_output {
+        Flags::COMMAND_OUTPUT_WRITE
+    } else {
+        Flags::empty()
+    }
+}
+
 impl TermDamageState {
     fn new(num_cols: usize, num_lines: usize) -> Self {
         let lines = (0..num_lines)
@@ -443,7 +452,21 @@ pub struct Term<T> {
     /// It starts empty and stays empty for a caller that never speaks, so upstream writes exactly
     /// the cells it always wrote — and, because the flag is the *claim* rather than its denial,
     /// that silence reads as "claimed by nobody" rather than as "claimed by a command".
+    ///
+    /// This is the answer for the screen that is **showing**; the one below is the answer waiting
+    /// for the other screen. Every print reads this field and nothing else, so a swap costs one
+    /// exchange and a printed cell costs nothing.
     write_provenance: Flags,
+
+    /// The same answer, for the screen that is not showing.
+    ///
+    /// **A screen swap is a change of provenance, and it happens in the middle of a segment.** The
+    /// caller states the answer for both screens before it feeds, because it knows both and the
+    /// emulator knows which screen is showing; `swap_alt` and a reset then exchange the two along
+    /// with the grids they belong to. Without it one answer spanned the swap, and the primary
+    /// screen's output after a full-screen program exited — still the same command's output, with
+    /// no marker between — landed on cells that claimed nothing.
+    inactive_write_provenance: Flags,
 
     /// A pending-wrap cursor position just returned by CPR.
     ///
@@ -589,18 +612,30 @@ impl<T> Term<T> {
         fork
     }
 
-    /// Say whether the writes that follow are a shell command's output.
+    /// Say whether the writes that follow are a shell command's output — **once per screen**.
     ///
-    /// Stamped onto every cell the terminal prints from here on, as [`Flags::NON_OUTPUT_WRITE`]
-    /// when they are *not* (see that flag). The caller is expected to state it before every segment
-    /// it feeds rather than only when it changes: the emulator has no way to know, and the value
-    /// that leaves a cell unclaimed is the safe one to hold by default.
-    pub fn set_write_provenance(&mut self, is_command_output: bool) {
-        self.write_provenance = if is_command_output {
-            Flags::COMMAND_OUTPUT_WRITE
+    /// Stamped onto every cell the terminal prints from here on, as
+    /// [`Flags::COMMAND_OUTPUT_WRITE`] when they are (see that flag). The caller is expected to
+    /// state it before every segment it feeds rather than only when it changes: the emulator has no
+    /// way to know, and the value that leaves a cell unclaimed is the safe one to hold by default.
+    ///
+    /// **Both screens, because one segment can cross between them.** `ESC[?1049l` inside a
+    /// command's output hands the screen back mid-segment, and the answer for the screen that comes
+    /// back is a different answer — the shell's own bookkeeping is kept per screen for exactly that
+    /// reason. The caller has both in hand and the emulator knows which screen is showing, so the
+    /// pair is stated here and [`Self::swap_alt`] exchanges them with the grids.
+    pub fn set_write_provenance(
+        &mut self,
+        primary_is_command_output: bool,
+        alternate_is_command_output: bool,
+    ) {
+        let (showing, waiting) = if self.mode.contains(TermMode::ALT_SCREEN) {
+            (alternate_is_command_output, primary_is_command_output)
         } else {
-            Flags::empty()
+            (primary_is_command_output, alternate_is_command_output)
         };
+        self.write_provenance = write_provenance_flags(showing);
+        self.inactive_write_provenance = write_provenance_flags(waiting);
     }
 
     /// Drain rows which received printable input, preserving the active screen at write time.
@@ -797,6 +832,7 @@ impl<T> Term<T> {
             grapheme: Default::default(),
             reported_pending_wrap: None,
             write_provenance: Flags::empty(),
+            inactive_write_provenance: Flags::empty(),
         }
     }
 
@@ -1164,6 +1200,14 @@ impl<T> Term<T> {
         self.set_keyboard_mode(keyboard_mode, KeyboardModesApplyBehavior::Replace);
 
         mem::swap(&mut self.grid, &mut self.inactive_grid);
+        // The provenance belongs to the screen, not to the segment: what a command's output is on
+        // the primary screen is not what it is on the canvas a full-screen program owns, and a
+        // swap lands in the middle of a segment with no marker to restate it. See
+        // `inactive_write_provenance`.
+        mem::swap(
+            &mut self.write_provenance,
+            &mut self.inactive_write_provenance,
+        );
         self.mode ^= TermMode::ALT_SCREEN;
         if let Some(hook) = &self.transcript_hook {
             hook(if entering {
@@ -2855,6 +2899,12 @@ impl<T: EventListener> Handler for Term<T> {
 
         if self.mode.contains(TermMode::ALT_SCREEN) {
             mem::swap(&mut self.grid, &mut self.inactive_grid);
+            // RIS puts the primary screen back, so the answer for the primary screen comes back
+            // with it — the same exchange `swap_alt` makes, for the same reason.
+            mem::swap(
+                &mut self.write_provenance,
+                &mut self.inactive_write_provenance,
+            );
         }
         self.active_charset = Default::default();
         self.cursor_style = None;
