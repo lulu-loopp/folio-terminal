@@ -421,6 +421,75 @@ fn repaint_with_opener_above_row_zero_keeps_visible_formula_suffix_rendered() {
     assert_eq!(session.live_detection_count(), detections);
 }
 
+/// The screen this was reported from, end to end. A multi-line `$$` block has scrolled until only
+/// its `\end{aligned}` and its closing `$$` are left on the alternate screen, the window's first row
+/// is the program's own echoed prompt — a line of Chinese which happens to mention `$$` — and a
+/// second block sits a few rows below it.
+///
+/// Two things are asserted here and they are halves of one rule. The block below must typeset: the
+/// orphan `$$` above it is a CLOSER, and reading it as a fresh opener swallowed the heading and this
+/// block's own opening `$$` as body, so the block was never paired at all. And the clipped tail must
+/// be all of one thing. A block whose opener this window never read is not a block this window owns,
+/// so every row of the tail stays source — where the reported screen drew `\begin{aligned}…
+/// \end{aligned}` as a picture from a strict SUB-RANGE of the block and left the block's own closing
+/// `$$` underneath it as text. Half a block, and the half that was drawn was not one.
+#[test]
+fn a_clipped_block_tail_stays_whole_and_the_block_below_it_typesets() {
+    let start = std::time::Instant::now();
+    let mut session = DualPlaneSession::new(nz(60), nz(10));
+    let mut projection = session.new_projection(session.layout_key());
+    let mut oracle = FormulaFlashOracle::default();
+
+    let rows = [
+        "❯ 帮我把这几个方程排成公式,用 $$ 包起来",
+        r"\nabla \cdot \mathbf{E} &= \rho / \varepsilon_0 \\",
+        r"\nabla \cdot \mathbf{B} &= 0",
+        r"\end{aligned}",
+        "$$",
+        "",
+        "7. 薛定谔方程",
+        r"$$i\hbar \frac{\partial \Psi}{\partial t} =",
+        r"\hat{H}\Psi$$",
+        "prompt> ",
+    ];
+    let mut first = b"\x1b[?1049h".to_vec();
+    first.extend_from_slice(&synchronized_repaint(&rows));
+    session.feed_at(&first, start).unwrap();
+    observe_frame(&mut session, &mut projection, &mut oracle);
+    session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+    complete_live_math(&mut session);
+
+    session.refresh_projection(&mut projection);
+    let frame = session.viewport_frame(&mut projection).unwrap();
+    let observation = oracle.observe(&frame);
+    assert!(
+        observation
+            .rendered_sources
+            .iter()
+            .any(|source| source.contains(r"\hat{H}\Psi")),
+        "the block below the clipped one is a block and typesets: {observation:?}"
+    );
+    // `Mixed` and not `Rendered` is the honest state for this screen and the point of the fix: one
+    // block is a picture, and the clipped tail above it is source — all of it, delimiter and body
+    // together.
+    assert_eq!(observation.state, FormulaFrameState::Mixed);
+    let screen = (0..rows.len())
+        .map(|row| frame_row_text(&frame, row))
+        .collect::<Vec<_>>();
+    for row in 1..=4 {
+        assert!(
+            !frame_row_text(&frame, row).trim().is_empty(),
+            "the clipped tail is presented in halves: row {row} is under a picture while the rest \
+             of the tail is text: {screen:?}"
+        );
+    }
+    assert!(
+        frame_row_text(&frame, 8).trim().is_empty(),
+        "the block below the clip is covered by its own picture: {screen:?}"
+    );
+    assert!(!oracle.flash_detected(), "sequence={:?}", oracle.frames());
+}
+
 #[test]
 fn repaint_with_closer_below_last_row_keeps_visible_formula_prefix_rendered() {
     let start = std::time::Instant::now();
