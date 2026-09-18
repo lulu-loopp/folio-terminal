@@ -6,39 +6,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
-### Fixed
-
-- **A formula scrolled partly off the top of a full-screen program's screen no
-  longer swallows the formula below it, and what is left of it on screen is left
-  as text.** When a program like Claude Code moves its output up and a formula's
-  opening `$$` goes off the top of the window, the `$$` still on screen is that
-  formula's closing one. Folio used to read it as the opening of something new,
-  which swallowed everything down as far as the next formula's own `$$` — so the
-  next formula stayed as plain text however long you looked at it, and where the
-  scrolled formula's `\begin{aligned}` was still visible, that much of it was
-  typeset on its own: a picture of part of a formula with the formula's last line
-  sitting underneath it as text. The formula below is now typeset, and the rows
-  above the stray `$$` that belong to no complete formula are left as the text
-  they are. An environment that is whole on the screen is still typeset on its
-  own, as it always was, and the `$$` under it stays one line of text: nothing
-  on screen says what that `$$` once enclosed. A formula Folio has already
-  typeset keeps its picture when its beginning scrolls off the top — that has
-  not changed. It is a formula Folio meets for the first time with its
-  beginning already gone that stays text: there is nothing on screen that says
-  what the whole of it was, so it waits until you scroll its beginning back into
-  view.
-- **A file name printed right before an opening bracket is recognised as a file
-  link again.** An agent that wrote `docs/report.html（commit …）` — the name, a
-  bracket, no space in between — left the name dark: Folio read the bracket and
-  everything behind it as part of the name and then found no such file. A
-  bracket now ends a name from either half of its pair, in every script one is
-  written in (`(`, `[`, `{`, `（`, `「`, `【`, `《` and the rest), exactly as the
-  closing half always did. Nothing a name could carry is lost by it: a file
-  whose name really holds a bracket was already unreadable without quotes,
-  because the closing half ends the name too — and quoting a path still opens
-  every name there is.
-
-## 0.4.2-preview — 2026-09-17
+## 0.4.2-preview — 2026-09-18
 
 ### Added
 
@@ -105,6 +73,36 @@ All notable changes to Folio are recorded here. The format follows
   people actually notice live; a run started without it is unchanged.
 
 ### Fixed
+
+- **A formula scrolled partly off the top of a full-screen program's screen no
+  longer swallows the formula below it, and what is left of it on screen is left
+  as text.** When a program like Claude Code moves its output up and a formula's
+  opening `$$` goes off the top of the window, the `$$` still on screen is that
+  formula's closing one. Folio used to read it as the opening of something new,
+  which swallowed everything down as far as the next formula's own `$$` — so the
+  next formula stayed as plain text however long you looked at it, and where the
+  scrolled formula's `\begin{aligned}` was still visible, that much of it was
+  typeset on its own: a picture of part of a formula with the formula's last line
+  sitting underneath it as text. The formula below is now typeset, and the rows
+  above the stray `$$` that belong to no complete formula are left as the text
+  they are. An environment that is whole on the screen is still typeset on its
+  own, as it always was, and the `$$` under it stays one line of text: nothing
+  on screen says what that `$$` once enclosed. A formula Folio has already
+  typeset keeps its picture when its beginning scrolls off the top — that has
+  not changed. It is a formula Folio meets for the first time with its
+  beginning already gone that stays text: there is nothing on screen that says
+  what the whole of it was, so it waits until you scroll its beginning back into
+  view.
+- **A file name printed right before an opening bracket is recognised as a file
+  link again.** An agent that wrote `docs/report.html（commit …）` — the name, a
+  bracket, no space in between — left the name dark: Folio read the bracket and
+  everything behind it as part of the name and then found no such file. A
+  bracket now ends a name from either half of its pair, in every script one is
+  written in (`(`, `[`, `{`, `（`, `「`, `【`, `《` and the rest), exactly as the
+  closing half always did. Nothing a name could carry is lost by it: a file
+  whose name really holds a bracket was already unreadable without quotes,
+  because the closing half ends the name too — and quoting a path still opens
+  every name there is.
 
 - **A formula no longer flashes back to its source while you scroll inside a
   full-screen program.** On macOS the system hands a terminal a program's

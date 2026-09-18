@@ -122,4 +122,4 @@ shasum -c SHA256SUMS-macos.txt
 
 </details>
 
-完整列表见 [CHANGELOG.md](https://github.com/lulu-loopp/folio-terminal/blob/v0.4.2-preview/CHANGELOG.md#042-preview--2026-09-17) · [v0.4.1-preview…v0.4.2-preview](https://github.com/lulu-loopp/folio-terminal/compare/v0.4.1-preview...v0.4.2-preview)
+完整列表见 [CHANGELOG.md](https://github.com/lulu-loopp/folio-terminal/blob/v0.4.2-preview/CHANGELOG.md#042-preview--2026-09-18) · [v0.4.1-preview…v0.4.2-preview](https://github.com/lulu-loopp/folio-terminal/compare/v0.4.1-preview...v0.4.2-preview)
