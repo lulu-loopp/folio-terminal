@@ -8378,25 +8378,42 @@ impl DualPlaneSession {
         // which is the halting the change of face was reported for and which left every other
         // formula in the window queued behind it.
         //
+        // **And a block whose render *failed* owns its rows exactly as one that succeeded does.**
+        // `record.fail` is terminal on the owner — `Failed`, undone only by the three revisions
+        // below — but the closing row was handed back armed whatever the render came back with,
+        // and a failed block draws no artifact at all, so *every* one of its rows is terminal text
+        // and visible on its own id. That is the same loop in the failure path, and it buys a
+        // whole render attempt per frame that fails the same way every time. Nothing else holds
+        // it: `schedule_retry_artifacts` answers queue pressure and knows nothing about failures,
+        // and there is no retry budget anywhere.
+        //
         // **Asked of the picture in hand and of the record together**, because the two answer
         // different halves. The frame says which transcript rows a block is drawn over — including
         // a block whose opener has scrolled off the top, which no walk back through the records
         // could bound — and the record says whether that drawing is still the current answer.
-        // `Ready` is exactly that: a layout change, a source change and a detector change all put
-        // the owner back to `None`, and on that frame its closing row arms again and proves the
-        // block afresh, which is the liveness this refusal must not cost.
+        // `Ready` and `Failed` are exactly that: both are computed from one source at one layout
+        // key and one detector revision, and a change to any of the three puts the owner back to
+        // `None`, so on that frame its closing row arms again and the block is proven — or tried —
+        // afresh. That liveness is what this refusal must not cost: a formula that could not be
+        // compiled at one width is owed a look at the next one.
+        let answer_is_current = |start: &TranscriptId| {
+            self.decorations.get(start).is_some_and(|owner| {
+                matches!(
+                    owner.decoration,
+                    DecorationLifecycle::Ready | DecorationLifecycle::Failed
+                )
+            })
+        };
         let owned_rows: Vec<(TranscriptId, TranscriptId)> = frame
             .math_blocks
             .iter()
-            .filter_map(|placement| match &placement.anchor {
+            .map(|placement| &placement.anchor)
+            .chain(frame.math_failures.iter().map(|failure| &failure.anchor))
+            .filter_map(|anchor| match anchor {
                 MathBlockAnchor::History { start, end, .. } if end > start => Some((*start, *end)),
                 _ => None,
             })
-            .filter(|(start, _)| {
-                self.decorations
-                    .get(start)
-                    .is_some_and(|owner| owner.decoration == DecorationLifecycle::Ready)
-            })
+            .filter(|(start, _)| answer_is_current(start))
             .collect();
         let is_body_of_a_proven_block = |id: TranscriptId| {
             owned_rows
@@ -16700,6 +16717,112 @@ mod tests {
                     && record.show_source
                     && record.artifact.is_some()),
             "and the block still holds the picture it will turn back to"
+        );
+    }
+
+    /// RED — **a block whose render failed is asked once per revision, not once per frame**
+    /// (owner's report 2026-09-18, the same disease in the failure path).
+    ///
+    /// `record.fail` is terminal on the *owner* — `DecorationLifecycle::Failed`, and only a
+    /// layout, source or detector change undoes it — but the row that proves a block is its
+    /// closing delimiter, and that row is put back to `DecorationLifecycle::None` by
+    /// `apply_worker_completion` whatever the render came back with. A failed block draws no
+    /// artifact, so all of its rows are terminal text and every one of them is a visible id of its
+    /// own: the closing row re-armed on every frame and bought another whole scan and another
+    /// whole render attempt that failed the same way, for ever. There is no retry budget anywhere
+    /// to hold it — `schedule_retry_artifacts` answers queue pressure and nothing else.
+    ///
+    /// **And the revision is what re-asks it**, which is the half a plain refusal would break: a
+    /// formula that failed to compile at one scale may render at another, so the refusal is over
+    /// `Failed` *at the current versions* and a new layout key hands the block back.
+    ///
+    /// MUTATIONS: honour only `Ready` in the frame refusal and the failing block is tried again on
+    /// every frame. Take the closing row out of the running for good instead — suppress it when
+    /// the block resolves — and `frozen_inline_math_survives_window_resize` goes red, because the
+    /// row that proves a block is the row a new revision has to be able to arm.
+    #[test]
+    fn a_block_whose_render_failed_is_asked_once_per_revision() {
+        let doc = [
+            "$$",
+            r"\nabla \times \mathbf{E} = -\frac{\partial \mathbf{B}}{\partial t}, \qquad",
+            r"\nabla \cdot \mathbf{B} = 0",
+            "$$",
+            "",
+            "tail1",
+            "tail2",
+            "tail3",
+            "tail4",
+            "tail5",
+            "tail6",
+            "end",
+        ]
+        .join("\r\n");
+        let mut session = DualPlaneSession::new(nz(60), nz(6));
+        session.feed(doc.as_bytes()).unwrap();
+        while session.take_worker_task().is_some() {}
+        for record in session.decorations.values_mut() {
+            record.decoration = DecorationLifecycle::None;
+            record.artifact = None;
+            record.stale_artifact = None;
+        }
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_to_top();
+
+        let mut attempts = Vec::new();
+        let attempt_once = |session: &mut DualPlaneSession, projection: &mut _| {
+            session.refresh_projection(projection);
+            let frame = session.viewport_frame(projection).unwrap();
+            session.schedule_visible_artifacts(&frame);
+            let mut attempted = 0usize;
+            while let Some(mut task) = session.take_worker_task() {
+                if resolve_detection_task(&mut task) {
+                    attempted += 1;
+                    session.complete_worker_result(
+                        task,
+                        Err(MathRenderError::Compile("synthetic".to_owned())),
+                    );
+                } else {
+                    session.complete_worker_task(task);
+                }
+            }
+            attempted
+        };
+        for _ in 0..6 {
+            attempts.push(attempt_once(&mut session, &mut projection));
+        }
+        assert_eq!(
+            attempts.first().copied(),
+            Some(1),
+            "the block is tried once, when it is proven: {attempts:?}"
+        );
+        assert!(
+            attempts[1..].iter().all(|tried| *tried == 0),
+            "and a render that failed is not tried again on the next frame: {attempts:?}"
+        );
+        assert!(
+            session
+                .decorations
+                .values()
+                .any(|record| record.decoration == DecorationLifecycle::Failed
+                    && record.failure_reason.is_some()),
+            "the failure is remembered on the record that owns the block"
+        );
+
+        // And the one thing it was computed from, changed: a formula that could not be drawn at
+        // this scale is owed a look at the next one.
+        let rescaled = LayoutKey {
+            dpi_milli: nz(2000),
+            ..session.layout_key()
+        };
+        session.set_layout_key(rescaled);
+        let mut moved = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut moved).unwrap();
+        moved.scroll_to_top();
+        assert_eq!(
+            attempt_once(&mut session, &mut moved),
+            1,
+            "a new layout hands the block back"
         );
     }
 
