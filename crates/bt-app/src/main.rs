@@ -83,6 +83,7 @@ mod menubar;
 mod mouse_trace;
 mod notice;
 mod notify;
+mod pace;
 mod palette;
 mod palette_index;
 mod pdf;
@@ -12680,6 +12681,12 @@ struct WindowRuntime {
     /// a frame is what a profiler measures; the gap between frames is what a
     /// hand feels, and under CPU starvation the two stop being the same number.
     last_present_at: Option<Instant>,
+    /// **One display frame, and every animation in this window draws on it**
+    /// (owner's report 2026-09-18). Read against [`Self::last_present_at`],
+    /// which is why the two are neighbours here: the gate is "has the glass had
+    /// a frame since the last picture reached it", and that question is about
+    /// pictures rather than about turns of the loop. See [`crate::pace`].
+    frame_clock: pace::FrameClock,
     /// **What this window owes the glass from the PTY, and when it must pay** — the bounded
     /// wait for the rest of a burst the kernel said was coming. See [`crate::coalesce::Pending`]
     /// for the invariant that keeps an armed deadline from outliving its own wake.
@@ -37516,6 +37523,23 @@ struct NewWindowParts {
 
 /// Assemble a window's runtime from [`NewWindowParts`] and the resting value of
 /// everything else.
+/// **What the display a window is on says one of its frames is worth**, in
+/// millihertz, or `None` when the platform will not say.
+///
+/// The current monitor first and the primary one only as a fallback: a window
+/// straddling two panels is on the one the platform names for it, and a window
+/// whose handle is momentarily unavailable — which happens on Windows between a
+/// display change and the message that announces it — is better paced to the
+/// main display than to nothing at all. Both answers pass through
+/// [`pace::interval_from_millihertz`], so neither can put a window on a rate no
+/// panel runs at.
+fn display_frame_rate_millihertz(window: &Window) -> Option<u32> {
+    window
+        .current_monitor()
+        .or_else(|| window.primary_monitor())
+        .and_then(|monitor| monitor.refresh_rate_millihertz())
+}
+
 fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
     let NewWindowParts {
         favicons,
@@ -37556,6 +37580,15 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         )
         .ok()
     });
+    // **A window is born knowing its display's rate**, before it has drawn
+    // anything: the first journey a reader starts can be in the first second,
+    // and a window that had to wait for a move or a scale change to find out
+    // would pace that journey to the 60 Hz fallback on a 144 Hz panel.
+    let frame_clock = {
+        let mut clock = pace::FrameClock::default();
+        clock.follow(display_frame_rate_millihertz(&window));
+        clock
+    };
     WindowRuntime {
         // A window is born staying.
         leaving: None,
@@ -37636,6 +37669,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         wheel_burst: None,
         dropped_files: None,
         last_present_at: None,
+        frame_clock,
         pty_coalesce: coalesce::Pending::default(),
         perf_trace_us: 0,
         strip_animation_ticked_at: None,
@@ -42348,11 +42382,12 @@ impl Runtime<'_> {
     /// frame of a fade that has not landed.
     fn tooltip_deadline(&self, now: Instant) -> Option<Instant> {
         if self.tooltip_owes_frame(now) {
-            return Some(now);
+            return Some(self.next_animation_frame(now));
         }
         self.window
             .tooltip
-            .deadline(now, self.app.motion, STRIP_ANIMATION_FRAME)
+            .deadline(now, self.app.motion, self.window.frame_clock.interval())
+            .map(|deadline| deadline.max(self.next_animation_frame(now)))
     }
 
     /// Note what the pointer is over — and in which face it would be answered,
@@ -42579,13 +42614,23 @@ impl Runtime<'_> {
     /// out, an exit finishing — or this instant, when a frame is already owed.
     fn toast_deadline(&self, now: Instant) -> Option<Instant> {
         if self.toasts_owe_frame(now) {
-            return Some(now);
+            return Some(self.next_animation_frame(now));
         }
-        self.window.toasts.deadline(now, self.app.motion)
+        self.window
+            .toasts
+            .deadline(now, self.app.motion)
+            .map(|deadline| deadline.max(self.next_animation_frame(now)))
     }
 
     /// Move every card's clock on, and pay the frames the movement owes.
     fn advance_toasts(&mut self, now: Instant) -> Result<()> {
+        // **On the window's own display frame** (owner's report 2026-09-18).
+        // See [`Self::animation_frame_is_due`]: a turn inside the frame the
+        // glass is already showing has nothing it could put on it, and the
+        // refusal books the turn that has.
+        if !self.animation_frame_is_due() {
+            return Ok(());
+        }
         let moved = self.window.toasts.advance(now, self.app.motion);
         if (moved || self.toasts_owe_frame(now)) && self.refresh_overlay() {
             self.present_chrome_change()?;
@@ -42959,14 +43004,30 @@ impl Runtime<'_> {
         let flash = self.window.command_flash.as_ref().filter(|flash| {
             cmdrail::flash_is_running(now.saturating_duration_since(flash.started))
         })?;
-        Some(match self.app.motion {
-            Motion::Reduced => flash.started + cmdrail::JUMP_FLASH,
-            Motion::Full => now + STRIP_ANIMATION_FRAME,
-        })
+        Some(
+            match self.app.motion {
+                Motion::Reduced => flash.started + cmdrail::JUMP_FLASH,
+                Motion::Full => self.next_animation_frame(now),
+            }
+            // The reduced-motion arm is a clock rather than a frame, and it is
+            // clamped for the reason every clock behind the gate is: the turn
+            // that spends it is a turn the gate has to admit, so a wake-up
+            // earlier than the glass will take a picture is a wake-up that
+            // would be turned away and re-armed. See
+            // [`Self::animation_frame_is_due`].
+            .max(self.next_animation_frame(now)),
+        )
     }
 
     /// Pay the flash's frames, and let it go when it is over.
     fn advance_command_flash(&mut self, now: Instant) -> Result<()> {
+        if self.window.command_flash.is_none() {
+            return Ok(());
+        }
+        // On the window's own display frame — see [`Self::animation_frame_is_due`].
+        if !self.animation_frame_is_due() {
+            return Ok(());
+        }
         let Some(flash) = self.window.command_flash.as_ref() else {
             return Ok(());
         };
@@ -43272,8 +43333,7 @@ impl Runtime<'_> {
     /// While any rail still owes a frame to one of its four clocks, one frame at
     /// the animation's own rate; nothing at all otherwise.
     fn command_rail_deadline(&self, now: Instant) -> Option<Instant> {
-        self.command_rails_are_moving(now)
-            .then(|| now + STRIP_ANIMATION_FRAME)
+        self.animating_deadline(self.command_rails_are_moving(now), now)
     }
 
     fn command_rails_are_moving(&self, now: Instant) -> bool {
@@ -43288,6 +43348,10 @@ impl Runtime<'_> {
     /// stop them, because `is_animating` and the paint read the same instants.
     fn advance_command_rails(&mut self, now: Instant) -> Result<()> {
         if !self.command_rails_are_moving(now) {
+            return Ok(());
+        }
+        // On the window's own display frame — see [`Self::animation_frame_is_due`].
+        if !self.animation_frame_is_due() {
             return Ok(());
         }
         if self.refresh_overlay() {
@@ -44960,6 +45024,10 @@ impl Runtime<'_> {
 
     /// Show a settled tip, and keep paying the fade's frames until it lands.
     fn advance_tooltip_if_due(&mut self, now: Instant) -> Result<()> {
+        // On the window's own display frame — see [`Self::animation_frame_is_due`].
+        if !self.animation_frame_is_due() {
+            return Ok(());
+        }
         let promoted = self.window.tooltip.activate_if_due(now);
         if (promoted || self.tooltip_owes_frame(now)) && self.refresh_overlay() {
             self.present_chrome_change()?;
@@ -47647,11 +47715,12 @@ impl Runtime<'_> {
     /// hands are empty.
     fn key_hint_deadline(&self, now: Instant) -> Option<Instant> {
         if self.key_hint_owes_frame(now) {
-            return Some(now);
+            return Some(self.next_animation_frame(now));
         }
         self.window
             .key_hint
-            .deadline(now, self.app.motion, STRIP_ANIMATION_FRAME)
+            .deadline(now, self.app.motion, self.window.frame_clock.interval())
+            .map(|deadline| deadline.max(self.next_animation_frame(now)))
     }
 
     /// Note what the modifiers are now, and repaint if the answer moved a card.
@@ -47677,6 +47746,10 @@ impl Runtime<'_> {
     /// already in the past, which is the `WaitUntil` pin's own definition of a
     /// loop that never sleeps.
     fn advance_key_hint_if_due(&mut self, now: Instant) -> Result<()> {
+        // On the window's own display frame — see [`Self::animation_frame_is_due`].
+        if !self.animation_frame_is_due() {
+            return Ok(());
+        }
         let promoted = self.window.key_hint.activate_if_due(now);
         if (promoted || self.key_hint_owes_frame(now)) && self.refresh_overlay() {
             self.present_chrome_change()?;
@@ -47810,6 +47883,10 @@ impl Runtime<'_> {
     /// are asked in this order because a bubble whose dwell has just ended has
     /// nothing left to nudge.
     fn advance_card_hint(&mut self, now: Instant) -> Result<()> {
+        // On the window's own display frame — see [`Self::animation_frame_is_due`].
+        if !self.animation_frame_is_due() {
+            return Ok(());
+        }
         let ended = self.window.card_hint.expire(now) != cardhint::CardHint::Unchanged;
         let nudging = self.window.card_hint.nudge_moving(now, self.app.motion);
         if ended || nudging {
@@ -47842,7 +47919,8 @@ impl Runtime<'_> {
     fn card_hint_deadline(&self, now: Instant) -> Option<Instant> {
         self.window
             .card_hint
-            .deadline(now, self.app.motion, STRIP_ANIMATION_FRAME)
+            .deadline(now, self.app.motion, self.window.frame_clock.interval())
+            .map(|deadline| deadline.max(self.next_animation_frame(now)))
     }
 
     /// The `˅`'s verb: show the profile list, or put away the one on screen.
@@ -59931,6 +60009,10 @@ impl Runtime<'_> {
         if !owed && !self.terminal_thumb_owed_frame {
             return Ok(());
         }
+        // On the window's own display frame — see [`Self::animation_frame_is_due`].
+        if !self.animation_frame_is_due() {
+            return Ok(());
+        }
         self.terminal_thumb_owed_frame = owed;
         if self.refresh_overlay() {
             self.present_chrome_change()?;
@@ -59978,6 +60060,10 @@ impl Runtime<'_> {
                     }),
             )
             .min()
+            // On the window's own frame, like every other fade it draws
+            // (owner's report 2026-09-18): the turn that pays this is a turn
+            // [`Self::animation_frame_is_due`] has to admit.
+            .map(|deadline| deadline.max(self.next_animation_frame(now)))
     }
 
     /// The markdown link under the pointer, if there is one, and the surface it
@@ -71478,15 +71564,17 @@ impl Runtime<'_> {
     /// the card leaves in one frame, so there is no exit to schedule.
     fn file_peek_deadline(&self, now: Instant) -> Option<Instant> {
         if self.file_peek_owes_frame(now) {
-            return Some(now);
+            return Some(self.next_animation_frame(now));
         }
         let clock = self.window.file_peek.as_ref()?.clock;
         if let Some(due) = clock.due() {
-            return Some(due);
+            return Some(due.max(self.next_animation_frame(now)));
         }
         let shown = clock.shown_at()?;
-        tooltip::hover_fade_owes_frames(now.duration_since(shown), self.app.motion)
-            .then(|| now + STRIP_ANIMATION_FRAME)
+        self.animating_deadline(
+            tooltip::hover_fade_owes_frames(now.duration_since(shown), self.app.motion),
+            now,
+        )
     }
 
     /// The 350ms is up — put the card on screen (P145).
@@ -71504,6 +71592,12 @@ impl Runtime<'_> {
         // tip's reason ([`Self::advance_tooltip_if_due`]): nothing else in this
         // window would wake the loop to finish a 90ms a still hand started, and
         // the frame the fade *lands* on is owed by this question and by no other.
+        //
+        // **And all four on the window's own display frame** — see
+        // [`Self::animation_frame_is_due`].
+        if !self.animation_frame_is_due() {
+            return Ok(());
+        }
         if !(self.switch_file_peek(now) | self.mature_file_peek(now) | self.expire_file_peek(now))
             && !self.file_peek_owes_frame(now)
         {
@@ -77000,6 +77094,12 @@ impl Runtime<'_> {
             }
             return Ok(());
         }
+        // On the window's own display frame — see [`Self::animation_frame_is_due`].
+        // Below the clock's own retirement above, because a hand that has left
+        // the band owes nothing and must be able to say so on any turn.
+        if !self.animation_frame_is_due() {
+            return Ok(());
+        }
         let Some(last) = self
             .window
             .drag
@@ -77042,10 +77142,10 @@ impl Runtime<'_> {
 
     /// The auto-scroll's next wake-up, for the loop's set (缺陷 #188).
     ///
-    /// Clamped to [`STRIP_ANIMATION_FRAME`] past the last tick on
-    /// [`Runtime::strip_animation_next_tick`]'s own terms: asking for anything
-    /// sooner would wake the loop to integrate a few microseconds and re-arm the
-    /// same deadline, which is a spin wearing a schedule's clothes.
+    /// Clamped to the window's own display frame on
+    /// [`Runtime::next_animation_frame`]'s terms: asking for anything sooner
+    /// would wake the loop to integrate a few microseconds and re-arm the same
+    /// deadline, which is a spin wearing a schedule's clothes.
     ///
     /// `None` for every drag that is not currently at an edge — and for every
     /// window with no drag at all — so the ordinary gesture costs no wake-ups.
@@ -77067,7 +77167,7 @@ impl Runtime<'_> {
                 .as_ref()
                 .and_then(|drag| drag.autoscroll_ticked_at)
                 .map_or(now, |last| last + STRIP_ANIMATION_FRAME)
-                .max(now),
+                .max(self.next_animation_frame(now)),
         )
     }
 
@@ -79351,6 +79451,10 @@ impl Runtime<'_> {
 
     /// Advance both of the float's clocks and its animation.
     fn advance_float(&mut self, now: Instant) -> Result<()> {
+        // On the window's own display frame — see [`Self::animation_frame_is_due`].
+        if !self.animation_frame_is_due() {
+            return Ok(());
+        }
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let mut changed = false;
         // A *transient* peek whose trigger has gone — the tab closed, the split
@@ -80436,7 +80540,13 @@ impl Runtime<'_> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         self.window
             .float
-            .deadline(now, self.app.motion, scale, STRIP_ANIMATION_FRAME)
+            .deadline(
+                now,
+                self.app.motion,
+                scale,
+                self.window.frame_clock.interval(),
+            )
+            .map(|deadline| deadline.max(self.next_animation_frame(now)))
     }
 
     /// The tabs whose own triggers opened the floats on screen — `.vtab.shown`'s
@@ -84705,6 +84815,17 @@ impl Runtime<'_> {
         if !strip_animation_tick_is_due(self.window.strip_animation_ticked_at, now) {
             return Ok(());
         }
+        // **And the window's own display frame, above the strip's own rate**
+        // (owner's report 2026-09-18). The gate above this one is the ring's
+        // measured rate and this one is the glass's: a turn the loop was
+        // not woken for — a shell speaking, a pointer moving — can be far enough
+        // past the ring's sixteen milliseconds to pass it while the picture that
+        // frame would replace has not reached the display yet. See
+        // [`Self::animation_frame_is_due`], which is this gate generalised out of
+        // this method to every animation this window runs.
+        if !self.animation_frame_is_due() {
+            return Ok(());
+        }
         self.window.strip_animation_ticked_at = Some(now);
         // Every door of the attention queue, in one pass over one leaf at a time
         // — see `settle_attention` for why they stopped being two passes whose
@@ -85027,6 +85148,95 @@ impl Runtime<'_> {
             .strip_animation_ticked_at
             .map_or(now, |last| last + STRIP_ANIMATION_FRAME)
             .max(now)
+            // And never before the glass will take one either: the ring is one
+            // of the window's animations and draws on the window's frame, so a
+            // tick that is due by the strip's own clock and not by the
+            // display's is a wake-up that would be turned away again. See
+            // [`Self::next_animation_frame`].
+            .max(self.next_animation_frame(now))
+    }
+
+    /// **Read the rate of the display this window is on**, and say so in the
+    /// trace when it moves.
+    ///
+    /// Asked at the two events that can put a window in front of another panel —
+    /// a move and a scale change — and never on the ordinary turn, because it
+    /// costs a call into the platform's monitor list and a window that has not
+    /// moved is on the display it was on. A rate that cannot be believed leaves
+    /// the window on the one it already had; see [`pace::FrameClock::follow`].
+    fn follow_the_display(&mut self) {
+        let millihertz = display_frame_rate_millihertz(&self.window.window);
+        if !self.window.frame_clock.follow(millihertz) {
+            return;
+        }
+        if self.app.trace_perf {
+            trace_sink::stderr_line(format!(
+                "BT_PERF_TRACE pace interval_us={} millihertz={}",
+                self.window.frame_clock.interval().as_micros(),
+                millihertz.unwrap_or_default(),
+            ));
+        }
+    }
+
+    /// **The next instant an animation in this window may draw**, and the one
+    /// answer every animated deadline in the fold is clamped to (owner's report
+    /// 2026-09-18).
+    ///
+    /// The last present plus one display frame — never *now* plus a frame, which
+    /// is the arithmetic this replaces and the whole of what was wrong with it:
+    /// `now` is the instant this turn began, and a turn begins whenever anything
+    /// at all happens, including the present the previous turn asked for. An
+    /// animation that adds a frame to that is asking for a frame from the moment
+    /// it was last looked at rather than from the moment the glass was last
+    /// written, and on a platform whose present does not block — Windows, where
+    /// the DXGI acquire costs 10–50 µs and hands a back buffer straight back —
+    /// nothing else was throttling it. See [`crate::pace`] for the two
+    /// recordings this is measured from.
+    fn next_animation_frame(&self, now: Instant) -> Instant {
+        self.window
+            .frame_clock
+            .next_frame(self.window.last_present_at, now)
+    }
+
+    /// **The next frame an animation that is still running is owed**, and
+    /// nothing at all once it has landed.
+    ///
+    /// The one shape every animated clock in this window reports its debt in, so
+    /// that "I am animating" is said in one place and paced in one place rather
+    /// than thirteen times with a constant each. `owes` is the animation's own
+    /// judgement and is all it is asked for; when the loop should next look is
+    /// not a question any single animation is in a position to answer.
+    fn animating_deadline(&self, owes: bool, now: Instant) -> Option<Instant> {
+        owes.then(|| self.next_animation_frame(now))
+    }
+
+    /// **Whether an animation may draw its frame on this turn**, and the gate
+    /// that books the turn it may draw on when the answer is no.
+    ///
+    /// The other half of [`Self::next_animation_frame`], and neither half works
+    /// alone. The deadline says when the loop should be woken; this says what a
+    /// turn that was *not* woken by it may do — and the loop is turned by
+    /// everything, so without this an animation still advances at whatever rate
+    /// the machine can compose at, and its own deadline is never the thing that
+    /// wakes it. It is the gate `advance_strip_animation` has kept for the ring
+    /// since the ring was measured at 120 ticks a second against a declared
+    /// 62.5, asked here on behalf of every animation instead of one.
+    ///
+    /// **One answer for the whole turn**, decided at its head by
+    /// [`pace::FrameClock::open`] and merely read here — this is not the live
+    /// question, and it must not be. A turn runs several animations in a row and
+    /// each of them may present; asked live, the first one to reach the glass
+    /// would refuse every one after it, so a formula's height would move on this
+    /// frame and the two marks riding its rectangle on the next. That is a worse
+    /// stutter than the one this repairs.
+    ///
+    /// A refusal is recorded rather than dropped: see [`pace::FrameClock::refuse`].
+    fn animation_frame_is_due(&mut self) -> bool {
+        if self.window.frame_clock.admits() {
+            return true;
+        }
+        self.window.frame_clock.refuse();
+        false
     }
 
     fn strip_animation_deadline(&self, now: Instant) -> Option<Instant> {
@@ -87367,8 +87577,7 @@ impl Runtime<'_> {
     /// Until the owner's report of 2026-09-14 evening this asked for the end of
     /// the fade, which on a still window is two frames of a fade and no middle.
     fn math_tools_deadline(&self, now: Instant) -> Option<Instant> {
-        self.math_tools_owe_frames(now)
-            .then(|| now + STRIP_ANIMATION_FRAME)
+        self.animating_deadline(self.math_tools_owe_frames(now), now)
     }
 
     /// **Draw the band's marks from the picture in hand**, and keep paying their
@@ -87401,6 +87610,16 @@ impl Runtime<'_> {
     /// it for ever after. **Both halves are needed**: filtering the deadline
     /// alone would leave the tick drawn until something else repainted the band.
     fn advance_math_tools_if_due(&mut self, now: Instant) -> Result<()> {
+        // **On the window's own display frame** (owner's report 2026-09-18), and
+        // above the unconditional look for the reason the look is unconditional:
+        // what it notices is a picture that has changed, and a picture cannot
+        // change twice inside one frame of the glass. A refusal books the turn
+        // that pays it, so the second look the 2026-09-14 report is about is
+        // late by at most one frame and never lost. See
+        // [`Self::animation_frame_is_due`].
+        if !self.animation_frame_is_due() {
+            return Ok(());
+        }
         let spent = retire_spent_math_copy(&mut self.window.math_copied, now);
         let moved = self.sync_math_tools(now);
         if (moved || spent || self.math_tools_owe_frames(now)) && self.refresh_overlay() {
@@ -87887,6 +88106,19 @@ impl Runtime<'_> {
     /// is that pair, counted rather than laid out. The rows are the press's business and the
     /// press asks for them once.
     fn advance_math_toggle_if_due(&mut self, now: Instant) -> Result<()> {
+        if self.window.math_toggle.is_none() {
+            return Ok(());
+        }
+        // **On the window's own display frame** (owner's report 2026-09-18:
+        // 「两个图标的移动还是一顿一顿的」). The ninety milliseconds is sampled
+        // from the clock wherever this lands, so fewer turns draw the same
+        // journey in fewer steps rather than a slower one — and the burst of
+        // near-identical steps the recording caught, thirteen to twenty of them
+        // inside one journey, is what the eye was reading as a jerk. See
+        // [`Self::animation_frame_is_due`].
+        if !self.animation_frame_is_due() {
+            return Ok(());
+        }
         let motion = self.app.motion;
         let Some((target, anchor, landed)) = self.window.math_toggle.as_ref().map(|flight| {
             (
@@ -87917,11 +88149,13 @@ impl Runtime<'_> {
     /// span, so the ninety milliseconds is drawn rather than merely begun and finished. No span is
     /// spelled here either.
     fn math_toggle_deadline(&self, now: Instant) -> Option<Instant> {
-        self.window
-            .math_toggle
-            .as_ref()
-            .is_some_and(|flight| flight.owes_frames(now, self.app.motion))
-            .then(|| now + STRIP_ANIMATION_FRAME)
+        self.animating_deadline(
+            self.window
+                .math_toggle
+                .as_ref()
+                .is_some_and(|flight| flight.owes_frames(now, self.app.motion)),
+            now,
+        )
     }
 
     /// **The other face of a block that is changing, over the band it is changing in.**
@@ -100348,6 +100582,13 @@ impl Runtime<'_> {
     /// which is not a reason to fail a window move.
     fn window_moved(&mut self) -> Result<()> {
         self.remember_summoned_arrangement();
+        // **The window may be on another panel now** (owner's report
+        // 2026-09-18), and the two displays a window is dragged between are
+        // routinely not the same rate. Unconditional for
+        // [`Self::reoffer_ime_cursor_area`]'s reason, one line down: "the window
+        // is on a different display now" is not a question this program can
+        // answer more cheaply than the platform can re-derive the answer.
+        self.follow_the_display();
         // The input method's copy of the caret rectangle is in screen
         // coordinates and this is the event that invalidated it
         // (`reoffer_ime_cursor_area`). Unconditional, because "the window is on
@@ -100420,6 +100661,11 @@ impl Runtime<'_> {
     /// has changed yet. See [`DpiRectangle`], which is announced here and holds
     /// the whole of that argument.
     fn scale_factor_changed(&mut self) -> Result<()> {
+        // A scale change is a display change on every road that produces one, so
+        // the rate is re-read here as well as on the move — see
+        // [`Self::follow_the_display`]. The two events do not always both
+        // arrive, and neither is reliably first.
+        self.follow_the_display();
         self.claim_lawful_layout();
         self.window.dpi_rectangle.announced();
         self.defer_preview_resample(Instant::now());
@@ -103044,7 +103290,7 @@ impl Runtime<'_> {
         // and stops once the sink has the line.
         let trace_started = Instant::now();
         trace_sink::stderr_line(format!(
-            "BT_PERF_TRACE present source={source:?} retained={} event_to_present_us={} event_to_submit_us={} since_previous_us={} composed={} slot_overwrites={} wheel_events={} wheel_routings={} trace_us={}",
+            "BT_PERF_TRACE present source={source:?} retained={} event_to_present_us={} event_to_submit_us={} since_previous_us={} composed={} slot_overwrites={} wheel_events={} wheel_routings={} pace_interval_us={} pace_skipped={} trace_us={}",
             u8::from(retained),
             latency.event_to_present_call.as_micros(),
             latency.event_to_submit.as_micros(),
@@ -103053,6 +103299,15 @@ impl Runtime<'_> {
             self.window.pending_frames.overwrites(),
             self.window.wheel_events,
             self.window.wheel_routings,
+            // **What the pacer is doing, on the line the cadence is read from**
+            // (owner's report 2026-09-18). `pace_interval_us` is the display's
+            // own frame as this window understands it, and `pace_skipped` is how
+            // many turns the gate turned away since the previous present — so a
+            // recording says both what the rate *should* be and that the loop
+            // was genuinely being held to it, rather than leaving the reader to
+            // infer the second from the gaps.
+            self.window.frame_clock.interval().as_micros(),
+            self.window.frame_clock.take_skipped(),
             self.window.perf_trace_us,
         ));
         self.window.perf_trace_us = trace_started.elapsed().as_micros();
@@ -103604,6 +103859,17 @@ impl Runtime<'_> {
     /// debounce that fires N times; exactly one window in the process is given
     /// the job, and it is the one that opened first — see [`FolioApp::order`].
     fn turn(&mut self, now: Instant, application_clocks: bool) -> Result<Option<Instant>> {
+        // **The frame debt belongs to the turn that incurs it** (owner's report
+        // 2026-09-18). Opened here rather than cleared wherever it is paid,
+        // because "an animation asked to draw and the glass was not ready" is a
+        // fact about *this* pass of the loop: whatever the gate refuses below is
+        // what the deadline fold at the foot of this method books, and a turn
+        // that refuses nothing books nothing and lets the window go idle. And
+        // the answer itself is decided here, once, for every animation this
+        // turn will run — see [`pace::FrameClock::open`] for why it cannot be
+        // the live question. See [`crate::pace`].
+        let last_present = self.window.last_present_at;
+        self.window.frame_clock.open(last_present, now);
         // First, because everything below it is allowed to assume the window is
         // where the hand last left it. This is the door the coalescing is *for*:
         // the queue has just run dry, so whatever the wheel collected while the
@@ -104130,6 +104396,19 @@ impl Runtime<'_> {
             // window not currently holding unanswered news about a folder it is
             // showing, which is every window most of the time.
             self.window.files_watch.deadline(),
+            // **And the frame an animation asked for and was refused** (owner's
+            // report 2026-09-18). Every entry above says when a clock is next
+            // worth reading; this one says that a clock already read wanted to
+            // draw and the glass was not ready for it, which is the only kind of
+            // debt in this fold that nothing else would ever come back for — a
+            // band whose shape changed under a motionless pointer owes a frame
+            // and has no clock of its own to ask for one. Absent on every turn
+            // that refused nothing, which is every turn of a window with nothing
+            // moving in it. See [`Runtime::animation_frame_is_due`].
+            self.window
+                .frame_clock
+                .owes_a_frame()
+                .then(|| self.next_animation_frame(now)),
         ]);
         self.reap_exited_tabs()?;
         Ok(wake_deadline)
@@ -107334,10 +107613,20 @@ mod formula_tool_seat_tests {
         // And what a running journey asks the loop for is the **next frame**,
         // the tip's own arrangement — asking for the end of the span instead
         // draws two frames of a ninety-millisecond motion and no middle.
+        //
+        // **Through the window's one pacer since the owner's report of
+        // 2026-09-18**, and no longer `now + STRIP_ANIMATION_FRAME` of its own:
+        // `now` is the instant the turn began, and a turn begins whenever
+        // anything happens — including the present the last frame asked for — so
+        // a frame measured from it is a frame measured from nothing.
         let wake = body(&["    fn math_tools", "_deadline(&self, now: Instant)"].concat());
         assert!(
-            wake.contains("now + STRIP_ANIMATION_FRAME"),
-            "a moving surface wakes for its next frame:\n{wake}"
+            wake.contains("self.animating_deadline("),
+            "a moving surface wakes for its next frame, and the window says when that is:\n{wake}"
+        );
+        assert!(
+            !wake.contains("STRIP_ANIMATION_FRAME"),
+            "and it does not keep a rate of its own beside the window's:\n{wake}"
         );
         assert!(
             wake.contains("self.math_tools_owe_frames(now)"),

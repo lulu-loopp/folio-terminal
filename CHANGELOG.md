@@ -6,6 +6,22 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Fixed
+
+- **Everything that moves in a window is now drawn once per display frame, on
+  both platforms.** Turning a typeset formula over with `‹›`, and the two small
+  marks that travel with the block, moved in bursts rather than smoothly: Folio
+  was composing pictures as fast as the loop could turn — a dozen or two inside
+  one ninety-millisecond motion, far more than a screen can show — and then one
+  of them waited the better part of a tenth of a second for the display to take
+  them, so the eye read a flurry of near-identical steps and then a pause.
+  Windows was the worse of the two. A motion now asks for the next picture the
+  display will actually show, at the refresh rate of the monitor the window is
+  on, so a formula turning over and its marks travel evenly; a 144 Hz screen
+  gets twice the steps a 60 Hz one does. The same rate now governs every other
+  fade and slide in the window, and a window with nothing moving in it still
+  falls completely silent.
+
 ## 0.4.2-preview — 2026-09-18
 
 ### Added
