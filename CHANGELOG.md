@@ -17,10 +17,13 @@ All notable changes to Folio are recorded here. The format follows
   next formula stayed as plain text however long you looked at it, and where the
   scrolled formula's `\begin{aligned}` was still visible, that much of it was
   typeset on its own: a picture of part of a formula with the formula's last line
-  sitting underneath it as text. The formula below is now typeset, and the
-  remainder above it is left alone, all of it, as the text it is. A formula Folio
-  has already typeset keeps its picture when its beginning scrolls off the top —
-  that has not changed. It is a formula Folio meets for the first time with its
+  sitting underneath it as text. The formula below is now typeset, and the rows
+  above the stray `$$` that belong to no complete formula are left as the text
+  they are. An environment that is whole on the screen is still typeset on its
+  own, as it always was, and the `$$` under it stays one line of text: nothing
+  on screen says what that `$$` once enclosed. A formula Folio has already
+  typeset keeps its picture when its beginning scrolls off the top — that has
+  not changed. It is a formula Folio meets for the first time with its
   beginning already gone that stays text: there is nothing on screen that says
   what the whole of it was, so it waits until you scroll its beginning back into
   view.

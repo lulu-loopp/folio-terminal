@@ -3336,13 +3336,6 @@ fn clipped_tail(
     // so pairing forward from the closer encloses the prose between them and is refused. Without
     // this, one row of ordinary text above a block — a single word, which is not enough whitespace
     // to read as prose — was enough to eat that block's opening `$$` as an above-window closer.
-    //
-    // It is also what bounds the one reading the floors deliberately leave open. A standalone
-    // `\begin{env}…\end{env}` above a `$$` that is still streaming is read here as a clipped tail,
-    // because at that instant the two readings are the same rows; when the block below closes, this
-    // guard answers "opener", the clip falls away, and the environment is a standalone block again.
-    // It shows as source while the block below is being typed, where before it showed permanently as
-    // a picture of part of a formula with that formula's last row underneath it as text.
     (!grid_dollars_opens_valid_block(&lines, first_dollars, options)).then_some(ClippedTail {
         body_start: body_start as u32,
         closer: first_dollars as u32,
