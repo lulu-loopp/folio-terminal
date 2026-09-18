@@ -56,6 +56,9 @@
 
 ### Fixed
 
+- **Formulas no longer flash back to their source while you scroll inside a
+  full-screen program**, and a window dragged back to the size it started at no
+  longer leaves its formulas untypeset.
 - **An inline formula in a command's output is typeset even when its picture is
   ready after the prompt has come back**, and a wrapped one stays typeset when
   the window's width changes.
