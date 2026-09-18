@@ -647,6 +647,26 @@ impl ToastHost {
             .min()
     }
 
+    /// **Whether any card is actually in motion right now** (review 2026-09-18
+    /// round 2) — an entrance still climbing or an exit still running, and never
+    /// a life merely ticking down.
+    ///
+    /// [`Self::deadline`]'s own two tweens without its third clock, and the
+    /// distinction is the whole reason this is a second function: a notice
+    /// standing still for four seconds is *waiting*, not moving, and a window
+    /// that carried it on every frame composed for anything else would rebuild
+    /// its overlay for those four seconds at whatever rate a shell can print.
+    /// Under [`Motion::Reduced`] neither tween exists, so nothing here is ever
+    /// moving.
+    #[must_use]
+    pub fn is_animating(&self, now: Instant, motion: Motion) -> bool {
+        motion == Motion::Full
+            && self
+                .toasts
+                .iter()
+                .any(|toast| toast.leaving.is_some() || now < toast.born + TOAST_ENTER)
+    }
+
     /// What should be on screen this instant: every card's id and its opacity.
     ///
     /// The strip's frame-debt idea ([`crate::tooltip::TooltipHost`] applies the

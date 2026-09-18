@@ -1488,6 +1488,20 @@ impl FloatHost {
         self.pinned.iter().chain(self.peek.iter())
     }
 
+    /// **Whether any float on screen is actually in motion right now** (review
+    /// 2026-09-18 round 2) — an entrance or an exit still moving, and never an
+    /// intent merely settling or a grace merely running down.
+    ///
+    /// [`Self::deadline`]'s `animating` arm without its two clocks, and the
+    /// distinction is the whole reason this is a second function: a float
+    /// standing open under a still hand is *waiting*, and a window that carried
+    /// it on every frame composed for anything else would rebuild its overlay
+    /// for as long as it stood there.
+    #[must_use]
+    pub fn is_animating(&self, now: Instant, motion: Motion, scale: f32) -> bool {
+        self.drawn().any(|win| win.fade(now, motion, scale).moving)
+    }
+
     /// Every window that answers the pointer, **top to bottom** — the order a
     /// hit test must ask them in, which is the reverse of the one they are
     /// painted in.

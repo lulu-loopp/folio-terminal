@@ -85270,10 +85270,13 @@ impl Runtime<'_> {
     /// [`crate::pace`].
     ///
     /// A refusal is recorded rather than dropped: see [`pace::FrameClock::refuse`].
+    /// **Asking costs nothing and marks nothing** (review 2026-09-18 round 2).
+    /// It used to record that an animation was running, on the reasoning that
+    /// only a running one would ask; four advancers ask before they have
+    /// established that they hold anything at all, so a window with an empty tip
+    /// host marked itself running for ever. What is mid-flight is reported once
+    /// a turn from the journeys' own predicates — see [`Self::running_journeys`].
     fn animation_frame_is_due(&mut self) -> bool {
-        // Reaching this gate at all is the animation saying it is running: every
-        // caller asks it below its own "am I moving" refusals.
-        self.window.frame_clock.note_running();
         if self.window.frame_clock.admits() {
             return true;
         }
@@ -85307,22 +85310,100 @@ impl Runtime<'_> {
     /// A window with nothing moving pays one `bool` and one `Option` read.
     fn carry_live_journeys(&mut self, now: Instant) {
         // The cached one, whether or not anything else is running: a flight in
-        // hand is a flight whose two numbers this frame must be built from.
+        // hand is a flight whose two numbers this frame must be built from, and
+        // a window with no flight pays one `Option` read for the question.
         self.sample_math_toggle(now);
-        if !self.window.frame_clock.is_running() {
+        let running = self.window.frame_clock.running();
+        if !running.any() {
             return;
         }
         // **And the marks re-read the band they ride, before the layer that
         // draws them is built.** Their fade and their travel are sampled from
-        // the clock by `refresh_overlay` below, but *where they are travelling
+        // the clock by the overlay build below, but *where they are travelling
         // to* is a fact about the picture in hand — and during a change of face
         // that is moving on every frame. This is the same look
         // `advance_math_tools_if_due` takes, asked here so that a frame composed
-        // for somebody else takes it too (§7.1.5p ⑦ ii, ⑪).
-        self.sync_math_tools(now);
-        // And the two lanes that sample themselves, asked so that they do.
-        self.refresh_chrome();
-        self.refresh_overlay();
+        // for somebody else takes it too (§7.1.5p ⑦ ii, ⑪). It refuses on two
+        // `Option` reads for a window with no band under the pointer.
+        let marks_moved = self.sync_math_tools(now);
+        // **One rebuild and never two** (review 2026-09-18 round 2).
+        // `refresh_chrome` ends in `refresh_overlay` — the overlay is rebuilt
+        // from the same choke point the chrome is — so asking for both is asking
+        // for two overlay builds, which is what the review measured at four
+        // hundred a second. The chrome is the expensive lane, so it is asked for
+        // only when something that lives *in* it is mid-flight.
+        if running.chrome {
+            self.refresh_chrome();
+        } else if running.overlay || marks_moved {
+            self.refresh_overlay();
+        }
+    }
+
+    /// **What is mid-flight in this window**, recomputed from scratch and told
+    /// to the frame clock once a turn (review 2026-09-18 round 2, P1).
+    ///
+    /// Every entry is a journey's own "am I still moving" — the predicate its
+    /// deadline is built from — and never the deadline itself, because several
+    /// of those also carry a clock that is not a tween: a tip's 380 ms before it
+    /// is shown, a notice's life running out, a glance card's grace. Waiting is
+    /// not moving, and a window that treated it as moving would rebuild its
+    /// interface on every keystroke for the length of every wait.
+    ///
+    /// The cost is one pass of cheap predicates per turn, most of them an
+    /// `Option` read over an empty host. Two of them — the strip's and the
+    /// thumbs' — are the deadline the fold is about to ask for anyway, and are
+    /// handed in rather than asked twice.
+    fn running_journeys(
+        &self,
+        now: Instant,
+        strip: Option<Instant>,
+        thumbs: Option<Instant>,
+    ) -> pace::Lanes {
+        let motion = self.app.motion;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        pace::Lanes {
+            // Everything the strip's own deadline folds together is a tween: the
+            // ring, the `˅`, a pane in flight, a card breathing, the dock's
+            // fade. It is the one lane whose answer is exactly its deadline.
+            chrome: strip.is_some(),
+            overlay: thumbs.is_some()
+                || self.tooltip_owes_frame(now)
+                || self.window.tooltip.is_fading(now, motion)
+                || self.key_hint_owes_frame(now)
+                || self.window.key_hint.is_fading(now, motion)
+                || self.window.card_hint.nudge_moving(now, motion)
+                || self.window.toasts.is_animating(now, motion)
+                || self.command_flash_is_running(now)
+                || self.command_rails_are_moving(now)
+                || self.file_peek_is_fading(now)
+                || self.window.float.is_animating(now, motion, scale)
+                || self.math_tools_owe_frames(now),
+        }
+    }
+
+    /// Whether the jump's band is still on screen and still worth a frame — the
+    /// first half of [`Self::command_flash_deadline`], which is the half that
+    /// says whether anything is moving.
+    fn command_flash_is_running(&self, now: Instant) -> bool {
+        self.app.motion == Motion::Full
+            && self.window.command_flash.as_ref().is_some_and(|flash| {
+                cmdrail::flash_is_running(now.saturating_duration_since(flash.started))
+            })
+    }
+
+    /// Whether the glance card's own ninety milliseconds is still climbing — the
+    /// last arm of [`Self::file_peek_deadline`], asked on its own.
+    fn file_peek_is_fading(&self, now: Instant) -> bool {
+        if self.file_peek_owes_frame(now) {
+            return true;
+        }
+        self.window
+            .file_peek
+            .as_ref()
+            .and_then(|peek| peek.clock.shown_at())
+            .is_some_and(|shown| {
+                tooltip::hover_fade_owes_frames(now.duration_since(shown), self.app.motion)
+            })
     }
 
     /// **The band's travelling height and the picture's strength, written where
@@ -104334,6 +104415,21 @@ impl Runtime<'_> {
         // deadline arithmetic below is this window reading its own clocks, not
         // conhost answering.
         hang_watch::at(hang_watch::Station::Deadlines);
+        // **What is mid-flight in this window, told to the frame clock once a
+        // turn** (review 2026-09-18 round 2, P1). Here rather than at the gate
+        // because a journey being alive is a *fact*, and the gate only ever sees
+        // a question: four of the advancers above ask it before they have
+        // established that they hold anything at all, so a window with an empty
+        // tip host and an empty float host answered "running" on every turn for
+        // ever — and every keystroke after that rebuilt the whole interface.
+        //
+        // The two deadlines the report shares with the fold are taken once and
+        // handed to both. See [`Self::running_journeys`] and
+        // [`Self::carry_live_journeys`].
+        let strip_animation_deadline = self.strip_animation_deadline(now);
+        let terminal_thumb_deadline = self.terminal_thumb_deadline(now);
+        let running = self.running_journeys(now, strip_animation_deadline, terminal_thumb_deadline);
+        self.window.frame_clock.note_running(running);
         let startup_deadline =
             startup_poll_delay(self.window.first_text_presented).map(|delay| now + delay);
         // Every leaf, not every tab's focused leaf: an unfocused pane runs its own resize
@@ -104388,7 +104484,7 @@ impl Runtime<'_> {
                 .is_some()
                 .then(|| self.window.rename_blink.deadline())
                 .flatten(),
-            self.strip_animation_deadline(now),
+            strip_animation_deadline,
             // Only while a page is waiting for its browser to go — a window with
             // no page, and a page nobody is closing, ask for no wake-ups at all.
             self.window
@@ -104440,7 +104536,7 @@ impl Runtime<'_> {
             // A terminal thumb's rest and the fade after it — and nothing at all
             // for a pane with no scrollback, a pane parked in history (its bar
             // is standing, not fading) or a pane whose fade has landed.
-            self.terminal_thumb_deadline(now),
+            terminal_thumb_deadline,
             // The peek's 350ms while one is settling, and nothing afterwards:
             // it has no fade, so a schematic on screen is finished and asks for
             // no frames at all.
@@ -108572,26 +108668,69 @@ mod formula_tool_seat_tests {
             "the one animation this window caches is sampled on every frame:\n{carry}"
         );
         assert!(
-            carry.contains("self.refresh_overlay();") && carry.contains("self.refresh_chrome();"),
-            "and the two lanes that sample themselves are asked so that they do:\n{carry}"
-        );
-        assert!(
-            carry
-                .find("self.sync_math_tools(now);")
-                .unwrap_or(usize::MAX)
-                < carry.find("self.refresh_overlay();").unwrap_or(0),
-            "the marks re-read the band they ride before the layer that draws them is built, \
-             or they trail a block that is moving on every frame:\n{carry}"
-        );
-        assert!(
             carry
                 .find("self.sample_math_toggle(now);")
                 .unwrap_or(usize::MAX)
-                < carry
-                    .find("if !self.window.frame_clock.is_running() {")
-                    .unwrap_or(0),
+                < carry.find("if !running.any() {").unwrap_or(0),
             "a flight in hand is carried whether or not the last turn saw one:\n{carry}"
         );
+        assert!(
+            carry
+                .find("let marks_moved = self.sync_math_tools(now);")
+                .unwrap_or(usize::MAX)
+                < carry.find("if running.chrome {").unwrap_or(0),
+            "the marks re-read the band they ride before the layer that draws them is built, \
+             or they trail a block that is moving on every frame:\n{carry}"
+        );
+        // **One rebuild and never two** (review 2026-09-18 round 2). The
+        // chrome's own refresh ends in the overlay's, so a carry that asked for
+        // both asked for two overlay builds — four hundred a second on the
+        // review's schedule. The `else` is what makes that impossible rather
+        // than merely avoided.
+        assert!(
+            carry.contains("self.refresh_chrome();") && carry.contains("} else if running.overlay"),
+            "the two rebuilds are exclusive, because the first already does the second:\n{carry}"
+        );
+        let chrome = body("    fn refresh_chrome(&mut self) -> bool {");
+        assert!(
+            chrome.contains("let overlay_changed = self.refresh_overlay();"),
+            "which is only true while the chrome's own refresh ends in the overlay's:\n{chrome}"
+        );
+        // **And nothing is inferred from asking the gate** (review 2026-09-18
+        // round 2, P1). Liveness is reported once a turn from the journeys' own
+        // "am I moving" predicates — never from their deadlines, several of
+        // which also carry a wait: a tip's 380ms, a notice's life, a card's
+        // grace. Waiting is not moving, and a window that treated it as moving
+        // would rebuild its whole interface for the length of every wait.
+        let gate = body("    fn animation_frame_is_due(&mut self) -> bool {");
+        assert!(
+            !gate.contains("note_running"),
+            "asking the gate is a question and never evidence:\n{gate}"
+        );
+        let turning = body("    fn turn(&mut self, now: Instant, application_clocks: bool)");
+        assert!(
+            turning.contains("self.window.frame_clock.note_running(running);"),
+            "the window reports what is mid-flight once a turn:\n{turning}"
+        );
+        let report = body("    fn running_journeys(");
+        for waiting in ["tooltip_deadline", "toast_deadline", "file_peek_deadline"] {
+            assert!(
+                !report.contains(waiting),
+                "{waiting} answers a wait as well as a tween:\n{report}"
+            );
+        }
+        for moving in [
+            "is_fading(now, motion)",
+            "nudge_moving(now, motion)",
+            "is_animating(now, motion)",
+            "self.command_rails_are_moving(now)",
+            "self.math_tools_owe_frames(now)",
+        ] {
+            assert!(
+                report.contains(moving),
+                "a journey's own predicate is what says it is running: {moving}\n{report}"
+            );
+        }
 
         let advance = body("    fn advance_math_toggle_if_due(&mut self, now: Instant)");
         let settles = advance

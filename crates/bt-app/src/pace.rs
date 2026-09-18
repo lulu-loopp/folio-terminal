@@ -143,9 +143,39 @@ pub struct FrameClock {
     interval: Duration,
     admitted: bool,
     owed: bool,
-    running: bool,
-    running_this_turn: bool,
+    running: Lanes,
     skipped: u64,
+}
+
+/// **Where the journeys that are running keep their pictures**, and therefore
+/// what a frame composed for somebody else has to rebuild to carry them (review
+/// 2026-09-18 round 2).
+///
+/// Two lanes because this window has two, and the difference is a real cost: the
+/// chrome is the strip, the rail, every pane head and the focus column's
+/// thumbnails, and rebuilding it walks every tab and measures text; the overlay
+/// is the layer stack over the panes. A tip fading owes the second and nothing
+/// of the first, and a carry that rebuilt both would charge every fade the price
+/// of the strip.
+///
+/// A block changing face is in neither, which is why it is not a variant here:
+/// its two numbers go into the session and the *projection* reads them, so
+/// carrying it is one write and no rebuild at all.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Lanes {
+    /// The strip's ring, a pane in flight, the `˅` turning, a card breathing.
+    pub chrome: bool,
+    /// A tip, a hint card, a notice, the rails, a thumb, a glance card, a float,
+    /// a band's two marks.
+    pub overlay: bool,
+}
+
+impl Lanes {
+    /// Whether anything at all is mid-flight.
+    #[must_use]
+    pub fn any(self) -> bool {
+        self.chrome || self.overlay
+    }
 }
 
 impl Default for FrameClock {
@@ -157,8 +187,7 @@ impl Default for FrameClock {
             // behind anything. `open` overwrites this on the first turn.
             admitted: true,
             owed: false,
-            running: false,
-            running_this_turn: false,
+            running: Lanes::default(),
             skipped: 0,
         }
     }
@@ -222,20 +251,23 @@ impl FrameClock {
         self.skipped = self.skipped.saturating_add(1);
     }
 
-    /// **A journey asked the gate a question**, which is the same thing as
-    /// saying it is running (review 2026-09-18, P1).
+    /// **What is mid-flight in this window, as a fact rather than as a side
+    /// effect** (review 2026-09-18 round 2, P1).
     ///
-    /// Every gated advance reaches its gate *after* its own "am I animating"
-    /// refusals, so arriving here at all is the animation saying so — admitted
-    /// or refused, it makes no difference to this fact. It is what
-    /// `Runtime::carry_live_journeys` reads to know whether a frame composed for
-    /// some other reason has any journey to carry, so a window with nothing
-    /// moving pays one `bool` for it on every frame and nothing else.
-    pub fn note_running(&mut self) {
-        self.running_this_turn = true;
+    /// Told once a turn, recomputed from scratch from the journeys' own "am I
+    /// still moving" predicates — the same ones their deadlines are made of —
+    /// and therefore `false` on the very turn after the last one lands. The
+    /// first version of this was set by the *gate*, on the reasoning that an
+    /// animation only asks when it is animating; four advancers ask before they
+    /// have established they have anything at all, so a window with an empty tip
+    /// host and an empty float host marked itself running on every turn for
+    /// ever, and every ordinary keystroke then rebuilt the whole interface. A
+    /// question is not evidence. This is.
+    pub fn note_running(&mut self, lanes: Lanes) {
+        self.running = lanes;
     }
 
-    /// Whether this window had a journey running on its last completed turn.
+    /// What this window had mid-flight when its last turn finished.
     ///
     /// The *last* turn, and deliberately: a frame is composed from all sorts of
     /// places — a keystroke's own event, a drain, an expose — and most of them
@@ -243,8 +275,8 @@ impl FrameClock {
     /// that exists at those moments, and an animation that was running a
     /// millisecond ago is running now.
     #[must_use]
-    pub fn is_running(&self) -> bool {
-        self.running || self.running_this_turn
+    pub fn running(&self) -> Lanes {
+        self.running
     }
 
     /// Whether a refused frame is still owed.
@@ -273,10 +305,6 @@ impl FrameClock {
     pub fn open(&mut self, last_present: Option<Instant>, now: Instant) {
         self.admitted = self.is_due(last_present, now);
         self.owed = false;
-        // What this turn learns about running journeys replaces what the last
-        // one did, so a window whose last animation has landed stops paying for
-        // the carry on the very next turn.
-        self.running = std::mem::take(&mut self.running_this_turn);
     }
 
     /// Whether this turn is one the animations in this window may draw on.
@@ -294,7 +322,7 @@ impl FrameClock {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_FRAME_INTERVAL, FrameClock, interval_from_millihertz};
+    use super::{DEFAULT_FRAME_INTERVAL, FrameClock, Lanes, interval_from_millihertz};
     use std::time::{Duration, Instant};
 
     /// Every instant in these tests is derived from one base by arithmetic, so
@@ -484,6 +512,59 @@ mod tests {
         assert_eq!(clock.next_frame(presented, last), last + clock.interval());
         assert!(!clock.is_due(presented, last + FLOOD));
         assert!(clock.is_due(presented, last + clock.interval()));
+    }
+
+    /// RED — **an idle window is never told it is running, and a window whose
+    /// last journey has landed stops being told on the very next turn** (review
+    /// 2026-09-18 round 2, P1).
+    ///
+    /// The first version of this flag was set by the *gate*, on the reasoning
+    /// that only a running animation would ask. Four of the advancers ask before
+    /// they have established that they hold anything at all, so a window with an
+    /// empty tip host marked itself running on every turn for ever — and the
+    /// carry then rebuilt the whole interface on every ordinary keystroke, which
+    /// is worse than the stutter the module was written for. Liveness is now
+    /// reported as a fact, recomputed from the journeys' own predicates, and
+    /// this pins the two properties that follow from that: nothing is inferred
+    /// from asking, and a report retires.
+    ///
+    /// MUTATION: make the report additive — `self.running.chrome |= …` — and the
+    /// flag never comes down again, which is the defect verbatim.
+    #[test]
+    fn liveness_is_reported_and_retires_rather_than_being_inferred() {
+        let mut clock = clock_at(60_000);
+        let now = Instant::now();
+
+        // A thousand turns of an idle window: the gate is asked and refused, and
+        // nothing about that marks the window as animating.
+        let mut turn = now;
+        for _ in 0..1_000 {
+            clock.open(Some(turn), turn);
+            let _ = clock.admits();
+            clock.refuse();
+            clock.note_running(Lanes::default());
+            assert!(
+                !clock.running().any(),
+                "asking the gate is a question and never evidence"
+            );
+            turn += Duration::from_millis(1);
+        }
+
+        // One journey on one host, and it is the only host carried.
+        clock.note_running(Lanes {
+            overlay: true,
+            ..Lanes::default()
+        });
+        assert!(clock.running().any());
+        assert!(clock.running().overlay);
+        assert!(
+            !clock.running().chrome,
+            "a tip fading owes the overlay and nothing of the strip"
+        );
+
+        // And the turn after it lands, the window is quiet again.
+        clock.note_running(Lanes::default());
+        assert!(!clock.running().any());
     }
 
     /// RED — **one turn is one answer, and a present inside it does not starve
