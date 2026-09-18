@@ -141,7 +141,7 @@
 
 | asset | what it is |
 | --- | --- |
-| `folio-0.4.2-windows-x64.zip` | the nine files that belong together, in one folder — `sha256:<hash>` |
+| `folio-0.4.2-windows-x64.zip` | the nine files that belong together, in one folder — `sha256:7e8dc605cc9c2a0a2718e2ddceedca8eacdc531460714d5cb516840546d3e079` |
 | `folio-windows-x64.zip` | the same archive under a name that does not change from one release to the next — the same `sha256` |
 | `SHA256SUMS.txt` | the hash of the archive under each of its two names and of the bill of materials, in the format `sha256sum -c` reads |
 | `folio-0.4.2.cdx.json` | the CycloneDX bill of materials for what is in the build |
@@ -173,7 +173,7 @@ sha256sum -c SHA256SUMS.txt
 
 | asset | what it is |
 | --- | --- |
-| `Folio-0.4.2-macos-arm64.dmg` | the application, signed and notarized — `sha256:<hash>` |
+| `Folio-0.4.2-macos-arm64.dmg` | the application, signed and notarized — `sha256:cf39c61430e36a1c80d8744fec9fb0eaa8b68df91c1780cb737e4e425a750dd9` |
 | `Folio-macos-arm64.dmg` | the same image under a name that does not change from one release to the next — the same `sha256` |
 | `SHA256SUMS-macos.txt` | the hash of the image under each of its two names, in the format `shasum -c` reads |
 

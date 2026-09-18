@@ -76,7 +76,7 @@
 
 | 文件 | 说明 |
 | --- | --- |
-| `folio-0.4.2-windows-x64.zip` | 九个归属文件，打包在一个文件夹中 — `sha256:<hash>` |
+| `folio-0.4.2-windows-x64.zip` | 九个归属文件，打包在一个文件夹中 — `sha256:7e8dc605cc9c2a0a2718e2ddceedca8eacdc531460714d5cb516840546d3e079` |
 | `folio-windows-x64.zip` | 同一份压缩包，名称在各版本间固定不变 — 同一个 `sha256` |
 | `SHA256SUMS.txt` | 压缩包两个名称和物料清单的哈希，格式为 `sha256sum -c` 可读 |
 | `folio-0.4.2.cdx.json` | CycloneDX 物料清单 |
@@ -101,7 +101,7 @@ sha256sum -c SHA256SUMS.txt
 
 | 文件 | 说明 |
 | --- | --- |
-| `Folio-0.4.2-macos-arm64.dmg` | 应用程序，已签名并经过 Apple 公证 — `sha256:<hash>` |
+| `Folio-0.4.2-macos-arm64.dmg` | 应用程序，已签名并经过 Apple 公证 — `sha256:cf39c61430e36a1c80d8744fec9fb0eaa8b68df91c1780cb737e4e425a750dd9` |
 | `Folio-macos-arm64.dmg` | 同一个磁盘映像，名称在各版本间固定不变 — 同一个 `sha256` |
 | `SHA256SUMS-macos.txt` | 磁盘映像两个名称的哈希，格式为 `shasum -c` 可读 |
 
