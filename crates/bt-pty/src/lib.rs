@@ -1043,12 +1043,15 @@ pub enum Transport {
     Pipe,
 }
 
-/// **The smallest number of bytes a conforming line discipline may hand over in one read.**
+/// **The smallest running maximum this rule is willing to call a transfer unit.**
 ///
-/// POSIX gives `_POSIX_MAX_INPUT` — the `MAX_CANON` floor a terminal's input queue must be able
-/// to hold — as 255 (IEEE Std 1003.1, `<limits.h>`), so no line discipline caps a transfer below
-/// that. A running maximum under this is therefore not a transfer unit, whatever else it is: it
-/// is a keystroke's echo, a prompt, a status line that happened to repeat its length.
+/// The number is taken from the terminal input queue POSIX requires — `_POSIX_MAX_INPUT` /
+/// `MAX_CANON` = 255 (IEEE Std 1003.1, `<limits.h>`) — because a line discipline that must hold
+/// that much at once has no reason to hand over less per read. That is a chosen floor, not a
+/// guarantee the standard makes about a pty master's reads, and it is stated as such: what it
+/// buys is that a running maximum under it is never taken for a cap — a keystroke's echo, a
+/// prompt, a status line that happened to repeat its length — and what it costs is that a transport
+/// with a smaller cap, should one exist, simply never coalesces.
 ///
 /// The floor is named after what it is rather than set to any particular system's cap: hard-coding
 /// macOS's 1024 would be this rule guessing at a platform instead of reading a transport.

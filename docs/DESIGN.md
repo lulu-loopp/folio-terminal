@@ -446,10 +446,13 @@ name, why Windows never showed the defect and needs no rule of its own: ordinary
 6–9 KiB ConPTY reads are published the moment they arrive, exactly as before.
 
 Two conditions keep an echo from being taken for a cap. The candidate must be at
-least `SMALLEST_CREDIBLE_TRANSFER_UNIT` — POSIX gives `_POSIX_MAX_INPUT` /
-`MAX_CANON` as 255 (IEEE Std 1003.1, `<limits.h>`), so no conforming line
-discipline caps a transfer below 256 and read lengths of `[1, 1]` are two
-keystrokes rather than a one-byte transport. And a maximum seen once proves
+least `SMALLEST_CREDIBLE_TRANSFER_UNIT`, a floor of 256 chosen from the terminal
+input queue POSIX requires (`_POSIX_MAX_INPUT` / `MAX_CANON` = 255, IEEE Std
+1003.1, `<limits.h>`): the standard does not promise a pty master's reads are
+never smaller, so the floor is a choice, stated as one — under it a running
+maximum is never taken for a cap, so read lengths of `[1, 1]` are two keystrokes
+rather than a one-byte transport, and a transport with a smaller cap, should one
+exist, simply never coalesces. And a maximum seen once proves
 nothing: `capped` first becomes true on the **second** read that returns the
 largest length so far. A later, larger read raises the maximum and starts it
 uncorroborated again; the chunks flagged under the old one are long consumed and
