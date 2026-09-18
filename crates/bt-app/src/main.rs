@@ -107422,7 +107422,7 @@ mod formula_tool_seat_tests {
     /// `update_math_hover` → two doors, and the 500ms grace lives behind only
     /// one of them.
     #[test]
-    fn a_picture_that_moved_under_a_resting_pointer_is_asked_again() {
+    fn math_hover_is_asked_again_when_the_picture_moved_under_a_resting_pointer() {
         let door = body(
             &[
                 "    fn refresh_math_hover",
@@ -107475,7 +107475,7 @@ mod formula_tool_seat_tests {
     /// `terminal_content_revision` instead → the question is asked of a picture
     /// that has not reached the glass.
     #[test]
-    fn the_pictures_door_refuses_before_it_asks() {
+    fn math_hover_refuses_before_it_asks_the_picture() {
         let door = body(
             &[
                 "    fn refresh_math_hover",
@@ -107519,7 +107519,7 @@ mod formula_tool_seat_tests {
     /// pointer never left loses its grace on the frame it scrolls away. Drop the
     /// `!=` guard and every frame of a scroll rewrites the shells and repaints.
     #[test]
-    fn a_band_that_comes_back_inside_the_grace_keeps_its_marks() {
+    fn math_hover_is_kept_by_a_band_that_comes_back_inside_the_grace() {
         let door = body(&["    fn update_math", "_hover(&mut self, now: Instant)"].concat());
         let cleared = door
             .find("self.window.math_hover_clear_at = None;")

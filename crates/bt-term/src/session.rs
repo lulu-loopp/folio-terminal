@@ -8362,67 +8362,8 @@ impl DualPlaneSession {
         }
 
         let inline_formulas = self.inline_math_bands;
-        // **The rows a proven block owns are that block's body and never candidates of their own**
-        // (owner's report 2026-09-18: the `‹›` change of face stutters).
-        //
-        // A block is proven by its **closing** delimiter and never by its opener — the opener's own
-        // window cannot see the end of it — so `apply_worker_completion` finishes on a candidate
-        // that is not the record it completed, and puts that candidate back to
-        // `DecorationLifecycle::None`, which is the *armed* state. While the block wears its
-        // picture nothing came of that: the artifact covers its rows, their cells carry the block's
-        // own anchor, and the closing row is therefore never a visible history id for this loop to
-        // find. The moment the reader presses `‹›` the rows are terminal text again, every one of
-        // them is visible on its own id, and the closing row armed itself on every frame — a whole
-        // scan and a whole LaTeX raster per frame, rendered and thrown away, for a window nobody
-        // was touching. Measured on the owner's machine: 638 renders of one block at ~7ms each,
-        // which is the halting the change of face was reported for and which left every other
-        // formula in the window queued behind it.
-        //
-        // **And a block whose render *failed* owns its rows exactly as one that succeeded does.**
-        // `record.fail` is terminal on the owner — `Failed`, undone only by the three revisions
-        // below — but the closing row was handed back armed whatever the render came back with,
-        // and a failed block draws no artifact at all, so *every* one of its rows is terminal text
-        // and visible on its own id. That is the same loop in the failure path, and it buys a
-        // whole render attempt per frame that fails the same way every time. Nothing else holds
-        // it: `schedule_retry_artifacts` answers queue pressure and knows nothing about failures,
-        // and there is no retry budget anywhere.
-        //
-        // **Asked of the picture in hand and of the record together**, because the two answer
-        // different halves. The frame says which transcript rows a block is drawn over — including
-        // a block whose opener has scrolled off the top, which no walk back through the records
-        // could bound — and the record says whether that drawing is still the current answer.
-        // `Ready` and `Failed` are exactly that: both are computed from one source at one layout
-        // key and one detector revision, and a change to any of the three puts the owner back to
-        // `None`, so on that frame its closing row arms again and the block is proven — or tried —
-        // afresh. That liveness is what this refusal must not cost: a formula that could not be
-        // compiled at one width is owed a look at the next one.
-        let answer_is_current = |start: &TranscriptId| {
-            self.decorations.get(start).is_some_and(|owner| {
-                matches!(
-                    owner.decoration,
-                    DecorationLifecycle::Ready | DecorationLifecycle::Failed
-                )
-            })
-        };
-        let owned_rows: Vec<(TranscriptId, TranscriptId)> = frame
-            .math_blocks
-            .iter()
-            .map(|placement| &placement.anchor)
-            .chain(frame.math_failures.iter().map(|failure| &failure.anchor))
-            .filter_map(|anchor| match anchor {
-                MathBlockAnchor::History { start, end, .. } if end > start => Some((*start, *end)),
-                _ => None,
-            })
-            .filter(|(start, _)| answer_is_current(start))
-            .collect();
-        let is_body_of_a_proven_block = |id: TranscriptId| {
-            owned_rows
-                .iter()
-                .any(|(start, end)| *start < id && id <= *end)
-        };
         let mut candidates = visible
             .iter()
-            .filter(|id| !is_body_of_a_proven_block(**id))
             .filter(|id| {
                 self.document.entries().get(id).is_some_and(|entry| {
                     may_arm_math(&entry.line.text, inline_formulas, || {
@@ -8449,7 +8390,6 @@ impl DualPlaneSession {
                 .and_then(|context| context.required_start(*id))
                 .is_some_and(|start| start <= last_visible);
             if overlaps_visible
-                && !is_body_of_a_proven_block(*id)
                 && (may_arm_math(&entry.line.text, inline_formulas, || {
                     self.history_inline_site(*id)
                 }) || may_arm_table(&entry.line.text, || {
@@ -12077,7 +12017,78 @@ impl DualPlaneSession {
         .then_some(inputs)
     }
 
+    /// **The block that already owns this row**, asked of the records and never of the picture
+    /// (owner's report 2026-09-18, review 2026-09-18 P1).
+    ///
+    /// A block is proven by its **closing** delimiter and never by its opener — the opener's own
+    /// window cannot see the end of it — so `apply_worker_completion` finishes on a candidate that
+    /// is not the record it completed, and hands that candidate back at
+    /// `DecorationLifecycle::None`, which is the *armed* state. While the block wears its picture
+    /// nothing came of that: the artifact covers its rows, their cells carry the block's own
+    /// anchor, and no row of it is a visible history id for the scheduler to find. The moment the
+    /// reader presses `‹›` every row is terminal text on its own id again, and the closing row
+    /// armed itself on every frame — a whole scan and a whole LaTeX raster per frame, rendered and
+    /// thrown away, for a window nobody was touching. Measured on the owner's machine: 638 renders
+    /// of one block at ~7ms apiece, which is the halting the change of face was reported for and
+    /// which left every other formula in the window queued behind it.
+    ///
+    /// **The record owns its rows whether or not the picture draws them.** A first attempt read
+    /// the ownership off `frame.math_blocks`, and the review's first probe is why that is not the
+    /// fact: `decorate_math_frame` needs the block's *opener* row on the frame, so a source face
+    /// scrolled two rows down publishes no placement at all while its body and its closing row are
+    /// both on screen — and the gate had nothing to refuse with. The record layer has no such
+    /// horizon: `block_end` names the last row this block covers, in transcript ids, and that is
+    /// true of a block with every row off screen.
+    ///
+    /// **`Ready` and `Failed` both answer, and nothing else does.** Both are computed from one
+    /// source at one layout key and one detector revision, and a change to any of the three puts
+    /// the owner back to `None` — so on that frame its closing row arms again and the block is
+    /// proven, or tried, afresh. That liveness is what this refusal must not cost: a formula that
+    /// could not be compiled at one scale is owed a look at the next one, and a block whose pixels
+    /// were measured for a window that has since been resized is owed a new raster. (Stale layout
+    /// pixels are not `Ready`: `DecorationRecord::layout_changed` demotes to `None`.)
+    ///
+    /// **Bounded by the same window a scan is.** The walk stops at the first *current* multi-row
+    /// block it meets, because blocks do not overlap — one that ends before this row is proof that
+    /// nothing earlier can span it — and otherwise at [`MAX_MATH_SOURCE_BYTES`], which is the cap
+    /// on how far back a block covering this row could possibly start. It is asked once per
+    /// candidate that is actually about to be armed, which is the same row `schedule_scan` is
+    /// already building a window of that size for, so the ordinary picture path — whose rows are
+    /// not visible ids at all — asks nothing and allocates nothing (release bar 4).
+    fn block_that_owns(&self, id: TranscriptId) -> Option<&DecorationRecord> {
+        let mut source_bytes = 0usize;
+        for (start, record) in self.decorations.range(..id).rev() {
+            if matches!(
+                record.decoration,
+                DecorationLifecycle::Ready | DecorationLifecycle::Failed
+            ) && let Some(end) = record.block_end
+                && end > *start
+            {
+                return (end >= id).then_some(record);
+            }
+            source_bytes = source_bytes
+                .saturating_add(
+                    self.document
+                        .entries()
+                        .get(start)
+                        .map_or(0, |entry| entry.line.text.len()),
+                )
+                .saturating_add(1);
+            if source_bytes > MAX_MATH_SOURCE_BYTES {
+                return None;
+            }
+        }
+        None
+    }
+
     fn schedule_scan(&mut self, candidate_id: TranscriptId) {
+        // **A row a proven block already owns is not a candidate of its own** — see
+        // [`Self::block_that_owns`], which is the whole of the reason. First, because everything
+        // below it is the cost this refusal exists to avoid: a scan window built out of the
+        // document's own lines, and behind it a worker that lays the formula out again.
+        if self.block_that_owns(candidate_id).is_some() {
+            return;
+        }
         let detection_options = self.detection_options();
         let Some(candidate_context) = self.frozen_detection_contexts.get(&candidate_id) else {
             return;
@@ -16642,10 +16653,10 @@ mod tests {
     /// work stops, and "how many scans did the second frame ask for" is a number that reads the
     /// same on an idle machine and under load.
     ///
-    /// MUTATIONS: drop the `is_body_of_a_proven_block` refusal and every pass past the first
-    /// renders the block again. Make the refusal unconditional — skip the rows whatever state the
-    /// owner is in — and a block whose layout changed can never be proven afresh, because the row
-    /// that proves a block is its closing delimiter and never its opener.
+    /// MUTATIONS: drop `block_that_owns`' refusal from `schedule_scan` and every pass past the
+    /// first renders the block again. Make the refusal unconditional — refuse the rows whatever
+    /// state the owner is in — and a block whose layout changed can never be proven afresh,
+    /// because the row that proves a block is its closing delimiter and never its opener.
     #[test]
     fn a_block_showing_its_source_face_asks_for_no_more_scans() {
         let doc = [
@@ -16720,6 +16731,97 @@ mod tests {
         );
     }
 
+    /// RED — **a source face scrolled past its own opener asks for nothing either** (review
+    /// 2026-09-18, P1).
+    ///
+    /// The first attempt at this read the ownership off `frame.math_blocks`, and this is the probe
+    /// that says why the picture cannot be the evidence: `decorate_math_frame` needs the block's
+    /// *opening* row on the frame, so a source face scrolled two rows down publishes no placement
+    /// at all — while its body and its closing row are both on screen, both visible history ids of
+    /// their own, and the closing row therefore armed itself on every frame exactly as it did
+    /// before. The record has no such horizon: `block_end` names the last row the block covers in
+    /// transcript ids, and that is true of a block whose every row is off screen.
+    ///
+    /// The empty `math_blocks` is asserted here rather than left implied, because it is the whole
+    /// of the argument: a gate built on the picture has nothing to refuse with on this frame.
+    ///
+    /// MUTATIONS: drop the refusal from `schedule_scan` and this repeats `[1, 1, 1, 1, 1, 1]`.
+    #[test]
+    fn a_source_face_scrolled_past_its_opener_asks_for_no_more_scans() {
+        let doc = [
+            "$$",
+            r"\nabla \times \mathbf{E} = -\frac{\partial \mathbf{B}}{\partial t}, \qquad",
+            r"\nabla \cdot \mathbf{B} = 0",
+            "$$",
+            "",
+            "tail1",
+            "tail2",
+            "tail3",
+            "tail4",
+            "tail5",
+            "tail6",
+            "end",
+        ]
+        .join("\r\n");
+        let mut session = DualPlaneSession::new(nz(60), nz(6));
+        session.feed(doc.as_bytes()).unwrap();
+        while session.take_worker_task().is_some() {}
+        for record in session.decorations.values_mut() {
+            record.decoration = DecorationLifecycle::None;
+            record.artifact = None;
+            record.stale_artifact = None;
+        }
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_to_top();
+        let raster = synthetic_raster(40, 40);
+
+        let drain = |session: &mut DualPlaneSession, projection: &mut ViewportProjection| {
+            session.refresh_projection(projection);
+            let frame = session.viewport_frame(projection).unwrap();
+            session.schedule_visible_artifacts(&frame);
+            let mut rendered = 0usize;
+            while let Some(mut task) = session.take_worker_task() {
+                if resolve_detection_task(&mut task) {
+                    session.complete_worker_result(task, Ok(raster.clone()));
+                    rendered += 1;
+                } else {
+                    session.complete_worker_task(task);
+                }
+            }
+            rendered
+        };
+        assert_eq!(
+            drain(&mut session, &mut projection),
+            1,
+            "the block is proven and rastered once"
+        );
+
+        for record in session.decorations.values_mut() {
+            if record.decoration == DecorationLifecycle::Ready {
+                assert!(record.toggle_source(), "the block turns over");
+            }
+        }
+        // Two rows down: the opener is above row zero, the body and the closing `$$` are not.
+        session.refresh_projection(&mut projection);
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_by_rows(-2);
+        session.refresh_projection(&mut projection);
+        let clipped = session.viewport_frame(&mut projection).unwrap();
+        assert!(
+            clipped.math_blocks.is_empty(),
+            "the picture cannot name a block whose opener it does not draw"
+        );
+
+        let renders: Vec<usize> = (0..6)
+            .map(|_| drain(&mut session, &mut projection))
+            .collect();
+        assert!(
+            renders.iter().all(|rendered| *rendered == 0),
+            "and the rows are still the block's, however little of it is on screen: {renders:?}"
+        );
+    }
+
     /// RED — **a block whose render failed is asked once per revision, not once per frame**
     /// (owner's report 2026-09-18, the same disease in the failure path).
     ///
@@ -16736,7 +16838,7 @@ mod tests {
     /// formula that failed to compile at one scale may render at another, so the refusal is over
     /// `Failed` *at the current versions* and a new layout key hands the block back.
     ///
-    /// MUTATIONS: honour only `Ready` in the frame refusal and the failing block is tried again on
+    /// MUTATIONS: honour only `Ready` in `block_that_owns` and the failing block is tried again on
     /// every frame. Take the closing row out of the running for good instead — suppress it when
     /// the block resolves — and `frozen_inline_math_survives_window_resize` goes red, because the
     /// row that proves a block is the row a new revision has to be able to arm.
