@@ -18,27 +18,6 @@
   even when its picture is ready after the prompt has come back — the first
   `cat` of a fresh window included — and your prompt is never typeset, whatever
   it says.
-- Formulas hold still inside a full-screen program: scrolling through Claude
-  Code, Codex CLI or anything else that draws its own screen no longer flashes a
-  typeset formula back to its `$$…$$` source, a formula worked out while such a
-  program is redrawing survives the end of that redraw, and a window gesture
-  that ends on the size it began on no longer leaves a pane that typesets
-  nothing at all for as long as it is open. Folio also answers now when a
-  program asks which terminal it is running in — the question a full-screen
-  program asks before it decides to hand its screen over in one piece, so more
-  of them do.
-- On a Mac the system hands a terminal a program's output in pieces of at most
-  1,024 bytes, so one redraw of a full screen arrives as several of them a
-  millisecond or two apart; Folio now waits up to three milliseconds for the
-  rest whenever the system says more was coming, and draws the redraw whole.
-  Typing is not delayed — a keystroke's echo is the system saying there is
-  nothing more. Two things this does not reach, plainly: a program that pauses
-  in the middle of writing its own redraw can still be caught half-drawn, since
-  nothing outside it can know it has not finished, unless it hands its screen
-  over in one piece; and on the ordinary screen, a formula redrawn by a program
-  that does not follow the conventions Folio watches for can still show its
-  source for a moment — that one is next. Windows is unchanged: there, a
-  program's write arrives whole.
 - A formula a program prints cannot harm the window it is printed in: one nested
   too deeply or asking for too large a table is refused and left as text, a
   formula cannot run a program, and one that cannot be drawn no longer takes the
@@ -77,41 +56,9 @@
 
 ### Fixed
 
-- **On a Mac, a formula no longer flashes back to its source while you scroll
-  inside a full-screen program.** One redraw of a full screen arrives there in
-  pieces; Folio now waits up to three milliseconds for the rest and draws the
-  whole redraw at once, without holding up what you type.
-- **Programs that ask which terminal they are running in now get an answer**, so
-  a full-screen program goes on to ask whether Folio can update the screen in
-  one piece — and then updates it that way.
-- **After dragging a window's edge back to where it started, formulas in that
-  pane are typeset again.** A gesture that ended on the size it began on used to
-  leave that pane typesetting nothing, drawing no table and showing no picture,
-  for as long as it stayed open.
-- **A formula typeset while a full-screen program was redrawing no longer
-  disappears the moment that redraw finishes**, and one edited in place — body
-  rewritten, `$$` lines untouched — is typeset again rather than left as source.
-- **A formula edited before Folio had finished reading it the first time is read
-  again** instead of staying as source for as long as it is on the screen.
-- **A picture Folio has just taken down does not come back a moment later** when
-  the redraw it was taken down during comes to an end.
-- **A picture is never put on a line that is a formula plus something else** —
-  the last line of the content, which a full-screen program often shares with
-  its own "jump to bottom" chip — and a formula scrolling back into view inside
-  a code block stays code.
-- **A picture is never left standing over a formula that has just been
-  edited**: every picture is checked against the lines underneath it the moment
-  they change.
-- **Resizing the window while a program is drawing no longer loses a formula**,
-  nor draws one over the wrong lines while the old shape of the screen is still
-  being measured against.
-- **When a program finishes one screenful and begins the next in the same
-  breath, the formulas on the finished one stay where they are.**
-- **A formula too long for the pane keeps its picture when it scrolls up into
-  the history** instead of being read and drawn a second time.
-- **Folio no longer reads the whole screen again looking for a formula it has
-  already failed to find there**, so a program that redraws itself on every
-  keystroke no longer makes it pay for that on every keystroke.
+- **Formulas no longer flash back to their source while you scroll inside a
+  full-screen program**, and a window dragged back to the size it started at no
+  longer leaves its formulas untypeset.
 - **An inline formula in a command's output is typeset even when its picture is
   ready after the prompt has come back**, and a wrapped one stays typeset when
   the window's width changes.
