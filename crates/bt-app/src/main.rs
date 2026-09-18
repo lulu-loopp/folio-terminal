@@ -12891,6 +12891,15 @@ struct WindowRuntime {
     peek_thumbnail_pending: Option<PeekThumbnailTarget>,
     math_hover_anchor: Option<MathBlockAnchor>,
     math_hover_clear_at: Option<Instant>,
+    /// **The picture the formula hover was last answered against** — see
+    /// [`Runtime::refresh_math_hover_against_the_picture`] (owner's report
+    /// 2026-09-18).
+    ///
+    /// A copy of [`Self::presented_picture_revision`] and nothing else, so the
+    /// two can be compared with one `u64` load on every turn: when they differ,
+    /// the glass holds a picture nobody has asked "what is under the pointer
+    /// now" of.
+    math_hover_revision: u64,
     /// **The two marks on the glass: where they stand, how solid they are, and
     /// what they are on their way to** (owner's ruling 2026-09-14 ②, and its
     /// report of that evening, T-MATH-TOOLS-FOLLOW).
@@ -37680,6 +37689,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         peek_thumbnail_pending: None,
         math_hover_anchor: None,
         math_hover_clear_at: None,
+        math_hover_revision: 0,
         math_tools: None,
         math_toggle: None,
         math_tool_pressed: None,
@@ -87488,6 +87498,62 @@ impl Runtime<'_> {
         changed
     }
 
+    /// **Ask again what the pointer is on, because the picture moved under it**
+    /// (owner's report 2026-09-18).
+    ///
+    /// A formula's hover is a fact about two things — where the pointer is, and
+    /// what the pane is drawing there — and until this door existed only one of
+    /// them was ever asked about. [`Self::update_math_hover`] had exactly one
+    /// caller, the pointer-moved handler, so the window re-read the band under
+    /// the hand when *the hand* moved and never when *the picture* did. A wheel
+    /// notch (which on a trackpad produces no pointer event at all), a
+    /// full-screen program repainting its own screen, a pane's own output
+    /// scrolling, a resize, a block changing shape: every one of those takes the
+    /// band out from under a resting pointer, and the band went on wearing its
+    /// ground and its two marks until the pointer happened to twitch.
+    ///
+    /// **One rule and one door.** Nothing here decides anything: it re-asks the
+    /// very question the pointer asks, through the very function the pointer
+    /// goes through, so a band lit by a move and a band lit by a scroll cannot
+    /// come to two different answers. The anchor going to `None` arms the same
+    /// 500 ms grace a pointer leaving arms, and a band that scrolls back under
+    /// the pointer inside that grace cancels it exactly as a returning pointer
+    /// does — `update_math_hover`'s first branch, unchanged. The marks do not
+    /// flicker through any of it: [`Self::set_hovered_math`] answers `false`
+    /// when the shells already believe what they are being told, and
+    /// [`formula_tools::FormulaToolFollow`] keys on
+    /// [`MathBlockAnchor::same_block`], so a band that merely stands on
+    /// different rows this frame is followed rather than re-arrived at.
+    ///
+    /// **It is the presented picture's revision and not the composed one**, and
+    /// that is the whole of what makes this honest: [`Self::math_hit`] reads
+    /// `last_presented_frame`, which is written in the same breath as
+    /// [`WindowRuntime::presented_picture_revision`], so the number compared
+    /// here names the exact picture the hit test is about to be answered from.
+    ///
+    /// **A window with no pointer in it pays one `Option` read.** A window with
+    /// one pays that plus a `u64` comparison on every turn, and the hit test
+    /// only on the turns a new picture actually reached the glass — which is the
+    /// same bargain [`Self::sync_math_tools`] already makes one clock over.
+    fn refresh_math_hover_against_the_picture(&mut self, now: Instant) -> Result<()> {
+        if self.window.pointer_position.is_none() {
+            // The hand is not in this window, so there is nothing to ask on its
+            // behalf — and the pictures that went by while it was away are not a
+            // debt to pay when it comes back: `pointer_moved` asks for itself on
+            // the very first move. Squaring the number here is what keeps a
+            // window nobody is pointing at from answering a stale comparison on
+            // the turn the pointer returns.
+            self.window.math_hover_revision = self.window.presented_picture_revision;
+            return Ok(());
+        }
+        if self.window.math_hover_revision == self.window.presented_picture_revision {
+            return Ok(());
+        }
+        self.window.math_hover_revision = self.window.presented_picture_revision;
+        self.update_math_hover(now)?;
+        Ok(())
+    }
+
     fn clear_math_hover_if_due(&mut self, now: Instant) -> Result<()> {
         if self
             .window
@@ -103723,6 +103789,14 @@ impl Runtime<'_> {
         // window is actually showing rather than the one it was showing a line
         // ago.
         self.advance_drag_autoscroll(now)?;
+        // **And what the pointer is on, re-read against the picture that is
+        // actually on the glass, before the grace above it is spent** (owner's
+        // report 2026-09-18). The band under a resting hand can stop being under
+        // it without the hand doing anything, and this is the only thing that
+        // notices; the clock on the next line is then spent on an answer that is
+        // this frame's rather than on one left over from the last time the hand
+        // moved. See [`Self::refresh_math_hover_against_the_picture`].
+        self.refresh_math_hover_against_the_picture(now)?;
         self.clear_math_hover_if_due(now)?;
         // And the band that is changing face, **ahead** of the marks: the
         // journey this pays for moves the block's own rectangle, and the marks
@@ -107322,6 +107396,146 @@ mod formula_tool_seat_tests {
             door.contains("self.window.math_hover_anchor = None")
                 && door.contains("self.window.math_tool_pressed = None"),
             "and the three facts about the band under the pointer end together:\n{door}"
+        );
+    }
+
+    /// RED — **the band under the pointer is re-read when the picture moves, not
+    /// only when the hand does** (owner's report 2026-09-18).
+    ///
+    /// A formula's hover is a fact about two things, and until this ticket only
+    /// one of them was ever asked about: `update_math_hover` had exactly one
+    /// caller, the pointer-moved handler. Everything that moves the *picture*
+    /// under a resting hand — a wheel notch, which on a trackpad produces no
+    /// pointer event at all; a full-screen program repainting its own screen; a
+    /// pane's own output scrolling; a resize; a block changing shape — left the
+    /// band wearing its ground and its two marks until the pointer next twitched.
+    ///
+    /// One door, and it is the pointer's own: the picture asks the same question
+    /// through the same function, so a band lit by a move and a band lit by a
+    /// scroll cannot come to two different answers. And it is asked **above**
+    /// the grace it may arm, so the clock on the next line is spent on this
+    /// frame's answer rather than on the one left over from the last move.
+    ///
+    /// MUTATIONS: drop the call from `turn` → the owner's report exactly. Put it
+    /// *below* `clear_math_hover_if_due` → the grace is spent a whole turn
+    /// before the answer it is about. Give it a hit test of its own instead of
+    /// `update_math_hover` → two doors, and the 500ms grace lives behind only
+    /// one of them.
+    #[test]
+    fn a_picture_that_moved_under_a_resting_pointer_is_asked_again() {
+        let door = body(
+            &[
+                "    fn refresh_math_hover",
+                "_against_the_picture(&mut self, now: Instant)",
+            ]
+            .concat(),
+        );
+        assert!(
+            door.contains("self.update_math_hover(now)?;"),
+            "the picture asks the pointer's own question through the pointer's own door:\n{door}"
+        );
+        assert!(
+            !door.contains("math_hit()"),
+            "and it does no hit testing of its own:\n{door}"
+        );
+
+        let turning = body("    fn turn(&mut self, now: Instant, application_clocks: bool)");
+        let asked = turning
+            .find("self.refresh_math_hover_against_the_picture(now)?;")
+            .expect("every turn re-reads the band under a pointer that has not moved");
+        let grace = turning
+            .find("self.clear_math_hover_if_due(now)?;")
+            .expect("and then spends the grace");
+        assert!(
+            asked < grace,
+            "the answer is this frame's before the clock is spent on it:\n{turning}"
+        );
+    }
+
+    /// RED — **the picture's door costs a window nothing when there is nothing
+    /// to ask** (owner's report 2026-09-18).
+    ///
+    /// It runs on every turn of every window, so what it does on the turns that
+    /// have no question is the whole of its price: one `Option` read when the
+    /// hand is not in this window, and one `u64` comparison when the glass still
+    /// holds the picture the hover was already answered against. Both refusals
+    /// stand ahead of the ask, which is what makes "a window nobody is pointing
+    /// at pays nothing" structural rather than a remark.
+    ///
+    /// **The revision is the *presented* one**, and that is not a detail:
+    /// `math_hit` reads `last_presented_frame`, which `redraw` writes in the
+    /// same breath as `presented_picture_revision`, so the number compared here
+    /// names the exact picture the hit test is about to be answered from. A
+    /// composed-frame counter would ask against a picture that is still in the
+    /// slot.
+    ///
+    /// MUTATIONS: drop the pointer refusal → a window with the hand somewhere
+    /// else hit-tests a pane on every frame a talkative shell produces. Drop the
+    /// revision comparison → the same, with the hand inside. Compare
+    /// `terminal_content_revision` instead → the question is asked of a picture
+    /// that has not reached the glass.
+    #[test]
+    fn the_pictures_door_refuses_before_it_asks() {
+        let door = body(
+            &[
+                "    fn refresh_math_hover",
+                "_against_the_picture(&mut self, now: Instant)",
+            ]
+            .concat(),
+        );
+        let pointer = door
+            .find("if self.window.pointer_position.is_none() {")
+            .expect("a window with no pointer in it asks nothing");
+        let revision = door
+            .find("if self.window.math_hover_revision == self.window.presented_picture_revision {")
+            .expect("and a glass holding the picture the hover already knows asks nothing");
+        let ask = door
+            .find("self.update_math_hover(now)?;")
+            .expect("and everything else does");
+        assert!(
+            pointer < revision && revision < ask,
+            "both refusals stand ahead of the work they refuse:\n{door}"
+        );
+        assert!(
+            !door.contains("terminal_content_revision"),
+            "the picture asked about is the one on the glass, not the one in the slot:\n{door}"
+        );
+    }
+
+    /// RED — **a band that comes back under the pointer cancels the grace rather
+    /// than arriving a second time** (owner's report 2026-09-18).
+    ///
+    /// The picture's door makes this case ordinary where it used to be
+    /// impossible: content scrolls a band out from under a resting hand, the
+    /// grace is armed, and then it scrolls back — a reader rocking a wheel, a
+    /// program redrawing. Nothing new is written for it. `update_math_hover`'s
+    /// first branch drops the deadline and touches the shells only when the
+    /// *anchor* changed, `set_hovered_math` answers `false` when the shells
+    /// already believe what they are being told, and the marks' own follow keys
+    /// on `MathBlockAnchor::same_block` — so a band that merely stands on
+    /// different rows this frame is followed rather than faded in again.
+    ///
+    /// MUTATIONS: clear the deadline outside the hit's branch and a band the
+    /// pointer never left loses its grace on the frame it scrolls away. Drop the
+    /// `!=` guard and every frame of a scroll rewrites the shells and repaints.
+    #[test]
+    fn a_band_that_comes_back_inside_the_grace_keeps_its_marks() {
+        let door = body(&["    fn update_math", "_hover(&mut self, now: Instant)"].concat());
+        let cleared = door
+            .find("self.window.math_hover_clear_at = None;")
+            .expect("a band under the pointer is not on its way out");
+        let changed = door
+            .find("if self.window.math_hover_anchor.as_ref() != Some(&hit.anchor) {")
+            .expect("and the shells hear about it only when the block itself changed");
+        assert!(
+            cleared < changed,
+            "the grace goes first, whether or not this is the same block:\n{door}"
+        );
+
+        let sweep = body("    fn set_hovered_math(&mut self, anchor: Option<MathBlockAnchor>)");
+        assert!(
+            sweep.contains("changed |= leaf.session.set_math_hover(wanted);"),
+            "and the sweep answers whether anything actually moved:\n{sweep}"
         );
     }
 

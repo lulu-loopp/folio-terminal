@@ -8362,8 +8362,50 @@ impl DualPlaneSession {
         }
 
         let inline_formulas = self.inline_math_bands;
+        // **The rows a proven block owns are that block's body and never candidates of their own**
+        // (owner's report 2026-09-18: the `‹›` change of face stutters).
+        //
+        // A block is proven by its **closing** delimiter and never by its opener — the opener's own
+        // window cannot see the end of it — so `apply_worker_completion` finishes on a candidate
+        // that is not the record it completed, and puts that candidate back to
+        // `DecorationLifecycle::None`, which is the *armed* state. While the block wears its
+        // picture nothing came of that: the artifact covers its rows, their cells carry the block's
+        // own anchor, and the closing row is therefore never a visible history id for this loop to
+        // find. The moment the reader presses `‹›` the rows are terminal text again, every one of
+        // them is visible on its own id, and the closing row armed itself on every frame — a whole
+        // scan and a whole LaTeX raster per frame, rendered and thrown away, for a window nobody
+        // was touching. Measured on the owner's machine: 638 renders of one block at ~7ms each,
+        // which is the halting the change of face was reported for and which left every other
+        // formula in the window queued behind it.
+        //
+        // **Asked of the picture in hand and of the record together**, because the two answer
+        // different halves. The frame says which transcript rows a block is drawn over — including
+        // a block whose opener has scrolled off the top, which no walk back through the records
+        // could bound — and the record says whether that drawing is still the current answer.
+        // `Ready` is exactly that: a layout change, a source change and a detector change all put
+        // the owner back to `None`, and on that frame its closing row arms again and proves the
+        // block afresh, which is the liveness this refusal must not cost.
+        let owned_rows: Vec<(TranscriptId, TranscriptId)> = frame
+            .math_blocks
+            .iter()
+            .filter_map(|placement| match &placement.anchor {
+                MathBlockAnchor::History { start, end, .. } if end > start => Some((*start, *end)),
+                _ => None,
+            })
+            .filter(|(start, _)| {
+                self.decorations
+                    .get(start)
+                    .is_some_and(|owner| owner.decoration == DecorationLifecycle::Ready)
+            })
+            .collect();
+        let is_body_of_a_proven_block = |id: TranscriptId| {
+            owned_rows
+                .iter()
+                .any(|(start, end)| *start < id && id <= *end)
+        };
         let mut candidates = visible
             .iter()
+            .filter(|id| !is_body_of_a_proven_block(**id))
             .filter(|id| {
                 self.document.entries().get(id).is_some_and(|entry| {
                     may_arm_math(&entry.line.text, inline_formulas, || {
@@ -8390,6 +8432,7 @@ impl DualPlaneSession {
                 .and_then(|context| context.required_start(*id))
                 .is_some_and(|start| start <= last_visible);
             if overlaps_visible
+                && !is_body_of_a_proven_block(*id)
                 && (may_arm_math(&entry.line.text, inline_formulas, || {
                     self.history_inline_site(*id)
                 }) || may_arm_table(&entry.line.text, || {
@@ -16564,6 +16607,100 @@ mod tests {
                 .decoration(*id)
                 .is_some_and(|record| record.decoration == DecorationLifecycle::Ready)
         }));
+    }
+
+    /// RED — **a block showing its `$$…$$` source face schedules nothing** (owner's report
+    /// 2026-09-18: the `‹›` change of face stutters).
+    ///
+    /// The scheduler arms a visible history line whose text carries a display delimiter, and the
+    /// row that *resolves* a block is its closing delimiter — so `apply_worker_completion` puts
+    /// that row back to `DecorationLifecycle::None`, which is the armed state. While the block
+    /// wears its picture the artifact covers those rows and none of them is a visible id of its
+    /// own, so nothing came of it. In the source face every row is terminal text again, the
+    /// closing row is visible on its own id, and it re-armed on every frame: one whole scan and
+    /// one whole LaTeX raster per frame, rendered and thrown away. The owner's trace carries 638
+    /// renders of one block at ~7ms apiece.
+    ///
+    /// The count and not a timing, for the arming ledger's reason: what the fix claims is that the
+    /// work stops, and "how many scans did the second frame ask for" is a number that reads the
+    /// same on an idle machine and under load.
+    ///
+    /// MUTATIONS: drop the `is_body_of_a_proven_block` refusal and every pass past the first
+    /// renders the block again. Make the refusal unconditional — skip the rows whatever state the
+    /// owner is in — and a block whose layout changed can never be proven afresh, because the row
+    /// that proves a block is its closing delimiter and never its opener.
+    #[test]
+    fn a_block_showing_its_source_face_asks_for_no_more_scans() {
+        let doc = [
+            "$$",
+            r"\nabla \times \mathbf{E} = -\frac{\partial \mathbf{B}}{\partial t}, \qquad",
+            r"\nabla \cdot \mathbf{B} = 0",
+            "$$",
+            "",
+            "tail1",
+            "tail2",
+            "tail3",
+            "tail4",
+            "tail5",
+            "tail6",
+            "end",
+        ]
+        .join("\r\n");
+        let mut session = DualPlaneSession::new(nz(60), nz(6));
+        session.feed(doc.as_bytes()).unwrap();
+        while session.take_worker_task().is_some() {}
+        for record in session.decorations.values_mut() {
+            record.decoration = DecorationLifecycle::None;
+            record.artifact = None;
+            record.stale_artifact = None;
+        }
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_to_top();
+        let raster = synthetic_raster(40, 40);
+        let mut renders = Vec::new();
+        for pass in 0..6 {
+            // The press, on the frame after the block first reached the glass: the reader has
+            // asked to read the source the picture replaced.
+            if pass == 1 {
+                for record in session.decorations.values_mut() {
+                    if record.decoration == DecorationLifecycle::Ready {
+                        assert!(record.toggle_source(), "the block turns over");
+                    }
+                }
+            }
+            session.refresh_projection(&mut projection);
+            let frame = session.viewport_frame(&mut projection).unwrap();
+            session.schedule_visible_artifacts(&frame);
+            let mut rendered = 0usize;
+            while let Some(mut task) = session.take_worker_task() {
+                if resolve_detection_task(&mut task) {
+                    session.complete_worker_result(task, Ok(raster.clone()));
+                    rendered += 1;
+                } else {
+                    session.complete_worker_task(task);
+                }
+            }
+            renders.push(rendered);
+        }
+        assert_eq!(
+            renders.first().copied(),
+            Some(1),
+            "the block is rastered once, when it is proven: {renders:?}"
+        );
+        assert!(
+            renders[1..].iter().all(|rendered| *rendered == 0),
+            "and never again for a face the reader turned over: {renders:?}"
+        );
+        assert!(
+            session
+                .decorations
+                .values()
+                .any(|record| record.decoration == DecorationLifecycle::Ready
+                    && record.show_source
+                    && record.artifact.is_some()),
+            "and the block still holds the picture it will turn back to"
+        );
     }
 
     #[test]

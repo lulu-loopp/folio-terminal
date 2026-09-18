@@ -8,6 +8,20 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **A formula's highlight no longer stays lit after the formula has scrolled out
+  from under a resting pointer, and turning one over no longer stutters.** Two
+  things shared a screen. A formula showing its `$$…$$` source instead of its
+  picture had that picture drawn again on every single frame, thrown away each
+  time — several hundred renderings of one formula for a window nobody had
+  touched — which is the halting the change of face was reported for and which
+  left every other formula waiting behind it. And the pale band under a formula,
+  with the two marks beside it, was worked out only when the pointer moved: if
+  the formula itself moved away instead — a wheel, a full-screen program
+  redrawing, new output, a resized window — the band stayed lit under a hand
+  that was no longer on anything. Folio now asks what the pointer is on whenever
+  either of the two moves, and a formula that comes back under the pointer
+  before the half-second grace is up simply keeps its marks rather than fading
+  them in again.
 - **A formula scrolled partly off the top of a full-screen program's screen no
   longer swallows the formula below it, and what is left of it on screen is left
   as text.** When a program like Claude Code moves its output up and a formula's
