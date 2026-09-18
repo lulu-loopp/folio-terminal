@@ -1288,6 +1288,53 @@ fn an_elapsed_time_service_is_never_gated_and_the_flood_shows_its_state() {
         !autoscroll.contains("animation_frame_is_due"),
         "the auto-scroll integrates true elapsed time and must not be refused:\n{autoscroll}"
     );
+
+    // ── ⑤ and every other clock that changes state stands above the gate ─────
+    //
+    // The same distinction once the two measured cases are closed: a wait
+    // maturing, a life running out and a finished thing being swept are *state*,
+    // and behind the gate a printing pane keeps a tip from ever appearing, a
+    // notice from ever leaving and a flyout from ever opening. What stays paced
+    // is the fade each of them starts.
+    for (advancer, clock) in [
+        (
+            "    fn advance_toasts(&mut self, now: Instant) -> Result<()> {",
+            "self.window.toasts.advance(now, self.app.motion)",
+        ),
+        (
+            "    fn advance_tooltip_if_due(&mut self, now: Instant) -> Result<()> {",
+            "self.window.tooltip.activate_if_due(now)",
+        ),
+        (
+            "    fn advance_key_hint_if_due(&mut self, now: Instant) -> Result<()> {",
+            "self.window.key_hint.activate_if_due(now)",
+        ),
+        (
+            "    fn advance_card_hint(&mut self, now: Instant) -> Result<()> {",
+            "self.window.card_hint.expire(now)",
+        ),
+        (
+            "    fn advance_file_peek(&mut self, now: Instant) -> Result<()> {",
+            "self.switch_file_peek(now)",
+        ),
+        (
+            "    fn advance_float(&mut self, now: Instant) -> Result<()> {",
+            "self.window.float.take_due(now)",
+        ),
+    ] {
+        let body = method(advancer);
+        let state = body
+            .find(clock)
+            .unwrap_or_else(|| panic!("`{clock}` is this advancer's state clock:\n{body}"));
+        let gate = body
+            .find("!self.animation_frame_is_due() {")
+            .unwrap_or_else(|| panic!("this advancer still asks for a frame:\n{body}"));
+        assert!(
+            state < gate,
+            "`{clock}` stands behind the frame gate, so a printing pane can \
+             postpone it for ever:\n{body}"
+        );
+    }
 }
 
 /// RED — **an integrator does not care how often it is called, only that it is**

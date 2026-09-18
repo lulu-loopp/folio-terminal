@@ -42729,14 +42729,22 @@ impl Runtime<'_> {
 
     /// Move every card's clock on, and pay the frames the movement owes.
     fn advance_toasts(&mut self, now: Instant) -> Result<()> {
-        // **On the window's own display frame** (owner's report 2026-09-18).
-        // See [`Self::animation_frame_is_due`]: a turn inside the frame the
-        // glass is already showing has nothing it could put on it, and the
-        // refusal books the turn that has.
-        if !self.animation_frame_is_due() {
+        // **The clocks first, and never paced** (closure review O4,
+        // 2026-09-18). A notice's life running out and a departed card being
+        // dropped are *state* rather than a frame of animation — see
+        // [`Self::animation_frame_is_due`] for the three things an advancer
+        // does — and behind the gate they are a notice that a neighbouring pane
+        // printing every five milliseconds can keep on the reader's screen for
+        // as long as it keeps printing.
+        let moved = self.window.toasts.advance(now, self.app.motion);
+        // **And then the fade's own frame** (owner's report 2026-09-18): a turn
+        // inside the frame the glass is already showing has nothing it could put
+        // on it, and the refusal books the turn that has. A turn on which the
+        // service changed something is not that turn — what it has to say is new
+        // — so it goes through.
+        if !moved && !self.animation_frame_is_due() {
             return Ok(());
         }
-        let moved = self.window.toasts.advance(now, self.app.motion);
         if (moved || self.toasts_owe_frame(now)) && self.refresh_overlay() {
             self.present_chrome_change()?;
         }
@@ -45129,11 +45137,17 @@ impl Runtime<'_> {
 
     /// Show a settled tip, and keep paying the fade's frames until it lands.
     fn advance_tooltip_if_due(&mut self, now: Instant) -> Result<()> {
-        // On the window's own display frame — see [`Self::animation_frame_is_due`].
-        if !self.animation_frame_is_due() {
+        // **The wait maturing is state, and state is never paced** (closure
+        // review O4, 2026-09-18): behind the gate, a tip whose three hundred and
+        // eighty milliseconds ran out while a neighbouring pane was printing
+        // would not appear at all until the printing stopped. See
+        // [`Self::animation_frame_is_due`] for the three things an advancer does.
+        let promoted = self.window.tooltip.activate_if_due(now);
+        // And then the fade's own frame, which is the only paced thing here — a
+        // turn that promoted a tip has something new to say and goes through.
+        if !promoted && !self.animation_frame_is_due() {
             return Ok(());
         }
-        let promoted = self.window.tooltip.activate_if_due(now);
         if (promoted || self.tooltip_owes_frame(now)) && self.refresh_overlay() {
             self.present_chrome_change()?;
         }
@@ -47851,11 +47865,13 @@ impl Runtime<'_> {
     /// already in the past, which is the `WaitUntil` pin's own definition of a
     /// loop that never sleeps.
     fn advance_key_hint_if_due(&mut self, now: Instant) -> Result<()> {
-        // On the window's own display frame — see [`Self::animation_frame_is_due`].
-        if !self.animation_frame_is_due() {
+        // The tip's own arrangement, for the tip's own reason (closure review
+        // O4, 2026-09-18): the eight hundred milliseconds maturing is state and
+        // is never paced, and only the fade that follows it is.
+        let promoted = self.window.key_hint.activate_if_due(now);
+        if !promoted && !self.animation_frame_is_due() {
             return Ok(());
         }
-        let promoted = self.window.key_hint.activate_if_due(now);
         if (promoted || self.key_hint_owes_frame(now)) && self.refresh_overlay() {
             self.present_chrome_change()?;
         }
@@ -47988,11 +48004,15 @@ impl Runtime<'_> {
     /// are asked in this order because a bubble whose dwell has just ended has
     /// nothing left to nudge.
     fn advance_card_hint(&mut self, now: Instant) -> Result<()> {
-        // On the window's own display frame — see [`Self::animation_frame_is_due`].
-        if !self.animation_frame_is_due() {
+        // The bubble's four seconds running out is state, not a frame of
+        // animation, and is never paced (closure review O4, 2026-09-18): behind
+        // the gate a printing pane would leave the sentence on the glass for as
+        // long as it printed.
+        let ended = self.window.card_hint.expire(now) != cardhint::CardHint::Unchanged;
+        // The nudge's own frames are the paced half.
+        if !ended && !self.animation_frame_is_due() {
             return Ok(());
         }
-        let ended = self.window.card_hint.expire(now) != cardhint::CardHint::Unchanged;
         let nudging = self.window.card_hint.nudge_moving(now, self.app.motion);
         if ended || nudging {
             self.repaint_card_hint()?;
@@ -71733,14 +71753,17 @@ impl Runtime<'_> {
         // window would wake the loop to finish a 90ms a still hand started, and
         // the frame the fade *lands* on is owed by this question and by no other.
         //
-        // **And all four on the window's own display frame** — see
-        // [`Self::animation_frame_is_due`].
-        if !self.animation_frame_is_due() {
+        // **The three clocks are state and are never paced; the fade is the one
+        // paced thing here** (closure review O4, 2026-09-18). Behind the gate, a
+        // card whose dwell matured while a neighbouring pane was printing did
+        // not appear, and one whose grace ran out did not leave — see
+        // [`Self::animation_frame_is_due`] for the three things an advancer does.
+        let moved =
+            self.switch_file_peek(now) | self.mature_file_peek(now) | self.expire_file_peek(now);
+        if !moved && !self.animation_frame_is_due() {
             return Ok(());
         }
-        if !(self.switch_file_peek(now) | self.mature_file_peek(now) | self.expire_file_peek(now))
-            && !self.file_peek_owes_frame(now)
-        {
+        if !moved && !self.file_peek_owes_frame(now) {
             return Ok(());
         }
         if self.refresh_overlay() {
@@ -79602,10 +79625,13 @@ impl Runtime<'_> {
 
     /// Advance both of the float's clocks and its animation.
     fn advance_float(&mut self, now: Instant) -> Result<()> {
-        // On the window's own display frame — see [`Self::animation_frame_is_due`].
-        if !self.animation_frame_is_due() {
-            return Ok(());
-        }
+        // **Everything down to the fade is state, and state is never paced**
+        // (closure review O4, 2026-09-18). Behind the gate, a hover intent that
+        // matured while a neighbouring pane was printing opened no window, a
+        // grace that ran out closed none, a finished exit was never swept, and
+        // the two questions at the foot — which the note on them says are asked
+        // "on every turn of the loop" — were asked on no turn at all. See
+        // [`Self::animation_frame_is_due`] for the three things an advancer does.
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let mut changed = false;
         // A *transient* peek whose trigger has gone — the tab closed, the split
@@ -79653,8 +79679,18 @@ impl Runtime<'_> {
         if self.resize_floats_to_content() {
             changed = true;
         }
-        // A float in the middle of its entrance owes a frame; one standing still
-        // owes nothing, which is why the deadline below reports nothing then.
+        // A living float asks the worker for whatever it has not yet been told.
+        // Above the gate with the rest of the service: these are idempotent and
+        // they are how a window that has just opened gets its rows at all.
+        self.ask_float_directories();
+        self.ask_git_for_floats();
+        // **And now the one paced thing**: a float in the middle of its entrance
+        // owes a frame; one standing still owes nothing, which is why the
+        // deadline reports nothing then. A turn on which the clocks above
+        // changed something has news of its own and goes through.
+        if !changed && !self.animation_frame_is_due() {
+            return Ok(());
+        }
         let animating = self
             .window
             .float
@@ -79663,9 +79699,6 @@ impl Runtime<'_> {
         if (changed || animating) && self.refresh_overlay() {
             self.present_chrome_change()?;
         }
-        // A living float asks the worker for whatever it has not yet been told.
-        self.ask_float_directories();
-        self.ask_git_for_floats();
         Ok(())
     }
 
