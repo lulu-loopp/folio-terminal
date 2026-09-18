@@ -8,22 +8,22 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
-- **A multi-line formula scrolled partly off the top of a full-screen
-  program's screen no longer swallows the formula below it, or shows half of
-  itself as a picture.** When a program like Claude Code moves its output up and
-  a formula's opening `$$` goes off the top of the window, what is left on
-  screen is the tail of that formula — and Folio now reads it as one: the `$$`
-  still visible is the formula's closing one, not the opening one of something
-  new. It used to be read as an opening `$$`, which swallowed everything down to
-  the next formula's own `$$`, so the next formula stayed as plain text however
-  long you looked at it. The tail itself is now left alone as well: where a
-  formula's `\begin{aligned}` was still on screen it was being typeset on its
-  own, as a picture of part of a formula with the formula's last line sitting
-  underneath it as text. A formula that Folio has already typeset keeps its
-  picture when its beginning scrolls off the top — that has not changed. What
-  changes is a formula Folio meets for the first time with its beginning already
-  gone: there is no way to tell from the tail alone what the whole of it was, so
-  it stays text until you scroll its beginning back into view.
+- **A formula scrolled partly off the top of a full-screen program's screen no
+  longer swallows the formula below it, and what is left of it on screen is left
+  as text.** When a program like Claude Code moves its output up and a formula's
+  opening `$$` goes off the top of the window, the `$$` still on screen is that
+  formula's closing one. Folio used to read it as the opening of something new,
+  which swallowed everything down as far as the next formula's own `$$` — so the
+  next formula stayed as plain text however long you looked at it, and where the
+  scrolled formula's `\begin{aligned}` was still visible, that much of it was
+  typeset on its own: a picture of part of a formula with the formula's last line
+  sitting underneath it as text. The formula below is now typeset, and the
+  remainder above it is left alone, all of it, as the text it is. A formula Folio
+  has already typeset keeps its picture when its beginning scrolls off the top —
+  that has not changed. It is a formula Folio meets for the first time with its
+  beginning already gone that stays text: there is nothing on screen that says
+  what the whole of it was, so it waits until you scroll its beginning back into
+  view.
 
 ## 0.4.2-preview — 2026-09-17
 
