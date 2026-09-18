@@ -1347,9 +1347,22 @@ enum StructuralStep {
     FenceMarker,
     /// A line inside an open fence.
     InsideFence,
-    /// Ordinary structure — read the line. `abandon_opening` is the swallow-radius bound: an
-    /// unfinished environment has met a display opener, and must be given up first.
-    Read { abandon_opening: bool },
+    /// Ordinary structure — read the line. `abandon` names a bound the open delimiter has just
+    /// crossed, if any: it is given up first, and the line is then read as though nothing were open.
+    Read { abandon: Option<AbandonedOpening> },
+}
+
+/// Why an open display delimiter is given up at a line rather than at a closer. Both are the same
+/// judgement — this opening cannot close into a block, and the earliest line that proves it is this
+/// one — and both hand the line on to the ordinary opening-is-none paths.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AbandonedOpening {
+    /// The swallow-radius bound: an unfinished environment has met a `$$`/`\[` display opener.
+    EnvironmentSwallow,
+    /// A row of natural-language prose while a display delimiter is open. A display body is refused
+    /// when ANY of its rows is prose (`block_body_looks_like_prose`), so from this row on there is
+    /// no closer anywhere below that could make this opening into a block.
+    ProseBody,
 }
 
 fn structural_line_step(
@@ -1383,11 +1396,38 @@ fn structural_line_step(
     // escapes, CommonMark code, ambiguous-prefix pairing. This never fires for an active `$$`/`\[`
     // opening: inner `\begin`/`\end` directional environments are not display openers, so a
     // genuinely nested environment is still swallowed as body.
-    let abandon_opening = matches!(opening, Some(DisplayDelimiter::Environment(_)))
+    if matches!(opening, Some(DisplayDelimiter::Environment(_)))
         && opening_delimiter(text).is_some_and(|(kind, _)| {
             matches!(kind, DelimiterKind::Dollars | DelimiterKind::Brackets)
-        });
-    StructuralStep::Read { abandon_opening }
+        })
+    {
+        return StructuralStep::Read {
+            abandon: Some(AbandonedOpening::EnvironmentSwallow),
+        };
+    }
+    // Prose bound, and the same argument one step earlier. A display body is refused outright when
+    // any one of its rows is natural language, so an open delimiter that has just read such a row
+    // has no closer below it that could make a block: the pairing is decided here, not at whatever
+    // `$$` happens to come next. Waiting for that `$$` was the second half of the reported defect —
+    // an orphan `$$` reached past a heading to the closing `$$` of the block underneath, the joined
+    // body was refused for the heading, and both delimiters went down together, so the block below
+    // was not refused but never seen. Ending the opening at the heading leaves the rows under it to
+    // be read for what they are, and the orphan stays one row of text.
+    //
+    // This is a line's own verdict, which is why it is here and not in the scan: the walker reaches
+    // the same state from the same line, and a caller's checkpoint still says what the scanner would
+    // have said. Only prose is decidable this way — whether a body is empty, or longer than the
+    // source limit, is not known until the closer, and those refusals stay where they were.
+    //
+    // The question asked is the whole-body one, not the per-row one under it: a logical line can
+    // carry a newline of its own, and then the two do not agree — which is the point, because what
+    // has to be predicted here is exactly what the closer would decide about these same bytes.
+    if opening.is_some() && block_body_looks_like_prose(text) {
+        return StructuralStep::Read {
+            abandon: Some(AbandonedOpening::ProseBody),
+        };
+    }
+    StructuralStep::Read { abandon: None }
 }
 
 /// What one line does to the display delimiter a scan has open.
@@ -1496,8 +1536,8 @@ pub fn advance_detection_context(context: &mut DetectionContext, id: TranscriptI
                 *opening = None;
                 return;
             }
-            StructuralStep::Read { abandon_opening } => {
-                if abandon_opening {
+            StructuralStep::Read { abandon } => {
+                if abandon.is_some() {
                     *opening = None;
                 }
             }
@@ -1701,11 +1741,11 @@ fn scan_math_blocks_impl<'a>(
         if clipped.is_some_and(|tail| tail.covers_body(index)) {
             continue;
         }
-        // The structural half of this line, from the one place that decides it. The swallow-radius
-        // verdict is taken here with the rest and applied at its own place below, so that the clip
-        // resync still gets the first word and the ownership ledger still records the abandon
-        // exactly where it always did.
-        let abandon_environment = match structural_line_step(
+        // The structural half of this line, from the one place that decides it. The abandon verdict
+        // is taken here with the rest and applied at its own place below, so that the clip resync
+        // still gets the first word and the ownership ledger still records the abandon exactly where
+        // it always did.
+        let abandoned = match structural_line_step(
             text,
             &mut fence,
             opening.as_ref().map(|active| &active.delimiter),
@@ -1721,7 +1761,7 @@ fn scan_math_blocks_impl<'a>(
                 }
                 continue;
             }
-            StructuralStep::Read { abandon_opening } => abandon_opening,
+            StructuralStep::Read { abandon } => abandon,
         };
         // Row-0 clip resync (④ / evidence-driven ②). `clipped` is the decidable evidence that the
         // live grid begins inside a display block whose opener scrolled above grid row 0
@@ -1752,11 +1792,18 @@ fn scan_math_blocks_impl<'a>(
         // The swallow-radius bound, decided by `structural_line_step` above and applied here, where
         // it has always been applied: the line is then handled by the normal opening-is-none paths
         // below (single-line complete block, or a fresh multi-line opener) under every existing
-        // guard — prose body, escapes, CommonMark code, ambiguous-prefix pairing.
-        if abandon_environment {
+        // guard — prose body, escapes, CommonMark code, ambiguous-prefix pairing. A prose row ends
+        // an opening for the same reason and is accounted the same way the closer used to account
+        // it: the opener is refused for the body it was going to have.
+        if let Some(reason) = abandoned {
             opening = None;
             if let Some(rec) = recorder.as_deref_mut() {
-                rec.abandon_pending(LegitimateRejection::EnvironmentSwallowAbandoned);
+                rec.abandon_pending(match reason {
+                    AbandonedOpening::EnvironmentSwallow => {
+                        LegitimateRejection::EnvironmentSwallowAbandoned
+                    }
+                    AbandonedOpening::ProseBody => LegitimateRejection::GuardRejectedBody,
+                });
             }
         }
         // Frozen→live `$$` boundary resync. A Dollars opening whose opener lies in the frozen
@@ -1970,8 +2017,8 @@ fn scan_math_blocks_impl<'a>(
             let active = opening.take().expect("a closer implies an active opening");
             let closer_kind = structural_kind(&active.delimiter, false);
             let Some(start_index) = active.start_index else {
-                // The opener is before this bounded window. Its exact state proves that this is a
-                // closer, but the missing source means there is no occurrence to render.
+                // The opener is before this bounded window. Its exact state proves that this is
+                // a closer, but the missing source means there is no occurrence to render.
                 if let Some(rec) = recorder.as_deref_mut() {
                     rec.close_rejected(
                         index,
@@ -2130,12 +2177,21 @@ fn append_table_blocks(
         })
         .collect();
     let texts: Vec<&str> = lines.iter().map(|(_, text)| *text).collect();
+    // One pass to place every line, then one range per block: a block's rows are consecutive lines,
+    // so its extent is its two endpoints and nothing has to be compared against every line. Asking
+    // each line whether it fell inside each block cost a pass per occurrence, which is the same
+    // answer at the price of the product.
+    let row_of = lines
+        .iter()
+        .enumerate()
+        .map(|(index, (id, _))| (*id, index))
+        .collect::<BTreeMap<_, _>>();
     let mut claimed = vec![false; lines.len()];
     for block in &result.blocks {
-        for (index, (id, _)) in lines.iter().enumerate() {
-            if *id >= block.start && *id <= block.end {
-                claimed[index] = true;
-            }
+        if let (Some(&start), Some(&end)) = (row_of.get(&block.start), row_of.get(&block.end))
+            && start <= end
+        {
+            claimed[start..=end].fill(true);
         }
     }
     // A clipped block's tail is claimed too, for the reason the math loop skips it: those rows are
@@ -3093,14 +3149,14 @@ pub fn live_detection_ownership_ledger(
 /// the proven body, `closer` the delimiter that ends it, and every row between them is body — not
 /// structure — because the block that owns them began off the top of the window.
 ///
-/// The scanner reads the tail as one thing for the same reason it reads any block as one thing. A
-/// clipped block's body may perfectly well contain a `\begin{aligned}`, which on its own opens a
-/// display block (`opening_delimiter`); scanning those rows as if they stood alone drew the
-/// environment as its own picture and left the block's own closing `$$` beneath it as text — half a
-/// block, twice wrong. A pipe table in the body is the same sub-range by another route, so the table
-/// pass is handed the tail too. Nothing here is rendered: the detector never owns a block whose
-/// opener it has not read, so a clipped tail's rows stay source, and only the block below the clip —
-/// whose opener and closer are both on this screen — is detected.
+/// The scanner reads the tail as one thing for the same reason it reads any block as one thing, and
+/// the tail is exactly the rows above the delimiter that no complete occurrence claims. That is what
+/// is left of a block whose opener went off the top of the window: a run of body and, where the
+/// block was written as an environment, a bare `\end{aligned}` whose `\begin` went with the opener.
+/// A pipe table among those rows would be the same sub-range by another route, so the table pass is
+/// handed the tail too. Nothing here is rendered: the detector never owns a block whose opener it
+/// has not read, so a clipped tail's rows stay source, and only the blocks below the clip — whose
+/// openers and closers are both on this screen — are detected.
 ///
 /// **That is not the same as saying a picture is lost whenever an opener goes off the top.** The two
 /// cases differ by what has been proven, not by what is on screen. A block this session already
@@ -3183,14 +3239,18 @@ fn clipped_tail(
         .iter()
         .map(|line| (line.id, line.text.as_str()))
         .collect::<Vec<_>>();
-    // **The floor: how far up the tail is allowed to reach, decided by what TeX allows inside
-    // `$$…$$`.** Seen from this window alone, `[a complete thing][a lone $$]` is two readings at
-    // once — a standalone occurrence followed by a streaming opener, or the tail of a clipped block
-    // — and neither the rows nor the phase can tell them apart. What can is the grammar of the thing
-    // above: a complete `$$…$$`, a complete `\[…\]` and an inline `$…$` run can never stand inside a
-    // display block, so a window that proves one has proved the tail does not reach over it; a
-    // complete `\begin{env}…\end{env}` CAN, and is in fact exactly what the body of a clipped `$$`
-    // block usually looks like, so it is no floor at all and the tail runs over any number of them.
+    // **The floor: how far up the tail is allowed to reach. Only rows that belong to NO complete
+    // occurrence can be tail body.** Seen from this window alone, `[a complete thing][a lone $$]` is
+    // two readings at once — a standalone occurrence and then a `$$` whose block is still being
+    // typed, or the tail of a block clipped at the top — and neither the rows nor the phase can tell
+    // them apart. So the tie goes to what the window can prove: a complete occurrence is a block
+    // this window owns, and a reading that turns an owned block back into text on evidence the
+    // window does not have is the worse of the two, permanently, for output that has stopped.
+    //
+    // A clipped block's visible remainder does not look like that. What is left of it is rows no
+    // occurrence claims — a run of body and, when the block was written as an environment, a bare
+    // `\end{aligned}` whose `\begin` went off the top with the opener. That is the shape this rule
+    // recognises, and a complete `\begin{env}…\end{env}` is not it.
     //
     // The floors are read off a scan of the rows in front of the delimiter — the detector's own
     // answer to "what does this window prove on its own", not a second reading of it, and the same
@@ -3208,21 +3268,15 @@ fn clipped_tail(
         false,
         None,
     );
-    let hard_floor_ends = prefix
+    let occurrence_ends = prefix
         .blocks
         .iter()
-        .filter(|block| {
-            !matches!(
-                block.span.delimiter_kind,
-                DelimiterKind::Environment(_) | DelimiterKind::Table
-            )
-        })
         .map(|block| block.end)
         .collect::<BTreeSet<_>>();
     let occurrence_floor = lines[..first_dollars]
         .iter()
         .enumerate()
-        .filter(|(_, (id, _))| hard_floor_ends.contains(id))
+        .filter(|(_, (id, _))| occurrence_ends.contains(id))
         .map(|(index, _)| index + 1)
         .max()
         .unwrap_or(b);
@@ -3255,7 +3309,7 @@ fn clipped_tail(
         if options.reject_claude_code_jump_chip_overlay && text.contains(CLAUDE_CODE_JUMP_CHIP) {
             break;
         }
-        if body_line_looks_like_prose(text) {
+        if block_body_looks_like_prose(text) {
             break;
         }
         // The joined body is the rows with one `\n` between them, so every row but the lowest costs
@@ -6232,6 +6286,12 @@ abla f",
     /// GREEN containment: an odd-`$$` frozen-history reflow (a lost opener) is contained by the
     /// resync — the phantom frozen opener is abandoned (`PhantomOpenerAbandoned`) and the live grid
     /// re-pairs cleanly. The damage does not spill: zero orphans (the live-norender class).
+    ///
+    /// The row under the phantom is blank, and deliberately: a row of PROSE there ends the opening
+    /// where it stands (`AbandonedOpening::ProseBody`), which contains the same damage one witness
+    /// earlier and would leave this resync with nothing to do. A blank row is a body a closer could
+    /// still legitimately arrive for, so the phantom survives to the seam and the resync is the
+    /// thing under test again.
     #[test]
     fn contained_phantom_abandon_leaves_no_orphan() {
         let ledger = ledger_of(
@@ -6240,7 +6300,7 @@ abla f",
                 hist(2, r"\alpha = 1"),
                 hist(3, "$$"),
                 hist(4, "$$"), // dangling phantom opener from a reflow
-                hist(5, "some prose here now"),
+                hist(5, ""),
                 grid(0, "$$"),
                 grid(1, r"\gamma = 2"),
                 grid(2, "$$"),
@@ -6665,15 +6725,21 @@ abla f",
         assert!(!verdict.red);
     }
 
-    /// One screen earlier, with the environment's own `\begin{aligned}` still visible: the block's
-    /// `$$` opener is above the window, everything else is not. `\begin{aligned}` opens a display
-    /// block on its own, so scanning those rows as though they stood alone drew the environment as a
-    /// picture from a strict SUB-RANGE of the block and left the block's closing `$$` under it as
-    /// text — half a block, and the half that is drawn is not one. The clipped tail is one thing:
-    /// its rows are body, the detector never owns a block whose opener it has not read, and so the
-    /// whole tail stays source while the block below is detected.
+    /// The owner's screen one screen earlier, where the environment's own `\begin{aligned}` is still
+    /// visible and only the enclosing `$$` opener has gone off the top.
+    ///
+    /// Three things have to be true together and each of them was once false. The environment is a
+    /// complete occurrence this window proves on its own, so it is a block: nothing about a `$$`
+    /// underneath it may turn a block back into text. The `$$` is an orphan — its opener is above
+    /// the window and there is nothing here that says which rows it once enclosed — so it is one row
+    /// of text and no picture is drawn from part of anything. And the wrapped block below is
+    /// detected, which is the half that used to be lost: read as an opener, the orphan reached past
+    /// the heading to that block's own closing `$$`, the joined body was refused for the heading,
+    /// and the two delimiters went down together, so the block below was never seen at all. The
+    /// heading ends the orphan's opening where it stands, and the rows under it are read for what
+    /// they are.
     #[test]
-    fn a_clipped_environment_tail_is_never_drawn_from_a_sub_range() {
+    fn an_orphan_dollars_under_a_complete_environment_costs_neither_of_its_neighbours() {
         let ledger = ledger_of(
             &[
                 grid(0, r"\begin{aligned}"),
@@ -6690,24 +6756,21 @@ abla f",
         );
         let verdict = ledger.containment(&[]);
         assert!(
-            !owns_block(&ledger, 0, 3),
-            "the environment is body of the clipped block, never a block of its own"
-        );
-        assert!(
-            rejected_at(&ledger, 4, LegitimateRejection::OpenerAboveWindow),
-            "the `$$` under the environment closes the block whose opener is above the window"
+            owns_block(&ledger, 0, 3),
+            "the environment is a complete occurrence and stays one"
         );
         assert!(
             owns_block(&ledger, 7, 8),
-            "the wrapped block below the clip is owned and typeset"
+            "the wrapped block below the orphan is owned and typeset"
+        );
+        assert!(
+            !has_reason(&ledger, LegitimateRejection::OpenerAboveWindow),
+            "nothing here proves a clipped tail: the rows above the `$$` are a block of their own"
         );
         assert_eq!(
-            verdict.detected, 1,
-            "exactly one block on this screen has both of its delimiters on it"
+            verdict.detected, 2,
+            "the environment and the block below it, and nothing drawn from part of either"
         );
-        assert!(!has_reason(&ledger, LegitimateRejection::GuardRejectedBody));
-        assert_eq!(verdict.orphans, 0);
-        assert!(!verdict.red);
     }
 
     /// The convergence guard still decides, and a wider body proof does not weaken it: a `$$` that
@@ -6942,15 +7005,32 @@ abla f",
         );
     }
 
-    /// **An environment is the one complete thing a clipped tail DOES reach over, because TeX lets
-    /// it.** `\begin{aligned}…\end{aligned}` inside `$$…$$` is the ordinary way to write a
-    /// multi-line formula, so the body of a clipped block is full of them — and stopping the tail at
-    /// the last one left the ones above it emitted on their own, which is the sub-range this whole
-    /// rule exists to refuse. The tail runs over any number of them, one-line environments included.
+    /// **A complete environment is a floor like any other complete occurrence.** It was briefly not
+    /// one: `\begin{aligned}…\end{aligned}` inside `$$…$$` is the ordinary way to write a multi-line
+    /// formula, so it seemed the body of a clipped block would be full of them. But an environment
+    /// that is complete ON THIS SCREEN is a block this screen proves, and the window holds nothing
+    /// that says otherwise — so a reading which turns it into somebody else's body turns a block
+    /// into text, and for output that has stopped it does so for good. The clipped remainder of a
+    /// block written that way does not look like this in any case: when the enclosing `$$` went off
+    /// the top, the `\begin{aligned}` went with it, and what is left is a bare `\end{aligned}` that
+    /// no occurrence claims.
+    ///
+    /// Both shapes, multi-row and one-line, and in every state the `$$` under them can be in: still
+    /// being typed, closed into a valid block, and closed into one that is refused for its body.
     #[test]
-    fn a_clipped_tail_reaches_over_every_complete_environment_in_its_body() {
-        let ledger = ledger_of(
-            &[
+    fn a_complete_environment_above_a_lone_dollars_keeps_its_own_rows() {
+        for (state, below) in [
+            ("still being typed", vec![grid(6, "a=b")]),
+            (
+                "closed into a valid block",
+                vec![grid(6, "a=b"), grid(7, "$$")],
+            ),
+            (
+                "closed into a block refused for its body",
+                vec![grid(6, "ordinary prose here"), grid(7, "$$")],
+            ),
+        ] {
+            let mut rows = vec![
                 grid(0, r"\begin{aligned}"),
                 grid(1, "x&=y"),
                 grid(2, r"\end{aligned}"),
@@ -6958,21 +7038,21 @@ abla f",
                 grid(4, "z&=w"),
                 grid(5, r"\end{aligned}"),
                 grid(6, "$$"),
-                grid(7, "ordinary prose here"),
-                grid(8, "$$q=r$$"),
-            ],
-            DetectionContext::default(),
-        );
-        assert!(
-            !owns_block(&ledger, 0, 2) && !owns_block(&ledger, 3, 5),
-            "neither environment is a block of its own inside a clipped body"
-        );
-        assert!(
-            rejected_at(&ledger, 6, LegitimateRejection::OpenerAboveWindow),
-            "the `$$` under them closes the block whose opener is above the window"
-        );
-        assert!(owns_block(&ledger, 8, 8), "the block below is detected");
-        assert_eq!(ledger.containment(&[]).detected, 1);
+            ];
+            rows.extend(below.iter().enumerate().map(|(offset, (source, text))| {
+                let _ = source;
+                grid(7 + offset as u32, text)
+            }));
+            let ledger = ledger_of(&rows, DetectionContext::default());
+            assert!(
+                owns_block(&ledger, 0, 2) && owns_block(&ledger, 3, 5),
+                "{state}: both environments are blocks of their own"
+            );
+            assert!(
+                !has_reason(&ledger, LegitimateRejection::OpenerAboveWindow),
+                "{state}: rows that are complete occurrences are not a clipped tail"
+            );
+        }
 
         let one_line = ledger_of(
             &[
@@ -6985,73 +7065,113 @@ abla f",
             DetectionContext::default(),
         );
         assert!(
-            !owns_block(&one_line, 0, 0),
-            "a one-line environment inside a clipped body is body too"
+            owns_block(&one_line, 0, 0),
+            "a one-line environment is a complete occurrence too"
         );
-        assert!(rejected_at(
-            &one_line,
-            2,
-            LegitimateRejection::OpenerAboveWindow
-        ));
-        assert!(owns_block(&one_line, 4, 4));
+        assert!(owns_block(&one_line, 4, 4), "and the block below survives");
+        // Row 1 belongs to no occurrence, so it may be tail body and the clip may read it as one.
+        // That is the rule doing its job, not an exception to it: what the floor protects is the
+        // environment's own rows, and they are untouched either way.
     }
 
-    /// The price of letting the tail reach over an environment, and the proof it is only a loan.
+    /// **A row of prose ends an open delimiter where it stands.** A display body is refused outright
+    /// when any one of its rows is natural language, so an opening that has just read such a row has
+    /// no closer anywhere below it that could make a block — the pairing is already decided, and
+    /// waiting for the next `$$` to decide it is what cost the owner a formula. Read as an opener,
+    /// an orphan `$$` reached past a heading to the closing `$$` of the block underneath; the joined
+    /// body was refused for the heading; and both delimiters went down together, so the block below
+    /// was not refused but never seen.
     ///
-    /// A standalone `\begin{aligned}…\end{aligned}` above a `$$` whose block is still being typed is
-    /// the same rows as a clipped tail, and nothing in the window separates them, so it is read as
-    /// the tail and shows as source. The moment the block below closes, the convergence guard
-    /// answers "this `$$` opens a block that closes", the clip falls away, and the environment is a
-    /// standalone block again. Source while the formula below is being typed, where before it was a
-    /// picture of part of a formula with that formula's last row underneath it as text — for good.
+    /// It is a line's own verdict, which is why it lives in the shared per-line step: a caller
+    /// holding a walker's checkpoint stands where the scanner stands.
     #[test]
-    fn an_environment_above_a_streaming_block_comes_back_when_the_closer_arrives() {
-        let streaming = ledger_of(
+    fn a_prose_row_ends_an_opening_and_leaves_the_block_under_it_alone() {
+        let ledger = ledger_of(
             &[
-                grid(0, r"\begin{aligned}"),
-                grid(1, "x&=y"),
-                grid(2, r"\end{aligned}"),
-                grid(3, "$$"),
-                grid(4, "a=b"),
+                grid(0, "$$"),
+                grid(1, ""),
+                grid(2, "7. 薛定谔方程"),
+                grid(3, r"$$i\hbar \frac{\partial \Psi}{\partial t} ="),
+                grid(4, r"\hat{H}\Psi$$"),
             ],
             DetectionContext::default(),
         );
         assert!(
-            rejected_at(&streaming, 3, LegitimateRejection::OpenerAboveWindow),
-            "while the block below is unfinished the rows above read as a clipped tail"
+            rejected_at(&ledger, 0, LegitimateRejection::GuardRejectedBody),
+            "the orphan is refused for the body it was going to have, and stays one row of text"
         );
-        assert_eq!(streaming.containment(&[]).detected, 0);
-        assert_eq!(streaming.containment(&[]).orphans, 0);
+        assert!(
+            owns_block(&ledger, 3, 4),
+            "the block below it is found on its own"
+        );
+        assert_eq!(ledger.containment(&[]).detected, 1);
+        assert_eq!(ledger.containment(&[]).orphans, 0);
 
-        let closed = ledger_of(
-            &[
-                grid(0, r"\begin{aligned}"),
-                grid(1, "x&=y"),
-                grid(2, r"\end{aligned}"),
-                grid(3, "$$"),
-                grid(4, "a=b"),
-                grid(5, "$$"),
-            ],
-            DetectionContext::default(),
-        );
+        // The same line, asked of the walker: a checkpoint taken over these rows must stand where
+        // the scan stands, or a caller scanning from it reads the rows below in a state no scan was
+        // ever in. (`walking_a_prefix_leaves_the_scanner_where_scanning_it_would_have` is the
+        // general form of this over generated corpora; this is the case that motivated the rule.)
+        let mut context = DetectionContext::default();
+        for (index, text) in ["$$", "", "7. 薛定谔方程"].iter().enumerate() {
+            advance_detection_context(&mut context, TranscriptId(index as u64 + 1), text);
+        }
         assert!(
-            !has_reason(&closed, LegitimateRejection::OpenerAboveWindow),
-            "a `$$` that opens a block that closes is an opener, so there is no clip"
+            context.opening.is_none(),
+            "the walker gives the opening up at the heading, exactly as the scan does"
         );
-        assert!(
-            owns_block(&closed, 0, 2),
-            "and the environment is a standalone block again"
-        );
-        assert!(owns_block(&closed, 3, 5));
-        assert_eq!(closed.containment(&[]).detected, 2);
     }
 
-    /// A pipe table inside a clipped tail is a sub-range of a block just as much as an environment
-    /// is, and the table pass decides separately from the math loop — so the clip has to be handed
-    /// to it as well. Nothing in the tail is drawn: the rows are the body of a block that began
-    /// above this window, and this window owns none of it.
+    /// A chain of openers that each meet prose costs one pass, not one pass each. Deciding a refused
+    /// pairing at the row that refuses it, rather than at whatever `$$` comes next, is what makes
+    /// that true: there is no point at which the scan goes back over rows it has read, so no row is
+    /// ever tried as an opener twice and a window of refusals is read exactly once. The ledger is the
+    /// witness — one entry per delimiter and no row named twice — and the valid block at the bottom
+    /// proves the chain poisons nothing below it.
     #[test]
-    fn a_table_inside_a_clipped_tail_is_not_drawn() {
+    fn a_chain_of_refused_openers_reads_every_row_once() {
+        const LINKS: u32 = 40;
+        let mut rows = Vec::new();
+        for link in 0..LINKS {
+            rows.push(grid(link * 2, "$$"));
+            rows.push(grid(link * 2 + 1, "ordinary prose here"));
+        }
+        rows.push(grid(LINKS * 2, "$$"));
+        rows.push(grid(LINKS * 2 + 1, r"\gamma = 2"));
+        rows.push(grid(LINKS * 2 + 2, "$$"));
+        let ledger = ledger_of(&rows, DetectionContext::default());
+
+        let mut seen = BTreeSet::new();
+        for entry in &ledger.entries {
+            assert!(
+                seen.insert(entry.logical_index),
+                "row {} was read as a delimiter twice",
+                entry.logical_index
+            );
+        }
+        assert_eq!(
+            ledger.entries.len() as u32,
+            LINKS + 2,
+            "one entry for each refused opener, and two for the block that closes"
+        );
+        assert!(
+            owns_block(&ledger, LINKS * 2, LINKS * 2 + 2),
+            "the block below the chain is detected"
+        );
+        assert_eq!(ledger.containment(&[]).detected, 1);
+        assert_eq!(ledger.containment(&[]).orphans, 0);
+    }
+
+    /// A complete pipe table is a complete occurrence, so it is a floor like the rest — the table
+    /// pass decides separately from the math loop, but it decides the same thing, and a reading that
+    /// turned its rows into somebody else's body would take a drawn table away for good.
+    ///
+    /// The tail exclusion the table pass is handed stays for the case the floor scan cannot see: it
+    /// runs without capture geometry, so a table that only exists once wrapped rows are joined is
+    /// invisible to it, and without the exclusion that table would be drawn out of the middle of a
+    /// clipped body. Below, nothing is clipped — the rows above the `$$` are the table and one blank
+    /// row, and a body of nothing but blanks is no proof at all.
+    #[test]
+    fn a_complete_table_above_a_lone_dollars_keeps_its_own_rows() {
         let inputs = output_inputs(&[
             grid(0, "ordinary prose here"),
             grid(1, "| a | b |"),
@@ -7064,14 +7184,14 @@ abla f",
         ]);
         let blocks = live_blocks_of(&inputs);
         assert!(
-            !blocks
+            blocks
                 .iter()
                 .any(|block| block.span.delimiter_kind == DelimiterKind::Table),
-            "the table is body of the clipped block, not a table: {blocks:?}"
+            "the table above the lone `$$` is still a table: {blocks:?}"
         );
         assert!(
             owns_occurrence(&blocks, MathMode::Display, "q=r"),
-            "and the block below the clip is detected: {blocks:?}"
+            "and the block below it is detected: {blocks:?}"
         );
     }
 
