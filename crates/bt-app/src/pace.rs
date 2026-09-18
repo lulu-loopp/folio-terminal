@@ -102,6 +102,30 @@ use std::time::{Duration, Instant};
 /// to be running at. It is a fallback and not a target: a window on a display
 /// that reports itself gets that display's interval, and this number is never
 /// consulted again.
+///
+/// **It is also the only sixteen milliseconds left in this window** (closure
+/// review 2, 2026-09-18). The strip kept a `STRIP_ANIMATION_FRAME` of its own
+/// and so did the thumbs' fade, the panes' flight and the drag's auto-scroll;
+/// two rates in one window is a door that admits and a door that refuses at the
+/// same instant, which at 144 Hz is how a picture that had arrived found every
+/// one of them shut. They all read [`FrameClock::interval`] now, and what
+/// remains here is the number that clock is born with.
+///
+/// **What a tick of the strip actually costs, measured rather than budgeted.**
+/// The retired constant carried this note and it is still the reason the rate
+/// can be held to: it used to read "an animating ring costs one rasterize of a
+/// 15px SVG per frame, measured at 16.5µs". The rasterize was measured honestly;
+/// what was never measured is what the tick dragged behind it. Every tick called
+/// `publish_frame(Expose)`, and `publish_frame_inner` composed a whole terminal
+/// picture before anything could opt out: full grid capture, viewport
+/// projection, inline-reference scan, IME re-anchor, then a present that
+/// re-shaped the grid's text. Sampled on that workspace at **6-8ms of
+/// main-thread CPU per tick — a ~400x miss** — with the main thread
+/// allocator-bound, and a `Start-Sleep 30` emitting *zero bytes* holding one
+/// core at 69%. A tick now re-presents the picture already on the glass instead
+/// of composing another one, which is what makes the 16.5µs a budget this rate
+/// can be held to; if a tick ever composes a terminal frame again, the display's
+/// rate is the wrong rate for it and this number is not the thing to change.
 pub const DEFAULT_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
 /// The band a monitor's answer has to fall inside to be believed.

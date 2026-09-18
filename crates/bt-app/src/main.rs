@@ -238,33 +238,6 @@ const IME_CURSOR_AREA_INTERVAL: Duration = Duration::from_millis(16);
 /// The mock-up's `.cursor` uses a 1.1 second step-end animation, so each visible/hidden phase is
 /// half of that cycle.
 const CURSOR_BLINK_PHASE: Duration = Duration::from_millis(550);
-/// How often a live tab-strip animation asks to be redrawn.
-///
-/// 60Hz, and only ever while something is actually moving — a breath, a
-/// spinning indeterminate arc, or an arc easing to a new reading. The strip
-/// reports no deadline at all otherwise, so this is the *rate* of an animation
-/// and never a standing poll.
-///
-/// **What a tick actually costs, measured rather than budgeted.** This comment
-/// used to read "an animating ring costs one rasterize of a 15px SVG per frame,
-/// measured at 16.5µs — a tenth of a percent of a frame, per ring." The
-/// rasterize was measured honestly; what was never measured is what the tick
-/// dragged behind it. Every tick called `publish_frame(Expose)`, and
-/// `publish_frame_inner` composed a whole terminal picture before anything
-/// could opt out: full grid capture, viewport projection, inline-reference
-/// scan, IME re-anchor, then a present that re-shaped the grid's text. Sampled
-/// on this workspace at **6-8ms of main-thread CPU per tick — a ~400x miss** —
-/// with the main thread allocator-bound (ntdll 50% self, `__rdl_dealloc` on
-/// 75% of stacks). A `Start-Sleep 30` emitting *zero bytes* held one core at
-/// **69%**, because the cost tracked nothing but "is a command running".
-///
-/// A tick now takes [`Runtime::publish_chrome_frame`], which re-presents the
-/// picture already on the glass instead of composing another one — see
-/// [`chrome_tick_reuses_picture`] for the licence. The 16.5µs figure is a
-/// budget this rate can be held to only because nothing but chrome is rebuilt
-/// inside it; if a tick ever composes a terminal frame again, 60Hz is the wrong
-/// rate for it and this constant is not the thing to change.
-const STRIP_ANIMATION_FRAME: Duration = Duration::from_millis(16);
 
 /// **What one walk of a host answered about one instant**: when it next needs a
 /// frame, and whether anything inside it is travelling right now (review round
@@ -12765,7 +12738,7 @@ struct WindowRuntime {
     /// seconds.
     perf_trace_us: u128,
     /// When [`Self::advance_strip_animation`] last ran, so
-    /// [`STRIP_ANIMATION_FRAME`] can be the rate it claims to be rather than a
+    /// [`pace::DEFAULT_FRAME_INTERVAL`] can be the rate it claims to be rather than a
     /// floor nothing stands on. `None` until the first tick.
     strip_animation_ticked_at: Option<Instant>,
     /// **Whether a card on screen is behind the pane it is a picture of**
@@ -25984,7 +25957,7 @@ fn read_motion_preference() -> Motion {
 ///
 /// # What is deliberately not in it
 ///
-/// Frame cadences (`STRIP_ANIMATION_FRAME`, `IME_CURSOR_AREA_INTERVAL`: how
+/// Frame cadences (`pace::DEFAULT_FRAME_INTERVAL`, `IME_CURSOR_AREA_INTERVAL`: how
 /// often, not how long), input timings that never draw anything
 /// (`MULTI_CLICK_INTERVAL`), worker timeouts, watch debounces and process
 /// deadlines. None of them is a transition or a wait before one, and pulling
@@ -27979,9 +27952,8 @@ impl PaneMotion {
     /// for the same reason: it is what lets `about_to_wait` fall back to
     /// `ControlFlow::Wait` once a split has settled, instead of holding a 60fps
     /// loop open for a window that is doing nothing.
-    fn deadline(&self, now: Instant, motion: Motion) -> Option<Instant> {
-        self.is_animating(now, motion)
-            .then(|| now + STRIP_ANIMATION_FRAME)
+    fn deadline(&self, now: Instant, motion: Motion, frame: Duration) -> Option<Instant> {
+        self.is_animating(now, motion).then(|| now + frame)
     }
 
     /// Drop the tweens that have finished, so a landed pane stops being carried.
@@ -60223,7 +60195,9 @@ impl Runtime<'_> {
             );
         let mut work = AnimationWork::default();
         for rest in rests {
-            if let Some(due) = termscroll::fade_deadline(rest, now, motion) {
+            if let Some(due) =
+                termscroll::fade_deadline(rest, now, motion, self.window.frame_clock.interval())
+            {
                 work.deadline = Some(work.deadline.map_or(due, |soonest| soonest.min(due)));
             }
             work.moving |= termscroll::fade_is_moving(rest, now, motion);
@@ -77360,7 +77334,7 @@ impl Runtime<'_> {
                 .drag
                 .as_ref()
                 .and_then(|drag| drag.autoscroll_ticked_at)
-                .map_or(now, |last| last + STRIP_ANIMATION_FRAME)
+                .map_or(now, |last| last + self.window.frame_clock.interval())
                 .max(self.next_animation_frame(now)),
         )
     }
@@ -85102,7 +85076,7 @@ impl Runtime<'_> {
     /// every frame they are alive, and neither moves at all once its session
     /// stops working.
     fn advance_strip_animation(&mut self, now: Instant) -> Result<()> {
-        // **[`STRIP_ANIMATION_FRAME`] is a rate, and a rate nothing enforces is
+        // **[`pace::DEFAULT_FRAME_INTERVAL`] is a rate, and a rate nothing enforces is
         // not a rate.** `about_to_wait` runs after *every* event, not only when
         // a deadline expires — and the present each tick asks for is itself an
         // event. The arc moves far enough in half a frame to owe another, so
@@ -85117,7 +85091,7 @@ impl Runtime<'_> {
         // is next allowed to move.
         // **The taskbar is mirrored above the rate gate, and it has to be.**
         //
-        // [`STRIP_ANIMATION_FRAME`] is a rate for *pictures*: it exists so an
+        // [`pace::DEFAULT_FRAME_INTERVAL`] is a rate for *pictures*: it exists so an
         // arc does not ease twice per composited frame. The taskbar button is
         // not a picture this loop draws, it is a state this program is asserting
         // to the shell, and the frame it most needs to be right on is the one
@@ -85937,7 +85911,7 @@ impl Runtime<'_> {
         // its own: a card is not this window's decoration, it is a live picture of
         // a pane, and a reader who asked for stillness asked for tweens to stop
         // rather than for a terminal to stop being drawn. The frame it asks for is
-        // the breath's own [`STRIP_ANIMATION_FRAME`], so a card costs no more than
+        // the window's own display frame, so a card costs no more than
         // an integrated shell's tab mark always has, and the debt is cleared by
         // the very pass that draws it.
         let cards_behind = self.window.cards.owes_frame();
@@ -85982,7 +85956,9 @@ impl Runtime<'_> {
                 (strip_moving || rail_waiting || pictures_owe)
                     .then(|| now + self.window.frame_clock.interval()),
                 bar_deadline,
-                self.window.pane_motion.deadline(now, motion),
+                self.window
+                    .pane_motion
+                    .deadline(now, motion, self.window.frame_clock.interval()),
             ]
             .into_iter()
             .flatten()
@@ -108284,7 +108260,7 @@ mod formula_tool_seat_tests {
         // draws two frames of a ninety-millisecond motion and no middle.
         //
         // **Through the window's one pacer since the owner's report of
-        // 2026-09-18**, and no longer `now + STRIP_ANIMATION_FRAME` of its own:
+        // 2026-09-18**, and no longer `now + pace::DEFAULT_FRAME_INTERVAL` of its own:
         // `now` is the instant the turn began, and a turn begins whenever
         // anything happens — including the present the last frame asked for — so
         // a frame measured from it is a frame measured from nothing.
@@ -108294,7 +108270,7 @@ mod formula_tool_seat_tests {
             "a moving surface wakes for its next frame, and the window says when that is:\n{wake}"
         );
         assert!(
-            !wake.contains("STRIP_ANIMATION_FRAME"),
+            !wake.contains("pace::DEFAULT_FRAME_INTERVAL"),
             "and it does not keep a rate of its own beside the window's:\n{wake}"
         );
         assert!(
@@ -121720,7 +121696,7 @@ fn pty_drain_says_nothing_new(focused_frame_unchanged: bool, unpainted_pane_outp
 /// declared 62.5.
 ///
 /// **The rate is the window's own display frame** (closure review 2,
-/// 2026-09-18). It was [`STRIP_ANIMATION_FRAME`], a flat sixteen milliseconds,
+/// 2026-09-18). It was [`pace::DEFAULT_FRAME_INTERVAL`], a flat sixteen milliseconds,
 /// and a window has no business keeping two rates: on a 144 Hz panel the
 /// display gate admitted a turn seven milliseconds after a present and this one
 /// turned it away, which is how a picture that had arrived could find every door
@@ -121959,7 +121935,7 @@ fn a_retirement_happens_on_this_turn(
 /// grid capture, viewport projection, inline-reference scan, IME re-anchor,
 /// text re-shaping — all to redraw a fifteen-pixel arc one degree further round.
 /// Measured at 6-8ms of main-thread CPU per tick, against a design comment that
-/// budgeted 16.5µs (see [`STRIP_ANIMATION_FRAME`]). A command emitting *zero
+/// budgeted 16.5µs (see [`pace::DEFAULT_FRAME_INTERVAL`]). A command emitting *zero
 /// bytes* cost 69% of a core.
 ///
 /// The licence to reuse rests on one property of this app: **nothing repaints
@@ -135587,7 +135563,7 @@ mod tests {
                 "one step per {frame:?} is about {want} in a second, not {got}"
             );
         };
-        about(STRIP_ANIMATION_FRAME, 62);
+        about(pace::DEFAULT_FRAME_INTERVAL, 62);
         about(
             pace::interval_from_millihertz(60_000).expect("60 Hz is a display"),
             60,
@@ -135603,7 +135579,7 @@ mod tests {
     #[test]
     fn a_tick_offered_exactly_one_frame_later_is_due() {
         let start = Instant::now();
-        let frame = STRIP_ANIMATION_FRAME;
+        let frame = pace::DEFAULT_FRAME_INTERVAL;
         assert!(
             strip_animation_tick_is_due(None, start, frame),
             "the first ever"
@@ -146665,7 +146641,7 @@ mod tests {
              the box the solver gave it"
         );
         assert!(
-            !motion.settle_frame_debt(&layout, end + STRIP_ANIMATION_FRAME, Motion::Full),
+            !motion.settle_frame_debt(&layout, end + pace::DEFAULT_FRAME_INTERVAL, Motion::Full),
             "landed and drawn, it owes nothing"
         );
 
@@ -146690,7 +146666,7 @@ mod tests {
             if !moving {
                 break;
             }
-            at += STRIP_ANIMATION_FRAME;
+            at += pace::DEFAULT_FRAME_INTERVAL;
         }
         assert!(
             wakes > presents,
@@ -146715,7 +146691,7 @@ mod tests {
         let now = Instant::now();
         let mut motion = PaneMotion::default();
         assert_eq!(
-            motion.deadline(now, Motion::Full),
+            motion.deadline(now, Motion::Full, pace::DEFAULT_FRAME_INTERVAL),
             None,
             "a tab whose panes are all at rest asks for no wake-ups at all"
         );
@@ -146727,16 +146703,20 @@ mod tests {
         ];
         motion.begin(&before, &after, now, Motion::Full);
         assert_eq!(
-            motion.deadline(now, Motion::Full),
-            Some(now + STRIP_ANIMATION_FRAME)
+            motion.deadline(now, Motion::Full, pace::DEFAULT_FRAME_INTERVAL),
+            Some(now + pace::DEFAULT_FRAME_INTERVAL)
         );
         assert_eq!(
-            motion.deadline(now + PANE_FLIP / 2, Motion::Full),
-            Some(now + PANE_FLIP / 2 + STRIP_ANIMATION_FRAME),
+            motion.deadline(
+                now + PANE_FLIP / 2,
+                Motion::Full,
+                pace::DEFAULT_FRAME_INTERVAL
+            ),
+            Some(now + PANE_FLIP / 2 + pace::DEFAULT_FRAME_INTERVAL),
             "halfway through, both halves of the split are still moving"
         );
         assert_eq!(
-            motion.deadline(now + PANE_FLIP, Motion::Full),
+            motion.deadline(now + PANE_FLIP, Motion::Full, pace::DEFAULT_FRAME_INTERVAL),
             None,
             "and once the split lands, the loop may sleep"
         );
@@ -146747,7 +146727,7 @@ mod tests {
         let mut reduced = PaneMotion::default();
         reduced.begin(&before, &after, now, Motion::Reduced);
         assert_eq!(
-            reduced.deadline(now, Motion::Reduced),
+            reduced.deadline(now, Motion::Reduced, pace::DEFAULT_FRAME_INTERVAL),
             None,
             "reduced motion has no frames to ask for"
         );
@@ -147189,7 +147169,7 @@ mod tests {
             if !moving {
                 break;
             }
-            at += STRIP_ANIMATION_FRAME;
+            at += pace::DEFAULT_FRAME_INTERVAL;
         }
         assert_eq!(
             scheduled, 0,
@@ -147242,7 +147222,7 @@ mod tests {
 
         assert!(!motion.is_animating(now, Motion::Reduced));
         assert_eq!(
-            motion.deadline(now, Motion::Reduced),
+            motion.deadline(now, Motion::Reduced, pace::DEFAULT_FRAME_INTERVAL),
             None,
             "no deadline is asked for, so the loop goes back to `ControlFlow::Wait`"
         );
@@ -147253,7 +147233,7 @@ mod tests {
         assert!(
             !motion.settle_frame_debt(
                 &pane_rects_of(&after),
-                now + STRIP_ANIMATION_FRAME,
+                now + pace::DEFAULT_FRAME_INTERVAL,
                 Motion::Reduced
             ),
             "and after that one frame it owes nothing at all"
@@ -147285,7 +147265,7 @@ mod tests {
         let mut at = now;
         loop {
             let moving = motion.is_animating(at, Motion::Full);
-            let deadline = motion.deadline(at, Motion::Full);
+            let deadline = motion.deadline(at, Motion::Full, pace::DEFAULT_FRAME_INTERVAL);
             assert_eq!(
                 deadline.is_some(),
                 moving,
@@ -147298,7 +147278,7 @@ mod tests {
             if !moving {
                 break;
             }
-            at += STRIP_ANIMATION_FRAME;
+            at += pace::DEFAULT_FRAME_INTERVAL;
         }
         assert!(
             drawn >= 5,
@@ -147324,14 +147304,14 @@ mod tests {
              solver gave it"
         );
         assert_eq!(
-            motion.deadline(at, Motion::Full),
+            motion.deadline(at, Motion::Full, pace::DEFAULT_FRAME_INTERVAL),
             None,
             "and once it is drawn the window may go genuinely idle"
         );
         assert!(
             !motion.settle_frame_debt(
                 &pane_rects_of(&after),
-                at + STRIP_ANIMATION_FRAME,
+                at + pace::DEFAULT_FRAME_INTERVAL,
                 Motion::Full
             ),
             "landed and drawn, it owes nothing"
@@ -147469,13 +147449,13 @@ mod tests {
             if !moving {
                 break;
             }
-            at += STRIP_ANIMATION_FRAME;
+            at += pace::DEFAULT_FRAME_INTERVAL;
         }
 
         let mut reduced = PaneMotion::default();
         reduced.begin(&before, &after, now, Motion::Reduced);
         for step in 0..16 {
-            let at = now + STRIP_ANIMATION_FRAME * step;
+            let at = now + pace::DEFAULT_FRAME_INTERVAL * step;
             assert!(
                 pane_fade_veil_layers(&reduced, &after, at, Motion::Reduced, palette).is_empty(),
                 "reduced motion has no fade to veil, on frame {step}"
@@ -147556,7 +147536,7 @@ mod tests {
             if !moving {
                 break;
             }
-            at += STRIP_ANIMATION_FRAME;
+            at += pace::DEFAULT_FRAME_INTERVAL;
         }
         assert!(
             presents >= 5,
@@ -147564,7 +147544,7 @@ mod tests {
              appearance wearing a fade's clothes"
         );
         assert!(
-            !motion.settle_frame_debt(&arriving, at + STRIP_ANIMATION_FRAME, Motion::Full),
+            !motion.settle_frame_debt(&arriving, at + pace::DEFAULT_FRAME_INTERVAL, Motion::Full),
             "and once it is fully there it owes nothing"
         );
     }
@@ -148033,7 +148013,7 @@ mod tests {
             if !moving {
                 break;
             }
-            at += STRIP_ANIMATION_FRAME;
+            at += pace::DEFAULT_FRAME_INTERVAL;
         }
         assert!(
             redraws.iter().filter(|drew| **drew).count() > 3,
@@ -148051,7 +148031,7 @@ mod tests {
                 if !moving {
                     break;
                 }
-                at += STRIP_ANIMATION_FRAME;
+                at += pace::DEFAULT_FRAME_INTERVAL;
             }
             (owed, motion)
         };
@@ -148133,7 +148113,10 @@ mod tests {
         let revision = arriving_tab.structure_revision();
 
         assert!(!motion.is_animating(now, Motion::Full));
-        assert_eq!(motion.deadline(now, Motion::Full), None);
+        assert_eq!(
+            motion.deadline(now, Motion::Full, pace::DEFAULT_FRAME_INTERVAL),
+            None
+        );
         assert_eq!(
             motion.transform_of(survivor, now, Motion::Full),
             PaneTransform::IDENTITY,
@@ -148351,7 +148334,7 @@ mod tests {
             if !moving {
                 break;
             }
-            at += STRIP_ANIMATION_FRAME;
+            at += pace::DEFAULT_FRAME_INTERVAL;
         }
 
         assert!(

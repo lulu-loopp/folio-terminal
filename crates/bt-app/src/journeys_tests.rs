@@ -1027,7 +1027,8 @@ fn a_wait_is_not_a_journey() {
     // deadline the whole way and no motion anywhere in it.
     for at in [Duration::ZERO, termscroll::THUMB_REST / 2] {
         assert!(
-            termscroll::fade_deadline(start, start + at, Motion::Full).is_some(),
+            termscroll::fade_deadline(start, start + at, Motion::Full, Duration::from_millis(16))
+                .is_some(),
             "the rest ends at an instant, so the loop is woken for it"
         );
         assert!(
@@ -1463,6 +1464,39 @@ fn a_picture_that_arrives_between_frames_books_its_own_wake() {
     // `crate::pictures_need_handing_over` is what says so, and is counted in
     // `a_service_that_finds_nothing_changed_hands_nothing_over`.
     assert!(crate::pictures_need_handing_over(false, true, false));
+
+    // ── ⑤ one window, one rate, with no exception left ─────────────────────
+    //
+    // Every surface in this window that asks for "the next frame" asks for the
+    // *display's*. The sixteen milliseconds survives in exactly one place — the
+    // interval `FrameClock` is born with when the platform will not say — and
+    // nowhere at all on the road a frame is asked for: two rates in one window
+    // is a door that admits and a door that refuses at the same instant.
+    assert_eq!(
+        SOURCE.matches("STRIP_ANIMATION_FRAME").count(),
+        0,
+        "the strip's own sixteen milliseconds is retired, not merely unused"
+    );
+    for asker in [
+        "    fn strip_animation_work(&self, now: Instant) -> AnimationWork {",
+        "    fn terminal_thumb_work(&self, now: Instant) -> AnimationWork {",
+        "    fn drag_autoscroll_deadline(&self, now: Instant) -> Option<Instant> {",
+        "    fn next_animation_frame(&self, now: Instant) -> Instant {",
+    ] {
+        let body = method(asker);
+        assert!(
+            body.contains("frame_clock"),
+            "this has to ask the clock that reads the display:\n{body}"
+        );
+    }
+    // The two that are handed the frame rather than reading it — a `PaneMotion`
+    // and a `termscroll` fade cannot see the window — take it as an argument,
+    // and `terminal_thumb_work` and the strip's fold are what pass it.
+    assert!(
+        method("    fn deadline(&self, now: Instant, motion: Motion, frame: Duration)")
+            .contains("now + frame"),
+        "a pane in flight asks on the frame it is given"
+    );
 }
 
 /// RED — **a service that finds nothing changed allocates nothing** (closure

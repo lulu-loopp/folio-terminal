@@ -43584,9 +43584,10 @@ mod tests {",
         .expect("focus mode puts a column on screen")
     }
 
-    /// One frame of the clock this runs on — [`STRIP_ANIMATION_FRAME`] in
-    /// `main.rs`, spelled here because a `seats` test cannot see it and because
-    /// what the gate is about is the *integration*, not the cadence.
+    /// One frame of the clock this runs on — the window's display frame at
+    /// 60 Hz (`crate::pace::DEFAULT_FRAME_INTERVAL`), spelled here because a
+    /// `seats` test cannot see it and because what the gate is about is the
+    /// *integration*, not the cadence.
     const AUTOSCROLL_FIXTURE_FRAME: Duration = Duration::from_millis(16);
 
     /// Where in the column's own box a hand is, for a stated point on its axis.
