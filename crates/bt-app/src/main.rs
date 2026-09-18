@@ -66657,6 +66657,15 @@ impl Runtime<'_> {
 
     fn publish_frame_inner(&mut self, trigger: FrameTrigger, skip_unchanged: bool) -> Result<bool> {
         hang_watch::at(hang_watch::Station::Present);
+        // **Whatever asked for this frame, it carries every journey that is
+        // running** (review 2026-09-18, P1). Above everything that reads a
+        // height, a layer or a quad, because that is the whole of what it is
+        // for: the alternative is a frame built from a sample some earlier tick
+        // left behind, and a pane printing every five milliseconds composes
+        // enough of those to hold a band still for as long as it keeps printing.
+        // Costs a window with nothing moving one `bool` and one `Option` read.
+        // See [`Self::carry_live_journeys`].
+        self.carry_live_journeys(Instant::now());
         // **Every publish settles the PTY's debt**, and this is the one door they all come
         // through — a keystroke's frame, an expose, a resize's, the drain's own. What has been
         // fed is about to be on the glass, or is about to be found no different from what
@@ -85251,13 +85260,97 @@ impl Runtime<'_> {
     /// frame and the two marks riding its rectangle on the next. That is a worse
     /// stutter than the one this repairs.
     ///
+    /// **And it decides who has to ASK for a frame, never who is carried by
+    /// one** (review 2026-09-18, P1). The clock behind it is every present this
+    /// window makes, a shell's output included, so a pane printing every five
+    /// milliseconds refuses this for as long as it keeps printing — which is
+    /// right, because a picture reached the glass a moment ago and the animation
+    /// does not need one of its own. It is right only because
+    /// [`Self::carry_live_journeys`] makes that picture carry the animation. See
+    /// [`crate::pace`].
+    ///
     /// A refusal is recorded rather than dropped: see [`pace::FrameClock::refuse`].
     fn animation_frame_is_due(&mut self) -> bool {
+        // Reaching this gate at all is the animation saying it is running: every
+        // caller asks it below its own "am I moving" refusals.
+        self.window.frame_clock.note_running();
         if self.window.frame_clock.admits() {
             return true;
         }
         self.window.frame_clock.refuse();
         false
+    }
+
+    /// **Carry every journey this window is running up to the instant the frame
+    /// being composed is of** (review 2026-09-18, P1).
+    ///
+    /// The other half of the gate, and the half without which the gate is a
+    /// defect. A frame is composed for all sorts of reasons that have nothing to
+    /// do with an animation — a shell printing, a keystroke echoing, an expose —
+    /// and every one of them refuses the gate for a display frame afterwards. If
+    /// those frames drew the animation from a sample some earlier tick left
+    /// behind, a pane printing every five milliseconds would hold a journey
+    /// still for as long as it kept printing. So they do not: this is asked
+    /// first, and everything below it composes from numbers that are this
+    /// frame's.
+    ///
+    /// **Two halves, because this window draws its animations in two places.**
+    /// The overlay and the chrome are *rebuilt* from state and a clock —
+    /// `refresh_overlay` and `refresh_chrome` each read the instant themselves —
+    /// so for them carrying the journey is exactly rebuilding them. The block
+    /// changing face is the one animation whose sample is **cached**: it goes
+    /// into the session, and `refresh_projection` reads it there without ever
+    /// asking the flight what time it is, because the band's height has to move
+    /// the rows under it and the projection is where rows get their heights.
+    /// That cache is what the review found frozen.
+    ///
+    /// A window with nothing moving pays one `bool` and one `Option` read.
+    fn carry_live_journeys(&mut self, now: Instant) {
+        // The cached one, whether or not anything else is running: a flight in
+        // hand is a flight whose two numbers this frame must be built from.
+        self.sample_math_toggle(now);
+        if !self.window.frame_clock.is_running() {
+            return;
+        }
+        // **And the marks re-read the band they ride, before the layer that
+        // draws them is built.** Their fade and their travel are sampled from
+        // the clock by `refresh_overlay` below, but *where they are travelling
+        // to* is a fact about the picture in hand — and during a change of face
+        // that is moving on every frame. This is the same look
+        // `advance_math_tools_if_due` takes, asked here so that a frame composed
+        // for somebody else takes it too (§7.1.5p ⑦ ii, ⑪).
+        self.sync_math_tools(now);
+        // And the two lanes that sample themselves, asked so that they do.
+        self.refresh_chrome();
+        self.refresh_overlay();
+    }
+
+    /// **The band's travelling height and the picture's strength, written where
+    /// the projection reads them** (review 2026-09-18, P1).
+    ///
+    /// Split out from [`Self::present_math_toggle`] so that the two questions
+    /// are two functions: *what does this frame draw* is asked by every compose,
+    /// and *is a frame worth asking for* is asked by the flight's own turn. They
+    /// were one function, which is why a frame composed for any other reason
+    /// projected whatever the last tick had cached.
+    fn sample_math_toggle(&mut self, now: Instant) {
+        let Some(flight) = self.window.math_toggle.as_ref() else {
+            return;
+        };
+        let motion = self.app.motion;
+        let target = flight.target();
+        let presentation = bt_term::MathTogglePresentation {
+            anchor: flight.anchor().clone(),
+            height_subpixels: flight.height_subpixels(now, motion),
+            picture_opacity_milli: flight.picture_opacity_milli(now, motion),
+        };
+        let Some(index) = self.live_paste_target(target) else {
+            return;
+        };
+        if let Some(leaf) = self.window.tabs[index].sessions.get_mut(&target.seat) {
+            leaf.session
+                .set_math_toggle_presentation(Some(presentation));
+        }
     }
 
     fn strip_animation_deadline(&self, now: Instant) -> Option<Instant> {
@@ -87982,7 +88075,39 @@ impl Runtime<'_> {
             self.window.math_toggle = Some(flight);
             self.settle_math_toggle()?;
         }
-        let Some(faces) = self.math_toggle_faces(target, anchor) else {
+        let faces = self.math_toggle_faces(target, anchor);
+        // **Whether this press began a journey, said out loud** (review 2026-09-18, question ①).
+        //
+        // The instrument is the reason this had to be dug for. The owner's two recordings of
+        // 2026-09-18 were read for evidence that the band's height travels, and the honest answer
+        // turned out to be that no press in either of them turned a block over at all —
+        // `band_moved` never rose once in 14,033 projections, and the count of rendered blocks
+        // never changed across the clicked stretch — so the recordings said nothing about this
+        // clause either way. A press that takes the one-frame road looks, in every other line of
+        // the trace, exactly like a press that takes the journey and is then paced badly: both are
+        // a burst of overlay presents over one composed frame. One line at the door tells them
+        // apart. §7.10 ④‴'s lesson, on the gesture §7.1.5p ⑪ is about.
+        if self.app.trace_perf {
+            let plane = match anchor {
+                MathBlockAnchor::History { .. } => "history",
+                MathBlockAnchor::Live { .. } => "live",
+            };
+            let (road, from, to) = match (faces.as_ref(), motion) {
+                (Some(faces), Motion::Full) => {
+                    let [rendered, source] = faces.heights();
+                    ("journey", rendered, source)
+                }
+                // The two roads that end in a one-frame switch, under their own names: a block the
+                // session cannot measure two faces for (which is every live band today), and a
+                // reader who asked this window for stillness.
+                (Some(_), Motion::Reduced) => ("one_frame_reduced_motion", 0, 0),
+                (None, _) => ("one_frame_unmeasurable", 0, 0),
+            };
+            trace_sink::stderr_line(format!(
+                "BT_PERF_TRACE toggle plane={plane} road={road} rendered_subpixels={from} source_subpixels={to}"
+            ));
+        }
+        let Some(faces) = faces else {
             // Not a history display band. It changes in the one frame it always did.
             return self.switch_math_source_now(target, anchor);
         };
@@ -88156,19 +88281,6 @@ impl Runtime<'_> {
     /// is that pair, counted rather than laid out. The rows are the press's business and the
     /// press asks for them once.
     fn advance_math_toggle_if_due(&mut self, now: Instant) -> Result<()> {
-        if self.window.math_toggle.is_none() {
-            return Ok(());
-        }
-        // **On the window's own display frame** (owner's report 2026-09-18:
-        // 「两个图标的移动还是一顿一顿的」). The ninety milliseconds is sampled
-        // from the clock wherever this lands, so fewer turns draw the same
-        // journey in fewer steps rather than a slower one — and the burst of
-        // near-identical steps the recording caught, thirteen to twenty of them
-        // inside one journey, is what the eye was reading as a jerk. See
-        // [`Self::animation_frame_is_due`].
-        if !self.animation_frame_is_due() {
-            return Ok(());
-        }
         let motion = self.app.motion;
         let Some((target, anchor, landed)) = self.window.math_toggle.as_ref().map(|flight| {
             (
@@ -88187,8 +88299,28 @@ impl Runtime<'_> {
             .math_toggle
             .as_ref()
             .is_some_and(|flight| flight.still_measures(heights));
+        // **The landing is not paced, and stands above the gate for that reason**
+        // (review 2026-09-18, P1). What lands is owed to the *document* — the
+        // block is told which face it wears, the presentation is put back, the
+        // selection the switch invalidates is cleared — and none of that is a
+        // picture anybody is waiting for the display to take. Behind the gate it
+        // was a change of face that a neighbouring pane printing every five
+        // milliseconds could postpone for as long as it kept printing, which is
+        // a block frozen half way over for the rest of the flood.
         if landed || !still_measures {
             return self.settle_math_toggle();
+        }
+        // **And only the frame of its own is paced** (owner's report 2026-09-18:
+        // 「两个图标的移动还是一顿一顿的」). The ninety milliseconds is sampled
+        // from the clock wherever this lands, so fewer turns draw the same
+        // journey in fewer steps rather than a slower one — and the burst of
+        // near-identical steps the recording caught, thirteen to twenty of them
+        // inside one journey, is what the eye was reading as a jerk. A refusal
+        // loses nothing: a frame composed for any other reason carries this
+        // flight through [`Self::carry_live_journeys`], and if none is, the
+        // refusal books one. See [`Self::animation_frame_is_due`].
+        if !self.animation_frame_is_due() {
+            return Ok(());
         }
         self.present_math_toggle(target, now)
     }
@@ -88199,13 +88331,16 @@ impl Runtime<'_> {
     /// span, so the ninety milliseconds is drawn rather than merely begun and finished. No span is
     /// spelled here either.
     fn math_toggle_deadline(&self, now: Instant) -> Option<Instant> {
-        self.animating_deadline(
-            self.window
-                .math_toggle
-                .as_ref()
-                .is_some_and(|flight| flight.owes_frames(now, self.app.motion)),
-            now,
-        )
+        let flight = self.window.math_toggle.as_ref()?;
+        // **The landing, unpaced, and the next frame of the travel, paced — the
+        // earlier of the two** (review 2026-09-18, P1). The travel is a picture
+        // and waits for the glass; the landing is the document being told which
+        // face the block wears and waits for nothing, so a window whose other
+        // pane is printing hard still lands this change on the frame it is due
+        // rather than when the printing stops.
+        let landing = flight.lands_at();
+        let travelling = self.animating_deadline(flight.owes_frames(now, self.app.motion), now);
+        Some(travelling.map_or(landing, |frame| frame.min(landing)))
     }
 
     /// **The other face of a block that is changing, over the band it is changing in.**
@@ -104318,10 +104453,18 @@ impl Runtime<'_> {
             // all once its 90ms has landed, and asks for no wake-ups, which is
             // the same silence it kept when it could not be touched.
             self.file_peek_deadline(now),
+            //
+            // **Both of the card's own two clocks below are clamped to the
+            // window's frame** (review 2026-09-18). They are spent by
+            // `advance_file_peek`, which the frame gate can turn away; a raw
+            // deadline in front of a gated advance is a wake-up that arrives,
+            // is refused, and re-arms itself at the same instant — the spin a
+            // schedule's clothes are the usual disguise for.
             self.window
                 .file_peek
                 .as_ref()
-                .and_then(|peek| peek.closing_at),
+                .and_then(|peek| peek.closing_at)
+                .map(|closing| closing.max(self.next_animation_frame(now))),
             // And the dwell's own 350ms, which is the one clock in this window
             // that has to fire under a pointer that is not moving at all — a
             // hand resting on another row sends no events, so without this wake
@@ -104330,7 +104473,8 @@ impl Runtime<'_> {
                 .file_peek
                 .as_ref()
                 .and_then(|peek| peek.dwell.as_ref())
-                .and_then(|dwell| dwell.clock.due()),
+                .and_then(|dwell| dwell.clock.due())
+                .map(|due| due.max(self.next_animation_frame(now))),
             // The intent's 180ms, the grace's 220/420, and the entrance's own
             // frames until it lands. A window with no float and no hovered
             // trigger reports nothing and costs no wake-ups at all.
@@ -107921,6 +108065,33 @@ mod formula_tool_seat_tests {
             sweep.contains("changed |= leaf.session.set_math_hover(wanted);"),
             "and the sweep answers whether anything actually moved:\n{sweep}"
         );
+
+        // **And a hand that comes back inside the exit turns it round where it stands** (review
+        // 2026-09-18, question ③). This is what makes zero grace feel right rather than merely
+        // consistent: with a half-second in front of the exit a brief slip off the band was
+        // invisible, and without one it has to be *cheap* — the marks reverse from the opacity they
+        // had reached instead of popping back to full or climbing again from nothing. The value
+        // half is `formula_tools`' own `a_band_re_entered_before_its_exit_landed_turns_round_where_
+        // it_stands`; what is pinned here is that the window's own road reaches it, which is one
+        // `if let`: a follow that still exists is continued and never replaced.
+        let syncing = body(&["    fn sync_math", "_tools(&mut self, now: Instant)"].concat());
+        let continued = syncing
+            .find("if let Some(follow) = self.window.math_tools.as_mut() {")
+            .expect("marks that are still on the glass are the marks that answer");
+        let arrived = syncing
+            .find("formula_tools::FormulaToolFollow::arriving(")
+            .expect("and a band with none gets a fresh pair");
+        assert!(
+            continued < arrived,
+            "a band re-entered inside its own exit fade starts a second arrival from nothing, \
+             which is the pop the grace used to hide:\n{syncing}"
+        );
+        // And the exit is only dropped once it has actually landed, which is what leaves something
+        // for the return to turn round.
+        assert!(
+            syncing.contains("follow.gone(now, motion)"),
+            "the follow is dropped when the fade has finished and not when the anchor went:\n{syncing}"
+        );
     }
 
     /// RED — **a hover ends when the session it is about leaves the screen, not
@@ -108288,6 +108459,202 @@ mod formula_tool_seat_tests {
         let overlay = body("    fn formula_toggle_layers(&self, now: Instant)");
         assert!(overlay.contains("self.live_paste_target(target)"));
         assert!(!overlay.contains("self.sessions.iter()"));
+    }
+
+    /// RED — **every frame of a journey publishes a terminal picture, and nothing on the road can
+    /// dedupe it away** (review 2026-09-18, question ①).
+    ///
+    /// The question the review asked is whether the band's height actually travels or whether the
+    /// block arrives at its new height in one step while the two marks glide to it — which reads as
+    /// a jerk however well the frames are paced, and which no amount of pacing would cure. The
+    /// arithmetic is pinned without a window in `formula_tools`
+    /// (`a_journey_draws_one_distinct_height_per_paced_frame`); what can only be pinned here is
+    /// that the sample reaches the glass, and there are three ways it could quietly not.
+    ///
+    /// **① The refusal is on the presentation, not on a digest.** A frame's content digest is made
+    /// of the document's cells, and a change of face moves neither — the block is one entry with an
+    /// artifact height for the whole flight (§7.1.5p ⑪). A refusal that compared pictures would
+    /// therefore refuse every frame of every journey. It compares
+    /// [`bt_term::MathTogglePresentation`], which is exactly the travelling height and the picture's
+    /// strength, so it refuses a turn that would draw the frame already on the glass and nothing
+    /// else.
+    ///
+    /// **② It publishes a terminal frame and not only the overlay.** The height enters the
+    /// *projection* (`DualPlaneSession::refresh_projection`), so the rows under the band, the
+    /// ground, the clip and the marks' own seat all move together; an overlay-only publish would
+    /// move the two marks over a block that had not moved, which is the failure the review named.
+    ///
+    /// **③ The `skip=unchanged` road cannot swallow it.** That gate exists for a talkative shell
+    /// and is asked for `FrameSource::PtyOutput` alone; the toggle's publish goes through
+    /// `repaint_pane_change`, which passes `None` and therefore `skip_unchanged = false`.
+    ///
+    /// MUTATIONS: compare `content_fnv` in the refusal → every journey becomes one frame at each
+    /// end; call `present_chrome_change` alone → the marks glide over a block that snapped; pass a
+    /// `Some(..)` to `repaint_pane_change_inner` from this road → the drain's digest gate refuses
+    /// the frames whose cells have not changed, which is all of them.
+    #[test]
+    fn every_frame_of_a_change_of_face_reaches_the_glass_as_a_terminal_picture() {
+        let present = body("    fn present_math_toggle(");
+        assert!(
+            present.contains("leaf.session.math_toggle_presentation() == presentation.as_ref()"),
+            "the refusal is the presentation and not a picture's digest:\n{present}"
+        );
+        assert!(
+            present.contains("height_subpixels: flight.height_subpixels(now, motion)")
+                && present
+                    .contains("picture_opacity_milli: flight.picture_opacity_milli(now, motion)"),
+            "and the presentation is this frame's two numbers:\n{present}"
+        );
+        let published = present
+            .find("self.repaint_pane_change(seat)?;")
+            .expect("a frame of a journey is a terminal picture, not an overlay rebuild");
+        let overlay = present
+            .find("self.refresh_overlay()")
+            .expect("and the other face rides over it");
+        assert!(
+            published < overlay,
+            "the band moves before the layer laid on it:\n{present}"
+        );
+
+        // ③ — the one caller that may skip on an unchanged digest is the wheel, and it says so by
+        // handing an answer rather than by being the road a toggle takes.
+        let repaint = body("    fn repaint_pane_change(&mut self, seat: SeatId)");
+        assert!(
+            repaint.contains("self.repaint_pane_change_inner(seat, None)"),
+            "a pane change publishes unconditionally; only a wheel notch brings a verdict:\n{repaint}"
+        );
+        let inner = body("    fn repaint_pane_change_inner(");
+        assert!(
+            inner.contains("wheel_view_moved.is_some()"),
+            "and `skip_unchanged` is exactly that verdict's presence:\n{inner}"
+        );
+    }
+
+    /// RED — **a frame composed for any reason carries every journey that is running, and a
+    /// journey's end is never paced** (review 2026-09-18, P1).
+    ///
+    /// The gate admits an animation's own turn only when no picture has reached the glass for a
+    /// display frame. That is an economy and not a defect — a picture reached the glass a moment
+    /// ago, so the animation does not need one of its own — **provided that picture carried it**.
+    /// It did not: the band's travelling height was cached in the session by the flight's tick and
+    /// projected from there, so a neighbouring pane printing every five milliseconds composed frame
+    /// after frame from a sample the tick had left behind, and the gate refused the tick for as long
+    /// as the printing lasted. The review measured zero admissions in a thousand turns.
+    ///
+    /// Two lines answer it, and both are pinned here because both are placements rather than
+    /// values. **The carry stands at the head of the compose**, above everything that reads a
+    /// height, a layer or a quad. **The landing stands above the gate** in the flight's own
+    /// advancer: what lands is owed to the document, not to the glass, and behind the gate it was a
+    /// change of face a busy neighbour could postpone for ever.
+    ///
+    /// MUTATIONS: move the carry below the projection and the frame is built from the previous
+    /// sample; put the landing back under the gate and `settle_math_toggle` becomes unreachable
+    /// under a flood; drop `sample_math_toggle` from the carry and the one animation this window
+    /// caches is the one that freezes.
+    #[test]
+    fn a_frame_composed_for_any_reason_carries_the_journeys_and_the_landing_is_never_paced() {
+        let compose = body("    fn publish_frame_inner(");
+        let carried = compose
+            .find("self.carry_live_journeys(Instant::now());")
+            .expect("every compose carries the journeys that are running");
+        let projected = compose
+            .find("leaf.session.refresh_projection(&mut leaf.projection);")
+            .expect("and the projection is what reads the band's height");
+        assert!(
+            carried < projected,
+            "a frame built before its journeys are carried is a frame built from the last tick's \
+             sample:\n{compose}"
+        );
+
+        let carry = body("    fn carry_live_journeys(&mut self, now: Instant)");
+        assert!(
+            carry.contains("self.sample_math_toggle(now);"),
+            "the one animation this window caches is sampled on every frame:\n{carry}"
+        );
+        assert!(
+            carry.contains("self.refresh_overlay();") && carry.contains("self.refresh_chrome();"),
+            "and the two lanes that sample themselves are asked so that they do:\n{carry}"
+        );
+        assert!(
+            carry
+                .find("self.sync_math_tools(now);")
+                .unwrap_or(usize::MAX)
+                < carry.find("self.refresh_overlay();").unwrap_or(0),
+            "the marks re-read the band they ride before the layer that draws them is built, \
+             or they trail a block that is moving on every frame:\n{carry}"
+        );
+        assert!(
+            carry
+                .find("self.sample_math_toggle(now);")
+                .unwrap_or(usize::MAX)
+                < carry
+                    .find("if !self.window.frame_clock.is_running() {")
+                    .unwrap_or(0),
+            "a flight in hand is carried whether or not the last turn saw one:\n{carry}"
+        );
+
+        let advance = body("    fn advance_math_toggle_if_due(&mut self, now: Instant)");
+        let settles = advance
+            .find("if landed || !still_measures {")
+            .expect("a journey that has arrived is settled");
+        let gate = advance
+            .find("if !self.animation_frame_is_due() {")
+            .expect("and only a frame of its own is paced");
+        assert!(
+            settles < gate,
+            "the landing is owed to the document and waits for no display:\n{advance}"
+        );
+
+        let wake = body(&["    fn math_toggle", "_deadline(&self, now: Instant)"].concat());
+        assert!(
+            wake.contains("flight.lands_at()"),
+            "and the loop is woken for that landing on its own clock:\n{wake}"
+        );
+        assert!(
+            wake.contains("frame.min(landing)"),
+            "whichever of the two comes first:\n{wake}"
+        );
+    }
+
+    /// RED — **the press says which road it took** (review 2026-09-18, question ①).
+    ///
+    /// The instrument is the finding. Two recordings were read for evidence that the band's height
+    /// travels and neither contained a single press that turned a block over — `band_moved` never
+    /// rose in 14,033 projections — which nothing in the trace said, because a press that takes the
+    /// one-frame road and a press that takes the journey look identical from outside: a burst of
+    /// overlay presents over one composed frame. The line at the door tells them apart, and names
+    /// the plane, because the live plane is where the one-frame road is reached by design.
+    ///
+    /// MUTATION: print it after the `faces` refusal and the one road that most needs naming — the
+    /// block this window could not measure two faces for — is the one road that never prints.
+    #[test]
+    fn a_press_says_whether_it_began_a_journey() {
+        let press = body("    fn press_math_toggle(");
+        let printed = press
+            .find("BT_PERF_TRACE toggle plane=")
+            .expect("a press says which road it took");
+        let refused = press
+            .find("let Some(faces) = faces else {")
+            .expect("and the one-frame road is the refusal below it");
+        assert!(
+            printed < refused,
+            "a press that could not be measured is the press that most needs naming, and it is \
+             the one that would never print:\n{press}"
+        );
+        for road in [
+            "journey",
+            "one_frame_reduced_motion",
+            "one_frame_unmeasurable",
+        ] {
+            assert!(
+                press.contains(&["\"", road, "\""].concat()),
+                "every road out of this door has a name in the trace: {road}"
+            );
+        }
+        assert!(
+            press.contains("if self.app.trace_perf {"),
+            "and a run nobody asked to be told about pays nothing:\n{press}"
+        );
     }
 
     /// RED GATE — **the other face's rows are measured once per change, not once per frame**

@@ -20,7 +20,10 @@ All notable changes to Folio are recorded here. The format follows
   on, so a formula turning over and its marks travel evenly; a 144 Hz screen
   gets twice the steps a 60 Hz one does. The same rate now governs every other
   fade and slide in the window, and a window with nothing moving in it still
-  falls completely silent.
+  falls completely silent. A pane printing hard no longer holds anything still
+  either: whatever a picture was drawn for, it draws every motion at the instant
+  it is drawn, so a formula turning over beside a busy shell keeps moving and
+  still finishes on time.
 
 - **A typeset formula's highlight now leaves as soon as the pointer does, like
   every other hover.** Move off a formula and its shading and its two small

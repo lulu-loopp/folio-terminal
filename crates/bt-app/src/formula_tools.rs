@@ -674,6 +674,21 @@ impl FormulaToggleMotion {
         !self.journey.owes_frames(now, motion)
     }
 
+    /// **The instant this journey is due to have arrived** (review 2026-09-18, P1).
+    ///
+    /// The one clock of a change of face that is never paced, and the reason it is spelled here
+    /// rather than inferred by the caller: what happens at the far end is owed to the *document* —
+    /// the block is told which face it wears — and nobody is waiting for a display to take that.
+    /// Behind a frame gate it is a block a busy neighbouring pane can hold half way over for as
+    /// long as it keeps printing.
+    ///
+    /// The span is [`tooltip::TOOLTIP_FADE`] and is not spelled a second time: this reads the
+    /// journey's own epoch and adds the one number every fade in this window is drawn on.
+    #[must_use]
+    pub fn lands_at(&self) -> Instant {
+        self.journey.since + tooltip::TOOLTIP_FADE
+    }
+
     /// Whether this is still travelling towards the height the block's face will really stand at.
     ///
     /// `false` once a re-wrap, a scale change or a font change has moved that height under the
@@ -1835,6 +1850,150 @@ mod tests {
         );
         assert!(leaving.owes_frames(half, Motion::Full));
         assert!(!leaving.owes_frames(landing, Motion::Full));
+    }
+
+    /// RED — **the band's height really is drawn at every frame the display has, and it lands on
+    /// the far face exactly** (review 2026-09-18, question ①).
+    ///
+    /// The clause above pins the two ends and the midpoint; what the review asked is whether the
+    /// *loop* draws the middle — or whether the block arrives at its new height in one step while
+    /// the two marks glide to it, which reads as a jerk however well the frames are paced. So this
+    /// walks the loop the window actually runs: an admitted turn samples the journey, the present
+    /// stamps the frame clock, and the deadline books the next one ([`crate::pace`]). Every one of
+    /// those samples has to be a **different** height, or the frames in between are pictures of the
+    /// same band and the travel is a step with padding around it.
+    ///
+    /// The count is the display's and not a constant: six frames of ninety milliseconds at 60 Hz,
+    /// thirteen at 144. Fewer frames must draw the same journey rather than a shorter one, which is
+    /// what the exact landing at the far end says.
+    ///
+    /// MUTATION: return the far height from the first frame — the one-frame switch this clause
+    /// replaced — and the strict monotonicity goes red on the second sample rather than on the
+    /// hundredth frame of somebody's screen.
+    #[test]
+    fn a_journey_draws_one_distinct_height_per_paced_frame() {
+        for (millihertz, frames) in [(60_000_u32, 6_usize), (144_000, 13)] {
+            let mut clock = crate::pace::FrameClock::default();
+            assert!(clock.follow(Some(millihertz)));
+            let start = Instant::now();
+            let leaving = flight(true, start);
+
+            let mut heights = Vec::new();
+            let mut opacities = Vec::new();
+            let mut presented = None;
+            let mut now = start;
+            while leaving.owes_frames(now, Motion::Full) {
+                assert!(
+                    clock.is_due(presented, now),
+                    "the gate refused a frame its own deadline booked"
+                );
+                heights.push(leaving.height_subpixels(now, Motion::Full));
+                opacities.push(leaving.picture_opacity_milli(now, Motion::Full));
+                presented = Some(now);
+                now = clock.next_frame(presented, now);
+            }
+
+            assert_eq!(
+                heights.len(),
+                frames,
+                "a {millihertz} mHz display draws {frames} frames of ninety milliseconds: {heights:?}"
+            );
+            assert_eq!(heights[0], HEIGHTS[0], "the first frame is the near face");
+            assert!(
+                heights.windows(2).all(|pair| pair[0] < pair[1]),
+                "two frames of a travelling band stand at two heights: {heights:?}"
+            );
+            assert!(
+                opacities.windows(2).all(|pair| pair[0] > pair[1]),
+                "and the picture thins on every one of them: {opacities:?}"
+            );
+            assert_eq!(
+                opacities[0], 1000,
+                "the first frame is the picture at full strength"
+            );
+
+            // And the frame the loop stops on is the far face to the subpixel — the frame on which
+            // the document is told, so a band a subpixel short would put the jump back.
+            assert!(leaving.landed(now, Motion::Full));
+            assert_eq!(leaving.height_subpixels(now, Motion::Full), HEIGHTS[1]);
+            assert_eq!(leaving.picture_opacity_milli(now, Motion::Full), 0);
+        }
+    }
+
+    /// RED — **a journey under continuous unrelated traffic is drawn by that traffic's frames, and
+    /// lands on its own clock** (review 2026-09-18, P1).
+    ///
+    /// The schedule the review built, and the failure it demonstrated: a formula begins its ninety
+    /// milliseconds in one pane while a neighbouring pane prints every five milliseconds. Every one
+    /// of those presents refuses the frame gate and postpones the debt, so the flight's own tick was
+    /// admitted **zero** times in a thousand turns — and because that tick both sampled the journey
+    /// *and* settled it, the band sat at the height the press left it at and could not land for as
+    /// long as the neighbour kept printing.
+    ///
+    /// The repair is not to unpace the tick. It is that a journey is sampled by **whoever composes
+    /// a frame** rather than by a tick that caches its answer: `Runtime::carry_live_journeys` is
+    /// asked at the head of every compose, so the flood's own frames draw the journey, and the
+    /// landing is a plain deadline ([`FormulaToggleMotion::lands_at`]) that no gate stands in front
+    /// of. This walks that schedule over the real curve.
+    ///
+    /// **Three animations of three different kinds**, because the mechanism is the window's and not
+    /// this block's: the band's height (a terminal picture, projected), the marks that ride it (an
+    /// overlay layer), and the tip's own fade (the span every hover in this window is drawn on).
+    ///
+    /// MUTATION: sample any of them once and reuse it — which is what the cached presentation did —
+    /// and its column of samples collapses to one value repeated.
+    #[test]
+    fn a_journey_under_a_flood_is_drawn_by_the_floods_own_frames() {
+        const FLOOD: std::time::Duration = std::time::Duration::from_millis(5);
+        let start = Instant::now();
+        let leaving = flight(true, start);
+        let geometry = boxes(MathBlockDisplay::Rendered);
+        let marks = FormulaToolFollow::arriving(&geometry, None, start);
+
+        let mut heights = Vec::new();
+        let mut mark_opacities = Vec::new();
+        let mut tip_opacities = Vec::new();
+        let mut at = start;
+        while at <= start + tooltip::TOOLTIP_FADE {
+            // What a frame composed for somebody else draws, asked at the instant that frame is of.
+            heights.push(leaving.height_subpixels(at, Motion::Full));
+            mark_opacities.push((marks.opacity(at, Motion::Full) * 1000.0).round() as i64);
+            tip_opacities.push(
+                (tooltip::hover_fade_opacity(at.saturating_duration_since(start), Motion::Full)
+                    * 1000.0)
+                    .round() as i64,
+            );
+            at += FLOOD;
+        }
+
+        let drawn = tooltip::TOOLTIP_FADE.as_millis() as usize / FLOOD.as_millis() as usize;
+        for (what, samples) in [
+            ("the band's height", &heights),
+            ("the marks' fade", &mark_opacities),
+            ("the tip's fade", &tip_opacities),
+        ] {
+            assert_eq!(
+                samples.len(),
+                drawn + 1,
+                "{what}: the flood composed {drawn} frames inside the ninety milliseconds"
+            );
+            assert!(
+                samples.windows(2).all(|pair| pair[0] < pair[1]),
+                "{what} stood still across the flood's frames: {samples:?}"
+            );
+        }
+        // And the far end is exact on the frame the journey is due, whoever composed it.
+        assert_eq!(
+            leaving.height_subpixels(start + tooltip::TOOLTIP_FADE, Motion::Full),
+            HEIGHTS[1]
+        );
+
+        // **The landing is the flight's own clock and no gate stands in front of it.** It is due
+        // at the span's end, not at the end of the flood — which is the half of the review's
+        // finding that made a busy neighbour able to hold a block half way over indefinitely.
+        assert_eq!(leaving.lands_at(), start + tooltip::TOOLTIP_FADE);
+        assert!(!leaving.landed(start + tooltip::TOOLTIP_FADE / 2, Motion::Full));
+        assert!(leaving.landed(leaving.lands_at(), Motion::Full));
     }
 
     /// RED (owner's ruling 2026-09-15, T-MATH-TOGGLE-MOTION): **a second press turns the change

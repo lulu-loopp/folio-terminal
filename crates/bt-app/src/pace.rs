@@ -51,6 +51,35 @@
 //! so a 144 Hz panel gets fourteen frames of a ninety-millisecond journey where
 //! a 60 Hz one gets six.
 //!
+//! # The gate decides who ASKS for a frame, never who is carried by one
+//!
+//! This is the correction of review 2026-09-18 (P1), and getting it the wrong
+//! way round is a hard failure rather than a rough edge. The clock the gate is
+//! read against is *every* present this window makes, a shell's output included
+//! — so a pane printing every five milliseconds refuses an animation's turn for
+//! as long as it keeps printing. That is **right** and it is the whole economy
+//! of the thing: a picture reached the glass a moment ago, so the animation does
+//! not need to ask for one of its own. It is right *only* if that picture
+//! carried the animation forward.
+//!
+//! So the rule has two halves and neither works alone:
+//!
+//! * **Every frame this window composes, for whatever reason, carries every
+//!   journey that is running** — sampled from the clock at the instant the frame
+//!   is of (`Runtime::carry_live_journeys`). Nothing is ever projected or drawn
+//!   from a sample some earlier tick left behind.
+//! * **The gate decides only whether a journey has to ask for a frame of its
+//!   own**, and its refusal books one at [`FrameClock::next_frame`]. Under a
+//!   flood the journey rides the flood's frames; the moment the flood stops it
+//!   gets its own.
+//!
+//! And **a journey's end is not paced at all**. Landing is owed to the document
+//! rather than to the glass — the block is told which face it wears, a hold is
+//! released, the motion is dropped — so it is a plain deadline in the fold and
+//! runs whatever else the window is doing. A gate in front of it is a change of
+//! face that a busy neighbour can postpone for ever, which is exactly what the
+//! review found.
+//!
 //! It is **not** a frame budget, a skipped-frame compensator or a second clock
 //! animations advance by. Every animation in this window already samples its
 //! progress from the wall clock at compose time against an instant it started
@@ -114,6 +143,8 @@ pub struct FrameClock {
     interval: Duration,
     admitted: bool,
     owed: bool,
+    running: bool,
+    running_this_turn: bool,
     skipped: u64,
 }
 
@@ -126,6 +157,8 @@ impl Default for FrameClock {
             // behind anything. `open` overwrites this on the first turn.
             admitted: true,
             owed: false,
+            running: false,
+            running_this_turn: false,
             skipped: 0,
         }
     }
@@ -189,6 +222,31 @@ impl FrameClock {
         self.skipped = self.skipped.saturating_add(1);
     }
 
+    /// **A journey asked the gate a question**, which is the same thing as
+    /// saying it is running (review 2026-09-18, P1).
+    ///
+    /// Every gated advance reaches its gate *after* its own "am I animating"
+    /// refusals, so arriving here at all is the animation saying so — admitted
+    /// or refused, it makes no difference to this fact. It is what
+    /// `Runtime::carry_live_journeys` reads to know whether a frame composed for
+    /// some other reason has any journey to carry, so a window with nothing
+    /// moving pays one `bool` for it on every frame and nothing else.
+    pub fn note_running(&mut self) {
+        self.running_this_turn = true;
+    }
+
+    /// Whether this window had a journey running on its last completed turn.
+    ///
+    /// The *last* turn, and deliberately: a frame is composed from all sorts of
+    /// places — a keystroke's own event, a drain, an expose — and most of them
+    /// are nowhere near a turn's clock run. Last turn's answer is the only one
+    /// that exists at those moments, and an animation that was running a
+    /// millisecond ago is running now.
+    #[must_use]
+    pub fn is_running(&self) -> bool {
+        self.running || self.running_this_turn
+    }
+
     /// Whether a refused frame is still owed.
     #[must_use]
     pub fn owes_a_frame(&self) -> bool {
@@ -215,6 +273,10 @@ impl FrameClock {
     pub fn open(&mut self, last_present: Option<Instant>, now: Instant) {
         self.admitted = self.is_due(last_present, now);
         self.owed = false;
+        // What this turn learns about running journeys replaces what the last
+        // one did, so a window whose last animation has landed stops paying for
+        // the carry on the very next turn.
+        self.running = std::mem::take(&mut self.running_this_turn);
     }
 
     /// Whether this turn is one the animations in this window may draw on.
@@ -366,6 +428,62 @@ mod tests {
             !clock.owes_a_frame(),
             "the debt belongs to the turn that incurred it"
         );
+    }
+
+    /// RED — **a journey under continuous unrelated traffic rides the traffic's
+    /// frames, and lands on its own clock** (review 2026-09-18, P1).
+    ///
+    /// The schedule the review built: a formula begins its ninety milliseconds
+    /// in one pane while a neighbouring pane prints every five milliseconds. Every
+    /// one of those presents refuses the gate, and each one postpones the debt —
+    /// so on the unchanged mechanism the journey was admitted **zero** times in a
+    /// thousand turns and could not even land, because the tick that settles it
+    /// was behind the same gate.
+    ///
+    /// That is only a defect if the refused frames draw nothing. They do not:
+    /// every frame this window composes carries every live journey
+    /// (`Runtime::carry_live_journeys`), so the journey is *sampled by whoever
+    /// composes* rather than by the tick. What this pins is the two properties
+    /// that makes true — the flood's own frames are enough to draw a smooth
+    /// journey, and the landing is never postponed by it — and the third, that
+    /// the moment the flood stops the journey gets frames of its own again.
+    ///
+    /// MUTATIONS: sample the journey from the tick instead of from the compose
+    /// and `carried` collapses to one value repeated; gate the landing and
+    /// `settled_by` runs past the end of the flood.
+    #[test]
+    fn a_flood_of_unrelated_frames_takes_the_asking_away_and_gives_it_back() {
+        const FLOOD: Duration = Duration::from_millis(5);
+        let clock = clock_at(60_000);
+        let start = Instant::now();
+
+        let mut presented = None;
+        let mut admitted = 0;
+        let mut turn = start;
+        while turn <= start + Duration::from_millis(1_000) {
+            if clock.is_due(presented, turn) {
+                admitted += 1;
+            }
+            // Every one of those turns composed a frame for the neighbour, and
+            // every one of them carried the journey: see
+            // `Runtime::carry_live_journeys`, which is what makes this refusal
+            // an economy rather than a freeze.
+            presented = Some(turn);
+            turn += FLOOD;
+        }
+        assert_eq!(
+            admitted, 1,
+            "a window whose glass is being written every five milliseconds asks \
+             for no frames of its own beyond the first"
+        );
+
+        // And the asking comes straight back when the printing stops: one
+        // interval after the last of the flood's frames, and not one flood
+        // period after it.
+        let last = presented.expect("the flood presented");
+        assert_eq!(clock.next_frame(presented, last), last + clock.interval());
+        assert!(!clock.is_due(presented, last + FLOOD));
+        assert!(clock.is_due(presented, last + clock.interval()));
     }
 
     /// RED — **one turn is one answer, and a present inside it does not starve
