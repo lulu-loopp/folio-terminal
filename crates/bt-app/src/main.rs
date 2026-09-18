@@ -75,6 +75,13 @@ mod highlight;
 mod i18n;
 mod icons;
 mod input;
+/// **Every journey this window runs, put through the worst schedule it can be
+/// given** (review round 3, 2026-09-18). A file of its own because the table is
+/// long and because it drives the real hosts rather than reading this one as
+/// text.
+#[cfg(test)]
+#[path = "journeys_tests.rs"]
+mod journeys_tests;
 mod keyhint;
 mod launch_wire;
 mod linebreak;
@@ -258,6 +265,35 @@ const CURSOR_BLINK_PHASE: Duration = Duration::from_millis(550);
 /// inside it; if a tick ever composes a terminal frame again, 60Hz is the wrong
 /// rate for it and this constant is not the thing to change.
 const STRIP_ANIMATION_FRAME: Duration = Duration::from_millis(16);
+
+/// **What one walk of a host answered about one instant**: when it next needs a
+/// frame, and whether anything inside it is travelling right now (review round
+/// 3, 2026-09-18).
+///
+/// Two answers from one pass, because the two hosts that own more clocks than
+/// anything else in this window — the strip, which walks every tab, both file
+/// caches and every float, and the terminals' thumbs, which walk every pane on
+/// two axes — are walked once a turn, and asking them twice would double the
+/// only per-turn cost this window pays for being able to animate at all.
+///
+/// **And two answers rather than one, because a deadline is not a liveness.**
+/// Every fold of this shape carries clocks that are *waits* beside the tweens:
+/// a thumb's nine hundred milliseconds of rest at full strength, a video bar's
+/// intent and its dwell. The loop has to be woken when a wait runs out, so those
+/// belong in `deadline`; nothing about them is in motion, so a window that took
+/// `deadline.is_some()` as "something is mid-flight" rebuilt its interface for
+/// the length of every one of them — which is what it did, and what review round
+/// 3 recorded. See `docs/DESIGN.md` §7.1.5p ⑬.
+#[derive(Clone, Copy, Debug, Default)]
+struct AnimationWork {
+    /// When this host next needs the loop woken, or `None` when it needs nothing
+    /// at all.
+    deadline: Option<Instant>,
+    /// Whether anything in it is travelling at the instant of the walk — the
+    /// tweens alone, never the waits.
+    moving: bool,
+}
+
 /// Winit 0.30 has no enter/exit-size-move event; the final ConPTY size is committed after this
 /// silence interval while the local surface and terminal grid continue to follow every event.
 const WINDOW_RESIZE_QUIET: Duration = bt_term::RESIZE_REQUEST_QUIET;
@@ -12712,7 +12748,7 @@ struct WindowRuntime {
     /// on the same terms as every other debt this window settles in
     /// [`Runtime::advance_strip_animation`]: written where the fact is known
     /// ([`Runtime::drain_pty`], which is where a pane is heard), read where the
-    /// next frame is decided ([`Runtime::strip_animation_deadline`]), and paid off
+    /// next frame is decided ([`Runtime::strip_animation_work`]), and paid off
     /// where the cards are actually rebuilt
     /// ([`Runtime::refresh_focus_thumbnails`]).
     ///
@@ -24941,7 +24977,7 @@ fn mark_opacity(working: bool, mark_is_replaced: bool, elapsed: Duration, motion
 /// This is the question the scheduler has to ask, and asking a *different* one
 /// is what put a half-faded icon on screen after `Start-Sleep 8` returned. The
 /// old predicate was "is anything moving?", which is the right question for
-/// [`Runtime::strip_animation_deadline`] — how long to keep waking up — and the
+/// [`Runtime::strip_animation_work`] — how long to keep waking up — and the
 /// wrong one for whether to draw. The two part company at exactly one moment,
 /// and it is the moment that matters: the frame on which motion *stops*.
 /// Nothing is moving any more, so the old predicate said "nothing owed" and
@@ -27881,7 +27917,8 @@ impl PaneMotion {
 
     /// When these panes next need waking, or `None` when none of them is moving.
     ///
-    /// The same shape and the same `None` as [`Runtime::strip_animation_deadline`],
+    /// The same shape and the same `None` as [`Runtime::strip_animation_work`]'s
+    /// own deadline,
     /// for the same reason: it is what lets `about_to_wait` fall back to
     /// `ControlFlow::Wait` once a split has settled, instead of holding a 60fps
     /// loop open for a window that is doing nothing.
@@ -34297,7 +34334,7 @@ mod arrival_wiring_tests {
             "stage_departure",
             // The two that decide when to paint next.
             "advance_strip_animation",
-            "strip_animation_deadline",
+            "strip_animation_work",
         ];
         // Spelled in two halves so that this very line is not one of the
         // readers it is looking for. The field access and not the field: a
@@ -34341,7 +34378,7 @@ mod arrival_wiring_tests {
     /// woken frame returns without drawing.
     #[test]
     fn the_frame_schedule_knows_about_the_register() {
-        let deadline = fn_body("strip_animation_deadline");
+        let deadline = fn_body("strip_animation_work");
         assert!(
             deadline.contains("passages.moving(now, motion)"),
             "nothing wakes the loop for a menu that is still arriving"
@@ -34375,7 +34412,7 @@ mod arrival_wiring_tests {
     /// and the woken frame returns without drawing.
     #[test]
     fn the_frame_schedule_knows_about_the_fades_as_well() {
-        let deadline = fn_body("strip_animation_deadline");
+        let deadline = fn_body("strip_animation_work");
         assert!(
             deadline.contains("settling.moving(now, motion)"),
             "nothing wakes the loop for a fade that is still running"
@@ -34420,7 +34457,7 @@ mod arrival_wiring_tests {
             "drag_ghost_layer",
             "forget_the_ghost",
             "advance_strip_animation",
-            "strip_animation_deadline",
+            "strip_animation_work",
         ];
         // Spelled in two halves for the register above's reason: this very line
         // must not be one of the readings it is looking for.
@@ -48328,7 +48365,7 @@ impl Runtime<'_> {
     /// down, the arrow's target is one lookup away from the truth. The
     /// *repaint* is the caller's, which is why this only sets the target — a
     /// turn that has begun is finished by `advance_strip_animation` off the
-    /// deadline `strip_animation_deadline` asks for.
+    /// deadline `strip_animation_work` asks for.
     fn start_chevron_turn(&mut self) {
         let now = Instant::now();
         self.window.chevron_turn.retarget(
@@ -60026,7 +60063,7 @@ impl Runtime<'_> {
     /// pass on which the fade has finished is the pass that must draw the pane
     /// without it, and by then there is no fade left to ask about.
     fn advance_terminal_thumbs(&mut self, now: Instant) -> Result<()> {
-        let owed = self.terminal_thumb_deadline(now).is_some();
+        let owed = self.terminal_thumb_work(now).deadline.is_some();
         if !owed && !self.terminal_thumb_owed_frame {
             return Ok(());
         }
@@ -60041,14 +60078,24 @@ impl Runtime<'_> {
         Ok(())
     }
 
-    /// When any terminal thumb next owes a frame.
+    /// When any terminal thumb next owes a frame, **and whether any of them is
+    /// actually fading** (review round 3, 2026-09-18).
     ///
     /// Only the panes that are actually resting: one standing on a reason —
     /// held, hovered, or parked in history — is not going anywhere, and a pane
     /// with no scrollback has nothing on the glass to take off it.
-    fn terminal_thumb_deadline(&self, now: Instant) -> Option<Instant> {
+    ///
+    /// Two answers from the one walk, for [`AnimationWork`]'s stated reason and
+    /// with this host as the example: the deadline is `Some` for the whole of
+    /// [`termscroll::THUMB_REST`] as well, because the loop has to be woken when
+    /// the nine hundred milliseconds run out — and for those nine hundred
+    /// milliseconds the bar is a still picture at full strength. Reading the
+    /// deadline as the liveness kept the overlay lane open for every pane that
+    /// had been scrolled in the last second.
+    fn terminal_thumb_work(&self, now: Instant) -> AnimationWork {
         let motion = self.app.motion;
-        self.sessions
+        let rests = self
+            .sessions
             .iter()
             .filter(|(seat, leaf)| {
                 leaf.projection.scroll_extent_subpixels() > 0
@@ -60059,7 +60106,7 @@ impl Runtime<'_> {
                         .terminal_thumb_drag
                         .is_none_or(|drag| drag.seat != **seat)
             })
-            .filter_map(|(_, leaf)| termscroll::fade_deadline(leaf.thumb_awake, now, motion))
+            .map(|(_, leaf)| leaf.thumb_awake)
             .chain(
                 // The foot's marks, on the same clock and through the same
                 // latch. Their standing reasons are their own — a hover is not
@@ -60076,15 +60123,22 @@ impl Runtime<'_> {
                                 .terminal_column_drag
                                 .is_none_or(|drag| drag.seat != **seat)
                     })
-                    .filter_map(|(_, leaf)| {
-                        termscroll::fade_deadline(leaf.column_awake, now, motion)
-                    }),
-            )
-            .min()
-            // On the window's own frame, like every other fade it draws
-            // (owner's report 2026-09-18): the turn that pays this is a turn
-            // [`Self::animation_frame_is_due`] has to admit.
-            .map(|deadline| deadline.max(self.next_animation_frame(now)))
+                    .map(|(_, leaf)| leaf.column_awake),
+            );
+        let mut work = AnimationWork::default();
+        for rest in rests {
+            if let Some(due) = termscroll::fade_deadline(rest, now, motion) {
+                work.deadline = Some(work.deadline.map_or(due, |soonest| soonest.min(due)));
+            }
+            work.moving |= termscroll::fade_is_moving(rest, now, motion);
+        }
+        // On the window's own frame, like every other fade it draws
+        // (owner's report 2026-09-18): the turn that pays this is a turn
+        // [`Self::animation_frame_is_due`] has to admit.
+        work.deadline = work
+            .deadline
+            .map(|deadline| deadline.max(self.next_animation_frame(now)));
+        work
     }
 
     /// The markdown link under the pointer, if there is one, and the surface it
@@ -84813,7 +84867,7 @@ impl Runtime<'_> {
         // composited onto a 60Hz design, at twice the price.
         //
         // The gate is the constant, read as what it says it is. A tick skipped
-        // here is not a tick lost: [`Self::strip_animation_deadline`] is
+        // here is not a tick lost: [`Self::strip_animation_work`] is
         // clamped to the same clock, so the loop is woken exactly when the ring
         // is next allowed to move.
         // **The taskbar is mirrored above the rate gate, and it has to be.**
@@ -84824,7 +84878,7 @@ impl Runtime<'_> {
         // to the shell, and the frame it most needs to be right on is the one
         // where a run **ends** — which is exactly the frame nothing schedules,
         // because a window with nothing left animating reports no deadline at
-        // all ([`Self::strip_animation_deadline`]). Under the gate, the last
+        // all ([`Self::strip_animation_work`]). Under the gate, the last
         // reading before an idle window went quiet could be a green bar that
         // never comes down. Above it, the cost of a turn of the loop with
         // nothing happening is one fold over the sessions and one comparison
@@ -85349,29 +85403,39 @@ impl Runtime<'_> {
     /// not moving, and a window that treated it as moving would rebuild its
     /// interface on every keystroke for the length of every wait.
     ///
+    /// **And every entry is arithmetic on the journey's own epoch** (review
+    /// round 3, 2026-09-18; `docs/DESIGN.md` §7.1.5p ⑬). Three of these used to
+    /// read a flag instead, and a flag is cleared by code — code that stands
+    /// behind the frame gate and that a neighbouring pane printing every five
+    /// milliseconds refuses for as long as it keeps printing. The toast's
+    /// `leaving` was the one round 3 measured at nine hundred and eighty-three
+    /// redundant overlay builds per thousand publishes; the tip's, the hint
+    /// card's and the glance card's *drawn* receipts were the same shape one
+    /// turn deep, each carrying once past its own landing. The receipts have not
+    /// gone anywhere — they are what schedules the landing frame, and they are
+    /// read by the deadlines and paid by the advances, which is where a debt
+    /// belongs. They are simply not liveness: a journey stops being live at the
+    /// instant its clock says so, whether or not anything has run.
+    ///
     /// The cost is one pass of cheap predicates per turn, most of them an
     /// `Option` read over an empty host. Two of them — the strip's and the
-    /// thumbs' — are the deadline the fold is about to ask for anyway, and are
-    /// handed in rather than asked twice.
-    fn running_journeys(
-        &self,
-        now: Instant,
-        strip: Option<Instant>,
-        thumbs: Option<Instant>,
-    ) -> pace::Lanes {
+    /// thumbs' — come from a walk the fold is about to make anyway, and are
+    /// handed in rather than walked twice.
+    fn running_journeys(&self, now: Instant, strip: bool, thumbs: bool) -> pace::Lanes {
         let motion = self.app.motion;
         let scale = self.window.renderer.metrics().scale_factor as f32;
         pace::Lanes {
-            // Everything the strip's own deadline folds together is a tween: the
-            // ring, the `˅`, a pane in flight, a card breathing, the dock's
-            // fade. It is the one lane whose answer is exactly its deadline.
-            chrome: strip.is_some(),
-            overlay: thumbs.is_some()
-                || self.tooltip_owes_frame(now)
+            // The strip's ring, the `˅`, a pane in flight, a card breathing, the
+            // dock's fade — and the card column's nudge, which lives here and
+            // not in the overlay: the bubble is an overlay layer but what the
+            // nudge moves is `focus_card_nudge_rows`, a chrome card. The chrome
+            // lane covers both, because `refresh_chrome` ends in
+            // `refresh_overlay`; the overlay lane would have moved the caption
+            // and left the picture (review round 3, 2026-09-18).
+            chrome: strip || self.window.card_hint.nudge_moving(now, motion),
+            overlay: thumbs
                 || self.window.tooltip.is_fading(now, motion)
-                || self.key_hint_owes_frame(now)
                 || self.window.key_hint.is_fading(now, motion)
-                || self.window.card_hint.nudge_moving(now, motion)
                 || self.window.toasts.is_animating(now, motion)
                 || self.command_flash_is_running(now)
                 || self.command_rails_are_moving(now)
@@ -85393,10 +85457,16 @@ impl Runtime<'_> {
 
     /// Whether the glance card's own ninety milliseconds is still climbing — the
     /// last arm of [`Self::file_peek_deadline`], asked on its own.
+    ///
+    /// The card's *epoch* and nothing else (review round 3, 2026-09-18). This
+    /// used to begin with [`Self::file_peek_owes_frame`], which is the debt the
+    /// landing frame is scheduled by rather than a statement that anything is
+    /// moving: a card whose fade had finished at ninety milliseconds went on
+    /// reporting itself in flight until some turn rebuilt the overlay and
+    /// settled the receipt, which under a flood is one carry past the end and
+    /// over a surface that could not be laid out is never. The debt is still in
+    /// the deadline and is still paid by the advance.
     fn file_peek_is_fading(&self, now: Instant) -> bool {
-        if self.file_peek_owes_frame(now) {
-            return true;
-        }
         self.window
             .file_peek
             .as_ref()
@@ -85434,7 +85504,7 @@ impl Runtime<'_> {
         }
     }
 
-    fn strip_animation_deadline(&self, now: Instant) -> Option<Instant> {
+    fn strip_animation_work(&self, now: Instant) -> AnimationWork {
         let motion = self.app.motion;
         let tabs_moving = self.window.tabs.iter().any(|tab| {
             tab.mark_is_animating(now, motion)
@@ -85580,7 +85650,15 @@ impl Runtime<'_> {
         // And the bar's own two waits, which do obey it: a bar rising, standing
         // out its dwell, or fading is a reason to wake even when the decoder has
         // nothing new — and no reason at all once it has settled.
-        let bar_moving = self.window.video.bar_deadline(now, motion);
+        //
+        // **A reason to wake and not, by itself, a thing in flight** (review
+        // round 3, 2026-09-18). Two of the three clocks folded in there are
+        // waits — the intent a still pointer serves out before the bar is
+        // offered, and the two seconds a shown bar stands before it begins to go
+        // — so the liveness half asks [`video_seat::VideoSeats::bar_is_moving`],
+        // which is the fade alone.
+        let bar_deadline = self.window.video.bar_deadline(now, motion);
+        let bar_moving = self.window.video.bar_is_moving(now, motion);
         // **§7.1.6b′ T-5 — the card column's own, and the one line here that is
         // not about an animation at all.**
         //
@@ -85608,31 +85686,48 @@ impl Runtime<'_> {
         // an integrated shell's tab mark always has, and the debt is cleared by
         // the very pass that draws it.
         let cards_behind = self.window.cards.owes_frame();
-        [
-            (tabs_moving
-                || chevron_turning
-                || dock_fading
-                || cards_moving
-                || focus_arriving
-                || rail_moving
-                || files_turning
-                || page_loading
-                || passing
-                || fading
-                || saying
-                || disclosing
-                || playing
-                || cards_behind)
-                .then(|| now + STRIP_ANIMATION_FRAME),
-            bar_moving,
-            self.window.pane_motion.deadline(now, motion),
-        ]
-        .into_iter()
-        .flatten()
-        .min()
-        // Clamped to the gate that will actually admit the tick. See
-        // [`Self::strip_animation_next_tick`].
-        .map(|deadline| deadline.max(self.strip_animation_next_tick(now)))
+        // **Everything folded into this line is either a tween, a periodic or a
+        // debt this window's own chrome rebuild settles** (review round 3,
+        // 2026-09-18) — which is what lets the chrome lane read it as liveness.
+        // The two periodics, `page_loading` and `playing`, are their conditions
+        // read fresh on this turn and are never latched: the engine is asked
+        // whether a navigation is still in flight and the seats are asked
+        // whether anything is still decoding, so a page that has landed and a
+        // recording that has been paused stop counting on the very next turn.
+        // `cards_behind` is a one-shot debt and is settled by `refresh_chrome`,
+        // which is what the carry runs, so it cannot survive the frames it asks
+        // for.
+        let strip_moving = tabs_moving
+            || chevron_turning
+            || dock_fading
+            || cards_moving
+            || focus_arriving
+            || rail_moving
+            || files_turning
+            || page_loading
+            || passing
+            || fading
+            || saying
+            || disclosing
+            || playing
+            || cards_behind;
+        AnimationWork {
+            deadline: [
+                strip_moving.then(|| now + STRIP_ANIMATION_FRAME),
+                bar_deadline,
+                self.window.pane_motion.deadline(now, motion),
+            ]
+            .into_iter()
+            .flatten()
+            .min()
+            // Clamped to the gate that will actually admit the tick. See
+            // [`Self::strip_animation_next_tick`].
+            .map(|deadline| deadline.max(self.strip_animation_next_tick(now))),
+            // The two the fold expresses as deadlines of their own, asked here
+            // as the predicates they are made of: the panes' own tween, and the
+            // bar's fade without the two waits its deadline also carries.
+            moving: strip_moving || bar_moving || self.window.pane_motion.is_animating(now, motion),
+        }
     }
 
     /// The rail as the chrome would draw it, quantised to what can reach the
@@ -89010,7 +89105,7 @@ impl Runtime<'_> {
         //
         // **It asks for no frame of its own**, and that is deliberate: what a
         // move can change is when the bar is *due* — an intent armed, a dwell
-        // restarted — and `strip_animation_deadline` reads exactly those two
+        // restarted — and `strip_animation_work` reads exactly those two
         // through `VideoSeats::bar_deadline` on the turn this move ends. A
         // present forced here would be a repaint on every pointer move anywhere
         // in the window for as long as anything is playing.
@@ -104423,12 +104518,14 @@ impl Runtime<'_> {
         // tip host and an empty float host answered "running" on every turn for
         // ever — and every keystroke after that rebuilt the whole interface.
         //
-        // The two deadlines the report shares with the fold are taken once and
-        // handed to both. See [`Self::running_journeys`] and
-        // [`Self::carry_live_journeys`].
-        let strip_animation_deadline = self.strip_animation_deadline(now);
-        let terminal_thumb_deadline = self.terminal_thumb_deadline(now);
-        let running = self.running_journeys(now, strip_animation_deadline, terminal_thumb_deadline);
+        // The two walks the report shares with the fold are made once and
+        // answer both questions. See [`AnimationWork`], [`Self::running_journeys`]
+        // and [`Self::carry_live_journeys`].
+        let strip_animation = self.strip_animation_work(now);
+        let terminal_thumbs = self.terminal_thumb_work(now);
+        let strip_animation_deadline = strip_animation.deadline;
+        let terminal_thumb_deadline = terminal_thumbs.deadline;
+        let running = self.running_journeys(now, strip_animation.moving, terminal_thumbs.moving);
         self.window.frame_clock.note_running(running);
         let startup_deadline =
             startup_poll_delay(self.window.first_text_presented).map(|delay| now + delay);
@@ -111642,7 +111739,7 @@ mod pty_drain_budget_tests {
     /// ran" rather than on the gates, and one of these goes red.
     #[test]
     fn the_frame_schedule_knows_about_the_card_column() {
-        let deadline = method_body("strip_animation_deadline");
+        let deadline = method_body("strip_animation_work");
         assert!(
             deadline.contains("self.window.cards.owes_frame()"),
             "nothing wakes the loop for a card that is behind its pane"
@@ -118069,7 +118166,7 @@ mod files_turn_wake_tests {
     /// becomes the open folder, and its triangle stays `▸`. Move the pointer
     /// anywhere over that tree and the very next frame draws `▾`. Nothing about
     /// the state was ever wrong — `row_turn` had the right angle the whole time
-    /// — and nothing repainted to spend it, because `strip_animation_deadline`
+    /// — and nothing repainted to spend it, because `strip_animation_work`
     /// asked only `tabs[active].file_trees`, the **docked** columns' caches. A
     /// float keeps its own `DirCache` on the window, so a turn started in one
     /// drew its first frame and then asked nobody for a second: the loop went
@@ -118088,7 +118185,7 @@ mod files_turn_wake_tests {
     fn a_turning_triangle_wakes_the_loop_from_every_tree_that_can_draw_one() {
         const SOURCE: &str = include_str!("main.rs");
         let at = SOURCE
-            .find("fn strip_animation_deadline(")
+            .find("fn strip_animation_work(")
             .expect("the window has an animation deadline");
         let body = &SOURCE[at..];
         let end = body.find("\n    fn ").unwrap_or(body.len());
@@ -146256,7 +146353,7 @@ mod tests {
     }
 
     /// PIN — the deadline is `None` when nothing is moving and `Some` while
-    /// something is, on the same terms as [`Runtime::strip_animation_deadline`].
+    /// something is, on the same terms as [`Runtime::strip_animation_work`].
     ///
     /// `None` is the important half: it is what lets the loop fall back to
     /// `ControlFlow::Wait` and the process go genuinely idle once the split has
@@ -147257,8 +147354,8 @@ mod tests {
     /// Verified rather than assumed. "There is no transition under Reduced" is a
     /// property of [`RevealTween::retarget`] storing no `started`, and the two
     /// things that follow from it — the terminal inset on the first sample, and
-    /// a `false` that lets `strip_animation_deadline` answer `None` — are each a
-    /// separate consumer that could have read the clock for itself.
+    /// a `false` that lets `strip_animation_work` ask for no deadline at all —
+    /// are each a separate consumer that could have read the clock for itself.
     #[test]
     fn reduced_motion_snaps_the_resizing_cards_in_and_out_and_asks_for_no_frames() {
         let now = Instant::now();

@@ -421,6 +421,26 @@ pub fn visibility(
     }
 }
 
+/// **Whether a thumb whose last reason ended at `rest` is actually fading at
+/// `now`** (review round 3, 2026-09-18).
+///
+/// [`fade_deadline`]'s second half on its own, and the two must not be confused
+/// for the reason [`visibility`] gives one line above the branch: **a wait is
+/// not a transition.** The nine hundred milliseconds of [`THUMB_REST`] is a bar
+/// standing at full strength with nothing about it changing, and the window read
+/// this host's *deadline* as its liveness — so every pane that had been scrolled
+/// kept the overlay lane alive for nine hundred milliseconds afterwards, and a
+/// neighbouring pane printing rebuilt the overlay on every one of its presents
+/// for the whole of it. Only the fade moves.
+#[must_use]
+pub fn fade_is_moving(rest: Instant, now: Instant, motion: Motion) -> bool {
+    if motion == Motion::Reduced {
+        return false;
+    }
+    let since = now.saturating_duration_since(rest);
+    (THUMB_REST..THUMB_REST + THUMB_FADE).contains(&since)
+}
+
 /// When a thumb whose last reason ended at `rest` next owes a frame.
 ///
 /// The **same** two durations [`visibility`] reads, deliberately shared rather

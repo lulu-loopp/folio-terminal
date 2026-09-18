@@ -453,6 +453,24 @@ impl Toast {
         self.hover_since.is_none().then(|| self.expires_at(now))
     }
 
+    /// **Whether this card is travelling at `now`** (review round 3,
+    /// 2026-09-18) — the half of [`Self::deadline`] that is a tween, stated as
+    /// arithmetic on this card's own epoch and on nothing else.
+    ///
+    /// A `match` and not an `||`, because the two ends are exclusive: a card
+    /// dismissed during its entrance is drawn by the exit branch of
+    /// [`Self::opacity`] alone, so an entrance that had not finished is over the
+    /// moment the exit begins. The span each end is bounded by is the span its
+    /// opacity is read against, which is what makes "it is still moving" and
+    /// "its opacity is still changing" one sentence rather than two that can
+    /// disagree.
+    fn is_moving(&self, now: Instant) -> bool {
+        match self.leaving {
+            Some((left, _)) => now.saturating_duration_since(left) < TOAST_EXIT,
+            None => now.saturating_duration_since(self.born) < TOAST_ENTER,
+        }
+    }
+
     /// Begin the exit, from wherever this card currently stands.
     fn depart(&mut self, now: Instant, motion: Motion) {
         if self.leaving.is_none() {
@@ -658,13 +676,21 @@ impl ToastHost {
     /// its overlay for those four seconds at whatever rate a shell can print.
     /// Under [`Motion::Reduced`] neither tween exists, so nothing here is ever
     /// moving.
+    ///
+    /// **Each card answers from its own clock** (review round 3, 2026-09-18).
+    /// This asked whether an exit had *begun* — `leaving.is_some()` — which is a
+    /// flag, and the only thing that clears it is [`Self::retire_the_departed`]
+    /// reached through [`Self::advance`], which is behind the window's frame
+    /// gate. A neighbouring pane printing every five milliseconds refuses that
+    /// gate for as long as it keeps printing, so a card whose exit finished at
+    /// ninety milliseconds went on reporting itself in flight for ever and the
+    /// window rebuilt its overlay for it on every one of those presents: nine
+    /// hundred and eighty-three of a thousand of them after the card had faded
+    /// to nothing. Retirement may be delayed for ever without that being visible
+    /// here, because [`Toast::is_moving`] is arithmetic on the card's own epoch.
     #[must_use]
     pub fn is_animating(&self, now: Instant, motion: Motion) -> bool {
-        motion == Motion::Full
-            && self
-                .toasts
-                .iter()
-                .any(|toast| toast.leaving.is_some() || now < toast.born + TOAST_ENTER)
+        motion == Motion::Full && self.toasts.iter().any(|toast| toast.is_moving(now))
     }
 
     /// What should be on screen this instant: every card's id and its opacity.

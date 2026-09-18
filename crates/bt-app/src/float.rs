@@ -96,7 +96,12 @@ pub const PEEK_PAD_LOGICAL_PX: f32 = 8.0;
 
 /// The entrance and its reverse, one span for both (§7.1.2「进出动画 120ms」) —
 /// now the archive's **base** span, because a float is a popup.
-const FLOAT_ANIMATION: Duration = Duration::from_millis(FLOAT_WINDOW_ANIMATION_MS);
+///
+/// Visible to the crate since review round 3 (2026-09-18) for
+/// [`crate::cardhint::NUDGE_END`]'s reason: the journey audit asks this host
+/// when its entrance and its exit end, and an endpoint spelled a second time
+/// somewhere else is an endpoint that can disagree with this one.
+pub(crate) const FLOAT_ANIMATION: Duration = Duration::from_millis(FLOAT_WINDOW_ANIMATION_MS);
 
 /// Which of the two promises this float is standing on.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
