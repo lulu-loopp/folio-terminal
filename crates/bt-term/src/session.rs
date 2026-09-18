@@ -8107,10 +8107,25 @@ impl DualPlaneSession {
         // sub-block; suppress any stale standalone render left on one — which the certified-frontier
         // recovery can now produce when the enclosing `$$` opener was a phantom until its forward
         // block landed — so the block's artifact does not double-render over an inner environment.
-        if applied && rendered {
+        //
+        // **However the render came back** (review 2026-09-18 round 2, P1). A block's extent is a
+        // fact of the *detection*: where it begins, where it ends and which rows it swallows are
+        // all settled before a raster is asked for, and a raster that could not be produced does
+        // not give any of them back. Requiring pixels here left a second `Failed` record standing
+        // *inside* a failed outer block -- the environment proven on its own before the enclosing
+        // delimiters were recovered from a phantom opener -- and two overlapping records is
+        // exactly what [`Self::block_that_owns`] cannot answer over: it walks back to the first
+        // current multi-row block and lets it decide, on the strength of blocks not overlapping.
+        // It met the inner one, saw it end before the outer's closing row, and said nothing owns
+        // that row; the closer then re-armed on every frame and bought a whole scan and a whole
+        // render attempt that failed the same way.
+        if applied {
             self.suppress_block_interior(task.transcript_id, task.block_end);
+        }
+        if applied && rendered {
             // The frozen pipeline has now paired this block on durable transcript ids. Any live
-            // record still bridging over those lines is a superseded duplicate of it.
+            // record still bridging over those lines is a superseded duplicate of it -- and that
+            // one *is* about the pixels: what supersedes a live bridge is a frozen raster.
             self.retire_stale_bridge_prefixes(false);
         }
         if applied {
@@ -12082,9 +12097,21 @@ impl DualPlaneSession {
     }
 
     fn schedule_scan(&mut self, candidate_id: TranscriptId) {
+        // **The cheapest question first** (review 2026-09-18 round 2, P2): a line that already has
+        // an answer of its own, or one in flight, is refused by the two record-level schedulers
+        // below whatever else is true of it, and asking them here rather than at the end is what
+        // keeps a screen of settled prose from paying for the ownership walk on every frame.
+        // `DecorationRecord::may_be_scanned` is their own condition, named rather than copied.
+        if self
+            .decorations
+            .get(&candidate_id)
+            .is_none_or(|record| !record.may_be_scanned())
+        {
+            return;
+        }
         // **A row a proven block already owns is not a candidate of its own** — see
-        // [`Self::block_that_owns`], which is the whole of the reason. First, because everything
-        // below it is the cost this refusal exists to avoid: a scan window built out of the
+        // [`Self::block_that_owns`], which is the whole of the reason. Ahead of everything below,
+        // because that is the cost this refusal exists to avoid: a scan window built out of the
         // document's own lines, and behind it a worker that lays the formula out again.
         if self.block_that_owns(candidate_id).is_some() {
             return;
@@ -16728,6 +16755,80 @@ mod tests {
                     && record.show_source
                     && record.artifact.is_some()),
             "and the block still holds the picture it will turn back to"
+        );
+    }
+
+    /// RED — **a block that could not be drawn owns its rows whether or not a raster came back**
+    /// (review 2026-09-18 round 2, P1).
+    ///
+    /// `block_that_owns` walks back to the first *current* multi-row block and lets it decide,
+    /// because blocks do not overlap — one that ends before this row is proof that nothing earlier
+    /// spans it. That invariant is established by `suppress_block_interior`, and until now it was
+    /// established only on a completion that produced pixels: an outer `$$…$$` recovered from a
+    /// phantom opener owns ids 2..8, the `\begin{pmatrix}` environment inside it was proven first
+    /// and owns 4..7, and when the outer's render *fails* the inner was left standing as a second
+    /// `Failed` record inside the first. The walk from the outer's closing row then met 4..7,
+    /// which ends before it, and answered "nothing owns this" — so the closer re-armed for ever,
+    /// one whole scan and one whole render attempt per frame.
+    ///
+    /// A block's extent is a fact of the detection and not of the raster, so the body is settled
+    /// on every completion the record accepted.
+    ///
+    /// **`[2, 0, 0, 0, 0, 0]` and not `[1, 0, …]`**: the inner environment is a block in its own
+    /// right until the outer one is proven, so it is genuinely detected and tried once before the
+    /// recovery that swallows it. What must not happen is the second attempt, and every one after
+    /// it, on a screen nobody has touched.
+    ///
+    /// MUTATIONS: put `rendered` back in front of the suppression and this repeats
+    /// `[2, 1, 1, 1, 1, 1]`.
+    #[test]
+    fn a_failed_block_owns_its_rows_against_an_inner_record() {
+        let doc = [
+            "$$",
+            "$$",
+            "A=",
+            r"\begin{pmatrix}",
+            r"a & b\\",
+            "c & d",
+            r"\end{pmatrix}",
+            "$$",
+        ]
+        .iter()
+        .copied()
+        .chain((0..15).map(|_| "tail"))
+        .collect::<Vec<_>>()
+        .join("\r\n");
+        let mut session = DualPlaneSession::new(nz(100), nz(12));
+        session.feed(doc.as_bytes()).unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_to_top();
+
+        let attempt = |session: &mut DualPlaneSession, projection: &mut ViewportProjection| {
+            session.refresh_projection(projection);
+            let frame = session.viewport_frame(projection).unwrap();
+            session.schedule_visible_artifacts(&frame);
+            let mut attempted = 0usize;
+            while let Some(mut task) = session.take_worker_task() {
+                if resolve_detection_task(&mut task) {
+                    attempted += 1;
+                    session.complete_worker_result(
+                        task,
+                        Err(MathRenderError::Compile("r2".to_owned())),
+                    );
+                } else {
+                    session.complete_worker_task(task);
+                }
+            }
+            attempted
+        };
+        let attempts: Vec<usize> = (0..6)
+            .map(|_| attempt(&mut session, &mut projection))
+            .collect();
+        assert_eq!(
+            attempts,
+            vec![2, 0, 0, 0, 0, 0],
+            "an outer block whose render failed still owns the row that proves it"
         );
     }
 
