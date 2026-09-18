@@ -12521,6 +12521,17 @@ struct WindowRuntime {
     /// [`Runtime::running_journeys`]'s question and is arithmetic on a clock
     /// (`docs/DESIGN.md` §7.1.5p ⑬). This says the glass is one picture behind,
     /// which is a fact about what has been *presented*.
+    ///
+    /// **And a debt books its own wake** (closure review 2, 2026-09-18, P1).
+    /// That is the rule this field is an instance of, and the first version of
+    /// it broke the rule: the bit was set and nothing in the deadline fold read
+    /// it, so on an otherwise idle window — a decoder's last picture, or the one
+    /// a pause leaves standing — it could sit set until some unrelated event
+    /// happened to turn the loop. `Runtime::strip_animation_work` now folds it
+    /// in, which books the strip's next eligible tick, which is the only pass
+    /// that can take it. Anything written down as owed has to say when it will
+    /// be paid, exactly as a refused frame does
+    /// ([`pace::FrameClock::refuse`]).
     pictures_owe_a_frame: bool,
     /// **What each surface is showing, so that opening a file can be told from
     /// revealing one** (adversarial review 2026-09-11, B8).
@@ -56264,7 +56275,13 @@ impl Runtime<'_> {
     /// read the missing picture as "not about this file" would shut down the
     /// engine it was just given, which is the re-open this ruling refused,
     /// arriving by the back door.
-    fn sweep_video_seats(&mut self) {
+    ///
+    /// **Answers whether the set of seats moved** (closure review 2, 2026-09-18):
+    /// a membership change is one of the three things that can make the layers
+    /// the renderer is holding wrong, and the service above this one rebuilds
+    /// them on that answer rather than on every turn — see
+    /// [`Self::service_pictures`].
+    fn sweep_video_seats(&mut self) -> bool {
         // **A window holding no recording has nothing to retire** (closure
         // review O4, 2026-09-18). This used to run once per strip tick; it now
         // runs on every turn and at the head of every compose, because it is a
@@ -56272,7 +56289,7 @@ impl Runtime<'_> {
         // cost a `is_empty()` rather than a walk of every surface this window
         // draws.
         if self.window.video.is_empty() {
-            return;
+            return false;
         }
         // **Which surfaces still exist**, asked once: a float that has finished
         // its exit fade and a pane that has been closed are both gone from this
@@ -56326,6 +56343,7 @@ impl Runtime<'_> {
             })
             .map(|(surface, _)| surface)
             .collect();
+        let mut membership_moved = !doomed.is_empty();
         for surface in doomed {
             self.window.video.close(surface);
         }
@@ -56344,6 +56362,7 @@ impl Runtime<'_> {
             .iter()
             .filter_map(|(surface, seat)| Some((surface, seat.fault()?)))
             .collect();
+        membership_moved |= !faulted.is_empty();
         for (surface, error) in faulted {
             self.mouse_trace(|| format!("video_seat surface={surface:?} fault={error:?}"));
             self.window.video.close(surface);
@@ -56353,6 +56372,7 @@ impl Runtime<'_> {
                 ));
             }
         }
+        membership_moved
     }
 
     /// Drop the view of every surface that has stopped existing.
@@ -79718,7 +79738,10 @@ impl Runtime<'_> {
     /// slice — not one process — and a window that never turned to the page
     /// never reads a repository, however git-shaped the folder it is looking at.
     fn ask_git_for_floats(&mut self) {
-        if !self.git_panel_on() {
+        // The float host first, because it is the cheaper of the two questions
+        // and the one that is false far more often (closure review 2,
+        // 2026-09-18).
+        if self.window.float.is_empty() || !self.git_panel_on() {
             return;
         }
         // Which pool a document answer would land in. Read once, before the
@@ -79768,6 +79791,11 @@ impl Runtime<'_> {
     /// rides along, so a late answer is matched to the view that asked rather
     /// than to whichever float is in front when it lands.
     fn ask_float_directories(&mut self) {
+        // Nothing open asks nothing, and it asks it without allocating (closure
+        // review 2, 2026-09-18): this is on the per-turn road.
+        if self.window.float.is_empty() {
+            return;
+        }
         let window = self.window_id();
         let mut asks = Vec::new();
         for win in self.window.float.live_windows_mut() {
@@ -80604,6 +80632,12 @@ impl Runtime<'_> {
     /// host: two windows can be following their content at once, and a hand on
     /// one of them ends it for that one alone.
     fn resize_floats_to_content(&mut self) -> bool {
+        // A window with no float has nothing to grow (closure review 2,
+        // 2026-09-18): this runs on every turn, and the read below is a walk and
+        // a `Vec`.
+        if self.window.float.is_empty() {
+            return false;
+        }
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let viewport = self.float_viewport();
         let git_panel_on = self.git_panel_on();
@@ -84995,8 +85029,20 @@ impl Runtime<'_> {
         // float being dragged, a window resized — and a picture that stayed
         // where the layout used to be would be the FLIP's own defect with a
         // recording in it.
-        self.sweep_video_seats();
+        let membership_moved = self.sweep_video_seats();
         let frames_arrived = self.window.video.pump(now) | self.advance_animations(now);
+        // **And a box that is moving on a clock rather than on an event**
+        // (closure review 2, 2026-09-18). Every *event* that moves a picture's
+        // rectangle — a resize, a split, a tab switch, a scroll, a window
+        // dragged — already ends in `refresh_preview_for_layout`, which asks
+        // this question unconditionally from twenty doors. What that leaves is
+        // the two rectangles that move without anybody touching anything: a pane
+        // in FLIP and a float on its way in or out. Both are cheap to ask — a
+        // walk of the panes that hold a tween, which is almost always none, and
+        // of the floats that are drawn, which is almost always none.
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let boxes_may_be_moving = self.window.pane_motion.is_animating(now, self.app.motion)
+            || self.window.float.is_animating(now, self.app.motion, scale);
         // **Animations count here too**, and forgetting them was a real bug for
         // the length of one edit: a `.gif` with no recording anywhere in the
         // window would advance its frame, bump its generation, and never hand
@@ -85028,6 +85074,19 @@ impl Runtime<'_> {
         let anything_moving = !self.window.video.is_empty()
             || !self.window.animations.is_empty()
             || !self.window.renderer.video_layers().is_empty();
+        // **And nothing at all when nothing has changed** (closure review 2,
+        // 2026-09-18, P2). A service runs on every turn *and* at the head of
+        // every compose, so a paused recording standing in a still pane was
+        // rebuilding the whole layer list twice per five-millisecond present of
+        // a neighbouring shell — the same pixels in the same rectangle, at four
+        // heap allocations a time, with nothing in this window moving at all.
+        // That is exactly the charge this work exists to remove: ordinary output
+        // must pay nothing. The three reasons above are the whole of what can
+        // make the list the renderer is holding wrong; if none of them holds,
+        // what it is holding is right.
+        if !pictures_need_handing_over(frames_arrived, membership_moved, boxes_may_be_moving) {
+            return;
+        }
         let boxes_moved = anything_moving && self.refresh_video_layers();
         if frames_arrived || boxes_moved {
             self.window.pictures_owe_a_frame = true;
@@ -85082,7 +85141,11 @@ impl Runtime<'_> {
             taskbar, window, ..
         } = &mut self.window;
         taskbar.show(window, wanted);
-        if !strip_animation_tick_is_due(self.window.strip_animation_ticked_at, now) {
+        if !strip_animation_tick_is_due(
+            self.window.strip_animation_ticked_at,
+            now,
+            self.window.frame_clock.interval(),
+        ) {
             return Ok(());
         }
         // **And the window's own display frame, above the strip's own rate**
@@ -85374,7 +85437,7 @@ impl Runtime<'_> {
     fn strip_animation_next_tick(&self, now: Instant) -> Instant {
         self.window
             .strip_animation_ticked_at
-            .map_or(now, |last| last + STRIP_ANIMATION_FRAME)
+            .map_or(now, |last| last + self.window.frame_clock.interval())
             .max(now)
             // And never before the glass will take one either: the ring is one
             // of the window's animations and draws on the window's frame, so a
@@ -85903,9 +85966,21 @@ impl Runtime<'_> {
             || disclosing
             || playing
             || cards_behind;
+        // **A debt books its own wake** (closure review 2, 2026-09-18, P1). The
+        // pictures are serviced above every gate now, so the turn that finds a
+        // frame and the turn that may present it are two different turns — and
+        // on an otherwise idle window there is nothing else to bring the second
+        // one round. A decoder's last picture, or the one a pause leaves
+        // standing, would sit in `pictures_owe_a_frame` until some unrelated
+        // event happened to wake the loop. It is a **deadline** and never a
+        // liveness: nothing is moving, one frame is owed, and this is where the
+        // window says when it will pay it — the same shape the pacer's own
+        // refusal takes ([`pace::FrameClock::refuse`]).
+        let pictures_owe = self.window.pictures_owe_a_frame;
         AnimationWork {
             deadline: [
-                (strip_moving || rail_waiting).then(|| now + STRIP_ANIMATION_FRAME),
+                (strip_moving || rail_waiting || pictures_owe)
+                    .then(|| now + self.window.frame_clock.interval()),
                 bar_deadline,
                 self.window.pane_motion.deadline(now, motion),
             ]
@@ -121638,16 +121713,54 @@ fn pty_drain_says_nothing_new(focused_frame_unchanged: bool, unpainted_pane_outp
 
 /// Whether the tab strip's animation is allowed to move again.
 ///
-/// [`STRIP_ANIMATION_FRAME`] is the rate the ring turns at, and this is the
-/// only thing that makes it one. `about_to_wait` runs after *every* event
-/// rather than only when a deadline expires, and the present each tick asks for
-/// is itself an event — so without this the ring simply ran as fast as the loop
-/// could turn, measured at 120 steps a second against a declared 62.5.
+/// A rate is only a rate if something enforces it. `about_to_wait` runs after
+/// *every* event rather than only when a deadline expires, and the present each
+/// tick asks for is itself an event — so without this the ring simply ran as
+/// fast as the loop could turn, measured at 120 steps a second against a
+/// declared 62.5.
+///
+/// **The rate is the window's own display frame** (closure review 2,
+/// 2026-09-18). It was [`STRIP_ANIMATION_FRAME`], a flat sixteen milliseconds,
+/// and a window has no business keeping two rates: on a 144 Hz panel the
+/// display gate admitted a turn seven milliseconds after a present and this one
+/// turned it away, which is how a picture that had arrived could find every door
+/// shut — the state the review's counterexample is built on. One clock, read
+/// from the glass ([`pace::FrameClock::interval`]), and the constant stays only
+/// as the fallback that clock is born with.
 ///
 /// The first tick of a window's life is always due: there is no last one to be
 /// too soon after.
-fn strip_animation_tick_is_due(last: Option<Instant>, now: Instant) -> bool {
-    last.is_none_or(|last| now.saturating_duration_since(last) >= STRIP_ANIMATION_FRAME)
+/// **Whether the picture service has anything to hand the renderer** (closure
+/// review 2, 2026-09-18, P2).
+///
+/// Three reasons and there is no fourth, which is what makes the answer `false`
+/// on the turns that matter — every one of a printing neighbour's. **A new
+/// generation** is new pixels, from a decoder or from a decoded animation's
+/// clock. **A membership change** is a seat opened, closed, faulted or swept,
+/// which is the one case where the list itself is a different length. **A box
+/// that may be moving** is a pane in FLIP or a float on its way in or out: every
+/// *event* that moves a picture's rectangle already ends in
+/// `Runtime::refresh_preview_for_layout`, and those two are the rectangles that
+/// move on a clock instead.
+///
+/// What it is worth: a paused recording standing in a still pane was having the
+/// whole layer list rebuilt on every turn *and* again at the head of every
+/// compose — two thousand reconstructions and some eight thousand allocations
+/// over a thousand five-millisecond presents of a neighbouring shell, for the
+/// same pixels in the same rectangle with nothing in this window moving.
+///
+/// A free function so that the sentence the service acts on and the sentence a
+/// test counts are the same sentence ([`tick_owes_a_present`]'s arrangement).
+fn pictures_need_handing_over(
+    frames_arrived: bool,
+    membership_moved: bool,
+    boxes_may_be_moving: bool,
+) -> bool {
+    frames_arrived || membership_moved || boxes_may_be_moving
+}
+
+fn strip_animation_tick_is_due(last: Option<Instant>, now: Instant, frame: Duration) -> bool {
+    last.is_none_or(|last| now.saturating_duration_since(last) >= frame)
 }
 
 /// What the window can say about the terminal picture, at the moment an
@@ -135437,44 +135550,73 @@ mod tests {
         );
     }
 
-    /// **The ring turns at the rate the constant declares — no faster.**
+    /// **The ring turns at the rate the display declares — no faster.**
     ///
     /// A second of wall clock offered to the loop one millisecond at a time,
     /// which is what a window whose every present wakes `about_to_wait` again
-    /// actually looks like. Sixty-two steps, not a thousand.
+    /// actually looks like. Sixty-two steps on a 60 Hz panel, not a thousand.
+    ///
+    /// **And the rate is the window's, not a second one of the strip's own**
+    /// (closure review 2, 2026-09-18): a 144 Hz panel gets 144 steps, because a
+    /// window that keeps two rates has a door that admits and a door that
+    /// refuses at the same instant — which is how a picture that had arrived
+    /// found every one of them shut.
     #[test]
-    fn the_strip_animation_moves_at_its_own_declared_rate() {
-        let start = Instant::now();
-        let mut last = None;
-        let mut ticks = 0;
-        for millisecond in 0..1000 {
-            let now = start + Duration::from_millis(millisecond);
-            if strip_animation_tick_is_due(last, now) {
-                last = Some(now);
-                ticks += 1;
+    fn the_strip_animation_moves_at_the_rate_of_the_display_it_is_on() {
+        let steps_in_a_second = |frame: Duration| {
+            let start = Instant::now();
+            let mut last = None;
+            let mut ticks = 0_u32;
+            for tenth in 0..10_000 {
+                let now = start + Duration::from_micros(tenth * 100);
+                if strip_animation_tick_is_due(last, now, frame) {
+                    last = Some(now);
+                    ticks += 1;
+                }
             }
-        }
-        assert_eq!(
-            ticks,
-            1000_u32.div_ceil(STRIP_ANIMATION_FRAME.as_millis() as u32),
-            "one step per {}ms and not one more",
-            STRIP_ANIMATION_FRAME.as_millis()
+            ticks
+        };
+        // Offered a tenth of a millisecond at a time, so a rate whose period is
+        // not a whole number of those can land one step either side of its own
+        // arithmetic — 144 Hz is 6.944 ms. The property is the rate, not the
+        // rounding.
+        let about = |frame: Duration, want: u32| {
+            let got = steps_in_a_second(frame);
+            assert!(
+                got.abs_diff(want) <= 1,
+                "one step per {frame:?} is about {want} in a second, not {got}"
+            );
+        };
+        about(STRIP_ANIMATION_FRAME, 62);
+        about(
+            pace::interval_from_millihertz(60_000).expect("60 Hz is a display"),
+            60,
+        );
+        about(
+            pace::interval_from_millihertz(144_000).expect("144 Hz is a display"),
+            144,
         );
     }
 
-    /// And it is never *slower* than the constant either: a tick offered
-    /// exactly one frame after the last is due, not one frame and a bit.
+    /// And it is never *slower* than the frame either: a tick offered exactly
+    /// one frame after the last is due, not one frame and a bit.
     #[test]
     fn a_tick_offered_exactly_one_frame_later_is_due() {
         let start = Instant::now();
-        assert!(strip_animation_tick_is_due(None, start), "the first ever");
+        let frame = STRIP_ANIMATION_FRAME;
+        assert!(
+            strip_animation_tick_is_due(None, start, frame),
+            "the first ever"
+        );
         assert!(strip_animation_tick_is_due(
             Some(start),
-            start + STRIP_ANIMATION_FRAME
+            start + frame,
+            frame
         ));
         assert!(!strip_animation_tick_is_due(
             Some(start),
-            start + STRIP_ANIMATION_FRAME - Duration::from_micros(1)
+            start + frame - Duration::from_micros(1),
+            frame
         ));
     }
 

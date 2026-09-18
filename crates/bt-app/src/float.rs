@@ -1493,6 +1493,19 @@ impl FloatHost {
         self.pinned.iter().chain(self.peek.iter())
     }
 
+    /// **Whether this window has any float at all** — the cheapest question
+    /// there is about this host, and the one every per-turn pass asks first
+    /// (closure review 2, 2026-09-18).
+    ///
+    /// The overwhelming majority of windows have none, and the passes that
+    /// belong to floats run on every turn of the loop: a walk that finds nothing
+    /// still costs the walk, and a `Vec` allocated to hold nothing still costs
+    /// the allocation. This is two `is_empty`s.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.pinned.is_empty() && self.peek.is_none()
+    }
+
     /// **Whether any float on screen is actually in motion right now** (review
     /// 2026-09-18 round 2) — an entrance or an exit still moving, and never an
     /// intent merely settling or a grace merely running down.

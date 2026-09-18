@@ -1246,7 +1246,7 @@ fn an_elapsed_time_service_is_never_gated_and_the_flood_shows_its_state() {
     );
     assert!(
         pictures.contains("if self.window.video.is_empty() {") || {
-            let sweep = method("    fn sweep_video_seats(&mut self) {");
+            let sweep = method("    fn sweep_video_seats(&mut self) -> bool {");
             sweep.contains("if self.window.video.is_empty() {")
         },
         "a service that runs on every turn is free when nothing is live"
@@ -1333,6 +1333,237 @@ fn an_elapsed_time_service_is_never_gated_and_the_flood_shows_its_state() {
             state < gate,
             "`{clock}` stands behind the frame gate, so a printing pane can \
              postpone it for ever:\n{body}"
+        );
+    }
+}
+
+/// RED — **a debt books its own wake** (closure review 2, 2026-09-18, P1).
+///
+/// The split that closed O4 made the turn that *finds* a picture and the turn
+/// that may *present* it two different turns, and a bit written down between
+/// them is a debt. A debt that books no wake is a debt nothing comes back for:
+/// a decoder's last frame, or the one a pause leaves standing, arrives on an
+/// otherwise idle turn, is recorded, and then waits for something unrelated to
+/// happen to the window — which on an idle window is nothing at all.
+///
+/// The review's counterexample is a 144 Hz display, and it is also why this
+/// window may not keep two rates. The strip guarded its tick with a flat sixteen
+/// milliseconds beside the display's 6.94, so seven milliseconds after a present
+/// the pacer's door admitted and the strip's refused — and because the strip
+/// returns at its own guard *above* the pacer's, no refusal was recorded either,
+/// so not even the frame clock's own debt was booked. Both doors now read one
+/// interval, and the picture's debt is folded into the strip's deadline.
+///
+/// MUTATIONS: drop `pictures_owe` from the fold and nothing books the wake; give
+/// the strip its own sixteen milliseconds back and the two doors disagree at
+/// 144 Hz, which is the first block below.
+#[test]
+fn a_picture_that_arrives_between_frames_books_its_own_wake() {
+    let hz_144 = {
+        let mut clock = FrameClock::default();
+        assert!(clock.follow(Some(144_000)));
+        clock
+    };
+    let interval = hz_144.interval();
+    let start = Instant::now();
+
+    // ── ① one window, one rate: both doors answer the same at every instant ──
+    for micros in [0, 1_000, 3_000, 6_943, 6_944, 7_000, 16_000] {
+        let at = start + Duration::from_micros(micros);
+        assert_eq!(
+            hz_144.is_due(Some(start), at),
+            crate::strip_animation_tick_is_due(Some(start), at, interval),
+            "{micros}µs after a present the display and the strip disagree, which \
+             is how a picture that had arrived found every door shut"
+        );
+    }
+
+    // ── ② a picture arrives on an idle turn inside the frame ────────────────
+    // The last tick and the last present were both at t = 0; the decoder's
+    // final picture lands at t = 3 ms, on a turn that publishes nothing.
+    let arrived = start + Duration::from_millis(3);
+    assert!(
+        !crate::strip_animation_tick_is_due(Some(start), arrived, interval),
+        "the strip is not due, so it returns above the pacer and records no refusal"
+    );
+    assert!(
+        !hz_144.is_due(Some(start), arrived),
+        "and the display would have refused it anyway"
+    );
+
+    // So nothing but the debt can bring the loop round. What it books is the
+    // strip's next eligible tick — `Runtime::strip_animation_next_tick` — and
+    // the instant it books is an instant both doors admit.
+    let booked = (start + interval).max(arrived);
+    assert!(
+        booked > arrived && booked <= arrived + interval,
+        "a debt is paid within one frame of being incurred"
+    );
+    assert!(
+        hz_144.is_due(Some(start), booked)
+            && crate::strip_animation_tick_is_due(Some(start), booked, interval),
+        "and the tick that pays it is a tick both doors let through"
+    );
+
+    // ── ③ and the wiring says so ────────────────────────────────────────────
+    let work = method("    fn strip_animation_work(&self, now: Instant) -> AnimationWork {");
+    let deadline = work
+        .find("deadline: [")
+        .expect("the strip answers when it next needs waking");
+    let moving = work
+        .find("moving: strip_moving")
+        .expect("and what is mid-flight in it");
+    let owed = work
+        .find("|| pictures_owe)")
+        .expect("a picture that is owed books the strip's next tick");
+    assert!(
+        deadline < owed && owed < moving,
+        "the debt is a deadline and never a liveness — nothing is moving, one \
+         frame is owed:\n{work}"
+    );
+    assert!(
+        work.contains("self.window.frame_clock.interval()"),
+        "and the strip asks for its next frame on the window's one rate:\n{work}"
+    );
+    let tick = method("    fn advance_strip_animation(&mut self, now: Instant) -> Result<()> {");
+    let guard = tick
+        .find("strip_animation_tick_is_due(")
+        .expect("the strip still enforces a rate");
+    assert!(
+        tick[guard..].contains("self.window.frame_clock.interval(),"),
+        "and it enforces the window's, not a second one of its own:\n{tick}"
+    );
+
+    // ── ④ the debt has exactly one taker, and the fold is not it ────────────
+    //
+    // A seat removed while the window is idle is the case this matters most in:
+    // the sweep says the membership moved, the service hands the shorter list
+    // over, and what is owed is the frame that shows the rectangle empty. If the
+    // fold *took* the bit instead of reading it, that frame would be booked and
+    // then forgotten in the same breath; if two passes took it, whichever ran
+    // first would pay a debt the other had already booked a wake for.
+    assert!(
+        work.contains("let pictures_owe = self.window.pictures_owe_a_frame;"),
+        "the fold reads the debt and leaves it where it is:\n{work}"
+    );
+    // The whole statement rather than the call, so that `main.rs`'s own source
+    // pin on the same line is not counted as a second taker.
+    let taken = "let pictures_owe = std::mem::take(&mut self.window.pictures_owe_a_frame);";
+    assert_eq!(
+        SOURCE.matches(taken).count(),
+        1,
+        "one taker, and it is the tick that presents"
+    );
+    assert!(
+        tick.contains(taken),
+        "and that taker is the strip's own tick:\n{tick}"
+    );
+    // A removed seat is a membership change, so the service hands the shorter
+    // list over and the debt that books this wake is set by the same pass —
+    // `crate::pictures_need_handing_over` is what says so, and is counted in
+    // `a_service_that_finds_nothing_changed_hands_nothing_over`.
+    assert!(crate::pictures_need_handing_over(false, true, false));
+}
+
+/// RED — **a service that finds nothing changed allocates nothing** (closure
+/// review 2, 2026-09-18, P2).
+///
+/// A service runs on every turn *and* again at the head of every compose, which
+/// is what makes it correct — and what makes an unconditional rebuild inside one
+/// the most expensive idle thing in the window. A paused recording standing in a
+/// still pane was having the whole layer list reconstructed twice per
+/// five-millisecond present of a neighbouring shell: two thousand rebuilds and
+/// some eight thousand allocations over a thousand presents, for the same pixels
+/// in the same rectangle, with nothing in this window moving at all. Ordinary
+/// output must pay nothing, and that is the charge this whole branch exists to
+/// answer.
+///
+/// MUTATION: hand the layers over unconditionally — which is what the split's
+/// first version did — and the first count below reads 1,000 instead of 0 and
+/// the second 1,000 instead of 50.
+#[test]
+fn a_service_that_finds_nothing_changed_hands_nothing_over() {
+    // ── ① a paused seat: nothing new, nothing gone, nothing moving ──────────
+    let mut rebuilds = 0_u32;
+    for _ in 0..1_000 {
+        if crate::pictures_need_handing_over(false, false, false) {
+            rebuilds += 1;
+        }
+    }
+    assert_eq!(
+        rebuilds, 0,
+        "a picture that has not changed is a picture the renderer is already \
+         holding"
+    );
+
+    // ── ② a playing animation: one rebuild per new frame, not per service ───
+    // The real host, the real clock: a hundred-millisecond ring serviced every
+    // five milliseconds for five seconds.
+    let start = Instant::now();
+    let drawn: BTreeMap<String, u64> = [("on the glass".to_owned(), 1)].into();
+    let mut cache = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
+    cache.insert("on the glass".to_owned(), a_playback_of(64, start));
+    present_drawn_animations(&mut cache, &BTreeMap::new(), &drawn, start);
+    let mut services = 0_u32;
+    let mut rebuilds = 0_u32;
+    let mut turn = start;
+    while turn <= start + FLOOD_SPAN {
+        let frames_arrived = advance_drawn_animations(&mut cache, &drawn, turn);
+        services += 1;
+        if crate::pictures_need_handing_over(frames_arrived, false, false) {
+            rebuilds += 1;
+        }
+        turn += FLOOD;
+    }
+    assert_eq!(services, 1_001);
+    assert_eq!(
+        rebuilds, 50,
+        "fifty new frames in five seconds, and {services} services to find them"
+    );
+
+    // ── ③ the two other reasons, and there is no fourth ─────────────────────
+    assert!(
+        crate::pictures_need_handing_over(false, true, false),
+        "a seat opened, closed or faulted changes the list itself"
+    );
+    assert!(
+        crate::pictures_need_handing_over(false, false, true),
+        "and a pane in FLIP or a float on its way in moves the rectangle under it"
+    );
+    let service = method("    fn service_pictures(&mut self, now: Instant) {");
+    assert!(
+        service.contains(
+            "if !pictures_need_handing_over(frames_arrived, membership_moved, boxes_may_be_moving)"
+        ),
+        "the service asks that one question before it builds anything:\n{service}"
+    );
+    let asked = service
+        .find("pictures_need_handing_over(")
+        .expect("the service asks");
+    let built = service
+        .find("self.refresh_video_layers()")
+        .expect("and only then hands the layers over");
+    assert!(asked < built, "it is asked first, or it is not a guard");
+
+    // ── ④ and the per-turn float passes are free with nothing open ──────────
+    let host = float::FloatHost::default();
+    assert!(host.is_empty() && host.drawn().count() == 0);
+    for (pass, signature) in [
+        (
+            "resize",
+            "    fn resize_floats_to_content(&mut self) -> bool {",
+        ),
+        ("directories", "    fn ask_float_directories(&mut self) {"),
+        ("git", "    fn ask_git_for_floats(&mut self) {"),
+    ] {
+        let body = method(signature);
+        let empty = body
+            .find("self.window.float.is_empty()")
+            .expect("every per-turn float pass asks whether there is a float at all");
+        assert!(
+            empty < body.find("Vec::new()").unwrap_or(usize::MAX)
+                && empty < body.find("live_windows").unwrap_or(usize::MAX),
+            "the {pass} pass walks or allocates before asking:\n{body}"
         );
     }
 }
