@@ -12506,6 +12506,22 @@ struct WindowRuntime {
     /// ring, and — when the tab came back — resumed in the middle of the file
     /// and then waited on a worker round trip to move at all.
     animations_drawn: BTreeMap<String, u64>,
+    /// **A decoded picture has moved and the glass has not been told**
+    /// (closure review O4, 2026-09-18).
+    ///
+    /// The pictures are serviced above every gate — a decoder is pumped and a
+    /// decoded animation's clock is walked on every turn and at the head of
+    /// every compose ([`Runtime::service_pictures`]) — but the turn that *asks
+    /// the glass for a frame* can be refused, so the two are no longer the same
+    /// pass and the debt between them has to be written down. It is set by the
+    /// service and taken by [`Runtime::advance_strip_animation`] on the next
+    /// turn the gate admits, which is the only thing that can pay it.
+    ///
+    /// A debt and never a liveness: what is mid-flight is
+    /// [`Runtime::running_journeys`]'s question and is arithmetic on a clock
+    /// (`docs/DESIGN.md` §7.1.5p ⑬). This says the glass is one picture behind,
+    /// which is a fact about what has been *presented*.
+    pictures_owe_a_frame: bool,
     /// **What each surface is showing, so that opening a file can be told from
     /// revealing one** (adversarial review 2026-09-11, B8).
     ///
@@ -27193,7 +27209,20 @@ impl RevealTween {
         };
     }
 
-    /// Where the reveal is now, and whether it is still moving.
+    /// Where the reveal is now, and whether the curve is **running**.
+    ///
+    /// **A delay in front of a transition is a wait, and a wait is not motion**
+    /// (closure review, 2026-09-18; `docs/DESIGN.md` §7.1.5p ⑬). The second
+    /// value used to be "this tween has been aimed somewhere and has not got
+    /// there yet", which for the one reveal in this window with a
+    /// `transition-delay` — the rail's labels, Q183's sixty milliseconds —
+    /// reported motion through a span in which the value is exactly its start
+    /// and the glass has nothing new to show. Under a hand opening and closing
+    /// the panel every five milliseconds the review found that span renewed
+    /// indefinitely: liveness true, opacity exactly zero, the interface rebuilt
+    /// on every incoming publish for the whole of it. The loop still has to be
+    /// woken for the instant the curve begins, and that is a different question
+    /// with a different answer — [`Self::owes_a_wake`].
     fn sample(self, now: Instant, motion: Motion) -> (f32, bool) {
         let Some(started) = self.started.filter(|_| motion == Motion::Full) else {
             return (self.to, false);
@@ -27205,7 +27234,24 @@ impl RevealTween {
         }
         let progress = elapsed.as_secs_f32() / duration.as_secs_f32();
         let eased = cubic_bezier(progress, self.curve);
-        (self.from + (self.to - self.from) * eased, true)
+        // `now < started` is the delay: `saturating_duration_since` reads zero
+        // there, so the value is the start of the curve — which is the right
+        // picture — and the flag must not call standing still a journey.
+        (self.from + (self.to - self.from) * eased, now >= started)
+    }
+
+    /// **When this reveal still owes the loop a wake-up** — the curve, *and* any
+    /// delay in front of it.
+    ///
+    /// [`Self::sample`]'s flag says whether anything is moving, which is what
+    /// decides whether a frame composed for somebody else has to be rebuilt
+    /// around it. This says whether the loop may go to sleep, which is a
+    /// different thing: a transition that has not started yet is still a
+    /// transition somebody has to be woken for.
+    fn owes_a_wake(self, now: Instant, motion: Motion) -> bool {
+        self.started
+            .filter(|_| motion == Motion::Full)
+            .is_some_and(|started| now < started + self.span)
     }
 }
 
@@ -34170,7 +34216,7 @@ mod drag_autoscroll_wiring_tests {
     fn the_auto_scroll_turns_on_the_clock_the_spring_turns_on() {
         let tick = |name: &str| holder(&format!("self.{name}(now)?;"));
         assert_eq!(
-            tick("advance_drag_autoscroll"),
+            tick("service_drag_autoscroll"),
             tick("advance_drag_spring"),
             "the edge scroll has to be advanced from the pass that advances the \
              spring: both fire under a hand that has stopped moving, which is \
@@ -37700,6 +37746,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         video: video_seat::VideoSeats::default(),
         animations: AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES),
         animations_drawn: BTreeMap::new(),
+        pictures_owe_a_frame: false,
         animation_presence: BTreeMap::new(),
         preview_watch: preview_watch::PreviewWatch::default(),
         files_watch: files_watch::FilesWatch::default(),
@@ -56198,6 +56245,15 @@ impl Runtime<'_> {
     /// engine it was just given, which is the re-open this ruling refused,
     /// arriving by the back door.
     fn sweep_video_seats(&mut self) {
+        // **A window holding no recording has nothing to retire** (closure
+        // review O4, 2026-09-18). This used to run once per strip tick; it now
+        // runs on every turn and at the head of every compose, because it is a
+        // service, so the one case that is overwhelmingly the common one has to
+        // cost a `is_empty()` rather than a walk of every surface this window
+        // draws.
+        if self.window.video.is_empty() {
+            return;
+        }
         // **Which surfaces still exist**, asked once: a float that has finished
         // its exit fade and a pane that has been closed are both gone from this
         // list, and both take their decoder with them. Asked *here* and not
@@ -77164,7 +77220,22 @@ impl Runtime<'_> {
     ///    function that re-solves all three, and it is spent whole rather than
     ///    partly copied, which is what makes "松手落在当时可见的槽位" true by
     ///    construction instead of by agreement.
-    fn advance_drag_autoscroll(&mut self, now: Instant) -> Result<()> {
+    ///
+    /// **A service, and therefore never paced** (closure review O4,
+    /// 2026-09-18). This stood behind the window's display gate for one turn of
+    /// that work's life, on the reasoning that every clock which moves something
+    /// on the glass belongs there. It does not. What the gate decides is *who
+    /// may ask for a frame of their own*, and this asks for none: step 2 is an
+    /// **integrator**, and step 3 publishes through the gesture's own door. A
+    /// refused turn therefore does not cost it a step, it costs it the gesture —
+    /// a pane printing every five milliseconds refuses the gate for as long as
+    /// it prints, so a hand held at the edge of a full strip would have moved
+    /// the list nowhere at all for the length of a build log. It is free when
+    /// there is no drag: [`Self::drag_autoscroll_aim`] answers `None`. Its own
+    /// wake is [`Self::drag_autoscroll_deadline`], which is clamped to the
+    /// display frame — that is where the pacing belongs, and the name of this
+    /// method says which side of the line it is on.
+    fn service_drag_autoscroll(&mut self, now: Instant) -> Result<()> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let motion = self.app.motion;
         let Some((run, scroll, pointer)) = self.drag_autoscroll_aim(now) else {
@@ -77178,12 +77249,8 @@ impl Runtime<'_> {
             }
             return Ok(());
         }
-        // On the window's own display frame — see [`Self::animation_frame_is_due`].
-        // Below the clock's own retirement above, because a hand that has left
-        // the band owes nothing and must be able to say so on any turn.
-        if !self.animation_frame_is_due() {
-            return Ok(());
-        }
+        // Nothing stands between the reading above and the integration below:
+        // see this method's own note on why a service is never paced.
         let Some(last) = self
             .window
             .drag
@@ -84848,6 +84915,92 @@ impl Runtime<'_> {
         self.publish_chrome_frame(now)
     }
 
+    /// **Bring every picture in this window up to `now`** — the *service* half
+    /// of a turn, which the frame gate has no business standing in front of
+    /// (closure review O4, 2026-09-18).
+    ///
+    /// Every gated advancer in this window does up to three different things and
+    /// only one of them is the pacer's: a **service** brings time-driven state up
+    /// to `now`, a **sample** draws it at compose, and an **ask** requests a
+    /// frame of this window's own. This is a service, and the whole of the O4
+    /// finding is that it was standing on the wrong side of the line — these
+    /// lines lived below `advance_strip_animation`'s display gate, so a
+    /// neighbouring pane printing every five milliseconds refused them for as
+    /// long as it kept printing and a `.gif` or a recording stood on whatever
+    /// frame it happened to be holding. Measured on a real playback: frame 0
+    /// after five seconds, against frame 50 when the same host is serviced on
+    /// those same presents. The periodic was reporting it live the whole time;
+    /// what it was not was moving.
+    ///
+    /// So it runs on **every** turn, above every gate, and again at the head of
+    /// every compose ([`Self::carry_live_journeys`]) so that a frame composed for
+    /// a keystroke or a drain shows the picture as of the instant it is of. That
+    /// is safe because it is idempotent in `now`: a second call at the same
+    /// instant pumps nothing, walks no clock and hands over no new layer.
+    ///
+    /// It costs nothing when nothing is live. A window with no recording sweeps
+    /// an empty list and pumps an empty map; one drawing no animation has no
+    /// clock to run ([`advance_drawn_animations`] walks what is *drawn*), and the
+    /// layers are rebuilt only when something is there to rebuild them from.
+    ///
+    /// The debt it leaves is the one thing that has to outlive it. A frame that
+    /// arrived is a frame the glass is owed, and the turn that pays it may be
+    /// refused — so it is recorded on the window rather than returned, and
+    /// [`Self::advance_strip_animation`] takes it when it is finally admitted.
+    fn service_pictures(&mut self, now: Instant) {
+        // **This turn's decoded pictures, collected** (route B slice ②; §7.44
+        // ③).
+        //
+        // Here rather than in `redraw` because this is the pass that runs on the
+        // clock: `redraw` runs when somebody asks for a frame, and a video that
+        // waited to be asked would be a video that played only while the pointer
+        // was moving. `pump` also settles each bar's armed hover intent, which
+        // is the one wait in this window that has no other tick to ride on.
+        //
+        // The layers are recomputed whether or not a frame arrived, because the
+        // *box* moves for reasons that are not the decoder — a pane in flight, a
+        // float being dragged, a window resized — and a picture that stayed
+        // where the layout used to be would be the FLIP's own defect with a
+        // recording in it.
+        self.sweep_video_seats();
+        let frames_arrived = self.window.video.pump(now) | self.advance_animations(now);
+        // **Animations count here too**, and forgetting them was a real bug for
+        // the length of one edit: a `.gif` with no recording anywhere in the
+        // window would advance its frame, bump its generation, and never hand
+        // the renderer the new layer — an animation that moved in the model and
+        // stood still on the glass.
+        // **And the tick that empties the list is a tick with something to say**
+        // (§7.44 ⑨, photographed on the machine 2026-08-28).
+        //
+        // The first two clauses are the cheap gate they look like: a window with
+        // no recording and no animation has no picture list to rebuild, and an
+        // idle window should cost nothing. The third is the one that was
+        // missing. `sweep_video_seats` runs one line above this and its whole job
+        // is to *remove* seats — so the tick on which the last one goes is
+        // precisely the tick where `self.window.video` is empty, the guard is
+        // false, and the renderer is never handed the shorter list. It goes on
+        // drawing what it was last given.
+        //
+        // Photographed: a floating window playing `clock.mp4` was closed, and
+        // its last decoded frame stayed on the glass — no head, no bar, no
+        // window around it, a rectangle of picture where a window used to be —
+        // for three and a half seconds, until a hover card was dismissed and
+        // `refresh_preview_for_layout` (which asks unconditionally) ran and swept
+        // it away. The decoder had already stopped: four captures 700ms apart
+        // were byte-identical over that rectangle.
+        //
+        // So the guard asks the renderer too. "Nothing is moving *and* the
+        // renderer is holding nothing" is the real idle case, and it is still
+        // one `is_empty()` on a slice.
+        let anything_moving = !self.window.video.is_empty()
+            || !self.window.animations.is_empty()
+            || !self.window.renderer.video_layers().is_empty();
+        let boxes_moved = anything_moving && self.refresh_video_layers();
+        if frames_arrived || boxes_moved {
+            self.window.pictures_owe_a_frame = true;
+        }
+    }
+
     /// Redraw the tab strip if anything in a mark slot has moved.
     ///
     /// Modelled on [`Self::advance_cursor_blink_if_due`] and for the same
@@ -85109,58 +85262,16 @@ impl Runtime<'_> {
             .pane_motion
             .settle_frame_debt(&pane_rects, now, motion);
         self.window.pane_motion.retire(now, motion);
-        // **This tick's decoded pictures, collected** (route B slice ②; §7.44
-        // ③).
-        //
-        // Here rather than in `redraw` because this is the pass that runs on the
-        // clock: `redraw` runs when somebody asks for a frame, and a video that
-        // waited to be asked would be a video that played only while the pointer
-        // was moving. `pump` also settles each bar's armed hover intent, which
-        // is the one wait in this window that has no other tick to ride on.
-        //
-        // The layers are recomputed whether or not a frame arrived, because the
-        // *box* moves for reasons that are not the decoder — a pane in flight, a
-        // float being dragged, a window resized — and a picture that stayed
-        // where the layout used to be would be the FLIP's own defect with a
-        // recording in it.
-        self.sweep_video_seats();
-        let frames_arrived = self.window.video.pump(now) | self.advance_animations(now);
-        // **Animations count here too**, and forgetting them was a real bug for
-        // the length of one edit: a `.gif` with no recording anywhere in the
-        // window would advance its frame, bump its generation, and never hand
-        // the renderer the new layer — an animation that moved in the model and
-        // stood still on the glass.
-        // **And the tick that empties the list is a tick with something to say**
-        // (§7.44 ⑨, photographed on the machine 2026-08-28).
-        //
-        // The first two clauses are the cheap gate they look like: a window with
-        // no recording and no animation has no picture list to rebuild, and an
-        // idle window should cost nothing. The third is the one that was
-        // missing. `sweep_video_seats` runs one line above this and its whole job
-        // is to *remove* seats — so the tick on which the last one goes is
-        // precisely the tick where `self.window.video` is empty, the guard is
-        // false, and the renderer is never handed the shorter list. It goes on
-        // drawing what it was last given.
-        //
-        // Photographed: a floating window playing `clock.mp4` was closed, and
-        // its last decoded frame stayed on the glass — no head, no bar, no
-        // window around it, a rectangle of picture where a window used to be —
-        // for three and a half seconds, until a hover card was dismissed and
-        // `refresh_preview_for_layout` (which asks unconditionally) ran and swept
-        // it away. The decoder had already stopped: four captures 700ms apart
-        // were byte-identical over that rectangle.
-        //
-        // So the guard asks the renderer too. "Nothing is moving *and* the
-        // renderer is holding nothing" is the real idle case, and it is still
-        // one `is_empty()` on a slice.
-        let anything_moving = !self.window.video.is_empty()
-            || !self.window.animations.is_empty()
-            || !self.window.renderer.video_layers().is_empty();
-        let boxes_moved = anything_moving && self.refresh_video_layers();
         // **The pictures' own debt, kept as a name of its own.** It has to
         // survive the chrome's question below, which is why it is not folded
         // into `owes_frame` and forgotten — see [`tick_owes_a_present`].
-        let pictures_owe = frames_arrived || boxes_moved;
+        //
+        // **Taken rather than computed** (closure review O4, 2026-09-18): the
+        // pictures are serviced above every gate now, so what reaches this line
+        // is what [`Self::service_pictures`] found since the last tick that was
+        // admitted — a frame that arrived during a refused turn is still owed
+        // when one is finally allowed.
+        let pictures_owe = std::mem::take(&mut self.window.pictures_owe_a_frame);
         // **§7.1.6b′ T-5 — and the card column's debt is a fourth, kept beside
         // them for the same reason.**
         //
@@ -85330,6 +85441,33 @@ impl Runtime<'_> {
     /// established that they hold anything at all, so a window with an empty tip
     /// host marked itself running for ever. What is mid-flight is reported once
     /// a turn from the journeys' own predicates — see [`Self::running_journeys`].
+    ///
+    /// # What may stand behind this, and what may never (closure review O4)
+    ///
+    /// Every advancer in this window does up to three different things, and only
+    /// the third of them is this gate's business. Putting one of the first two
+    /// behind it is not a saving, it is a stall:
+    ///
+    /// 1. **Service** — bring time-driven state up to `now`: pump a decoder,
+    ///    walk a decoded animation's clock to the frame that is due, integrate
+    ///    the distance an auto-scroll has travelled, retire what has ended.
+    ///    Cheap, idempotent in `now`, and **never gated**: it runs on every turn
+    ///    and again at the head of every compose
+    ///    ([`Self::carry_live_journeys`]), so whatever frame goes out, for
+    ///    whatever reason, is a picture of now. The O4 finding is two services
+    ///    that were standing here — [`Self::service_pictures`] and
+    ///    [`Self::service_drag_autoscroll`] — where a neighbouring pane printing
+    ///    every five milliseconds held a playing recording on one frame and a
+    ///    hand at the edge of a list still.
+    /// 2. **Sample and draw** — a pure function of state and `now`, done at
+    ///    compose and never here at all.
+    /// 3. **Ask for a frame of this window's own** — the only thing this gate
+    ///    decides, and for a periodic the ask is "one per display interval while
+    ///    my condition holds", which a flood's own frames already satisfy.
+    ///
+    /// A fade has no service: it is a number read off a clock, so there is
+    /// nothing to bring forward and nothing to lose by a refusal. That is why
+    /// eleven of the thirteen advancers are gated whole.
     fn animation_frame_is_due(&mut self) -> bool {
         if self.window.frame_clock.admits() {
             return true;
@@ -85361,8 +85499,20 @@ impl Runtime<'_> {
     /// the rows under it and the projection is where rows get their heights.
     /// That cache is what the review found frozen.
     ///
+    /// **And the third thing, above both of them: what has to be *serviced*
+    /// before this frame is composed at all** (closure review O4, 2026-09-18).
+    /// A journey is sampled; a decoder and a decoded animation's clock are not,
+    /// they have to be walked forward, and a frame composed without walking them
+    /// is a picture of a moment that has passed. [`Self::service_pictures`] is
+    /// therefore the first statement here, above everything that reads a layer.
+    ///
     /// A window with nothing moving pays one `bool` and one `Option` read.
     fn carry_live_journeys(&mut self, now: Instant) {
+        // The pictures, before anything is built from them and whether or not
+        // any journey is running: a frame composed for a keystroke shows the
+        // frame the decoder is on at the instant that frame is of, or a
+        // recording plays only while something else happens to be animating.
+        self.service_pictures(now);
         // The cached one, whether or not anything else is running: a flight in
         // hand is a flight whose two numbers this frame must be built from, and
         // a window with no flight pays one `Option` read for the question.
@@ -85554,6 +85704,15 @@ impl Runtime<'_> {
             && (self.window.rail_open.sample(now, motion).1
                 || self.window.rail_text.sample(now, motion).1))
             || self.window.rail_fold.sample(now, motion).1;
+        // **And the labels' sixty milliseconds of waiting, which is a wake and
+        // not a motion** (closure review, 2026-09-18). Q183 hangs a
+        // `transition-delay` on the way open — the words hold still until the
+        // panel is wide enough to carry them — and the loop has to be woken for
+        // the instant the fade begins. It is the one reveal in this window with
+        // a delay, so it is the one place the two questions part company: see
+        // [`RevealTween::owes_a_wake`].
+        let rail_waiting =
+            self.window.rail.draws_icon_rail() && self.window.rail_text.owes_a_wake(now, motion);
         // U8 — the active tab's panes, on the same terms and with the same
         // `None`: a window whose split has settled asks for no wake-ups at all,
         // and under reduced motion there was never a tween to ask for one.
@@ -85713,7 +85872,7 @@ impl Runtime<'_> {
             || cards_behind;
         AnimationWork {
             deadline: [
-                strip_moving.then(|| now + STRIP_ANIMATION_FRAME),
+                (strip_moving || rail_waiting).then(|| now + STRIP_ANIMATION_FRAME),
                 bar_deadline,
                 self.window.pane_motion.deadline(now, motion),
             ]
@@ -104328,6 +104487,13 @@ impl Runtime<'_> {
         // the one the switch produced.
         hang_watch::at(hang_watch::Station::Clocks);
         self.advance_tab_press_if_due(now)?;
+        // **The pictures are serviced before anything can be refused** (closure
+        // review O4, 2026-09-18). A decoder pumped and a decoded animation's
+        // clock walked are not this window asking the glass for a frame — they
+        // are state being brought up to `now` — and the tick below can be turned
+        // away by any neighbouring pane that is printing. See
+        // [`Self::service_pictures`], which the head of every compose calls too.
+        self.service_pictures(now);
         self.advance_strip_animation(now)?;
         // A screenful of held-back output arriving at once, under its own name
         // rather than the web page's — see [`hang_watch::Station::SyncUpdate`].
@@ -104415,7 +104581,7 @@ impl Runtime<'_> {
         // auto-scroll's own re-survey should be struck against the stage the
         // window is actually showing rather than the one it was showing a line
         // ago.
-        self.advance_drag_autoscroll(now)?;
+        self.service_drag_autoscroll(now)?;
         // **And what the pointer is on, re-read against the picture that is
         // actually on the glass** (owner's report 2026-09-18). The band under a
         // resting hand can stop being under it without the hand doing anything,
@@ -141665,13 +141831,24 @@ mod tests {
         // ── opening: nothing for 60ms, then a 100ms fade ──
         text.retarget_after(1.0, start, Motion::Full, RAIL_TEXT_FADE_OPEN_DELAY);
         for waiting in [0, 30, 59] {
-            let (opacity, moving) =
-                text.sample(start + Duration::from_millis(waiting), Motion::Full);
+            let at = start + Duration::from_millis(waiting);
+            let (opacity, moving) = text.sample(at, Motion::Full);
             assert_eq!(
                 opacity, 0.0,
                 "{waiting}ms in: the panel is still widening and the words have not started"
             );
-            assert!(moving, "but the transition is running, and owes its frames");
+            // **And the delay is a wait, not a journey** (closure review,
+            // 2026-09-18). This read `moving` before that review, on the
+            // reasoning that a transition which has been aimed somewhere is
+            // running; it is not, it is standing at its own start, and a window
+            // that carried it rebuilt its interface for sixty milliseconds on
+            // every frame anybody else composed. The loop is still woken for the
+            // instant the fade begins, which is the other question.
+            assert!(!moving, "{waiting}ms in: nothing is moving yet");
+            assert!(
+                text.owes_a_wake(at, Motion::Full),
+                "{waiting}ms in: but the loop must be woken for the fade's first frame"
+            );
         }
         let (halfway, moving) = text.sample(start + Duration::from_millis(110), Motion::Full);
         assert!(
@@ -169851,9 +170028,20 @@ mod tests {
             tick.contains("tick_owes_a_present(self.refresh_chrome(), panes_owe, pictures_owe)"),
             "the chrome gate asks the whole question, with the picture's debt in it"
         );
+        // **The debt is now written down between two passes** (closure review
+        // O4, 2026-09-18): the pictures are serviced above every gate, so what
+        // reaches this gate is what the service recorded — including a frame
+        // that arrived on a turn the gate refused, which nothing else would ever
+        // come back for.
         assert!(
-            tick.contains("let pictures_owe = frames_arrived || boxes_moved;"),
+            tick.contains("std::mem::take(&mut self.window.pictures_owe_a_frame)"),
             "and the picture's debt is a name that survives as far as that gate"
+        );
+        let service = body("fn service_pictures(");
+        assert!(
+            service.contains("if frames_arrived || boxes_moved {")
+                && service.contains("self.window.pictures_owe_a_frame = true;"),
+            "and the service is what writes it down"
         );
     }
 
@@ -169899,10 +170087,13 @@ mod tests {
             let rest = &SOURCE[start + signature.len()..];
             &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
         }
-        let tick = body("fn advance_strip_animation(");
+        // Read off the *service* since the closure review of 2026-09-18 moved
+        // these lines out of the tick and above the display gate; the property
+        // is unchanged and so is the order it is about.
+        let tick = body("fn service_pictures(");
         let guard = tick
             .find("let anything_moving =")
-            .expect("the tick still gates the picture list");
+            .expect("the service still gates the picture list");
         let end = tick[guard..].find(';').expect("the gate is one statement") + guard;
         let condition = &tick[guard..end];
         assert!(
@@ -169916,7 +170107,7 @@ mod tests {
         // tick and no longer.
         let sweep = tick
             .find("self.sweep_video_seats();")
-            .expect("the tick sweeps the seats");
+            .expect("the service sweeps the seats");
         assert!(
             sweep < guard,
             "the seats are swept after the list is gated, which is a different \

@@ -58,13 +58,20 @@
 //! of this file: neither is a journey, and the rule for both is that they are
 //! read fresh and never latched.
 
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use winit::keyboard::ModifiersState;
 
-use super::{Motion, PasteTarget, PeekClock, RevealTween, SeatId, TabId};
+use super::{
+    AnimationCache, AnimationEntry, MAX_ANIMATION_CACHE_BYTES, Motion, PasteTarget, PeekClock,
+    RevealTween, SeatId, TabId, advance_drawn_animations, present_drawn_animations,
+};
 use crate::pace::{FrameClock, Lanes};
-use crate::{cardhint, cmdrail, float, formula_tools, keyhint, termscroll, toast, tooltip};
+use crate::{
+    animation, cardhint, cmdrail, float, formula_tools, keyhint, seats, termscroll, toast, tooltip,
+};
 
 /// One journey of this window, driven by the host that really owns it.
 ///
@@ -1029,11 +1036,322 @@ fn a_wait_is_not_a_journey() {
         );
     }
 
+    // **A transition's own delay**, which is the same shape once more and the
+    // one the closure review of 2026-09-18 recorded: Q183 holds the rail's
+    // labels for sixty milliseconds while the panel widens under them, and for
+    // those sixty milliseconds the value is exactly its start. The loop is woken
+    // for the instant the fade begins; nothing is moving until it does.
+    let delay = Duration::from_millis(60);
+    let span = Duration::from_millis(100);
+    let mut delayed = RevealTween::over(span);
+    delayed.retarget_after(1.0, start, Motion::Full, delay);
+    for waiting in [Duration::ZERO, delay / 2] {
+        assert!(
+            delayed.owes_a_wake(start + waiting, Motion::Full),
+            "a transition that has not started is one the loop must be woken for"
+        );
+        assert!(
+            !delayed.sample(start + waiting, Motion::Full).1,
+            "but a delay is a wait, and a wait is not motion"
+        );
+    }
+    assert!(
+        delayed.sample(start + delay, Motion::Full).1,
+        "and on the instant the curve begins, it is moving"
+    );
+    assert!(
+        !delayed.sample(start + delay + span, Motion::Full).1
+            && !delayed.owes_a_wake(start + delay + span, Motion::Full),
+        "and when it lands it is neither"
+    );
+
     // The glance card's dwell, which is the same shape once more.
     let armed = PeekClock::Settling(start + Duration::from_millis(350));
     assert_eq!(
         peek_opacity(armed, start),
         None,
         "a card that is still settling has nothing on the glass to move"
+    );
+}
+
+// ── the third thing an advancer does ────────────────────────────────────────
+
+/// `main.rs`, read as text, for the properties that are about **where a
+/// statement stands** rather than about what it computes.
+const SOURCE: &str = include_str!("main.rs");
+
+/// The text of one method of `main.rs`, from its signature to the next one's.
+fn method(signature: &str) -> &'static str {
+    let start = SOURCE
+        .find(signature)
+        .unwrap_or_else(|| panic!("{signature} is declared in main.rs"));
+    let rest = &SOURCE[start + signature.len()..];
+    &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+}
+
+/// One playback of `frames` frames, each standing a tenth of a second — the
+/// shape of every `.gif` this window draws, with no decoder behind it.
+fn a_playback_of(frames: usize, started: Instant) -> AnimationEntry {
+    let ring = (0..frames)
+        .map(|index| animation::AnimationFrame {
+            bgra: Arc::from(vec![index as u8; 4]),
+            delay: Duration::from_millis(100),
+        })
+        .collect();
+    AnimationEntry::Ready {
+        serial: 1,
+        animation: Box::new(animation::Animation::of(ring, 1, 1, started)),
+    }
+}
+
+/// Which frame of one cached animation is standing.
+fn standing_frame(cache: &AnimationCache, key: &str) -> u64 {
+    match cache.get(key) {
+        Some(AnimationEntry::Ready { animation, .. }) => animation.frame_index(),
+        _ => panic!("{key} is not a playing animation"),
+    }
+}
+
+/// A list long enough to scroll, with the pointer resting in its trailing edge
+/// band — where a hand holding a tab at the end of a full strip is.
+fn a_run_being_scrolled() -> (seats::TabRun, (f64, f64)) {
+    let run = seats::TabRun {
+        axis: bt_layout::Axis::Row,
+        slots: (0..12)
+            .map(|index| {
+                let left = index as f32 * 100.0;
+                [left, 0.0, left + 100.0, 30.0]
+            })
+            .collect(),
+        viewport: [0.0, 600.0],
+        band: [0.0, 0.0, 600.0, 30.0],
+        pane_offers: seats::PaneOffers::BOTH,
+        max_scroll: 600.0,
+    };
+    (run, (596.0, 15.0))
+}
+
+/// RED — **a service is not a picture, and the pacer has no business gating
+/// one** (closure review O4, 2026-09-18).
+///
+/// Every gated advancer in this window does up to three different things, and
+/// only one of them belongs to the frame gate.
+///
+/// 1. **Service.** Bring time-driven state up to `now`: pump a decoder, walk a
+///    decoded animation's clock to the frame that is due, integrate the distance
+///    an auto-scroll has travelled. Cheap, idempotent in `now`, and **never**
+///    gated — it runs on every turn and at the head of every compose, so
+///    whatever frame goes out, for whatever reason, is a picture of now.
+/// 2. **Sample and draw.** A pure function of state and `now`, done at compose.
+/// 3. **Ask for a frame of its own.** The only gated thing there is.
+///
+/// This branch had put a service on the wrong side of that line:
+/// `advance_strip_animation` returned at the display gate above its one call to
+/// `video.pump` and `advance_animations`, so a `.gif` or a recording playing
+/// beside a pane printing a build log every five milliseconds stood on whatever
+/// frame it was holding — the carry rebuilt the chrome and the overlay around
+/// it, the periodic correctly reported it live, and nobody ever moved its clock.
+/// Drag auto-scroll had the same shape: its only integration stood below the
+/// same gate.
+///
+/// MUTATIONS: put either service back under `animation_frame_is_due` and block ②
+/// is what the window does — frame 0 after five seconds instead of frame 50 —
+/// and block ④ names the method that did it.
+#[test]
+fn an_elapsed_time_service_is_never_gated_and_the_flood_shows_its_state() {
+    let start = Instant::now();
+    let clock = {
+        let mut clock = FrameClock::default();
+        assert!(clock.follow(Some(60_000)));
+        clock
+    };
+    let drawn: BTreeMap<String, u64> = [("on the glass".to_owned(), 1)].into();
+
+    // ── ① the flood, and a decoded animation serviced on every turn ──────────
+    let mut cache = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
+    cache.insert("on the glass".to_owned(), a_playback_of(64, start));
+    present_drawn_animations(&mut cache, &BTreeMap::new(), &drawn, start);
+
+    let mut refusals = 0_u32;
+    let mut turn = start;
+    let mut presented = Some(start - FLOOD);
+    while turn <= start + FLOOD_SPAN {
+        let mut gate = clock;
+        gate.open(presented, turn);
+        assert!(!gate.admits(), "the flood refuses every turn");
+        refusals += 1;
+        // The service, ungated, at the head of the turn — and then the compose,
+        // which is what the flood's own present draws.
+        advance_drawn_animations(&mut cache, &drawn, turn);
+        let shown = standing_frame(&cache, "on the glass");
+        let due = turn.saturating_duration_since(start).as_millis() as u64 / 100;
+        assert_eq!(
+            shown,
+            due,
+            "the frame the flood presents is the frame the clock says, {:?} in",
+            turn.saturating_duration_since(start)
+        );
+        presented = Some(turn);
+        turn += FLOOD;
+    }
+    assert_eq!(refusals, 1_001, "five seconds of somebody else's frames");
+    assert_eq!(
+        standing_frame(&cache, "on the glass"),
+        50,
+        "fifty tenths of a second is fifty frames"
+    );
+
+    // ── ② the same host on the gated schedule, which is the defect ───────────
+    let mut gated = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
+    gated.insert("on the glass".to_owned(), a_playback_of(64, start));
+    present_drawn_animations(&mut gated, &BTreeMap::new(), &drawn, start);
+    let mut turn = start;
+    let mut presented = Some(start - FLOOD);
+    while turn <= start + FLOOD_SPAN {
+        let mut gate = clock;
+        gate.open(presented, turn);
+        if gate.admits() {
+            advance_drawn_animations(&mut gated, &drawn, turn);
+        }
+        presented = Some(turn);
+        turn += FLOOD;
+    }
+    assert_eq!(
+        standing_frame(&gated, "on the glass"),
+        0,
+        "a clock behind the frame gate does not run at all under a flood, which \
+         is why a service may never stand there"
+    );
+
+    // ── ③ and it costs nothing when nothing is live ──────────────────────────
+    let mut idle = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
+    idle.insert("in another tab".to_owned(), a_playback_of(64, start));
+    let nothing_drawn = BTreeMap::new();
+    let mut turn = start;
+    while turn <= start + FLOOD_SPAN {
+        assert!(
+            !advance_drawn_animations(&mut idle, &nothing_drawn, turn),
+            "a window drawing no animation has no clock to run"
+        );
+        turn += FLOOD;
+    }
+    assert_eq!(standing_frame(&idle, "in another tab"), 0);
+
+    // ── ④ and both services are wired above the gate ─────────────────────────
+    let pictures = method("    fn service_pictures(&mut self, now: Instant) {");
+    assert!(
+        pictures.contains("self.window.video.pump(now) | self.advance_animations(now)")
+            && !pictures.contains("animation_frame_is_due"),
+        "the decoders and the decoded animations are serviced, ungated:\n{pictures}"
+    );
+    assert!(
+        pictures.contains("if self.window.video.is_empty() {") || {
+            let sweep = method("    fn sweep_video_seats(&mut self) {");
+            sweep.contains("if self.window.video.is_empty() {")
+        },
+        "a service that runs on every turn is free when nothing is live"
+    );
+    let turning = method("    fn turn(&mut self, now: Instant, application_clocks: bool)");
+    let serviced = turning
+        .find("self.service_pictures(now);")
+        .expect("the turn services the pictures");
+    let strip = turning
+        .find("self.advance_strip_animation(now)?;")
+        .expect("and then the tick asks for its frame");
+    assert!(
+        serviced < strip,
+        "the service runs before the tick that can be refused:\n{turning}"
+    );
+    let carry = method("    fn carry_live_journeys(&mut self, now: Instant) {");
+    assert!(
+        carry
+            .find("self.service_pictures(now);")
+            .unwrap_or(usize::MAX)
+            < carry.find("let running =").unwrap_or(0),
+        "a frame composed for anybody shows the pictures as of now:\n{carry}"
+    );
+    // And the frame a refused turn could not ask for is still owed afterwards:
+    // the service writes the debt down and the first admitted tick takes it.
+    assert!(
+        pictures.contains("self.window.pictures_owe_a_frame = true;"),
+        "a frame that arrived during a refused turn is still owed:\n{pictures}"
+    );
+    let tick = method("    fn advance_strip_animation(&mut self, now: Instant) -> Result<()> {");
+    assert!(
+        tick.contains("std::mem::take(&mut self.window.pictures_owe_a_frame)")
+            && !tick.contains("self.window.video.pump(now)"),
+        "and the tick pays that debt rather than doing the service itself:\n{tick}"
+    );
+    let autoscroll =
+        method("    fn service_drag_autoscroll(&mut self, now: Instant) -> Result<()> {");
+    assert!(
+        !autoscroll.contains("animation_frame_is_due"),
+        "the auto-scroll integrates true elapsed time and must not be refused:\n{autoscroll}"
+    );
+}
+
+/// RED — **an integrator does not care how often it is called, only that it is**
+/// (closure review O4, 2026-09-18).
+///
+/// The auto-scroll is the one clock in this window that is not sampled but
+/// *integrated*: it multiplies a speed by the time since it last ran and moves
+/// the list by that much. A turn it misses therefore costs it no distance, which
+/// is exactly why gating it is not a saving but a stop — a schedule that refuses
+/// it for five seconds does not slow the list down, it holds it still, and there
+/// is no "afterwards" to pay the distance back in while the flood lasts.
+///
+/// MUTATION: integrate a fixed step per call instead of `now - last` and the two
+/// schedules below disagree by the ratio of their rates.
+#[test]
+fn the_auto_scroll_integrates_the_same_distance_on_any_schedule() {
+    let (run, pointer) = a_run_being_scrolled();
+    let start = Instant::now();
+    let span = Duration::from_millis(500);
+
+    // Integrate the list from a standing start, stepping every `period`.
+    let travelled = |period: Duration| {
+        let mut scroll = 0.0_f32;
+        let mut last = start;
+        let mut calls = 0_u32;
+        let mut now = start + period;
+        while now <= start + span {
+            if let Some(moved) = seats::autoscroll_step(
+                &run,
+                scroll,
+                pointer,
+                1.0,
+                Motion::Full,
+                now.saturating_duration_since(last),
+            ) {
+                scroll = moved;
+                calls += 1;
+            }
+            last = now;
+            now += period;
+        }
+        (scroll, calls)
+    };
+
+    // Every turn of a five-millisecond flood, against one admitted turn per
+    // display frame: two schedules over the same half-second.
+    let (flooded, flood_calls) = travelled(FLOOD);
+    let (paced, paced_calls) = travelled(Duration::from_millis(16));
+    assert!(flood_calls > paced_calls && paced_calls > 0);
+    assert!(
+        flooded > 0.0,
+        "the hand is in the band, so the list travels"
+    );
+    let step = flooded / flood_calls as f32;
+    assert!(
+        (flooded - paced).abs() <= step.max(1.0),
+        "one integrator, two schedules, one distance: {flooded} against {paced}"
+    );
+
+    // And a hand nowhere near an edge integrates nothing at all, on any
+    // schedule: the service is free when nothing is live.
+    assert_eq!(
+        seats::autoscroll_step(&run, 0.0, (300.0, 15.0), 1.0, Motion::Full, span),
+        None,
+        "a pointer in the middle of a list is not asking it to travel"
     );
 }
