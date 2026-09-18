@@ -1391,7 +1391,9 @@ fn is_posix_root_prefix_at(bytes: &[u8], start: usize) -> bool {
 ///
 /// Everything else opens a path — whitespace of any width, opening brackets and quotes of any script
 /// (`(`、`（`、`「`、`“`), separators (`:`、`：`、`=`、`,`), and the rest of punctuation. That
-/// generality is the point: a path is no less a path for sitting in CJK prose.
+/// generality is the point: a path is no less a path for sitting in CJK prose. A bracket both opens
+/// a name and ends one, and that is one fact rather than two ([`is_opening_delimiter`]): it is a
+/// boundary, and a boundary is read from whichever side the name lies on.
 pub fn is_path_tail_char(character: char) -> bool {
     character.is_alphanumeric() || matches!(character, '/' | '\\' | '.' | '-' | '_' | '~')
 }
@@ -1432,6 +1434,70 @@ fn is_closing_delimiter(character: char) -> bool {
     )
 }
 
+/// Opening delimiters that end an unquoted path token — the **opening counterparts** of
+/// [`is_closing_delimiter`], §7.30 (user report 2026-09-17).
+///
+/// The line that settled it is an agent's, printed into a pane standing in the directory it names:
+/// `文件还是 docs/…/advisor_status_202609.html（commit e0bfcfe）。` A full-width `（` with no space
+/// in front of it, and the reference went dark — the token ran past the bracket to the space behind
+/// `commit`, and a bare reading may carry no character a path is not spelled with.
+///
+/// **A name loses nothing by this and that is the whole of the argument.** A bracket comes in a
+/// pair, and the closing half has ended a token since [`is_closing_delimiter`] was written, so a
+/// filename that genuinely carries one is *already* unreadable unquoted: `D:\x\photo(1).png` stops
+/// at its `)` today and the name it offers is `D:\x\photo`. Making the opening half stop it too
+/// changes where a name is cut, never whether it could have been read whole — and a **quoted**
+/// token still admits every name there is,
+/// because quoting is a declaration of extent and nothing inside one is prose to be cut at.
+///
+/// The one reading it does give up is a name carrying an **unmatched** opening bracket
+/// (`D:\x\a(1` with no `)` anywhere behind it), which was read whole while the balanced spelling of
+/// the same name never was. That is the asymmetry rather than a case worth keeping: no pair, no
+/// name, and quoting is the appeal.
+///
+/// The class is stated once — the opening halves of the pairs whose closing halves are on the list
+/// above — and it is why this is a rule and not a character. `（` was the mark the report arrived
+/// on; `「`, `【`, `《`, `〔`, `«` and the rest open the same aside in the same prose, and none of
+/// them was ever going to arrive one report at a time.
+///
+/// **The opening quotes come with the brackets, and `’` is why `‘` can.** `“` is admitted for the
+/// same reason its twin `”` is: it only ever opens. `’` is deliberately absent from the closing
+/// list because it doubles as an apostrophe inside ordinary filenames (`Bob’s photo.png`), and
+/// `‘` carries no such double duty — nobody's name opens with a left single quote — so the mark
+/// that made the exception there makes none here. The ASCII `"` and `'` stay off this list
+/// entirely: `"` is this scan's own declaration of extent (a terminator would cut inside a quoted
+/// token and offer the bare `b\c.md` lying across `"D:\a b\c.md"`), and `'` is the apostrophe
+/// again, in the script most filenames are written in.
+fn is_opening_delimiter(character: char) -> bool {
+    matches!(
+        character,
+        '(' | '['
+            | '{'
+            | '<'
+            | '\u{ff08}' // （
+            | '\u{ff3b}' // ［
+            | '\u{ff5b}' // ｛
+            | '\u{ff5f}' // ｟
+            | '\u{ff62}' // ｢
+            | '\u{ff1c}' // ＜
+            | '\u{3008}' // 〈
+            | '\u{300a}' // 《
+            | '\u{300c}' // 「
+            | '\u{300e}' // 『
+            | '\u{3010}' // 【
+            | '\u{3014}' // 〔
+            | '\u{3016}' // 〖
+            | '\u{3018}' // 〘
+            | '\u{301a}' // 〚
+            | '\u{27e8}' // ⟨
+            | '\u{27ea}' // ⟪
+            | '\u{00ab}' // «
+            | '\u{2039}' // ‹
+            | '\u{201c}' // “
+            | '\u{2018}' // ‘
+    )
+}
+
 /// Where an unquoted path token stops.
 ///
 /// The backtick is here for the same reason the web-address scan has stopped on it since it was
@@ -1442,8 +1508,15 @@ fn is_closing_delimiter(character: char) -> bool {
 /// report 2026-08-28: an `.exe` in a code span went unrecognized while a bare `.md` did not). A
 /// filename that genuinely carries a backtick is as rare as one that ends in `)` and, like it, can
 /// still be quoted.
+///
+/// A delimiter stops a token from **either** half of its pair ([`is_opening_delimiter`], user
+/// report 2026-09-17): a name that reaches an opening bracket has ended exactly as surely as one
+/// that reaches a closing one, and reading only the closing half was a rule stated at one end.
 pub fn is_path_terminator_char(character: char) -> bool {
-    character.is_whitespace() || is_closing_delimiter(character) || character == '`'
+    character.is_whitespace()
+        || is_closing_delimiter(character)
+        || is_opening_delimiter(character)
+        || character == '`'
 }
 
 /// Where a row's ink starts: the byte offset of its first non-blank character, and the visual
@@ -1552,38 +1625,18 @@ fn release_prose_tail(text: &str, start: usize, end: usize) -> usize {
 /// for this: an agent wrote `docs/a.md(正斜杠)…` and `dist\folio.exe(反斜杠)…`, and because `(`
 /// was not one of the five, the candidate ate its way to the closing `)` and went to the disk under
 /// a name no file holds. Enumerating brackets and operators one at a time is the very thing the
-/// class was invented to end.
+/// class was invented to end. (The brackets in that story are terminators since 2026-09-17 —
+/// [`is_opening_delimiter`] — so they no longer reach this test at all; the class is what admitted
+/// them in the first place, and it is stated here unchanged.)
 ///
 /// The class is: **ASCII punctuation a path is never spelled with.** [`is_ascii_punctuation`] minus
 /// the path-structure characters `/ \ . - _ ~` — everything else, from the sentence separators to
-/// `(`, `[`, `{`, `"`, `'`, `=`, `+`, `*`, `#`, `@`, `&`, `%`, `|`, is a mark a name is glued to,
-/// not part of the name.
+/// `"`, `'`, `=`, `+`, `*`, `#`, `@`, `&`, `%` and `|`, is a mark a name is glued to, not part of
+/// the name.
 ///
 /// [`is_ascii_punctuation`]: char::is_ascii_punctuation
 fn is_seam_separator(character: char) -> bool {
     character.is_ascii_punctuation() && !matches!(character, '/' | '\\' | '.' | '-' | '_' | '~')
-}
-
-/// The ASCII **opening brackets**, which are seams on their own account — §7.30 (user ruling
-/// 2026-08-28, on next16).
-///
-/// This is the one mark whose seam does not consult the character behind it. The line that settled
-/// it is `dist\folio-next16.exe(0.1.0 (84d843f47e))`: the byte after the bracket is an ASCII `0`,
-/// so the class-transition rule saw no transition, the token ate its way to the closing `)`, and a
-/// file that is really on the disk went unmarked. What a version banner, a `(1)` copy suffix and
-/// `docs/a.md(说明)` have in common is not the script behind the bracket — it is the bracket, which
-/// opens an aside about the thing just named rather than continuing its name.
-///
-/// The class is stated once and not enumerated twice: these are the **opening halves of the ASCII
-/// bracket pairs whose closing halves already end a token** ([`is_closing_delimiter`] holds `)`,
-/// `]`, `}` and `>`). None of the four is legal in a Windows path, which is why a name loses
-/// nothing by being read up to one.
-///
-/// A bracket is a seam and **not** a terminator, and the difference is the whole of the ruling: a
-/// terminator would make `D:\x\a(1).txt` unaskable, while a seam merely offers `D:\x\a` as a
-/// shorter reading — asked only after the disk has denied the longer one.
-fn is_ascii_opening_bracket(character: char) -> bool {
-    matches!(character, '(' | '[' | '{' | '<')
 }
 
 /// The ASCII marks that end a **sentence** rather than a name, read only where a token ends —
@@ -1626,17 +1679,13 @@ fn is_sentence_stop(character: char) -> bool {
 /// Whether a token can carry a seam at all — the cheap per-token test that keeps an ordinary
 /// screenful free (§7.30 ④).
 ///
-/// A seam is a transition into another script, an opening bracket, or the sentence's own
-/// punctuation at the token's end, so a token holding none of the three offers no shorter form and
-/// needs no search. The first two are read over bytes rather than characters because those two
-/// questions agree byte for byte: every byte of a multi-byte character is non-ASCII, and no bracket
-/// byte can appear inside one. The third is one character at one place — the token's last — so it
-/// costs a look and not a walk, and it is asked first for exactly that reason.
+/// A seam is a transition into another script or the sentence's own punctuation at the token's end,
+/// so a token holding neither offers no shorter form and needs no search. The first is read over
+/// bytes rather than characters because the two questions agree byte for byte: every byte of a
+/// multi-byte character is non-ASCII. The second is one character at one place — the token's last —
+/// so it costs a look and not a walk, and it is asked first for exactly that reason.
 fn token_may_carry_a_seam(token: &str) -> bool {
-    token.ends_with(is_sentence_stop)
-        || token
-            .bytes()
-            .any(|byte| !byte.is_ascii() || is_ascii_opening_bracket(char::from(byte)))
+    token.ends_with(is_sentence_stop) || token.bytes().any(|byte| !byte.is_ascii())
 }
 
 /// Where one unquoted token offers a **shorter form** of itself, longest first — §7.30.
@@ -1652,10 +1701,11 @@ fn token_may_carry_a_seam(token: &str) -> bool {
 ///   [`release_prose_tail`] (boundary table row 17), and `D:\资料\A、B.md` is somebody's filename
 ///   read whole (row 19 stands unmoved).
 ///
-/// **An [`is_ascii_opening_bracket`] is the exception, and it is a seam whatever follows it** (user
-/// ruling 2026-08-28) — read that function for why a bracket carries its own evidence and needs no
-/// witness behind it. It is found in this same pass and not a second one: a seam search is one walk
-/// over the token, and the two questions are asked of each character where it stands.
+/// **An opening bracket needs no seam of its own any more** (user report 2026-09-17). It had one
+/// from 2026-08-28, because a bracket carries its own evidence and needs no witness behind it —
+/// and that same evidence is why it is now a terminator ([`is_opening_delimiter`]), so no unquoted
+/// token reaches this walk carrying one. The rule did not go away; it moved to the one place a
+/// token's extent is decided.
 ///
 /// **The end of the token is a witness of its own** (user ruling 2026-09-05), and it is the same
 /// character-class transition seen at the one place where the other class is empty: an
@@ -1682,7 +1732,6 @@ fn prose_seam_ends(token: &str, limit: usize) -> Vec<usize> {
         }
         // `offset + 1` is a character boundary: every separator is one ASCII byte.
         let seams_here = offset >= stops_from
-            || is_ascii_opening_bracket(character)
             || (is_seam_separator(character)
                 && token[offset + 1..]
                     .chars()
@@ -4908,49 +4957,39 @@ mod tests {
                 "{line} has no settled position syntax, so it has no link at all"
             );
         }
-        // 7 and 8 as the opening-bracket seam leaves them (§7.30, user ruling 2026-08-28 evening).
-        // The bracket is a seam whatever follows it, so the reading in front of it is **the path
-        // itself** — which is what these two rows always wanted ("只画路径"), short of the
-        // `(12,34)` fragment no contract spells out yet. What the scenario forbade — a link over
-        // `…main.cpp(12,34`, a name nobody printed — is still not offered by anything.
-        let with_position_syntax = ledger(
-            "D:\\case",
-            &[
-                ("D:\\case\\src\\main.cpp", true),
-                ("D:\\case\\src\\main.cpp(12,34", false),
-                ("D:\\case\\src\\app.ts", true),
-            ],
-        );
+        // 7 and 8 as the opening bracket leaves them (§7.30, user report 2026-09-17). The bracket
+        // ends the token, so the only reading is **the path itself** — which is what these two rows
+        // always wanted ("只画路径"), short of the `(12,34)` fragment no contract spells out yet.
+        // What the scenario forbade — a link over `…main.cpp(12,34`, a name nobody printed — is
+        // offered by nothing, and since the bracket ends a token it is not even asked about.
         assert_eq!(
-            linked(
-                &with_position_syntax,
-                "D:\\case\\src\\main.cpp(12,34): error C2143",
-                None
-            ),
+            linked(&named, "D:\\case\\src\\main.cpp(12,34): error C2143", None),
             [(
                 "D:\\case\\src\\main.cpp",
                 "file:///D:/case/src/main.cpp".to_owned()
             )]
         );
         assert_eq!(
-            linked(
-                &with_position_syntax,
-                "src/app.ts(7,19): error TS2322",
-                None
-            ),
+            linked(&named, "src/app.ts(7,19): error TS2322", None),
             [("src/app.ts", "file:///D:/case/src/app.ts".to_owned())]
         );
-        // And the absolute spelling's first frame is the ordinary two-frame rhythm, not a promise:
-        // the whole printed string is a name of its own until the disk has denied it.
+        // And there is no longer reading to wait for: one name, one question, drawn on the frame
+        // its answer arrives in.
         let mut unknown = BTreeSet::new();
         assert_eq!(
-            named.links_in(
-                "D:\\case\\src\\main.cpp(12,34): error C2143",
-                None,
-                &mut unknown
-            ),
-            [],
-            "the shorter reading waits for the longer one's verdict"
+            named
+                .links_in(
+                    "D:\\case\\src\\main.cpp(12,34): error C2143",
+                    None,
+                    &mut unknown
+                )
+                .len(),
+            1,
+            "the name in front of the bracket is the whole of what the line offers"
+        );
+        assert!(
+            unknown.is_empty(),
+            "and no name with a bracket welded into it was ever asked about: {unknown:?}"
         );
         // 11, 12 — the two position shapes that *are* unambiguous today.
         assert_eq!(
@@ -5963,76 +6002,65 @@ mod tests {
         }
     }
 
-    /// §7.30, boundary table rows 46–48 (user ruling 2026-08-28): the seam is a **class**, so every
-    /// ASCII punctuation mark a path is not spelled with cuts — a bracket every bit as much as a
-    /// comma. This is the fifth screenshot: `docs/a.md(说明)` and its backslash twin both went dark
-    /// because `(` was not on the old five-mark table.
+    /// §7.30, boundary table rows 46–48 (user ruling 2026-08-28, amended 2026-09-17): a mark glued
+    /// to a CJK word cuts the name in front of it. This is the fifth screenshot: `docs/a.md(说明)`
+    /// and its backslash twin both went dark because `(` was not on the old five-mark table.
+    ///
+    /// Two different cuts do it, and the difference is worth seeing in one place. A **bracket** ends
+    /// the token outright ([`is_opening_delimiter`]), because its closing half always did. An
+    /// **operator** — `=`, `,`, `;` — only seams, so the whole token is still a reading and the disk
+    /// chooses between the two.
     #[test]
-    fn a_bracket_glued_to_a_cjk_word_seams_like_any_other_separator() {
-        // Row 46: an opening bracket then CJK — the shorter form is offered. The bare spelling is
-        // no candidate whole (`(` is not a path character), so the seam is the only reading there is.
+    fn a_mark_glued_to_a_cjk_word_cuts_the_name_it_follows() {
+        // Row 46: an opening bracket then CJK. The bare spelling is no candidate whole (`(` is not
+        // a path character) and the drive-rooted one stops at the bracket, so both read one name.
         assert_eq!(spans("docs/a.md(说明)"), ["docs/a.md"]);
-        assert_eq!(spans("dist\\folio.exe(说明)"), ["dist\\folio.exe"]); // the backslash twin seams too
-        // The drive-rooted form is a candidate whole (a `(` is legal in an absolute path), so both
-        // readings are offered, longest first, and the disk chooses.
-        assert_eq!(
-            spans("见 D:\\x\\a.md(说明)"),
-            ["D:\\x\\a.md(说明", "D:\\x\\a.md"]
-        );
-        // Row 47: other brackets and operators are the same class, no table to extend.
+        assert_eq!(spans("dist\\folio.exe(说明)"), ["dist\\folio.exe"]); // the backslash twin too
+        assert_eq!(spans("见 D:\\x\\a.md(说明)"), ["D:\\x\\a.md"]);
+        // Row 47: other brackets are the same class, no table to extend — and an operator is the
+        // other cut, where the longest reading is still offered first.
         assert_eq!(spans("docs/a.md[注]"), ["docs/a.md"]);
-        assert_eq!(
-            spans("见 D:\\x\\a.md{批}"),
-            ["D:\\x\\a.md{批", "D:\\x\\a.md"]
-        );
+        assert_eq!(spans("见 D:\\x\\a.md{批}"), ["D:\\x\\a.md"]);
         assert_eq!(
             spans("见 D:\\x\\a.md=值"),
             ["D:\\x\\a.md=值", "D:\\x\\a.md"]
         );
-        // Row 48 as it stands after the evening ruling of the same day (see
-        // `an_opening_bracket_is_a_seam_whatever_follows_it`): an opening bracket seams whatever
-        // follows it, so `docs/a.md(1).txt` **does** offer the shorter reading — it is offered, not
-        // promised, and the disk still decides. What has not changed is that `(` is a seam and not
-        // a terminator, which is what leaves a name that really carries a bracket askable at all.
+        // Row 48: a `(1)` copy suffix is read without its suffix, in either spelling. A name that
+        // really carries a bracket was already unreadable unquoted — its closing half has ended a
+        // token since the day this file was written — so the opening half costs it nothing.
         assert_eq!(spans("docs/a.md(1).txt"), ["docs/a.md"]);
-        assert_eq!(
-            spans("见 D:\\x\\a.md(1"),
-            ["D:\\x\\a.md(1", "D:\\x\\a.md"],
-            "the whole name is still the first reading offered"
-        );
+        assert_eq!(spans("见 D:\\x\\a.md(1"), ["D:\\x\\a.md"]);
     }
 
-    /// §7.30, boundary table rows 50 and 51 (user ruling 2026-08-28, on next16): an **ASCII
-    /// opening bracket** is a seam on its own account, **whatever follows it** — the one place in
-    /// this ruling where the character after the mark is not consulted.
+    /// §7.30, boundary table rows 50 and 51 (user ruling 2026-08-28, on next16; the mark promoted
+    /// from seam to terminator 2026-09-17): an **opening bracket** ends a token **whatever follows
+    /// it** — the one cut in this ruling that does not consult the character after the mark.
     ///
     /// The line that proved it: `dist\folio-next16.exe(0.1.0 (84d843f47e))`, where the byte behind
     /// the bracket is an ASCII `0`. The transition rule saw no transition, the token ate its way to
     /// the closing `)`, and a file that is really on the disk went unmarked. A bracket does not open
-    /// a filename in the wild — it opens an aside about the thing just named — so it offers a
-    /// shorter reading, and the disk still decides between the readings, longest first.
+    /// a filename in the wild — it opens an aside about the thing just named — and that is the same
+    /// evidence its closing half has always been read on, which is why the mark now stops the token
+    /// where it stands instead of offering a second reading behind it.
     #[test]
-    fn an_opening_bracket_is_a_seam_whatever_follows_it() {
-        // Row 50, the user's line. The bare spelling is no candidate whole (`(` is not a path
-        // character), so the seam is the only reading there is — and it is a real file.
+    fn an_opening_bracket_ends_a_token_whatever_follows_it() {
+        // Row 50, the user's line, in both spellings: the name in front of the bracket, and nothing
+        // longer. The bare one never had a longer reading (`(` is not a path character); the
+        // drive-rooted one gives up the reading that welded the version banner onto the name.
         assert_eq!(
             spans("dist\\folio-next16.exe(0.1.0 (84d843f47e))"),
             ["dist\\folio-next16.exe"]
         );
-        // The drive-rooted spelling *is* a candidate whole, so both readings are offered, longest
-        // first, exactly as a comma's seam offers them.
-        assert_eq!(
-            spans("见 D:\\dist\\x.exe(0.1.0"),
-            ["D:\\dist\\x.exe(0.1.0", "D:\\dist\\x.exe"]
-        );
-        // All four openers, and an ASCII digit, letter and space-less word behind each of them: the
-        // class is "the opening half of the bracket pairs whose closing half already ends a token".
+        assert_eq!(spans("见 D:\\dist\\x.exe(0.1.0"), ["D:\\dist\\x.exe"]);
+        // All four ASCII openers, and an ASCII digit, letter and space-less word behind each of
+        // them: the class is "the opening half of the pairs whose closing half already ends a
+        // token", and the full-width and CJK halves of that class are read in
+        // `a_name_printed_in_front_of_an_opening_bracket_is_read_without_it`.
         for line in ["docs/a.md(1", "docs/a.md[2", "docs/a.md{v3", "docs/a.md<x"] {
-            assert_eq!(spans(line), ["docs/a.md"], "{line} seams at its bracket");
+            assert_eq!(spans(line), ["docs/a.md"], "{line} ends at its bracket");
         }
-        // Row 51 at the disk, all three frames. Frame one: neither reading has an answer, so
-        // nothing is promised and both are asked — the shorter one may not be drawn ahead of the
-        // longer one's verdict.
+        // Row 51 at the disk, now two frames instead of three. Frame one: one reading, unanswered,
+        // so nothing is promised and exactly that one name is asked about.
         let mut unknown = BTreeSet::new();
         let asking = ledger("D:\\case", &[]);
         assert_eq!(
@@ -6041,28 +6069,93 @@ mod tests {
         );
         assert_eq!(
             unknown.into_iter().collect::<Vec<_>>(),
-            [
-                PathBuf::from("D:\\x\\a.exe"),
-                PathBuf::from("D:\\x\\a.exe(0.1.0")
-            ]
+            [PathBuf::from("D:\\x\\a.exe")],
+            "the name with the banner welded onto it is not a reading any more"
         );
-        // Frame two, the ordinary answer: the printed string is nobody's name, the name in front of
-        // the bracket is.
-        let denied = ledger(
-            "D:\\case",
-            &[("D:\\x\\a.exe", true), ("D:\\x\\a.exe(0.1.0", false)],
-        );
+        // Frame two: the name in front of the bracket is the link.
+        let answered = ledger("D:\\case", &[("D:\\x\\a.exe", true)]);
         assert_eq!(
-            linked(&denied, "见 D:\\x\\a.exe(0.1.0", None),
+            linked(&answered, "见 D:\\x\\a.exe(0.1.0", None),
             [("D:\\x\\a.exe", "file:///D:/x/a.exe".to_owned())]
         );
-        // Frame two, the other answer: a name that really carries a bracket wins whole, which is
-        // why the bracket is a seam and not a terminator.
+        // What the promotion costs, stated where it can be seen: a name carrying an **unmatched**
+        // opening bracket is no longer read whole unquoted, even on a disk that holds it — the
+        // balanced spelling of the same name never was, because `)` ends a token. Quoting is the
+        // appeal, and it still admits every name there is.
         let whole = ledger("D:\\case", &[("D:\\x\\a(1", true), ("D:\\x\\a", true)]);
         assert_eq!(
             linked(&whole, "见 D:\\x\\a(1", None),
+            [("D:\\x\\a", "file:///D:/x/a".to_owned())]
+        );
+        assert_eq!(
+            linked(&whole, "见 \"D:\\x\\a(1\"", None),
             [("D:\\x\\a(1", "file:///D:/x/a%281".to_owned())]
         );
+    }
+
+    /// PIN (user report 2026-09-17) — **a name printed straight in front of an opening bracket is
+    /// read without it**, whatever script the bracket is written in.
+    ///
+    /// The line is an agent's, printed into a pane standing in the directory it names, and the mark
+    /// behind the name is a full-width `（` with no space in front of it. Every rule on the line
+    /// already worked from the other side — `）` has ended a token since the day
+    /// [`is_closing_delimiter`] was written — and the reference still went dark, because the token
+    /// ran past the bracket to the space behind `commit` and a bare reading may carry no character a
+    /// path is not spelled with.
+    #[test]
+    fn a_name_printed_in_front_of_an_opening_bracket_is_read_without_it() {
+        let printed = "改完了，你说的每一条都落了，现在是 6 页，中英各页截图都过了。文件还是 \
+                       docs/deliverables/slides/dist/advisor_status_202609.html（commit e0bfcfe）。";
+        assert_eq!(
+            spans(printed),
+            ["docs/deliverables/slides/dist/advisor_status_202609.html"]
+        );
+        // The same line at the disk, through a ledger that says that one name is a file.
+        let links = ledger(
+            "D:\\Documents\\SyncFolder\\Research\\MPC",
+            &[(
+                "D:\\Documents\\SyncFolder\\Research\\MPC\\docs\\deliverables\\slides\\dist\\advisor_status_202609.html",
+                true,
+            )],
+        );
+        assert_eq!(
+            linked(&links, printed, None),
+            [(
+                "docs/deliverables/slides/dist/advisor_status_202609.html",
+                "file:///D:/Documents/SyncFolder/Research/MPC/docs/deliverables/slides/dist/\
+                 advisor_status_202609.html"
+                    .to_owned()
+            )]
+        );
+        // The class, not the character: every opening half whose closing half is a terminator, in
+        // both spellings a person types them in.
+        for opening in [
+            '(', '[', '{', '<', '（', '［', '｛', '＜', '「', '『', '【', '〈', '《', '〔', '«',
+            '“', '‘',
+        ] {
+            let line = format!("见 D:\\x\\a.md{opening}说明");
+            assert_eq!(
+                spans(&line),
+                ["D:\\x\\a.md"],
+                "`{line}` ends its name at the bracket"
+            );
+            let bare = format!("docs/a.md{opening}说明");
+            assert_eq!(
+                spans(&bare),
+                ["docs/a.md"],
+                "`{bare}` ends its name at the bracket"
+            );
+        }
+        // The closing halves are untouched, in both widths — this rule was only ever stated at one
+        // end, and the other end goes on saying what it said.
+        assert_eq!(spans("（见 docs/a.md）"), ["docs/a.md"]);
+        assert_eq!(spans("(see docs/a.md)"), ["docs/a.md"]);
+        assert_eq!(spans("见 D:\\x\\a.md）"), ["D:\\x\\a.md"]);
+        // And what a name pays for it: a filename that really carries a full-width pair is no more
+        // readable unquoted than it was before — the `）` already cut it — while quoting, which is
+        // a declaration of extent, still admits it whole.
+        assert_eq!(spans("docs/报告（一）.md"), ["docs/报告"]);
+        assert_eq!(spans("\"docs/报告（一）.md\""), ["docs/报告（一）.md"]);
     }
 
     /// §7.30, boundary table row 54 (user report 2026-09-03, on next29): **a colon another script
