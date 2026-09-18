@@ -385,13 +385,25 @@ impl DecorationRecord {
         }
     }
 
+    /// **Whether a scan of this line could have an outcome at all** — one frozen line, with no
+    /// answer of its own yet and none in flight.
+    ///
+    /// The condition the two schedulers below already refuse on, given a name so that it can be
+    /// asked *before* the work of building a scan window rather than after (review 2026-09-18
+    /// round 2, P2). One spelling and one reader's rule: a second copy of it in the session would
+    /// be a second chance for the two to drift.
+    #[must_use]
+    pub fn may_be_scanned(&self) -> bool {
+        self.source == SourceLifecycle::Frozen && self.decoration == DecorationLifecycle::None
+    }
+
     pub fn schedule(
         &mut self,
         transcript_id: TranscriptId,
         block_end: TranscriptId,
         span: MathSpan,
     ) -> Option<DetectionTask> {
-        if self.source != SourceLifecycle::Frozen || self.decoration != DecorationLifecycle::None {
+        if !self.may_be_scanned() {
             return None;
         }
         self.decoration = DecorationLifecycle::Pending;
@@ -419,7 +431,7 @@ impl DecorationRecord {
         inputs: Arc<[DetectionInput]>,
         options: DetectionOptions,
     ) -> Option<DetectionTask> {
-        if self.source != SourceLifecycle::Frozen || self.decoration != DecorationLifecycle::None {
+        if !self.may_be_scanned() {
             return None;
         }
         self.decoration = DecorationLifecycle::Pending;
