@@ -27,6 +27,16 @@ All notable changes to Folio are recorded here. The format follows
   beginning already gone that stays text: there is nothing on screen that says
   what the whole of it was, so it waits until you scroll its beginning back into
   view.
+- **A file name printed right before an opening bracket is recognised as a file
+  link again.** An agent that wrote `docs/report.html（commit …）` — the name, a
+  bracket, no space in between — left the name dark: Folio read the bracket and
+  everything behind it as part of the name and then found no such file. A
+  bracket now ends a name from either half of its pair, in every script one is
+  written in (`(`, `[`, `{`, `（`, `「`, `【`, `《` and the rest), exactly as the
+  closing half always did. Nothing a name could carry is lost by it: a file
+  whose name really holds a bracket was already unreadable without quotes,
+  because the closing half ends the name too — and quoting a path still opens
+  every name there is.
 
 ## 0.4.2-preview — 2026-09-17
 

@@ -2510,6 +2510,44 @@ mod tests {
         }
     }
 
+    /// PIN (2026-09-17, beside the printed-path scan's own promotion of the opening bracket to a
+    /// terminator) — **an address keeps its ASCII brackets, and that is not the same question.**
+    ///
+    /// [`paths::is_opening_delimiter`] reads `(` as the end of a *name* because the closing half of
+    /// the pair already ended one, so a filename carrying a bracket was unreadable either way. An
+    /// address is the other case on both counts: `)` is no terminator here, `(` is legal and
+    /// ordinary inside a path — every Wikipedia disambiguation link carries a balanced pair — and
+    /// [`release_url_tail`] already tells a closing bracket of the address's own from the one a
+    /// sentence wrapped it in by counting them. The mark the report arrived on needs nothing added
+    /// here either: `（` is non-ASCII, and every non-ASCII byte has terminated an address since
+    /// 2026-08-20 (the test above).
+    ///
+    /// [`paths::is_opening_delimiter`]: crate::paths
+    #[test]
+    fn an_address_keeps_the_brackets_a_filename_gives_up() {
+        for (text, expected) in [
+            (
+                "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+                "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+            ),
+            // The sentence's own bracket is still released, because it is the unbalanced one.
+            ("(https://example.test/a.md)", "https://example.test/a.md"),
+            // And the full-width bracket the printed-path scan was reported on needs no clause of
+            // its own: it is not ASCII.
+            ("https://example.test/x（见附件）", "https://example.test/x"),
+        ] {
+            let ranges = detect_http_urls(text);
+            assert_eq!(
+                ranges
+                    .iter()
+                    .map(|range| &text[range.byte_start..range.byte_end])
+                    .collect::<Vec<_>>(),
+                [expected],
+                "reading `{text}`"
+            );
+        }
+    }
+
     /// Every bare domain one line offers, as the printed text of each range.
     fn domains(text: &str) -> Vec<&str> {
         detect_bare_domains(text)
