@@ -65,8 +65,8 @@ use std::time::{Duration, Instant};
 use winit::keyboard::ModifiersState;
 
 use super::{
-    AnimationCache, AnimationEntry, MAX_ANIMATION_CACHE_BYTES, Motion, PasteTarget, PeekClock,
-    RevealTween, SeatId, TabId, advance_drawn_animations, present_drawn_animations,
+    AnimationCache, AnimationEntry, MAX_ANIMATION_CACHE_BYTES, Motion, PaneMotion, PasteTarget,
+    PeekClock, RevealTween, SeatId, TabId, advance_drawn_animations, present_drawn_animations,
 };
 use crate::pace::{FrameClock, Lanes};
 use crate::{
@@ -1463,7 +1463,7 @@ fn a_picture_that_arrives_between_frames_books_its_own_wake() {
     // list over and the debt that books this wake is set by the same pass —
     // `crate::pictures_need_handing_over` is what says so, and is counted in
     // `a_service_that_finds_nothing_changed_hands_nothing_over`.
-    assert!(crate::pictures_need_handing_over(false, true, false));
+    assert!(crate::pictures_need_handing_over(false, true, false, false));
 
     // ── ⑤ one window, one rate, with no exception left ─────────────────────
     //
@@ -1520,7 +1520,7 @@ fn a_service_that_finds_nothing_changed_hands_nothing_over() {
     // ── ① a paused seat: nothing new, nothing gone, nothing moving ──────────
     let mut rebuilds = 0_u32;
     for _ in 0..1_000 {
-        if crate::pictures_need_handing_over(false, false, false) {
+        if crate::pictures_need_handing_over(false, false, false, false) {
             rebuilds += 1;
         }
     }
@@ -1544,7 +1544,7 @@ fn a_service_that_finds_nothing_changed_hands_nothing_over() {
     while turn <= start + FLOOD_SPAN {
         let frames_arrived = advance_drawn_animations(&mut cache, &drawn, turn);
         services += 1;
-        if crate::pictures_need_handing_over(frames_arrived, false, false) {
+        if crate::pictures_need_handing_over(frames_arrived, false, false, false) {
             rebuilds += 1;
         }
         turn += FLOOD;
@@ -1557,19 +1557,32 @@ fn a_service_that_finds_nothing_changed_hands_nothing_over() {
 
     // ── ③ the two other reasons, and there is no fourth ─────────────────────
     assert!(
-        crate::pictures_need_handing_over(false, true, false),
+        crate::pictures_need_handing_over(false, true, false, false),
         "a seat opened, closed or faulted changes the list itself"
     );
     assert!(
-        crate::pictures_need_handing_over(false, false, true),
+        crate::pictures_need_handing_over(false, false, true, false),
         "and a pane in FLIP or a float on its way in moves the rectangle under it"
+    );
+    assert!(
+        crate::pictures_need_handing_over(false, false, false, true),
+        "and the frame a travelling box has just stopped on is the one that \
+         carries where it stopped"
     );
     let service = method("    fn service_pictures(&mut self, now: Instant) {");
     assert!(
+        service.contains("if !pictures_need_handing_over(")
+            && service.contains("boxes_are_moving,")
+            && service.contains("boxes_were_moving,"),
+        "the service asks that one question, with both halves of the box fact, \
+         before it builds anything:\n{service}"
+    );
+    assert!(
         service.contains(
-            "if !pictures_need_handing_over(frames_arrived, membership_moved, boxes_may_be_moving)"
+            "std::mem::replace(&mut self.window.picture_boxes_were_moving, boxes_are_moving)"
         ),
-        "the service asks that one question before it builds anything:\n{service}"
+        "and it remembers this decision's answer for the next one, so a landed \
+         tween owes one hand-over and never two:\n{service}"
     );
     let asked = service
         .find("pictures_need_handing_over(")
@@ -1598,6 +1611,134 @@ fn a_service_that_finds_nothing_changed_hands_nothing_over() {
             empty < body.find("Vec::new()").unwrap_or(usize::MAX)
                 && empty < body.find("live_windows").unwrap_or(usize::MAX),
             "the {pass} pass walks or allocates before asking:\n{body}"
+        );
+    }
+}
+
+/// RED — **the frame a travelling box has just stopped on is handed over, and
+/// it is the last one that is** (closure review 3, 2026-09-18).
+///
+/// The service's third reason used to ask "is a box moving *now*", and the one
+/// frame a moving box most needs handed over is the one where it has just
+/// stopped. The review's geometry: a paused picture in a pane that FLIPs four
+/// hundred pixels into a 500×500 box. The last hand-over lands one frame short
+/// of the end — the review measured a clip of `x = 49` where the pane comes to
+/// rest at `0` — and then the tween reports itself finished, every reason goes
+/// false together, and the renderer goes on holding that forty-nine-pixel clip.
+/// The tick pays the *pane's* own debt and retires the tween; nothing on the
+/// chrome, overlay or pane-draw road hands the video layers over.
+///
+/// So the fact is "a box has moved since the last decision", which is true on
+/// exactly one more service than "is moving" is. Both box movers are driven
+/// here, on real hosts: a pane's FLIP and a float's entrance and exit.
+///
+/// MUTATIONS: drop `boxes_were_moving` from the predicate and the landing
+/// hand-over disappears from all three; make it sticky instead of a
+/// one-decision memory and the thousand idle services after the landing hand
+/// over a thousand times.
+#[test]
+fn the_landing_frame_of_a_travelling_box_is_handed_over_exactly_once() {
+    let start = Instant::now();
+    let seat = SeatId(1);
+    // Four hundred pixels of travel into the box the pane comes to rest in.
+    let before = [(seat, [400.0, 0.0, 900.0, 500.0])];
+    let after = [(seat, [0.0, 0.0, 500.0, 500.0])];
+    let mut motion = PaneMotion::default();
+    motion.begin(&before, &after, start, Motion::Full);
+
+    // The service loop: every five milliseconds, the decision the product
+    // makes, and — when it says yes — the geometry the renderer would be handed.
+    let mut were_moving = false;
+    let mut handed: Vec<(Duration, [f32; 4])> = Vec::new();
+    let service = |motion: &PaneMotion, were: &mut bool, handed: &mut Vec<_>, now: Instant| {
+        let moving = motion.is_animating(now, Motion::Full);
+        let were_before = std::mem::replace(were, moving);
+        if crate::pictures_need_handing_over(false, false, moving, were_before) {
+            let shape = motion.snapshot(&after, now, Motion::Full)[0].1;
+            handed.push((now.saturating_duration_since(start), shape));
+        }
+    };
+
+    let mut now = start;
+    while now <= start + crate::PANE_FLIP + Duration::from_millis(100) {
+        service(&motion, &mut were_moving, &mut handed, now);
+        now += FLOOD;
+    }
+
+    // It was handed over while it travelled...
+    assert!(
+        handed.len() > 2,
+        "a four-hundred-pixel flight is drawn in more than two frames"
+    );
+    let (at, landed) = *handed.last().expect("the flight was handed over");
+    // ...and the last hand-over is the landing, carrying where it lands.
+    assert!(
+        at >= crate::PANE_FLIP && at < crate::PANE_FLIP + FLOOD,
+        "the final hand-over is the first service at or after the landing, not \
+         one frame short of it: {at:?}"
+    );
+    assert_eq!(
+        landed, after[0].1,
+        "and what it carries is where the pane came to rest"
+    );
+    let (_, one_short) = handed[handed.len() - 2];
+    assert!(
+        one_short != after[0].1,
+        "the hand-over before it is the stale one the review measured: {one_short:?}"
+    );
+    let landings = handed
+        .iter()
+        .filter(|(at, _)| *at >= crate::PANE_FLIP)
+        .count();
+    assert_eq!(landings, 1, "exactly one, and never a second");
+
+    // And a thousand services afterwards hand over nothing at all: an ended
+    // tween does not come back to life.
+    let quiet = handed.len();
+    for _ in 0..1_000 {
+        service(&motion, &mut were_moving, &mut handed, now);
+        now += FLOOD;
+    }
+    assert_eq!(handed.len(), quiet, "an idle window hands over nothing");
+
+    // ── the other box mover, on its own two ends ────────────────────────────
+    for leaving in [false, true] {
+        let begun = Instant::now();
+        let mut host = float::FloatHost::default();
+        let id = host.open(
+            float::FloatMode::Pinned,
+            None,
+            files_tenant(),
+            [100.0, 100.0, 364.0, 400.0],
+            None,
+            if leaving {
+                begun - float::FLOAT_ANIMATION
+            } else {
+                begun
+            },
+        );
+        if leaving {
+            assert!(host.dismiss(id, begun), "the window was there to close");
+        }
+        let mut were_moving = false;
+        let mut overs = 0_u32;
+        let mut landing = 0_u32;
+        let mut now = begun;
+        while now <= begun + float::FLOAT_ANIMATION + Duration::from_millis(100) {
+            let moving = host.is_animating(now, Motion::Full, 1.0);
+            let were_before = std::mem::replace(&mut were_moving, moving);
+            if crate::pictures_need_handing_over(false, false, moving, were_before) {
+                overs += 1;
+                if now >= begun + float::FLOAT_ANIMATION {
+                    landing += 1;
+                }
+            }
+            now += FLOOD;
+        }
+        assert!(overs > 2, "a float's fade is drawn in more than two frames");
+        assert_eq!(
+            landing, 1,
+            "and the frame it settles on is handed over once (leaving={leaving})"
         );
     }
 }

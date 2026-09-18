@@ -12506,6 +12506,24 @@ struct WindowRuntime {
     /// be paid, exactly as a refused frame does
     /// ([`pace::FrameClock::refuse`]).
     pictures_owe_a_frame: bool,
+    /// **Whether a picture's rectangle was travelling at the last hand-over
+    /// decision** (closure review 3, 2026-09-18).
+    ///
+    /// A pane in FLIP and a float on its way in or out move on a clock rather
+    /// than on an event, and [`Runtime::service_pictures`] hands the layers over
+    /// while they do. The frame that matters most is the one where they *stop*:
+    /// the tween reports itself finished, every other reason is false, and
+    /// without this the renderer would go on holding the second-to-last
+    /// geometry — measured at a forty-nine-pixel clip on a pane that lands at
+    /// zero — until something unrelated invalidated it.
+    ///
+    /// So the service asks whether a box has moved *since the last decision*
+    /// rather than whether one is moving now, and this is the other half of that
+    /// question. It is written on every decision, so it says `true` for exactly
+    /// one service after the motion ends and `false` from the next one on: a
+    /// tween that has landed cannot become live again, and an idle window still
+    /// hands over nothing.
+    picture_boxes_were_moving: bool,
     /// **What each surface is showing, so that opening a file can be told from
     /// revealing one** (adversarial review 2026-09-11, B8).
     ///
@@ -37730,6 +37748,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         animations: AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES),
         animations_drawn: BTreeMap::new(),
         pictures_owe_a_frame: false,
+        picture_boxes_were_moving: false,
         animation_presence: BTreeMap::new(),
         preview_watch: preview_watch::PreviewWatch::default(),
         files_watch: files_watch::FilesWatch::default(),
@@ -85015,8 +85034,16 @@ impl Runtime<'_> {
         // walk of the panes that hold a tween, which is almost always none, and
         // of the floats that are drawn, which is almost always none.
         let scale = self.window.renderer.metrics().scale_factor as f32;
-        let boxes_may_be_moving = self.window.pane_motion.is_animating(now, self.app.motion)
+        let boxes_are_moving = self.window.pane_motion.is_animating(now, self.app.motion)
             || self.window.float.is_animating(now, self.app.motion, scale);
+        // **And what they were doing at the last decision**, because the frame a
+        // travelling box most needs handed over is the one where it has stopped
+        // — see [`pictures_need_handing_over`]. One `bool`, written on every
+        // decision including the ones that hand nothing over, so a tween that
+        // ended between two services owes exactly one final hand-over and an
+        // ended one never comes back.
+        let boxes_were_moving =
+            std::mem::replace(&mut self.window.picture_boxes_were_moving, boxes_are_moving);
         // **Animations count here too**, and forgetting them was a real bug for
         // the length of one edit: a `.gif` with no recording anywhere in the
         // window would advance its frame, bump its generation, and never hand
@@ -85058,7 +85085,12 @@ impl Runtime<'_> {
         // must pay nothing. The three reasons above are the whole of what can
         // make the list the renderer is holding wrong; if none of them holds,
         // what it is holding is right.
-        if !pictures_need_handing_over(frames_arrived, membership_moved, boxes_may_be_moving) {
+        if !pictures_need_handing_over(
+            frames_arrived,
+            membership_moved,
+            boxes_are_moving,
+            boxes_were_moving,
+        ) {
             return;
         }
         let boxes_moved = anything_moving && self.refresh_video_layers();
@@ -121714,7 +121746,7 @@ fn pty_drain_says_nothing_new(focused_frame_unchanged: bool, unpainted_pane_outp
 /// generation** is new pixels, from a decoder or from a decoded animation's
 /// clock. **A membership change** is a seat opened, closed, faulted or swept,
 /// which is the one case where the list itself is a different length. **A box
-/// that may be moving** is a pane in FLIP or a float on its way in or out: every
+/// that has moved** is a pane in FLIP or a float on its way in or out: every
 /// *event* that moves a picture's rectangle already ends in
 /// `Runtime::refresh_preview_for_layout`, and those two are the rectangles that
 /// move on a clock instead.
@@ -121725,14 +121757,30 @@ fn pty_drain_says_nothing_new(focused_frame_unchanged: bool, unpainted_pane_outp
 /// over a thousand five-millisecond presents of a neighbouring shell, for the
 /// same pixels in the same rectangle with nothing in this window moving.
 ///
+/// **The third reason is a fact about the past and not about this instant**
+/// (closure review 3, 2026-09-18). It asked "is a box moving *now*", and the one
+/// frame a moving box most needs handed over is the one where it has just
+/// stopped: a four-hundred-pixel FLIP under a paused picture had its last
+/// hand-over one frame short of the end — clip `x = 49` where the pane lands at
+/// `0` — and then every reason went false together, so the layer kept the stale
+/// clip until something unrelated happened to invalidate it. The tick pays the
+/// pane's own debt and retires the tween; nothing on the chrome, overlay or
+/// pane-draw road hands the *video* layers over. So the question is whether a
+/// box has moved **since the last decision**, which is true on exactly one more
+/// service than "is moving" is — the one that carries the final geometry — and
+/// false on every service after it. An ended tween does not come back to life:
+/// `boxes_were_moving` is what the caller stored on the previous decision and is
+/// overwritten by this one.
+///
 /// A free function so that the sentence the service acts on and the sentence a
 /// test counts are the same sentence ([`tick_owes_a_present`]'s arrangement).
 fn pictures_need_handing_over(
     frames_arrived: bool,
     membership_moved: bool,
-    boxes_may_be_moving: bool,
+    boxes_are_moving: bool,
+    boxes_were_moving: bool,
 ) -> bool {
-    frames_arrived || membership_moved || boxes_may_be_moving
+    frames_arrived || membership_moved || boxes_are_moving || boxes_were_moving
 }
 
 fn strip_animation_tick_is_due(last: Option<Instant>, now: Instant, frame: Duration) -> bool {
