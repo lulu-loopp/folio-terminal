@@ -4018,8 +4018,8 @@ mod tests {
         passes: Vec<Instant>,
     }
 
-    /// The window's own [`crate::STRIP_ANIMATION_FRAME`], spelled here because
-    /// this module cannot see the binary's constants.
+    /// The window's own display frame at 60 Hz — [`crate::pace::DEFAULT_FRAME_INTERVAL`],
+    /// spelled here because this module cannot see the binary's constants.
     const STRIP_FRAME: Duration = Duration::from_millis(16);
 
     impl CardLoop {

@@ -538,6 +538,20 @@ pub struct BarPresence {
     pub opacity: f32,
     /// When this value stops changing on its own, or `None` when it already has.
     pub settled_at: Option<Instant>,
+    /// **Whether the opacity above is changing at the instant it was read**
+    /// (review round 3, 2026-09-18).
+    ///
+    /// A third answer and not a reading of the second, because the two say
+    /// different things and the window needs both. [`Self::settled_at`] is when
+    /// the bar next needs a frame and is `Some` through the bar's two **waits**
+    /// as well — the intent a still pointer is serving out before the bar is
+    /// shown at all, and the two seconds a shown bar stands before it begins to
+    /// go. This is `true` only while the fade is running. The window used to
+    /// take `bar_deadline(…).is_some()` as its liveness, so a bar standing at
+    /// full strength over a paused recording kept the chrome lane alive — and
+    /// the chrome is the expensive lane, walked tab by tab with text measured on
+    /// the way.
+    pub moving: bool,
 }
 
 /// Everything the bar's presence is decided from, gathered so that the decision
@@ -585,6 +599,7 @@ impl BarSituation {
             return BarPresence {
                 opacity: 0.0,
                 settled_at: None,
+                moving: false,
             };
         };
         if self.held() {
@@ -594,6 +609,10 @@ impl BarSituation {
         }
         let idle = now.saturating_duration_since(self.acted_at);
         if idle < VIDEO_BAR_IDLE_REST {
+            // **The rest is added to the deadline and never to the motion**
+            // (review round 3, 2026-09-18): the bar has to be woken when its two
+            // seconds run out, and for the whole of those two seconds it is a
+            // picture standing still.
             let mut presence = Self::rising(revealed_at, now, motion);
             let rests_at = self.acted_at + VIDEO_BAR_IDLE_REST;
             presence.settled_at = Some(match presence.settled_at {
@@ -607,6 +626,7 @@ impl BarSituation {
             return BarPresence {
                 opacity: 0.0,
                 settled_at: None,
+                moving: false,
             };
         }
         let fading = idle - VIDEO_BAR_IDLE_REST;
@@ -614,11 +634,13 @@ impl BarSituation {
             return BarPresence {
                 opacity: 0.0,
                 settled_at: None,
+                moving: false,
             };
         }
         BarPresence {
             opacity: 1.0 - fraction_of(fading, VIDEO_BAR_FADE),
             settled_at: Some(self.acted_at + VIDEO_BAR_IDLE_REST + VIDEO_BAR_FADE),
+            moving: true,
         }
     }
 
@@ -627,6 +649,7 @@ impl BarSituation {
             return BarPresence {
                 opacity: 1.0,
                 settled_at: None,
+                moving: false,
             };
         }
         let risen = now.saturating_duration_since(revealed_at);
@@ -634,11 +657,13 @@ impl BarSituation {
             return BarPresence {
                 opacity: 1.0,
                 settled_at: None,
+                moving: false,
             };
         }
         BarPresence {
             opacity: fraction_of(risen, VIDEO_BAR_FADE),
             settled_at: Some(revealed_at + VIDEO_BAR_FADE),
+            moving: true,
         }
     }
 }
@@ -1016,6 +1041,18 @@ impl VideoSeat {
             .chain(self.presence(now, motion).settled_at)
             .min()
             .filter(|deadline| *deadline > now)
+    }
+
+    /// **Whether this seat's bar is in flight at `now`** — the half of
+    /// [`Self::bar_deadline`] that is a tween (review round 3, 2026-09-18).
+    ///
+    /// The deadline folds two waits in with the fade: the intent a still pointer
+    /// serves out before the bar is offered at all, and the rest a shown bar
+    /// stands before it starts to go. Neither is motion, so neither may put the
+    /// window's chrome lane in flight — see [`BarPresence::moving`].
+    #[must_use]
+    pub fn bar_is_moving(&self, now: Instant, motion: crate::Motion) -> bool {
+        self.presence(now, motion).moving
     }
 
     /// Take hold of a track. The fraction under the pointer applies at once,
@@ -1448,6 +1485,14 @@ impl VideoSeats {
             .min()
     }
 
+    /// Whether any seat's bar is in flight — see [`VideoSeat::bar_is_moving`].
+    #[must_use]
+    pub fn bar_is_moving(&self, now: Instant, motion: crate::Motion) -> bool {
+        self.seats
+            .values()
+            .any(|seat| seat.bar_is_moving(now, motion))
+    }
+
     /// **Every seat shut down, with nothing left running.** The door §7.42 ⑦'s
     /// exit protocol comes through when a window closes.
     pub fn shutdown_all(&mut self) {
@@ -1568,6 +1613,85 @@ mod tests {
             situation.presence(gone, crate::Motion::Reduced).opacity,
             0.0
         );
+    }
+
+    /// RED — **a bar that is standing still is not a bar in motion** (review
+    /// round 3, 2026-09-18).
+    ///
+    /// The window's audit of what is mid-flight could not reach this seat — it
+    /// owns a decoder on another thread — so the property every other journey is
+    /// put through in `journeys_tests` is pinned here, on the arithmetic: the
+    /// bar is moving exactly while its opacity is changing, and the two clocks
+    /// that are not fades report nothing at all. The window read
+    /// `bar_deadline(…).is_some()` as this seat's liveness, which is `Some`
+    /// through both of those waits, so a paused recording with its bar up held
+    /// the chrome lane open and a neighbouring pane printing rebuilt the strip
+    /// on every present.
+    ///
+    /// MUTATION: answer `settled_at.is_some()` in [`BarPresence::moving`] and
+    /// the dwell and the held bar below both report motion.
+    #[test]
+    fn a_resting_bar_is_not_a_moving_one() {
+        let start = Instant::now();
+        let situation = BarSituation {
+            revealed_at: Some(start),
+            acted_at: start,
+            over_bar: false,
+            grabbing: false,
+            paused: false,
+        };
+        let moving = |at: Instant| situation.presence(at, crate::Motion::Full).moving;
+        let woken = |at: Instant| {
+            situation
+                .presence(at, crate::Motion::Full)
+                .settled_at
+                .is_some()
+        };
+
+        // Rising: moving, and woken for the end of the rise.
+        assert!(moving(start) && woken(start));
+        assert!(moving(start + VIDEO_BAR_FADE / 2));
+        // Up, and standing out its two seconds. The loop is still woken — the
+        // rest ends at an instant — and nothing is in flight.
+        let risen = start + VIDEO_BAR_FADE;
+        assert!(!moving(risen) && woken(risen), "the rise has landed");
+        let resting = start + VIDEO_BAR_IDLE_REST;
+        assert!(!moving(resting - VIDEO_BAR_FADE), "standing is not moving");
+        assert!(woken(resting - VIDEO_BAR_FADE), "and it is still woken");
+        // Going, and then gone: moving for exactly one archived span.
+        assert!(moving(resting));
+        assert!(moving(resting + VIDEO_BAR_FADE / 2));
+        let gone = resting + VIDEO_BAR_FADE;
+        assert!(
+            !moving(gone) && !woken(gone),
+            "a bar that has gone is quiet"
+        );
+
+        // A hand on the bar, a track in hand or a paused player holds it up for
+        // ever — and a bar held up is a bar standing still.
+        for (over_bar, grabbing, paused) in [
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ] {
+            let held = BarSituation {
+                revealed_at: Some(start),
+                acted_at: start,
+                over_bar,
+                grabbing,
+                paused,
+            };
+            assert!(
+                !held.presence(gone, crate::Motion::Full).moving,
+                "over_bar={over_bar} grabbing={grabbing} paused={paused}: a bar that is \
+                 held up is not travelling"
+            );
+        }
+
+        // And under reduced motion there is no fade to be in the middle of.
+        for at in [start, risen, resting, gone] {
+            assert!(!situation.presence(at, crate::Motion::Reduced).moving);
+        }
     }
 
     /// RED — **the video bar is flush with the stage's bottom edge, and leaves

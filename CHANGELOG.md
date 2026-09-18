@@ -6,6 +6,36 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Fixed
+
+- **Everything that moves in a window is now drawn once per display frame, on
+  both platforms.** Turning a typeset formula over with `‹›`, and the two small
+  marks that travel with the block, moved in bursts rather than smoothly: Folio
+  was composing pictures as fast as the loop could turn — a dozen or two inside
+  one ninety-millisecond motion, far more than a screen can show — and then one
+  of them waited the better part of a tenth of a second for the display to take
+  them, so the eye read a flurry of near-identical steps and then a pause.
+  Windows was the worse of the two. A motion now asks for the next picture the
+  display will actually show, at the refresh rate of the monitor the window is
+  on, so a formula turning over and its marks travel evenly; a 144 Hz screen
+  gets twice the steps a 60 Hz one does. The same rate now governs every other
+  fade and slide in the window, and a window with nothing moving in it still
+  falls completely silent. A pane printing hard no longer holds anything still
+  either: whatever a picture was drawn for, it draws every motion at the instant
+  it is drawn, so a formula turning over beside a busy shell keeps moving and
+  still finishes on time.
+
+- **A typeset formula's highlight now leaves as soon as the pointer does, like
+  every other hover.** Move off a formula and its shading and its two small
+  marks stayed for another half-second before they began to go — the only thing
+  in the window that waited. They now start leaving on the same movement that
+  takes a pane header's buttons, a tab's close, a link's underline and a tooltip
+  away, and they fade out over the same ninety milliseconds they faded in on.
+  Reaching for one of the two marks still cannot drop the highlight: the marks
+  stand inside the formula's own shaded area, so the pointer never leaves it to
+  get to them. A formula caught in the middle of turning over goes on turning
+  over — looking away no longer cuts it short.
+
 ## 0.4.2-preview — 2026-09-18
 
 ### Added

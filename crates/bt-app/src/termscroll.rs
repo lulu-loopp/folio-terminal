@@ -421,6 +421,26 @@ pub fn visibility(
     }
 }
 
+/// **Whether a thumb whose last reason ended at `rest` is actually fading at
+/// `now`** (review round 3, 2026-09-18).
+///
+/// [`fade_deadline`]'s second half on its own, and the two must not be confused
+/// for the reason [`visibility`] gives one line above the branch: **a wait is
+/// not a transition.** The nine hundred milliseconds of [`THUMB_REST`] is a bar
+/// standing at full strength with nothing about it changing, and the window read
+/// this host's *deadline* as its liveness — so every pane that had been scrolled
+/// kept the overlay lane alive for nine hundred milliseconds afterwards, and a
+/// neighbouring pane printing rebuilt the overlay on every one of its presents
+/// for the whole of it. Only the fade moves.
+#[must_use]
+pub fn fade_is_moving(rest: Instant, now: Instant, motion: Motion) -> bool {
+    if motion == Motion::Reduced {
+        return false;
+    }
+    let since = now.saturating_duration_since(rest);
+    (THUMB_REST..THUMB_REST + THUMB_FADE).contains(&since)
+}
+
 /// When a thumb whose last reason ended at `rest` next owes a frame.
 ///
 /// The **same** two durations [`visibility`] reads, deliberately shared rather
@@ -428,8 +448,19 @@ pub fn visibility(
 /// it does have to agree exactly, or the window either spins for ever on a bar
 /// that has finished or leaves one half-faded on the glass. `None` once the fade
 /// has landed, which is what makes a resting terminal cost no wake-ups at all.
+///
+/// **`frame` is the window's display frame** (closure review 2, 2026-09-18):
+/// this asked for a flat sixteen milliseconds of its own, which on a 144 Hz
+/// panel is a fade drawn in nine steps where every other surface in the window
+/// gets thirteen. One window, one rate, read from the glass — see
+/// `crate::pace::FrameClock::interval`.
 #[must_use]
-pub fn fade_deadline(rest: Instant, now: Instant, motion: Motion) -> Option<Instant> {
+pub fn fade_deadline(
+    rest: Instant,
+    now: Instant,
+    motion: Motion,
+    frame: Duration,
+) -> Option<Instant> {
     let since = now.saturating_duration_since(rest);
     if since < THUMB_REST {
         return Some(rest + THUMB_REST);
@@ -437,7 +468,7 @@ pub fn fade_deadline(rest: Instant, now: Instant, motion: Motion) -> Option<Inst
     if motion == Motion::Reduced || since >= THUMB_REST + THUMB_FADE {
         return None;
     }
-    Some(now + crate::STRIP_ANIMATION_FRAME)
+    Some(now + frame)
 }
 
 /// The mark, on a layer of its own.
@@ -1028,28 +1059,51 @@ mod tests {
 
     /// The deadline and the paint read the same two durations, so a window stops
     /// waking exactly when there is nothing left to draw.
+    ///
+    /// **And the frames it asks for are the window's, not sixteen milliseconds
+    /// of its own** (closure review 2, 2026-09-18): one window, one rate, so a
+    /// 144 Hz panel draws this fade in the same number of steps it draws every
+    /// other fade in the window.
     #[test]
     fn the_fade_asks_for_frames_until_it_lands_and_not_one_after() {
         let rest = Instant::now();
+        let frame = Duration::from_millis(16);
         assert_eq!(
-            fade_deadline(rest, rest, Motion::Full),
+            fade_deadline(rest, rest, Motion::Full, frame),
             Some(rest + THUMB_REST),
             "the first wake-up owed is the end of the rest"
         );
         assert!(
-            fade_deadline(rest, rest + THUMB_REST, Motion::Full).is_some(),
+            fade_deadline(rest, rest + THUMB_REST, Motion::Full, frame).is_some(),
             "the fade's own frames follow it"
         );
         assert_eq!(
-            fade_deadline(rest, rest + THUMB_REST + THUMB_FADE, Motion::Full),
+            fade_deadline(rest, rest + THUMB_REST + THUMB_FADE, Motion::Full, frame),
             None,
             "and a landed fade owes nothing"
         );
         assert_eq!(
-            fade_deadline(rest, rest + THUMB_REST, Motion::Reduced),
+            fade_deadline(rest, rest + THUMB_REST, Motion::Reduced, frame),
             None,
             "under reduced motion there was never a fade to wake for"
         );
+
+        // The rate is the caller's, all the way through: a display twice as fast
+        // is asked for frames twice as often, and the rest in front of the fade
+        // is a wait and is not asked at any rate at all.
+        let midway = rest + THUMB_REST + THUMB_FADE / 2;
+        for hz in [Duration::from_millis(16), Duration::from_nanos(6_944_444)] {
+            assert_eq!(
+                fade_deadline(rest, midway, Motion::Full, hz),
+                Some(midway + hz),
+                "the fade asks for the next frame of the display it is on"
+            );
+            assert_eq!(
+                fade_deadline(rest, rest, Motion::Full, hz),
+                Some(rest + THUMB_REST),
+                "and the rest ends when it ends, whatever the display is doing"
+            );
+        }
     }
 
     /// The hit test agrees with the picture — the property the shared shape

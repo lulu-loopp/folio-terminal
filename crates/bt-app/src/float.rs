@@ -96,7 +96,12 @@ pub const PEEK_PAD_LOGICAL_PX: f32 = 8.0;
 
 /// The entrance and its reverse, one span for both (§7.1.2「进出动画 120ms」) —
 /// now the archive's **base** span, because a float is a popup.
-const FLOAT_ANIMATION: Duration = Duration::from_millis(FLOAT_WINDOW_ANIMATION_MS);
+///
+/// Visible to the crate since review round 3 (2026-09-18) for
+/// [`crate::cardhint::NUDGE_END`]'s reason: the journey audit asks this host
+/// when its entrance and its exit end, and an endpoint spelled a second time
+/// somewhere else is an endpoint that can disagree with this one.
+pub(crate) const FLOAT_ANIMATION: Duration = Duration::from_millis(FLOAT_WINDOW_ANIMATION_MS);
 
 /// Which of the two promises this float is standing on.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1486,6 +1491,33 @@ impl FloatHost {
     /// stated: the pinned list in its own order, then the peek over all of them.
     pub fn drawn(&self) -> impl Iterator<Item = &FloatWin> {
         self.pinned.iter().chain(self.peek.iter())
+    }
+
+    /// **Whether this window has any float at all** — the cheapest question
+    /// there is about this host, and the one every per-turn pass asks first
+    /// (closure review 2, 2026-09-18).
+    ///
+    /// The overwhelming majority of windows have none, and the passes that
+    /// belong to floats run on every turn of the loop: a walk that finds nothing
+    /// still costs the walk, and a `Vec` allocated to hold nothing still costs
+    /// the allocation. This is two `is_empty`s.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.pinned.is_empty() && self.peek.is_none()
+    }
+
+    /// **Whether any float on screen is actually in motion right now** (review
+    /// 2026-09-18 round 2) — an entrance or an exit still moving, and never an
+    /// intent merely settling or a grace merely running down.
+    ///
+    /// [`Self::deadline`]'s `animating` arm without its two clocks, and the
+    /// distinction is the whole reason this is a second function: a float
+    /// standing open under a still hand is *waiting*, and a window that carried
+    /// it on every frame composed for anything else would rebuild its overlay
+    /// for as long as it stood there.
+    #[must_use]
+    pub fn is_animating(&self, now: Instant, motion: Motion, scale: f32) -> bool {
+        self.drawn().any(|win| win.fade(now, motion, scale).moving)
     }
 
     /// Every window that answers the pointer, **top to bottom** — the order a
