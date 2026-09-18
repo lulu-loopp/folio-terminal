@@ -19,8 +19,11 @@ All notable changes to Folio are recorded here. The format follows
   long you looked at it. The tail itself is now left alone as well: where a
   formula's `\begin{aligned}` was still on screen it was being typeset on its
   own, as a picture of part of a formula with the formula's last line sitting
-  underneath it as text. A formula whose beginning has scrolled away stays text
-  until you scroll it back.
+  underneath it as text. A formula that Folio has already typeset keeps its
+  picture when its beginning scrolls off the top — that has not changed. What
+  changes is a formula Folio meets for the first time with its beginning already
+  gone: there is no way to tell from the tail alone what the whole of it was, so
+  it stays text until you scroll its beginning back into view.
 
 ## 0.4.2-preview — 2026-09-17
 
