@@ -59,6 +59,9 @@
 - **Formulas no longer flash back to their source while you scroll inside a
   full-screen program**, and a window dragged back to the size it started at no
   longer leaves its formulas untypeset.
+- **Motion in a window is drawn once per display frame**, so a formula turning
+  over and the two marks beside it move evenly instead of in bursts — on Windows
+  most of all — and a formula's highlight leaves as soon as the pointer does.
 - **An inline formula in a command's output is typeset even when its picture is
   ready after the prompt has come back**, and a wrapped one stays typeset when
   the window's width changes.
