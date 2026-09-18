@@ -51,6 +51,7 @@ mod cardhint;
 mod cli;
 mod clipboard_picture;
 mod cmdrail;
+mod coalesce;
 mod context_menu;
 mod diagnostics;
 mod dir_news;
@@ -12679,6 +12680,10 @@ struct WindowRuntime {
     /// a frame is what a profiler measures; the gap between frames is what a
     /// hand feels, and under CPU starvation the two stop being the same number.
     last_present_at: Option<Instant>,
+    /// **What this window owes the glass from the PTY, and when it must pay** — the bounded
+    /// wait for the rest of a burst the kernel said was coming. See [`crate::coalesce::Pending`]
+    /// for the invariant that keeps an armed deadline from outliving its own wake.
+    pty_coalesce: coalesce::Pending,
     /// **What the previous present line cost to write**, reported on the next
     /// one as `trace_us` (T-TRACE-OFF-THREAD).
     ///
@@ -36817,6 +36822,33 @@ struct DrainOutcome {
     /// `bt_pty::OutputRing::push` is a thread that will not raise anything: it is
     /// waiting for the very drain it would be asking for.
     pending: bool,
+    /// **Bytes reached the screen and the transport did not say more was coming.**
+    ///
+    /// The one fact [`crate::coalesce`] cannot learn anywhere else: a `read(2)` that returned
+    /// the transport's whole transfer unit is the kernel saying it had more than it could hand
+    /// over, and that flag is erased by the time the bytes reach this crate — a pop concatenates
+    /// whatever the reader happened to deliver. So the pane reports it here.
+    ///
+    /// Or-ed across passes and panes on purpose, and it is the direction that makes the rule
+    /// safe: **one pane with nothing to wait for publishes the window's frame for all of them.**
+    /// Publishing early is never wrong, only untidy; making a pane that has finished speaking
+    /// wait on a pane that has not would be a pane held back by a decision that was never about
+    /// it.
+    arrived_uncapped: bool,
+    /// How many bytes this turn took out of the rings. Diagnostic only — it is what the
+    /// per-drain trace line reports, so a traced run can be read against its own recording.
+    bytes: usize,
+    /// **A DEC 2026 synchronized update committed on this pane during this turn.**
+    ///
+    /// The program has said in the protocol where its frame ends, which is better information
+    /// than any timer, so that frame goes out at once.
+    sync_bracket_closed: bool,
+    /// **A DEC 2026 synchronized update is open on this pane.**
+    ///
+    /// Or-ed over every pane rather than read off the focused one: the parser withholds a
+    /// block's bytes wherever the block is, so a window has nothing to gain by waiting while any
+    /// of its panes is inside one.
+    sync_open: bool,
     /// Bytes reached the screen of a leaf that is **not** the one holding this
     /// tab's keyboard.
     ///
@@ -36857,6 +36889,10 @@ impl DrainOutcome {
     fn merge(&mut self, other: Self) {
         self.arrived |= other.arrived;
         self.pending |= other.pending;
+        self.arrived_uncapped |= other.arrived_uncapped;
+        self.bytes += other.bytes;
+        self.sync_bracket_closed |= other.sync_bracket_closed;
+        self.sync_open |= other.sync_open;
         self.arrived_off_focus |= other.arrived_off_focus;
         self.renamed |= other.renamed;
         self.moved |= other.moved;
@@ -36919,6 +36955,21 @@ fn terminal_palette(
 /// `holds_the_keyboard` is [`seat_holds_the_keyboard`] already answered for this
 /// pane — the four bits are the window's and the tab's, and a leaf can supply
 /// none of them about itself.
+/// **Did this pane commit a synchronized update while it was being fed?**
+///
+/// `before` is [`bt_term::DualPlaneSession::synchronized_update_commits`] read on the near side of
+/// the feed. A counter and not the deadline, and the difference is a whole class of block: one
+/// that opens *and* commits inside a single `read(2)` — `BSU`, a screenful, `ESU`, all under the
+/// pty's 1,024-byte cap — leaves the deadline `None` on both sides of that feed, so a drain
+/// sampling the deadline sees nothing happen and makes a completed frame wait. The count cannot
+/// fall between two samples.
+///
+/// A named function rather than a comparison written in place, so that this is one thing a test
+/// can put a real session through — see `coalesce::session_tests`.
+fn synchronized_update_committed(before: u64, session: &bt_term::DualPlaneSession) -> bool {
+    session.synchronized_update_commits() != before
+}
+
 fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<DrainOutcome> {
     if leaf.pty.is_none() {
         return Ok(DrainOutcome::default());
@@ -36973,11 +37024,20 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
     // read per call is unchanged and load-bearing: the caller cannot stop a call
     // it is already inside, so the loop that repeats this one lives up there,
     // where the deadline is.
-    let bytes = leaf
+    let slice = leaf
         .pty
         .as_ref()
         .expect("PTY mode checked above")
         .read_output_slice();
+    let bytes = slice.bytes;
+    // **Was this pane's picture under the program's own control across this slice?**
+    //
+    // A *counter* and not the deadline, and the difference was a defect: a 1,024-byte capped read
+    // holding `BSU … ESU` whole opens and commits a block inside one feed, so the deadline is
+    // `None` on both sides of it and a completed frame would have waited three milliseconds for
+    // nothing. What is compared is how many updates this pane has committed — a question that
+    // cannot fall between two samples. [`crate::coalesce`] declines to wait on either answer.
+    let sync_commits_before = leaf.session.synchronized_update_commits();
     if !bytes.is_empty() {
         debug_assert!(bytes.len() <= bt_pty::TERM_READ_SLICE.get());
         // The drain brackets all of its slices with begin/end_feed_turn, so a
@@ -37103,6 +37163,20 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
             .collect(),
         arrived: changed,
         pending,
+        // **Bytes arrived and the transport did not say there was more**, folded here because a
+        // slice's read boundary is visible nowhere else — see [`crate::coalesce`]. A pane whose
+        // slice ended on a whole capped read is a pane a millisecond ahead of the rest of a
+        // burst; a pane whose slice ended anywhere else has nothing to wait for, and says so.
+        arrived_uncapped: changed && !slice.ends_capped,
+        bytes: bytes.len(),
+        // **The program named its own frame's end during this turn.** That frame is complete and
+        // must not be made to wait behind a timer — however far inside one read the naming fell.
+        sync_bracket_closed: synchronized_update_committed(sync_commits_before, &leaf.session),
+        // **A block is open on this pane.** Asked of every pane and not only the one the frame
+        // path composes: a sibling holding a block open is a sibling whose bytes the parser is
+        // withholding, and a window that waited on its account would be waiting for a program
+        // that has already said where its frame ends.
+        sync_open: leaf.session.synchronized_update_deadline().is_some(),
         // A leaf cannot know whether it is the one the frame path will compose;
         // that is a fact about the tab, and [`drain_tab_pty`] is where it is
         // known and where this is filled in.
@@ -37553,6 +37627,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         wheel_burst: None,
         dropped_files: None,
         last_present_at: None,
+        pty_coalesce: coalesce::Pending::default(),
         perf_trace_us: 0,
         strip_animation_ticked_at: None,
         cards: focus_thumb::CardClock::default(),
@@ -66465,6 +66540,13 @@ impl Runtime<'_> {
 
     fn publish_frame_inner(&mut self, trigger: FrameTrigger, skip_unchanged: bool) -> Result<bool> {
         hang_watch::at(hang_watch::Station::Present);
+        // **Every publish settles the PTY's debt**, and this is the one door they all come
+        // through — a keystroke's frame, an expose, a resize's, the drain's own. What has been
+        // fed is about to be on the glass, or is about to be found no different from what
+        // already is, and either answers the question the wait was asking. Cleared here rather
+        // than at each caller so that a publication path added later cannot forget: an armed
+        // deadline nobody disarms is the failure [`coalesce::Pending`] is written against.
+        self.window.pty_coalesce.settle();
         // **The tripwire.** A frame is about to describe a tab whose seat set
         // may have changed; if it changed without anyone carrying the change to
         // the shells, this is the moment the two pictures diverge and the last
@@ -84002,6 +84084,10 @@ impl Runtime<'_> {
         // Lowered first: see [`PtyWakeSignal::accept`].
         self.window.pty_wake.accept();
         let mut active_changed = false;
+        let mut active_uncapped = false;
+        let mut active_sync_closed = false;
+        let mut active_sync_open = false;
+        let mut active_bytes = 0_usize;
         let mut active_changed_off_focus = false;
         let mut chrome_changed = false;
         let mut moved = false;
@@ -84164,6 +84250,10 @@ impl Runtime<'_> {
             );
             if index == active_tab {
                 active_changed = outcome.arrived;
+                active_uncapped = outcome.arrived_uncapped;
+                active_sync_closed = outcome.sync_bracket_closed;
+                active_sync_open = outcome.sync_open;
+                active_bytes = outcome.bytes;
                 active_changed_off_focus = outcome.arrived_off_focus;
                 // **Only the tab on screen** (R31): a Git page in a tab nobody is
                 // looking at is not a surface looking at a repository, and the
@@ -84271,14 +84361,120 @@ impl Runtime<'_> {
         }
         if active_changed {
             let now = Instant::now();
+            // **On arrival, and before anything decides when to draw.** Output is the event the
+            // caret answers to, so the blink is reset the moment the bytes land, exactly as it
+            // was before the wait existed. Doing it in the publish branch instead left the caret
+            // dark whenever some other publication — a decoration result, an expose — settled
+            // the burst before the wait ran out, because that publication knows nothing about a
+            // caret and the release then had nothing left to do. Three milliseconds of drawing
+            // is not worth a second field to carry this across.
             let cursor_revealed = self.reset_cursor_blink(now);
-            // The vendor parser withholds bytes inside an open DEC 2026 block, so projecting here
-            // cannot expose its intermediate state. It can expose ordinary output before a
-            // trailing BSU or a completed update before the next BSU; the unchanged-frame gate in
-            // publish_frame cheaply suppresses drains containing only still-buffered sync bytes.
-            self.publish_pty_drain_frame(now, cursor_revealed)?;
+            let opened = self.window.pty_coalesce.opened_at(now);
+            // **The one branch this rule adds.** Everything downstream of
+            // [`Self::publish_pty_drain_frame`] is untouched: what changes is only *when* this
+            // turn's picture is composed, and only when the kernel has said there is more of it
+            // on the way. See [`crate::coalesce`] for why that is a fact about the transfer and
+            // not a guess about the bytes.
+            //
+            // The vendor parser withholds bytes inside an open DEC 2026 block, so projecting
+            // here cannot expose its intermediate state. It can expose ordinary output before a
+            // trailing BSU or a completed update before the next BSU; the unchanged-frame gate
+            // in publish_frame cheaply suppresses drains containing only still-buffered sync
+            // bytes.
+            let arrival = coalesce::Arrival {
+                ends_capped: !active_uncapped,
+                ring_pending: pending,
+                sync_open: active_sync_open,
+                sync_closed: active_sync_closed,
+                first_unpublished: Some(opened),
+                // **Nothing supplies one.** A `Fifo` surface does not say when the display will
+                // next take a frame, and this window keeps no frame pacer, so the only bound in
+                // force is the timer. The input stays because it is the shape a pacer will need
+                // the day there is one — not because it is doing anything today.
+                next_display_deadline: None,
+            };
+            let decision = coalesce::decide(arrival, now, coalesce::COALESCE_WINDOW);
+            self.trace_drain(slices_taken, active_bytes, &arrival, decision, opened, now);
+            match decision {
+                coalesce::Publication::WaitUntil(until) => {
+                    self.window.pty_coalesce.until = Some(until);
+                }
+                coalesce::Publication::Now => {
+                    self.publish_pty_drain_frame(now, cursor_revealed)?;
+                }
+            }
         }
         Ok(())
+    }
+
+    /// **The deferred publication, when its wait runs out.**
+    ///
+    /// A sibling of [`Self::finish_synchronized_update_if_due`] and driven from the same place
+    /// for the same reason: it is the other path on which a pane's picture moves with no byte
+    /// passing through the drain. It is also the whole of [`coalesce::Pending`]'s invariant —
+    /// this runs on every turn, so a deadline that has passed is published and disarmed on the
+    /// next wake whatever else the window has been doing.
+    fn finish_pty_coalesce_if_due(&mut self, now: Instant) -> Result<()> {
+        let Some(until) = self.window.pty_coalesce.until else {
+            return Ok(());
+        };
+        if now < until {
+            return Ok(());
+        }
+        self.window.pty_coalesce.until = None;
+        let cursor_revealed = self.reset_cursor_blink(now);
+        self.publish_pty_drain_frame(now, cursor_revealed)
+    }
+
+    /// One line per drain turn, and only when `BT_PERF_TRACE` asked for one.
+    ///
+    /// The publication rule is otherwise invisible: its whole effect is a frame that did not
+    /// happen, which no existing line reports. The owner's trace runs already record every
+    /// `read(2)` boundary and arrival in the `BT_PTY_DUMP` `.chunks` sidecar, so a run traced
+    /// with both can be replayed against its own recording and every decision here checked.
+    fn trace_drain(
+        &self,
+        slices: usize,
+        bytes: usize,
+        arrival: &coalesce::Arrival,
+        decision: coalesce::Publication,
+        opened: Instant,
+        now: Instant,
+    ) {
+        if !self.app.trace_perf {
+            return;
+        }
+        let (publish, deferred_us, reason) = match decision {
+            coalesce::Publication::Now => (
+                "now",
+                0,
+                if arrival.sync_open {
+                    "sync-block"
+                } else if arrival.sync_closed {
+                    "sync-commit"
+                } else if arrival.ring_pending {
+                    "ring-pending"
+                } else if arrival.ends_capped {
+                    "flood-bound"
+                } else {
+                    "short-read"
+                },
+            ),
+            coalesce::Publication::WaitUntil(until) => (
+                "deferred",
+                until.saturating_duration_since(now).as_micros(),
+                "capped",
+            ),
+        };
+        trace_sink::stderr_line(format!(
+            "BT_PERF_TRACE drain slices={slices} bytes={bytes} capped={} ring_pending={} sync_open={} \
+             sync_closed={} owed_us={} publish={publish} deferred_us={deferred_us} reason={reason}",
+            arrival.ends_capped,
+            arrival.ring_pending,
+            arrival.sync_open,
+            arrival.sync_closed,
+            now.saturating_duration_since(opened).as_micros(),
+        ));
     }
 
     /// **How far every rail on screen has been told its pane's ledger got**
@@ -103444,6 +103640,11 @@ impl Runtime<'_> {
         // rather than the web page's — see [`hang_watch::Station::SyncUpdate`].
         hang_watch::at(hang_watch::Station::SyncUpdate);
         self.finish_synchronized_update_if_due(now)?;
+        // The other road on which a pane's picture moves with no byte passing through the drain:
+        // the bounded wait for the rest of a burst, run out. Beside the sync-update release
+        // because it is the same kind of thing and must not be forgotten on any turn — see
+        // [`coalesce::Pending`].
+        self.finish_pty_coalesce_if_due(now)?;
         // The watcher's own clock (R31's D), beside the rest of this window's:
         // it asks for a wake-up only while it is holding news, and the
         // subscriptions it keeps level with the screen are dropped here the turn
@@ -103672,6 +103873,12 @@ impl Runtime<'_> {
             resize_finish_deadline,
             synchronized_update_deadline,
             live_stability_deadline,
+            // **The bounded wait for the rest of a burst**, and the wake that keeps
+            // [`coalesce::Pending`]'s invariant true: a deferred publication is never `Some`
+            // without this line booking the turn that pays it. A window whose panes are not
+            // mid-burst reports nothing and costs no wake-ups at all, which is every window
+            // almost always.
+            self.window.pty_coalesce.until,
             // A standing credential's ten minutes, and only while one is standing. A window whose
             // panes are asking for nothing reports nothing and costs no wake-ups at all — which is
             // every window, almost always.
@@ -109944,6 +110151,63 @@ mod pty_drain_budget_tests {
         );
     }
 
+    /// **A sibling pane's synchronized update is the window's answer too.**
+    ///
+    /// The window composes one picture, so the question "is a program bracketing its own output
+    /// right now" is asked of every pane and not of the one holding the keyboard. A block open —
+    /// or committed — on a pane beside it is still a reason to publish at once.
+    ///
+    /// Mutation: read either fact off the focused leaf, or fold it with `&` instead of `|`.
+    #[test]
+    fn a_synchronized_update_on_any_pane_survives_the_merge() {
+        let mut all = super::DrainOutcome::default();
+        assert!(!all.sync_open);
+        assert!(!all.sync_bracket_closed);
+        all.merge(super::DrainOutcome {
+            sync_open: true,
+            ..Default::default()
+        });
+        all.merge(super::DrainOutcome {
+            sync_bracket_closed: true,
+            ..Default::default()
+        });
+        all.merge(super::DrainOutcome::default());
+        assert!(
+            all.sync_open && all.sync_bracket_closed,
+            "one pane inside a block answers for the window, and a quiet pane \
+             drained after it does not cancel it"
+        );
+    }
+
+    /// **The caret answers to output arriving, not to the frame that happens to draw it.**
+    ///
+    /// The blink reset stands ahead of the publication decision. Behind it, a burst that was
+    /// deferred and then settled by some *other* publication — a decoration result, an expose —
+    /// left the caret dark until its old 550 ms deadline, because that publication knows nothing
+    /// about a caret and the release found nothing left to do.
+    ///
+    /// Mutation: move the reset into the publish arm, or past `coalesce::decide`.
+    #[test]
+    fn the_caret_is_revealed_when_output_arrives_and_not_when_it_is_drawn() {
+        let drain = method_body("drain_pty");
+        let reset = drain
+            .find("self.reset_cursor_blink(now)")
+            .expect("the drain reveals the caret on output");
+        let decision = drain
+            .find("coalesce::decide(")
+            .expect("the drain decides when to publish");
+        assert!(
+            reset < decision,
+            "the caret is reset on arrival, before anything decides when to draw"
+        );
+        assert_eq!(
+            drain.matches("self.reset_cursor_blink(now)").count(),
+            1,
+            "once per turn and on one road: a second reset is a caret whose \
+             blink phase depends on which branch drew it"
+        );
+    }
+
     /// RED (T-DRAIN-BURST, owner's `diagnostics.log` 2026-09-15) — **a turn is
     /// bounded by a clock as well as by a byte count, and the clock is the one
     /// that ends a burst.**
@@ -109964,6 +110228,59 @@ mod pty_drain_budget_tests {
     /// Mutation: make either bound `<=`, drop either conjunct, or let
     /// `DRAIN_SLICES_PER_TURN` become a number of its own instead of the
     /// quantum-over-slice quotient.
+    /// **The bounded publication wait, pinned as shape**, because none of its four roads can be
+    /// walked in a unit test: arming needs a drain, releasing needs a turn, and both need a
+    /// window. What can be pinned is that each road exists and that there is exactly *one* of
+    /// the one that matters — the settle. A second publication path that forgot it would be a
+    /// deadline nobody disarms, which is the failure [`crate::coalesce::Pending`] is written
+    /// against.
+    ///
+    /// Mutation: arm the wait somewhere other than the drain, settle it at a caller instead of
+    /// at the publish door, drop the release from the turn, or drop the deadline from the fold.
+    #[test]
+    fn the_bounded_publication_wait_is_armed_settled_released_and_woken_once_each() {
+        let drain = method_body("drain_pty");
+        assert!(
+            drain.contains("coalesce::decide("),
+            "the drain is where a turn's picture is deferred or published"
+        );
+        assert!(
+            drain.contains("self.window.pty_coalesce.until = Some(until);"),
+            "and the deferral is written down where the loop's fold can find it"
+        );
+
+        // Spelled in two halves so that these assertions are not themselves two of the matches
+        // they are counting.
+        let settle = format!("pty_coalesce.{}", "settle();");
+        assert!(
+            method_body("publish_frame_inner").contains(&settle),
+            "every publish comes through this door, so the debt is settled at it"
+        );
+        assert_eq!(
+            SOURCE.matches(&settle).count(),
+            1,
+            "one settle and no other: a second one is a caller taking on a \
+             responsibility the door already has, and a third is the one that \
+             will be forgotten"
+        );
+
+        assert!(
+            method_body("turn").contains("self.finish_pty_coalesce_if_due(now)?;"),
+            "a wait that has run out is paid on the very next turn, whatever woke it"
+        );
+        assert!(
+            method_body("finish_pty_coalesce_if_due")
+                .contains("self.window.pty_coalesce.until = None;"),
+            "and paying it disarms it, before anything can fail on the way to the glass"
+        );
+
+        assert!(
+            SOURCE.contains("\n            self.window.pty_coalesce.until,\n"),
+            "the deadline stands in the window's fold, which is what books the \
+             wake that pays it"
+        );
+    }
+
     #[test]
     fn a_turn_stops_at_the_clock_or_at_the_quantum_whichever_comes_first() {
         let budget = super::DRAIN_TURN_BUDGET;

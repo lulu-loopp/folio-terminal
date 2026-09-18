@@ -3602,6 +3602,15 @@ impl DualPlaneSession {
         self.terminal.synchronized_update_deadline()
     }
 
+    /// **How many synchronized updates this pane has committed**, however they ended.
+    ///
+    /// Compared across a feed rather than read at an instant, because a block that opens and
+    /// commits inside one `read(2)` leaves the deadline `None` on both sides of that feed. See
+    /// [`TerminalAdapter::synchronized_update_commits`].
+    pub fn synchronized_update_commits(&self) -> u64 {
+        self.terminal.synchronized_update_commits()
+    }
+
     /// Commit a DEC 2026 update when its parser-owned timeout expires without ESU.
     pub fn finish_synchronized_update(
         &mut self,
