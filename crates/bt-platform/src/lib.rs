@@ -11701,6 +11701,7 @@ mod platform_door_tests {
 /// constructor ungated, and this goes red naming the file and the declaration.
 #[cfg(test)]
 mod native_window_door_tests {
+    use std::collections::BTreeSet;
     use std::path::{Path, PathBuf};
 
     /// The spellings that are a Windows handle however they are dressed.
@@ -11858,6 +11859,12 @@ mod native_window_door_tests {
     /// a line-based reading cannot answer that. The definition itself is the
     /// one occurrence outside such a module, and it is named.
     ///
+    /// **A gated module is not always text in the file that gates it**
+    /// (2026-09-18). It is `mod name { … }` or it is `mod name;` with the body
+    /// in a file beside it, and the two say exactly the same thing about what is
+    /// test-only. [`wholly_test_files`] is the half of the answer the brace
+    /// count cannot give.
+    ///
     /// MUTATION: call `stand_in` from any shipped path and this fails naming
     /// the file and the line.
     #[test]
@@ -11879,11 +11886,24 @@ mod native_window_door_tests {
             found.len()
         );
 
+        let (wholly_test, unfollowed) = wholly_test_files(&found);
+        assert!(
+            unfollowed.is_empty(),
+            "a `#[cfg(test)]` module is declared out of line and this walk cannot say which file \
+             holds it, so it cannot say what is test-only either — which is worse than saying so: \
+             {unfollowed:#?}"
+        );
+
         let mut outside = Vec::new();
         for file in found {
             let Ok(text) = std::fs::read_to_string(&file) else {
                 continue;
             };
+            // The whole file is somebody's `#[cfg(test)] mod …;`, so every line
+            // in it is inside that module.
+            if wholly_test.contains(&file) {
+                continue;
+            }
             let spans = test_module_spans(&text);
             for (at, _) in text.match_indices("stand_in(") {
                 // **On a word boundary**, for the quiet door's reason one file
@@ -11940,41 +11960,280 @@ mod native_window_door_tests {
     /// in that module to name `stand_in` was reported as a shipped path. A gate
     /// that answers about a file it cannot parse is worse than one that says it
     /// cannot, which is why this is a fix rather than an exception.
+    /// **A gate stands on exactly one item, and that item ends at the first `{`
+    /// or `;` after it** (2026-09-18). Reading further is how a gate on a
+    /// declaration came to claim the next item's braces.
     fn test_module_spans(text: &str) -> Vec<(usize, usize)> {
         let bytes = text.as_bytes();
         let mut spans = Vec::new();
-        for gate in ["#[cfg(test)]", "#[cfg(all(test"] {
-            for (at, _) in text.match_indices(gate) {
-                let Some(open) = text[at..].find('{').map(|offset| at + offset) else {
-                    continue;
-                };
-                let mut depth = 0_i32;
-                let mut index = open;
-                while index < bytes.len() {
-                    match bytes[index] {
-                        b'r' if raw_string_opens_at(bytes, index) => {
-                            index = skip_raw_string(bytes, index);
+        for at in gate_positions(text) {
+            let Some(GatedItem::Inline { open }) = gated_item(bytes, at) else {
+                continue;
+            };
+            let mut depth = 0_i32;
+            for index in code_indices(bytes, open) {
+                match bytes[index] {
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            spans.push((open, index));
+                            break;
                         }
-                        b'"' => index = skip_string(bytes, index),
-                        b'\'' => index = skip_char(bytes, index),
-                        b'/' if bytes.get(index + 1) == Some(&b'/') => {
-                            index += text[index..].find('\n').unwrap_or(bytes.len() - index);
-                        }
-                        b'{' => depth += 1,
-                        b'}' => {
-                            depth -= 1;
-                            if depth == 0 {
-                                spans.push((open, index));
-                                break;
-                            }
-                        }
-                        _ => {}
                     }
-                    index += 1;
+                    _ => {}
                 }
             }
         }
         spans
+    }
+
+    /// Where each `#[cfg(test)]` or `#[cfg(all(test…` stands in `text`, in the
+    /// order they are written.
+    fn gate_positions(text: &str) -> Vec<usize> {
+        let mut gates: Vec<usize> = ["#[cfg(test)]", "#[cfg(all(test"]
+            .into_iter()
+            .flat_map(|gate| text.match_indices(gate).map(|(at, _)| at))
+            .collect();
+        gates.sort_unstable();
+        gates
+    }
+
+    /// Whether a gate's item carries its body here or names a file for it.
+    enum GatedItem {
+        /// `mod name { … }`, and `open` is that brace.
+        Inline { open: usize },
+        /// An item that ends in a semicolon — `mod name;`, and also a gated
+        /// `const` or `use`, which is not a module at all. Either way there is
+        /// no body here to take a span from; [`out_of_line_modules`] is what
+        /// reads the ones that name a file.
+        Declaration,
+    }
+
+    /// The item the gate at `at` stands on.
+    ///
+    /// **The first `{` or `;`, whichever comes first, and nothing after it.**
+    /// Until 2026-09-18 this looked only for a `{`, so a gate on `mod tests;`
+    /// — or on a gated `const`, of which `bt-app` has several — reached past its
+    /// own item and took the braces of whatever product item came next, and
+    /// every `stand_in` inside that item was exempted in silence. An
+    /// over-exemption is the failure this gate cannot see, so it is the one the
+    /// reading has to make impossible.
+    fn gated_item(bytes: &[u8], at: usize) -> Option<GatedItem> {
+        code_indices(bytes, at).find_map(|index| match bytes[index] {
+            b'{' => Some(GatedItem::Inline { open: index }),
+            b';' => Some(GatedItem::Declaration),
+            _ => None,
+        })
+    }
+
+    /// The indices of the bytes at and after `at` that are **code**: everything
+    /// inside a string, a raw string, a character literal or a line comment is
+    /// stepped over rather than yielded.
+    ///
+    /// One reader for every question this module asks of a source file — where
+    /// an item ends, how deep the braces are, what a declaration names — so that
+    /// a literal spelling `{`, `;` or `mod` cannot answer any of them. The
+    /// note on [`test_module_spans`] carries the case that made the skipping
+    /// necessary in the first place.
+    fn code_indices(bytes: &[u8], at: usize) -> impl Iterator<Item = usize> + '_ {
+        let mut index = at;
+        std::iter::from_fn(move || {
+            while index < bytes.len() {
+                let here = index;
+                match bytes[here] {
+                    b'r' if raw_string_opens_at(bytes, here) => {
+                        index = skip_raw_string(bytes, here) + 1;
+                    }
+                    b'"' => index = skip_string(bytes, here) + 1,
+                    b'\'' => {
+                        let past = skip_char(bytes, here);
+                        index = past + 1;
+                        // A quote that opens nothing is a lifetime, and a
+                        // lifetime is code.
+                        if past == here {
+                            return Some(here);
+                        }
+                    }
+                    b'/' if bytes.get(here + 1) == Some(&b'/') => {
+                        index = bytes[here..]
+                            .iter()
+                            .position(|byte| *byte == b'\n')
+                            .map_or(bytes.len(), |offset| here + offset);
+                    }
+                    _ => {
+                        index = here + 1;
+                        return Some(here);
+                    }
+                }
+            }
+            None
+        })
+    }
+
+    /// One module a file declares out of line — `mod name;`, with the body in a
+    /// file of its own.
+    struct Declaration {
+        name: String,
+        /// The file named by a `#[path = "…"]` written above it, if there is one.
+        path: Option<String>,
+        /// Whether a `#[cfg(test)]` stands on it. **This is the owner of the
+        /// fact "the file it names is test-only"** — never the file's name.
+        gated: bool,
+        /// The line it is written on, for the message when it cannot be followed.
+        line: usize,
+    }
+
+    /// Every module `text` declares out of line.
+    ///
+    /// The `mod` keyword is found in the code — a `#[path = "mod_a.rs"]` is a
+    /// string and is stepped over — and what stands above it is then read as
+    /// lines, which is sound for this one question because an attribute on a
+    /// module declaration is written above it and the read stops at the first
+    /// line that is neither an attribute, a comment, nor blank.
+    fn out_of_line_modules(text: &str) -> Vec<Declaration> {
+        let bytes = text.as_bytes();
+        let is_word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+        let mut found = Vec::new();
+        for at in code_indices(bytes, 0) {
+            // The keyword, at both its edges: `submod` and `mode` are names.
+            if !bytes[at..].starts_with(b"mod")
+                || (at > 0 && is_word(bytes[at - 1]))
+                || bytes.get(at + 3).copied().is_some_and(is_word)
+            {
+                continue;
+            }
+            let mut name = String::new();
+            let mut after_name = false;
+            let mut ends_declaration = false;
+            for index in code_indices(bytes, at + 3) {
+                let byte = bytes[index];
+                if byte.is_ascii_whitespace() {
+                    after_name = !name.is_empty();
+                    continue;
+                }
+                if is_word(byte) && !after_name {
+                    name.push(char::from(byte));
+                    continue;
+                }
+                ends_declaration = byte == b';';
+                break;
+            }
+            if name.is_empty() || !ends_declaration {
+                continue;
+            }
+            let (gated, path) = attributes_above(text, at);
+            found.push(Declaration {
+                name,
+                path,
+                gated,
+                line: text[..at].lines().count(),
+            });
+        }
+        found
+    }
+
+    /// What is written above the item at `at`: whether a `cfg(test)` gate stands
+    /// on it, and the file any `#[path = "…"]` names.
+    fn attributes_above(text: &str, at: usize) -> (bool, Option<String>) {
+        let mut written: Vec<&str> = Vec::new();
+        let line_start = text[..at].rfind('\n').map_or(0, |newline| newline + 1);
+        written.push(text[line_start..at].trim());
+        for line in text[..line_start].lines().rev() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with("//") {
+                continue;
+            }
+            if !trimmed.starts_with("#[") {
+                break;
+            }
+            written.push(trimmed);
+        }
+        let gated = written
+            .iter()
+            .any(|line| line.starts_with("#[cfg(test)]") || line.starts_with("#[cfg(all(test"));
+        let path = written.iter().find_map(|line| {
+            let rest = line.strip_prefix("#[path")?.split_once('"')?.1;
+            rest.split_once('"').map(|(named, _)| named.to_owned())
+        });
+        (gated, path)
+    }
+
+    /// The file a module `declaring` declares out of line lives in.
+    ///
+    /// Rust's own rule, and no other: a `#[path]` on a module declared at the
+    /// top of a file is relative to the directory that file is in; otherwise a
+    /// crate root and a `mod.rs` own the directory they are in, and every other
+    /// file owns a directory named after it.
+    fn module_file(declaring: &Path, module: &Declaration) -> Option<PathBuf> {
+        let directory = declaring.parent()?;
+        if let Some(named) = &module.path {
+            let file = directory.join(named);
+            return file.is_file().then_some(file);
+        }
+        let stem = declaring.file_stem()?.to_str()?;
+        let directory = match stem {
+            "lib" | "main" | "mod" => directory.to_path_buf(),
+            owner => directory.join(owner),
+        };
+        let beside = directory.join(format!("{}.rs", module.name));
+        if beside.is_file() {
+            return Some(beside);
+        }
+        let nested = directory.join(&module.name).join("mod.rs");
+        nested.is_file().then_some(nested)
+    }
+
+    /// **Every file of `files` that exists only under `cfg(test)`**, and every
+    /// gated declaration this walk could not follow to a file.
+    ///
+    /// The fact is owned by the declaration: a file is here because a
+    /// `#[cfg(test)] mod …;` names it, never because of what it is called.
+    /// Transitively, too — a file that is only compiled under `cfg(test)`
+    /// compiles its own children under it as well, whether or not they carry a
+    /// gate of their own, because there is no build in which their parent is
+    /// there and they are not.
+    fn wholly_test_files(files: &[PathBuf]) -> (BTreeSet<PathBuf>, Vec<String>) {
+        let read = |file: &Path| std::fs::read_to_string(file).ok();
+        let mut wholly = BTreeSet::new();
+        let mut unfollowed = Vec::new();
+        let mut frontier = Vec::new();
+        for file in files {
+            let Some(text) = read(file) else { continue };
+            for module in out_of_line_modules(&text).iter().filter(|it| it.gated) {
+                match module_file(file, module) {
+                    Some(named) => {
+                        if wholly.insert(named.clone()) {
+                            frontier.push(named);
+                        }
+                    }
+                    None => unfollowed.push(format!(
+                        "{}:{}: mod {};",
+                        file.display(),
+                        module.line,
+                        module.name
+                    )),
+                }
+            }
+        }
+        while let Some(file) = frontier.pop() {
+            let Some(text) = read(&file) else { continue };
+            for module in out_of_line_modules(&text) {
+                let Some(named) = module_file(&file, &module) else {
+                    unfollowed.push(format!(
+                        "{}:{}: mod {};",
+                        file.display(),
+                        module.line,
+                        module.name
+                    ));
+                    continue;
+                };
+                if wholly.insert(named.clone()) {
+                    frontier.push(named);
+                }
+            }
+        }
+        (wholly, unfollowed)
     }
 
     /// Whether the `r` at `at` opens a raw string rather than sitting inside a
@@ -12054,6 +12313,109 @@ mod native_window_door_tests {
             (Some(_), Some(b'\'')) => at + 2,
             _ => at,
         }
+    }
+
+    /// RED — **a gate on a declaration covers the file it names, and never the
+    /// item that happens to follow it** (2026-09-18).
+    ///
+    /// The reading this gate makes is the whole of what it can say, so the
+    /// reading is tested against text rather than only against the tree — the
+    /// tree has the cases it has today, and the ones that matter are the ones
+    /// somebody writes tomorrow.
+    ///
+    /// The first assertion is the one that was red before this day's change:
+    /// the old scan took the *next* `{` after a gate, whatever item it belonged
+    /// to, so `struct Shipped` below was inside a "test module" and every
+    /// `stand_in` in it was exempted without a word.
+    #[test]
+    fn a_gate_reads_its_own_item_and_the_file_it_names() {
+        let declared = "#[cfg(test)]\nmod tests;\n\nstruct Shipped {\n    door: usize,\n}\n";
+        assert!(
+            test_module_spans(declared).is_empty(),
+            "the braces of the item after a gated declaration are not a test module's body"
+        );
+        let modules = out_of_line_modules(declared);
+        assert_eq!(modules.len(), 1, "one declaration, and `struct` is not one");
+        assert!(
+            modules[0].gated && modules[0].name == "tests" && modules[0].path.is_none(),
+            "the gate stands on `mod tests;`, which is what makes that file test-only"
+        );
+
+        // An inline gated module still gives up its own body, and only that.
+        let inline = "#[cfg(test)]\nmod tests {\n    fn one() {}\n}\nstruct Shipped;\n";
+        let spans = test_module_spans(inline);
+        assert_eq!(spans.len(), 1, "the inline module is still read");
+        assert!(
+            inline[spans[0].0..=spans[0].1].contains("fn one")
+                && !inline[spans[0].0..=spans[0].1].contains("Shipped"),
+            "the span is the module's braces and stops at them"
+        );
+
+        // A declaration with no gate says nothing about the file it names, and a
+        // gate that is spelled inside a string is not a gate.
+        let plain =
+            out_of_line_modules("mod files;\nconst NEEDLE: &str = \"#[cfg(test)]\\nmod x;\";\n");
+        assert_eq!(
+            plain.len(),
+            1,
+            "the one in the literal is text, not a module"
+        );
+        assert!(
+            !plain[0].gated,
+            "an ungated `mod files;` names a file this crate ships"
+        );
+
+        // `#[path]` is honoured, and it is read from above the declaration.
+        let pathed =
+            out_of_line_modules("#[cfg(test)]\n#[path = \"journeys_tests.rs\"]\nmod journeys;\n");
+        assert_eq!(pathed.len(), 1);
+        assert!(
+            pathed[0].gated && pathed[0].path.as_deref() == Some("journeys_tests.rs"),
+            "the file a gated module is told to read is the file that is test-only"
+        );
+    }
+
+    /// RED — **and on this tree, the declaration is followed to the file.**
+    ///
+    /// The half above is about the reading; this is about the answer. `bt-app`
+    /// declares its largest test module out of line since 2026-09-18, and two
+    /// `stand_in` calls live in the file it names — so if this classification
+    /// ever stops working, `a_stand_in_window_is_only_named_by_tests` goes red
+    /// and names a test as a shipped path.
+    #[test]
+    fn the_out_of_line_test_modules_of_this_workspace_are_followed() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .canonicalize()
+            .expect("the crates directory, one above this crate");
+        let mut found = Vec::new();
+        walk(&root, &mut found);
+        found.retain(|path| {
+            path.components()
+                .any(|component| component.as_os_str() == "src")
+        });
+        let (wholly, unfollowed) = wholly_test_files(&found);
+        assert!(unfollowed.is_empty(), "{unfollowed:#?}");
+        for named in [
+            // Declared `#[cfg(test)] mod tests;` in `main.rs`, beside it.
+            "bt-app/src/tests.rs",
+            // Declared with a `#[path]`, which is the other spelling.
+            "bt-app/src/journeys_tests.rs",
+            // Declared in `attention.rs`, so it lives in `attention/`.
+            "bt-app/src/attention/tests.rs",
+        ] {
+            let file = root.join(named.replace('/', std::path::MAIN_SEPARATOR_STR));
+            assert!(
+                wholly.contains(&file),
+                "{named} is a `#[cfg(test)]` module's whole body and is not classified as one"
+            );
+        }
+        assert!(
+            !wholly.contains(
+                &root.join("bt-app/src/main.rs".replace('/', std::path::MAIN_SEPARATOR_STR))
+            ),
+            "a file that declares a test module is not itself one"
+        );
     }
 
     /// RED — **the handle is spelled twice, and each spelling is gated.**
