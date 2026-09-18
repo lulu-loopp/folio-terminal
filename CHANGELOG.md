@@ -6,6 +6,22 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Fixed
+
+- **A multi-line formula scrolled partly off the top of a full-screen
+  program's screen no longer swallows the formula below it, or shows half of
+  itself as a picture.** When a program like Claude Code moves its output up and
+  a formula's opening `$$` goes off the top of the window, what is left on
+  screen is the tail of that formula — and Folio now reads it as one: the `$$`
+  still visible is the formula's closing one, not the opening one of something
+  new. It used to be read as an opening `$$`, which swallowed everything down to
+  the next formula's own `$$`, so the next formula stayed as plain text however
+  long you looked at it. The tail itself is now left alone as well: where a
+  formula's `\begin{aligned}` was still on screen it was being typeset on its
+  own, as a picture of part of a formula with the formula's last line sitting
+  underneath it as text. A formula whose beginning has scrolled away stays text
+  until you scroll it back.
+
 ## 0.4.2-preview — 2026-09-17
 
 ### Added
