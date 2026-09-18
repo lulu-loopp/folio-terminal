@@ -22,6 +22,17 @@ All notable changes to Folio are recorded here. The format follows
   fade and slide in the window, and a window with nothing moving in it still
   falls completely silent.
 
+- **A typeset formula's highlight now leaves as soon as the pointer does, like
+  every other hover.** Move off a formula and its shading and its two small
+  marks stayed for another half-second before they began to go — the only thing
+  in the window that waited. They now start leaving on the same movement that
+  takes a pane header's buttons, a tab's close, a link's underline and a tooltip
+  away, and they fade out over the same ninety milliseconds they faded in on.
+  Reaching for one of the two marks still cannot drop the highlight: the marks
+  stand inside the formula's own shaded area, so the pointer never leaves it to
+  get to them. A formula caught in the middle of turning over goes on turning
+  over — looking away no longer cuts it short.
+
 ## 0.4.2-preview — 2026-09-18
 
 ### Added

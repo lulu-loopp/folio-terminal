@@ -12897,7 +12897,6 @@ struct WindowRuntime {
     peek_thumbnail: Option<PeekThumbnail>,
     peek_thumbnail_pending: Option<PeekThumbnailTarget>,
     math_hover_anchor: Option<MathBlockAnchor>,
-    math_hover_clear_at: Option<Instant>,
     /// **The picture the formula hover was last answered against** — see
     /// [`Runtime::refresh_math_hover_against_the_picture`] (owner's report
     /// 2026-09-18).
@@ -12915,14 +12914,15 @@ struct WindowRuntime {
     /// [`tooltip::TOOLTIP_FADE`] once the pointer is on a band — the tip's own
     /// ninety milliseconds, which is the one duration this window spends on
     /// everything a hover reveals, and which the glance card was ruled onto the
-    /// day before this. They fade out again over the same span when the band's
-    /// 500 ms grace runs out, and when the block underneath them changes shape
-    /// they *travel* to their new boxes; [`formula_tools::FormulaToolFollow`] is
-    /// all three, with no second clock beside it.
+    /// day before this. They fade out again over the same span the instant the
+    /// pointer leaves (owner's ruling 2026-09-18), and when the block underneath
+    /// them changes shape they *travel* to their new boxes;
+    /// [`formula_tools::FormulaToolFollow`] is all three, with no second clock
+    /// beside it.
     ///
     /// **Deliberately not the same fact as [`Self::math_hover_anchor`].** That
-    /// field is the band the pointer is on and it dies the instant the grace
-    /// runs out; this one outlives it by the exit fade, and it is written from
+    /// field is the band the pointer is on and it dies the instant the pointer
+    /// leaves it; this one outlives it by the exit fade, and it is written from
     /// the *picture in hand* rather than from the gesture — which is the whole of
     /// §7.1.5p ⑥'s "the marks are drawn from the picture that lit the band",
     /// extended by the evening's report to every picture in which the band's
@@ -19367,6 +19367,28 @@ fn button_router_position(
         ElementState::Released => live.or(last_seen),
         ElementState::Pressed => live,
     }
+}
+
+/// **Why a formula's hover ended**, because the two answers differ about one
+/// thing and nothing else (owner's ruling 2026-09-18).
+///
+/// [`Runtime::leave_hovered_math`] is one door and it stays one door: the anchor
+/// is dropped, the marks start the ninety milliseconds they arrived on, and the
+/// pane is told to stop lighting the block, whichever of these brought it here.
+/// What the two cannot share is a block that is still changing face — see
+/// §7.1.5p ⑪. A session leaving the screen has to land that journey, because
+/// there is about to be no picture for it to land against; a hand moving off a
+/// band must not, because the block is still on the glass and cutting its motion
+/// short for the one reader who looked away is the opposite of what the journey
+/// is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MathHoverExit {
+    /// The pointer moved off the band and its marks, or out of the window
+    /// altogether. The block stays where it is.
+    PointerLeft,
+    /// The band went with its session: a tab switch, a pane close, a focus
+    /// change (audit 2026-09-15, RB-3).
+    BandLeftTheScreen,
 }
 
 /// Who owns the pointer between a press and its release.
@@ -37722,7 +37744,6 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         peek_thumbnail: None,
         peek_thumbnail_pending: None,
         math_hover_anchor: None,
-        math_hover_clear_at: None,
         math_hover_revision: 0,
         math_tools: None,
         math_toggle: None,
@@ -39978,7 +39999,7 @@ impl Runtime<'_> {
         //
         // Above `hover_pane = None` a dozen lines down for the same reason it is
         // above the assignment: the sweep asks which pane the pointer is in.
-        self.leave_hovered_math(Instant::now())?;
+        self.leave_hovered_math(Instant::now(), MathHoverExit::BandLeftTheScreen)?;
         self.window.active_tab = index;
         // Looking at a tab is what answers every claim it was making, so the
         // dot goes out here — the unread mark, the bell and the failure all at
@@ -55077,7 +55098,7 @@ impl Runtime<'_> {
         // certain, and nothing has moved yet — the sweep can still reach the
         // session that is about to be removed, and the frame this publishes is
         // struck against a layout that is still the one on the glass.
-        self.leave_hovered_math(Instant::now())?;
+        self.leave_hovered_math(Instant::now(), MathHoverExit::BandLeftTheScreen)?;
         let metrics = self.seat_metrics();
         if !self.seats.close_seat(&metrics, seat) {
             return Ok(());
@@ -55588,7 +55609,7 @@ impl Runtime<'_> {
     /// one nothing about the pointer reaches: a pane chord, or the attention
     /// queue jumping to a seat.
     fn focus_seat(&mut self, seat: SeatId) -> Result<()> {
-        self.leave_hovered_math(Instant::now())?;
+        self.leave_hovered_math(Instant::now(), MathHoverExit::BandLeftTheScreen)?;
         self.take_keyboard_into(seat)?;
         self.settle_focus_on(seat)
     }
@@ -87199,9 +87220,15 @@ impl Runtime<'_> {
         }
         self.dismiss_peek()?;
         let hyperlink_changed = self.window.hyperlink_hover.clear();
-        if self.window.math_hover_anchor.is_some() {
-            self.window.math_hover_clear_at = Some(Instant::now() + Duration::from_millis(500));
-        }
+        // **And the band the pointer was on, at once** (owner's ruling
+        // 2026-09-18: 「为什么不能和其它 hover 保持一致」). A pointer that has
+        // left the window has left the band, and every other hover on the two
+        // lines above this one — the run a pane head wears, the `×` on a tab,
+        // the settings row, the underline under a link — is taken on this very
+        // door with no clock between. The marks still leave over the ninety
+        // milliseconds they arrived on; what is gone is the half-second of
+        // waiting before that begins. See [`Self::leave_hovered_math`].
+        self.leave_hovered_math(Instant::now(), MathHoverExit::PointerLeft)?;
         // Whatever pane the pointer was standing in is standing in none now, and owes the removal
         // of its marks — which, if it was not the focused one, only a redraw can deliver.
         self.window.hover_pane = None;
@@ -87367,32 +87394,52 @@ impl Runtime<'_> {
     /// it: `math_hit` already answers from that pane's frame, and the hover it sets is written to
     /// that pane's own shell. Writing it to the focused shell instead would darken a block in the
     /// pane holding the keyboard because the pointer was somewhere else entirely.
+    ///
+    /// **The band is held while the pointer is on it or on either mark, and let
+    /// go the instant it is on neither** (owner's ruling 2026-09-18: 「为什么不能
+    /// 和其它 hover 保持一致」). There is one question here and it is
+    /// [`Self::math_hit`]'s, which is what makes that sentence structural rather
+    /// than a pair of tests: since the ruling of 2026-09-15 ② (§7.1.5p ⑨ ii) the
+    /// two marks stand *inside* the band's own rectangle, in the inset it
+    /// reserves for them, so `math_hit`'s three answers — the `‹›`, the `⧉` and
+    /// the block — are three regions of one box with no gap between them and
+    /// nothing outside it. Reaching for a mark cannot drop the band, because the
+    /// pointer never leaves the band to get there.
+    ///
+    /// That is what the half-second this used to arm was for. The mock-up's
+    /// `transition-delay: .5s` forgave a pointer crossing from a band to marks
+    /// that stood *beside* it, which was ③'s geometry and has not been this
+    /// window's since ⑨ overturned it; what the delay bought after that was a
+    /// highlight that stayed lit half a second after the hand had gone, which is
+    /// what the owner reported, and no other hover in this window does it — a
+    /// pane head's run, a tab's `×`, a link's underline and the tip all go on
+    /// the pointer's own event.
     fn update_math_hover(&mut self, now: Instant) -> Result<Option<MathHit>> {
-        let hit = self.math_hit().map(|(_, hit)| hit);
-        if let Some(hit) = hit.as_ref() {
-            self.window.math_hover_clear_at = None;
-            if self.window.math_hover_anchor.as_ref() != Some(&hit.anchor) {
-                self.window.math_hover_anchor = Some(hit.anchor.clone());
-                // **And no clock is set here** (owner's report 2026-09-14
-                // evening). Until that report the marks' fade began on this
-                // line, from the gesture — and a fade begun by the gesture is a
-                // fade whose first frames are drawn from the picture that was in
-                // hand *before* it, which is the stale-overlay half of the very
-                // defect §7.1.5p ⑥ was written about. The marks arrive when the
-                // picture that lights the band arrives, which is
-                // [`Self::sync_math_tools`]'s answer and nobody else's. Crossing
-                // straight from one formula to the next is a change of anchor,
-                // so that door still sees a second arrival rather than a move.
-                if self.set_hovered_math(Some(hit.anchor.clone())) {
-                    self.repaint_hovered_pane()?;
-                }
+        let Some(hit) = self.math_hit().map(|(_, hit)| hit) else {
+            // On neither the band nor either mark: the hover is over, on this
+            // event and not half a second after it. `leave_hovered_math` costs
+            // one `Option` read for a window that was not hovering a formula,
+            // which is what lets this door be unconditional.
+            self.leave_hovered_math(now, MathHoverExit::PointerLeft)?;
+            return Ok(None);
+        };
+        if self.window.math_hover_anchor.as_ref() != Some(&hit.anchor) {
+            self.window.math_hover_anchor = Some(hit.anchor.clone());
+            // **And no clock is set here** (owner's report 2026-09-14
+            // evening). Until that report the marks' fade began on this
+            // line, from the gesture — and a fade begun by the gesture is a
+            // fade whose first frames are drawn from the picture that was in
+            // hand *before* it, which is the stale-overlay half of the very
+            // defect §7.1.5p ⑥ was written about. The marks arrive when the
+            // picture that lights the band arrives, which is
+            // [`Self::sync_math_tools`]'s answer and nobody else's. Crossing
+            // straight from one formula to the next is a change of anchor,
+            // so that door still sees a second arrival rather than a move.
+            if self.set_hovered_math(Some(hit.anchor.clone())) {
+                self.repaint_hovered_pane()?;
             }
-        } else if self.window.math_hover_anchor.is_some()
-            && self.window.math_hover_clear_at.is_none()
-        {
-            self.window.math_hover_clear_at = Some(now + Duration::from_millis(500));
         }
-        Ok(hit)
+        Ok(Some(hit))
     }
 
     /// **Read the picture in hand against the marks on the glass**, and answer
@@ -87510,12 +87557,14 @@ impl Runtime<'_> {
     /// it. Named, the stale frame simply has no lit placement under that name and
     /// answers `None`, which is the only honest thing a stale frame can say.
     ///
-    /// **Still the shells and not the pointer's pane**: the anchor outlives the
-    /// pointer by the 500ms grace, so a pointer that has left the *pane* leaves a
-    /// band still wearing its ground for half a second, and marks that went
-    /// looking for the pointer's own pane would have vanished a beat before the
-    /// floor they stand beside. The pointer still decides which mark is *lit*,
-    /// which is the only question it is the authority on.
+    /// **Still the shells and not the pointer's pane**: the marks outlive the
+    /// pointer by the ninety milliseconds they leave over (owner's ruling
+    /// 2026-09-18 took the half-second that used to come first), so a pointer
+    /// that has left the *pane* leaves marks that are still fading, and marks
+    /// that went looking for the pointer's own pane would have vanished on the
+    /// frame the hand crossed the edge instead of fading where they stand. The
+    /// pointer still decides which mark is *lit*, which is the only question it
+    /// is the authority on.
     ///
     /// **The pane's own viewport goes in, and the same one moves the answer
     /// out** (audit 2026-09-15, RC-2). The renderer cuts a band's boxes to the
@@ -87734,10 +87783,10 @@ impl Runtime<'_> {
     /// **One rule and one door.** Nothing here decides anything: it re-asks the
     /// very question the pointer asks, through the very function the pointer
     /// goes through, so a band lit by a move and a band lit by a scroll cannot
-    /// come to two different answers. The anchor going to `None` arms the same
-    /// 500 ms grace a pointer leaving arms, and a band that scrolls back under
-    /// the pointer inside that grace cancels it exactly as a returning pointer
-    /// does — `update_math_hover`'s first branch, unchanged. The marks do not
+    /// come to two different answers. A band that has gone out from under the
+    /// pointer ends the hover exactly as a pointer leaving a band does — the
+    /// same door, on the same terms, since the owner's ruling of 2026-09-18 made
+    /// that door immediate for both. The marks do not
     /// flicker through any of it: [`Self::set_hovered_math`] answers `false`
     /// when the shells already believe what they are being told, and
     /// [`formula_tools::FormulaToolFollow`] keys on
@@ -87773,69 +87822,70 @@ impl Runtime<'_> {
         Ok(())
     }
 
-    fn clear_math_hover_if_due(&mut self, now: Instant) -> Result<()> {
-        if self
-            .window
-            .math_hover_clear_at
-            .is_none_or(|deadline| now < deadline)
-        {
-            return Ok(());
-        }
-        self.leave_hovered_math(now)
-    }
-
     /// **The band under the pointer stops being under the pointer** — the one
     /// door that ends a formula's hover, whatever ended it.
     ///
-    /// [`Self::clear_math_hover_if_due`]'s body since the audit of 2026-09-15
-    /// (RB-3), because the grace running out was not the only way this fact can
-    /// stop being true and it was the only door that said so. A hover is a fact
+    /// The pointer's own door since the owner's ruling of 2026-09-18, and the
+    /// session's since the audit of 2026-09-15 (RB-3) — because leaving the band
+    /// was never the only way this fact can stop being true. A hover is a fact
     /// about **a session**: the anchor names a block in one shell's transcript,
     /// `math_tool_placement` looks for it in the active tab's leaves, and
     /// `sync_math_tools`' last arm deliberately *keeps* the marks where they are
     /// when no picture knows the band. Switch tabs by keyboard and all three
     /// hold: the anchor is a block in a transcript nobody can see, no frame in
     /// the new tab knows it, and the two marks therefore stood on the glass over
-    /// the new tab's content until the pointer happened to move. Now every door
-    /// that takes that session off the screen comes through here.
+    /// the new tab's content until the pointer happened to move. Every door that
+    /// takes that session off the screen comes through here.
     ///
     /// **The marks leave with the band, and they leave over the ninety
-    /// milliseconds they arrived on** (owner's report 2026-09-14 evening).
+    /// milliseconds they arrived on** (owner's report 2026-09-14 evening):
+    /// §7.1.5p ② spent the glance card's asymmetry here — a fade in and no fade
+    /// out — and the owner asked for the pair, so the ground goes with the
+    /// pane's next picture and the two marks fade where they stand. `math_tools`
+    /// therefore outlives `math_hover_anchor` by exactly that span, and
+    /// `sync_math_tools` — which reads the anchor, not this door — is what
+    /// finally drops it.
     ///
-    /// The 500ms the pointer's own door spends first is the grace — the
-    /// mock-up's own `transition-delay: .5s` on leaving, which forgives a
-    /// pointer clipping the corner of a mark on its way to it — and it is
-    /// untouched, *and it is that door's*: a tab switch is not a hand hesitating
-    /// on an edge and waits for nothing. What the report revised is what happens
-    /// when the hover ends: §7.1.5p ② spent the glance card's asymmetry here (a
-    /// fade in and no fade out) and the owner asked for the pair, so the ground
-    /// still goes with the pane's next picture and the two marks fade where they
-    /// stand. `math_tools` therefore outlives `math_hover_anchor` by exactly
-    /// that span, and `sync_math_tools` — which reads the anchor, not this door
-    /// — is what finally drops it.
-    fn leave_hovered_math(&mut self, now: Instant) -> Result<()> {
+    /// **And they begin leaving on the pointer's own event** (owner's ruling
+    /// 2026-09-18: 「为什么不能和其它 hover 保持一致」). Until that ruling the
+    /// pointer's door armed a half-second first — the mock-up's own
+    /// `transition-delay: .5s`, which forgave a hand crossing from a band to
+    /// marks that stood *beside* it. That was ③'s geometry and has not been this
+    /// window's since ⑨ ii moved the marks inside the band's own rectangle, so
+    /// what the delay still bought was a highlight left lit half a second after
+    /// the hand had gone, which no other hover in this window does. See
+    /// [`Self::update_math_hover`] for why the property the grace protected is
+    /// now geometric.
+    ///
+    /// `why` is the one thing the doors do not agree on. A pointer moving off a
+    /// band leaves the block exactly where it is, possibly in the middle of
+    /// changing face; a tab switch, a pane close or a focus change takes the
+    /// whole session off the screen, and a journey carried across one of those
+    /// would go on presenting a height for a document nobody can see.
+    fn leave_hovered_math(&mut self, now: Instant, why: MathHoverExit) -> Result<()> {
         // **A window with no band under the pointer leaves nothing**, and that
-        // matters now that the doors are tab switches and pane closes rather
-        // than one 500ms deadline: everything below rebuilds the overlay and may
-        // present, and a window that has never hovered a formula must not pay
-        // for that on every tab switch it ever makes. The grace's own door
-        // reaches here only with `math_hover_clear_at` armed, so it is never the
-        // caller this refuses.
+        // matters now that this door is on every pointer move that misses a
+        // band as well as on every tab switch: everything below rebuilds the
+        // overlay and may present, and a window that has never hovered a formula
+        // must not pay for that.
         if self.window.math_hover_anchor.is_none()
-            && self.window.math_hover_clear_at.is_none()
             && self.window.math_tools.is_none()
             && self.window.math_tool_pressed.is_none()
             && self.window.math_toggle.is_none()
         {
             return Ok(());
         }
-        // **And a block still changing face lands here.** This is the door a tab switch, a pane
-        // close and a focus change come through (audit 2026-09-15, RB-3), and all three take the
-        // band off the screen; a journey carried across one would go on presenting a height for a
-        // document nobody can see, and land — or not — against a picture from another tab. The end
-        // state is what such a change is carried across as (§7.1.5p ⑪).
-        self.settle_math_toggle()?;
-        self.window.math_hover_clear_at = None;
+        // **And a block still changing face lands here — when the change is what
+        // is leaving.** A tab switch, a pane close and a focus change (audit
+        // 2026-09-15, RB-3) all take the band off the screen, and the end state
+        // is what such a change is carried across as (§7.1.5p ⑪). A hand simply
+        // moving off the band is not one of those: the block is still on the
+        // glass, still travelling, and landing it early because nobody is
+        // pointing at it would be this window cutting a motion short for the one
+        // reader who looked away (owner's ruling 2026-09-18).
+        if why == MathHoverExit::BandLeftTheScreen {
+            self.settle_math_toggle()?;
+        }
         self.window.math_hover_anchor = None;
         let motion = self.app.motion;
         if let Some(follow) = self.window.math_tools.as_mut() {
@@ -104056,14 +104106,16 @@ impl Runtime<'_> {
         // ago.
         self.advance_drag_autoscroll(now)?;
         // **And what the pointer is on, re-read against the picture that is
-        // actually on the glass, before the grace above it is spent** (owner's
-        // report 2026-09-18). The band under a resting hand can stop being under
-        // it without the hand doing anything, and this is the only thing that
-        // notices; the clock on the next line is then spent on an answer that is
-        // this frame's rather than on one left over from the last time the hand
-        // moved. See [`Self::refresh_math_hover_against_the_picture`].
+        // actually on the glass** (owner's report 2026-09-18). The band under a
+        // resting hand can stop being under it without the hand doing anything,
+        // and this is the only thing that notices. **It is also now the whole of
+        // the exit** (owner's ruling of that afternoon): the half-second clock
+        // that used to be spent on the next line is gone, and the door this
+        // reaches — `update_math_hover` — ends the hover on the spot, so a band
+        // that stopped being under a motionless pointer is let go on the turn
+        // that noticed rather than half a second later. See
+        // [`Self::refresh_math_hover_against_the_picture`].
         self.refresh_math_hover_against_the_picture(now)?;
-        self.clear_math_hover_if_due(now)?;
         // And the band that is changing face, **ahead** of the marks: the
         // journey this pays for moves the block's own rectangle, and the marks
         // ride that rectangle's right-hand midline (§7.1.5p ⑨ ii, ⑪) — so the
@@ -104338,7 +104390,13 @@ impl Runtime<'_> {
             self.drag_autoscroll_deadline(now),
             self.window.hyperlink_hover.show_at,
             self.window.peek_hover.show_at,
-            self.window.math_hover_clear_at,
+            // **And nothing at all for the band's own exit** (owner's ruling
+            // 2026-09-18). This used to be `math_hover_clear_at`, the
+            // half-second a band was held for after the pointer left it; the
+            // hover now ends on the pointer's own event, like every other hover
+            // in this window, so there is no clock left to wake for. What the
+            // marks still owe — the ninety milliseconds they leave over — is the
+            // next entry's, exactly as it was.
             // The band's marks while either of their journeys is still running —
             // the fade in, the fade out, or a move to the boxes a block that
             // changed shape has just published — and nothing once both have
@@ -107634,40 +107692,62 @@ mod formula_tool_seat_tests {
         );
     }
 
-    /// RED — **the marks leave when the band does, over the span they arrived
-    /// on** (owner's report 2026-09-14 evening ③).
+    /// RED — **the pointer leaving takes the marks off the glass, at once and
+    /// over the span they arrived on** (owner's report 2026-09-14 evening ③;
+    /// owner's ruling 2026-09-18: 「为什么不能和其它 hover 保持一致」).
     ///
-    /// The 500ms grace is where it always was; what happens at the end of it is
-    /// the half of §7.1.5p ② that report revised. The door that clears the
-    /// anchor starts the exit itself and puts its first frame up in the same
-    /// breath, because the marks are an overlay layer and nothing is on the
-    /// glass until the overlay is rebuilt — `hide_tooltip`'s own idiom, for a
-    /// surface that goes down the same way.
+    /// Two rulings meet in one door. The evening of 2026-09-14 revised the half
+    /// of §7.1.5p ② that gave this surface the glance card's asymmetry — a fade
+    /// in and no fade out — so the door that clears the anchor starts the exit
+    /// itself and puts its first frame up in the same breath, because the marks
+    /// are an overlay layer and nothing is on the glass until the overlay is
+    /// rebuilt (`hide_tooltip`'s own idiom, for a surface that goes down the
+    /// same way). 2026-09-18 took away the half-second that used to come first:
+    /// the pointer's own door is `update_math_hover`, it leaves on the event,
+    /// and no clock stands between.
     ///
-    /// MUTATIONS: leave the overlay alone here and a band the pointer left half
-    /// a second ago keeps its two marks on the glass for as long as nothing else
-    /// happens to rebuild the overlay. Drop the follow here instead of sending
-    /// it out — `self.window.math_tools = None` — and the exit is a blink again,
-    /// which is the thing the owner reported.
+    /// **The property the half-second protected is now geometric rather than
+    /// timed.** It forgave a hand crossing from a band to marks standing
+    /// *beside* it (§7.1.5p ③); since ⑨ ii the marks stand inside the band's own
+    /// rectangle, so `math_hit`'s three answers are three regions of one box and
+    /// reaching for a mark never leaves the band at all.
+    ///
+    /// MUTATIONS: leave the overlay alone in the door and a band the pointer has
+    /// left keeps its two marks on the glass until something else happens to
+    /// rebuild the overlay. Drop the follow instead of sending it out —
+    /// `self.window.math_tools = None` — and the exit is a blink again, which is
+    /// the thing the owner reported. Put a clock back in front of the pointer's
+    /// door and the highlight outstays the hand, which is what the ruling is
+    /// about.
     #[test]
-    fn the_grace_running_out_takes_the_marks_off_the_glass() {
-        // The grace's own door holds the clock and nothing else since the audit
-        // of 2026-09-15 (RB-3): what it does when the clock runs out is the one
-        // leave every other door now shares.
-        let clock = body(
+    fn the_pointer_leaving_takes_the_marks_off_the_glass() {
+        // The pointer's own door: no hit, no hover, no waiting.
+        let pointer = body(&["    fn update_math", "_hover(&mut self, now: Instant)"].concat());
+        assert!(
+            pointer.contains("self.leave_hovered_math(now, MathHoverExit::PointerLeft)?;"),
+            "a pointer that is on neither the band nor a mark ends the hover here:\n{pointer}"
+        );
+        assert!(
+            !pointer.contains("from_millis(500)"),
+            "and it arms no half-second first — every other hover in this window \
+             leaves on the pointer's own event:\n{pointer}"
+        );
+        let production = SOURCE
+            .split("mod formula_tool_seat_tests {")
+            .next()
+            .unwrap();
+        assert!(
+            !production.contains(&["self.window.math_hover", "_clear_at"].concat()),
+            "the grace's field is gone with it, so nothing can arm it again"
+        );
+
+        let door = body(
             &[
-                "    fn clear_math_hover",
-                "_if_due(&mut self, now: Instant)",
+                "    fn leave_hovered",
+                "_math(&mut self, now: Instant, why: MathHoverExit)",
             ]
             .concat(),
         );
-        assert!(
-            clock.contains(".math_hover_clear_at")
-                && clock.contains("self.leave_hovered_math(now)"),
-            "the grace is a deadline, and running out is a leave:\n{clock}"
-        );
-
-        let door = body(&["    fn leave_hovered", "_math(&mut self, now: Instant)"].concat());
         assert!(
             door.contains("self.refresh_overlay()"),
             "the band and its marks go together"
@@ -107686,6 +107766,15 @@ mod formula_tool_seat_tests {
                 && door.contains("self.window.math_tool_pressed = None"),
             "and the three facts about the band under the pointer end together:\n{door}"
         );
+        // **And a hand that merely looked away does not land a journey.** The
+        // settle belongs to the doors that take the session off the screen; a
+        // pointer leaving a band that is still changing face leaves it changing.
+        assert!(
+            door.contains("if why == MathHoverExit::BandLeftTheScreen {")
+                && door.contains("self.settle_math_toggle()?;"),
+            "only a band leaving the screen lands the change of face it was in \
+             the middle of:\n{door}"
+        );
     }
 
     /// RED — **the band under the pointer is re-read when the picture moves, not
@@ -107701,15 +107790,17 @@ mod formula_tool_seat_tests {
     ///
     /// One door, and it is the pointer's own: the picture asks the same question
     /// through the same function, so a band lit by a move and a band lit by a
-    /// scroll cannot come to two different answers. And it is asked **above**
-    /// the grace it may arm, so the clock on the next line is spent on this
-    /// frame's answer rather than on the one left over from the last move.
+    /// scroll cannot come to two different answers. **And since the owner's
+    /// ruling of 2026-09-18 that door is the whole of the exit** — the
+    /// half-second clock that used to be spent on the line below this one is
+    /// gone, so a band that went out from under a motionless pointer is let go
+    /// on the turn that noticed rather than half a second after it.
     ///
-    /// MUTATIONS: drop the call from `turn` → the owner's report exactly. Put it
-    /// *below* `clear_math_hover_if_due` → the grace is spent a whole turn
-    /// before the answer it is about. Give it a hit test of its own instead of
-    /// `update_math_hover` → two doors, and the 500ms grace lives behind only
-    /// one of them.
+    /// MUTATIONS: drop the call from `turn` → the owner's report exactly. Give
+    /// it a hit test of its own instead of `update_math_hover` → two doors, and
+    /// only one of them ends the hover. Put it *below* the band's own turn and a
+    /// journey's frames are paid against an answer from the last time the hand
+    /// moved.
     #[test]
     fn math_hover_is_asked_again_when_the_picture_moved_under_a_resting_pointer() {
         let door = body(
@@ -107732,12 +107823,12 @@ mod formula_tool_seat_tests {
         let asked = turning
             .find("self.refresh_math_hover_against_the_picture(now)?;")
             .expect("every turn re-reads the band under a pointer that has not moved");
-        let grace = turning
-            .find("self.clear_math_hover_if_due(now)?;")
-            .expect("and then spends the grace");
+        let paid = turning
+            .find("self.advance_math_toggle_if_due(now)?;")
+            .expect("and then pays the journeys that answer depends on");
         assert!(
-            asked < grace,
-            "the answer is this frame's before the clock is spent on it:\n{turning}"
+            asked < paid,
+            "the answer is this frame's before the frames are struck against it:\n{turning}"
         );
     }
 
@@ -107791,34 +107882,38 @@ mod formula_tool_seat_tests {
         );
     }
 
-    /// RED — **a band that comes back under the pointer cancels the grace rather
-    /// than arriving a second time** (owner's report 2026-09-18).
+    /// RED — **a band that comes back under the pointer is followed, not
+    /// arrived at a second time** (owner's report 2026-09-18).
     ///
     /// The picture's door makes this case ordinary where it used to be
-    /// impossible: content scrolls a band out from under a resting hand, the
-    /// grace is armed, and then it scrolls back — a reader rocking a wheel, a
-    /// program redrawing. Nothing new is written for it. `update_math_hover`'s
-    /// first branch drops the deadline and touches the shells only when the
-    /// *anchor* changed, `set_hovered_math` answers `false` when the shells
+    /// impossible: content scrolls a band out from under a resting hand and then
+    /// scrolls it back — a reader rocking a wheel, a program redrawing. Nothing
+    /// new is written for it. `update_math_hover` touches the shells only when
+    /// the *anchor* changed, `set_hovered_math` answers `false` when the shells
     /// already believe what they are being told, and the marks' own follow keys
     /// on `MathBlockAnchor::same_block` — so a band that merely stands on
-    /// different rows this frame is followed rather than faded in again.
+    /// different rows this frame is followed rather than faded in again, and a
+    /// band that comes back inside the ninety milliseconds of its own exit turns
+    /// round where it stands (`formula_tools`' own gate).
     ///
-    /// MUTATIONS: clear the deadline outside the hit's branch and a band the
-    /// pointer never left loses its grace on the frame it scrolls away. Drop the
-    /// `!=` guard and every frame of a scroll rewrites the shells and repaints.
+    /// MUTATIONS: drop the `!=` guard and every frame of a scroll rewrites the
+    /// shells and repaints. Make the leave branch run for a *different* block
+    /// rather than for no block, and crossing between two formulas becomes an
+    /// exit and an entrance instead of an anchor changing.
     #[test]
-    fn math_hover_is_kept_by_a_band_that_comes_back_inside_the_grace() {
+    fn math_hover_is_kept_by_a_band_that_comes_back_under_the_pointer() {
         let door = body(&["    fn update_math", "_hover(&mut self, now: Instant)"].concat());
-        let cleared = door
-            .find("self.window.math_hover_clear_at = None;")
-            .expect("a band under the pointer is not on its way out");
+        let left = door
+            .find("self.leave_hovered_math(now, MathHoverExit::PointerLeft)?;")
+            .expect("a pointer on no band at all ends the hover");
         let changed = door
             .find("if self.window.math_hover_anchor.as_ref() != Some(&hit.anchor) {")
             .expect("and the shells hear about it only when the block itself changed");
         assert!(
-            cleared < changed,
-            "the grace goes first, whether or not this is the same block:\n{door}"
+            left < changed,
+            "the one exit is the miss, and it is answered before any block is \
+             compared — so crossing from one band to the next is an anchor \
+             changing and never an exit:\n{door}"
         );
 
         let sweep = body("    fn set_hovered_math(&mut self, anchor: Option<MathBlockAnchor>)");
@@ -107896,7 +107991,13 @@ mod formula_tool_seat_tests {
         // the new doors: the leave refuses before it rebuilds an overlay, so a
         // tab switch in a window that has never hovered a formula costs what it
         // always did.
-        let leaving = body(&["    fn leave_hovered", "_math(&mut self, now: Instant)"].concat());
+        let leaving = body(
+            &[
+                "    fn leave_hovered",
+                "_math(&mut self, now: Instant, why: MathHoverExit)",
+            ]
+            .concat(),
+        );
         let refusal = leaving
             .find("return Ok(());")
             .expect("a window with nothing hovered leaves nothing");
@@ -107966,7 +108067,13 @@ mod formula_tool_seat_tests {
     fn an_interrupted_change_of_face_lands_before_the_thing_that_interrupted_it() {
         for (door, why) in [
             (
-                body(&["    fn leave_hovered", "_math(&mut self, now: Instant)"].concat()),
+                body(
+                    &[
+                        "    fn leave_hovered",
+                        "_math(&mut self, now: Instant, why: MathHoverExit)",
+                    ]
+                    .concat(),
+                ),
                 "a tab switch, a pane close and a focus change",
             ),
             (
