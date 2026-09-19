@@ -1497,6 +1497,26 @@ pub struct FrameTrigger {
     pub source: FrameSource,
 }
 
+/// A real call boundary inside one on-screen presentation.
+///
+/// The application uses these transitions to move its one window-thread time
+/// ledger between stations. They deliberately carry no durations: the caller's
+/// monotonic clock is the authority for where its thread's time went, while the
+/// renderer only knows where one call ends and the next begins.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PresentPhase {
+    /// CPU composition and command encoding, on both sides of surface acquire.
+    ComposeEncode,
+    /// `Surface::get_current_texture`.
+    SurfaceAcquire,
+    /// `Queue::submit`.
+    QueueSubmit,
+    /// `Queue::present` for a swapchain frame.
+    Present,
+    /// The renderer has left all presentation phases.
+    Complete,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct PresentReceipt {
     pub trigger: FrameTrigger,
@@ -6689,6 +6709,16 @@ impl GpuContext {
         self.adapter.get_info().name
     }
 
+    /// The adapter that owns this context, after selection or recovery.
+    ///
+    /// Read from wgpu rather than copied into context state, so a diagnostic
+    /// emitted after device recovery cannot accidentally describe the adapter
+    /// that was lost.
+    #[must_use]
+    pub fn adapter_info(&self) -> wgpu::AdapterInfo {
+        self.adapter.get_info()
+    }
+
     #[must_use]
     pub fn max_texture_dimension_2d(&self) -> u32 {
         self.max_texture_dimension_2d
@@ -8731,7 +8761,20 @@ impl WindowRenderer {
         seats: &[SeatFrame<'_>],
         trigger: FrameTrigger,
     ) -> Result<PresentOutcome, RenderError> {
-        let outcome = self.compose_frame(gpu, seats, trigger);
+        self.present_frame_with_phases(gpu, seats, trigger, |_| {})
+    }
+
+    /// [`Self::present_frame`], reporting only its real external-call
+    /// boundaries to the caller's timing ledger.
+    pub fn present_frame_with_phases(
+        &mut self,
+        gpu: &mut GpuContext,
+        seats: &[SeatFrame<'_>],
+        trigger: FrameTrigger,
+        mut phase: impl FnMut(PresentPhase),
+    ) -> Result<PresentOutcome, RenderError> {
+        phase(PresentPhase::ComposeEncode);
+        let outcome = self.compose_frame(gpu, seats, trigger, &mut phase);
         // **The one place the shared atlas is told the frame is over, and it is
         // outside every way the frame can end.**
         //
@@ -8766,6 +8809,7 @@ impl WindowRenderer {
         // in-use set — see [`GpuContext::close_the_frame`], which is now the one
         // place either debt is paid.
         gpu.close_the_frame(&outcome);
+        phase(PresentPhase::Complete);
         outcome
     }
 
@@ -8779,6 +8823,7 @@ impl WindowRenderer {
         gpu: &mut GpuContext,
         seats: &[SeatFrame<'_>],
         trigger: FrameTrigger,
+        phase: &mut dyn FnMut(PresentPhase),
     ) -> Result<PresentOutcome, RenderError> {
         let frame_started = Instant::now();
         // **Nothing is drawn on a device that is not there any more.** The
@@ -9485,7 +9530,9 @@ impl WindowRenderer {
         // ResizeBuffers discards them; configuring only immediately before acquire/submit bounds
         // both the default-black interval and DXGI's stretch of the old frame.
         self.configure_surface_if_needed(gpu)?;
+        phase(PresentPhase::SurfaceAcquire);
         let acquisition = self.acquire();
+        phase(PresentPhase::ComposeEncode);
         let (acquired, view) = match acquisition {
             SurfaceAcquisition::Frame(texture) => {
                 let view = texture.texture.create_view(&Default::default());
@@ -9992,8 +10039,11 @@ impl WindowRenderer {
             }
         }
         let encoded_at = Instant::now();
-        gpu.queue.submit([encoder.finish()]);
+        let command_buffer = encoder.finish();
+        phase(PresentPhase::QueueSubmit);
+        gpu.queue.submit([command_buffer]);
         let submitted_at = Instant::now();
+        phase(PresentPhase::Present);
         match acquired {
             AcquiredFrame::Swapchain(texture) => gpu.queue.present(texture),
             // Nothing to hand back: an offscreen frame is finished the moment it
@@ -10001,6 +10051,7 @@ impl WindowRenderer {
             AcquiredFrame::Offscreen => {}
         }
         let present_called_at = Instant::now();
+        phase(PresentPhase::ComposeEncode);
         let receipt = PresentReceipt {
             trigger,
             submitted_at,

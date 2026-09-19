@@ -6,6 +6,16 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Changed
+
+- **When Folio's window pauses, its own log now names the call it was inside.**
+  The log records the GPU adapter Folio actually opened, then separates surface
+  acquisition, frame composition, submission and presentation from one another;
+  terminal-output turns say whether time went into the ring, the parser,
+  detection or publication, and input turns name both the event and either IME
+  platform call. A stall line also carries the run's age and its own number, so
+  one day's recording can show whether pauses grew as the session aged.
+
 ## 0.4.2-preview — 2026-09-18
 
 ### Added
