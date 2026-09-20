@@ -46,7 +46,7 @@
 
 | asset | what it is |
 | --- | --- |
-| `folio-<version>-windows-x64.zip` | the nine files that belong together, in one folder — `sha256:<hash>` |
+| `folio-<version>-windows-x64.zip` | the ten files that belong together, in one folder — `sha256:<hash>` |
 | `folio-windows-x64.zip` | the same archive under a name that does not change from one release to the next — the same `sha256` |
 | `SHA256SUMS.txt` | the hash of the archive under each of its two names and of the bill of materials, in the format `sha256sum -c` reads |
 | `folio-<version>.cdx.json` | the CycloneDX bill of materials for what is in the build |

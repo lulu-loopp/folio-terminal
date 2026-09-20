@@ -50,7 +50,8 @@ use crate::{
 pub mod profile_marks;
 mod profile_runtime;
 pub use profile_runtime::{
-    begin_enable, begin_removal, begin_startup_migration, remove_shell_integration, take_removal,
+    begin_enable, begin_removal, begin_startup_migration, remove_shell_integration,
+    remove_shell_integration_at, take_removal,
 };
 
 /// The script, compiled in.

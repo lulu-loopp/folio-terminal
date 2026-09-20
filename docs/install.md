@@ -12,9 +12,9 @@ wherever you keep programs, and run `folio.exe`. There is no installer; keep the
 extracted files together in one folder. `SHA256SUMS.txt` is the hash of what you
 downloaded. Needs **Windows 10 1809 or newer, or Windows 11, 64-bit**.
 
-The archive holds nine files that belong together: `folio.exe`, the two console
+The archive holds ten files that belong together: `folio.exe`, the two console
 libraries it needs to start a shell, `folio.msix` for the Explorer menu,
-`folio-here.cmd` for VS Code, and the licences and notices. `folio.msix` is not
+`folio-here.cmd` for VS Code, `uninstall.cmd` for cleanup, and the licences and notices. `folio.msix` is not
 an installer and is not run: it is the sparse package that lets Windows 11 put
 "Open in Folio" on the first page of a folder's right-click menu, and it names
 the folder it was unpacked into — which is why moving `folio.exe` out on its own
@@ -149,55 +149,31 @@ read Off.
 
 ## Uninstalling
 
-Folio is files in a folder, plus — on Windows — the two registrations it makes
-for Explorer's right-click menu if you switched that row on: the entry on
-Windows 11's first page, which the sparse package `folio.msix` registers, and
-the classic entry under **Show more options**, which is two keys under
-`HKEY_CURRENT_USER\Software\Classes`. Deleting the files does not take either
-off, because nothing but Folio itself can — there is no installer and nothing
-runs on the way out. What is left is a menu entry pointing at a `folio.exe` that
-is no longer there.
+Close Folio, then run one command from another terminal:
 
-**So take them off first, then delete the files:**
+- **Windows:** `folio.exe --uninstall-cleanup` from the extracted folder, or
+  double-click its `uninstall.cmd`.
+- **macOS:** `/Applications/Folio.app/Contents/MacOS/folio --uninstall-cleanup`.
 
-```
-folio.exe --remove-explorer-menu
-```
+The command opens no window. It removes Folio's integrations, keeps hooks and
+Explorer entries belonging to another existing copy, and reports each result.
+Exit `0` means cleanup succeeded; `1` names a refusal to fix and retry; `2`
+means Folio is running or, with purge, a process still holds its data.
 
-It opens no window, prints one line saying what it removed and what it left, and
-exits. A registration that belongs to **another** copy of Folio on the same
-machine is left alone: this takes away only what the copy you ran it from put
-there. A machine with nothing registered is not an error — it says so and exits
-`0`.
+Add `--purge` to the same command to also delete settings, sessions and browser
+data, including both Windows data roots and legacy data, or all six macOS data
+locations. Without it, your data stays. **On macOS, Folio cannot tell whether
+another program is holding that data** — there is no equivalent of the Windows
+check — so quit Folio before you purge; the command says so as it starts. Dated recovery copies beside user
+configuration files are kept. The application folder is never deleted.
+After cleanup succeeds, delete the extracted folder or move Folio.app to the Bin;
+for a managed installation, use its package manager to remove the application.
 
-- **Zip** — run the command, then delete the folder you unpacked.
-- **scoop** — `scoop uninstall folio` deletes the files. Run the command first,
-  out of the folder scoop keeps Folio in (`scoop prefix folio`).
-- **winget** — `winget uninstall Folio` deletes the files; run the command
-  first, out of the folder it installed into.
+macOS notification permission and cached Services entries are managed by the OS;
+removing the bundle may take time to be reflected. Windows notification history
+and package-manager records are also managed by their owners.
 
-What Folio remembers — your settings, the session it restores, its log — is all
-inside `%APPDATA%\Folio`. Delete that folder to forget everything, or keep it and
-a later version picks your settings back up. The one other thing Folio can write
-outside its own folder is the single `. "$env:APPDATA\Folio\shell-integration\folio.ps1"`
-line in your PowerShell `$PROFILE`, if you said yes to that; delete that line to
-undo it.
-
-If you have already deleted the files and the menu entry is still there,
-unpack the same download again anywhere, run the command from that folder, and
-delete it again — a registration whose `folio.exe` has gone is answered by
-nobody, so this clears it.
-
-If you deleted an older Folio and something it wrote is still there — a
-PowerShell that now starts with an error, hook entries in a coding agent's
-configuration, that menu row, or the settings folders —
-[`recovery-after-deleting-folio.md`](recovery-after-deleting-folio.md) takes
-each one out by hand, with no Folio needed.
-
-**On a Mac there is nothing to undo.** Finder's **Open in Folio** lives in the
-application bundle's own `Info.plist`, so it goes when Folio goes; drag the
-application to the Bin, and delete `~/Library/Application Support/Folio` if you
-want the settings gone too. The command exists there and says as much.
+Already deleted Folio? See [recovery after deleting Folio](recovery-after-deleting-folio.md).
 
 ## Known issues
 

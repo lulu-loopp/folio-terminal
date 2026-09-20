@@ -80,10 +80,21 @@ fn candidates(marks: &Marks) -> (Vec<PathBuf>, Report) {
         }
         Ok(None) => {}
     }
-    let mut paths = marks.powershell_profiles.clone();
-    for refusal in &marks.profile_refusals {
-        if !paths.contains(&refusal.path) {
-            paths.push(refusal.path.clone());
+    // Recorded paths are checked before they are used, here and not only under a
+    // sandbox: see `recorded_profile_is_usable`. A refused one is named and left.
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for path in marks
+        .powershell_profiles
+        .iter()
+        .chain(marks.profile_refusals.iter().map(|refusal| &refusal.path))
+    {
+        if !recorded_profile_is_usable(path) {
+            report.files.push(FileReport {
+                path: path.clone(),
+                fate: Fate::Refused(Text::ShellMarksProfileKind.text().to_owned()),
+            });
+        } else if !paths.contains(path) {
+            paths.push(path.clone());
         }
     }
     for program in installed_powershells() {
@@ -106,6 +117,17 @@ fn candidates(marks: &Marks) -> (Vec<PathBuf>, Report) {
 /// results retained. Call on its cleanup worker or early CLI path.
 pub fn remove_shell_integration() -> Report {
     operate(&persist::storage_dir(), Action::Remove)
+}
+
+/// The cleanup door supplies its resolved data root without triggering storage migration.
+/// An explicit profile set replaces historical and probed paths, just like the sandbox env door.
+pub fn remove_shell_integration_at(data: &Path, profiles: Option<&[PathBuf]>) -> Report {
+    operate_with(data, Action::Remove, Ok(MANAGED_LINE), |marks| {
+        profiles.map_or_else(
+            || candidates(marks),
+            |paths| (paths.to_vec(), Report::default()),
+        )
+    })
 }
 
 fn operate(data: &Path, action: Action) -> Report {
@@ -137,10 +159,16 @@ fn operate_with(
             fate: Fate::Refused(error.to_string()),
         }],
     };
-    let _lock = match lock(data) {
+    // An uninstaller must not create anything, and this is the door it runs through.
+    // A data root that does not exist holds no marks and has no decision to keep, so
+    // the run reads the default record and writes nothing — the root is still absent
+    // afterwards. Discovery and removal still run: a `$PROFILE` line outlives the data
+    // folder, and an account that never had one simply has nothing to report.
+    let _lock = match lock_existing(data) {
         Ok(lock) => lock,
         Err(e) => return refused_record(e),
     };
+    let records = _lock.is_some();
     let mut marks = match Marks::read(data) {
         Ok(marks) => marks,
         Err(e) => return refused_record(e),
@@ -152,7 +180,7 @@ fn operate_with(
         Ok(managed) => managed,
         Err(e) => return refused_record(e),
     };
-    if action == Action::Remove {
+    if action == Action::Remove && records {
         marks.turn_off(std::time::SystemTime::now());
         if let Err(e) = marks.write(data) {
             return refused_record(e);
@@ -172,7 +200,7 @@ fn operate_with(
     report.files.extend(
         apply_recorded(&paths, &forms, action, |path| {
             marks.remember(path, &script);
-            marks.write(data)
+            if records { marks.write(data) } else { Ok(()) }
         })
         .files,
     );
@@ -185,7 +213,8 @@ fn operate_with(
         .collect();
     // Merely discovering a hand-written installation must not create an
     // enabled record. Existing records and explicit Off decisions still persist.
-    if (record_path.exists() || !marks.profile_refusals.is_empty())
+    if records
+        && (record_path.exists() || !marks.profile_refusals.is_empty())
         && let Err(e) = marks.write(data)
     {
         report.files.extend(refused_record(e).files);
