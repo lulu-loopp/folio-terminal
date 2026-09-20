@@ -27944,8 +27944,8 @@ impl PaneMotion {
     /// animation in a race with the seat id being reused.
     ///
     /// Tweens that have nothing to do are not stored. Under reduced motion that
-    /// is all of them, which is what makes [`Self::deadline`] answer `None` for
-    /// a preference rather than for a timeout.
+    /// is all of them, which is what makes [`Self::is_animating`] answer `false`
+    /// for a preference rather than for a timeout.
     fn begin(
         &mut self,
         before: &[(SeatId, [f32; 4])],
@@ -28009,17 +28009,6 @@ impl PaneMotion {
             .iter()
             .filter_map(|pane| pane.tween)
             .any(|tween| tween.is_animating(now, motion))
-    }
-
-    /// When these panes next need waking, or `None` when none of them is moving.
-    ///
-    /// The same shape and the same `None` as [`Runtime::strip_animation_work`]'s
-    /// own deadline,
-    /// for the same reason: it is what lets `about_to_wait` fall back to
-    /// `ControlFlow::Wait` once a split has settled, instead of holding a 60fps
-    /// loop open for a window that is doing nothing.
-    fn deadline(&self, now: Instant, motion: Motion, frame: Duration) -> Option<Instant> {
-        self.is_animating(now, motion).then(|| now + frame)
     }
 
     /// Drop the tweens that have finished, so a landed pane stops being carried.

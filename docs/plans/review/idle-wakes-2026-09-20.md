@@ -63,3 +63,24 @@ The candidate names sub-100 ms idle winners under `BT_PERF_TRACE`.
 The menu memo rejects unchanged inputs before plan allocation or AppKit entry.
 Memory footprint sampling is coarse rather than per-wake.
 Windows and macOS idle measurements remain for the coordinator's candidate build.
+
+## CI follow-up
+
+The Windows `logic` job found one production orphan in the deadline rewrite:
+`PaneMotion::deadline` was called only by tests and still manufactured
+`now + frame`. It is removed. The pane wake test now composes
+`PaneMotion::is_animating` with one absolute animation appointment and proves
+resting, in-flight, unchanged-query, landed, and reduced-motion behavior without
+pinning the retired renewal shape.
+
+Orphan audit: `PaneMotion::deadline` was the only `fn deadline` or
+`*_deadline` definition whose callers were all under `tests.rs` or
+`#[cfg(test)]`; no other deadline owner required removal.
+
+Windows validation passed, serially and with `-j 4`:
+
+- `cargo clippy -p bt-app --all-targets --locked -j 4 -- -D warnings`
+- `RUSTFLAGS="-D warnings" cargo check -p bt-app --bin folio --locked -j 4`
+- Narrowed `cargo test -p bt-app --bin folio --locked -j 4` filters for the
+  absolute pane wake, reduced motion, the full pane flight, tab-switch cleanup,
+  and the no-query-time-renewal source gate.
