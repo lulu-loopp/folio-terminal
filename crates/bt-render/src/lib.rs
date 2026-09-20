@@ -1506,6 +1506,12 @@ pub struct FrameTrigger {
 /// renderer only knows where one call ends and the next begins.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PresentPhase {
+    /// Shape text rows and chrome/preview labels.
+    TextShaping,
+    /// Rasterize glyphs and upload atlas textures.
+    AtlasUpload,
+    /// Prepare frame geometry and image layers.
+    Layout,
     /// CPU composition and command encoding, on both sides of surface acquire.
     ComposeEncode,
     /// `Surface::get_current_texture`.
@@ -9057,12 +9063,14 @@ impl WindowRenderer {
         for (index, entry) in seats.iter().enumerate() {
             let frame = entry.frame;
             self.seat = entry.seat;
+            phase(PresentPhase::TextShaping);
             let text_stats = self.prepare_text_rows(gpu, frame)?;
             rows_prepared_at = Instant::now();
             // `text_rows` and `status_overlay` stay single slots on purpose:
             // they are staging for the prepare that immediately follows, and
             // glyphon copies what it needs into this seat's own renderer. What
             // may not be shared is the renderer, and it is not.
+            phase(PresentPhase::AtlasUpload);
             let text_prepare_result = {
                 let slot = &mut self.seat_slots[index];
                 match prepare_text_atlas(
@@ -9140,6 +9148,7 @@ impl WindowRenderer {
 
             // Math draws first: the hover dim rect decorates a block's raster, so it must know which
             // rasters this frame actually put on screen before it decides to darken anything.
+            phase(PresentPhase::Layout);
             let math_batch = self.prepare_math_draws(gpu, frame);
             table_block_bodies.extend(self.table_block_bodies(frame));
             math_prepared_at = Instant::now();
@@ -9355,6 +9364,7 @@ impl WindowRenderer {
         // loses its letters is not a document. So the page is served first, and
         // what yields under pressure is the furniture around it.
 
+        phase(PresentPhase::TextShaping);
         let mut preview_text_layouts: Vec<ChromeTextLayout> = Vec::new();
         for body in self.preview_bodies.iter().chain(table_block_bodies.iter()) {
             // A seat's document is never faded as a whole — a pane is the window,
@@ -9369,6 +9379,7 @@ impl WindowRenderer {
                 chrome_text_areas(&preview_text_layouts),
             );
         }
+        phase(PresentPhase::AtlasUpload);
         let preview_text_prepared = if preview_text_layouts.is_empty() {
             false
         } else {
@@ -9391,6 +9402,7 @@ impl WindowRenderer {
             )
         };
 
+        phase(PresentPhase::TextShaping);
         let chrome_layouts = shape_chrome_labels_with_cjk(
             &mut gpu.font_system,
             &self.chrome_labels,
@@ -9406,6 +9418,7 @@ impl WindowRenderer {
                 chrome_text_areas(&chrome_layouts),
             );
         }
+        phase(PresentPhase::AtlasUpload);
         let chrome_prepared = if chrome_layouts.is_empty() {
             false
         } else {
@@ -9431,6 +9444,7 @@ impl WindowRenderer {
         // already carries its own `clip` in whole-surface coordinates, so two
         // documents on screen are two sets of cropped rectangles and not two
         // passes.
+        phase(PresentPhase::Layout);
         let preview_body_rects: Vec<RectInstance> = self
             .preview_bodies
             .iter()
@@ -9582,6 +9596,7 @@ impl WindowRenderer {
             let icon_buffer = (!icon_vertices.is_empty()).then(|| {
                 gpu.vertex_buffer("modal overlay mark vertices", icon_vertices.as_slice())
             });
+            phase(PresentPhase::TextShaping);
             let mut layouts = shape_chrome_labels_with_cjk(
                 &mut gpu.font_system,
                 &layer.labels,
@@ -9621,6 +9636,7 @@ impl WindowRenderer {
                     chrome_text_areas(&layouts),
                 );
             }
+            phase(PresentPhase::AtlasUpload);
             let text_prepared = if layouts.is_empty() {
                 false
             } else {
@@ -9642,6 +9658,7 @@ impl WindowRenderer {
                     &mut refused,
                 )
             };
+            phase(PresentPhase::Layout);
             overlay_draws.push(PreparedOverlayLayer {
                 ground_buffer,
                 ground_count: ground_rects.len() as u32,
