@@ -101365,9 +101365,12 @@ impl Runtime<'_> {
             && !modifiers.super_key()
             && ime_report::printable_latin(event.text.as_deref());
         let terminal = self.keyboard_owner_is_a_shell();
-        if self.window.ime_report.key(terminal, latin) {
-            // Only the threshold candidate refreshes native facts. In
-            // particular an English-mode reading at focus is not reused.
+        if self.window.ime_report.key(terminal, latin)
+            && self.window.ime_report.may_probe(ime_report::now_ms())
+        {
+            // Only the threshold candidate refreshes native facts, and no
+            // oftener than the report's own interval. In particular an
+            // English-mode reading at focus is not reused.
             let facts = self.ime_native_facts();
             if self.window.ime_report.confirm(facts) {
                 self.emit_ime_observation("plain-text", facts);

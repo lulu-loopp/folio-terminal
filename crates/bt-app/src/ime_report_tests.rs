@@ -236,3 +236,30 @@ fn ime_self_report_stamps_preserve_order_even_at_the_same_injected_time() {
     assert!(!report.enabled_since_focus);
     assert_eq!(report.first_enabled.unwrap().order, 5);
 }
+
+#[test]
+fn ime_self_report_reads_native_facts_once_per_interval_within_a_focus() {
+    let mut report = focused();
+    // Two hundred words typed in nine seconds: one reading, not two hundred.
+    let mut readings = 0;
+    for word in 0..200u64 {
+        assert!(keys(&mut report, true));
+        if report.may_probe(word * 45) {
+            readings += 1;
+            assert!(!report.confirm(NativeFacts {
+                conversion: Some(0),
+                ..native_ime()
+            }));
+        }
+        assert!(!report.key(true, false));
+    }
+    assert_eq!(readings, 1);
+    // The interval over, the next streak is read again, and can still report.
+    assert!(keys(&mut report, true));
+    assert!(report.may_probe(PROBE_MIN_INTERVAL_MS + 1));
+    assert!(report.confirm(native_ime()));
+    // A new focus starts a new budget.
+    report.focus(false, 0);
+    report.focus(true, 0);
+    assert!(report.may_probe(1));
+}

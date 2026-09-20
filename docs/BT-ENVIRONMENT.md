@@ -226,6 +226,8 @@ at most once per focus. Any delivered IME event, including `Disabled`, suppresse
 it for that focus. Alphanumeric/closed/unknown mode suppresses the line. Layout
 language alone never proves an IME. Native reads happen only at focus changes,
 the one delayed sample, and the third-key candidate; not on ordinary keys.
+Within one focus the third-key reading is taken at most once per ten seconds:
+a reading that does not confirm would otherwise be repeated at every word.
 
 `mode_source=imm-compat` is deliberate: IMM open/conversion flags are the
 Windows compatibility view, not authoritative proof of a TSF-only service's

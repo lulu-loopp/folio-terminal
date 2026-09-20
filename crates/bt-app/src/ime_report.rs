@@ -41,7 +41,11 @@ pub struct Report {
     ime_since_focus: bool,
     latin_keys: u8,
     reported: bool,
+    probed_at: Option<u64>,
 }
+
+/// The least time between two native readings inside one focus.
+pub const PROBE_MIN_INTERVAL_MS: u64 = 10_000;
 
 impl Report {
     fn stamp(&mut self, ms: u64) -> Stamp {
@@ -87,6 +91,7 @@ impl Report {
             self.enabled_since_focus = false;
             self.ime_since_focus = false;
             self.reported = false;
+            self.probed_at = None;
             let stamp = self.stamp(ms);
             self.first_focus.get_or_insert(stamp);
             self.focus_at = Some(stamp);
@@ -111,6 +116,24 @@ impl Report {
         }
         self.latin_keys = self.latin_keys.saturating_add(1).min(4);
         self.latin_keys == 3
+    }
+    /// Whether the native reading may be taken now, and if so, that it was.
+    ///
+    /// **The budget on the probe itself** (closure review, 2026-09-20). The
+    /// streak alone bounds nothing: a reading that does not confirm leaves the
+    /// report unlatched, so every later word reaches the threshold again, and a
+    /// machine with no input method at all would pay a COM activation per word
+    /// for the life of the focus. The first streak of a focus is always read;
+    /// after that, one reading per [`PROBE_MIN_INTERVAL_MS`].
+    pub fn may_probe(&mut self, ms: u64) -> bool {
+        if self
+            .probed_at
+            .is_some_and(|at| ms.saturating_sub(at) < PROBE_MIN_INTERVAL_MS)
+        {
+            return false;
+        }
+        self.probed_at = Some(ms);
+        true
     }
     pub fn confirm(&mut self, facts: NativeFacts) -> bool {
         let report = self.focused
