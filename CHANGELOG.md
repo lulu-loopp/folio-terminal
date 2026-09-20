@@ -45,6 +45,32 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **A local page or PDF whose path contains Chinese — or a space with `{`, `}`,
+  `^` or `` ` `` in the name — now opens in the preview, instead of being turned
+  away by Folio itself.** Double-clicking `报告.pdf` under `D:\文档\项目 (1)\`
+  drew Folio's own refusal card: the window had opened the file and then refused
+  it, because it was comparing two *spellings* of one path where it meant to
+  compare the path. The browser engine re-spells a local address in its own
+  form — every character outside a small set comes back percent-encoded — and
+  the two strings no longer matched. Folio now reads a local address as the file
+  it names, once, at the door, so the two spellings are one answer. The address
+  row shows the ordinary path again (`D:\文档\报告.pdf`, not `file:///D:/%E6…`),
+  links to files beside the page, in-page jumps and reload keep working, and a
+  session saved before this change still reopens its pages. Nothing that was
+  refused for a safety reason is opened now: a path that walks out of the page's
+  own folder, a network share, or an address that matches only after a spelling
+  is guessed at is refused exactly as before. Reported as issue #7.
+
+- **`diagnostics.log` now always opens with the line that says which build
+  wrote it.** The file a bug report arrives as is a stack of runs, and the line
+  between them carries the version, the commit and the process id. It was
+  written only by a run whose diagnostics went to that file, so a run started
+  with a trace variable set — or one whose log would not take the program's
+  output — appended its watchdog's lines to a file with no such line anywhere in
+  it, and nothing in what you sent said which Folio had written it. The line is
+  now written when the log is opened, before the run has said anything else, on
+  every kind of run.
+
 - **An idle Folio window now lets the event loop sleep.** Wake-up deadlines are
   retained as absolute appointments owned by the event that armed them instead
   of being renewed from each loop turn; unchanged macOS menu inputs also stop

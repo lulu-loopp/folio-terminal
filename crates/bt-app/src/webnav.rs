@@ -116,6 +116,245 @@ pub enum Decision {
     Refuse(Refusal),
 }
 
+/// **A `file:` URL parsed into the one thing it names: a path on this disk**
+/// (issue #7, 2026-09-20).
+///
+/// # Why a type and not three comparisons
+///
+/// A URL is a *spelling* of a path, and a path has many spellings. Three times
+/// now this product has compared two spellings where it meant to compare the
+/// thing:
+///
+/// 1. a Mac minted `file:////Users/…` — four slashes — the engine normalised it
+///    to three, and a local seat refused its own document (M4-2);
+/// 2. the drive letter's case, which `eq_ignore_ascii_case` papered over rather
+///    than answered;
+/// 3. percent-encoding. Measured on 2026-09-20 against WebView2 153.0.4234.48
+///    (`scratchpad/pdf-vhost-spike/REPORT.md`, 17 recorded pairs): the engine
+///    **canonicalises** the URI it is navigated to — every byte outside its
+///    `file:`-path safe set comes back percent-encoded as upper-case-hex UTF-8,
+///    escapes that are already there are left verbatim, and the drive letter is
+///    upper-cased. Observed outside that safe set: all non-ASCII, `{`, `}`, `^`
+///    and `` ` ``. [`Mint::file`] escapes five characters and leaves the rest
+///    raw, so `报告.pdf` went out raw and came back as `%E6%8A%A5…`; the mint
+///    compared the two strings, they differed, and Folio refused the document it
+///    had just opened — issue #7.
+///
+/// Minting in the engine's spelling would work today and is an allowlist: it
+/// requires this product to carry the engine's safe set, which is a list of the
+/// characters somebody thought of, on an engine that may lengthen it, on two
+/// engines that need not agree. Parsing both sides to the path they name is
+/// total. So: **a URL that names a local file is parsed to a path at the door,
+/// once; past the door nobody compares or slices URL strings.**
+///
+/// # The grammar
+///
+/// ```text
+/// local-file-url := "file:///" body [ tail ]      (the scheme ASCII-case-blind)
+/// tail           := ( "?" | "#" ) *ANY            (the page's, never the path's)
+/// body           := *( "%" HEXDIG HEXDIG | ANY )
+/// ```
+///
+/// The body is percent-decoded and the bytes read as UTF-8, and then the path
+/// has to be **one absolute path with a name in it**, which is the whole of what
+/// [`Mint::file`] can ever have written:
+///
+/// * invalid UTF-8 is refused, never replaced — a candidate that matches the
+///   mint only after a lossy decode is a different file wearing its name;
+/// * a control character, NUL included, is refused;
+/// * a decoded `\` is refused rather than guessed at. It is the separator on one
+///   of this product's two machines and a legal name character on the other, and
+///   a rule that read it as a name would hand Windows a traversal
+///   (`…/page/%5C../secret`) while a rule that read it as a separator would name
+///   a file on macOS that nobody asked for;
+/// * an empty, `.` or `..` segment is refused **after** decoding, so `%2e%2e`
+///   and `%2E%2E` are the same refusal `..` is. Double encoding is not: `%252e`
+///   decodes once, to the two characters `%2e`, which is a *name* — the disk
+///   resolves no traversal out of it and neither does this;
+/// * the root is read off the string and not off the machine (M4-3), because a
+///   `session.json` travels: a first segment of `X:` is the drive-rooted form —
+///   its separator is `\` and its drive letter is upper-cased, which is what the
+///   engine and the OS both call it — and anything else is the slash-rooted form
+///   whose one leading separator the `file:///` prefix already ate.
+///
+/// Everything else the body carries is a name character, escaped or raw, which
+/// is what lets one of these read both spellings of a stored row: the raw
+/// non-ASCII [`Mint::file`] wrote into `session.json` before this change, and
+/// the percent-encoded form the engine commits.
+///
+/// # What it does *not* normalise
+///
+/// **The Windows trailing-dot and trailing-space aliases** (`report.pdf.`,
+/// `report.pdf `) are left alone, so they do not compare equal to `report.pdf`.
+/// Windows opens all three as one file, which is an argument for folding them
+/// and a better argument against: on the other machine they are three different
+/// files, folding them would make this gate admit a name the engine never
+/// produced, and refusing them is what it already did. A gate may be wrong by
+/// refusing a page; it may not be wrong by opening one.
+#[derive(Clone, Debug)]
+pub struct LocalFileUrl {
+    /// The text this was parsed from — the spelling the engine is navigated to,
+    /// kept because that is what a navigation needs and never because anything
+    /// compares it.
+    url: String,
+    /// **The fact.** Absolute, decoded, separators and drive-letter case as the
+    /// machine the path is *for* spells them.
+    path: PathBuf,
+    /// The `?query` and `#fragment` the *page* is answerable for: a local
+    /// report's table of contents is `report.html#ch3`, and a row that dropped
+    /// the fragment would reopen the report at the top.
+    tail: String,
+}
+
+/// **Two of these are equal when they name the same file and the same place in
+/// it** — never when they are spelled the same way.
+///
+/// Case-insensitively, and by ASCII case alone: that is what
+/// `eq_ignore_ascii_case` has always given this comparison, both of this
+/// product's machines default to a case-insensitive filesystem, and full Unicode
+/// case folding would answer *yes* for pairs of names that are two files
+/// everywhere (`K` and the Kelvin sign, `i` and `İ`).
+impl PartialEq for LocalFileUrl {
+    fn eq(&self, other: &Self) -> bool {
+        self.names_the_same_file_as(other) && self.tail == other.tail
+    }
+}
+
+impl Eq for LocalFileUrl {}
+
+impl LocalFileUrl {
+    /// The one parser. `None` is "this string does not name one local file",
+    /// and the caller's answer to that is always to refuse rather than to guess.
+    #[must_use]
+    pub fn parse(url: &str) -> Option<Self> {
+        let rest = url
+            .get(..8)
+            .filter(|head| head.eq_ignore_ascii_case("file:///"))
+            .map(|_| &url[8..])?;
+        let cut = rest.find(['?', '#']).unwrap_or(rest.len());
+        let (body, tail) = rest.split_at(cut);
+
+        let mut bytes = Vec::with_capacity(body.len());
+        let mut characters = body.chars();
+        while let Some(character) = characters.next() {
+            if character == '%' {
+                let high = characters.next()?.to_digit(16)?;
+                let low = characters.next()?.to_digit(16)?;
+                bytes.push(u8::try_from(high * 16 + low).ok()?);
+            } else {
+                let mut buffer = [0u8; 4];
+                bytes.extend_from_slice(character.encode_utf8(&mut buffer).as_bytes());
+            }
+        }
+        // `from_utf8` and never `from_utf8_lossy`: a replacement character is
+        // this door inventing a name.
+        let mut decoded = String::from_utf8(bytes).ok()?;
+        if decoded
+            .chars()
+            .any(|character| character.is_control() || character == '\\')
+        {
+            return None;
+        }
+
+        // **The root, read off the string**, and every segment read after the
+        // decoding rather than before it.
+        let mut segments = decoded.split('/');
+        let first = segments.next()?;
+        let mut letters = first.chars();
+        let drive_rooted = letters
+            .next()
+            .is_some_and(|letter| letter.is_ascii_alphabetic())
+            && letters.next() == Some(':')
+            && letters.next().is_none();
+        // A drive is a root and not a name, so `file:///D:` names no file.
+        let mut names = usize::from(!drive_rooted);
+        if !drive_rooted && matches!(first, "" | "." | "..") {
+            return None;
+        }
+        for segment in segments {
+            if matches!(segment, "" | "." | "..") {
+                return None;
+            }
+            names += 1;
+        }
+        if names == 0 {
+            return None;
+        }
+
+        let path = if drive_rooted {
+            decoded[..1].make_ascii_uppercase();
+            decoded.replace('/', "\\")
+        } else {
+            let mut rooted = String::with_capacity(decoded.len() + 1);
+            rooted.push('/');
+            rooted.push_str(&decoded);
+            rooted
+        };
+        Some(Self {
+            url: url.to_owned(),
+            path: PathBuf::from(path),
+            tail: tail.to_owned(),
+        })
+    }
+
+    /// The spelling to navigate to. The engine is the only reader.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.url
+    }
+
+    /// The file this URL names.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The `?query` and `#fragment`, empty when there is none.
+    #[must_use]
+    pub fn tail(&self) -> &str {
+        &self.tail
+    }
+
+    /// The pair, for a caller that wants both and keeps neither.
+    #[must_use]
+    pub fn into_path_and_tail(self) -> (PathBuf, String) {
+        (self.path, self.tail)
+    }
+
+    /// **Whether these two URLs name one file**, whatever either of them did to
+    /// spell it. The tail does not participate: a jump to `#section` inside the
+    /// page that was minted is the same page.
+    #[must_use]
+    pub fn names_the_same_file_as(&self, other: &Self) -> bool {
+        self.path
+            .as_os_str()
+            .as_encoded_bytes()
+            .eq_ignore_ascii_case(other.path.as_os_str().as_encoded_bytes())
+    }
+
+    /// **Whether this URL names something inside the folder `minted` sits in** —
+    /// the whole of a local seat's reach.
+    ///
+    /// The folder and the folders under it, because that is what a document is:
+    /// a report and its `images/` directory are one thing a person opened, and a
+    /// rule that admitted only the exact file would show them a report with no
+    /// pictures in it. The comparison is against the folder **plus its
+    /// separator**, so `D:\tmp\page` does not admit `D:\tmp\pageant\x.png`.
+    #[must_use]
+    pub fn is_inside_the_folder_of(&self, minted: &Self) -> bool {
+        let minted = minted.path.as_os_str().as_encoded_bytes();
+        let Some(last) = minted
+            .iter()
+            .rposition(|byte| *byte == b'/' || *byte == b'\\')
+        else {
+            return false;
+        };
+        let folder = &minted[..=last];
+        let candidate = self.path.as_os_str().as_encoded_bytes();
+        candidate.len() >= folder.len() && candidate[..folder.len()].eq_ignore_ascii_case(folder)
+    }
+}
+
 /// What the host itself put in front of one web seat.
 ///
 /// Last write wins, mirroring §4's `desired_url`: a seat has at most one minted
@@ -131,9 +370,11 @@ pub enum Mint {
     /// The host's own empty page — a fresh seat, a seat between two documents,
     /// the target of a popup the host is about to redirect into this pane.
     Blank,
-    /// The one `file:` URL the controlled file entry minted from a
-    /// canonicalised path.
-    File(String),
+    /// **The one local file the controlled file entry minted**, as the path it
+    /// names rather than as one spelling of it ([`LocalFileUrl`]). A mint that
+    /// could not be parsed cannot be built, so no seat ever carries a mint that
+    /// nothing can compare.
+    File(LocalFileUrl),
 }
 
 impl Mint {
@@ -159,8 +400,8 @@ impl Mint {
         // old spelling assumed the first, so a Mac minted
         // `file:////Users/…` — four slashes — which is a URL the engine
         // normalises back to three and which therefore matched neither
-        // [`Self::admits`] nor [`file_url_is_inside_the_folder_of`]: a local
-        // seat refused its own document.
+        // [`Self::admits`] nor [`LocalFileUrl::is_inside_the_folder_of`]: a
+        // local seat refused its own document.
         //
         // A question about the string and not about the machine, so this file
         // still names no platform.
@@ -178,107 +419,18 @@ impl Mint {
                 other => url.push(other),
             }
         }
-        Ok(Self::File(url))
-    }
-
-    /// **The path a URL this door minted was made from, and whatever the page
-    /// added to it** (W2 slice 5).
-    ///
-    /// [`Self::file`] read backwards, and deliberately no further: it undoes the
-    /// four percent escapes that encoder writes and puts the separators back.
-    /// It is **not** a `file:` URL parser and must never become one. Its whole
-    /// job is to let a row in the switcher, a line in `session.json` and a pin
-    /// be taken back to the *disk* — where the path is canonicalised and minted
-    /// again, exactly as the files column does it — so that a stored string is
-    /// never the thing that authorises a load. A string this cannot read
-    /// answers `None`, and `None` means "this did not come out of that door".
-    ///
-    /// The tail is the `?query` and `#fragment` the *page* is answerable for
-    /// ([`Self::admits`]): a local report's table of contents is `report.html#ch3`,
-    /// and a row that dropped the fragment would reopen the report at the top.
-    ///
-    /// # Two roots, because [`Self::file`] mints from two (M4-3)
-    ///
-    /// M4-2 taught the *encoder* that an absolute path spells its root in one of
-    /// two ways — `D:\report.html` carries none and `/Users/somebody/report.html`
-    /// is nothing but one — and left the **reader** assuming the first. So a Mac
-    /// minted a URL this function then refused: `file:///Users/somebody/report.html`
-    /// came back as `\Users\somebody\report.html`, which is not an absolute path
-    /// on either machine, and [`local_path_form`] therefore answered `None` for
-    /// every local page a Mac ever opened.
-    ///
-    /// The fix reads the root off the **string**, which is where both spellings
-    /// of it already are, so this function still names no platform: a body
-    /// beginning `X:` is the drive-rooted form and its separators are `\`; a body
-    /// beginning with anything else is the slash-rooted form, whose one leading
-    /// separator was eaten by the `file:///` prefix and whose separators are
-    /// already what they will stay. Reading the *host's* rules instead — asking
-    /// [`Path::is_absolute`] — is what was wrong before: it answers about the
-    /// machine doing the reading rather than about the machine the path is for,
-    /// and a session written on one and read on the other is exactly the case
-    /// that has to come back with the same answer on both.
-    #[must_use]
-    pub fn path_and_tail_of_file_url(url: &str) -> Option<(PathBuf, String)> {
-        let rest = url
-            .get(..8)
-            .filter(|head| head.eq_ignore_ascii_case("file:///"))
-            .map(|_| &url[8..])?;
-        let cut = rest.find(['?', '#']).unwrap_or(rest.len());
-        let (body, tail) = rest.split_at(cut);
-        // **The root, read off the string.** A drive letter, a colon and a
-        // separator — the one shape `Self::file` leaves a path that carried no
-        // leading separator of its own. Everything else is the other root, and
-        // it is the one the prefix above already consumed. The separator is
-        // part of the shape rather than optional: `D:` alone is a *drive
-        // relative* path on the machine that spells paths that way, which is
-        // the one kind of absolute-looking string this door must not hand back.
-        let mut head = body.chars();
-        let drive_rooted = matches!(
-            (head.next(), head.next(), head.next()),
-            (Some(letter), Some(':'), Some('/')) if letter.is_ascii_alphabetic()
-        );
-        let separator = if drive_rooted { '\\' } else { '/' };
-        let mut path = String::with_capacity(body.len() + 1);
-        if !drive_rooted {
-            path.push(separator);
-        }
-        let mut bytes = body.chars();
-        while let Some(character) = bytes.next() {
-            match character {
-                '/' => path.push(separator),
-                '%' => {
-                    let escape: String = [bytes.next()?, bytes.next()?].into_iter().collect();
-                    // Only the four this door writes. Anything else is a URL
-                    // somebody else built, and guessing at it is how a path
-                    // comes out of a string that never named one.
-                    path.push(match escape.to_ascii_uppercase().as_str() {
-                        "25" => '%',
-                        "23" => '#',
-                        "3F" => '?',
-                        "20" => ' ',
-                        _ => return None,
-                    });
-                }
-                other => path.push(other),
-            }
-        }
-        // An absolute path with something in it, and nothing else: the mint was
-        // made from a canonicalised path, so an empty body, anything with a `..`
-        // in it and anything spelled as a share is a string that did not come
-        // from here. The disk is asked again by the caller either way.
-        //
-        // The segments are split here rather than walked as `Path::components`
-        // for the reason the root was read off the string: on Windows that walk
-        // reads `/Users/x/..` as three plain names, and a `..` it did not
-        // recognise is a `..` this door let through.
-        if body.is_empty()
-            || path
-                .split(['/', '\\'])
-                .any(|segment| segment == ".." || segment == ".")
-        {
-            return None;
-        }
-        Some((PathBuf::from(path), tail.to_owned()))
+        // **Minted through the same door everything else is read through**
+        // (issue #7). The string just written is handed to [`LocalFileUrl`] and
+        // the mint carries what comes back, so there is one grammar rather than
+        // an encoder and a reader that can disagree, and a mint that exists is
+        // a mint every comparison can answer about. What this can now refuse is
+        // a path that is not one absolute path with a name in it — a `.` or
+        // `..` segment, a control character, a bare drive. Those are not
+        // addresses a reader asked for: the files column canonicalises before
+        // it mints, and `canonicalize` returns none of them.
+        LocalFileUrl::parse(&url)
+            .map(Self::File)
+            .ok_or(Refusal::FileScheme)
     }
 
     /// The URL this mint stands for, which is what the host navigates to.
@@ -286,30 +438,34 @@ impl Mint {
         match self {
             Self::Nothing => None,
             Self::Blank => Some(BLANK_PAGE),
-            Self::File(url) => Some(url),
+            Self::File(url) => Some(url.as_str()),
         }
     }
 
     /// Whether `candidate` is this mint, and if so the URL to allow.
     ///
-    /// The sanctioned file answers for its own fragments and queries — a jump
-    /// to `#section` inside the page that was minted is the same page — and the
-    /// comparison is case-insensitive because Windows paths are. There is no
-    /// normalisation of `..`: the mint was made from a canonicalised path, so a
-    /// candidate that would need normalising to match is a candidate that did
-    /// not come from the mint.
-    fn admits(&self, candidate: &str) -> Option<String> {
+    /// **Both sides are read as the path they name** ([`LocalFileUrl`], issue
+    /// #7) and never as text. The sanctioned file answers for its own fragments
+    /// and queries — a jump to `#section` inside the page that was minted is
+    /// the same page — and a candidate that names anything else, or that names
+    /// nothing this door can read, is not this mint. There is no normalisation
+    /// of `..`: the mint was made from a canonicalised path, so a candidate
+    /// that would need normalising to match is a candidate that did not come
+    /// from the mint, and the parser refuses one outright.
+    ///
+    /// The URL handed back is the **candidate's own** spelling, because that is
+    /// the string the engine is already loading; answering with the mint's
+    /// would be [`check`]'s contract asking for a cancel-and-restart on every
+    /// local page.
+    pub(crate) fn admits(&self, candidate: &str) -> Option<String> {
         match self {
             Self::Nothing => None,
             Self::Blank => candidate
                 .eq_ignore_ascii_case(BLANK_PAGE)
                 .then(|| BLANK_PAGE.to_owned()),
-            Self::File(minted) => {
-                let without_tail = candidate.split(['?', '#']).next().unwrap_or(candidate);
-                minted
-                    .eq_ignore_ascii_case(without_tail)
-                    .then(|| candidate.to_owned())
-            }
+            Self::File(minted) => LocalFileUrl::parse(candidate)?
+                .names_the_same_file_as(minted)
+                .then(|| candidate.to_owned()),
         }
     }
 }
@@ -324,13 +480,18 @@ impl Mint {
 /// the `file:` URI stays what it always was underneath: what the engine is
 /// navigated to, what a mint compares, what `session.json` keeps.
 ///
-/// [`Mint::path_and_tail_of_file_url`] read for display, which is why it is here
-/// and not spelled again at each surface: this is that reader's own strictness —
-/// only the four escapes this product writes, only a path rooted the way that
-/// door roots one — so a URL that did not come out of [`Mint::file`] answers
-/// `None` and is shown exactly as it arrived. A `file:` URL from somewhere else
-/// is somebody else's string, and guessing at it is how a path comes out of
+/// [`LocalFileUrl`] read for display, which is why it is here and not spelled
+/// again at each surface. A string that does not name one local file answers
+/// `None` and is shown exactly as it arrived — a `file:` URL with a host on it
+/// is a share and not a path, and guessing at one is how a path comes out of
 /// something that never named one.
+///
+/// **A page whose path is in Chinese is shown as a path too** (issue #7,
+/// 2026-09-20). The engine commits the URL in its own spelling — `报告.pdf`
+/// comes back as `%E6%8A%A5%E5%91%8A.pdf` — and the reader this used to call
+/// knew four escapes, so every such page showed the reader a percent-encoded
+/// URI where the ruling says a path goes. The parser is total now and the row
+/// says `D:\文档\报告.pdf`.
 ///
 /// **The root is the machine's, and so is the spelling** (M4-3): `D:\Developer\notes.html`
 /// where a drive rooted the path and `/Users/somebody/notes.html` where a slash
@@ -345,8 +506,8 @@ impl Mint {
 /// displayed path that dropped the fragment would name the top of it.
 #[must_use]
 pub fn local_path_form(url: &str) -> Option<String> {
-    let (path, tail) = Mint::path_and_tail_of_file_url(url)?;
-    Some(format!("{}{tail}", path.display()))
+    let parsed = LocalFileUrl::parse(url)?;
+    Some(format!("{}{}", parsed.path().display(), parsed.tail()))
 }
 
 /// The same sentence read the other way: **a drive-absolute path typed into an
@@ -611,7 +772,10 @@ pub fn resource_request(candidate: &str, mint: &Mint) -> Decision {
     }
     if scheme == DISK {
         return match mint {
-            Mint::File(minted) if file_url_is_inside_the_folder_of(minted, trimmed) => {
+            Mint::File(minted)
+                if LocalFileUrl::parse(trimmed)
+                    .is_some_and(|candidate| candidate.is_inside_the_folder_of(minted)) =>
+            {
                 Decision::Navigate(trimmed.to_owned())
             }
             // A `file:` URL that names a host is a share, and it is refused
@@ -792,119 +956,23 @@ fn names_a_file_host(url: &str) -> bool {
     rest.starts_with("//") && !rest.starts_with("///")
 }
 
-/// **Whether a `file:` URL names something inside the folder the minted file
-/// sits in** — the whole of the local seat's reach.
-///
-/// The folder and the folders under it, because that is what a document is: a
-/// report and its `images/` directory are one thing a person opened, and a rule
-/// that admitted only the exact file would show them a report with no pictures
-/// in it. What it is not is a rule about prefixes of *text*: both sides are
-/// decoded to a path first, so `%2e%2e`, `%5c` and a percent-encoded drive
-/// letter are the same string here that they are on disk, and a path with a
-/// `..` in it is refused outright rather than folded — the engine resolves
-/// relative references before it asks, so a `..` arriving here is a candidate
-/// that did not come from resolving anything.
-fn file_url_is_inside_the_folder_of(minted: &str, candidate: &str) -> bool {
-    let (Some(minted), Some(candidate)) = (
-        decoded_file_path(minted),
-        decoded_file_path(strip_the_tail(candidate)),
-    ) else {
-        return false;
-    };
-    let Some(folder) = minted.rsplit_once('/').map(|(head, _)| head) else {
-        return false;
-    };
-    // The folder itself is not a file, so the comparison is against the folder
-    // plus its separator: `D:/report` must not admit `D:/reportage/x.png`.
-    let folder = format!("{}/", folder.to_lowercase());
-    candidate.to_lowercase().starts_with(&folder)
-}
-
-/// A URL's path, without the `?query` and `#fragment` the page owns.
-fn strip_the_tail(url: &str) -> &str {
-    match url.find(['?', '#']) {
-        Some(cut) => &url[..cut],
-        None => url,
-    }
-}
-
-/// **A `file:///` URL as one absolute path**, with every percent escape undone.
-///
-/// A second reader beside [`Mint::path_and_tail_of_file_url`] and deliberately
-/// so: that one is strict on purpose — it reads back only what
-/// [`Mint::file`] writes, because its job is to prove a stored string came out
-/// of this product's own door. This one reads what *the engine* wrote, which is
-/// a URL it built by resolving a reference inside a document and percent-encoded
-/// by its own rules: a Chinese file name arrives as UTF-8 in `%XX`, and a reader
-/// that only knew four escapes would answer `None` for a picture that is
-/// sitting in the folder it is allowed to read.
-///
-/// `None` for anything that is not one absolute path — a drive-rooted one
-/// (`D:/report.html`) or a separator-rooted one (`/Users/somebody/report.html`),
-/// which are the two shapes this product's two machines write: no authority, no
-/// relative path, no `.` or `..` component, no interior NUL, and no escape that
-/// is not two hexadecimal digits. The separator in the answer is `/` on both,
-/// because the only reader of it compares two of these against each other.
-fn decoded_file_path(url: &str) -> Option<String> {
-    let rest = url
-        .get(..8)
-        .filter(|head| head.eq_ignore_ascii_case("file:///"))
-        .map(|_| &url[8..])?;
-    let mut bytes = Vec::with_capacity(rest.len());
-    let mut characters = rest.chars();
-    while let Some(character) = characters.next() {
-        match character {
-            '%' => {
-                let high = characters.next()?.to_digit(16)?;
-                let low = characters.next()?.to_digit(16)?;
-                bytes.push(u8::try_from(high * 16 + low).ok()?);
-            }
-            // A path is bytes to Windows and characters here; the encoder above
-            // is the only thing that ever wrote a multi-byte one, so the rest
-            // are pushed as they are.
-            other => {
-                let mut buffer = [0u8; 4];
-                bytes.extend_from_slice(other.encode_utf8(&mut buffer).as_bytes());
-            }
-        }
-    }
-    // **One separator, and it is the slash the URL already spelled** (M4-2).
-    // Both spellings are treated as separators, which is the refusing
-    // direction: a candidate meaning a literal backslash inside a file's name
-    // is turned away rather than admitted.
-    let path = String::from_utf8(bytes).ok()?.replace('\\', "/");
-    if path.chars().any(char::is_control) {
-        return None;
-    }
-    let mut parts = path.split('/');
-    let first = parts.next()?;
-    // **Two shapes of absolute, and the string says which** — `D:/report.html`
-    // carries its root in a drive letter and `/Users/somebody/report.html`
-    // carries it in the separator the `file:///` prefix already ate. Asked of
-    // the string rather than of the machine, so this file still names no
-    // platform: a first component that reads as a drive is one, and anything
-    // else is the first component of a separator-rooted path.
-    let mut letters = first.chars();
-    let drive = letters
-        .next()
-        .is_some_and(|letter| letter.is_ascii_alphabetic())
-        && letters.next() == Some(':')
-        && letters.next().is_none();
-    let mut components = usize::from(!drive);
-    if !drive && (first == ".." || first == "." || first.is_empty()) {
-        return None;
-    }
-    for part in parts {
-        if part == ".." || part == "." || part.is_empty() {
-            return None;
-        }
-        components += 1;
-    }
-    if components == 0 {
-        return None;
-    }
-    Some(if drive { path } else { format!("/{path}") })
-}
+// **Retired on 2026-09-20 (issue #7), and its absence is the repair.**
+//
+// There were two readers of a `file:` URL in this file and they disagreed:
+// `Mint::path_and_tail_of_file_url` knew four escapes because its job was to
+// prove a stored string came out of this product's own door, and
+// `decoded_file_path` knew every escape because its job was to read what the
+// *engine* wrote. Two readers of one grammar is two grammars, and the third
+// failure of the obligation ("a local seat refused its own document") was the
+// seam between them: `Mint::admits` compared spellings, so a document whose
+// name is in Chinese — which this door minted raw and the engine committed
+// percent-encoded — was refused by the window that had just opened it.
+//
+// One parser now, [`LocalFileUrl`], and everything that used to compare,
+// slice or decode a `file:` URL asks it instead:
+// `file_url_is_inside_the_folder_of` is
+// [`LocalFileUrl::is_inside_the_folder_of`], `strip_the_tail` is the tail the
+// parse already split off, and `decoded_file_path` is the parse.
 
 /// Split `input` into `(scheme, rest)` when it carries an explicit scheme.
 ///
@@ -1198,7 +1266,7 @@ mod resource_gate_tests {
     /// The seat a reader opens out of the files column: one report, in one
     /// folder, with a second folder beside it that has nothing to do with it.
     fn a_report() -> Mint {
-        Mint::File(String::from("file:///D:/tmp/page/report.html"))
+        Mint::file(Path::new(r"D:\tmp\page\report.html")).expect("a local path mints")
     }
 
     /// RED — **a picture in a previewed page cannot come from outside the page's
@@ -1370,7 +1438,7 @@ mod content_rule_tests {
 
     /// The local seat, as a Windows path — the shape [`Mint::file`] writes.
     fn a_report() -> Mint {
-        Mint::File(String::from("file:///D:/seat/open/report.html"))
+        Mint::file(Path::new(r"D:\seat\open\report.html")).expect("a local path mints")
     }
 
     /// **The emitted pattern, read rather than re-derived.**
@@ -1407,10 +1475,14 @@ mod content_rule_tests {
     /// measured it doing exactly this with no rule list in the room.
     fn outside_the_read_access(mint: &Mint, candidate: &str) -> bool {
         match mint {
+            // The scheme is asked of the splitter rather than sliced off the
+            // front, and the reach is asked of the parsed URL rather than of
+            // its text — a candidate this door cannot read as one local path is
+            // outside every read access there is.
             Mint::File(minted) => {
-                candidate.len() >= 5
-                    && candidate[..5].eq_ignore_ascii_case("file:")
-                    && !file_url_is_inside_the_folder_of(minted, candidate)
+                split_scheme(candidate).is_some_and(|(scheme, _)| scheme == DISK)
+                    && !LocalFileUrl::parse(candidate)
+                        .is_some_and(|candidate| candidate.is_inside_the_folder_of(minted))
             }
             // A seat that opened no file was granted no read access, so this
             // half refuses nothing and the patterns carry the whole sentence.
@@ -1617,6 +1689,414 @@ mod content_rule_tests {
     }
 }
 
+/// **A `file:` URL is the path it names** (issue #7, 2026-09-20).
+///
+/// The evidence these tables are built out of is a measurement, not a guess:
+/// `scratchpad/pdf-vhost-spike/REPORT.md` part 2 recorded 17 (passed, reported)
+/// pairs from a standalone WebView2 host on runtime 153.0.4234.48, with the
+/// URLs minted by a byte-for-byte copy of [`Mint::file`] and handed to
+/// `Navigate` raw. The fixture table below is those pairs with the machine's own
+/// directory replaced by a synthetic one; the file names are the spike's and
+/// carry nobody's data.
+#[cfg(test)]
+mod file_url_tests {
+    use super::*;
+
+    /// The folder the spike's files sat in, shortened.
+    const ROOT: &str = "file:///D:/spike/docroot/";
+
+    /// One recorded pair: what was passed to `Navigate`, and what
+    /// `NavigationStarting` reported back.
+    fn pair(passed: &str, reported: &str) -> (String, String) {
+        (format!("{ROOT}{passed}"), format!("{ROOT}{reported}"))
+    }
+
+    /// The seven `file:` rows of the spike's table.
+    fn recorded() -> [(String, String); 7] {
+        [
+            // F-a — issue #7's own shape: Chinese, spaces, parentheses.
+            pair(
+                "文档%20测试%20V1.1%20(1).pdf",
+                "%E6%96%87%E6%A1%A3%20%E6%B5%8B%E8%AF%95%20V1.1%20(1).pdf",
+            ),
+            // F-b — ASCII only; the engine changed nothing.
+            pair("plain%20(1).pdf", "plain%20(1).pdf"),
+            // F-c1 — `{`, `}` and `^` are outside the engine's safe set; `[`,
+            // `]` and `~` are inside it.
+            pair(
+                "sym-a%20[b]%20{c}%20^d%20~e.pdf",
+                "sym-a%20[b]%20%7Bc%7D%20%5Ed%20~e.pdf",
+            ),
+            // F-c2 — nine symbols the engine leaves raw.
+            pair(
+                "sym-b%20'q'%20&a%20+p%20,c%20;s%20=e%20@a%20!b%20$d.pdf",
+                "sym-b%20'q'%20&a%20+p%20,c%20;s%20=e%20@a%20!b%20$d.pdf",
+            ),
+            // F-c3 — escapes already there are kept verbatim, not re-encoded.
+            pair("sym-c%20%23h%20%25p.pdf", "sym-c%20%23h%20%25p.pdf"),
+            // F-c4 — the backtick.
+            pair("sym-d%20backtick`bt.pdf", "sym-d%20backtick%60bt.pdf"),
+            // F-d — the same four escapes on an `.html`: not PDF-specific.
+            pair(
+                "文档%20测试%20page.html",
+                "%E6%96%87%E6%A1%A3%20%E6%B5%8B%E8%AF%95%20page.html",
+            ),
+        ]
+    }
+
+    /// RED — **the seat admits its own document, in the spelling the engine
+    /// gives it back** (issue #7; A1).
+    ///
+    /// On `main` this fails on F-a, F-c1, F-c4 and F-d — the four rows where the
+    /// engine re-spelled something — with `admitted its own document` naming the
+    /// row. Those four are exactly the reported defect: a user whose report
+    /// lives under `D:\文档\` clicked it and Folio drew its own refusal card.
+    ///
+    /// RED GATE: compare the two strings with `eq_ignore_ascii_case` again, as
+    /// `Mint::admits` did until this change, and the same four rows fail.
+    #[test]
+    fn the_engines_own_spelling_of_a_minted_file_is_the_minted_file() {
+        for (passed, reported) in recorded() {
+            let minted =
+                Mint::File(LocalFileUrl::parse(&passed).expect("the spike passed a local path"));
+            assert_eq!(
+                navigation_starting(&reported, &minted),
+                Decision::Navigate(reported.clone()),
+                "the seat refused its own document: passed {passed}, reported {reported}"
+            );
+            // And so does the door the document's pictures come through.
+            assert!(
+                matches!(resource_request(&reported, &minted), Decision::Navigate(_)),
+                "the document could not read itself: {reported}"
+            );
+        }
+        // F-e — the drive letter, which the engine upper-cases and the old
+        // comparison hid behind `eq_ignore_ascii_case`. The parser answers it
+        // rather than hiding it: the path it reads back is upper-cased.
+        let lower = Mint::file(Path::new(r"c:\spike\docroot\plain (1).pdf")).expect("a local path");
+        assert_eq!(
+            navigation_starting("file:///C:/spike/docroot/plain%20(1).pdf", &lower),
+            Decision::Navigate("file:///C:/spike/docroot/plain%20(1).pdf".to_owned())
+        );
+        assert_eq!(
+            local_path_form(lower.target().expect("a minted URL")).as_deref(),
+            Some(r"C:\spike\docroot\plain (1).pdf")
+        );
+    }
+
+    /// RED — **and nothing else becomes admitted** (A2, the security table).
+    ///
+    /// Every row of it is a thing that is refused on `main` and must stay
+    /// refused: a traversal in any spelling, a sibling outside the folder, a
+    /// share, a candidate that matches only after a lossy decode, a NUL, a
+    /// separator smuggled in as an escape, and the two Windows aliases.
+    ///
+    /// RED GATE ①: decode with `String::from_utf8_lossy` and the `%FF` rows go
+    /// green — a different file admitted under the minted file's name. RED GATE
+    /// ②: fold the `.` and `..` check to before the decoding and every `%2e`
+    /// row goes green. RED GATE ③: strip trailing dots and spaces to make the
+    /// Windows aliases compare equal and the last block goes green on a machine
+    /// where those are three different files.
+    #[test]
+    fn the_gate_admits_nothing_it_did_not_admit_before() {
+        let minted = Mint::file(Path::new(r"D:\tmp\page\report.html")).expect("a local page");
+        for refused in [
+            // ① traversal, in every spelling
+            "file:///D:/tmp/page/../other/secret.png",
+            "file:///D:/tmp/page/%2e%2e/other/secret.png",
+            "file:///D:/tmp/page/%2E%2E/other/secret.png",
+            "file:///D:/tmp/page/.%2e/other/secret.png",
+            "file:///D:/tmp/page/./report.html",
+            // ② a sibling outside the minted folder
+            "file:///D:/tmp/other/secret.png",
+            "file:///D:/tmp/secret.png",
+            "file:///C:/Windows/win.ini",
+            "file:///D:/tmp/pageant/secret.png",
+            // ③ a share, spelled as a host on a `file:` URL
+            "file://server/share/x.png",
+            "file://localhost/D:/tmp/page/report.html",
+            // ④ equal to the mint only after a lossy decode
+            "file:///D:/tmp/page/report%FF.html",
+            "file:///D:/tmp/page/%FFreport.html",
+            // ⑤ NUL, and the rest of the control characters with it
+            "file:///D:/tmp/page/report%00.html",
+            "file:///D:/tmp/page/report%0A.html",
+            // ⑥ a separator smuggled in as an escape
+            "file:///D:/tmp/page/%5C../secret.png",
+            "file:///D:%5Ctmp%5Cpage%5Creport.html",
+            // ⑦ a half-written escape
+            "file:///D:/tmp/page/rep%rt.html",
+            "file:///D:/tmp/page/report.html%2",
+            // ⑧ nothing at all
+            "file:///",
+            "file:///D:",
+            "",
+        ] {
+            // Every one of these is refused as `FileScheme` — the allow-list's
+            // own word for the disk — because the mint did not admit it and the
+            // list refuses `file:` from every door. The empty string never
+            // reaches that far.
+            let expected = if refused.is_empty() {
+                Refusal::Empty
+            } else {
+                Refusal::FileScheme
+            };
+            assert_eq!(
+                navigation_starting(refused, &minted),
+                Decision::Refuse(expected),
+                "the gate admitted {refused}"
+            );
+            assert!(
+                matches!(
+                    resource_request(refused, &minted),
+                    Decision::Refuse(Refusal::FileScheme | Refusal::NetworkPath | Refusal::Empty)
+                ),
+                "the document read {refused}"
+            );
+        }
+
+        // ⑨ **Double encoding is one decode, and one decode is what the disk
+        // sees.** `%252e` is the two-character *name* `%2e` — the disk resolves
+        // no traversal out of it and neither does this — so it names a child of
+        // the folder it was written in and can never leave it.
+        assert!(matches!(
+            resource_request("file:///D:/tmp/%252e%252e/other/secret.png", &minted),
+            Decision::Refuse(_)
+        ));
+        assert_eq!(
+            LocalFileUrl::parse("file:///D:/tmp/page/%252e%252e/x.png")
+                .expect("a name, not a traversal")
+                .path(),
+            Path::new(r"D:\tmp\page\%2e%2e\x.png")
+        );
+
+        // ⑩ **A `file:` URL typed into the address field is still refused**, by
+        // the ruling that has always said so and not by anything here.
+        for typed in [
+            "file:///D:/tmp/page/report.html",
+            "FILE:///D:/tmp/page/report.html",
+            "file://server/share/x.png",
+        ] {
+            assert_eq!(
+                address_bar(typed),
+                Decision::Refuse(Refusal::FileScheme),
+                "{typed}"
+            );
+        }
+
+        // ⑪ **The Windows trailing-dot and trailing-space aliases.** Windows
+        // opens all three of these as `report.html`; the other machine opens
+        // three different files. They are refused — which is what `main` did,
+        // and the direction a gate is allowed to be wrong in.
+        for alias in [
+            "file:///D:/tmp/page/report.html.",
+            "file:///D:/tmp/page/report.html%20",
+            "file:///D:/tmp/page/report.html%2E",
+        ] {
+            assert_eq!(
+                navigation_starting(alias, &minted),
+                Decision::Refuse(Refusal::FileScheme),
+                "the gate took the Windows alias {alias} for the file it minted"
+            );
+        }
+
+        // ⑫ …and a mixed-case scheme is the same scheme it always was, on the
+        // door that has a mint to compare against.
+        assert_eq!(
+            navigation_starting("FILE:///D:/tmp/page/report.html", &minted),
+            Decision::Navigate("FILE:///D:/tmp/page/report.html".to_owned())
+        );
+
+        // ⑬ The other half of the rule, so that a door which refused
+        // everything could not pass this test: the file, its folder and the
+        // folders under it.
+        for inside in [
+            "file:///D:/tmp/page/report.html",
+            "file:///D:/tmp/page/report.html#ch3",
+            "file:///D:/tmp/page/images/figure-1.png",
+            "file:///D:/tmp/page/%E5%9B%BE.png",
+            "file:///D:/tmp/page/图.png",
+        ] {
+            assert!(
+                matches!(resource_request(inside, &minted), Decision::Navigate(_)),
+                "the document could not read {inside}, which is beside it"
+            );
+        }
+    }
+
+    /// RED — **path → URL → path is the identity**, on both roots (A5).
+    ///
+    /// RED GATE: drop a character from [`Mint::file`]'s escape table, or teach
+    /// the parser one escape fewer, and the name that needs it comes back
+    /// different.
+    #[test]
+    fn a_path_survives_the_round_trip_whatever_is_in_its_name() {
+        let long = "n".repeat(250);
+        let names = [
+            "报告.pdf",
+            "文档 测试 V1.1 (1).pdf",
+            "a b.html",
+            "hash#1.html",
+            "100% done?.htm",
+            "brace{a}^b`c.html",
+            "sq[a](b).html",
+            "🙂-page.html",
+            // A combining sequence: one grapheme, two scalars, six bytes.
+            "e\u{301}clair.html",
+            "ünïcödé.html",
+            long.as_str(),
+        ];
+        for name in names {
+            for original in [
+                format!(r"D:\文档\项目 (1)\{name}"),
+                format!("/Users/somebody/项目 (1)/{name}"),
+            ] {
+                let Mint::File(minted) =
+                    Mint::file(Path::new(&original)).expect("a local path mints")
+                else {
+                    panic!("`Mint::file` makes a file mint");
+                };
+                assert_eq!(
+                    minted.path(),
+                    Path::new(&original),
+                    "{original} went out as {}",
+                    minted.as_str()
+                );
+                assert_eq!(minted.tail(), "");
+                // …and what is written next time is what was written this time,
+                // which is what makes a `session.json` stable across a save.
+                let again = Mint::file(minted.path()).expect("mints again");
+                assert_eq!(again.target(), Some(minted.as_str()), "{original}");
+            }
+        }
+    }
+
+    /// RED — **a `session.json` written by 0.4.2 still opens its page** (A6).
+    ///
+    /// Two spellings of one file were persisted by that build: the raw one
+    /// [`Mint::file`] writes, which is what a mint carried, and the
+    /// percent-encoded one the engine committed, which is what a switcher row
+    /// and a restore were keyed by. Both are read back to the same path, and
+    /// what is written now is the first of them.
+    #[test]
+    fn a_session_written_before_this_change_still_names_its_page() {
+        let committed = "file:///D:/%E6%96%87%E6%A1%A3/report.html";
+        let minted = "file:///D:/文档/report.html";
+        let path = Path::new(r"D:\文档\report.html");
+        for stored in [committed, minted] {
+            let read = LocalFileUrl::parse(stored).expect("a stored row names a path");
+            assert_eq!(read.path(), path, "{stored}");
+        }
+        assert_eq!(
+            LocalFileUrl::parse(committed).expect("reads"),
+            LocalFileUrl::parse(minted).expect("reads"),
+            "one file, two rows"
+        );
+        assert_eq!(
+            Mint::file(path).expect("mints").target(),
+            Some(minted),
+            "and what is written now is the spelling this door has always written"
+        );
+    }
+
+    /// RED — **a page opened from a Chinese path is shown as that path** (A4,
+    /// the ruling of 2026-08-25 applied to the string the engine commits).
+    ///
+    /// RED GATE: teach the parser only the four escapes [`Mint::file`] writes,
+    /// as the reader this replaced knew, and the first row comes back `None` —
+    /// which on screen is the percent-encoded URI in the address row, under a
+    /// globe, for a file on this disk.
+    #[test]
+    fn a_page_under_a_chinese_path_is_shown_as_a_path() {
+        assert_eq!(
+            local_path_form("file:///D:/%E7%BB%8F%E6%B5%8E/%E6%8A%A5%E5%91%8A%20V1.1%20(1).pdf")
+                .as_deref(),
+            Some(r"D:\经济\报告 V1.1 (1).pdf")
+        );
+        assert_eq!(
+            local_path_form("file:///Users/somebody/%E6%96%87%E6%A1%A3/a.html#ch3").as_deref(),
+            Some("/Users/somebody/文档/a.html#ch3")
+        );
+        // What is not one local path is still shown exactly as it arrived.
+        for foreign in [
+            "file://server/share/x.html",
+            "http://example.com/a",
+            "file:///D:/tmp/../secret.html",
+        ] {
+            assert_eq!(local_path_form(foreign), None, "{foreign}");
+        }
+    }
+
+    /// PIN — **nothing in this crate compares the *text* of a `file:` URL**
+    /// (A3; the class this change closes).
+    ///
+    /// Read off the crate's own sources rather than off any one file's name, so
+    /// that a comparison added to a file that does not exist yet is caught too.
+    /// The one line that may hold both a `file://` literal and a comparison is
+    /// the parser reading its own scheme; every other question about a `file:`
+    /// URL is a question about the path it names, and [`LocalFileUrl`] is where
+    /// it is asked.
+    ///
+    /// RED GATE: put `minted.eq_ignore_ascii_case(candidate)` back into
+    /// `Mint::admits` and this names the line.
+    #[test]
+    fn no_file_url_is_compared_as_text() {
+        // Spelled in halves so that this test is not its own first offender:
+        // every line below would otherwise carry the needle it is looking for.
+        let a_file_url = concat!("file:", "//");
+        let the_one_line = concat!(
+            r#".filter(|head| head.eq_ignore_ascii_case("file:"#,
+            r#"///"))"#
+        );
+        let mut stack = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+        let mut found: Vec<String> = Vec::new();
+        while let Some(directory) = stack.pop() {
+            for entry in std::fs::read_dir(&directory).expect("a directory of this crate") {
+                let path = entry.expect("a directory entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|extension| extension != "rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).expect("a source file");
+                for line in text.lines() {
+                    let code = line.trim_start();
+                    // A comment is prose about a rule and not a use of it. The
+                    // test is the *start* of the line rather than the first
+                    // `//` in it, because `file://` carries two slashes of its
+                    // own and a cleverer reader would cut every needle in half.
+                    if code.starts_with("//") || !code.contains(a_file_url) {
+                        continue;
+                    }
+                    if [
+                        "eq_ignore_ascii_case",
+                        "starts_with",
+                        "ends_with",
+                        "strip_prefix",
+                        "to_lowercase(",
+                        "to_ascii_lowercase(",
+                        ".contains(",
+                    ]
+                    .iter()
+                    .any(|needle| code.contains(needle))
+                    {
+                        found.push(code.to_owned());
+                    }
+                }
+            }
+        }
+        found.sort();
+        found.dedup();
+        assert_eq!(
+            found,
+            [the_one_line],
+            "a `file:` URL is compared as text somewhere in this crate"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1682,13 +2162,12 @@ mod tests {
     /// PIN (W2 slice 5) - **the file door read backwards is the file door read
     /// forwards.**
     ///
-    /// `Mint::path_and_tail_of_file_url` exists so that a URL this window wrote
-    /// into a switcher row, a session file or a pin can be taken back to a
-    /// *path* and minted again from the disk - never so that the string itself
-    /// can authorise anything. So the only thing it has to be is the exact
-    /// inverse of the encoder, and the only thing it must never be is a general
-    /// `file:` parser: everything it cannot read answers `None`, which sends the
-    /// caller back to the disk with nothing.
+    /// [`LocalFileUrl`] exists so that a URL this window wrote into a switcher
+    /// row, a session file or a pin can be taken back to a *path* and minted
+    /// again from the disk - never so that the string itself can authorise
+    /// anything. Being the exact inverse of the encoder is one half of its
+    /// contract; the other half, since issue #7, is that it reads **any**
+    /// spelling of a local path, because the engine commits its own.
     #[test]
     fn a_minted_file_url_reads_back_as_the_path_it_was_minted_from() {
         for original in [
@@ -1702,7 +2181,7 @@ mod tests {
                 panic!("`Mint::file` makes a file mint");
             };
             assert_eq!(
-                Mint::path_and_tail_of_file_url(&url),
+                LocalFileUrl::parse(url.as_str()).map(LocalFileUrl::into_path_and_tail),
                 Some((PathBuf::from(original), String::new())),
                 "{original}"
             );
@@ -1712,44 +2191,45 @@ mod tests {
         // it is not part of the path and the disk must never be asked about it.
         let minted = Mint::file(Path::new(r"C:\site\report.html")).expect("mints");
         let url = minted.target().expect("a file mint names its URL");
+        for (tail, spelled) in [("#chapter-3", "#chapter-3"), ("?page=2#top", "?page=2#top")] {
+            assert_eq!(
+                LocalFileUrl::parse(&format!("{url}{tail}")).map(LocalFileUrl::into_path_and_tail),
+                Some((PathBuf::from(r"C:\site\report.html"), spelled.to_owned()))
+            );
+        }
+
+        // What the *engine* writes reads back as the same path, which is the
+        // whole of issue #7: an escape this door never writes is still an
+        // escape, and the bytes under it are UTF-8.
         assert_eq!(
-            Mint::path_and_tail_of_file_url(&format!("{url}#chapter-3")),
-            Some((
-                PathBuf::from(r"C:\site\report.html"),
-                "#chapter-3".to_owned()
-            ))
-        );
-        assert_eq!(
-            Mint::path_and_tail_of_file_url(&format!("{url}?page=2#top")),
-            Some((
-                PathBuf::from(r"C:\site\report.html"),
-                "?page=2#top".to_owned()
-            ))
+            LocalFileUrl::parse("file:///C:/site/%C3%A9.html")
+                .expect("the engine's spelling is a spelling")
+                .path(),
+            Path::new(r"C:\site\é.html")
         );
 
-        // And everything this door did not write.
+        // And everything that is not one local path.
         for foreign in [
             "http://localhost:5173/app",
             "file://server/share/page.html",
             "file:///C:/site/../secret.html",
             "file:///Users/somebody/../secret.html",
-            "file:///C:/site/%C3%A9.html",
             "file:///C:/site/%2",
-            // `file:///C:` is **not** on this list, and that is the two-root
-            // reading being honest rather than a gap in it: a body of `C:` with
-            // no separator after it is not a drive-absolute path, and what it
-            // *is* is a slash-rooted path to a file called `C:` — which is a
-            // legal name on the machine that spells paths that way, and which
-            // `Mint::file` would have minted exactly this string from. The
-            // reader is the inverse of the encoder, and the disk is asked again
-            // either way.
+            // A drive is a root and not a name. Before issue #7 this read as a
+            // slash-rooted path to a file *called* `C:` — legal on the machine
+            // that spells paths that way — and answered with it; one parser
+            // cannot hold both readings, and the one it holds is the one that
+            // refuses. A file named `C:` at the root of a Mac is not a page
+            // anybody opened, and a bare drive handed to Windows is the one
+            // absolute-looking string that is not absolute.
+            "file:///C:",
             "file:///",
             "",
         ] {
             assert_eq!(
-                Mint::path_and_tail_of_file_url(foreign),
+                LocalFileUrl::parse(foreign).map(LocalFileUrl::into_path_and_tail),
                 None,
-                "not a string this door minted: {foreign}"
+                "not one local path: {foreign}"
             );
         }
     }
@@ -1759,11 +2239,10 @@ mod tests {
     ///
     /// M4-2 fixed the encoder for a path that is nothing but a root
     /// (`a_minted_file_url_has_one_root_however_the_path_spelled_it`) and left
-    /// the decoder assuming a drive letter, so
-    /// [`Mint::path_and_tail_of_file_url`] answered `None` for every URL a Mac
-    /// ever minted and [`local_path_form`] therefore showed the URI where the
-    /// ruling of 2026-08-25 says a path goes — the carry-forward §13.29 ⑬ wrote
-    /// down.
+    /// the decoder assuming a drive letter, so the reader answered `None` for
+    /// every URL a Mac ever minted and [`local_path_form`] therefore showed the
+    /// URI where the ruling of 2026-08-25 says a path goes — the carry-forward
+    /// §13.29 ⑬ wrote down.
     ///
     /// **Both spellings are asked of both, on one machine**, which is the whole
     /// point: these are string questions, a session file travels, and a test that
@@ -1787,7 +2266,8 @@ mod tests {
             Some("/Users/somebody/notes and more.html#ch3")
         );
         assert_eq!(
-            Mint::path_and_tail_of_file_url("file:///Users/somebody/report.html?page=2#top"),
+            LocalFileUrl::parse("file:///Users/somebody/report.html?page=2#top")
+                .map(LocalFileUrl::into_path_and_tail),
             Some((
                 PathBuf::from("/Users/somebody/report.html"),
                 "?page=2#top".to_owned()
@@ -1804,11 +2284,9 @@ mod tests {
         let Mint::File(url) = Mint::file(Path::new(original)).expect("a local path mints") else {
             panic!("`Mint::file` makes a file mint");
         };
-        assert_eq!(url, "file:///Users/somebody/a%20b/p%231.html");
-        assert_eq!(
-            Mint::path_and_tail_of_file_url(&url),
-            Some((PathBuf::from(original), String::new()))
-        );
+        assert_eq!(url.as_str(), "file:///Users/somebody/a%20b/p%231.html");
+        assert_eq!(url.path(), Path::new(original));
+        assert_eq!(url.tail(), "");
     }
 
     // ---- the twelve carried over from the W0′ probe (w0-evidence.md) ----
@@ -2013,10 +2491,8 @@ mod tests {
             Mint::file(Path::new(r"\\?\UNC\server\share\page.html")),
             Err(Refusal::NetworkPath)
         );
-        assert_eq!(
-            Mint::file(Path::new(r"\\?\C:\a b\p#1.html")),
-            Ok(Mint::File("file:///C:/a%20b/p%231.html".to_owned()))
-        );
+        let local = Mint::file(Path::new(r"\\?\C:\a b\p#1.html")).expect("a local path mints");
+        assert_eq!(local.target(), Some("file:///C:/a%20b/p%231.html"));
     }
 
     #[test]
