@@ -4576,17 +4576,21 @@ impl Text {
                 "Hooks kept for another Folio:",
                 "已为另一份 Folio 保留 hook：",
             ),
-            // CHINESE PENDING — T-B follow-ups; English until owner copy review.
-            //
-            // The three answers the shared filesystem predicate gives about a file, said about an
-            // agent's configuration rather than about a PowerShell profile. One sentence each and
-            // not one between them: "this build cannot read it" was untrue of every one of them,
-            // and a reader told that goes looking for a corrupt document (closure review R1).
-            Self::AgentConfigLink => "This file is a link Folio will not write through.",
-            Self::AgentConfigHardLink => {
-                "This file has hard links, possibly from a dotfile manager. Folio left it unchanged."
-            }
-            Self::AgentConfigReadOnly => "This file is read-only, or is not a regular file.",
+            Self::AgentConfigLink => pick(
+                lang,
+                "This file is a link Folio will not write through.",
+                "此文件是链接，Folio 未写入。",
+            ),
+            Self::AgentConfigHardLink => pick(
+                lang,
+                "This file has hard links, possibly from a dotfile manager. Folio left it unchanged.",
+                "此文件存在硬链接，Folio 未做修改。",
+            ),
+            Self::AgentConfigReadOnly => pick(
+                lang,
+                "This file is read-only, or is not a regular file.",
+                "此文件为只读，或不是普通文件。",
+            ),
             Self::ClaudeHooksFailedToast => pick(
                 lang,
                 "Claude Code's settings were not changed",
@@ -6031,14 +6035,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 6] = [
-        (Self::AgentConfigLink, HostPlatform::Windows),
-        (Self::AgentConfigLink, HostPlatform::MacOs),
-        (Self::AgentConfigHardLink, HostPlatform::Windows),
-        (Self::AgentConfigHardLink, HostPlatform::MacOs),
-        (Self::AgentConfigReadOnly, HostPlatform::Windows),
-        (Self::AgentConfigReadOnly, HostPlatform::MacOs),
-    ];
+    const CHINESE_PENDING: [(Self, HostPlatform); 0] = [];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
