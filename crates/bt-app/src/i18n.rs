@@ -3049,7 +3049,7 @@ impl Text {
             ),
             Self::DescTerminalCjkFont => pick(
                 lang,
-                "The font used for Chinese, Japanese and Korean text. Automatic picks the platform's default for these scripts.",
+                "The font for CJK text. Automatic is the platform's default.",
                 "中日韩文字使用的字体。设为自动时使用系统默认。",
             ),
             Self::DescFontSize => pick(
