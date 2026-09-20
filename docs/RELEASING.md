@@ -57,7 +57,12 @@ address it does not have to rewrite each time.
 
 ## The workflow
 
-`.github/workflows/release.yml` has one job, `archive`, and two ways in.
+The shipped Windows executable is now built by `build-release.yml`; follow
+[Windows CI release and candidate builds](WINDOWS-CI-RELEASE.md) to dispatch,
+fetch, verify, sign and package it. The workstation does no compilation in the
+normal release path. The section below describes the separate rehearsal.
+
+`.github/workflows/release.yml` has a Windows job, `archive`, and two ways in.
 **Neither of them publishes anything**, and the job holds no permission that
 would let it. It builds, runs the licensing gates against the tree it is
 building, writes the bill of materials, packs the archive, starts the executable
@@ -107,8 +112,9 @@ run by hand exactly as it runs there:
 
 ## What gets published
 
-**Every asset on a release page comes off the machine that signed it, and none
-of it comes out of CI.** `target/release-package` on that machine is the whole of
+**Every final asset on a release page comes off the machine that signed it.**
+The Windows executable and SBOM originate in the verified CI build; local
+signing and packaging produce the final archive. `target/release-package` on that machine is the whole of
 it: what the three scripts leave there, after `package.ps1 -Sign` has signed the
 executable and the package, is exactly what a reader downloads. `gh release
 create` is handed that directory and no list is written down anywhere, so there
@@ -306,10 +312,11 @@ Explorer menu row that fails for everybody who turns it on.
 
 ```powershell
 az login --scope "https://management.core.windows.net//.default"   # once per few hours
-cargo build --release
-./scripts/release/sbom.ps1
-./scripts/release/package.ps1 -Sign
-./scripts/release/smoke.ps1 -Exe target/release/folio.exe -ExpectSigned
+./scripts/release/fetch-ci-build.ps1 -Ref <full-commit-or-tag> -Out target/ci-unsigned -Account <login>
+./scripts/release/fetch-ci-build.ps1 -Ref <full-commit-or-tag> -Out target/ci-unsigned -Account <login> -Apply
+Copy-Item target/ci-unsigned target/ci-signing -Recurse
+./scripts/release/package.ps1 -Binary target/ci-signing -Sign
+./scripts/release/smoke.ps1 -Exe target/ci-signing/folio.exe -ExpectSigned
 ```
 
 **Four lines, each run once, with nothing to fill in.** There is no version in
@@ -478,7 +485,8 @@ written into the steps they belong to:
    the four documents. `dmg.sh` writes `Folio-macos-arm64.dmg` beside the image,
    and the rename moves both. `checksums.sh` writes `SHA256SUMS-macos.txt` with
    **bare file names**.
-2. **The Windows lane** — `sbom.ps1`, then `package.ps1 -Sign`, which
+2. **The Windows lane** — fetch and verify the CI build as described above,
+   then `package.ps1 -Binary target/ci-signing -Sign`, which copies the CI SBOM and
    **empties `target/release-package`** before it writes, then `smoke.ps1`.
 3. **Fetch the three macOS assets** — `Folio-<version>-macos-arm64.dmg`,
    `Folio-macos-arm64.dmg` and `SHA256SUMS-macos.txt` — from the Mac into
