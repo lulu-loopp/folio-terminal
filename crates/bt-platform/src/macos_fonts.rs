@@ -122,21 +122,21 @@ fn collect_cjk_families() -> Vec<crate::CjkFamily> {
         {
             localized_names.push((crate::os_ui_language(), localized.to_string()));
         }
-        if let Some(bytes) = table(b"name") {
-            if let Some(names) = ttf_parser::name::Table::parse(&bytes) {
-                for record in names.names {
-                    if record.name_id != ttf_parser::name_id::FAMILY {
-                        continue;
-                    }
-                    let locale = match record.language_id {
-                        0x0804 => "zh-CN",
-                        0x0409 => "en-US",
-                        _ => continue,
-                    };
-                    if let Some(text) = record.to_string() {
-                        localized_names.retain(|(lang, _)| lang != locale);
-                        localized_names.push((locale.into(), text));
-                    }
+        if let Some(bytes) = table(b"name")
+            && let Some(names) = ttf_parser::name::Table::parse(&bytes)
+        {
+            for record in names.names {
+                if record.name_id != ttf_parser::name_id::FAMILY {
+                    continue;
+                }
+                let locale = match record.language_id {
+                    0x0804 => "zh-CN",
+                    0x0409 => "en-US",
+                    _ => continue,
+                };
+                if let Some(text) = record.to_string() {
+                    localized_names.retain(|(lang, _)| lang != locale);
+                    localized_names.push((locale.into(), text));
                 }
             }
         }
