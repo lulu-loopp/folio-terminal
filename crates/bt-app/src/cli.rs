@@ -733,6 +733,18 @@ where
         .is_some_and(|first| first.to_str() == Some(REMOVE_EXPLORER_MENU_FLAG))
 }
 
+/// Account-wide profile removal, answered before the ordinary window grammar.
+pub const REMOVE_SHELL_INTEGRATION_FLAG: &str = "--remove-shell-integration";
+
+pub fn remove_shell_integration<I>(args: I) -> bool
+where
+    I: IntoIterator<Item = OsString>,
+{
+    args.into_iter()
+        .next()
+        .is_some_and(|first| first.to_str() == Some(REMOVE_SHELL_INTEGRATION_FLAG))
+}
+
 /// `--json`, spelled once.
 const JSON_FLAG: &str = "--json";
 
@@ -918,6 +930,20 @@ mod tests {
 
     fn refused(list: &[&str]) -> CliFault {
         parse(args(list)).expect_err("this command line was meant to be refused")
+    }
+
+    #[test]
+    fn cli_shell_integration_removal_is_only_a_leading_door() {
+        assert!(remove_shell_integration(args(&[
+            "--remove-shell-integration"
+        ])));
+        assert!(!remove_shell_integration(args(&[])));
+        assert!(!remove_shell_integration(args(&[
+            "--cwd",
+            "D:\\x",
+            "--remove-shell-integration"
+        ])));
+        assert!(refusal_text(&CliFault::HelpAsked).contains("--remove-shell-integration"));
     }
 
     /// PIN (§7.4a) — **the COM server's door opens on the first word and on

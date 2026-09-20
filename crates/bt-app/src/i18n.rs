@@ -2669,6 +2669,19 @@ pub enum Text {
     /// here, so a row left on when the card was answered is a row waiting for a
     /// shell to name its own file.
     ShellIntegrationPending,
+    ShellProfileEncoding,
+    ShellMarksVersion,
+    ShellMarksPath,
+    ShellProfileUnchanged,
+    ShellProfileMigrated,
+    ShellProfileRemoved,
+    ShellProfileRefused,
+    ShellProfileProbeFailed,
+    ShellProfileLink,
+    ShellProfileReadOnly,
+    ShellProfileChanged,
+    ShellProfileScriptLocation,
+    ShellProfileNothing,
 
     // ── the application menu bar (M3-2, macOS) ─────────────────────────────
     //
@@ -4456,8 +4469,8 @@ impl Text {
             // twice rather than two lists once.
             Self::DescPowerShellOffer => pick(
                 lang,
-                "A PowerShell pane without integration offers to add one. Integration marks commands, follows the folder, typesets $…$.",
-                "未整合的 PowerShell 窗格提示加入整合。整合提供命令标记、目录跟随和 $…$ 排版。",
+                "On offers integration in PowerShell panes. Off removes Folio profile lines for this account; open shells keep their current integration.",
+                "CHINESE PENDING",
             ),
             // **The three installer rows are 「通知」 rows** (user ruling
             // 2026-08-29). 「钩子」 and 「通知程序」 named the mechanism this window
@@ -4951,6 +4964,57 @@ impl Text {
                 "Takes a dated copy of your $PROFILE, then appends one line to it.",
                 "先做带日期的副本，再追加一行到 $PROFILE",
             ),
+            Self::ShellProfileEncoding => pick(
+                lang,
+                "Unsupported profile encoding; expected UTF-8, UTF-8 BOM or UTF-16LE BOM.",
+                "CHINESE PENDING",
+            ),
+            Self::ShellMarksVersion => pick(
+                lang,
+                "Unsupported integration marks version.",
+                "CHINESE PENDING",
+            ),
+            Self::ShellMarksPath => pick(
+                lang,
+                "Integration mark paths must be absolute.",
+                "CHINESE PENDING",
+            ),
+            Self::ShellProfileUnchanged => pick(lang, "Folio profile unchanged", "CHINESE PENDING"),
+            Self::ShellProfileMigrated => {
+                pick(lang, "Updated Folio profile line", "CHINESE PENDING")
+            }
+            Self::ShellProfileRemoved => {
+                pick(lang, "Removed Folio profile line", "CHINESE PENDING")
+            }
+            Self::ShellProfileRefused => pick(lang, "Could not change profile", "CHINESE PENDING"),
+            Self::ShellProfileProbeFailed => pick(
+                lang,
+                "Could not query this PowerShell profile within five seconds.",
+                "CHINESE PENDING",
+            ),
+            Self::ShellProfileLink => pick(
+                lang,
+                "Symbolic links and reparse points are not edited.",
+                "CHINESE PENDING",
+            ),
+            Self::ShellProfileReadOnly => pick(
+                lang,
+                "The profile is read-only or is not a regular file.",
+                "CHINESE PENDING",
+            ),
+            Self::ShellProfileChanged => pick(
+                lang,
+                "The profile changed during the operation; retry when the editor is finished.",
+                "CHINESE PENDING",
+            ),
+            Self::ShellProfileScriptLocation => pick(
+                lang,
+                "The managed script must be under APPDATA\\Folio\\shell-integration.",
+                "CHINESE PENDING",
+            ),
+            Self::ShellProfileNothing => {
+                pick(lang, "No Folio profile lines found.", "CHINESE PENDING")
+            }
             Self::ShellIntegrationPending => pick(
                 lang,
                 "Takes effect in the next PowerShell session",
@@ -5006,7 +5070,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 690] = [
+    pub const ALL: [Self; 703] = [
         Self::PastePathEncoding,
         Self::PastePathControl,
         Self::PastePathPowerShellQuote,
@@ -5697,6 +5761,19 @@ impl Text {
         Self::MenuZoomWindow,
         Self::MenuBringAllToFront,
         Self::MenuFolioHelp,
+        Self::ShellProfileEncoding,
+        Self::ShellMarksVersion,
+        Self::ShellMarksPath,
+        Self::ShellProfileUnchanged,
+        Self::ShellProfileMigrated,
+        Self::ShellProfileRemoved,
+        Self::ShellProfileRefused,
+        Self::ShellProfileProbeFailed,
+        Self::ShellProfileLink,
+        Self::ShellProfileReadOnly,
+        Self::ShellProfileChanged,
+        Self::ShellProfileScriptLocation,
+        Self::ShellProfileNothing,
     ];
 
     /// **The two columns of the platform table** — every string
@@ -5813,6 +5890,8 @@ impl Text {
         Self::DescPowerShellOffer,
         Self::PowerShellNoticeBody,
         Self::ShellIntegrationPending,
+        // Only the Windows PowerShell discovery worker can emit this refusal.
+        Self::ShellProfileProbeFailed,
         // — the Acrylic row's reason, which only a Windows with no backdrop
         //   reads: off Windows this build has no backdrop to ask for and
         //   `settings::visible_rows_for` does not offer the row at all (§13.32
@@ -5840,12 +5919,36 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 0] = [
-        // The hovered link's two macOS clauses (T-MAC-CMDCLICK, §13.45 ②) were
-        // written on 2026-09-13 and left this table then. Their Windows columns
-        // had carried Chinese since the overlay was written; what was owed was
-        // the same two clauses with `⌘` in them and the Finder's own name in
-        // the second, and that is what they say.
+    const CHINESE_PENDING: [(Self, HostPlatform); 28] = [
+        // T-A: English approved for implementation; Chinese is explicitly pending.
+        (Self::DescPowerShellOffer, HostPlatform::Windows),
+        (Self::DescPowerShellOffer, HostPlatform::MacOs),
+        (Self::ShellProfileEncoding, HostPlatform::Windows),
+        (Self::ShellProfileEncoding, HostPlatform::MacOs),
+        (Self::ShellMarksVersion, HostPlatform::Windows),
+        (Self::ShellMarksVersion, HostPlatform::MacOs),
+        (Self::ShellMarksPath, HostPlatform::Windows),
+        (Self::ShellMarksPath, HostPlatform::MacOs),
+        (Self::ShellProfileUnchanged, HostPlatform::Windows),
+        (Self::ShellProfileUnchanged, HostPlatform::MacOs),
+        (Self::ShellProfileMigrated, HostPlatform::Windows),
+        (Self::ShellProfileMigrated, HostPlatform::MacOs),
+        (Self::ShellProfileRemoved, HostPlatform::Windows),
+        (Self::ShellProfileRemoved, HostPlatform::MacOs),
+        (Self::ShellProfileRefused, HostPlatform::Windows),
+        (Self::ShellProfileRefused, HostPlatform::MacOs),
+        (Self::ShellProfileProbeFailed, HostPlatform::Windows),
+        (Self::ShellProfileProbeFailed, HostPlatform::MacOs),
+        (Self::ShellProfileLink, HostPlatform::Windows),
+        (Self::ShellProfileLink, HostPlatform::MacOs),
+        (Self::ShellProfileReadOnly, HostPlatform::Windows),
+        (Self::ShellProfileReadOnly, HostPlatform::MacOs),
+        (Self::ShellProfileChanged, HostPlatform::Windows),
+        (Self::ShellProfileChanged, HostPlatform::MacOs),
+        (Self::ShellProfileScriptLocation, HostPlatform::Windows),
+        (Self::ShellProfileScriptLocation, HostPlatform::MacOs),
+        (Self::ShellProfileNothing, HostPlatform::Windows),
+        (Self::ShellProfileNothing, HostPlatform::MacOs),
     ];
 }
 
@@ -7018,7 +7121,8 @@ impl CliText<'_> {
                      \x20 -h, --help        this text\n\
                      \x20 --version         which build this is\n\
                      \x20 --remove-explorer-menu  take this copy of Folio out of Explorer's \
-                     right-click menu"
+                     right-click menu\n\
+                     \x20 --remove-shell-integration  remove Folio lines from this account's PowerShell profiles"
                 ),
                 Lang::Chinese => format!(
                     "folio [--cwd <文件夹>] [--profile <id>] [--new-window | --tab] [<路径>]\n\n\
@@ -7029,7 +7133,8 @@ impl CliText<'_> {
                      \x20 <路径>            文件夹等同 --cwd，文件则打开预览\n\
                      \x20 -h, --help        显示这段说明\n\
                      \x20 --version         显示这是哪一个构建\n\
-                     \x20 --remove-explorer-menu  把这份 Folio 从资源管理器的右键菜单里撤掉"
+                     \x20 --remove-explorer-menu  把这份 Folio 从资源管理器的右键菜单里撤掉\n\
+                     \x20 --remove-shell-integration  CHINESE PENDING"
                 ),
             },
             Self::MissingValue(flag) => match lang {
@@ -8481,9 +8586,8 @@ mod tests {
             }
             .in_lang(lang);
             let lines: Vec<&str> = usage.lines().collect();
-            // Ten since `--remove-explorer-menu` joined the list: the summary, a blank, and one
-            // line for each of the eight things this program can be told by somebody typing.
-            assert_eq!(lines.len(), 10, "{lang:?}: {usage}");
+            // The summary, one blank line, and nine supported command forms.
+            assert_eq!(lines.len(), 11, "{lang:?}: {usage}");
             assert!(lines[0].starts_with("folio [--cwd "), "{lang:?}");
             assert!(lines[1].is_empty(), "{lang:?}");
             for line in &lines[2..] {
