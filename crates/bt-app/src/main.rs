@@ -168,8 +168,8 @@ use bt_render::{
     ChromePalette, CursorStyle, DEVICE_REBUILD_ATTEMPTS, DeviceLossPilot, Flight, FrameSource,
     FrameTrigger, GpuContext, GridSize, ImeCursorArea, LatestFrameSlot, LostDevice, MathHit,
     MathHitTarget, PREVIEW_BODY_INSET_LOGICAL_PX, PeekImageOverlay, Preedit, PresentOutcome,
-    PreviewImage, RebuiltWindow, RenderError, SeatViewport, Theme, ThemeChange, Travel,
-    WINDOW_TAB_BREATHE_MIN_OPACITY, WINDOW_TAB_BREATHE_PERIOD_MS,
+    PresentPhase, PreviewImage, RebuiltWindow, RenderError, SeatViewport, Theme, ThemeChange,
+    Travel, WINDOW_TAB_BREATHE_MIN_OPACITY, WINDOW_TAB_BREATHE_PERIOD_MS,
     WINDOW_TAB_BREATHE_REDUCED_OPACITY, WINDOW_TAB_PIN_FADE_MS, WINDOW_TAB_PIN_REVEAL_MS,
     WINDOW_TAB_RING_INDETERMINATE_TURNS, WINDOW_TAB_RING_SPIN_PERIOD_MS,
     WINDOW_TAB_RING_SWEEP_TRANSITION_MS, WindowRenderer, background_rgb, compose_preedit,
@@ -238,6 +238,24 @@ const IME_CURSOR_AREA_INTERVAL: Duration = Duration::from_millis(16);
 /// The mock-up's `.cursor` uses a 1.1 second step-end animation, so each visible/hidden phase is
 /// half of that cycle.
 const CURSOR_BLINK_PHASE: Duration = Duration::from_millis(550);
+
+/// Say which adapter wgpu actually selected, through the same two destinations
+/// as a slow-hold line: the bounded trace sink when one exists, and
+/// `diagnostics.log` in every resident run.
+fn note_gpu_adapter(gpu: &GpuContext) {
+    let info = gpu.adapter_info();
+    diagnostics::note(&format!(
+        "Folio: GPU adapter name={:?} vendor=0x{:04x} device=0x{:04x} type={:?} \
+         backend={:?} driver={:?} driver_info={:?}",
+        info.name,
+        info.vendor,
+        info.device,
+        info.device_type,
+        info.backend,
+        info.driver,
+        info.driver_info,
+    ));
+}
 
 /// **What one walk of a host answered about one instant**: when it next needs a
 /// frame, and whether anything inside it is travelling right now (review round
@@ -37146,11 +37164,12 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
     // read per call is unchanged and load-bearing: the caller cannot stop a call
     // it is already inside, so the loop that repeats this one lives up there,
     // where the deadline is.
-    let slice = leaf
-        .pty
-        .as_ref()
-        .expect("PTY mode checked above")
-        .read_output_slice();
+    let slice = hang_watch::during(hang_watch::Station::DrainRingRead, || {
+        leaf.pty
+            .as_ref()
+            .expect("PTY mode checked above")
+            .read_output_slice()
+    });
     let bytes = slice.bytes;
     // **Was this pane's picture under the program's own control across this slice?**
     //
@@ -37164,16 +37183,21 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
         debug_assert!(bytes.len() <= bt_pty::TERM_READ_SLICE.get());
         // The drain brackets all of its slices with begin/end_feed_turn, so a
         // repaint's proven records stay protected until the whole turn settles.
-        leaf.session
-            .feed_at(&bytes, Instant::now())
-            .context("apply PTY output")?;
-        for reply in leaf.session.take_pty_writes() {
-            write_pty_input(
-                leaf.pty.as_ref(),
-                &reply,
-                "return terminal protocol reply to PTY",
-            )?;
-        }
+        hang_watch::during(hang_watch::Station::DrainFeed, || {
+            leaf.session
+                .feed_at(&bytes, Instant::now())
+                .context("apply PTY output")
+        })?;
+        hang_watch::during(hang_watch::Station::DrainReplies, || -> Result<()> {
+            for reply in leaf.session.take_pty_writes() {
+                write_pty_input(
+                    leaf.pty.as_ref(),
+                    &reply,
+                    "return terminal protocol reply to PTY",
+                )?;
+            }
+            Ok(())
+        })?;
         changed = true;
     }
     // Asked of the ring itself rather than guessed from the chunk's length: a
@@ -37202,13 +37226,16 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
     // them, are owed to a child that has said nothing — so the reply channel is
     // drained once more outside the read above, which only feeds when the child
     // speaks.
-    for reply in leaf.session.take_pty_writes() {
-        write_pty_input(
-            leaf.pty.as_ref(),
-            &reply,
-            "return terminal protocol reply to PTY",
-        )?;
-    }
+    hang_watch::during(hang_watch::Station::DrainReplies, || -> Result<()> {
+        for reply in leaf.session.take_pty_writes() {
+            write_pty_input(
+                leaf.pty.as_ref(),
+                &reply,
+                "return terminal protocol reply to PTY",
+            )?;
+        }
+        Ok(())
+    })?;
     // The one place a shell is heard to speak. Every leaf of every tab passes
     // through here on every turn of the loop, which is what lets a pane nobody
     // is watching keep an honest account of itself — the frame path cannot, and
@@ -38607,6 +38634,7 @@ impl Runtime<'_> {
             startup_scale_factor,
         ))
         .context("initialize wgpu renderer")?;
+        note_gpu_adapter(&gpu);
         if trace_startup && let Some(alpha) = renderer.alpha_report() {
             // The spike printed exactly these two lines, and they are what a
             // machine that goes wrong here will be asked for: the chosen mode
@@ -66961,11 +66989,11 @@ impl Runtime<'_> {
             }
             return Ok(false);
         }
-        if self
-            .shell_mut()
-            .session
-            .schedule_visible_artifacts(&terminal_frame)
-            != 0
+        if hang_watch::during(hang_watch::Station::DetectionPass, || {
+            self.shell_mut()
+                .session
+                .schedule_visible_artifacts(&terminal_frame)
+        }) != 0
             || asked_about_paths
         {
             dispatch_tab_decoration_tasks(
@@ -84156,11 +84184,16 @@ impl Runtime<'_> {
     /// Translating here would have applied the seat's origin to a rectangle that
     /// never had one.
     fn apply_ime_cursor_area(&mut self, area: ImeCursorArea) {
-        self.window.window.set_ime_cursor_area(
-            PhysicalPosition::new(area.x, area.y),
-            PhysicalSize::new(area.width, area.height),
-        );
-        if let Err(error) = self.window.ime_system_caret.update(area.x, area.y) {
+        hang_watch::during(hang_watch::Station::ImeCursorArea, || {
+            self.window.window.set_ime_cursor_area(
+                PhysicalPosition::new(area.x, area.y),
+                PhysicalSize::new(area.width, area.height),
+            );
+        });
+        let system_caret = hang_watch::during(hang_watch::Station::ImeSystemCaret, || {
+            self.window.ime_system_caret.update(area.x, area.y)
+        });
+        if let Err(error) = system_caret {
             eprintln!("Chinese IME system-caret update ignored: {error}");
         }
     }
@@ -84533,9 +84566,11 @@ impl Runtime<'_> {
                 }
             },
             |tab| {
-                for (_, leaf) in tab.leaves_mut() {
-                    leaf.session.end_feed_turn();
-                }
+                hang_watch::during(hang_watch::Station::DrainSettle, || {
+                    for (_, leaf) in tab.leaves_mut() {
+                        leaf.session.end_feed_turn();
+                    }
+                });
             },
             |tabs| -> Result<bool> {
                 let pending = loop {
@@ -84560,6 +84595,7 @@ impl Runtime<'_> {
             },
         );
         let pending = drain_result?;
+        let drain_parent = hang_watch::enter(hang_watch::Station::DrainOutcomes);
         for (index, tab) in self.window.tabs.iter_mut().enumerate() {
             let outcome = &mut outcomes[index];
             // **The OSC lane's turn, on the turn the bytes arrived.** A standing request a program
@@ -84691,50 +84727,56 @@ impl Runtime<'_> {
             self.present_chrome_change()?;
         }
         if active_changed {
-            let now = Instant::now();
-            // **On arrival, and before anything decides when to draw.** Output is the event the
-            // caret answers to, so the blink is reset the moment the bytes land, exactly as it
-            // was before the wait existed. Doing it in the publish branch instead left the caret
-            // dark whenever some other publication — a decoration result, an expose — settled
-            // the burst before the wait ran out, because that publication knows nothing about a
-            // caret and the release then had nothing left to do. Three milliseconds of drawing
-            // is not worth a second field to carry this across.
-            let cursor_revealed = self.reset_cursor_blink(now);
-            let opened = self.window.pty_coalesce.opened_at(now);
-            // **The one branch this rule adds.** Everything downstream of
-            // [`Self::publish_pty_drain_frame`] is untouched: what changes is only *when* this
-            // turn's picture is composed, and only when the kernel has said there is more of it
-            // on the way. See [`crate::coalesce`] for why that is a fact about the transfer and
-            // not a guess about the bytes.
-            //
-            // The vendor parser withholds bytes inside an open DEC 2026 block, so projecting
-            // here cannot expose its intermediate state. It can expose ordinary output before a
-            // trailing BSU or a completed update before the next BSU; the unchanged-frame gate
-            // in publish_frame cheaply suppresses drains containing only still-buffered sync
-            // bytes.
-            let arrival = coalesce::Arrival {
-                ends_capped: !active_uncapped,
-                ring_pending: pending,
-                sync_open: active_sync_open,
-                sync_closed: active_sync_closed,
-                first_unpublished: Some(opened),
-                // **Nothing supplies one.** A `Fifo` surface does not say when the display will
-                // next take a frame, and this window keeps no frame pacer, so the only bound in
-                // force is the timer. The input stays because it is the shape a pacer will need
-                // the day there is one — not because it is doing anything today.
-                next_display_deadline: None,
-            };
-            let decision = coalesce::decide(arrival, now, coalesce::COALESCE_WINDOW);
-            self.trace_drain(slices_taken, active_bytes, &arrival, decision, opened, now);
-            match decision {
-                coalesce::Publication::WaitUntil(until) => {
-                    self.window.pty_coalesce.until = Some(until);
+            hang_watch::during(hang_watch::Station::DrainPublish, || -> Result<()> {
+                let now = Instant::now();
+                // **On arrival, and before anything decides when to draw.** Output is the event the
+                // caret answers to, so the blink is reset the moment the bytes land, exactly as it
+                // was before the wait existed. Doing it in the publish branch instead left the caret
+                // dark whenever some other publication — a decoration result, an expose — settled
+                // the burst before the wait ran out, because that publication knows nothing about a
+                // caret and the release then had nothing left to do. Three milliseconds of drawing
+                // is not worth a second field to carry this across.
+                let cursor_revealed = self.reset_cursor_blink(now);
+                let opened = self.window.pty_coalesce.opened_at(now);
+                // **The one branch this rule adds.** Everything downstream of
+                // [`Self::publish_pty_drain_frame`] is untouched: what changes is only *when* this
+                // turn's picture is composed, and only when the kernel has said there is more of it
+                // on the way. See [`crate::coalesce`] for why that is a fact about the transfer and
+                // not a guess about the bytes.
+                //
+                // The vendor parser withholds bytes inside an open DEC 2026 block, so projecting
+                // here cannot expose its intermediate state. It can expose ordinary output before a
+                // trailing BSU or a completed update before the next BSU; the unchanged-frame gate
+                // in publish_frame cheaply suppresses drains containing only still-buffered sync
+                // bytes.
+                let arrival = coalesce::Arrival {
+                    ends_capped: !active_uncapped,
+                    ring_pending: pending,
+                    sync_open: active_sync_open,
+                    sync_closed: active_sync_closed,
+                    first_unpublished: Some(opened),
+                    // **Nothing supplies one.** A `Fifo` surface does not say when the display will
+                    // next take a frame, and this window keeps no frame pacer, so the only bound in
+                    // force is the timer. The input stays because it is the shape a pacer will need
+                    // the day there is one — not because it is doing anything today.
+                    next_display_deadline: None,
+                };
+                let decision = coalesce::decide(arrival, now, coalesce::COALESCE_WINDOW);
+                hang_watch::during(hang_watch::Station::DrainTrace, || {
+                    self.trace_drain(slices_taken, active_bytes, &arrival, decision, opened, now);
+                });
+                match decision {
+                    coalesce::Publication::WaitUntil(until) => {
+                        self.window.pty_coalesce.until = Some(until);
+                    }
+                    coalesce::Publication::Now => {
+                        self.publish_pty_drain_frame(now, cursor_revealed)?;
+                    }
                 }
-                coalesce::Publication::Now => {
-                    self.publish_pty_drain_frame(now, cursor_revealed)?;
-                }
-            }
+                Ok(())
+            })?;
         }
+        hang_watch::at(drain_parent);
         Ok(())
     }
 
@@ -103816,7 +103858,15 @@ impl Runtime<'_> {
         // `BT_GLYPH_CENSUS` names a file to write it to; setting the flag is a
         // bool store and asking the gate is a `OnceLock` read.
         renderer.set_glyph_census(glyph_trace::wanted());
-        let outcome = renderer.present_frame(gpu, seat_frames, trigger)?;
+        let outcome = renderer.present_frame_with_phases(gpu, seat_frames, trigger, |phase| {
+            hang_watch::at(match phase {
+                PresentPhase::ComposeEncode => hang_watch::Station::RenderCompose,
+                PresentPhase::SurfaceAcquire => hang_watch::Station::SurfaceAcquire,
+                PresentPhase::QueueSubmit => hang_watch::Station::QueueSubmit,
+                PresentPhase::Present => hang_watch::Station::SwapchainPresent,
+                PresentPhase::Complete => hang_watch::Station::Present,
+            });
+        })?;
         // **What this frame did with the documents on it** — the one funnel is
         // also the one place that can say it, and it says it only when the
         // answer moved (`BT_PREVIEW_TRACE`).
@@ -103847,14 +103897,18 @@ impl Runtime<'_> {
             // are in hand at once, which is why it is here and not beside the
             // resize handler.
             let (covered_width, covered_height) = renderer.presented_swapchain_size();
-            compositor
-                .set_covered_size(covered_width, covered_height)
-                .map_err(|error| anyhow!(error))
-                .context("tell the window's ground how much of it the swapchain covers")?;
-            compositor
-                .commit()
-                .map_err(|error| anyhow!(error))
-                .context("publish the presented frame to the window's composition tree")?;
+            hang_watch::during(hang_watch::Station::CompositorSize, || {
+                compositor
+                    .set_covered_size(covered_width, covered_height)
+                    .map_err(|error| anyhow!(error))
+                    .context("tell the window's ground how much of it the swapchain covers")
+            })?;
+            hang_watch::during(hang_watch::Station::CompositorCommit, || {
+                compositor
+                    .commit()
+                    .map_err(|error| anyhow!(error))
+                    .context("publish the presented frame to the window's composition tree")
+            })?;
             // **The frame that withdraws the skirt has to be asked for.** The
             // ground under the strip is sized against the picture of the
             // *previous* present, because a present queues an image rather than
@@ -103920,16 +103974,23 @@ impl Runtime<'_> {
         let Ok(latency) = receipt.latency() else {
             return;
         };
+        // Derived from the receipt's two existing boundaries. The stall ledger
+        // is the authority for station time; this field only saves a trace
+        // reader from subtracting two timestamps the renderer already returns.
+        let submit_to_present = latency
+            .event_to_present_call
+            .saturating_sub(latency.event_to_submit);
         // **The clock the line itself is measured on** — see
         // [`WindowRuntime::perf_trace_us`]. It starts before the `format!`,
         // because building the fields is part of what a trace costs a frame,
         // and stops once the sink has the line.
         let trace_started = Instant::now();
         trace_sink::stderr_line(format!(
-            "BT_PERF_TRACE present source={source:?} retained={} event_to_present_us={} event_to_submit_us={} since_previous_us={} composed={} slot_overwrites={} wheel_events={} wheel_routings={} pace_interval_us={} pace_skipped={} trace_us={}",
+            "BT_PERF_TRACE present source={source:?} retained={} event_to_present_us={} event_to_submit_us={} submit_to_present_us={} since_previous_us={} composed={} slot_overwrites={} wheel_events={} wheel_routings={} pace_interval_us={} pace_skipped={} trace_us={}",
             u8::from(retained),
             latency.event_to_present_call.as_micros(),
             latency.event_to_submit.as_micros(),
+            submit_to_present.as_micros(),
             since_previous.as_micros(),
             self.window.composed_terminal_frames,
             self.window.pending_frames.overwrites(),
@@ -104279,7 +104340,9 @@ impl Runtime<'_> {
                 .session
                 .absorb_printed_path_probes(&mut leaf.projection)
                 != 0;
-            owes_the_engine |= leaf.session.schedule_visible_artifacts(&projected) != 0;
+            owes_the_engine |= hang_watch::during(hang_watch::Station::DetectionPass, || {
+                leaf.session.schedule_visible_artifacts(&projected)
+            }) != 0;
             if hover_pane == Some(pane.seat) {
                 apply_hover_marks(
                     &mut projected,
@@ -113113,7 +113176,9 @@ impl LostDevice for TheDeviceAndItsWindows<'_> {
                 RebuiltWindow::OnScreen(&mut window.renderer, target)
             })
             .collect();
-        pollster::block_on(self.gpu.rebuild_after_device_loss(rebuilt))
+        pollster::block_on(self.gpu.rebuild_after_device_loss(rebuilt))?;
+        note_gpu_adapter(self.gpu);
+        Ok(())
     }
 }
 

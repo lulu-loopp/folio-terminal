@@ -316,7 +316,7 @@ fn slow_hold_threshold_ms() -> u64 {
 /// Held against [`Station`] by `every_station_has_a_slot_in_the_ledger`: a
 /// further variant added without widening this would have its milliseconds
 /// charged to nobody, and the line would silently stop adding up.
-const STATION_COUNT: usize = 50;
+const STATION_COUNT: usize = 66;
 
 /// How many reports are kept. The oldest beyond this are deleted.
 ///
@@ -716,6 +716,39 @@ pub enum Station {
     /// the dispatch itself — and, since that is very nearly impossible, a kind
     /// this window has started answering without being given a name.
     EventOther = 47,
+    /// CPU-side frame composition and command encoding. The surface acquire
+    /// sits between two intervals bearing this name, and the ledger adds them.
+    RenderCompose = 50,
+    /// `wgpu::Surface::get_current_texture`.
+    SurfaceAcquire = 51,
+    /// `wgpu::Queue::submit` after the command buffer has been finished.
+    QueueSubmit = 52,
+    /// `wgpu::Queue::present`, for a swapchain frame.
+    SwapchainPresent = 53,
+    /// winit's `Window::set_ime_cursor_area` platform call.
+    ImeCursorArea = 54,
+    /// Folio's platform system-caret update for the input method.
+    ImeSystemCaret = 55,
+    /// `bt_pty::OutputRing::try_pop`, through `read_output_slice`.
+    DrainRingRead = 56,
+    /// `DualPlaneSession::feed_at`: parse bytes and apply terminal events.
+    DrainFeed = 57,
+    /// Replies taken from the terminal actor and handed to bt-pty's writer.
+    DrainReplies = 58,
+    /// `DualPlaneSession::end_feed_turn`: settle the complete sliced feed.
+    DrainSettle = 59,
+    /// Interpret and publish the outcomes accumulated from all drained panes.
+    DrainOutcomes = 60,
+    /// The visible-artifact detection and scheduling pass over a projected frame.
+    DetectionPass = 61,
+    /// `Runtime::trace_drain` offering its line to the bounded trace sink.
+    DrainTrace = 62,
+    /// Decide whether terminal output publishes now or remains deferred.
+    DrainPublish = 63,
+    /// DirectComposition's update of the swapchain-covered rectangle.
+    CompositorSize = 64,
+    /// DirectComposition's `Commit`, which publishes the presented swapchain.
+    CompositorCommit = 65,
 }
 
 impl Station {
@@ -773,6 +806,22 @@ impl Station {
             Self::FileDrop => "flush_dropped_files",
             Self::EventFileDrop => "dropped_file",
             Self::EventOther => "window_event other",
+            Self::RenderCompose => "redraw compose/encode",
+            Self::SurfaceAcquire => "surface acquire",
+            Self::QueueSubmit => "queue submit",
+            Self::SwapchainPresent => "swapchain present",
+            Self::ImeCursorArea => "IME set_cursor_area",
+            Self::ImeSystemCaret => "IME system caret",
+            Self::DrainRingRead => "PTY ring read",
+            Self::DrainFeed => "terminal parse/feed",
+            Self::DrainReplies => "PTY reply dispatch",
+            Self::DrainSettle => "feed turn settle",
+            Self::DrainOutcomes => "drain outcomes",
+            Self::DetectionPass => "visible artifact detection",
+            Self::DrainTrace => "trace sink offer",
+            Self::DrainPublish => "drain publish decision",
+            Self::CompositorSize => "compositor covered size",
+            Self::CompositorCommit => "compositor commit",
         }
     }
 
@@ -843,6 +892,22 @@ impl Station {
             47 => Self::EventOther,
             48 => Self::FileDrop,
             49 => Self::EventFileDrop,
+            50 => Self::RenderCompose,
+            51 => Self::SurfaceAcquire,
+            52 => Self::QueueSubmit,
+            53 => Self::SwapchainPresent,
+            54 => Self::ImeCursorArea,
+            55 => Self::ImeSystemCaret,
+            56 => Self::DrainRingRead,
+            57 => Self::DrainFeed,
+            58 => Self::DrainReplies,
+            59 => Self::DrainSettle,
+            60 => Self::DrainOutcomes,
+            61 => Self::DetectionPass,
+            62 => Self::DrainTrace,
+            63 => Self::DrainPublish,
+            64 => Self::CompositorSize,
+            65 => Self::CompositorCommit,
             _ => Self::Starting,
         }
     }
@@ -999,6 +1064,10 @@ pub struct SlowHold {
     /// so a gap the ledger failed to attribute shows up as the line not adding
     /// up rather than as time that never existed.
     pub held_ms: u64,
+    /// Milliseconds since this process's heartbeat origin.
+    pub session_age_ms: u64,
+    /// One-based count of slow-hold lines successfully queued in this run.
+    pub stall_count: u64,
     /// Milliseconds per station, indexed by [`Station::slot`].
     pub spent_ms: [u64; STATION_COUNT],
     /// What the machine's memory manager did while the hold ran, when this
@@ -1062,6 +1131,11 @@ impl SlowHold {
                 megabytes(paging.working_set_after),
             ));
         }
+        line.push_str(&format!(
+            " · session age {}, stall #{}",
+            seconds(self.session_age_ms),
+            self.stall_count
+        ));
         line
     }
 }
@@ -1106,6 +1180,8 @@ pub struct Heartbeat {
     slow: Mutex<Vec<SlowHold>>,
     /// Slow holds that found the queue full or busy.
     slow_dropped: AtomicU64,
+    /// Slow-hold lines successfully admitted to [`Self::slow`].
+    slow_reported: AtomicU64,
     /// **Where the two footprint readings come from.**
     ///
     /// A function pointer rather than a direct call to
@@ -1157,6 +1233,7 @@ impl Heartbeat {
             spent_ms: std::array::from_fn(|_| AtomicU64::new(0)),
             slow: Mutex::new(Vec::new()),
             slow_dropped: AtomicU64::new(0),
+            slow_reported: AtomicU64::new(0),
         }
     }
 
@@ -1315,17 +1392,20 @@ impl Heartbeat {
         }
         // Below the threshold this line is never reached, which is the whole of
         // what keeps the second system call off the ordinary turn.
-        let hold = SlowHold {
-            turn: self.turn.load(Ordering::Relaxed),
-            held_ms,
-            spent_ms,
-            paging: self.close_footprint(),
-        };
+        let paging = self.close_footprint();
         // `try_lock` and never `lock`: see [`Self::slow`].
         if let Ok(mut queue) = self.slow.try_lock()
             && queue.len() < SLOW_HOLDS_KEPT
         {
-            queue.push(hold);
+            let stall_count = self.slow_reported.fetch_add(1, Ordering::Relaxed) + 1;
+            queue.push(SlowHold {
+                turn: self.turn.load(Ordering::Relaxed),
+                held_ms,
+                session_age_ms: now_ms,
+                stall_count,
+                spent_ms,
+                paging,
+            });
         } else {
             self.slow_dropped.fetch_add(1, Ordering::Relaxed);
         }
@@ -1486,6 +1566,19 @@ pub fn enter(station: Station) -> Station {
     let leaving = HEARTBEAT.sample().station;
     HEARTBEAT.at(station);
     leaving
+}
+
+/// Run one existing call as an exclusive child station, then resume its parent.
+///
+/// The two station transitions are the two monotonic-clock reads this
+/// instrumentation adds. Returning the parent's station after `work` rather
+/// than using a drop guard also restores it on an ordinary `Result::Err`
+/// without adding unwind work to a thread already in trouble.
+pub fn during<T>(station: Station, work: impl FnOnce() -> T) -> T {
+    let parent = enter(station);
+    let output = work();
+    at(parent);
+    output
 }
 
 /// The window thread is handing control back. See [`Heartbeat::park`].
@@ -3421,10 +3514,43 @@ mod tests {
         assert_eq!(hold.spent_ms[Station::WebPage.slot()], 1_880);
         assert_eq!(hold.spent_ms[Station::Event.slot()], 10);
         assert_eq!(hold.spent_ms[Station::Woken.slot()], 10);
+        assert_eq!(hold.session_age_ms, 2_900);
+        assert_eq!(hold.stall_count, 1);
         assert_eq!(
             hold.line(),
             "Folio: the window thread held control for 1900 ms on turn 0 — \
-             advance_web_page 1880 ms, window_event 10 ms, woken 10 ms",
+             advance_web_page 1880 ms, window_event 10 ms, woken 10 ms · \
+             session age 2.900s, stall #1",
+        );
+    }
+
+    /// **A child station owns its interval exclusively.** Returning to the
+    /// parent starts a new parent interval; it does not make the child time a
+    /// second copy inside the parent.
+    #[test]
+    fn redraw_substations_add_up_without_double_counting_the_parent() {
+        let heart = Heartbeat::sampling(no_footprint);
+        heart.woke_at(1_000);
+        heart.at_station(Station::RenderCompose, 1_010);
+        heart.at_station(Station::SurfaceAcquire, 1_110);
+        heart.at_station(Station::RenderCompose, 1_610);
+        heart.at_station(Station::QueueSubmit, 1_710);
+        heart.at_station(Station::SwapchainPresent, 1_810);
+        heart.at_station(Station::RenderCompose, 2_310);
+        heart.park_at(Park::Indefinite, 2_410);
+        let (holds, dropped) = heart.take_slow_holds();
+        assert_eq!(dropped, 0);
+        let [hold] = holds.as_slice() else {
+            panic!("one synthetic redraw hold was recorded: {holds:?}")
+        };
+        assert_eq!(hold.spent_ms[Station::RenderCompose.slot()], 300);
+        assert_eq!(hold.spent_ms[Station::SurfaceAcquire.slot()], 500);
+        assert_eq!(hold.spent_ms[Station::QueueSubmit.slot()], 100);
+        assert_eq!(hold.spent_ms[Station::SwapchainPresent.slot()], 500);
+        assert_eq!(
+            hold.spent_ms.iter().sum::<u64>(),
+            hold.held_ms,
+            "exclusive child intervals and their parent account for the hold once",
         );
     }
 
@@ -3460,7 +3586,8 @@ mod tests {
         assert_eq!(
             hold.line(),
             "Folio: the window thread held control for 1030 ms on turn 1 — \
-             apply_preview_results 1000 ms, woken 20 ms, about_to_wait 10 ms",
+             apply_preview_results 1000 ms, woken 20 ms, about_to_wait 10 ms · \
+             session age 2.030s, stall #1",
             "the handler is named, and named first",
         );
     }
@@ -3509,6 +3636,26 @@ mod tests {
             heart.take_slow_holds(),
             (Vec::new(), 0),
             "the short hold after a long one carries none of its milliseconds"
+        );
+    }
+
+    /// Session age and the ordinal come from the heartbeat that owns the
+    /// ledger, and the ordinal advances only for a line admitted to its queue.
+    #[test]
+    fn slow_hold_lines_carry_session_age_and_a_running_count() {
+        let heart = Heartbeat::sampling(no_footprint);
+        heart.woke_at(1_000);
+        heart.park_at(Park::Indefinite, 2_000);
+        heart.woke_at(9_000);
+        heart.park_at(Park::Indefinite, 10_000);
+        let (holds, dropped) = heart.take_slow_holds();
+        assert_eq!(dropped, 0);
+        assert_eq!(
+            holds
+                .iter()
+                .map(|hold| (hold.session_age_ms, hold.stall_count))
+                .collect::<Vec<_>>(),
+            [(2_000, 1), (10_000, 2)],
         );
     }
 
@@ -3606,12 +3753,15 @@ mod tests {
         let hold = SlowHold {
             turn: 7,
             held_ms: 900,
+            session_age_ms: 12_345,
+            stall_count: 4,
             spent_ms: [0; STATION_COUNT],
             paging: None,
         };
         assert_eq!(
             hold.line(),
-            "Folio: the window thread held control for 900 ms on turn 7 — no station held it",
+            "Folio: the window thread held control for 900 ms on turn 7 — no station held it · \
+             session age 12.345s, stall #4",
         );
     }
 
@@ -3632,6 +3782,8 @@ mod tests {
         let hold = SlowHold {
             turn: 3_937_579,
             held_ms: 4_056,
+            session_age_ms: 8_404_000,
+            stall_count: 31,
             spent_ms,
             paging: Some(Paging {
                 faults: 38_210,
@@ -3643,7 +3795,8 @@ mod tests {
             hold.line(),
             "Folio: the window thread held control for 4056 ms on turn 3937579 — \
              publish_frame_inner 2092 ms, flush_wheel 1928 ms · \
-             faults +38210, working set 179 → 412 MB",
+             faults +38210, working set 179 → 412 MB · \
+             session age 8404.000s, stall #31",
         );
     }
 
@@ -3661,13 +3814,15 @@ mod tests {
         let hold = SlowHold {
             turn: 3_937_579,
             held_ms: 4_056,
+            session_age_ms: 8_404_000,
+            stall_count: 31,
             spent_ms,
             paging: None,
         };
         assert_eq!(
             hold.line(),
             "Folio: the window thread held control for 4056 ms on turn 3937579 — \
-             flush_wheel 1928 ms",
+             flush_wheel 1928 ms · session age 8404.000s, stall #31",
         );
     }
 
@@ -3680,6 +3835,8 @@ mod tests {
         let hold = |before: u64, after: u64| SlowHold {
             turn: 0,
             held_ms: 900,
+            session_age_ms: 900,
+            stall_count: 1,
             spent_ms: [0; STATION_COUNT],
             paging: Some(Paging {
                 faults: 0,
@@ -3692,11 +3849,13 @@ mod tests {
         let after = 179 * 1024 * 1024 + 1;
         let line = hold(before, after).line();
         assert!(
-            line.ends_with("· faults +0, working set 180 → 179 MB"),
+            line.ends_with("· faults +0, working set 180 → 179 MB · session age 0.900s, stall #1"),
             "rounded to the nearest, both ends: {line}"
         );
         assert!(
-            hold(0, 0).line().ends_with("working set 0 → 0 MB"),
+            hold(0, 0)
+                .line()
+                .ends_with("working set 0 → 0 MB · session age 0.900s, stall #1"),
             "nothing resident is nothing, not a division that trapped"
         );
     }
@@ -3734,8 +3893,9 @@ mod tests {
         );
         assert_eq!(footprints_asked(), 2, "one end, then the other");
         assert!(
-            hold.line()
-                .ends_with("· faults +38210, working set 179 → 412 MB"),
+            hold.line().ends_with(
+                "· faults +38210, working set 179 → 412 MB · session age 2.900s, stall #1"
+            ),
             "{}",
             hold.line(),
         );
@@ -3803,7 +3963,7 @@ mod tests {
         assert_eq!(
             hold.line(),
             "Folio: the window thread held control for 3000 ms on turn 0 — \
-             drain_pty 2990 ms, woken 10 ms",
+             drain_pty 2990 ms, woken 10 ms · session age 3.000s, stall #1",
         );
     }
 
