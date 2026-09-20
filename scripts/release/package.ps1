@@ -78,7 +78,17 @@
 
 .PARAMETER Binaries
     Where the build put `folio.exe` and the ConPTY sidecar. Defaults to
-    `target/release`.
+    `target/release`. Legacy packaging-only input for the CI rehearsal.
+
+.PARAMETER Binary
+    An unsigned directory downloaded by fetch-ci-build.ps1. Rechecks BUILDINFO,
+    hashes and --version against this checkout's HEAD before packaging. Its SBOM
+    is copied into Output. -Sign signs this directory's exe in place, so keep an
+    unsigned copy if it will be packaged again.
+
+.PARAMETER BuildLocal
+    Explicitly opt into a local release build before packaging. This can consume
+    over 8 GB in one rustc and disrupt an active workstation. Prefer -Binary.
 
 .PARAMETER Documents
     Where the two licences, the third-party notices and the trademark notice
@@ -147,6 +157,8 @@
 param(
     [string] $Version,
     [string] $Binaries,
+    [string] $Binary,
+    [switch] $BuildLocal,
     [string] $Documents,
     [string] $Packaging,
     [string] $Output,
@@ -162,6 +174,7 @@ if (-not $Binaries) { $Binaries = Join-Path $root 'target\release' }
 if (-not $Documents) { $Documents = $root }
 if (-not $Packaging) { $Packaging = Join-Path $root 'packaging' }
 if (-not $Output) { $Output = Join-Path $root 'target\release-package' }
+$Output = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Output)
 
 # **Where the package is built, and where it does not stay.** `$Output` is the
 # release page: every file in it is uploaded and every file in it is hashed into
@@ -227,6 +240,35 @@ function Find-MakeAppx {
 if ($ToolsOnly) {
     Find-MakeAppx | Out-Null
     return
+}
+
+if ($Binary -and ($PSBoundParameters.ContainsKey('Binaries') -or $BuildLocal)) {
+    throw '-Binary cannot be combined with -Binaries or -BuildLocal'
+}
+if ($BuildLocal) {
+    if ($PSBoundParameters.ContainsKey('Binaries')) { throw '-BuildLocal uses target/release; do not pass -Binaries' }
+    Write-Warning 'Local fat-LTO release builds can use over 8 GB in one rustc and freeze an active workstation. Prefer CI and -Binary.'
+    Push-Location $root
+    try {
+        & cargo build --release --locked -p bt-app
+        if ($LASTEXITCODE -ne 0) { throw 'local release build failed' }
+        & "$PSScriptRoot/sbom.ps1" -Output (Join-Path $Output "folio-$(Get-WorkspaceVersion).cdx.json")
+    } finally { Pop-Location }
+}
+if ($Binary) {
+    . "$PSScriptRoot/ci-build.ps1"
+    $Binaries = (Resolve-Path -LiteralPath $Binary).Path
+    $inputPrefix = $Binaries.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    $outputPrefix = $Output.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    if ($inputPrefix.StartsWith($outputPrefix, [StringComparison]::OrdinalIgnoreCase) -or
+        $outputPrefix.StartsWith($inputPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw '-Binary and -Output must be separate, non-nested directories'
+    }
+    $commit = (& git -C $root rev-parse HEAD).Trim()
+    if ($LASTEXITCODE -ne 0) { throw 'cannot resolve packaging checkout HEAD' }
+    $buildInfo = Assert-CiBuild -Directory $Binaries -Commit $commit
+    if ($buildInfo.version -ne (Get-WorkspaceVersion)) { throw 'CI build and packaging manifest versions differ' }
+    if ($Version -and $Version -ne $buildInfo.version) { throw '-Version differs from the CI build' }
 }
 
 if (-not $Version) { $Version = Get-WorkspaceVersion }
@@ -306,6 +348,9 @@ foreach ($previous in (Get-ChildItem -LiteralPath $Output -Force)) {
     if ($previous.Name -eq $sbomName) { continue }
     Write-Host "cleared from $([IO.Path]::GetFileName($Output)): $($previous.Name)"
     Remove-Item -LiteralPath $previous.FullName -Recurse -Force
+}
+if ($Binary) {
+    Copy-Item -LiteralPath (Join-Path $Binaries $sbomName) -Destination (Join-Path $Output $sbomName) -Force
 }
 
 # The archive, in the order a person opening it should meet it: the program,
