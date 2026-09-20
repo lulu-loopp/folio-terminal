@@ -13010,6 +13010,8 @@ struct WindowRuntime {
     /// extended by the evening's report to every picture in which the band's
     /// geometry differs from the one they were placed from.
     math_tools: Option<formula_tools::FormulaToolFollow>,
+    /// Whole-overlay work deferred by the carry to the frame-aware present.
+    formula_overlay_owed: bool,
     /// **The block that is changing face, while it is changing** (owner's ruling
     /// 2026-09-15, T-MATH-TOGGLE-MOTION; §7.1.5p ⑪).
     ///
@@ -37920,6 +37922,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         math_hover_anchor: None,
         math_hover_revision: 0,
         math_tools: None,
+        formula_overlay_owed: false,
         math_toggle: None,
         math_tool_pressed: None,
         math_copied: None,
@@ -85957,7 +85960,10 @@ impl Runtime<'_> {
         // has been projected. If either formula journey is what made this lane
         // live, that present-time rebuild also carries every other overlay lane,
         // so rebuilding here would pay for the whole stack twice.
-        let formula_present = self.math_tools_owe_frames(now) || self.window.math_toggle.is_some();
+        let formula_present = self.formula_overlay_is_active();
+        if formula_present {
+            self.window.formula_overlay_owed |= running.chrome || running.overlay;
+        }
         if running.chrome {
             if formula_present {
                 self.refresh_chrome_without_overlay();
@@ -86070,6 +86076,8 @@ impl Runtime<'_> {
             anchor: flight.anchor().clone(),
             height_subpixels: flight.height_subpixels(now, motion),
             picture_opacity_milli: flight.picture_opacity_milli(now, motion),
+            face_milli: flight.face_milli(now, motion),
+            source_width_cells: flight.source_width_cells(),
         };
         let Some(index) = self.live_paste_target(target) else {
             return;
@@ -88374,7 +88382,7 @@ impl Runtime<'_> {
                 .as_ref()
                 .is_some_and(|flight| flight.anchor().same_block(&boxes.anchor));
             if let Some(follow) = self.window.math_tools.as_mut() {
-                if riding {
+                if follow.is_riding(&boxes.anchor, riding) {
                     follow.ride(&boxes, hovered, now, motion)
                 } else {
                     follow.follow(&boxes, hovered, now, motion)
@@ -88391,6 +88399,11 @@ impl Runtime<'_> {
             // block: naming the band and handing this frame are one lookup.
             false
         };
+        if self.window.math_toggle.is_none()
+            && let Some(follow) = self.window.math_tools.as_mut()
+        {
+            changed |= follow.finish_landing_frame();
+        }
         // And a fade that has finished leaving is a surface that is gone: the
         // follow is dropped whole, so "no marks" is one fact and not a struct
         // holding a zero.
@@ -88640,6 +88653,102 @@ impl Runtime<'_> {
         }]
     }
 
+    /// Sample diagnostics from the handed frame, before its ride receipt is consumed.
+    fn math_band_trace_for_present<'a>(
+        &self,
+        frame_for: impl Fn(SeatId) -> Option<(bt_render::SeatViewport, &'a ViewportFrame)>,
+    ) -> Option<(SeatId, bt_render::MathBandTrace, bool)> {
+        if !self.app.trace_perf {
+            return None;
+        }
+        let named = self.window.math_hover_anchor.as_ref()?;
+        self.sessions.keys().find_map(|seat| {
+            let (body, frame) = frame_for(*seat)?;
+            let mut trace = self.window.renderer.math_band_trace(body, frame, named)?;
+            let in_flight = self
+                .window
+                .math_toggle
+                .as_ref()
+                .is_some_and(|flight| flight.anchor().same_block(named));
+            let riding = self
+                .window
+                .math_tools
+                .as_ref()
+                .map_or(in_flight, |follow| follow.is_riding(named, in_flight));
+            for rect in [
+                &mut trace.seat.block,
+                &mut trace.seat.source,
+                &mut trace.seat.copy,
+            ] {
+                rect[0] += body.x as f32;
+                rect[2] += body.x as f32;
+                rect[1] += body.y as f32;
+                rect[3] += body.y as f32;
+            }
+            trace.ink_right += body.x as f32;
+            Some((*seat, trace, riding))
+        })
+    }
+
+    fn math_band_trace_line(
+        &self,
+        now: Instant,
+        trace: Option<(SeatId, bt_render::MathBandTrace, bool)>,
+    ) -> String {
+        let placed = self
+            .window
+            .math_tools
+            .as_ref()
+            .map(|follow| follow.placed(now, self.app.motion).source);
+        let eye = |rect: Option<[f32; 4]>| {
+            rect.map_or_else(
+                || "none".to_owned(),
+                |r| format!("{:.3},{:.3},{:.3},{:.3}", r[0], r[1], r[2], r[3]),
+            )
+        };
+        let owes = self.math_tools_owe_frames(now)
+            || self
+                .window
+                .math_toggle
+                .as_ref()
+                .is_some_and(|flight| flight.owes_frames(now, self.app.motion));
+        let Some((seat, trace, riding)) = trace else {
+            // The guard also covers departing marks. Say that the band is
+            // absent instead of silently losing those very post-landing frames.
+            return format!(
+                "seat=none display=none band_l=none band_r=none ink_r=none height_sub=none seat_eye=none placed_eye={} face_opacity_milli=none riding=0 owes={}",
+                eye(placed),
+                u8::from(owes),
+            );
+        };
+        let display = match trace.seat.display {
+            bt_viewport::MathBlockDisplay::Rendered => "rendered",
+            bt_viewport::MathBlockDisplay::Source => "source",
+        };
+        format!(
+            "seat={} display={display} band_l={:.3} band_r={:.3} ink_r={:.3} height_sub={} seat_eye={} placed_eye={} face_opacity_milli={} riding={} owes={}",
+            seat.0,
+            trace.seat.block[0],
+            trace.seat.block[2],
+            trace.ink_right,
+            trace.height_subpixels,
+            eye(Some(trace.seat.source)),
+            eye(placed),
+            trace.picture_opacity_milli,
+            u8::from(riding),
+            u8::from(owes),
+        )
+    }
+
+    fn trace_math_band(&self, line: Option<String>) {
+        if let Some(line) = line {
+            trace_sink::stderr_line(format!(
+                "BT_PERF_TRACE math_band frame={} {line}",
+                self.window.renderer.perf_frame(),
+            ));
+        }
+    }
+
     /// Whether a present can carry either formula overlay lane. These are the
     /// two `Option` reads paid by a present with no lit band and no flight; a
     /// flight begins from the marks and therefore keeps `math_tools` alive for
@@ -88659,11 +88768,12 @@ impl Runtime<'_> {
         placement: Option<bt_render::MathToolBoxes>,
         toggle_layers: Vec<marks::OverlayLayer>,
     ) -> bool {
+        let carried = std::mem::take(&mut self.window.formula_overlay_owed);
         let Some(moved) = self.sync_math_tools(now, placement) else {
             return false;
         };
         let in_flight = self.window.math_toggle.is_some();
-        if !moved && !in_flight && !self.math_tools_owe_frames(now) {
+        if !carried && !moved && !in_flight && !self.math_tools_owe_frames(now) {
             return false;
         }
         let formula_tools = toggle_layers
@@ -88897,7 +89007,7 @@ impl Runtime<'_> {
                     self.window.math_toggle = Some(flight);
                     return self.settle_math_toggle();
                 };
-                flight.reverse(faces.heights(), faces.source.rows, now, motion);
+                flight.reverse(faces.heights(), faces.source, now, motion);
                 self.window.math_toggle = Some(flight);
                 return self.present_math_toggle(target, now);
             }
@@ -88968,7 +89078,7 @@ impl Runtime<'_> {
             anchor.clone(),
             faces.heights(),
             to_source,
-            faces.source.rows,
+            faces.source,
             now,
         ));
         self.present_math_toggle(target, now)
@@ -89019,6 +89129,8 @@ impl Runtime<'_> {
                     anchor: flight.anchor().clone(),
                     height_subpixels: flight.height_subpixels(now, motion),
                     picture_opacity_milli: flight.picture_opacity_milli(now, motion),
+                    face_milli: flight.face_milli(now, motion),
+                    source_width_cells: flight.source_width_cells(),
                 });
         let Some(leaf) = self.window.tabs[index].sessions.get_mut(&seat) else {
             return Ok(());
@@ -89080,6 +89192,12 @@ impl Runtime<'_> {
             // The rows a selection was taken from are about to stop existing, which is why the
             // one-frame switch has always cleared it. The other direction cleared it at the press.
             self.clear_selection();
+        }
+        // Taking the flight must not hand changing geometry to a new ease.
+        // The receipt is consumed by sync_math_tools on exactly this landing
+        // frame, including interrupted journeys. It never books a wake-up.
+        if let Some(follow) = self.window.math_tools.as_mut() {
+            follow.finish_ride(flight.anchor());
         }
         self.repaint_pane_change(seat)?;
         Ok(())
@@ -104518,10 +104636,17 @@ impl Runtime<'_> {
             // frames, so those retained frames are the frames handed to both formula
             // lanes. The guard is two `Option` reads and stands before any lookup,
             // vector build, or allocation.
+            let mut math_band_trace = None;
             if self.formula_overlay_is_active() {
                 let active = self.window.active_tab;
                 let frame_for = |seat| {
-                    let body = bodies.iter().find(|pane| pane.seat == seat)?.viewport;
+                    let body = bodies
+                        .iter()
+                        .find(|pane| pane.seat == seat)
+                        .map(|pane| pane.viewport)
+                        .or_else(|| {
+                            (seat == focused_leaf).then(|| self.window.renderer.seat_viewport())
+                        })?;
                     let frame = if seat == focused_leaf {
                         self.window.last_presented_frame.as_ref()?
                     } else {
@@ -104533,6 +104658,7 @@ impl Runtime<'_> {
                     };
                     Some((body, frame))
                 };
+                let trace = self.math_band_trace_for_present(frame_for);
                 let placement = hang_watch::during(hang_watch::Station::RedrawOverlay, || {
                     self.math_tool_placement(frame_for)
                 });
@@ -104542,6 +104668,10 @@ impl Runtime<'_> {
                 hang_watch::during(hang_watch::Station::RedrawOverlay, || {
                     self.refresh_formula_overlay_for_present(now, placement, toggle_layers)
                 });
+                math_band_trace = self
+                    .app
+                    .trace_perf
+                    .then(|| self.math_band_trace_line(now, trace));
             }
             // The retained picture is the same picture, but the palette and the type size under it may
             // have moved since it was presented — a theme switch re-presents without re-projecting.
@@ -104605,6 +104735,7 @@ impl Runtime<'_> {
                     // well, and for what a tab with no shell looked like to the
                     // instrument while it was not.
                     self.trace_present(trigger.source, receipt, true);
+                    self.trace_math_band(math_band_trace);
                     Ok(())
                 }
                 // The swapchain was not ready. The picture is unchanged and still
@@ -104779,6 +104910,7 @@ impl Runtime<'_> {
         // been projected, and nothing has reached the present funnel yet. Hand
         // those exact frames to both lookups, then rebuild the overlay only when
         // a lit or travelling band can make the answer visible.
+        let mut math_band_trace = None;
         if self.formula_overlay_is_active() {
             let frame_for = |seat| {
                 if seat == focused_leaf {
@@ -104789,6 +104921,7 @@ impl Runtime<'_> {
                     .find(|(pane, _)| pane.seat == seat)
                     .map(|(pane, projected)| (pane.viewport, projected))
             };
+            let trace = self.math_band_trace_for_present(frame_for);
             let placement = hang_watch::during(hang_watch::Station::RedrawOverlay, || {
                 self.math_tool_placement(frame_for)
             });
@@ -104798,6 +104931,10 @@ impl Runtime<'_> {
             hang_watch::during(hang_watch::Station::RedrawOverlay, || {
                 self.refresh_formula_overlay_for_present(now, placement, toggle_layers)
             });
+            math_band_trace = self
+                .app
+                .trace_perf
+                .then(|| self.math_band_trace_line(now, trace));
         }
         let table_sources = Self::table_sources(
             std::iter::once(&frame).chain(unfocused_frames.iter().map(|(_, it)| it)),
@@ -104883,6 +105020,7 @@ impl Runtime<'_> {
                 let latency = receipt.map(|receipt| receipt.latency());
                 if let Some(receipt) = receipt {
                     self.trace_present(trigger.source, receipt, false);
+                    self.trace_math_band(math_band_trace);
                 }
                 if self.app.trace_startup
                     && matches!(trigger.source, FrameSource::Resize)
@@ -108881,6 +109019,11 @@ mod formula_tool_seat_tests {
     /// formula lanes owned by another frame.
     #[test]
     fn the_bands_own_turn_draws_the_marks_from_the_picture_that_lit_it() {
+        let sync = body("    fn sync_math_tools(");
+        assert!(
+            sync.find("math_hover_anchor.is_none()").unwrap()
+                < sync.find("else if let Some(boxes) = placement").unwrap()
+        );
         assert!(
             body("    fn turn(&mut self, now: Instant, application_clocks: bool)")
                 .contains("self.advance_math_tools_if_due(now)"),
@@ -109891,9 +110034,9 @@ mod formula_tool_seat_tests {
             .concat(),
         );
         assert_eq!(
-            press.matches("faces.source.rows").count(),
+            press.matches("faces.source,").count(),
             2,
-            "the press is the one place the block's rows are laid out:\n{press}"
+            "the press carries the measured rows and width together:\n{press}"
         );
     }
 }
