@@ -78,6 +78,7 @@ mod hex_peek;
 mod highlight;
 mod i18n;
 mod icons;
+mod ime_report;
 mod input;
 /// **Every journey this window runs, put through the worst schedule it can be
 /// given** (review round 3, 2026-09-18). A file of its own because the table is
@@ -11327,6 +11328,7 @@ enum Announce {
 /// exists to fix; keeping the arrow out of the window is what stops it being
 /// written in the first place.
 struct App {
+    ime_first_focus_seen: bool,
     /// **The device layer, one for the process** (§2.2, multiwindow slice C).
     ///
     /// The `wgpu` instance every surface is created by, the adapter every
@@ -12143,6 +12145,8 @@ impl NewWindowPlan {
 /// field into a map keyed by `WindowId`; this slice only makes that sentence
 /// something the type system can express.
 struct WindowRuntime {
+    ime_report: ime_report::Report,
+    ime_report_due: Option<Instant>,
     /// **When this window gives up waiting for its pages to let go** (§7.35).
     ///
     /// `Some` from the moment [`FolioApp::close`] has told this window to go: it
@@ -37686,6 +37690,7 @@ fn drain_tab_pty(
 /// a field added to the window layer gets its resting value in one place
 /// instead of drifting between a launch and a `New window`.
 struct NewWindowParts {
+    ime_report: ime_report::Report,
     /// The application's favicon store, handed to this window's mark rasterizer
     /// so that a page drawn here wears what any window in the process learned
     /// about its site — see [`App::favicons`].
@@ -37751,6 +37756,7 @@ fn display_frame_rate_millihertz(window: &Window) -> Option<u32> {
 
 fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
     let NewWindowParts {
+        ime_report,
         favicons,
         renderer,
         tabs,
@@ -37799,6 +37805,8 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         clock
     };
     WindowRuntime {
+        ime_report,
+        ime_report_due: None,
         // A window is born staying.
         leaving: None,
         renderer,
@@ -38632,10 +38640,15 @@ impl Runtime<'_> {
                 .create_window(attributes)
                 .context("create native window")?,
         );
+        let mut ime_report = ime_report::Report::default();
+        ime_report.created(ime_report::now_ms());
+        ime_report.trace_order(window.id(), "created");
         install_theme_class_background(&window);
         hang_watch::during(hang_watch::Station::ImeAllowed, || {
             window.set_ime_allowed(true)
         });
+        ime_report.allowed(true, ime_report::now_ms());
+        ime_report.trace_order(window.id(), "allowed");
         // Beside `set_ime_allowed` because it is the other half of the same
         // sentence — what this window does with the keys that are not plain
         // letters — and the stored answer rather than the shipped one, so a
@@ -38974,6 +38987,7 @@ impl Runtime<'_> {
         let preview_worker = preview::PreviewWorker::spawn(proxy.clone())?;
         let git_worker = git::GitWorker::spawn(proxy.clone())?;
         let mut app = App {
+            ime_first_focus_seen: false,
             gpu,
             device_loss_pilot: DeviceLossPilot::new(),
             favicons: Rc::new(RefCell::new(favicon::Favicons::default())),
@@ -39123,6 +39137,7 @@ impl Runtime<'_> {
                     .collect();
         }
         let mut window = new_window_runtime(NewWindowParts {
+            ime_report,
             favicons: Rc::clone(&app.favicons),
             renderer,
             tabs,
@@ -39291,10 +39306,15 @@ impl Runtime<'_> {
                 .create_window(attributes)
                 .context("create native window")?,
         );
+        let mut ime_report = ime_report::Report::default();
+        ime_report.created(ime_report::now_ms());
+        ime_report.trace_order(window.id(), "created");
         install_theme_class_background(&window);
         hang_watch::during(hang_watch::Station::ImeAllowed, || {
             window.set_ime_allowed(true)
         });
+        ime_report.allowed(true, ime_report::now_ms());
+        ime_report.trace_order(window.id(), "allowed");
         // A second window answers the Option key the way the first one does —
         // see that constructor's note. The setting is the process's, and a
         // window that opened before or after it was changed is still a window of
@@ -39636,6 +39656,7 @@ impl Runtime<'_> {
             Instant::now(),
         );
         let mut window = new_window_runtime(NewWindowParts {
+            ime_report,
             favicons: Rc::clone(&app.favicons),
             renderer,
             tabs,
@@ -39935,6 +39956,10 @@ impl Runtime<'_> {
         hang_watch::during(hang_watch::Station::WindowVisible, || {
             self.window.window.set_visible(true)
         });
+        self.window.ime_report.shown(ime_report::now_ms());
+        self.window
+            .ime_report
+            .trace_order(self.window.window.id(), "shown");
         self.window.window_shown = true;
         // Showing a hidden Win32 window can synchronously settle it onto a different monitor.
         // Query Win32 directly: winit's cached scale can race during initial monitor placement.
@@ -101399,6 +101424,81 @@ impl Runtime<'_> {
         .map(drop)
     }
 
+    /// Observe focus without changing IME, native focus, or composition state.
+    fn observe_ime_focus(&mut self, focused: bool) {
+        self.window.ime_report.focus(focused, ime_report::now_ms());
+        if focused && !self.app.ime_first_focus_seen {
+            self.app.ime_first_focus_seen = true;
+            self.window.ime_report_due = Some(Instant::now() + Duration::from_secs(1));
+        }
+        self.write_ime_observation(if focused { "focus-gain" } else { "focus-loss" });
+    }
+
+    fn ime_native_facts(&self) -> ime_report::NativeFacts {
+        native_window(&self.window.window)
+            .ok()
+            .map(bt_platform::ime_observation::snapshot)
+            .unwrap_or_default()
+    }
+
+    fn emit_ime_observation(&self, reason: &str, facts: ime_report::NativeFacts) {
+        let line = self.window.ime_report.line(
+            reason,
+            ime_report::now_ms(),
+            self.keyboard_owner_is_a_shell(),
+            !self.window.web.is_empty(),
+            facts,
+        );
+        let line = format!("{line} window={:?}", self.window.window.id());
+        diagnostics::note(&line);
+        ime_report::TRACE.line(|| line);
+    }
+
+    fn write_ime_observation(&self, reason: &str) {
+        self.emit_ime_observation(reason, self.ime_native_facts());
+    }
+
+    fn observe_ime_key(&mut self, event: &KeyEvent, is_synthetic: bool) {
+        if !self.window.ime_report.has_first_key() {
+            self.window.ime_report.first_key(ime_report::now_ms());
+            self.window
+                .ime_report
+                .trace_order(self.window.window.id(), "first-key");
+        }
+        // Releases do not break a run of presses. No native read, clock read,
+        // allocation, or logging on ordinary keys after the first one.
+        if !input::is_a_keystroke(event.state, is_synthetic)
+            || !self.window.ime_report.watching_keys()
+        {
+            return;
+        }
+        let modifiers = self.window.modifiers;
+        let latin = !modifiers.control_key()
+            && !modifiers.alt_key()
+            && !modifiers.super_key()
+            && ime_report::printable_latin(event.text.as_deref());
+        let terminal = self.keyboard_owner_is_a_shell();
+        if self.window.ime_report.key(terminal, latin)
+            && self.window.ime_report.may_probe(ime_report::now_ms())
+        {
+            // Only the threshold candidate refreshes native facts, and no
+            // oftener than the report's own interval. In particular an
+            // English-mode reading at focus is not reused.
+            let facts = self.ime_native_facts();
+            if self.window.ime_report.confirm(facts) {
+                self.emit_ime_observation("plain-text", facts);
+            }
+        }
+    }
+
+    fn service_ime_report(&mut self, now: Instant) -> Option<Instant> {
+        if self.window.ime_report_due.is_some_and(|due| now >= due) {
+            self.window.ime_report_due = None;
+            self.write_ime_observation("first-focus+1s");
+        }
+        self.window.ime_report_due
+    }
+
     /// A composition event, routed by [`ime_owner`].
     ///
     /// `Enabled`/`Disabled` are the IME's own bookkeeping and belong to the
@@ -101407,6 +101507,18 @@ impl Runtime<'_> {
     /// the composition next starts. `Preedit` and `Commit` are text, and text
     /// goes exactly where [`Self::keyboard_owner`] says the keyboard is.
     fn ime_input(&mut self, event: Ime) -> Result<()> {
+        let kind = match &event {
+            Ime::Enabled => ime_report::ImeKind::Enabled,
+            Ime::Preedit(..) => ime_report::ImeKind::Preedit,
+            Ime::Commit(_) => ime_report::ImeKind::Commit,
+            Ime::Disabled => ime_report::ImeKind::Disabled,
+        };
+        self.window.ime_report.ime(kind, ime_report::now_ms());
+        if matches!(event, Ime::Enabled) {
+            self.window
+                .ime_report
+                .trace_order(self.window.window.id(), "enabled");
+        }
         // **Diagnostic scaffolding: write every IME event to a file.** Off
         // unless `BT_IME_TRACE` names a path; then each event lands as one
         // line with its instant. It exists for the same reason
@@ -101414,9 +101526,8 @@ impl Runtime<'_> {
         // grepped, and the question "did the IME say that, or did we" has to
         // be answered from what the IME actually said. Written before any
         // routing so a swallowed event is still on the record.
-        static IME_TRACE: trace::Dump = trace::Dump::new("BT_IME_TRACE");
         hang_watch::during(hang_watch::Station::ImeTrace, || {
-            IME_TRACE.line(|| format!("{:?} {:?}", Instant::now(), event));
+            ime_report::TRACE.line(|| format!("{:?} {:?}", Instant::now(), event));
         });
         let composing = matches!(event, Ime::Preedit(..) | Ime::Commit(_));
         // **Which rung this composition was started in**, written above every
@@ -117309,6 +117420,8 @@ impl FolioApp {
             // The first window still open turns the application's clocks. See
             // `Runtime::turn` — it is the opening order, and a closed window at
             // the head of it must not take the job away from the rest.
+            let ime_deadline = runtime.service_ime_report(now);
+            wake_deadline = earliest_deadline([wake_deadline, ime_deadline]);
             let turn = runtime.turn(now, application_clocks);
             application_clocks = false;
             match turn {
@@ -118182,7 +118295,10 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     event,
                     is_synthetic,
                     ..
-                } => runtime.keyboard_input(&event, is_synthetic),
+                } => {
+                    runtime.observe_ime_key(&event, is_synthetic);
+                    runtime.keyboard_input(&event, is_synthetic)
+                }
                 WindowEvent::Ime(event) => runtime.ime_input(event),
                 WindowEvent::ModifiersChanged(modifiers) => {
                     // **The one door every modifier state in this process comes
@@ -118262,6 +118378,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 WindowEvent::ThemeChanged(_) => runtime.os_theme_changed().map(|_| ()),
                 WindowEvent::RedrawRequested => runtime.redraw(),
                 WindowEvent::Focused(false) => {
+                    runtime.observe_ime_focus(false);
                     // Losing the window is a blur, and blur commits (J102). The
                     // mock-up's editor is a real focusable element and gets this
                     // from the DOM; here it has to be said. A press that was still
@@ -118335,6 +118452,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     })
                 }
                 WindowEvent::Focused(true) => {
+                    runtime.observe_ime_focus(true);
                     // **R31's third invalidation moment, B: the window came back.**
                     // Whatever happened while it was away happened in another process
                     // — an editor saving, a `git` run in another terminal, a

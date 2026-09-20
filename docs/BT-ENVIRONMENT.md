@@ -35,7 +35,7 @@ added later; `BT_PTY_DUMP` and `BT_HANG_SELFTEST` deliberately do not match it.
 | --- | --- | --- | --- | --- |
 | `BT_PTY_DUMP` | file path, used verbatim | Records every byte the ConPTY reader receives, per pane. `File::create` — **the named file is truncated**. A `.chunks` sidecar beside it records arrival times. The first pane takes the named path; later panes take `<path>.2`, `<path>.3`. | **Everything on the screen and everything typed.** Shell output, prompts, the echo of what you type, the contents of any file printed to the terminal, anything a program prints including secrets. The `.chunks` header also records the process id and the wall-clock start. | off |
 | `BT_PTY_INPUT_DUMP` | file path; unset or empty is off | Records queued input through `PtyDump` to `<path>.in`, then `<path>.in.2`, etc. Raw bytes plus one `.chunks` line per write: sequence, elapsed microseconds, byte count, pane ordinal, quoted reason, hex bytes. Shares the receive dump clock and pane identity. A queued write does not prove the child consumed it. | **records your keystrokes, including anything typed at a password prompt; for a diagnosis you run yourself, never to be shared unread** | off, including release |
-| `BT_IME_TRACE` | file path, used verbatim | Appends one line per IME event, written before any routing. | **Composed and committed IME text** — the literal characters an input method produces. | off |
+| `BT_IME_TRACE` | file path, used verbatim | Appends one line per IME event before routing, plus text-free startup order and native focus snapshots (see below). | **Composed and committed IME text** — the literal characters an input method produces. | off |
 | `BT_CHROME_DUMP` | file path, used verbatim | Appends one block per chrome rebuild and per overlay frame: rectangles, colours, sprite marks, and label text. | **Every visible label**: tab titles, pane-head captions, file names in the files column, path foots, tooltips, menu rows. | off |
 | `BT_DECOR_TRACE` | file path, used verbatim | Appends one snapshot per call: the lifecycle state of each frozen or live formula decoration and why it failed. | **Up to 96 characters of the terminal line** the decoration was drawn from. | off |
 | `BT_WEB_TRACE` | file path, used verbatim | Appends one line per web-preview decision. | **Full navigation URLs**, including query and fragment, and the file names of refused downloads. | off |
@@ -180,6 +180,67 @@ temp directory.
   candidate return address **as a module name and an offset**. The stack bytes
   themselves are read but not written to the file.
 - `%TEMP%\bt-app-panic.log` — appended by the panic hook.
+
+### IME first-focus self-report
+
+`BT_IME_TRACE` retains its existing event payloads, which contain private typed
+text. New `Folio: IME observation` and `Folio: keys are arriving as plain text`
+lines contain no typed text. Focus snapshots and the single snapshot about one
+second after the process's first focus also go to `diagnostics.log` without an
+environment switch. The delayed sample uses the event loop's deadline and is
+retired after one observation; a busy event loop can deliver it late.
+
+Fields:
+
+- `reason`: `focus-gain`, `focus-loss`, `first-focus+1s`, `plain-text`, or a
+  trace-only startup station. `at_ms` is monotonic time since the first window's
+  instrumentation began, not wall time or time since the trace file opened.
+- `created`, `shown`, `first_focus`, `first_enabled`, `first_key`, and `focus`:
+  per-window order number followed by `@<milliseconds>ms`. `unknown` means the
+  event has not been observed. Trace-only `IME startup` lines use the equivalent
+  debug spelling `Some(Stamp { order, ms })` / `None`. `shown` records completion of the first show
+  request; native activation can occur synchronously inside that request.
+- `allowed`: the last `set_ime_allowed` argument and its observation stamp.
+  This records what Folio requested, not proof that the native context accepted
+  it. `enabled_since_focus` and `ime_since_focus` describe delivered winit
+  events in the current focus epoch, before surface routing.
+- `focused`, `terminal`, `web_host`: the application focus event, keyboard
+  owner's terminal status, and presence of a WebView host in this window.
+- `latin_keys`: consecutive qualifying key presses, saturated at four. Three
+  triggers a fresh native reading. Synthetic events and releases do not count;
+  controls, non-Latin presses, shortcuts, and non-terminal surfaces reset it.
+- `native`: `hwnd`, `focused_hwnd`, `focus_matches` (`GetFocus` vs the supplied
+  winit HWND); `context` (`ImmGetContext` non-null); `open`
+  (`ImmGetOpenStatus`); raw `conversion` (`ImmGetConversionStatus`, bit 0 is
+  `IME_CMODE_NATIVE`); `hkl_low` / `hkl_high` (`GetKeyboardLayout(0)` words);
+  `imm_is_ime` (`ImmIsIME`); `tsf_profile_type` (`GetActiveProfile`, 1 text
+  service, 2 keyboard layout); `tsf_error` (HRESULT if the read failed).
+  `None` means unknown/unavailable, never false. Native handles are numeric;
+  no profile names, window titles, key values, or composition strings are read.
+
+The always-on symptom line requires three consecutive presses carrying ASCII
+Latin letters (optionally printable ASCII punctuation/spaces) on a focused
+terminal, no IME event since focus, an active input method (TSF text service or
+`ImmIsIME`), a context, open status, and native conversion mode. It is written
+at most once per focus. Any delivered IME event, including `Disabled`, suppresses
+it for that focus. Alphanumeric/closed/unknown mode suppresses the line. Layout
+language alone never proves an IME. Native reads happen only at focus changes,
+the one delayed sample, and the third-key candidate; not on ordinary keys.
+Within one focus the third-key reading is taken at most once per ten seconds:
+a reading that does not confirm would otherwise be repeated at every word.
+
+`mode_source=imm-compat` is deliberate: IMM open/conversion flags are the
+Windows compatibility view, not authoritative proof of a TSF-only service's
+private English/Chinese mode. A service can leave them stale. Unknown flags
+suppress reporting; stale positive flags can still cause a false positive, and
+stale negative flags can hide the symptom. The line states observable API facts,
+not a diagnosis or proof of the user's intended language. The local TSF profile
+manager is queried without initializing COM, activating a profile, creating a
+text store, or changing focus. A missing apartment/profile remains unknown.
+macOS/native facts not already available are unknown; no AppKit reader is added.
+
+No report can detect keystrokes that never reach Folio. The focus and delayed
+snapshots are intended to leave evidence for that version of the symptom too.
 
 ### File-read self-report
 
