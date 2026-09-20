@@ -53,6 +53,24 @@ All notable changes to Folio are recorded here. The format follows
   GB18030 Bitmap on macOS.** Folio now chooses the terminal grid's CJK face
   explicitly from its platform chain.
 
+- **Pasting a screenshot no longer makes Folio copy the same picture three
+  times before it uses one of them.** A screenshot tool puts the same picture on
+  the clipboard in several shapes at once — on Windows a `PNG`, a `CF_DIBV5` and
+  a `CF_DIB`; on macOS a PNG and a TIFF — and Folio was copying every one of them
+  into memory, on the thread that draws the window, before handing the best one
+  to the worker that writes the file. For a 4K screen that was about 66 MB copied
+  to use perhaps 4 MB of it, and up to three synchronous round trips into the
+  application the picture was copied from, each of which can render the picture
+  on demand. Folio now walks its preference list and stops at the first shape it
+  can see is whole — a few hundred bytes of header, no decoding — so one shape is
+  copied and the source is asked once. What ends up in the folder is the same
+  picture it always was. Sources that advertise a picture shape and then hand
+  over something no decoder can read, which some browsers and remote-desktop
+  clients do, still paste: Folio reads the header, sees it is not a picture and
+  takes the next shape, exactly as it used to after copying all of them. A source
+  that offers only the older shapes is read as before, and text or a file list on
+  the clipboard still wins over a picture without any of it being read.
+
 - **A local page or PDF whose path contains Chinese — or a space with `{`, `}`,
   `^` or `` ` `` in the name — now opens in the preview, instead of being turned
   away by Folio itself.** Double-clicking `报告.pdf` under `D:\文档\项目 (1)\`
