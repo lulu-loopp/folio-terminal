@@ -6,6 +6,22 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- **`folio --remove-explorer-menu` takes Folio back out of Explorer's
+  right-click menu, without opening a window.** Both entries go: the one on
+  Windows 11's first page and the classic one under "Show more options". It is
+  the piece that was missing from every way of removing Folio — there is no
+  installer, so deleting the files left a menu entry pointing at a `folio.exe`
+  that is no longer there, and the switch that could have taken it off went with
+  the folder. A registration belonging to another copy of Folio on the same
+  machine is left exactly as it is; one whose `folio.exe` has gone is cleared,
+  because nobody is answering it. It prints one line saying what it removed and
+  what it left, exits `0` when the machine is the way you asked for it —
+  including when there was nothing to remove — and non-zero only when a removal
+  was refused, with the reason on standard error. `docs/install.md` has the
+  per-channel steps.
+
 ### Changed
 
 - **When Folio's window pauses, its own log now names the call it was inside.**

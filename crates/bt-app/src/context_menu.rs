@@ -67,10 +67,11 @@
 //! recorded in `docs/DESIGN.md` §7.4; the row's own sentence says where the
 //! entry will be found so that nobody has to go looking.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use bt_platform::{CONTEXT_MENU_CLASSES, ContextMenuShape, ContextMenuState};
+use bt_platform::{CONTEXT_MENU_CLASSES, ContextMenuShape, ContextMenuState, ContextMenuTree};
 
+use crate::explorer_menu::{MenuFate, MenuRemoval};
 use crate::i18n::Text;
 
 /// Where `folio.exe` is, as the registry will have to name it.
@@ -186,6 +187,105 @@ pub fn reassert() -> bool {
     installed(bt_platform::context_menu_verdict(&found, &desired))
 }
 
+/// **What `--remove-explorer-menu` does about the classic verb** — the package
+/// half's question ([`crate::explorer_menu::package_removal`]) asked of this
+/// store, and answered out of the same two owners.
+///
+/// [`bt_platform::context_menu_verdict`] says whether there is a registration at
+/// all, exactly as it does for the row: `Absent` is nothing to remove, and
+/// `Current` is a `command` value naming this very executable, which is this
+/// copy's by definition. `Stale` is the case that needs the second question, and
+/// it is put to [`bt_platform::context_menu_reassert_wanted`] — whose whole
+/// staleness-plus-ownership rule is what the launch-time repair already obeys:
+/// rewrite, or here remove, **unless** a tree names a `folio.exe` that is still
+/// on the disk and is not this one.
+///
+/// **A partial set that names both this copy and a live stranger is left
+/// alone**, which falls out of that rule and is the conservative side: one of
+/// the two trees would be somebody else's menu entry, and `remove_context_menu`
+/// takes the verb out of both.
+///
+/// `desired` is an `Option` because a machine that will not say where its own
+/// executable is cannot say which registrations are this copy's — and that is
+/// [`MenuRemoval::Unanswerable`] rather than "there is nothing there", for the
+/// reason R2-20 gave one store over: an answer that reads as absence is a
+/// removal reporting success over an entry that is still in somebody's menu.
+///
+/// `on_disk` is the one impure input and is handed in, so the whole table can be
+/// read without a file system under it.
+#[must_use]
+pub fn classic_removal(
+    found: &[ContextMenuTree],
+    desired: Option<&ContextMenuShape>,
+    on_disk: impl Fn(&Path) -> bool,
+) -> MenuRemoval {
+    let Some(desired) = desired else {
+        return MenuRemoval::Unanswerable;
+    };
+    match bt_platform::context_menu_verdict(found, desired) {
+        ContextMenuState::Absent => MenuRemoval::Nothing,
+        ContextMenuState::Current => MenuRemoval::Remove,
+        ContextMenuState::Stale => {
+            if bt_platform::context_menu_reassert_wanted(found, desired, on_disk) {
+                MenuRemoval::Remove
+            } else {
+                MenuRemoval::AnotherCopy
+            }
+        }
+    }
+}
+
+/// The classic half of `--remove-explorer-menu`: read the trees, decide, and act
+/// on the decision.
+///
+/// The read is done once and both the decision and the sentence come off it, for
+/// [`reassert`]'s reason: a second reading would be of a registry this function
+/// has since changed.
+///
+/// **The language is deliberately not installed first**, unlike
+/// `report_at_the_front_door`: this path says its one line in English by
+/// contract, and opening the settings file for a folder that is being deleted is
+/// work with nothing to show for it. What [`desired`] then builds is a shape
+/// whose *label* may be in the other column — and the answer cannot turn on it.
+/// A verb written in the other language reads [`ContextMenuState::Stale`]
+/// instead of `Current`, and `Stale` over a `command` naming this very
+/// executable answers `Remove` through the ownership rule, which is what
+/// `Current` answers directly. The `command` and the `folio.exe` in it are what
+/// every branch actually turns on, and neither is translated.
+pub(crate) fn classic_taken_off() -> MenuFate {
+    let desired = desired();
+    let found = bt_platform::read_context_menu(CONTEXT_MENU_CLASSES);
+    match classic_removal(&found, desired.as_ref(), |exe| exe.is_file()) {
+        MenuRemoval::Nothing => MenuFate::left("no Show more options entry was registered"),
+        MenuRemoval::Unanswerable => MenuFate::left(
+            "this machine would not say where its own folio.exe is, so the Show more options \
+             entry was left",
+        ),
+        MenuRemoval::AnotherCopy => MenuFate::left(match registered_exe(&found) {
+            Some(exe) => {
+                format!("the Show more options entry was left: it runs {exe}, which is still there")
+            }
+            None => "the Show more options entry was left: it runs another Folio".to_owned(),
+        }),
+        MenuRemoval::Remove => MenuFate::attempted("the Show more options entry", apply(false)),
+    }
+}
+
+/// The first `folio.exe` the trees name, for the sentence that says whose entry
+/// was left alone.
+///
+/// **For the report and never for the decision** — which executable a tree names
+/// is `bt_platform`'s to read and
+/// [`bt_platform::context_menu_reassert_wanted`]'s to judge, and this asks only
+/// so that a line in somebody's uninstall log can say where to look.
+fn registered_exe(found: &[ContextMenuTree]) -> Option<String> {
+    found
+        .iter()
+        .filter_map(ContextMenuTree::shape)
+        .find_map(|shape| bt_platform::context_menu_command_exe(&shape.command))
+        .map(str::to_owned)
+}
+
 // **The row's sentence used to be written here** and moved to
 // `explorer_menu::row_description` on 2026-09-07, when the two Explorer rows
 // became one. It is one sentence about two stores now — what the entry says, and
@@ -289,5 +389,95 @@ mod tests {
                 "{call} is written once, inside that wrapper"
             );
         }
+    }
+
+    /// **RED (A1/A5) — the whole table of what `--remove-explorer-menu` does
+    /// about the classic verb.**
+    ///
+    /// The same three claims the package half makes, over the store that has
+    /// four registry values instead of one folder. ① What this build would write
+    /// now names this very binary and is this copy's to take away. ② A verb whose
+    /// `folio.exe` is **gone** is removed too — it is the state an uninstall
+    /// leaves and clicking it does nothing at all. ③ A verb naming a `folio.exe`
+    /// that is still there belongs to another copy of Folio and is left (B1),
+    /// **including** a half-and-half set, because `remove_context_menu` takes the
+    /// verb out of both trees and there is no way to remove only ours.
+    ///
+    /// Two shapes that are not obvious are pinned beside them: a set somebody
+    /// deleted half of is still this copy's to clear, and a verb key with no
+    /// `command` under it (R2-26) names no executable at all — so it is nobody's
+    /// to lose and the flag clears it.
+    ///
+    /// MUTATION: read `Stale` as `Remove` without asking
+    /// `context_menu_reassert_wanted` and the last two cases go red, which is
+    /// this copy deleting a menu entry another Folio is answering. Answer
+    /// `Nothing` for a machine that will not say where its own executable is and
+    /// the final assertion goes red — a removal reporting success over an entry
+    /// it never looked at.
+    #[test]
+    fn the_flag_removes_this_copys_verb_and_a_verb_that_runs_nothing() {
+        const OURS: &str = r"D:\Tools\Folio\folio.exe";
+        const STRANGER: &str = r"D:\Other\Folio\folio.exe";
+        let shape = |exe: &str| bt_platform::context_menu_shape(Path::new(exe), "Open Folio here");
+        let written = |exe: &str| ContextMenuTree::Written(shape(exe));
+        let desired = shape(OURS);
+        // Only the stranger's binary is on the disk: ours has just been deleted
+        // by the uninstall that is running this flag, which is the ordinary
+        // shape of the machine this flag runs on.
+        let on_disk = |exe: &Path| exe == Path::new(STRANGER);
+        let cases = [
+            (
+                "nothing written",
+                vec![ContextMenuTree::Absent, ContextMenuTree::Absent],
+                MenuRemoval::Nothing,
+            ),
+            (
+                "exactly what this build would write",
+                vec![written(OURS), written(OURS)],
+                MenuRemoval::Remove,
+            ),
+            (
+                "a set somebody deleted half of",
+                vec![written(OURS), ContextMenuTree::Absent],
+                MenuRemoval::Remove,
+            ),
+            (
+                "a verb key with no command under it",
+                vec![ContextMenuTree::Broken, ContextMenuTree::Broken],
+                MenuRemoval::Remove,
+            ),
+            (
+                "another copy's, and its folio.exe is still there",
+                vec![written(STRANGER), written(STRANGER)],
+                MenuRemoval::AnotherCopy,
+            ),
+            (
+                "ours in one tree and another copy's in the other",
+                vec![written(OURS), written(STRANGER)],
+                MenuRemoval::AnotherCopy,
+            ),
+        ];
+        for (what, found, expected) in cases {
+            assert_eq!(
+                classic_removal(&found, Some(&desired), on_disk),
+                expected,
+                "{what}"
+            );
+        }
+        assert_eq!(
+            classic_removal(
+                &[written(STRANGER), written(STRANGER)],
+                Some(&desired),
+                |_| false
+            ),
+            MenuRemoval::Remove,
+            "a verb naming a folio.exe that is gone is answered by nobody"
+        );
+        assert_eq!(
+            classic_removal(&[written(OURS), written(OURS)], None, on_disk),
+            MenuRemoval::Unanswerable,
+            "a machine that will not say where its own folio.exe is cannot say \
+             whose the entry is"
+        );
     }
 }
