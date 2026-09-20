@@ -7,6 +7,7 @@
 //! `std::fs::rename` on Windows already goes through `MoveFileExW` with
 //! `MOVEFILE_REPLACE_EXISTING` when the destination exists, which is the
 //! platform atomic replace the spec asks for — no `unsafe` FFI needed here,
+//! The preserving variant delegates native calls to `bt-platform`,
 //! keeping this crate outside the workspace's one deliberate `unsafe`
 //! boundary (`bt-platform`, per `docs/CONVENTIONS.md` §零).
 
@@ -29,6 +30,31 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), WriteError> {
         source,
     })?;
     commit_rename(&tmp_path, path)
+}
+
+/// Replace an existing user-owned file without discarding its metadata.
+/// Windows merges DACLs, streams and creation time through ReplaceFileW;
+/// Unix copies ownership and mode before rename. Multiple links are refused.
+/// New files should use `atomic_write` instead.
+pub fn atomic_replace_preserving(path: &Path, contents: &[u8]) -> Result<(), WriteError> {
+    let tmp_path = temp_sibling_path(path)?;
+    let recovery = temp_sibling_path(path)?;
+    let result = (|| -> io::Result<()> {
+        let file = File::open(path)?;
+        if bt_platform::file_link_count(&file)? > 1 {
+            return Err(io::Error::other("hard-linked files are not replaced"));
+        }
+        drop(file);
+        write_temp(&tmp_path, contents)?;
+        bt_platform::replace_file_preserving(&tmp_path, path, &recovery)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+    result.map_err(|source| WriteError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 /// Step 1: write `contents` into `tmp_path` and `fsync` it. Does not touch
@@ -113,6 +139,51 @@ fn unique_suffix() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preserving_replace_writes_content_and_refuses_hardlinks() {
+        let dir = std::env::temp_dir().join(format!("bt-preserving-{}", unique_suffix()));
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("profile.ps1");
+        fs::write(&target, b"before").unwrap();
+        atomic_replace_preserving(&target, b"after").unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"after");
+        let linked = dir.join("dotfile.ps1");
+        fs::hard_link(&target, &linked).unwrap();
+        assert!(atomic_replace_preserving(&target, b"must not land").is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"after");
+        assert_eq!(fs::read(&linked).unwrap(), b"after");
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 2);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn preserving_replace_missing_target_is_refused_without_temps() {
+        let dir = std::env::temp_dir().join(format!("bt-preserving-missing-{}", unique_suffix()));
+        fs::create_dir_all(&dir).unwrap();
+        assert!(atomic_replace_preserving(&dir.join("missing"), b"no").is_err());
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preserving_replace_keeps_mode_and_ownership() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = std::env::temp_dir().join(format!("bt-preserving-mode-{}", unique_suffix()));
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("profile.ps1");
+        fs::write(&target, b"before").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+        let before = fs::metadata(&target).unwrap();
+        atomic_replace_preserving(&target, b"after").unwrap();
+        let after = fs::metadata(&target).unwrap();
+        assert_eq!(
+            (after.uid(), after.gid(), after.mode()),
+            (before.uid(), before.gid(), before.mode())
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn happy_path_replaces_content_and_leaves_no_temp_file() {

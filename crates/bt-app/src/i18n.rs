@@ -2669,6 +2669,20 @@ pub enum Text {
     /// here, so a row left on when the card was answered is a row waiting for a
     /// shell to name its own file.
     ShellIntegrationPending,
+    ShellProfileEncoding,
+    ShellMarksVersion,
+    ShellMarksPath,
+    ShellProfileUnchanged,
+    ShellProfileMigrated,
+    ShellProfileRemoved,
+    ShellProfileRefused,
+    ShellProfileProbeFailed,
+    ShellProfileLink,
+    ShellProfileHardLink,
+    ShellProfileReadOnly,
+    ShellProfileChanged,
+    ShellProfileScriptLocation,
+    ShellProfileNothing,
 
     // ── the application menu bar (M3-2, macOS) ─────────────────────────────
     //
@@ -4448,16 +4462,11 @@ impl Text {
                 "This file was deleted. What you are reading is still here.",
                 "文件已被删除。你正在读的这一份还在。",
             ),
-            Self::RowPowerShellOffer => {
-                pick(lang, "Offer PowerShell integration", "PowerShell 整合提示")
-            }
-            // The same three things as the strip, in the same order, so a
-            // reader who read one and then looked for the switch reads one list
-            // twice rather than two lists once.
+            Self::RowPowerShellOffer => pick(lang, "PowerShell integration", "PowerShell 整合"),
             Self::DescPowerShellOffer => pick(
                 lang,
-                "A PowerShell pane without integration offers to add one. Integration marks commands, follows the folder, typesets $…$.",
-                "未整合的 PowerShell 窗格提示加入整合。整合提供命令标记、目录跟随和 $…$ 排版。",
+                "On offers setup. Off removes Folio's profile lines.",
+                "开启时提示安装整合。关闭时移除 Folio 整合行。",
             ),
             // **The three installer rows are 「通知」 rows** (user ruling
             // 2026-08-29). 「钩子」 and 「通知程序」 named the mechanism this window
@@ -4951,6 +4960,70 @@ impl Text {
                 "Takes a dated copy of your $PROFILE, then appends one line to it.",
                 "先做带日期的副本，再追加一行到 $PROFILE",
             ),
+            Self::ShellProfileEncoding => pick(
+                lang,
+                "Unsupported profile encoding; expected UTF-8, UTF-8 BOM or UTF-16LE BOM.",
+                "$PROFILE 的编码不受支持，需要 UTF-8、UTF-8 BOM 或 UTF-16LE BOM。",
+            ),
+            Self::ShellMarksVersion => pick(
+                lang,
+                "Unsupported integration marks version.",
+                "整合记录的版本不受支持。",
+            ),
+            Self::ShellMarksPath => pick(
+                lang,
+                "Integration mark paths must be absolute.",
+                "整合记录中的路径必须是绝对路径。",
+            ),
+            Self::ShellProfileUnchanged => pick(lang, "Folio profile unchanged", "$PROFILE 未改动"),
+            Self::ShellProfileMigrated => pick(
+                lang,
+                "Updated Folio profile line",
+                "已更新 $PROFILE 中的 Folio 整合行",
+            ),
+            Self::ShellProfileRemoved => pick(
+                lang,
+                "Removed Folio profile line",
+                "已移除 $PROFILE 中的 Folio 整合行",
+            ),
+            Self::ShellProfileRefused => {
+                pick(lang, "Could not change profile", "无法修改 $PROFILE")
+            }
+            Self::ShellProfileProbeFailed => pick(
+                lang,
+                "Could not query this PowerShell profile within five seconds.",
+                "五秒内未能查到此 PowerShell 的 $PROFILE。",
+            ),
+            Self::ShellProfileLink => pick(
+                lang,
+                "Symbolic links and reparse points are not edited.",
+                "不修改符号链接和重解析点。",
+            ),
+            Self::ShellProfileHardLink => pick(
+                lang,
+                "This profile has hard links, possibly from a dotfile manager. Folio left it unchanged.",
+                "$PROFILE 存在硬链接，可能来自配置文件管理工具。Folio 未做修改。",
+            ),
+            Self::ShellProfileReadOnly => pick(
+                lang,
+                "The profile is read-only or is not a regular file.",
+                "$PROFILE 为只读，或不是普通文件。",
+            ),
+            Self::ShellProfileChanged => pick(
+                lang,
+                "The profile changed during the operation; retry when the editor is finished.",
+                "$PROFILE 在操作期间被改动，等编辑器关闭后重试。",
+            ),
+            Self::ShellProfileScriptLocation => pick(
+                lang,
+                "The script must be under APPDATA\\Folio or APPDATA\\BetterTerminal, in shell-integration.",
+                "脚本必须位于 APPDATA\\Folio 或 APPDATA\\BetterTerminal 的 shell-integration 下。",
+            ),
+            Self::ShellProfileNothing => pick(
+                lang,
+                "No Folio profile lines found.",
+                "未找到 Folio 整合行。",
+            ),
             Self::ShellIntegrationPending => pick(
                 lang,
                 "Takes effect in the next PowerShell session",
@@ -5006,7 +5079,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 690] = [
+    pub const ALL: [Self; 704] = [
         Self::PastePathEncoding,
         Self::PastePathControl,
         Self::PastePathPowerShellQuote,
@@ -5697,6 +5770,20 @@ impl Text {
         Self::MenuZoomWindow,
         Self::MenuBringAllToFront,
         Self::MenuFolioHelp,
+        Self::ShellProfileEncoding,
+        Self::ShellMarksVersion,
+        Self::ShellMarksPath,
+        Self::ShellProfileUnchanged,
+        Self::ShellProfileMigrated,
+        Self::ShellProfileRemoved,
+        Self::ShellProfileRefused,
+        Self::ShellProfileProbeFailed,
+        Self::ShellProfileLink,
+        Self::ShellProfileHardLink,
+        Self::ShellProfileReadOnly,
+        Self::ShellProfileChanged,
+        Self::ShellProfileScriptLocation,
+        Self::ShellProfileNothing,
     ];
 
     /// **The two columns of the platform table** — every string
@@ -5813,6 +5900,8 @@ impl Text {
         Self::DescPowerShellOffer,
         Self::PowerShellNoticeBody,
         Self::ShellIntegrationPending,
+        // Only the Windows PowerShell discovery worker can emit this refusal.
+        Self::ShellProfileProbeFailed,
         // — the Acrylic row's reason, which only a Windows with no backdrop
         //   reads: off Windows this build has no backdrop to ask for and
         //   `settings::visible_rows_for` does not offer the row at all (§13.32
@@ -5840,13 +5929,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 0] = [
-        // The hovered link's two macOS clauses (T-MAC-CMDCLICK, §13.45 ②) were
-        // written on 2026-09-13 and left this table then. Their Windows columns
-        // had carried Chinese since the overlay was written; what was owed was
-        // the same two clauses with `⌘` in them and the Finder's own name in
-        // the second, and that is what they say.
-    ];
+    const CHINESE_PENDING: [(Self, HostPlatform); 0] = [];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
@@ -7018,7 +7101,8 @@ impl CliText<'_> {
                      \x20 -h, --help        this text\n\
                      \x20 --version         which build this is\n\
                      \x20 --remove-explorer-menu  take this copy of Folio out of Explorer's \
-                     right-click menu"
+                     right-click menu\n\
+                     \x20 --remove-shell-integration  remove Folio lines from this account's PowerShell profiles"
                 ),
                 Lang::Chinese => format!(
                     "folio [--cwd <文件夹>] [--profile <id>] [--new-window | --tab] [<路径>]\n\n\
@@ -7029,7 +7113,8 @@ impl CliText<'_> {
                      \x20 <路径>            文件夹等同 --cwd，文件则打开预览\n\
                      \x20 -h, --help        显示这段说明\n\
                      \x20 --version         显示这是哪一个构建\n\
-                     \x20 --remove-explorer-menu  把这份 Folio 从资源管理器的右键菜单里撤掉"
+                     \x20 --remove-explorer-menu  把这份 Folio 从资源管理器的右键菜单里撤掉\n\
+                     \x20 --remove-shell-integration  从当前账户的 PowerShell $PROFILE 移除 Folio 整合行"
                 ),
             },
             Self::MissingValue(flag) => match lang {
@@ -8283,6 +8368,18 @@ mod tests {
     }
 
     #[test]
+    fn shell_integration_followup_settings_copy_budget() {
+        let description = Text::DescPowerShellOffer.in_lang(Lang::English);
+        let lines = crate::tooltip::wrap(description, 39.0, |run| run.chars().count() as f32);
+        assert!(lines.len() <= 2, "{lines:?}");
+        assert_eq!(
+            Text::RowPowerShellOffer.in_lang(Lang::English),
+            "PowerShell integration"
+        );
+        assert!(description.contains("Off removes"));
+    }
+
+    #[test]
     fn paste_refusal_copy_fits_two_lines_and_tracks_its_pending_columns() {
         use crate::toast;
         let entries = [
@@ -8481,9 +8578,8 @@ mod tests {
             }
             .in_lang(lang);
             let lines: Vec<&str> = usage.lines().collect();
-            // Ten since `--remove-explorer-menu` joined the list: the summary, a blank, and one
-            // line for each of the eight things this program can be told by somebody typing.
-            assert_eq!(lines.len(), 10, "{lang:?}: {usage}");
+            // The summary, one blank line, and nine supported command forms.
+            assert_eq!(lines.len(), 11, "{lang:?}: {usage}");
             assert!(lines[0].starts_with("folio [--cwd "), "{lang:?}");
             assert!(lines[1].is_empty(), "{lang:?}");
             for line in &lines[2..] {

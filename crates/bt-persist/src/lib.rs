@@ -51,7 +51,7 @@ mod settings;
 mod update;
 mod write_tracker;
 
-pub use atomic::atomic_write;
+pub use atomic::{atomic_replace_preserving, atomic_write};
 pub use debounce::Debouncer;
 pub use error::WriteError;
 pub use keybindings::{BindingOverrideV1, KEYBINDINGS_SCHEMA_VERSION, KeybindingsV1};

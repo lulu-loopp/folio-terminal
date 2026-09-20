@@ -38517,6 +38517,7 @@ impl Runtime<'_> {
         // start. It is an environment read and four `is_file` calls, so moving it
         // ahead of the window costs the launch nothing measurable.
         let profile_programs = profiles::ProfilePrograms::probe(&bt_pty::SystemShellEnvironment);
+        shell_integration::begin_startup_migration();
         // Three registry reads, on this thread, finishing before the next line
         // (§7.40 ②). This used to start a worker running `wsl.exe --list` and a
         // `getent` inside the distribution — and the `profiles::title` call
@@ -48725,6 +48726,24 @@ impl Runtime<'_> {
         }
         if let Some(enabled) = settings::powershell_integration_offer_requested(target) {
             self.apply_powershell_integration_offer(enabled)?;
+            if !enabled
+                && !self
+                    .app
+                    .settings_store
+                    .loaded()
+                    .powershell_integration_offer
+            {
+                shell_integration::begin_removal();
+            }
+            if enabled
+                && self
+                    .app
+                    .settings_store
+                    .loaded()
+                    .powershell_integration_offer
+            {
+                shell_integration::begin_enable();
+            }
         }
         // The machine fact travels with the press: what the switch's `On` reaches
         // is `explorer_menu::place_when_on`'s answer about this Windows and this
@@ -54874,6 +54893,9 @@ impl Runtime<'_> {
     fn apply_powershell_integration_offer(&mut self, enabled: bool) -> Result<()> {
         let mut settings = self.app.settings_store.loaded().clone();
         settings.powershell_integration_offer = enabled;
+        if !enabled {
+            settings.powershell_install_pending = false;
+        }
         if !self.app.settings_store.store(settings) {
             return Ok(());
         }
@@ -117315,7 +117337,28 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // and re-solves the ones whose bodies just got a row shorter. Every
             // window, because a `pwsh` is a `pwsh` in all of them.
             AppEvent::PowerShellProfileProbed => {
-                self.for_each_window(|runtime| runtime.settle_pane_notices())
+                let mut removal = shell_integration::take_removal();
+                self.for_each_window(|runtime| {
+                    runtime.settle_pane_notices()?;
+                    if let Some(report) = removal.take() {
+                        let refused = report.exit_code() != 0;
+                        let mut text = report.text(refused);
+                        if text.is_empty() {
+                            text = i18n::Text::ShellProfileNothing.text().to_owned();
+                        }
+                        runtime.toast(
+                            if refused {
+                                toast::ToastKind::Error
+                            } else {
+                                toast::ToastKind::Ok
+                            },
+                            toast::ToastAnchor::Window,
+                            None,
+                            text,
+                        )?;
+                    }
+                    Ok(())
+                })
             }
             // The answer is already in `update::known()`; what is owed is a
             // frame that reads it — the mark on the gear, and the sentence on
@@ -124007,6 +124050,17 @@ fn main() -> Result<()> {
     // message box**: this answer is for a transcript, and an uninstall that
     // stopped to raise a modal nobody is in front of would be worse than an
     // uninstall that said nothing at all.
+    if cli::remove_shell_integration(std::env::args_os().skip(1)) {
+        let report = shell_integration::remove_shell_integration();
+        let done = report.text(false);
+        if done.is_empty() && report.exit_code() == 0 {
+            bt_platform::write_to_console(&format!("{}\n", i18n::Text::ShellProfileNothing.text()));
+        } else {
+            bt_platform::write_to_console(&done);
+        }
+        bt_platform::write_std_error(report.text(true).as_bytes());
+        std::process::exit(report.exit_code());
+    }
     if cli::remove_explorer_menu(std::env::args_os().skip(1)) {
         let report = explorer_menu::remove_from_explorer_menu();
         bt_platform::write_to_console(&format!("{}\n", report.line));
