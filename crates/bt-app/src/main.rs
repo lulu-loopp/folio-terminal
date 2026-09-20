@@ -116479,6 +116479,46 @@ mod resident_run_tests {
              diagnostic in this process comes from"
         );
     }
+
+    /// **RED (A3) — `--remove-explorer-menu` is answered before anything that
+    /// would open a window, hand this launch to another Folio, or write a file.**
+    ///
+    /// The whole correctness of the flag is its position. Below
+    /// `launch_wire::hand_over` it would be sent down the pipe to a *running*
+    /// Folio, which would open a window on it and leave the uninstall hook with
+    /// nothing removed and exit `0`. Below `enter_resident_run` its one line
+    /// would go into `diagnostics.log` instead of the package manager's
+    /// transcript, and the process would have created `%APPDATA%\Folio` on the
+    /// way. Below the event loop it would be a window nobody asked for.
+    ///
+    /// MUTATION: move the block under `cli::parse(` and the first assertion
+    /// stands while the second goes red — which is the version that would have
+    /// survived review, because on a machine with no Folio running it still
+    /// works.
+    #[test]
+    fn taking_folio_out_of_explorers_menu_is_answered_before_any_of_that() {
+        let door = free_fn_body("main");
+        let at = |needle: &str| {
+            door.find(needle)
+                .unwrap_or_else(|| panic!("`main` still does `{needle}`:\n{door}"))
+        };
+        let asked = at("cli::remove_explorer_menu(");
+        let removed = at("explorer_menu::remove_from_explorer_menu()");
+        let handed_over = at("launch_wire::hand_over(");
+        let resident = at("diagnostics::enter_resident_run(");
+        let loop_built = at("EventLoop::<AppEvent>::with_user_event()");
+        assert!(
+            asked < removed && removed < handed_over,
+            "a package manager's uninstall hook must not be handed to a Folio \
+             that is already running"
+        );
+        assert!(
+            removed < resident,
+            "the one line belongs on the caller's console, not in this \
+             machine's diagnostics log"
+        );
+        assert!(removed < loop_built, "and no window is ever built for it");
+    }
 }
 
 impl ApplicationHandler<AppEvent> for FolioApp {
@@ -123295,6 +123335,29 @@ fn main() -> Result<()> {
     // answer a question about a menu item's title.
     if cli::explorer_command(std::env::args_os().skip(1)) {
         std::process::exit(explorer_menu::serve());
+    }
+    // **And the door that undoes what the other two registered**: somebody
+    // taking Folio back out of Explorer's menu, which is the one thing this
+    // program can be asked to do that has to work while the rest of it is being
+    // deleted.
+    //
+    // Above the parse for the two doorbells' reason — this launch is not opening
+    // a window and everything below would build one — and above everything the
+    // parse leads to for a reason of its own. A package manager's uninstall hook
+    // is not a person: it must not be handed over to a Folio that is already
+    // running (which would change *that* copy's idea of what is registered, in a
+    // process the hook is not waiting on), it must not write a settings file for
+    // a folder about to disappear, and it must not be met by a first-run card. It
+    // is one line of log text and an exit code.
+    //
+    // The line goes to standard output through the console door and **never to a
+    // message box**: this answer is for a transcript, and an uninstall that
+    // stopped to raise a modal nobody is in front of would be worse than an
+    // uninstall that said nothing at all.
+    if cli::remove_explorer_menu(std::env::args_os().skip(1)) {
+        let report = explorer_menu::remove_from_explorer_menu();
+        bt_platform::write_to_console(&format!("{}\n", report.line));
+        std::process::exit(report.exit_code);
     }
     // **The command line, before there is anything for it to be wrong about.**
     // `spike-win-landing.md` §8 puts slice 0 exactly here, between the panic hook

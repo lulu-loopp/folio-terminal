@@ -695,6 +695,44 @@ where
         .is_some_and(|first| first.to_str() == Some(EXPLORER_COMMAND_FLAG))
 }
 
+/// **`--remove-explorer-menu`**, spelled once.
+///
+/// The one way to undo, without a window, everything Folio writes outside its
+/// own folder and `%APPDATA%`: the sparse package's registration and the classic
+/// registry verb. It exists because nothing else can undo them — Folio ships as
+/// files in a folder, a package manager's uninstall deletes those files, and the
+/// two registrations are left behind pointing at a `folio.exe` that is no longer
+/// there. The switch that could have taken them off goes away with the folder.
+pub const REMOVE_EXPLORER_MENU_FLAG: &str = "--remove-explorer-menu";
+
+/// Whether this launch is Folio being told to take itself out of Explorer's
+/// menu rather than to open a window.
+///
+/// A fourth door beside [`attention`], [`explorer_command`] and [`parse`], and
+/// it is [`attention`]'s reason word for word: the flag grammar answers *what
+/// should this window open*, and this launch is not opening a window — it is
+/// taking a mark off the machine and leaving. A caller that reaches this one has
+/// asked for no window, no hand-over to a running Folio and no settings of its
+/// own, and `crate::main` answers it above every line that would build one.
+///
+/// **The first argument and only the first**, which is [`explorer_command`]'s
+/// rule and here it is also the whole grammar: this verb takes nothing, so a
+/// line that carries anything after it is a caller saying two things at once and
+/// what they wrote is deliberately not read. Reading the flag anywhere on the
+/// line would be worse than pedantic — `folio --cwd D:\x --remove-explorer-menu`
+/// would silently change the reader's right-click menu instead of opening the
+/// window they asked for.
+///
+/// An ordinary launch pays one string comparison for the existence of this door.
+pub fn remove_explorer_menu<I>(args: I) -> bool
+where
+    I: IntoIterator<Item = OsString>,
+{
+    args.into_iter()
+        .next()
+        .is_some_and(|first| first.to_str() == Some(REMOVE_EXPLORER_MENU_FLAG))
+}
+
 /// `--json`, spelled once.
 const JSON_FLAG: &str = "--json";
 
@@ -922,6 +960,52 @@ mod tests {
         assert_eq!(
             refused(&["--explorer-command"]),
             CliFault::UnknownFlag(EXPLORER_COMMAND_FLAG.to_owned())
+        );
+    }
+
+    /// **RED (A5) — the flag that takes Folio out of Explorer's menu opens its
+    /// own door, on the first word, and an ordinary launch never opens it.**
+    ///
+    /// Four things at once and each is a different failure. It is recognised at
+    /// all — before this door existed, `folio --remove-explorer-menu` was a usage
+    /// block and exit `2`, which is what a package manager's uninstall hook would
+    /// have recorded as a failure. An empty command line and every ordinary
+    /// launch answer `false`, so a window pays one string comparison for the
+    /// existence of this door and nothing else. It is read on the **first** word
+    /// only: `folio --cwd D:\x --remove-explorer-menu` is somebody asking for a
+    /// window, and answering it by changing their right-click menu is the one
+    /// mistake this flag could make that nobody would see until later. And it is
+    /// not confusable with the other door on the first word.
+    ///
+    /// MUTATION: search the whole line instead of the first word and the last two
+    /// assertions go red.
+    #[test]
+    fn taking_the_menu_entry_back_off_is_asked_for_by_its_own_first_word() {
+        assert!(remove_explorer_menu(args(&[REMOVE_EXPLORER_MENU_FLAG])));
+        assert!(!remove_explorer_menu(args(&[])));
+        assert!(!remove_explorer_menu(args(&["--cwd", r"D:\x"])));
+        assert!(!remove_explorer_menu(args(&["--explorer-command"])));
+        assert!(!remove_explorer_menu(args(&[
+            "--cwd",
+            r"D:\x",
+            REMOVE_EXPLORER_MENU_FLAG
+        ])));
+        // And the two doors on the first word do not answer each other's word.
+        assert!(!explorer_command(args(&[REMOVE_EXPLORER_MENU_FLAG])));
+    }
+
+    /// **RED (A5) — `--help` offers the flag, because a person who has just
+    /// uninstalled Folio and found the menu entry still there has no other way to
+    /// learn it exists.**
+    ///
+    /// MUTATION: leave the line out of `i18n::CliText::Usage` and this goes red,
+    /// which is a flag that only somebody who read the source would ever type.
+    #[test]
+    fn the_usage_block_offers_the_way_to_take_the_menu_entry_off() {
+        assert!(
+            refusal_text(&CliFault::HelpAsked).contains(REMOVE_EXPLORER_MENU_FLAG),
+            "{}",
+            refusal_text(&CliFault::HelpAsked)
         );
     }
 

@@ -147,6 +147,52 @@ The three rows on the Agent page read the tool's own configuration file and
 report what is in it. On a new machine all three files are absent, so all three
 read Off.
 
+## Uninstalling
+
+Folio is files in a folder, plus — on Windows — the two registrations it makes
+for Explorer's right-click menu if you switched that row on: the entry on
+Windows 11's first page, which the sparse package `folio.msix` registers, and
+the classic entry under **Show more options**, which is two keys under
+`HKEY_CURRENT_USER\Software\Classes`. Deleting the files does not take either
+off, because nothing but Folio itself can — there is no installer and nothing
+runs on the way out. What is left is a menu entry pointing at a `folio.exe` that
+is no longer there.
+
+**So take them off first, then delete the files:**
+
+```
+folio.exe --remove-explorer-menu
+```
+
+It opens no window, prints one line saying what it removed and what it left, and
+exits. A registration that belongs to **another** copy of Folio on the same
+machine is left alone: this takes away only what the copy you ran it from put
+there. A machine with nothing registered is not an error — it says so and exits
+`0`.
+
+- **Zip** — run the command, then delete the folder you unpacked.
+- **scoop** — `scoop uninstall folio` deletes the files. Run the command first,
+  out of the folder scoop keeps Folio in (`scoop prefix folio`).
+- **winget** — `winget uninstall Folio` deletes the files; run the command
+  first, out of the folder it installed into.
+
+What Folio remembers — your settings, the session it restores, its log — is all
+inside `%APPDATA%\Folio`. Delete that folder to forget everything, or keep it and
+a later version picks your settings back up. The one other thing Folio can write
+outside its own folder is the single `. "$env:APPDATA\Folio\shell-integration\folio.ps1"`
+line in your PowerShell `$PROFILE`, if you said yes to that; delete that line to
+undo it.
+
+If you have already deleted the files and the menu entry is still there,
+unpack the same download again anywhere, run the command from that folder, and
+delete it again — a registration whose `folio.exe` has gone is answered by
+nobody, so this clears it.
+
+**On a Mac there is nothing to undo.** Finder's **Open in Folio** lives in the
+application bundle's own `Info.plist`, so it goes when Folio goes; drag the
+application to the Bin, and delete `~/Library/Application Support/Folio` if you
+want the settings gone too. The command exists there and says as much.
+
 ## Known issues
 
 - **A window was once reported drawing its top half black** after a move to a
