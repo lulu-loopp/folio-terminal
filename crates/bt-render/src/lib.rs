@@ -6005,6 +6005,137 @@ fn limits_with_this_adapters_textures(adapter: &wgpu::Adapter) -> wgpu::Limits {
     }
 }
 
+/// The name a machine sets to move Folio between its GPUs for one run.
+const GPU_PREFERENCE_VARIABLE: &str = "BT_GPU_PREFERENCE";
+
+/// **What Folio asks for when nobody says otherwise**, and the only place that
+/// answer is written down.
+///
+/// `HighPerformance` has been the request since the first skeleton commit,
+/// where it arrived as a literal rather than as a decision. This ticket does
+/// not change it; it makes it nameable, reportable and switchable so that the
+/// two choices can be compared on the machine the question is about.
+const DEFAULT_GPU_POWER_PREFERENCE: wgpu::PowerPreference = wgpu::PowerPreference::HighPerformance;
+
+/// **Which GPU Folio asked the driver for, and why that one** — one fact, one
+/// owner.
+///
+/// Every `request_adapter` in this crate reads [`gpu_power_request`] and
+/// nothing else, so the three adapters this process can ask for over its life —
+/// the surface bootstrap, the rebuild after a device loss, and the headless
+/// probe — cannot come to disagree about what is being asked for. The source is
+/// carried beside the preference because a recording that says only
+/// `LowPower` leaves the reader unable to tell a machine that was switched from
+/// a build whose default changed.
+///
+/// `wgpu` has a switch of its own — `PowerPreference::from_env` over
+/// `WGPU_POWER_PREF` — and this crate never calls it, so there is exactly one
+/// name to set and exactly one answer to read back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GpuPowerRequest {
+    preference: wgpu::PowerPreference,
+    source: GpuPowerSource,
+}
+
+/// Where a [`GpuPowerRequest`] came from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GpuPowerSource {
+    /// Nothing was set, or the variable was set to nothing at all — which every
+    /// switch in this program reads as "not this run"
+    /// (`docs/BT-ENVIRONMENT.md`).
+    Default,
+    /// `BT_GPU_PREFERENCE` named this preference.
+    Environment,
+    /// `BT_GPU_PREFERENCE` was set to something this build does not know. The
+    /// default stands and the value is kept so that the line reporting the
+    /// adapter can say so: a diagnostic switch that ignores its own value in
+    /// silence is how somebody spends a day comparing a build against itself.
+    NotUnderstood(String),
+}
+
+impl GpuPowerRequest {
+    /// The preference to hand `wgpu`.
+    #[must_use]
+    pub fn preference(&self) -> wgpu::PowerPreference {
+        self.preference
+    }
+}
+
+/// One wording for the request, wherever it is read out: what was asked for and
+/// where the answer came from, in a line beside the adapter that answered.
+impl std::fmt::Display for GpuPowerRequest {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.source {
+            GpuPowerSource::Default => write!(out, "{:?} (default)", self.preference),
+            GpuPowerSource::Environment => {
+                write!(out, "{:?} ({GPU_PREFERENCE_VARIABLE})", self.preference)
+            }
+            GpuPowerSource::NotUnderstood(value) => write!(
+                out,
+                "{:?} ({GPU_PREFERENCE_VARIABLE}={value:?} not understood)",
+                self.preference
+            ),
+        }
+    }
+}
+
+/// **The one place Folio decides which GPU it runs on**, read by every
+/// `request_adapter` in this crate and by the line that reports the adapter
+/// each one returned.
+///
+/// The environment is read once per process and remembered, because the answer
+/// cannot change under a running process and because a request made at startup
+/// and one made an hour later after a device loss must be the same request. A
+/// frame pays nothing; the whole process pays one `var_os`.
+///
+/// **This is a diagnosis switch, not a setting.** It exists so the same build
+/// can be started twice on one hybrid-graphics laptop — once as it ships, once
+/// with `BT_GPU_PREFERENCE=low` — and the adapter line show a different
+/// adapter, which is the only way to find out whether that machine's long
+/// `swapchain present` holds follow the discrete GPU. A row in Settings is a
+/// later question, and so is the default.
+#[must_use]
+pub fn gpu_power_request() -> &'static GpuPowerRequest {
+    static RESOLVED: OnceLock<GpuPowerRequest> = OnceLock::new();
+    RESOLVED.get_or_init(|| read_gpu_power_request(std::env::var_os(GPU_PREFERENCE_VARIABLE)))
+}
+
+/// The parse alone, with the environment passed in so it can be held to a table
+/// without a machine, a GPU or a process-wide variable.
+///
+/// `low` and `high` are the words `wgpu` itself uses for these two adapters, so
+/// a reader who knows one switch knows this one. Case is ignored; surrounding
+/// whitespace is not trimmed, because every other switch in this program reads
+/// a value verbatim and one that quietly repaired its input would be a
+/// different kind of surprise.
+fn read_gpu_power_request(value: Option<std::ffi::OsString>) -> GpuPowerRequest {
+    let default = GpuPowerRequest {
+        preference: DEFAULT_GPU_POWER_PREFERENCE,
+        source: GpuPowerSource::Default,
+    };
+    let Some(value) = value else {
+        return default;
+    };
+    let value = value.to_string_lossy().into_owned();
+    if value.is_empty() {
+        return default;
+    }
+    let preference = match value.to_ascii_lowercase().as_str() {
+        "low" => wgpu::PowerPreference::LowPower,
+        "high" => wgpu::PowerPreference::HighPerformance,
+        _ => {
+            return GpuPowerRequest {
+                preference: DEFAULT_GPU_POWER_PREFERENCE,
+                source: GpuPowerSource::NotUnderstood(value),
+            };
+        }
+    };
+    GpuPowerRequest {
+        preference,
+        source: GpuPowerSource::Environment,
+    }
+}
+
 /// **Everything on [`GpuContext`] that is made out of a device**, and nothing
 /// that outlives one.
 ///
@@ -6200,7 +6331,7 @@ impl GpuContext {
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 compatible_surface: Some(surface),
-                power_preference: wgpu::PowerPreference::HighPerformance,
+                power_preference: gpu_power_request().preference(),
                 force_fallback_adapter: false,
                 ..Default::default()
             })
@@ -6308,7 +6439,7 @@ impl GpuContext {
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 compatible_surface: bootstrap.as_ref().map(|(_, surface, _)| surface),
-                power_preference: wgpu::PowerPreference::HighPerformance,
+                power_preference: gpu_power_request().preference(),
                 force_fallback_adapter: false,
                 ..Default::default()
             })
@@ -6491,7 +6622,7 @@ impl GpuContext {
         let phase_started = Instant::now();
         let options = |force_fallback_adapter| wgpu::RequestAdapterOptions {
             compatible_surface: None,
-            power_preference: wgpu::PowerPreference::HighPerformance,
+            power_preference: gpu_power_request().preference(),
             force_fallback_adapter,
             ..Default::default()
         };
@@ -23361,6 +23492,84 @@ mod tests {
         // Not an assumption about hardware, a statement about the floor: nothing
         // may make the atlas *smaller* than what wgpu would have given anyway.
         assert!(gpu.max_texture_dimension_2d() >= wgpu::Limits::default().max_texture_dimension_2d);
+    }
+
+    /// RED — **one name moves Folio between a machine's GPUs, and anything else
+    /// leaves today's choice standing and says so.**
+    ///
+    /// The whole table is the parse, taken with the environment as an argument:
+    /// nothing here asks a machine what GPUs it has, and nothing here touches
+    /// the process's own variables, which the tests of this crate share.
+    ///
+    /// The first row is the blocking one — unset is `HighPerformance`, which is
+    /// what every build before this one asked for, and this ticket changes no
+    /// default. The last two are the reason the source is carried beside the
+    /// preference: a value nobody understood is reported rather than dropped,
+    /// and whitespace is a value like any other, because every other switch in
+    /// this program reads its value verbatim (`docs/BT-ENVIRONMENT.md`).
+    ///
+    /// Mutation: let the unknown arm fall through to `Default` and the last two
+    /// rows fail on the wording a reader would have to diagnose without.
+    #[test]
+    fn the_gpu_preference_is_read_from_one_name_and_unknown_values_are_not_swallowed() {
+        let table: [(Option<&str>, wgpu::PowerPreference, &str); 8] = [
+            (
+                None,
+                wgpu::PowerPreference::HighPerformance,
+                "HighPerformance (default)",
+            ),
+            (
+                Some(""),
+                wgpu::PowerPreference::HighPerformance,
+                "HighPerformance (default)",
+            ),
+            (
+                Some("low"),
+                wgpu::PowerPreference::LowPower,
+                "LowPower (BT_GPU_PREFERENCE)",
+            ),
+            (
+                Some("LOW"),
+                wgpu::PowerPreference::LowPower,
+                "LowPower (BT_GPU_PREFERENCE)",
+            ),
+            (
+                Some("Low"),
+                wgpu::PowerPreference::LowPower,
+                "LowPower (BT_GPU_PREFERENCE)",
+            ),
+            (
+                Some("high"),
+                wgpu::PowerPreference::HighPerformance,
+                "HighPerformance (BT_GPU_PREFERENCE)",
+            ),
+            (
+                Some("medium"),
+                wgpu::PowerPreference::HighPerformance,
+                "HighPerformance (BT_GPU_PREFERENCE=\"medium\" not understood)",
+            ),
+            (
+                Some(" low"),
+                wgpu::PowerPreference::HighPerformance,
+                "HighPerformance (BT_GPU_PREFERENCE=\" low\" not understood)",
+            ),
+        ];
+        for (value, preference, said) in table {
+            let request = read_gpu_power_request(value.map(std::ffi::OsString::from));
+            assert_eq!(
+                request.preference(),
+                preference,
+                "{value:?} asked for the wrong adapter"
+            );
+            assert_eq!(request.to_string(), said, "{value:?} was reported wrongly");
+        }
+        // The default is the one the three call sites get when nobody sets
+        // anything, and it is still the literal every build before this one
+        // spelled out three times.
+        assert_eq!(
+            DEFAULT_GPU_POWER_PREFERENCE,
+            wgpu::PowerPreference::HighPerformance
+        );
     }
 
     /// PIN — **every lane prepares into the one shared atlas.**

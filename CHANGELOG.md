@@ -29,6 +29,17 @@ All notable changes to Folio are recorded here. The format follows
   platform call. A stall line also carries the run's age and its own number, so
   one day's recording can show whether pauses grew as the session aged.
 
+- **The log now names the GPU Folio asked for as well as the one it got, and a
+  laptop with two can be told to try the other.** Folio has always asked for the
+  highest-performance adapter, which on a laptop with two graphics chips is the
+  discrete one; it still does, and nothing about a normal run changes. What is
+  new is that the `GPU adapter` line in `diagnostics.log` says what was asked
+  for beside what the driver answered, and that setting `BT_GPU_PREFERENCE=low`
+  for one run asks for the integrated adapter instead
+  (`docs/BT-ENVIRONMENT.md`). It is there to find out whether a particular
+  machine's long pauses belong to its discrete GPU — the same build can be run
+  both ways and the two recordings compared.
+
 ## 0.4.2-preview — 2026-09-18
 
 ### Added
