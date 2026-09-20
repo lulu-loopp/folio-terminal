@@ -97,6 +97,7 @@ mod pdf;
 mod peek_strip;
 mod persist;
 mod pins;
+mod present_diagnostics;
 mod present_gate;
 mod preview;
 mod preview_edit;
@@ -12763,6 +12764,9 @@ struct WindowRuntime {
     /// a frame is what a profiler measures; the gap between frames is what a
     /// hand feels, and under CPU starvation the two stop being the same number.
     last_present_at: Option<Instant>,
+    present_diagnostics: present_diagnostics::State,
+    attention_sampled_at: Option<Instant>,
+    diagnostic_minimized: std::cell::Cell<bool>,
     /// **One display frame, and every animation in this window draws on it**
     /// (owner's report 2026-09-18). Read against [`Self::last_present_at`],
     /// which is why the two are neighbours here: the gate is "has the glass had
@@ -14228,6 +14232,7 @@ struct WindowRuntime {
 // The same boundary carries the no-op counter and the conditions under which
 // equality may pay the frame without producing a presentation receipt.
 struct FrameTraces<'a> {
+    attempt: &'a mut present_diagnostics::Attempt,
     gate: &'a mut present_gate::PresentGate,
     trace_perf: bool,
     slot_overwrites: u64,
@@ -37862,6 +37867,9 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         wheel_burst: None,
         dropped_files: None,
         last_present_at: None,
+        present_diagnostics: present_diagnostics::State::default(),
+        attention_sampled_at: None,
+        diagnostic_minimized: std::cell::Cell::new(false),
         frame_clock,
         pty_coalesce: coalesce::Pending::default(),
         perf_trace_us: 0,
@@ -84798,6 +84806,7 @@ impl Runtime<'_> {
         });
         self.window.window_hidden = place.hidden;
         self.window.window_exposed = place.exposed;
+        self.window.attention_sampled_at = Some(Instant::now());
         self.window.taskbar_auto_hidden = place.taskbar_is_auto_hidden;
         let switches = self.notification_switches();
         let owner_is_a_shell = self.keyboard_owner_is_a_shell();
@@ -85518,6 +85527,7 @@ impl Runtime<'_> {
         let place = sample_window_place(&self.window.window, self.window.window_focused);
         self.window.window_hidden = place.hidden;
         self.window.window_exposed = place.exposed;
+        self.window.attention_sampled_at = Some(Instant::now());
         self.window.taskbar_auto_hidden = place.taskbar_is_auto_hidden;
         let mut raised: Vec<AttentionDelivery> = Vec::new();
         let switches = self.notification_switches();
@@ -101479,9 +101489,11 @@ impl Runtime<'_> {
     /// Whether this window is iconic — Win32's own answer, and the same one
     /// [`Runtime::window_snapshot`] asks before it believes a rectangle.
     fn window_is_iconic(&self) -> bool {
-        native_window(&self.window.window)
+        let iconic = native_window(&self.window.window)
             .ok()
-            .is_some_and(bt_platform::is_window_minimized)
+            .is_some_and(bt_platform::is_window_minimized);
+        self.window.diagnostic_minimized.set(iconic);
+        iconic
     }
 
     fn resize(&mut self, physical: PhysicalSize<u32>) -> Result<()> {
@@ -104135,6 +104147,133 @@ impl Runtime<'_> {
         }
     }
 
+    fn picture_is_owed(&self) -> bool {
+        self.window.pending_frames.pending_frame().is_some()
+            || self.window.chrome_present_pending
+            || self.window.unpainted_pane_output
+            || self.pending_resize_present.is_some()
+    }
+
+    fn begin_present_attempt(
+        &mut self,
+        source: FrameSource,
+        retained: bool,
+        owed: bool,
+    ) -> present_diagnostics::Attempt {
+        let owed = owed || self.picture_is_owed();
+        let now = present_diagnostics::timestamp(Instant::now());
+        let state = &mut self.window.present_diagnostics;
+        state.observe(owed, now, present_diagnostics::progress());
+        state.sequence += 1;
+        let window = u64::from(self.window.window.id());
+        let generation = self.window.renderer.surface_generation();
+        hang_watch::present_attempt(window, generation, state.sequence);
+        present_diagnostics::Attempt::new(
+            window,
+            generation,
+            state.sequence,
+            source,
+            retained,
+            self.app.trace_perf,
+            now,
+        )
+    }
+
+    fn finish_present_attempt(
+        &mut self,
+        mut attempt: present_diagnostics::Attempt,
+        result: &Result<()>,
+    ) {
+        attempt.phase(None);
+        hang_watch::end_present_attempt();
+        let instant = attempt.landed_at.unwrap_or_else(Instant::now);
+        let now = present_diagnostics::timestamp(instant);
+        if result.is_err() && attempt.outcome == present_diagnostics::Outcome::NoPicture {
+            attempt.outcome = present_diagnostics::Outcome::FailedRender;
+        }
+        let state = &mut self.window.present_diagnostics;
+        state.attempted(&attempt);
+        if self.app.trace_perf {
+            hang_watch::during(hang_watch::Station::DiagnosticWrite, || {
+                let native = native_window(&self.window.window)
+                    .ok()
+                    .map(bt_platform::native_present_facts)
+                    .unwrap_or_default();
+                trace_sink::stderr_line(
+                    attempt.line(
+                        native,
+                        self.window.window_shown,
+                        (
+                            self.window.window_exposed,
+                            self.window
+                                .attention_sampled_at
+                                .map(|at| instant.saturating_duration_since(at).as_micros() as u64),
+                        ),
+                        self.window.renderer.present_configuration(&self.app.gpu),
+                        state.last_present.map_or(0, |at| now.saturating_sub(at)),
+                        state.age(now),
+                    ),
+                );
+            });
+        }
+        // Check before updating the landing timestamp: a single blocked attempt
+        // can cross the threshold and land before the next event-loop turn.
+        self.check_picture_freshness(instant, attempt.landed_at.is_some());
+        if attempt.landed_at.is_some() {
+            let state = &mut self.window.present_diagnostics;
+            state.last_present = Some(now);
+            state.last_landed = (attempt.generation, attempt.sequence);
+            state.observe(false, now, present_diagnostics::progress());
+        }
+    }
+
+    fn check_picture_freshness(&mut self, instant: Instant, landed: bool) {
+        let owed = self.picture_is_owed();
+        let now = present_diagnostics::timestamp(instant);
+        let state = &mut self.window.present_diagnostics;
+        // A just-completed attempt still owns its pre-call debt for the crossing
+        // check, even though the existing caller has already paid that debt.
+        let checking_owed = owed || (landed && state.pending_since.is_some());
+        if state.pending_since.is_none() {
+            state.observe(owed, now, present_diagnostics::progress());
+        }
+        let shown = self.window.window_shown;
+        let minimized = self.window.diagnostic_minimized.get();
+        if let Some(line) = state.check(checking_owed, shown, minimized, now, false) {
+            hang_watch::during(hang_watch::Station::DiagnosticWrite, || {
+                // Native observations are taken only once a line is due. The
+                // attention heuristic never decides visibility for this diagnostic.
+                let native = native_window(&self.window.window)
+                    .ok()
+                    .map(bt_platform::native_present_facts)
+                    .unwrap_or_default();
+                let text = state.line(
+                    u64::from(self.window.window.id()),
+                    now,
+                    present_diagnostics::progress(),
+                    line,
+                );
+                diagnostics::note(&format!(
+                    "{text}; {}",
+                    present_diagnostics::native_fields(native)
+                ));
+            });
+        }
+        if let Some(line) = state.check(checking_owed, shown, minimized, now, landed) {
+            hang_watch::during(hang_watch::Station::DiagnosticWrite, || {
+                diagnostics::note(&state.line(
+                    u64::from(self.window.window.id()),
+                    now,
+                    present_diagnostics::progress(),
+                    line,
+                ));
+            });
+        }
+        if !owed && !landed {
+            state.observe(false, now, present_diagnostics::progress());
+        }
+    }
+
     /// **The one door a frame reaches the screen through.**
     ///
     /// # wgpu presents; the compositor publishes
@@ -104180,6 +104319,7 @@ impl Runtime<'_> {
                 mut signature,
             } = intent;
             let FrameTraces {
+                attempt,
                 preview,
                 census,
                 gate,
@@ -104195,6 +104335,7 @@ impl Runtime<'_> {
                     seat_frames.first().map(|seat| seat.frame),
                     slot_overwrites,
                 );
+                attempt.outcome = present_diagnostics::Outcome::Unchanged;
                 return Ok(None);
             }
             // Failure, textless presentation, or even a failed commit must not
@@ -104208,9 +104349,12 @@ impl Runtime<'_> {
             // bool store and asking the gate is a `OnceLock` read.
             renderer.set_glyph_census(glyph_trace::wanted());
             let present_parent = hang_watch::enter(hang_watch::Station::RenderCompose);
+            attempt.outcome = present_diagnostics::Outcome::FailedRender;
             let outcome =
                 renderer.present_frame_with_phases(gpu, seat_frames, trigger, |phase| {
+                    attempt.render_phase(phase);
                     hang_watch::phase(match phase {
+                        PresentPhase::SurfaceConfigure(_) => hang_watch::Station::SurfaceConfigure,
                         PresentPhase::ComposeEncode => hang_watch::Station::RenderCompose,
                         PresentPhase::TextShaping => hang_watch::Station::TextShaping,
                         PresentPhase::AtlasUpload => hang_watch::Station::AtlasUpload,
@@ -104251,19 +104395,26 @@ impl Runtime<'_> {
                 // (§7.1.6c-4b). The present funnel is the only place both facts
                 // are in hand at once, which is why it is here and not beside the
                 // resize handler.
+                attempt.outcome = present_diagnostics::Outcome::FailedCommit;
+                attempt.phase(Some(5));
                 let (covered_width, covered_height) = renderer.presented_swapchain_size();
-                hang_watch::during(hang_watch::Station::CompositorSize, || {
-                    compositor
-                        .set_covered_size(covered_width, covered_height)
-                        .map_err(|error| anyhow!(error))
-                        .context("tell the window's ground how much of it the swapchain covers")
-                })?;
-                hang_watch::during(hang_watch::Station::CompositorCommit, || {
-                    compositor
-                        .commit()
-                        .map_err(|error| anyhow!(error))
-                        .context("publish the presented frame to the window's composition tree")
-                })?;
+                let committed = (|| {
+                    hang_watch::during(hang_watch::Station::CompositorSize, || {
+                        compositor
+                            .set_covered_size(covered_width, covered_height)
+                            .map_err(|error| anyhow!(error))
+                            .context("tell the window's ground how much of it the swapchain covers")
+                    })?;
+                    hang_watch::during(hang_watch::Station::CompositorCommit, || {
+                        compositor
+                            .commit()
+                            .map_err(|error| anyhow!(error))
+                            .context("publish the presented frame to the window's composition tree")
+                    })
+                })();
+                attempt.phase(None);
+                committed?;
+                attempt.landed_at = Some(Instant::now());
                 // **The frame that withdraws the skirt has to be asked for.** The
                 // ground under the strip is sized against the picture of the
                 // *previous* present, because a present queues an image rather than
@@ -104280,6 +104431,15 @@ impl Runtime<'_> {
                 signature.renderer = renderer.present_state();
                 gate.presented(signature);
             }
+            attempt.outcome = match &outcome {
+                PresentOutcome::Presented(_) => present_diagnostics::Outcome::Presented,
+                PresentOutcome::PresentedWithoutText(_) => {
+                    present_diagnostics::Outcome::WithoutText
+                }
+                PresentOutcome::Skipped => present_diagnostics::Outcome::Skipped,
+                PresentOutcome::SkippedNotVisible => present_diagnostics::Outcome::NotVisible,
+                PresentOutcome::Reconfigure => present_diagnostics::Outcome::Reconfigure,
+            };
             Ok(Some(outcome))
         })
     }
@@ -104503,7 +104663,8 @@ impl Runtime<'_> {
     /// this instant. See [`chrome_tick_reuses_picture`] for why that is a
     /// complete account of what an animation tick can have moved.
     fn present_retained_picture(&mut self) -> Result<()> {
-        hang_watch::during(hang_watch::Station::RetainedPicture, || {
+        let mut attempt = self.begin_present_attempt(FrameSource::Expose, true, true);
+        let result = hang_watch::during(hang_watch::Station::RetainedPicture, || {
             self.window.chrome_present_pending = false;
             // **A tab with a shell that has never presented has nothing to keep**,
             // which is what this guard has always said. A tab with *no* shell always
@@ -104586,6 +104747,7 @@ impl Runtime<'_> {
                 &self.window.compositor,
                 &self.window.window,
                 FrameTraces {
+                    attempt: &mut attempt,
                     gate: &mut self.window.present_gate,
                     trace_perf: self.app.trace_perf,
                     slot_overwrites: self.window.pending_frames.overwrites(),
@@ -104641,7 +104803,9 @@ impl Runtime<'_> {
                     Ok(())
                 }
             }
-        })
+        });
+        self.finish_present_attempt(attempt, &result);
+        result
     }
 
     fn redraw(&mut self) -> Result<()> {
@@ -104655,327 +104819,337 @@ impl Runtime<'_> {
             ) {
                 return self.present_retained_picture();
             }
+            let attempt = self.begin_present_attempt(FrameSource::Expose, false, false);
+            self.finish_present_attempt(attempt, &Ok(()));
             return Ok(());
         };
-        // A composed frame supersedes any chrome-only debt: it is about to be
-        // presented, chrome and all.
-        let validation_parent = hang_watch::enter(hang_watch::Station::RedrawValidate);
-        self.window.chrome_present_pending = false;
-        if let Some(expected) = self.pending_resize_present {
-            ensure!(
-                frame_matches_grid(&frame, expected),
-                "resize presentation requires the newly projected grid: expected {}x{}, got {}x{}",
-                expected.columns,
-                expected.rows,
-                frame.columns,
-                frame.grid_rows
-            );
-        }
-        let has_text = frame
-            .cells
-            .iter()
-            .take(
-                frame
-                    .drawable_rows()
-                    .saturating_mul(frame.columns.get() as usize),
-            )
-            .any(|cell| !cell.text.trim().is_empty());
-        // The other panes of this tab. The focused leaf's frame came out of the
-        // slot above, with every presentation-hold and resize contract the slot
-        // exists to enforce still attached to it; the panes the user is not
-        // typing in hold nothing, so they are projected here, at the moment they
-        // are drawn.
-        //
-        // A lone terminal leaf produces exactly one entry, whose rectangle is
-        // the same `pane_body_viewport` answer `resolve_seat_layout` already
-        // handed the renderer — so the slice is N = 1 and the command stream is
-        // the one that was always issued. The loop is not a second path; it is
-        // the same path counted.
-        hang_watch::at(validation_parent);
-        let focused_leaf = self.focused_leaf;
-        // U8 — one instant for the whole frame, as everywhere else a tween is
-        // read: two panes of one present sampled at two times would be two
-        // frames of the same animation composited together.
-        let now = Instant::now();
-        let bodies = hang_watch::during(hang_watch::Station::RedrawLayout, || self.pane_draws(now));
-        let active = self.window.active_tab;
-        // The pointer's marks belong to the pane the pointer is in, focused or not, so an
-        // unfocused pane that is being hovered is projected *and then decorated* — the same two
-        // steps `publish_frame_inner` takes for the focused one. Resolved before the loop because
-        // it is a question about the whole window and the loop holds a leaf.
-        let hovered_reference = self.hovered_image_reference();
-        let hover_pane = self.window.hover_pane.filter(|seat| *seat != focused_leaf);
-        let mut unfocused_frames: Vec<(PaneDraw, ViewportFrame)> = Vec::new();
-        // **And what those panes owe the typesetting engine** (review row R5-4).
-        // A settled `$$…$$` block becomes work for the engine when a frame is
-        // projected over it, and until this walk asked, the only frame that ever
-        // asked was the focused leaf's — so a block printed in the pane beside it
-        // stayed as its own LaTeX until somebody clicked into that pane. This is
-        // the road that already visits every visible leaf, so it is where the
-        // question belongs; the answer is gathered here and dispatched once
-        // below, because the dispatcher wants the tab and this loop is holding a
-        // leaf of it.
-        let mut owes_the_engine = false;
-        let projection_parent = hang_watch::enter(hang_watch::Station::RedrawProjection);
-        hang_watch::counters(0, 0, bodies.len());
-        for pane in &bodies {
-            if pane.seat == focused_leaf {
-                continue;
-            }
-            let hyperlink_hover = &self.window.hyperlink_hover;
-            let Some(leaf) = self.window.tabs[active].sessions.get_mut(&pane.seat) else {
-                continue;
-            };
-            leaf.session.refresh_projection(&mut leaf.projection);
-            let mut projected = leaf
-                .session
-                .viewport_frame(&mut leaf.projection)
-                .context("project an unfocused pane's grid into a viewport frame")?;
-            // A pane nobody has the keyboard in still draws paths, and still owes them an answer.
-            owes_the_engine |= leaf
-                .session
-                .absorb_printed_path_probes(&mut leaf.projection)
-                != 0;
-            owes_the_engine |= hang_watch::during(hang_watch::Station::DetectionPass, || {
-                leaf.session.schedule_visible_artifacts(&projected)
-            }) != 0;
-            if hover_pane == Some(pane.seat) {
-                apply_hover_marks(
-                    &mut projected,
-                    hyperlink_hover,
-                    hovered_reference
-                        .as_ref()
-                        .filter(|(seat, _)| *seat == pane.seat)
-                        .map(|(_, reference)| reference),
+        let mut attempt = self.begin_present_attempt(trigger.source, false, true);
+        let result = (|| {
+            // A composed frame supersedes any chrome-only debt: it is about to be
+            // presented, chrome and all.
+            let validation_parent = hang_watch::enter(hang_watch::Station::RedrawValidate);
+            self.window.chrome_present_pending = false;
+            if let Some(expected) = self.pending_resize_present {
+                ensure!(
+                    frame_matches_grid(&frame, expected),
+                    "resize presentation requires the newly projected grid: expected {}x{}, got {}x{}",
+                    expected.columns,
+                    expected.rows,
+                    frame.columns,
+                    frame.grid_rows
                 );
             }
-            unfocused_frames.push((*pane, projected));
-        }
-        hang_watch::at(projection_parent);
-        let dispatch_parent = hang_watch::enter(hang_watch::Station::RedrawDispatch);
-        if owes_the_engine {
-            let tasks = self.app.math_worker.tasks.clone();
-            let scale_tasks = self.app.math_worker.scale_tasks.clone();
-            let window = self.window_id();
-            dispatch_tab_decoration_tasks(
-                window,
-                &mut self.window.tabs[active],
-                &tasks,
-                &scale_tasks,
-                &mut self.app.math_worker_running,
-                &mut self.app.math_worker_notice_pending,
-            );
-        }
-        hang_watch::at(dispatch_parent);
-        let assembly_parent = hang_watch::enter(hang_watch::Station::RedrawSeatFrames);
-        let focused_body = bodies
-            .iter()
-            .find(|pane| pane.seat == focused_leaf)
-            .copied()
-            .unwrap_or_else(|| {
-                let viewport = self.window.renderer.seat_viewport();
-                PaneDraw {
-                    seat: focused_leaf,
-                    viewport,
-                    clip: viewport,
+            let has_text = frame
+                .cells
+                .iter()
+                .take(
+                    frame
+                        .drawable_rows()
+                        .saturating_mul(frame.columns.get() as usize),
+                )
+                .any(|cell| !cell.text.trim().is_empty());
+            // The other panes of this tab. The focused leaf's frame came out of the
+            // slot above, with every presentation-hold and resize contract the slot
+            // exists to enforce still attached to it; the panes the user is not
+            // typing in hold nothing, so they are projected here, at the moment they
+            // are drawn.
+            //
+            // A lone terminal leaf produces exactly one entry, whose rectangle is
+            // the same `pane_body_viewport` answer `resolve_seat_layout` already
+            // handed the renderer — so the slice is N = 1 and the command stream is
+            // the one that was always issued. The loop is not a second path; it is
+            // the same path counted.
+            hang_watch::at(validation_parent);
+            let focused_leaf = self.focused_leaf;
+            // U8 — one instant for the whole frame, as everywhere else a tween is
+            // read: two panes of one present sampled at two times would be two
+            // frames of the same animation composited together.
+            let now = Instant::now();
+            let bodies =
+                hang_watch::during(hang_watch::Station::RedrawLayout, || self.pane_draws(now));
+            let active = self.window.active_tab;
+            // The pointer's marks belong to the pane the pointer is in, focused or not, so an
+            // unfocused pane that is being hovered is projected *and then decorated* — the same two
+            // steps `publish_frame_inner` takes for the focused one. Resolved before the loop because
+            // it is a question about the whole window and the loop holds a leaf.
+            let hovered_reference = self.hovered_image_reference();
+            let hover_pane = self.window.hover_pane.filter(|seat| *seat != focused_leaf);
+            let mut unfocused_frames: Vec<(PaneDraw, ViewportFrame)> = Vec::new();
+            // **And what those panes owe the typesetting engine** (review row R5-4).
+            // A settled `$$…$$` block becomes work for the engine when a frame is
+            // projected over it, and until this walk asked, the only frame that ever
+            // asked was the focused leaf's — so a block printed in the pane beside it
+            // stayed as its own LaTeX until somebody clicked into that pane. This is
+            // the road that already visits every visible leaf, so it is where the
+            // question belongs; the answer is gathered here and dispatched once
+            // below, because the dispatcher wants the tab and this loop is holding a
+            // leaf of it.
+            let mut owes_the_engine = false;
+            let projection_parent = hang_watch::enter(hang_watch::Station::RedrawProjection);
+            hang_watch::counters(0, 0, bodies.len());
+            for pane in &bodies {
+                if pane.seat == focused_leaf {
+                    continue;
                 }
-            });
-        // **The frame this present draws owns both formula overlay lanes**
-        // (2026-09-20, T-MARKS-FRAME-IN-HAND). Every unfocused pane has now
-        // been projected, and nothing has reached the present funnel yet. Hand
-        // those exact frames to both lookups, then rebuild the overlay only when
-        // a lit or travelling band can make the answer visible.
-        if self.formula_overlay_is_active() {
-            let frame_for = |seat| {
-                if seat == focused_leaf {
-                    return Some((focused_body.viewport, &frame));
+                let hyperlink_hover = &self.window.hyperlink_hover;
+                let Some(leaf) = self.window.tabs[active].sessions.get_mut(&pane.seat) else {
+                    continue;
+                };
+                leaf.session.refresh_projection(&mut leaf.projection);
+                let mut projected = leaf
+                    .session
+                    .viewport_frame(&mut leaf.projection)
+                    .context("project an unfocused pane's grid into a viewport frame")?;
+                // A pane nobody has the keyboard in still draws paths, and still owes them an answer.
+                owes_the_engine |= leaf
+                    .session
+                    .absorb_printed_path_probes(&mut leaf.projection)
+                    != 0;
+                owes_the_engine |= hang_watch::during(hang_watch::Station::DetectionPass, || {
+                    leaf.session.schedule_visible_artifacts(&projected)
+                }) != 0;
+                if hover_pane == Some(pane.seat) {
+                    apply_hover_marks(
+                        &mut projected,
+                        hyperlink_hover,
+                        hovered_reference
+                            .as_ref()
+                            .filter(|(seat, _)| *seat == pane.seat)
+                            .map(|(_, reference)| reference),
+                    );
                 }
-                unfocused_frames
-                    .iter()
-                    .find(|(pane, _)| pane.seat == seat)
-                    .map(|(pane, projected)| (pane.viewport, projected))
-            };
-            let placement = hang_watch::during(hang_watch::Station::RedrawOverlay, || {
-                self.math_tool_placement(frame_for)
-            });
-            let toggle_layers = hang_watch::during(hang_watch::Station::RedrawOverlay, || {
-                self.formula_toggle_layers(now, frame_for)
-            });
-            hang_watch::during(hang_watch::Station::RedrawOverlay, || {
-                self.refresh_formula_overlay_for_present(now, placement, toggle_layers)
-            });
-        }
-        let table_sources = Self::table_sources(
-            std::iter::once(&frame).chain(unfocused_frames.iter().map(|(_, it)| it)),
-        );
-        hang_watch::during(hang_watch::Station::RedrawTables, || {
-            self.refresh_table_paints(&table_sources)
-        });
-        let mut seat_frames = Vec::with_capacity(unfocused_frames.len() + 1);
-        seat_frames.push(bt_render::SeatFrame {
-            seat: focused_body.viewport,
-            clip: focused_body.clip,
-            frame: &frame,
-            // **The owner, not the focus** (user report + ruling, 2026-08-13).
-            // This flag is read by `seat_caret` alone, and what it is asked
-            // there is "is this the caret typing would land in" — see
-            // [`Self::keyboard_owner_is_a_shell`] for why the answer stopped
-            // being "yes, it is the focused pane".
-            focused: self.keyboard_owner_is_a_shell(),
-        });
-        for (pane, projected) in &unfocused_frames {
-            seat_frames.push(bt_render::SeatFrame {
-                seat: pane.viewport,
-                clip: pane.clip,
-                frame: projected,
-                focused: false,
-            });
-        }
-        let seat_ids: Vec<_> = std::iter::once(focused_leaf)
-            .chain(unfocused_frames.iter().map(|(pane, _)| pane.seat))
-            .collect();
-        let signature = hang_watch::during(hang_watch::Station::RedrawSignature, || {
-            self.present_signature(&seat_ids, &seat_frames)
-        });
-        let conditions = self.present_conditions(trigger.source);
-        hang_watch::at(assembly_parent);
-        match Self::present_seats_and_commit(
-            &mut self.app.gpu,
-            &mut self.window.renderer,
-            &self.window.compositor,
-            &self.window.window,
-            FrameTraces {
-                gate: &mut self.window.present_gate,
-                trace_perf: self.app.trace_perf,
-                slot_overwrites: self.window.pending_frames.overwrites(),
-                conditions,
-                preview: &mut self.window.preview_trace_echo,
-                census: &mut self.window.glyph_census_echo,
-            },
-            &seat_frames,
-            PresentIntent { trigger, signature },
-        )
-        .context("render terminal frame")?
-        {
-            outcome @ (Some(PresentOutcome::Presented(_)) | None) => {
-                let commit_parent = hang_watch::enter(hang_watch::Station::RedrawCommit);
-                let receipt = outcome.and_then(|outcome| match outcome {
-                    PresentOutcome::Presented(receipt) => Some(receipt),
-                    _ => unreachable!(),
+                unfocused_frames.push((*pane, projected));
+            }
+            hang_watch::at(projection_parent);
+            let dispatch_parent = hang_watch::enter(hang_watch::Station::RedrawDispatch);
+            if owes_the_engine {
+                let tasks = self.app.math_worker.tasks.clone();
+                let scale_tasks = self.app.math_worker.scale_tasks.clone();
+                let window = self.window_id();
+                dispatch_tab_decoration_tasks(
+                    window,
+                    &mut self.window.tabs[active],
+                    &tasks,
+                    &scale_tasks,
+                    &mut self.app.math_worker_running,
+                    &mut self.app.math_worker_notice_pending,
+                );
+            }
+            hang_watch::at(dispatch_parent);
+            let assembly_parent = hang_watch::enter(hang_watch::Station::RedrawSeatFrames);
+            let focused_body = bodies
+                .iter()
+                .find(|pane| pane.seat == focused_leaf)
+                .copied()
+                .unwrap_or_else(|| {
+                    let viewport = self.window.renderer.seat_viewport();
+                    PaneDraw {
+                        seat: focused_leaf,
+                        viewport,
+                        clip: viewport,
+                    }
                 });
-                // A whole frame ends whatever textless run was going, which is
-                // what makes the next refusal a new question rather than the
-                // continuation of an old one ([`WindowRuntime::may_ask_again`]).
-                self.window.textless_frames = 0;
-                // And it ends a device-loss episode for the same kind of reason:
-                // a device that has drawn is a device this process is willing to
-                // lose again ([`DeviceLossPilot::a_frame_reached_the_glass`]).
-                if receipt.is_some() {
-                    self.app.device_loss_pilot.a_frame_reached_the_glass();
-                }
-                // The glass now holds the newest picture anyone composed. This
-                // is the equality [`chrome_tick_reuses_picture`] reads as its
-                // licence to answer the next animation tick from the screen.
-                self.window.presented_picture_revision = self.window.terminal_content_revision;
-                // And every pane that could be drawn was just projected afresh
-                // and put on the glass with it, so nothing is owed. See
-                // [`WindowRuntime::unpainted_pane_output`] for why this is one bit
-                // squared here rather than a debt kept per pane.
-                self.window.unpainted_pane_output = false;
-                if self.window.window_shown && !self.window.first_visible_present_dpi_checked {
-                    self.window.first_visible_present_dpi_checked = true;
-                    self.reconcile_authoritative_dpi("first-present")?;
-                }
-                let latency = receipt.map(|receipt| receipt.latency());
-                if let Some(receipt) = receipt {
-                    self.trace_present(trigger.source, receipt, false);
-                }
-                if self.app.trace_startup
-                    && matches!(trigger.source, FrameSource::Resize)
-                    && let Some(Ok(latency)) = latency
-                {
-                    trace_sink::stderr_line(format!(
-                        "BT_RESIZE present={}us columns={} rows={}",
-                        latency.event_to_present_call.as_micros(),
-                        frame.columns,
-                        frame.grid_rows
-                    ));
-                }
-                if has_text && !self.window.first_text_presented {
-                    self.window.first_text_presented = true;
-                    if self.app.trace_startup {
-                        let text_visible = self.app.startup_started.elapsed();
-                        self.window.first_text_visible = Some(text_visible);
+            // **The frame this present draws owns both formula overlay lanes**
+            // (2026-09-20, T-MARKS-FRAME-IN-HAND). Every unfocused pane has now
+            // been projected, and nothing has reached the present funnel yet. Hand
+            // those exact frames to both lookups, then rebuild the overlay only when
+            // a lit or travelling band can make the answer visible.
+            if self.formula_overlay_is_active() {
+                let frame_for = |seat| {
+                    if seat == focused_leaf {
+                        return Some((focused_body.viewport, &frame));
+                    }
+                    unfocused_frames
+                        .iter()
+                        .find(|(pane, _)| pane.seat == seat)
+                        .map(|(pane, projected)| (pane.viewport, projected))
+                };
+                let placement = hang_watch::during(hang_watch::Station::RedrawOverlay, || {
+                    self.math_tool_placement(frame_for)
+                });
+                let toggle_layers = hang_watch::during(hang_watch::Station::RedrawOverlay, || {
+                    self.formula_toggle_layers(now, frame_for)
+                });
+                hang_watch::during(hang_watch::Station::RedrawOverlay, || {
+                    self.refresh_formula_overlay_for_present(now, placement, toggle_layers)
+                });
+            }
+            let table_sources = Self::table_sources(
+                std::iter::once(&frame).chain(unfocused_frames.iter().map(|(_, it)| it)),
+            );
+            hang_watch::during(hang_watch::Station::RedrawTables, || {
+                self.refresh_table_paints(&table_sources)
+            });
+            let mut seat_frames = Vec::with_capacity(unfocused_frames.len() + 1);
+            seat_frames.push(bt_render::SeatFrame {
+                seat: focused_body.viewport,
+                clip: focused_body.clip,
+                frame: &frame,
+                // **The owner, not the focus** (user report + ruling, 2026-08-13).
+                // This flag is read by `seat_caret` alone, and what it is asked
+                // there is "is this the caret typing would land in" — see
+                // [`Self::keyboard_owner_is_a_shell`] for why the answer stopped
+                // being "yes, it is the focused pane".
+                focused: self.keyboard_owner_is_a_shell(),
+            });
+            for (pane, projected) in &unfocused_frames {
+                seat_frames.push(bt_render::SeatFrame {
+                    seat: pane.viewport,
+                    clip: pane.clip,
+                    frame: projected,
+                    focused: false,
+                });
+            }
+            let seat_ids: Vec<_> = std::iter::once(focused_leaf)
+                .chain(unfocused_frames.iter().map(|(pane, _)| pane.seat))
+                .collect();
+            let signature = hang_watch::during(hang_watch::Station::RedrawSignature, || {
+                self.present_signature(&seat_ids, &seat_frames)
+            });
+            let conditions = self.present_conditions(trigger.source);
+            hang_watch::at(assembly_parent);
+            match Self::present_seats_and_commit(
+                &mut self.app.gpu,
+                &mut self.window.renderer,
+                &self.window.compositor,
+                &self.window.window,
+                FrameTraces {
+                    attempt: &mut attempt,
+                    gate: &mut self.window.present_gate,
+                    trace_perf: self.app.trace_perf,
+                    slot_overwrites: self.window.pending_frames.overwrites(),
+                    conditions,
+                    preview: &mut self.window.preview_trace_echo,
+                    census: &mut self.window.glyph_census_echo,
+                },
+                &seat_frames,
+                PresentIntent { trigger, signature },
+            )
+            .context("render terminal frame")?
+            {
+                outcome @ (Some(PresentOutcome::Presented(_)) | None) => {
+                    let commit_parent = hang_watch::enter(hang_watch::Station::RedrawCommit);
+                    let receipt = outcome.and_then(|outcome| match outcome {
+                        PresentOutcome::Presented(receipt) => Some(receipt),
+                        _ => unreachable!(),
+                    });
+                    // A whole frame ends whatever textless run was going, which is
+                    // what makes the next refusal a new question rather than the
+                    // continuation of an old one ([`WindowRuntime::may_ask_again`]).
+                    self.window.textless_frames = 0;
+                    // And it ends a device-loss episode for the same kind of reason:
+                    // a device that has drawn is a device this process is willing to
+                    // lose again ([`DeviceLossPilot::a_frame_reached_the_glass`]).
+                    if receipt.is_some() {
+                        self.app.device_loss_pilot.a_frame_reached_the_glass();
+                    }
+                    // The glass now holds the newest picture anyone composed. This
+                    // is the equality [`chrome_tick_reuses_picture`] reads as its
+                    // licence to answer the next animation tick from the screen.
+                    self.window.presented_picture_revision = self.window.terminal_content_revision;
+                    // And every pane that could be drawn was just projected afresh
+                    // and put on the glass with it, so nothing is owed. See
+                    // [`WindowRuntime::unpainted_pane_output`] for why this is one bit
+                    // squared here rather than a debt kept per pane.
+                    self.window.unpainted_pane_output = false;
+                    if self.window.window_shown && !self.window.first_visible_present_dpi_checked {
+                        self.window.first_visible_present_dpi_checked = true;
+                        self.reconcile_authoritative_dpi("first-present")?;
+                    }
+                    let latency = receipt.map(|receipt| receipt.latency());
+                    if let Some(receipt) = receipt {
+                        self.trace_present(trigger.source, receipt, false);
+                    }
+                    if self.app.trace_startup
+                        && matches!(trigger.source, FrameSource::Resize)
+                        && let Some(Ok(latency)) = latency
+                    {
                         trace_sink::stderr_line(format!(
-                            "BT_STARTUP first_text_present={}ms",
-                            text_visible.as_millis()
+                            "BT_RESIZE present={}us columns={} rows={}",
+                            latency.event_to_present_call.as_micros(),
+                            frame.columns,
+                            frame.grid_rows
                         ));
                     }
-                }
-                // Each pane keeps the frame it just drew, so a pointer question
-                // asked over it can be answered by its own cells. The focused
-                // leaf's copy is `WindowRuntime::last_presented_frame` as well, which
-                // is what the presentation-hold and scroll contracts read.
-                //
-                // And each pane's ledger is squared here, in the same breath and
-                // for the same reason: this is the moment its cells reached the
-                // glass, which is the only moment [`seen_revision`] recognises as
-                // being looked at. Every painted pane, not the focused one —
-                // three panes on screen are three panes the user can read, and a
-                // tab that lit up for a sibling of the pane holding the keyboard
-                // was the bug this pass was written to end.
-                let active = self.window.active_tab;
-                for (pane, projected) in unfocused_frames {
-                    if let Some(leaf) = self.window.tabs[active].sessions.get_mut(&pane.seat) {
-                        leaf.last_presented_frame = Some(projected);
+                    if has_text && !self.window.first_text_presented {
+                        self.window.first_text_presented = true;
+                        if self.app.trace_startup {
+                            let text_visible = self.app.startup_started.elapsed();
+                            self.window.first_text_visible = Some(text_visible);
+                            trace_sink::stderr_line(format!(
+                                "BT_STARTUP first_text_present={}ms",
+                                text_visible.as_millis()
+                            ));
+                        }
+                    }
+                    // Each pane keeps the frame it just drew, so a pointer question
+                    // asked over it can be answered by its own cells. The focused
+                    // leaf's copy is `WindowRuntime::last_presented_frame` as well, which
+                    // is what the presentation-hold and scroll contracts read.
+                    //
+                    // And each pane's ledger is squared here, in the same breath and
+                    // for the same reason: this is the moment its cells reached the
+                    // glass, which is the only moment [`seen_revision`] recognises as
+                    // being looked at. Every painted pane, not the focused one —
+                    // three panes on screen are three panes the user can read, and a
+                    // tab that lit up for a sibling of the pane holding the keyboard
+                    // was the bug this pass was written to end.
+                    let active = self.window.active_tab;
+                    for (pane, projected) in unfocused_frames {
+                        if let Some(leaf) = self.window.tabs[active].sessions.get_mut(&pane.seat) {
+                            leaf.last_presented_frame = Some(projected);
+                            mark_leaf_painted(leaf);
+                        }
+                    }
+                    if let Some(leaf) = self.window.tabs[active].sessions.get_mut(&focused_leaf) {
+                        leaf.last_presented_frame = Some(frame.clone());
                         mark_leaf_painted(leaf);
                     }
+                    self.window.last_presented_frame = Some(frame);
+                    // The pane under the pointer just drew new cells, so the list its pointer verbs
+                    // read is re-derived from them. Only that pane: a reference scan answers a
+                    // question nobody is asking of the panes the pointer is not in, and the resting
+                    // dotted affordance they do wear was painted by the session itself.
+                    if let Some(seat) = self.window.hover_pane.filter(|seat| *seat != focused_leaf)
+                    {
+                        self.rescan_pane_references(seat);
+                    }
+                    self.pending_resize_present = None;
+                    hang_watch::at(commit_parent);
                 }
-                if let Some(leaf) = self.window.tabs[active].sessions.get_mut(&focused_leaf) {
-                    leaf.last_presented_frame = Some(frame.clone());
-                    mark_leaf_painted(leaf);
-                }
-                self.window.last_presented_frame = Some(frame);
-                // The pane under the pointer just drew new cells, so the list its pointer verbs
-                // read is re-derived from them. Only that pane: a reference scan answers a
-                // question nobody is asking of the panes the pointer is not in, and the resting
-                // dotted affordance they do wear was painted by the session itself.
-                if let Some(seat) = self.window.hover_pane.filter(|seat| *seat != focused_leaf) {
-                    self.rescan_pane_references(seat);
-                }
-                self.pending_resize_present = None;
-                hang_watch::at(commit_parent);
-            }
-            // The frame is still owed, so it goes back in the slot and the
-            // window asks for another turn. `PresentedWithoutText` joins the two
-            // swapchain refusals here rather than the arm above it: a picture
-            // that lost its characters is not the picture that was composed, and
-            // recording it as presented would leave `presented_picture_revision`
-            // claiming the glass holds a frame it does not — which is the licence
-            // the animation path reads before answering a tick from the screen.
-            //
-            // The frame a window that is off screen composed goes back in the
-            // slot with the rest of them, and waits there: `may_ask_again` is
-            // what declines to ask for the turn, not this arm. See
-            // [`ask_again_after`].
-            Some(
-                outcome @ (PresentOutcome::PresentedWithoutText(_)
-                | PresentOutcome::Skipped
-                | PresentOutcome::SkippedNotVisible
-                | PresentOutcome::Reconfigure),
-            ) => {
-                self.window
-                    .pending_frames
-                    .publish(frame, trigger)
-                    .context("reject non-rectangular frame during redraw retry")?;
-                if self.window.may_ask_again(&outcome) {
-                    hang_watch::during(hang_watch::Station::WindowRedraw, || {
-                        self.window.window.request_redraw()
-                    });
+                // The frame is still owed, so it goes back in the slot and the
+                // window asks for another turn. `PresentedWithoutText` joins the two
+                // swapchain refusals here rather than the arm above it: a picture
+                // that lost its characters is not the picture that was composed, and
+                // recording it as presented would leave `presented_picture_revision`
+                // claiming the glass holds a frame it does not — which is the licence
+                // the animation path reads before answering a tick from the screen.
+                //
+                // The frame a window that is off screen composed goes back in the
+                // slot with the rest of them, and waits there: `may_ask_again` is
+                // what declines to ask for the turn, not this arm. See
+                // [`ask_again_after`].
+                Some(
+                    outcome @ (PresentOutcome::PresentedWithoutText(_)
+                    | PresentOutcome::Skipped
+                    | PresentOutcome::SkippedNotVisible
+                    | PresentOutcome::Reconfigure),
+                ) => {
+                    self.window
+                        .pending_frames
+                        .publish(frame, trigger)
+                        .context("reject non-rectangular frame during redraw retry")?;
+                    if self.window.may_ask_again(&outcome) {
+                        hang_watch::during(hang_watch::Station::WindowRedraw, || {
+                            self.window.window.request_redraw()
+                        });
+                    }
                 }
             }
-        }
-        Ok(())
+            Ok(())
+        })();
+        self.finish_present_attempt(attempt, &result);
+        result
     }
 
     /// **One turn of the event loop, for one window** (multiwindow slice C).
@@ -104992,6 +105166,7 @@ impl Runtime<'_> {
     /// debounce that fires N times; exactly one window in the process is given
     /// the job, and it is the one that opened first — see [`FolioApp::order`].
     fn turn(&mut self, now: Instant, application_clocks: bool) -> Result<Option<Instant>> {
+        self.check_picture_freshness(now, false);
         // **The frame debt belongs to the turn that incurs it** (owner's report
         // 2026-09-18). Opened here rather than cleared wherever it is paid,
         // because "an animation asked to draw and the glass was not ready" is a
@@ -117258,6 +117433,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
+        present_diagnostics::event();
         // **The lane this wake belongs to, named before it is spent** — see
         // [`AppEvent::station`]. Paired with the `at` below rather than left
         // standing, on [`hang_watch::enter`]'s own rule: the station a handler
@@ -117510,6 +117686,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                         sample_window_place(&runtime.window.window, runtime.window.window_focused);
                     runtime.window.window_hidden = place.hidden;
                     runtime.window.window_exposed = place.exposed;
+                    runtime.window.attention_sampled_at = Some(Instant::now());
                     runtime.window.taskbar_auto_hidden = place.taskbar_is_auto_hidden;
                     let mut raised: Vec<AttentionDelivery> = Vec::new();
                     let switches = runtime.notification_switches();
@@ -117607,6 +117784,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         window_id: WindowId,
         event: WindowEvent,
     ) {
+        present_diagnostics::event();
         hang_watch::at(hang_watch::Station::Event);
         hang_watch::during(window_event_station(&event), || {
             // **The one line the whole slice is about.** winit stamps the id of the
@@ -118024,6 +118202,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         // took any of those states for a stopped pump would file a report on a
         // program that is working.
         hang_watch::beat();
+        present_diagnostics::turn();
         hang_watch::run_selftest_if_due();
         panic_selftest_if_due();
         self.surface_selftest_if_due();

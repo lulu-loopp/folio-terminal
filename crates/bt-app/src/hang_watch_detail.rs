@@ -16,6 +16,7 @@ pub(super) struct Node {
     bytes: u64,
     accepted: u64,
     count: u64,
+    attempt: [u64; 3],
 }
 
 impl Node {
@@ -36,6 +37,7 @@ struct AtomicNode {
     bytes: AtomicU64,
     accepted: AtomicU64,
     count: AtomicU64,
+    attempt: [AtomicU64; 3],
 }
 
 impl AtomicNode {
@@ -47,6 +49,7 @@ impl AtomicNode {
             bytes: AtomicU64::new(0),
             accepted: AtomicU64::new(0),
             count: AtomicU64::new(0),
+            attempt: std::array::from_fn(|_| AtomicU64::new(0)),
         }
     }
 
@@ -58,6 +61,7 @@ impl AtomicNode {
             bytes: self.bytes.load(Relaxed),
             accepted: self.accepted.load(Relaxed),
             count: self.count.load(Relaxed),
+            attempt: std::array::from_fn(|i| self.attempt[i].load(Relaxed)),
         }
     }
 }
@@ -83,6 +87,7 @@ pub(super) struct Ledger {
     current: AtomicU64,
     scope: AtomicU64,
     overflow: AtomicU64,
+    attempt: [AtomicU64; 3],
 }
 
 impl Ledger {
@@ -92,7 +97,18 @@ impl Ledger {
             current: AtomicU64::new(ROOT as u64),
             scope: AtomicU64::new(ROOT as u64),
             overflow: AtomicU64::new(0),
+            attempt: std::array::from_fn(|_| AtomicU64::new(0)),
         }
+    }
+
+    pub(super) fn attempt(&self, values: [u64; 3]) {
+        for (cell, value) in self.attempt.iter().zip(values) {
+            cell.store(value, Relaxed);
+        }
+    }
+
+    pub(super) fn generation(&self, generation: u64) {
+        self.attempt[1].store(generation, Relaxed);
     }
 
     pub(super) fn clear(&self) {
@@ -127,7 +143,11 @@ impl Ledger {
 
     pub(super) fn enter(&self, station: Station, parent: usize, pane: u64) {
         let key = ((parent as u64 + 1) << 8) | station as u64;
-        let hash = key.wrapping_mul(0x9e3779b97f4a7c15) ^ pane.wrapping_mul(0x517cc1b727220a95);
+        let attempt = std::array::from_fn::<_, 3, _>(|i| self.attempt[i].load(Relaxed));
+        let hash = attempt.iter().fold(0u64, |hash, value| {
+            hash.wrapping_mul(31).wrapping_add(*value)
+        }) ^ key.wrapping_mul(0x9e3779b97f4a7c15)
+            ^ pane.wrapping_mul(0x517cc1b727220a95);
         let start = ((hash ^ (hash >> 32)) as usize) % CAPACITY;
         for probe in 0..CAPACITY {
             let slot = (start + probe) % CAPACITY;
@@ -140,8 +160,19 @@ impl Ledger {
                 node.bytes.store(0, Relaxed);
                 node.accepted.store(0, Relaxed);
                 node.count.store(0, Relaxed);
+                for (cell, value) in node.attempt.iter().zip(attempt) {
+                    cell.store(value, Relaxed);
+                }
             }
-            if old == 0 || (old == key && node.pane.load(Relaxed) == pane) {
+            if old == 0
+                || (old == key
+                    && node.pane.load(Relaxed) == pane
+                    && node
+                        .attempt
+                        .iter()
+                        .zip(attempt)
+                        .all(|(cell, value)| cell.load(Relaxed) == value))
+            {
                 self.restore(slot);
                 return;
             }
@@ -185,6 +216,24 @@ impl Ledger {
             node.accepted.fetch_add(accepted as u64, Relaxed);
             node.count.fetch_add(count as u64, Relaxed);
         }
+    }
+
+    pub(super) fn active_attempt(&self) -> Option<String> {
+        let attempt = std::array::from_fn::<_, 3, _>(|i| self.attempt[i].load(Relaxed));
+        if attempt[2] == 0 {
+            return None;
+        }
+        let node = self.nodes.get(self.current())?.snapshot();
+        if node.key == 0 || node.attempt != attempt {
+            return None;
+        }
+        Some(format!(
+            " [win={} gen={} seq={} outcome={}]",
+            node.attempt[0],
+            node.attempt[1],
+            node.attempt[2],
+            super::present_progress(node.station())
+        ))
     }
 
     pub(super) fn snapshot(&self) -> Tree {
@@ -241,6 +290,15 @@ impl Tree {
                     line.push_str(&format!(
                         " [bytes={}, accepted={}, count={}]",
                         node.bytes, node.accepted, node.count
+                    ));
+                }
+                if node.attempt[2] != 0 {
+                    line.push_str(&format!(
+                        " [win={} gen={} seq={} outcome={}]",
+                        node.attempt[0],
+                        node.attempt[1],
+                        node.attempt[2],
+                        super::present_progress(node.station())
                     ));
                 }
                 let nested = self.children(index);
@@ -327,6 +385,39 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join(", ")
         }
+    }
+
+    #[test]
+    fn present_stations_keep_window_generation_sequence_and_progress_after_return() {
+        let ledger = Ledger::new();
+        ledger.at(Station::Event);
+        let root = ledger.current();
+        for (window, generation, sequence) in [(7, 3, 11), (8, 4, 1)] {
+            ledger.attempt([window, generation, sequence]);
+            ledger.enter(Station::SwapchainPresent, root, 0);
+            ledger.charge(600);
+        }
+        assert!(
+            ledger
+                .active_attempt()
+                .unwrap()
+                .contains("win=8 gen=4 seq=1")
+        );
+        ledger.attempt([9, 4, 1]); // the next window can have the same local sequence
+        assert_eq!(ledger.active_attempt(), None);
+        ledger.attempt([0; 3]);
+        assert_eq!(ledger.active_attempt(), None);
+        ledger.restore(root);
+        ledger.enter(Station::Event, root, 0);
+        ledger.charge(1);
+        let line = ledger.snapshot().line().unwrap();
+        assert!(line.contains("[win=7 gen=3 seq=11 outcome=in_progress:present]"));
+        assert!(line.contains("[win=8 gen=4 seq=1 outcome=in_progress:present]"));
+        assert_eq!(line.matches("[win=").count(), 2);
+        let mut remaining = line.as_str();
+        let parsed = Parsed::read(&mut remaining);
+        assert!(remaining.is_empty());
+        assert_eq!(Parsed::write(&parsed), line);
     }
 
     #[test]
