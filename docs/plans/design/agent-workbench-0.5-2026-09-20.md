@@ -512,3 +512,29 @@ Also ruled by the owner and folded in without further argument: Claude's orange 
 5. **Does the rail list other windows' rows when those windows are minimised or on another monitor**, or only windows on the current desktop?
 6. **The toast's three lines** — `Anthropic · 80% · 19:00`, `Anthropic · 0 · 19:00`, `Anthropic · 19:00`: is the third readable alone, or does recovery need one word?
 7. **Does the action log record what a person did through a Folio surface** (the notification reply, "go there"), or only what an agent did through the tool surface? The first makes §2.5's metrics richer and the log much larger.
+
+## 12. Revision 3 — the owner's rulings of 2026-09-20, afternoon (this section rules over §11 where they differ)
+
+### 12.1 Every notification appears
+
+**Supersedes §11.7.1.** **RULED: a notification appears for every agent that needs the person, including the agent in the focused pane.** The owner's reason, which is the whole argument: *a pane always holds focus while Folio is in front, and that says nothing about whether anybody is looking at it.* Focus is a fact about the keyboard, not about the eyes. Control is the person's: **mute per agent**, and a notification leaves by itself. When Folio is not the foreground application the system notification carries it, as today.
+
+### 12.2 The dot belongs to the pane
+
+**Supersedes the "seen" language in §11.6 and answers Kimi F10.** A dot is a property of a **pane**. The focused pane never wears one — the fact arrived where the person already is. An unfocused pane wears it, and its tab wears it because the pane does. **It clears when that pane gains focus**, and the tab's clears with it. The title-bar badge is the sum of the panes' dots (colour and number as §11.6). "Seen" therefore has one definition in the product: *that pane has held focus since*. This is the shipped attention ledger's model, unchanged.
+
+§12.1 and §12.2 do not conflict: the notification is the *arrival*, the dot is the *debt*. The focused pane gets the first and never the second.
+
+### 12.3 Context: the ring and the number, both
+
+**Supersedes §11.9's fourth bullet.** **RULED: the row shows context as a ring and a percentage, always both.** One ring, one meaning still holds, by position: **the ring on the row is context; the ring on the tab icon is OSC 9;4 progress** (DESIGN §7.1.5b, unchanged). Where no source reports context (§11.8's floor), the row shows neither — not an empty ring.
+
+### 12.4 §11.11, with recommendations — open until the owner says otherwise
+
+1. Waiting row sticks to the top of the rail's viewport. **Recommended: yes.**
+2. Dragged-out view. **Recommended: a float inside the window first** — the chassis exists; the OS window arrives with 0.6, where it is needed anyway.
+3. Hookless agent on an OSC row alone. **Recommended: listed, with a generic mark.** A row is a running agent; the mark is decoration.
+4. Reply text when the field is disarmed. **Recommended: kept**, field disabled, text selectable. Discarding a person's typing is never the cheap option.
+5. Other windows' rows when minimised or elsewhere. **Recommended: listed.** The rail is the application's (§11.3); a window's placement is not a fact about its agents.
+6. The toast's third line. Open.
+7. **The action log records agents only. Recommended, and the owner's worry is answered elsewhere.** The worry (2026-09-20): with two pages or two browsers open, a person acts on one and the agent cannot tell which. That is a question about *current state*, and a history of the person's clicks is the wrong instrument for it — the agent would have to replay a log to learn what one read would tell it. **The instrument is the tool surface's read verbs plus a revision on every addressable thing**: an agent's write names the revision it read; a surface the person touched since has moved on; Folio refuses the stale write and the agent reads again. The log stays small, holds nothing a person typed, and §2.5's interruption counts still come from it (a notification shown and a pane focused are Folio's own events, not the person's content). Web driving is outside the first 0.5 (§11.10), so this binds when that ticket is written.
