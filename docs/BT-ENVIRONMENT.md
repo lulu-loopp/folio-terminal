@@ -35,7 +35,7 @@ added later; `BT_PTY_DUMP` and `BT_HANG_SELFTEST` deliberately do not match it.
 | --- | --- | --- | --- | --- |
 | `BT_PTY_DUMP` | file path, used verbatim | Records every byte the ConPTY reader receives, per pane. `File::create` — **the named file is truncated**. A `.chunks` sidecar beside it records arrival times. The first pane takes the named path; later panes take `<path>.2`, `<path>.3`. | **Everything on the screen and everything typed.** Shell output, prompts, the echo of what you type, the contents of any file printed to the terminal, anything a program prints including secrets. The `.chunks` header also records the process id and the wall-clock start. | off |
 | `BT_PTY_INPUT_DUMP` | file path; unset or empty is off | Records queued input through `PtyDump` to `<path>.in`, then `<path>.in.2`, etc. Raw bytes plus one `.chunks` line per write: sequence, elapsed microseconds, byte count, pane ordinal, quoted reason, hex bytes. Shares the receive dump clock and pane identity. A queued write does not prove the child consumed it. | **records your keystrokes, including anything typed at a password prompt; for a diagnosis you run yourself, never to be shared unread** | off, including release |
-| `BT_IME_TRACE` | file path, used verbatim | Appends one line per IME event before routing, plus text-free startup order and native focus snapshots (see below). | **Composed and committed IME text** — the literal characters an input method produces. | off |
+| `BT_IME_TRACE` | file path, used verbatim | Appends inbound IME events, text-free startup order and native focus snapshots, outbound calls, ownership/routing rulings and changes in terminal pre-edit drawing. See line formats below. | Kinds, byte lengths, cursor ranges, rectangles, static reasons and results only. **No composed or committed text.** Older builds wrote literal text. | off |
 | `BT_CHROME_DUMP` | file path, used verbatim | Appends one block per chrome rebuild and per overlay frame: rectangles, colours, sprite marks, and label text. | **Every visible label**: tab titles, pane-head captions, file names in the files column, path foots, tooltips, menu rows. | off |
 | `BT_DECOR_TRACE` | file path, used verbatim | Appends one snapshot per call: the lifecycle state of each frozen or live formula decoration and why it failed. | **Up to 96 characters of the terminal line** the decoration was drawn from. | off |
 | `BT_WEB_TRACE` | file path, used verbatim | Appends one line per web-preview decision. | **Full navigation URLs**, including query and fragment, and the file names of refused downloads. | off |
@@ -64,6 +64,40 @@ added later; `BT_PTY_DUMP` and `BT_HANG_SELFTEST` deliberately do not match it.
 | `BT_CONPTY_FORCE_SYSTEM` | presence | Skips the packaged `conpty.dll`/`OpenConsole.exe` and uses the ConPTY that ships with Windows. Read in the vendored `portable-pty`. | — | the packaged pair is preferred. **Presence-only**: `BT_CONPTY_FORCE_SYSTEM=` counts as on. |
 | `BT_SHELL_INTEGRATION` | `login` \| `interactive` | Not read by `folio.exe` — **written** into the environment of a bash launched with `--init-file`, and read by the shipped `folio.bash` to decide **which** startup chain it must source in place of the one the flag displaced. `login` is `/etc/profile` then the first of `~/.bash_profile`, `~/.bash_login`, `~/.profile`; `interactive` is `~/.bashrc` alone. Which of the two is a fact about the profile's own arguments. | — | not set |
 | `BT_USER_ZDOTDIR` | a directory | Not read by `folio.exe` — **written** into the environment of a zsh whose `ZDOTDIR` this terminal has taken, carrying the one the session already had so that the shipped `folio.zsh` can source the reader's own startup files out of it. Absent when the session had none, which says the files are in `$HOME`. | — | not set |
+
+### `BT_IME_TRACE` line formats
+
+All lines share the existing `Instant` timestamp and file-writer queue. Shared
+window observations include `window=<numeric id>`. Native Windows observations
+occur between the shared call and return records, including synchronous IME
+callbacks. These are trace-file records only, not diagnostics-log records.
+Unset or empty is off; the producer checks a cached gate before formatting,
+examining diagnostic state or reading the clock. No native queries are added.
+
+| Kind | Fields and meaning |
+| --- | --- |
+| `IME_IN` | `kind=Enabled/Disabled/Preedit/Commit`, `bytes` (UTF-8 length); Preedit also has `cursor=Option<(byte,byte)>`. Written before routing. |
+| `IME_OUT_ALLOWED` | `value`, `reason=window_construction`, immediately before each existing `set_ime_allowed` call. |
+| `IME_OUT_CANCEL` | `owner`, static caller `reason=take_keyboard_into/settle_composition_owner`, `result=None` before the call and `Some(true/false)` after it. A false result does not change the existing local cleanup. |
+| `IME_OUT_NOTIFY` | Windows only: `notification=NI_COMPOSITIONSTR`, `index=CPS_CANCEL`, `value=0`, caller `reason`, `phase=call/return`, `result=None/Some(bool)`. No notify line means the native notification was not reached (for example, no input context). |
+| `IME_OUT_AREA` | Client-pixel `x,y,width,height`; `action=sent/flushed/reoffered` immediately before `set_ime_cursor_area`; `throttled/reoffer_throttled` means deferred and `unchanged` means suppressed by the existing throttle. |
+| `IME_OUT_CARET` | Shared `action=update/destroy`, static `reason`, `position=Some((x,y))/None`; update follows a cursor-area call, destroy names `ime_disabled/cancel_composition/window_teardown/window_blur`. Portable no-op calls are still calls and are recorded. |
+| `IME_OUT_NATIVE_CARET` | Windows only: `action=update/create/position/destroy`, `x,y,width=1,height=1`, prior `active`, `result=call/layout_not_chinese/inactive/ok/error`. Destroy has no position; its `x,y` are zero placeholders. Includes internal layout-change and Drop destruction. Error text is never included. |
+| `IME_OWNER` | Previous `old=Option<owner>` and `new`, `previous_cause`, `cause`. Emitted at the authoritative keyboard-owner reading when its kind changes (and once initially). Causes identify rename, git prompt, palette, quit dialog, dirty gate, first-run card, PSReadLine invitation, settings, popup, files tree, graph search, preview, search or shell. |
+| `IME_RULING` | Text-free inbound metadata, `origin=Option<owner>`, `destination`, `same_origin`, `deliver`, `next`, and `reason=origin_mismatch/owner_swallows/field_route/shell_route`. Recorded before applying the existing ruling; `same_origin` distinguishes different instances of the same kind without exposing names or paths. `deliver=true` passes the composition-origin barrier; Modal/FilesTree can still swallow it. |
+| `IME_DRAW` | `surface=terminal`, `drawn`, `reason`, `bytes`, `cursor_visible`, grid `row,column`, `alt`, and client-pixel `x,y,width,height`. One line when the terminal pre-edit outcome changes; clearing/committing/ending resets the latch for the next composition. Reasons: `drawn`, `owner_mismatch`, `cursor_invisible`, `zero_size_rectangle`, `no_visible_cells`. |
+
+`IME_DRAW` observes actual writes by the terminal pre-edit compositor, before
+unchanged-frame suppression; it does not claim swapchain presentation or field
+widget drawing. Field rerouting is identified by `IME_RULING`. Alternate-screen
+mode is recorded as context and does **not** prevent drawing. The rectangle is
+the starting cursor cell, before advancing through the pre-edit; the actual native
+candidate anchor is recorded by `IME_OUT_AREA`. The current renderer clamps cell
+rectangle dimensions to at least one pixel. `no_visible_cells` includes zero-width-only input and clusters that
+wrap beyond the grid. Length or rectangle changes alone do not repeat an
+unchanged draw answer. Ownership and draw latches are per window and diagnostic
+only. macOS gets the shared call-site records; no new macOS native calls or
+backend-specific probes are introduced.
 
 `BT_HANG_SELFTEST` (an integer number of seconds; holds the window thread that
 long, once, to prove the hang watchdog writes a report) is compiled out of release
@@ -183,8 +217,8 @@ temp directory.
 
 ### IME first-focus self-report
 
-`BT_IME_TRACE` retains its existing event payloads, which contain private typed
-text. New `Folio: IME observation` and `Folio: keys are arriving as plain text`
+`BT_IME_TRACE` no longer carries typed text: inbound events are written as kinds
+and byte lengths. `Folio: IME observation` and `Folio: keys are arriving as plain text`
 lines contain no typed text. Focus snapshots and the single snapshot about one
 second after the process's first focus also go to `diagnostics.log` without an
 environment switch. The delayed sample uses the event loop's deadline and is
@@ -217,6 +251,13 @@ Fields:
   service, 2 keyboard layout); `tsf_error` (HRESULT if the read failed).
   `None` means unknown/unavailable, never false. Native handles are numeric;
   no profile names, window titles, key values, or composition strings are read.
+
+Two further always-on lines name a broken composition bracket —
+`shape=restarted-inside-a-live-composition` (a second `Enabled` while a pre-edit
+is live) and `shape=ended-without-a-start` (a `Disabled` nobody opened) — with
+the live pre-edit's byte length and no text, at most 32 per window. On Windows
+the first is followed by winit dropping every composition message until the
+next start, so it marks the moment typed text began to be lost.
 
 The always-on symptom line requires three consecutive presses carrying ASCII
 Latin letters (optionally printable ASCII punctuation/spaces) on a focused

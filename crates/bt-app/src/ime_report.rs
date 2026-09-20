@@ -42,7 +42,13 @@ pub struct Report {
     latin_keys: u8,
     reported: bool,
     probed_at: Option<u64>,
+    composition_open: bool,
+    live_bytes: usize,
+    pairing_lines: u8,
 }
+
+/// How many bracket lines one window may write.
+pub const PAIRING_LINES_MAX: u8 = 32;
 
 /// The least time between two native readings inside one focus.
 pub const PROBE_MIN_INTERVAL_MS: u64 = 10_000;
@@ -116,6 +122,48 @@ impl Report {
         }
         self.latin_keys = self.latin_keys.saturating_add(1).min(4);
         self.latin_keys == 3
+    }
+    /// The input method's own bracket, checked: `Enabled … Disabled` around a
+    /// composition, and nothing restarting one that is still live.
+    ///
+    /// **Always on, because the defect it names loses what the user typed**
+    /// (2026-09-20, four occurrences in one afternoon). An input method that
+    /// restarts a live composition is followed, on Windows, by winit refusing
+    /// every later composition message until the next start — pre-edit and
+    /// committed text alike. Nothing in the event stream says so afterwards;
+    /// the only witnesses are these two shapes. Lengths only, never text, and
+    /// at most [`PAIRING_LINES_MAX`] lines in the life of a window.
+    pub fn pairing(&mut self, kind: ImeKind, preedit_bytes: usize) -> Option<String> {
+        let live = self.live_bytes;
+        let shape = match kind {
+            ImeKind::Enabled => {
+                let restarted = self.composition_open && live > 0;
+                self.composition_open = true;
+                restarted.then_some("restarted-inside-a-live-composition")
+            }
+            ImeKind::Preedit => {
+                self.live_bytes = preedit_bytes;
+                None
+            }
+            ImeKind::Commit => {
+                self.live_bytes = 0;
+                None
+            }
+            ImeKind::Disabled => {
+                let unpaired = !self.composition_open;
+                self.composition_open = false;
+                self.live_bytes = 0;
+                unpaired.then_some("ended-without-a-start")
+            }
+        }?;
+        if self.pairing_lines >= PAIRING_LINES_MAX {
+            return None;
+        }
+        self.pairing_lines += 1;
+        Some(format!(
+            "Folio: the input method's composition bracket is broken — shape={shape} live_preedit_bytes={live} focused={}",
+            self.focused
+        ))
     }
     /// Whether the native reading may be taken now, and if so, that it was.
     ///

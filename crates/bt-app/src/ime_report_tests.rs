@@ -263,3 +263,37 @@ fn ime_self_report_reads_native_facts_once_per_interval_within_a_focus() {
     report.focus(true, 0);
     assert!(report.may_probe(1));
 }
+
+#[test]
+fn ime_self_report_names_a_restart_inside_a_live_composition_and_an_unpaired_end() {
+    let mut report = focused();
+    // An ordinary composition says nothing.
+    assert_eq!(report.pairing(ImeKind::Enabled, 0), None);
+    assert_eq!(report.pairing(ImeKind::Preedit, 5), None);
+    assert_eq!(report.pairing(ImeKind::Preedit, 0), None);
+    assert_eq!(report.pairing(ImeKind::Commit, 0), None);
+    assert_eq!(report.pairing(ImeKind::Disabled, 0), None);
+    // The incident's shape: a second start while five bytes are live, then the
+    // teardown, then an end nobody opened.
+    assert_eq!(report.pairing(ImeKind::Enabled, 0), None);
+    assert_eq!(report.pairing(ImeKind::Preedit, 5), None);
+    let restart = report
+        .pairing(ImeKind::Enabled, 0)
+        .expect("a restart is named");
+    assert!(restart.contains("shape=restarted-inside-a-live-composition"));
+    assert!(restart.contains("live_preedit_bytes=5"));
+    assert_eq!(report.pairing(ImeKind::Preedit, 1), None);
+    assert_eq!(report.pairing(ImeKind::Preedit, 0), None);
+    assert_eq!(report.pairing(ImeKind::Commit, 0), None);
+    assert_eq!(report.pairing(ImeKind::Disabled, 0), None);
+    let unpaired = report
+        .pairing(ImeKind::Disabled, 0)
+        .expect("an unpaired end is named");
+    assert!(unpaired.contains("shape=ended-without-a-start"));
+    // Bounded for the life of the window.
+    let mut lines = 2;
+    for _ in 0..100 {
+        lines += usize::from(report.pairing(ImeKind::Disabled, 0).is_some());
+    }
+    assert_eq!(lines, usize::from(PAIRING_LINES_MAX));
+}
