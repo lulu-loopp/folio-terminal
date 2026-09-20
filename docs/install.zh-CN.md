@@ -7,7 +7,7 @@
 从[发布页](https://github.com/lulu-loopp/folio-terminal/releases)下载
 `folio-<version>-windows-x64.zip`，解压到任意目录，运行 `folio.exe`。无需安装。`SHA256SUMS.txt` 是下载文件的校验和。系统要求：**Windows 10 1809 及以上或 Windows 11，64 位**。
 
-压缩包共九个文件，需放在同一文件夹中。`folio.exe` 是主程序；`conpty.dll` 和 `OpenConsole.exe` 是启动 shell 的必需组件；`folio.msix` 是签名包，用于注册右键菜单第一页入口，指向解压目录；`folio-here.cmd` 供 VS Code 调用；其余是两份许可证、第三方声明和商标说明。
+压缩包共十个文件，需放在同一文件夹中。`folio.exe` 是主程序；`conpty.dll` 和 `OpenConsole.exe` 是启动 shell 的必需组件；`folio.msix` 是签名包，用于注册右键菜单第一页入口，指向解压目录；`folio-here.cmd` 供 VS Code 调用；`uninstall.cmd` 用于卸载清理；其余是两份许可证、第三方声明和商标说明。
 
 网页预览需要 **WebView2 Runtime**。Windows 11 已内置；Windows 10 通常也有，若缺少可安装 [Evergreen Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)。缺少时预览窗格提示。
 
@@ -73,20 +73,18 @@ Agent 页的三个开关**默认关闭**，各自读取对应工具的配置文�
 
 ## 卸载
 
-<!-- TODO(中文文案) — 本节待译，英文原文是 docs/install.md 的 `## Uninstalling`（2026-09-20 随
-     `--remove-explorer-menu` 一并加入）。要点：Folio 在 Windows 上写到自己文件夹之外的只有资源
-     管理器右键菜单的两处登记（Windows 11 第一页那一项由 folio.msix 注册，“显示更多选项”里的经典
-     项在 HKCU\Software\Classes 下的两个键）；直接删文件不会把它们带走，因为没有安装程序、卸载时
-     也没有任何东西会跑。所以先运行 `folio.exe --remove-explorer-menu`：不开窗，打印一行说明撤掉
-     了什么、留下了什么，然后退出；属于本机另一份 Folio 的登记不动；什么都没登记也不算出错，照样
-     退出 0。然后按渠道各一行：zip 直接删文件夹；scoop 先在 `scoop prefix folio` 的目录里跑这条
-     命令再 `scoop uninstall folio`；winget 同理。Folio 记住的一切都在 `%APPDATA%\Folio`，删掉
-     就全忘、留着下个版本还能接上；唯一另一处是 PowerShell `$PROFILE` 里那一行 integration，删
-     掉那行即可。文件已经删了而菜单项还在的，把同一个下载包随便解压到哪里，在那个文件夹里跑一次
-     这条命令再删掉即可。Mac 上没有要撤的东西：Finder 的 Open in Folio 在应用包自己的 Info.plist
-     里，应用删掉就一起没了；设置在 `~/Library/Application Support/Folio`。 -->
+关闭 Folio，在另一个终端中运行一条命令：
 
-如果你删除了旧版 Folio 后仍有残留——PowerShell 一打开就报错、编程 agent 配置里的钩子条目、右键菜单项、设置文件夹——[`recovery-after-deleting-folio.zh-CN.md`](recovery-after-deleting-folio.zh-CN.md) 逐项说明如何手动清除，不需要 Folio。
+- **Windows：** 在解压目录中运行 `folio.exe --uninstall-cleanup`，或双击 `uninstall.cmd`。
+- **macOS：** `/Applications/Folio.app/Contents/MacOS/folio --uninstall-cleanup`。
+
+命令不开窗。它移除 Folio 的整合项，保留属于另一份 Folio 的 hook 和右键菜单登记，逐项报告结果。退出码 `0` 表示清理完成；`1` 指出需要修正后重试的项；`2` 表示 Folio 正在运行，或使用 purge 时有进程仍持有数据。
+
+在同一命令后加 `--purge` 可同时删除设置、会话和浏览器数据，包括 Windows 上的两个数据根目录和历史数据目录，或 macOS 上的全部六个数据位置。不加则数据保留。带日期的配置备份不删除。应用文件夹本身不会被删除。清理完成后，删除解压文件夹或将 Folio.app 移至废纸篓；经包管理器安装的，用对应的包管理器卸载应用。
+
+macOS 通知权限和缓存的服务条目由系统管理，删除应用包后可能需要一段时间才会反映。Windows 通知记录和包管理器信息同样由各自的管理方维护。
+
+已经删除了 Folio？参阅[删除 Folio 后的恢复](recovery-after-deleting-folio.zh-CN.md)。
 
 ## 已知问题
 

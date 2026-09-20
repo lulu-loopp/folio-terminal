@@ -343,7 +343,7 @@ pub enum Text {
             reason = "Printed by uninstall.cmd; the archive source pin checks this copy."
         )
     )]
-    CleanupArchiveExit, // CHINESE PENDING: archive script copy.
+    CleanupArchiveExit,
     #[cfg_attr(
         not(test),
         expect(
@@ -351,7 +351,7 @@ pub enum Text {
             reason = "Printed by uninstall.cmd; the archive source pin checks this copy."
         )
     )]
-    CleanupArchiveReady, // CHINESE PENDING: archive script copy.
+    CleanupArchiveReady,
     #[cfg_attr(
         not(test),
         expect(
@@ -359,12 +359,11 @@ pub enum Text {
             reason = "Printed by uninstall.cmd; the archive source pin checks this copy."
         )
     )]
-    CleanupArchiveIncomplete, // CHINESE PENDING: archive script copy.
+    CleanupArchiveIncomplete,
 
-    CleanupRecovery, // CHINESE PENDING
-    CleanupRuntime,  // CHINESE PENDING
+    CleanupRecovery,
+    CleanupRuntime,
 
-    // CHINESE PENDING: uninstall cleanup command vocabulary.
     CleanupRemoved,
     CleanupAbsent,
     CleanupLeft,
@@ -4585,29 +4584,75 @@ impl Text {
                 "Move Folio out of App Translocation before installing hooks.",
                 "将 Folio 移出 App Translocation 后再安装 hook。",
             ),
-            Self::CleanupRecovery => "left (dated recovery copies of user configuration are kept)", // CHINESE PENDING
-            Self::CleanupRuntime => {
-                "left (OS runtime lock files are kept to preserve single-instance exclusion)"
-            } // CHINESE PENDING
-            Self::CleanupArchiveExit => "Cleanup exit code:", // CHINESE PENDING
-            Self::CleanupArchiveReady => {
-                "You can now delete the Folio application folder. Your settings and data were kept."
-            } // CHINESE PENDING
-            Self::CleanupArchiveIncomplete => {
-                "Cleanup did not complete. Read the result above before deleting the folder."
-            } // CHINESE PENDING
-            Self::CleanupRemoved => "removed",                // CHINESE PENDING
-            Self::CleanupAbsent => "not present",             // CHINESE PENDING
-            Self::CleanupLeft => "left (belongs to another existing copy):", // CHINESE PENDING
-            Self::CleanupRefused => "refused",                // CHINESE PENDING
-            Self::CleanupRoot => "An absolute, verified cleanup root is required.", // CHINESE PENDING
-            Self::CleanupRunning => "A Folio instance is running; nothing was changed.", // CHINESE PENDING
-            Self::CleanupBusy => "A process holds Folio data; nothing was changed", // CHINESE PENDING
-            Self::CleanupUnexpected => "The remover returned an unexpected outcome.", // CHINESE PENDING
-            Self::CleanupApplication => "The application folder cannot be purged.", // CHINESE PENDING
-            Self::CleanupLink => "A symlink or junction was found; the root was left unchanged.", // CHINESE PENDING
-            Self::CleanupUsage => "Use folio --uninstall-cleanup [--purge].", // CHINESE PENDING
-            Self::CleanupSystemUnknown => "The registration could not be read.", // CHINESE PENDING
+            Self::CleanupRecovery => pick(
+                lang,
+                "left (dated recovery copies of user configuration are kept)",
+                "已保留（带日期的配置备份不删除）",
+            ),
+            Self::CleanupRuntime => pick(
+                lang,
+                "left (OS runtime lock files are kept to preserve single-instance exclusion)",
+                "已保留（运行时锁文件用于单实例互斥）",
+            ),
+            Self::CleanupArchiveExit => pick(lang, "Cleanup exit code:", "清理退出码："),
+            Self::CleanupArchiveReady => pick(
+                lang,
+                "You can now delete the Folio application folder. Your settings and data were kept.",
+                "现在可以删除 Folio 应用文件夹。设置和数据已保留。",
+            ),
+            Self::CleanupArchiveIncomplete => pick(
+                lang,
+                "Cleanup did not complete. Read the result above before deleting the folder.",
+                "清理未完成。删除文件夹前请查看上方结果。",
+            ),
+            Self::CleanupRemoved => pick(lang, "removed", "已移除"),
+            Self::CleanupAbsent => pick(lang, "not present", "不存在"),
+            Self::CleanupLeft => pick(
+                lang,
+                "left (belongs to another existing copy):",
+                "已保留（属于另一份 Folio）：",
+            ),
+            Self::CleanupRefused => pick(lang, "refused", "未能移除"),
+            Self::CleanupRoot => pick(
+                lang,
+                "An absolute, verified cleanup root is required.",
+                "需要经过验证的绝对路径作为清理根目录。",
+            ),
+            Self::CleanupRunning => pick(
+                lang,
+                "A Folio instance is running; nothing was changed.",
+                "Folio 正在运行，未做任何更改。",
+            ),
+            Self::CleanupBusy => pick(
+                lang,
+                "A process holds Folio data; nothing was changed",
+                "有进程持有 Folio 数据，未做任何更改",
+            ),
+            Self::CleanupUnexpected => pick(
+                lang,
+                "The remover returned an unexpected outcome.",
+                "清理操作返回了意外结果。",
+            ),
+            Self::CleanupApplication => pick(
+                lang,
+                "The application folder cannot be purged.",
+                "应用程序文件夹不能被清除。",
+            ),
+            Self::CleanupLink => pick(
+                lang,
+                "A symlink or junction was found; the root was left unchanged.",
+                "发现符号链接或连接点，根目录未更改。",
+            ),
+            Self::CleanupUsage => pick(
+                lang,
+                "Use folio --uninstall-cleanup [--purge].",
+                "用法：folio --uninstall-cleanup [--purge]",
+            ),
+            Self::CleanupSystemUnknown => pick(
+                lang,
+                "The registration could not be read.",
+                "无法读取注册信息。",
+            ),
             Self::AgentHooksOwnerUnknown => pick(
                 lang,
                 "The hook executable’s owner could not be verified.",
@@ -6096,42 +6141,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 34] = [
-        (Self::CleanupArchiveExit, HostPlatform::Windows),
-        (Self::CleanupArchiveExit, HostPlatform::MacOs),
-        (Self::CleanupArchiveReady, HostPlatform::Windows),
-        (Self::CleanupArchiveReady, HostPlatform::MacOs),
-        (Self::CleanupArchiveIncomplete, HostPlatform::Windows),
-        (Self::CleanupArchiveIncomplete, HostPlatform::MacOs),
-        (Self::CleanupRecovery, HostPlatform::Windows),
-        (Self::CleanupRecovery, HostPlatform::MacOs),
-        (Self::CleanupRuntime, HostPlatform::Windows),
-        (Self::CleanupRuntime, HostPlatform::MacOs),
-        (Self::CleanupRemoved, HostPlatform::Windows),
-        (Self::CleanupRemoved, HostPlatform::MacOs),
-        (Self::CleanupAbsent, HostPlatform::Windows),
-        (Self::CleanupAbsent, HostPlatform::MacOs),
-        (Self::CleanupLeft, HostPlatform::Windows),
-        (Self::CleanupLeft, HostPlatform::MacOs),
-        (Self::CleanupRefused, HostPlatform::Windows),
-        (Self::CleanupRefused, HostPlatform::MacOs),
-        (Self::CleanupRoot, HostPlatform::Windows),
-        (Self::CleanupRoot, HostPlatform::MacOs),
-        (Self::CleanupRunning, HostPlatform::Windows),
-        (Self::CleanupRunning, HostPlatform::MacOs),
-        (Self::CleanupBusy, HostPlatform::Windows),
-        (Self::CleanupBusy, HostPlatform::MacOs),
-        (Self::CleanupUnexpected, HostPlatform::Windows),
-        (Self::CleanupUnexpected, HostPlatform::MacOs),
-        (Self::CleanupApplication, HostPlatform::Windows),
-        (Self::CleanupApplication, HostPlatform::MacOs),
-        (Self::CleanupLink, HostPlatform::Windows),
-        (Self::CleanupLink, HostPlatform::MacOs),
-        (Self::CleanupUsage, HostPlatform::Windows),
-        (Self::CleanupUsage, HostPlatform::MacOs),
-        (Self::CleanupSystemUnknown, HostPlatform::Windows),
-        (Self::CleanupSystemUnknown, HostPlatform::MacOs),
-    ];
+    const CHINESE_PENDING: [(Self, HostPlatform); 0] = [];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
