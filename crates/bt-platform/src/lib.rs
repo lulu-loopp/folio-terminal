@@ -2506,6 +2506,23 @@ pub struct MonospaceFamily {
     pub files: Vec<std::path::PathBuf>,
 }
 
+/// One installed family whose regular face covers the CJK picker probe.
+///
+/// It has the same name-and-files payload as a terminal family, but unlike the
+/// monospace picker it is selected by coverage, never by fixed-pitch metadata.
+pub type CjkFamily = MonospaceFamily;
+
+/// Small cross-script probe used to decide whether a family belongs in the CJK picker.
+pub const CJK_COVERAGE_SAMPLE: [char; 6] = ['你', '好', '日', '本', '語', '한'];
+
+/// Whether one face covers a useful script-sized part of the picker probe.
+/// Han faces must cover all five Han points; a Hangul face may answer the
+/// Hangul point instead. The renderer checks each cared-about script against
+/// the selected family, so a Chinese choice cannot draw Korean by accident.
+fn covers_cjk_sample(mut covers: impl FnMut(char) -> bool) -> bool {
+    CJK_COVERAGE_SAMPLE[..5].iter().copied().all(&mut covers) || covers(CJK_COVERAGE_SAMPLE[5])
+}
+
 /// **The page Windows installs fonts on**, and the door
 /// `open_system_fonts_page` knocks on first (user ruling 2026-08-19).
 ///
@@ -3054,6 +3071,19 @@ pub fn order_monospace_families(mut families: Vec<MonospaceFamily>) -> Vec<Monos
             },
         );
     }
+    families
+}
+
+/// Sort and de-duplicate installed CJK-capable families for the picker.
+#[must_use]
+pub fn order_cjk_families(mut families: Vec<CjkFamily>) -> Vec<CjkFamily> {
+    families.sort_by(|a, b| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    families.dedup_by(|a, b| a.name.eq_ignore_ascii_case(&b.name));
     families
 }
 
@@ -7969,6 +7999,63 @@ mod windows_impl {
         super::order_monospace_families(collect_monospace_families().unwrap_or_default())
     }
 
+    /// Every installed family whose regular collection faces cover the fixed
+    /// Han and Hangul probe used by the CJK picker.
+    #[must_use]
+    pub fn cjk_font_families() -> Vec<super::CjkFamily> {
+        super::order_cjk_families(collect_cjk_families().unwrap_or_default())
+    }
+
+    fn collect_cjk_families() -> windows::core::Result<Vec<super::CjkFamily>> {
+        let factory: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }?;
+        let mut collection: Option<IDWriteFontCollection> = None;
+        unsafe { factory.GetSystemFontCollection(&mut collection, false) }?;
+        let Some(collection) = collection else {
+            return Ok(Vec::new());
+        };
+
+        let locale = super::os_ui_language();
+        let mut families = Vec::new();
+        for index in 0..unsafe { collection.GetFontFamilyCount() } {
+            let Ok(family) = (unsafe { collection.GetFontFamily(index) }) else {
+                continue;
+            };
+            let mut files = Vec::new();
+            let mut covers_probe = false;
+            for face_index in 0..unsafe { family.GetFontCount() } {
+                let Ok(font) = (unsafe { family.GetFont(face_index) }) else {
+                    continue;
+                };
+                let covers_face = super::covers_cjk_sample(|character| {
+                    unsafe { font.HasCharacter(character as u32) }
+                        .is_ok_and(|covered| covered.as_bool())
+                });
+                if !covers_face {
+                    continue;
+                }
+                covers_probe = true;
+                let Ok(face) = (unsafe { font.CreateFontFace() }) else {
+                    continue;
+                };
+                for path in font_face_files(&face) {
+                    if !files.contains(&path) {
+                        files.push(path);
+                    }
+                }
+            }
+            if !covers_probe || files.is_empty() {
+                continue;
+            }
+            let Ok(names) = (unsafe { family.GetFamilyNames() }) else {
+                continue;
+            };
+            if let Some(name) = localized_string(&names, &locale) {
+                families.push(super::CjkFamily { name, files });
+            }
+        }
+        Ok(families)
+    }
+
     fn collect_monospace_families() -> windows::core::Result<Vec<super::MonospaceFamily>> {
         let factory: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }?;
         let mut collection: Option<IDWriteFontCollection> = None;
@@ -10390,7 +10477,7 @@ pub fn dock_badge_label(progress: TaskbarProgress) -> Option<String> {
 pub use windows_impl::{
     Compositor, CustomWindowFrame, DirChange, DirWatch, FilePickKind, FolderPicker, ImagePicker,
     ImeSystemCaret, MathContextMenu, Notifier, SystemSettingsWatch, Taskbar, adopt_parent_console,
-    announce_explorer_menu_change, apartments_left, cancel_composition,
+    announce_explorer_menu_change, apartments_left, cancel_composition, cjk_font_families,
     client_area_animation_enabled, clipboard_text, cloaked_from_attribute, current_thread_priority,
     current_user_registry_string, current_user_registry_subkeys, detach_console,
     directory_folds_case, documents_directory, dpi_at, exposed_from_probe, exposure_probe_points,
@@ -10471,7 +10558,7 @@ pub use portable_impl::{DirChange, DirWatch};
 /// `macos_fonts` now answer them for a Mac. A third platform still meets the
 /// refusal and the one-row list.
 #[cfg(all(not(windows), not(target_os = "macos")))]
-pub use portable_impl::{monospace_font_families, recycle};
+pub use portable_impl::{cjk_font_families, monospace_font_families, recycle};
 
 /// **The window and the screen doors, on a platform that has neither** — the
 /// twenty-two names [`macos_impl`] answers for a Mac and this module still
@@ -11028,7 +11115,7 @@ pub use macos_files::recycle;
 mod macos_fonts;
 
 #[cfg(target_os = "macos")]
-pub use macos_fonts::monospace_font_families;
+pub use macos_fonts::{cjk_font_families, monospace_font_families};
 
 /// **The application menu bar, over `NSMenu`** (M3-2).
 ///
@@ -14281,6 +14368,7 @@ mod macos_process_door_tests {
         for (door, macos_arm, module) in [
             ("recycle", MACOS_FILES, "macos_files"),
             ("monospace_font_families", MACOS_FONTS, "macos_fonts"),
+            ("cjk_font_families", MACOS_FONTS, "macos_fonts"),
         ] {
             let attributes = attributes_above(PORTABLE, &format!("pub fn {door}("));
             assert!(
@@ -14297,7 +14385,7 @@ mod macos_process_door_tests {
         assert!(
             root.contains(
                 "#[cfg(all(not(windows), not(target_os = \"macos\")))]\n\
-                 pub use portable_impl::{monospace_font_families, recycle};"
+                 pub use portable_impl::{cjk_font_families, monospace_font_families, recycle};"
             ),
             "the portable re-export is the one a third platform still meets"
         );
@@ -14307,7 +14395,8 @@ mod macos_process_door_tests {
         );
         assert!(
             root.contains(
-                "#[cfg(target_os = \"macos\")]\npub use macos_fonts::monospace_font_families;"
+                "#[cfg(target_os = \"macos\")]\n\
+                 pub use macos_fonts::{cjk_font_families, monospace_font_families};"
             ),
             "macOS takes its font list from the CoreText arm"
         );
@@ -14362,6 +14451,11 @@ mod macos_process_door_tests {
             signature(windows_arm, "monospace_font_families"),
             signature(MACOS_FONTS, "monospace_font_families"),
             "the font list is two different doors"
+        );
+        assert_eq!(
+            signature(windows_arm, "cjk_font_families"),
+            signature(MACOS_FONTS, "cjk_font_families"),
+            "the CJK font list is two different doors"
         );
     }
 
@@ -15836,7 +15930,9 @@ mod win32_error_tests {
 
 #[cfg(test)]
 mod monospace_family_tests {
-    use super::{DEFAULT_MONOSPACE_FAMILY, MonospaceFamily, order_monospace_families};
+    use super::{
+        DEFAULT_MONOSPACE_FAMILY, MonospaceFamily, order_cjk_families, order_monospace_families,
+    };
 
     fn named(name: &str) -> MonospaceFamily {
         MonospaceFamily {
@@ -15849,6 +15945,17 @@ mod monospace_family_tests {
 
     fn names(families: &[MonospaceFamily]) -> Vec<&str> {
         families.iter().map(|f| f.name.as_str()).collect()
+    }
+
+    #[test]
+    fn the_cjk_family_list_is_sorted_and_deduplicated_without_a_synthetic_face() {
+        let ordered = order_cjk_families(vec![
+            named("SimSun"),
+            named("Microsoft YaHei UI"),
+            named("simsun"),
+        ]);
+        assert_eq!(names(&ordered), vec!["Microsoft YaHei UI", "SimSun"]);
+        assert!(ordered.iter().all(|family| !family.name.is_empty()));
     }
 
     /// PIN — the list is sorted case-insensitively, so the row a user is looking
@@ -15968,7 +16075,7 @@ mod monospace_family_tests {
 /// on. Windows only, because there is nothing to enumerate elsewhere.
 #[cfg(all(test, windows))]
 mod monospace_enumeration_tests {
-    use super::{DEFAULT_MONOSPACE_FAMILY, monospace_font_families};
+    use super::{DEFAULT_MONOSPACE_FAMILY, cjk_font_families, monospace_font_families};
 
     /// PIN — a real Windows answers with families that can actually be loaded.
     ///
@@ -16006,6 +16113,24 @@ mod monospace_enumeration_tests {
                     family.name
                 );
             }
+        }
+    }
+
+    #[test]
+    fn the_machines_cjk_families_are_named_and_locatable() {
+        let families = cjk_font_families();
+        assert!(
+            !families.is_empty(),
+            "Windows exposes at least one CJK family"
+        );
+        for family in families {
+            assert!(!family.name.trim().is_empty());
+            assert!(
+                !family.files.is_empty(),
+                "{} has no loadable file",
+                family.name
+            );
+            assert!(family.files.iter().all(|path| path.is_absolute()));
         }
     }
 }

@@ -22,6 +22,10 @@ All notable changes to Folio are recorded here. The format follows
   was refused, with the reason on standard error. `docs/install.md` has the
   per-channel steps.
 
+- **Terminal settings now include a separate CJK font choice.** Automatic uses
+  Folio's platform defaults, and an installed Chinese, Japanese or Korean face
+  can be chosen without changing the monospace font used for ASCII.
+
 ### Changed
 
 - **When Folio's window pauses, its own log now names the call it was inside.**
@@ -44,6 +48,10 @@ All notable changes to Folio are recorded here. The format follows
   both ways and the two recordings compared.
 
 ### Fixed
+
+- **Chinese terminal text no longer falls through to SimSun on Windows or
+  GB18030 Bitmap on macOS.** Folio now chooses the terminal grid's CJK face
+  explicitly from its platform chain.
 
 - **A local page or PDF whose path contains Chinese — or a space with `{`, `}`,
   `^` or `` ` `` in the name — now opens in the preview, instead of being turned
@@ -87,6 +95,7 @@ All notable changes to Folio are recorded here. The format follows
   needed one pattern rewritten before the pure-Rust regex engine Folio uses
   would take it. The rewritten line, what it was, and why it means the same
   thing are recorded in `assets/syntaxes/README.md`, beside the grammar itself.
+
 
 ## 0.4.2-preview — 2026-09-18
 

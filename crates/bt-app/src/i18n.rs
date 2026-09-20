@@ -463,6 +463,7 @@ pub enum Text {
     /// "font" in a terminal's settings is ambiguous and the ambiguity is the
     /// whole complaint a reader would have.
     RowTerminalFont,
+    RowTerminalCjkFont,
     RowFontSize,
     /// The Terminal page's first row, and therefore the row that puts that page
     /// in the rail at all.
@@ -527,11 +528,13 @@ pub enum Text {
     DescDefaultProfile,
     DescLanguage,
     DescTerminalFont,
+    DescTerminalCjkFont,
     DescFontSize,
 
     /// Shared by Theme and Language, which is the point: it is one word meaning
     /// one thing — "ask Windows" — in both rows.
     OptionSystem,
+    OptionAutomatic,
     OptionLight,
     OptionDark,
     OptionCursorBar,
@@ -2909,6 +2912,7 @@ impl Text {
             Self::RowDefaultProfile => pick(lang, "Default profile", "默认配置文件"),
             Self::RowLanguage => pick(lang, "Language", "语言"),
             Self::RowTerminalFont => pick(lang, "Terminal font", "终端字体"),
+            Self::RowTerminalCjkFont => pick(lang, "CJK font", "中日韩字体"),
             Self::RowFontSize => pick(lang, "Font size", "字号"),
             Self::RowPsReadLine => pick(lang, "PSReadLine patch", "PSReadLine 补丁"),
 
@@ -3043,6 +3047,11 @@ impl Text {
                 "The font terminal text is drawn in. Tabs, menus and this dialog keep their own.",
                 "终端文字使用的字体。标签、菜单和这个对话框保持各自的字体。",
             ),
+            Self::DescTerminalCjkFont => pick(
+                lang,
+                "The font for CJK text. Automatic is the platform's default.",
+                "中日韩文字使用的字体。设为自动时使用系统默认。",
+            ),
             Self::DescFontSize => pick(
                 lang,
                 "The size of terminal text, before your display's scaling is applied.",
@@ -3131,6 +3140,7 @@ impl Text {
             Self::OptionFitTile => pick(lang, "Tile", "平铺"),
 
             Self::OptionSystem => pick(lang, "System", "系统"),
+            Self::OptionAutomatic => pick(lang, "Automatic", "自动"),
             Self::OptionLight => pick(lang, "Light", "浅色"),
             Self::OptionDark => pick(lang, "Dark", "深色"),
             Self::OptionCursorBar => pick(lang, "Bar", "竖线"),
@@ -4988,7 +4998,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 685] = [
+    pub const ALL: [Self; 688] = [
         Self::PastePathEncoding,
         Self::PastePathControl,
         Self::PastePathPowerShellQuote,
@@ -5059,6 +5069,7 @@ impl Text {
         Self::RowDefaultProfile,
         Self::RowLanguage,
         Self::RowTerminalFont,
+        Self::RowTerminalCjkFont,
         Self::RowFontSize,
         Self::RowPsReadLine,
         Self::DescTheme,
@@ -5079,8 +5090,10 @@ impl Text {
         Self::DescDefaultProfile,
         Self::DescLanguage,
         Self::DescTerminalFont,
+        Self::DescTerminalCjkFont,
         Self::DescFontSize,
         Self::OptionSystem,
+        Self::OptionAutomatic,
         Self::OptionLight,
         Self::OptionDark,
         Self::OptionCursorBar,
