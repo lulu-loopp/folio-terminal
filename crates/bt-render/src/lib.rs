@@ -20005,22 +20005,23 @@ mod tests {
         );
     }
 
-    /// PIN (owner's report 2026-09-14, T-MATH-TOOLS-SEAT): **a picture that has
-    /// not caught up draws no marks, rather than another block's.**
+    /// PIN (owner's report 2026-09-14, re-ruled 2026-09-20 by
+    /// T-MARKS-FRAME-IN-HAND): **the band is named and the picture is the frame
+    /// being drawn.**
     ///
-    /// This is the defect itself, in one line. The marks are built in `bt_app`
-    /// from a pane's *last presented* frame, and the picture that lights a band
-    /// is presented after the gesture that lit it — so the frame in hand at the
-    /// moment the pointer crosses onto a formula is the one from before it
-    /// crossed. Asked "where do this band's marks stand" of that frame, the only
-    /// true answer is "this frame does not have that band lit".
+    /// The 2026-09-14 premise was that marks appear on hover and then stand
+    /// still, so a previous picture was allowed to answer nothing for one frame.
+    /// The band now also travels while its height changes. The named lookup is
+    /// unchanged — a neighbouring lit block can never answer — but the caller
+    /// must ask the exact picture being drawn, so there is no honest stale-frame
+    /// gap left to preserve.
     ///
     /// MUTATION: answer with whichever placement in the frame carries
     /// `toolbar_visible` — the reading this ticket removed — and both assertions
     /// return the *other* band's boxes. That is the owner's screenshot: the
     /// ground on the block under the pointer, the marks one block above it.
     #[test]
-    fn a_frame_that_has_not_caught_up_places_no_marks_at_all() {
+    fn the_band_is_named_and_the_picture_is_the_frame_being_drawn() {
         let stale = seat_test_frame(0);
         let ahead = seat_test_frame(1);
 
@@ -20032,6 +20033,84 @@ mod tests {
             seat_test_boxes(&ahead, &stale.math_blocks[0].anchor).is_none(),
             "and the band it left is not lit in the picture it moved to"
         );
+    }
+
+    fn travelling_band_frames() -> Vec<ViewportFrame> {
+        [40_i64, 52, 68, 80]
+            .into_iter()
+            .map(|height_px| {
+                let mut frame = seat_test_frame(0);
+                let placement = &mut frame.math_blocks[0];
+                placement.clip_height_subpixels = height_px * SUBPIXELS_PER_PX;
+                placement.artifact.height_subpixels = height_px * SUBPIXELS_PER_PX;
+                placement.artifact.height_px = height_px as u32;
+                frame
+            })
+            .collect()
+    }
+
+    /// VALUE (2026-09-20, T-MARKS-FRAME-IN-HAND): every placed pair is derived
+    /// from the same changing `ViewportFrame` whose band it stands on, including
+    /// the first and landing frames. The bt-app test with this name pins the
+    /// handoff into this pure function.
+    #[test]
+    fn the_marks_stand_on_the_band_of_the_frame_being_drawn() {
+        let frames = travelling_band_frames();
+        let anchor = frames[0].math_blocks[0].anchor.clone();
+        for (index, frame) in frames.iter().enumerate() {
+            let placed = math_tool_boxes_for(fade_metrics(), seat_test_seat(), frame, &anchor)
+                .expect("the changing frame carries its named lit band");
+            let band = math_band_face_for(fade_metrics(), seat_test_seat(), frame, &anchor)
+                .expect("the changing frame carries its named band");
+            assert_eq!(placed.block, band.block, "frame {index}");
+        }
+    }
+
+    /// VALUE (2026-09-20, T-MARKS-FRAME-IN-HAND): no frame's mark rectangles
+    /// equal rectangles derived from another height, including at the landing.
+    #[test]
+    fn the_landing_frame_needs_no_snap() {
+        let frames = travelling_band_frames();
+        let anchor = frames[0].math_blocks[0].anchor.clone();
+        let placed: Vec<_> = frames
+            .iter()
+            .map(|frame| {
+                math_tool_boxes_for(fade_metrics(), seat_test_seat(), frame, &anchor).unwrap()
+            })
+            .collect();
+        for (index, boxes) in placed.iter().enumerate() {
+            for (other, stale) in placed
+                .iter()
+                .enumerate()
+                .filter(|(other, _)| *other != index)
+            {
+                assert_ne!(
+                    boxes.source, stale.source,
+                    "frame {index} borrowed frame {other}'s source mark"
+                );
+                assert_ne!(
+                    boxes.copy, stale.copy,
+                    "frame {index} borrowed frame {other}'s copy mark"
+                );
+            }
+        }
+    }
+
+    /// VALUE regression guard, not a reproduction (2026-09-20,
+    /// T-MARKS-FRAME-IN-HAND): the old code already read both lanes from one
+    /// stale frame. This preserves their agreement while the owner moves to the
+    /// frame being drawn.
+    #[test]
+    fn the_source_face_and_the_marks_read_one_frame() {
+        let frames = travelling_band_frames();
+        let anchor = frames[0].math_blocks[0].anchor.clone();
+        for (index, frame) in frames.iter().enumerate() {
+            let marks = math_tool_boxes_for(fade_metrics(), seat_test_seat(), frame, &anchor)
+                .expect("the frame carries its marks");
+            let face = math_band_face_for(fade_metrics(), seat_test_seat(), frame, &anchor)
+                .expect("the frame carries its source-face geometry");
+            assert_eq!(marks.block, face.block, "frame {index}");
+        }
     }
 
     /// PIN (owner's report 2026-09-14, T-MATH-TOOLS-SEAT): **the name is the
