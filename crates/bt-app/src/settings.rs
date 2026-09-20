@@ -4995,6 +4995,15 @@ impl SettingsRow {
                 Some(false) => values.psreadline_remove_available,
                 None => false,
             },
+            // **The three agent rows, when the file is one this build will not edit** (re-review
+            // f): a link out of the agent's own folder, a file shared by hard links, a read-only
+            // one. `PsReadLine`'s rule above, for its reason — the row's line already says what
+            // the machine is, and a switch that stayed pressable would be offering an action the
+            // line says will not happen. Neither `On` nor `Off`: there is no press that reaches
+            // that file, in either direction.
+            Self::ClaudeHooks => values.agent_config_refusals[0].is_none(),
+            Self::CodexNotify => values.agent_config_refusals[1].is_none(),
+            Self::CopilotHooks => values.agent_config_refusals[2].is_none(),
             // **`ContextMenu` was the third such row for one afternoon** (user
             // ruling 2026-09-07) and is not one now: its greyed rung went with
             // the picker. A machine that cannot reach the first page can still
@@ -24133,6 +24142,17 @@ mod tests {
                 }),
                 plain
             );
+            // **And the switch beside it takes no press in either direction** (re-review f).
+            // A row that says "Folio will not write to this file" and still offered `On` would be
+            // offering an action it has just said it will not perform.
+            let refused = SettingsValues {
+                agent_config_refusals: refusals,
+                ..values()
+            };
+            for option in 0..row.option_count() {
+                assert!(row.option_enabled(option, &values()), "{row:?} {option}");
+                assert!(!row.option_enabled(option, &refused), "{row:?} {option}");
+            }
         }
     }
 

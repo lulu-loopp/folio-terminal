@@ -221,14 +221,18 @@ pub(crate) fn row_state() -> (bool, Option<&'static str>) {
 /// machine it runs on.
 #[must_use]
 fn state_at(path: &Path) -> State {
-    let text = match crate::attention_hooks::standing(path) {
+    let config = match crate::attention_hooks::Config::resolve(path) {
+        Ok(config) => config,
+        // Read, and not ours to change. The row says which file it is looking at.
+        Err(crate::attention_hooks::Unresolved::Refused(reason)) => return State::Refused(reason),
+        Err(crate::attention_hooks::Unresolved::Unreadable) => return State::Unreadable,
+    };
+    let text = match config.standing() {
         // No file is the same answer to the only question being asked.
         crate::attention_hooks::Standing::Nothing => return State::Absent,
         // **Not `Absent`.** There is a file, and a row that said "not installed" about it would
         // offer to write over one this build never read.
         crate::attention_hooks::Standing::Unreadable => return State::Unreadable,
-        // Nor `Unreadable`: this one was read, and the row says why it is not ours to change.
-        crate::attention_hooks::Standing::Refused(reason) => return State::Refused(reason),
         crate::attention_hooks::Standing::Text(text) => text,
     };
     match text.parse::<DocumentMut>() {
@@ -283,10 +287,16 @@ fn notify_owner(document: &DocumentMut) -> Result<Option<PathBuf>, &'static str>
     if !folio {
         return Ok(None);
     }
+    // The verb said *a* Folio; the program's own name says whether it is one at all. A `notify` of
+    // somebody's own that speaks this verb is theirs, and `declares_somebody_else` then keeps this
+    // module's oldest promise about it (re-review B2).
+    let Some(owner) = ownership::folio_operand(&words[0]) else {
+        return Ok(None);
+    };
     if words.len() != 4 || words[2] != format!("{CODEX}:{EVENT}") || words[3] != JSON_FLAG {
         return Err(crate::i18n::Text::AgentHooksSchemaUnknown.text());
     }
-    Ok(Some(PathBuf::from(&words[0])))
+    Ok(Some(owner))
 }
 
 /// **Whether somebody else's program is on the key.**
@@ -348,14 +358,32 @@ pub(crate) fn apply(decision: Decision, exe: &Path) -> Outcome {
 /// The same act on a named file — the seam the tests press, so that what they pin is this function
 /// and not a `config.toml` belonging to whoever runs them.
 pub(crate) fn apply_at(path: &Path, decision: Decision, exe: &Path, data: &Path) -> Outcome {
+    match crate::attention_hooks::Config::resolve(path) {
+        Ok(config) => apply_resolved(&config, decision, exe, data),
+        Err(crate::attention_hooks::Unresolved::Refused(reason)) => Outcome::Refused(reason),
+        Err(crate::attention_hooks::Unresolved::Unreadable) => Outcome::Refused(UNREADABLE),
+    }
+}
+
+/// The same act on a configuration this operation has already resolved.
+///
+/// **Everything below the entry takes this value.** The path was resolved once, at the top; the
+/// read, the dated copy, the replace and the removal all name that one answer, and there is no
+/// second resolution on this path for a repointed link to slip through (re-review B1).
+pub(crate) fn apply_resolved(
+    config: &crate::attention_hooks::Config,
+    decision: Decision,
+    exe: &Path,
+    data: &Path,
+) -> Outcome {
     if let Err(reason) = ownership::stable_executable(Some(exe)) {
         return Outcome::Refused(reason);
     }
-    if !path.is_absolute() {
+    if !config.named().is_absolute() {
         return Outcome::Refused(crate::i18n::Text::AgentHooksRootUnstable.text());
     }
     let install = decision.installs();
-    let existing = match crate::attention_hooks::standing(path) {
+    let existing = match config.standing() {
         crate::attention_hooks::Standing::Text(text) => text,
         // Nothing there yet: the install creates the file, and there is nothing to keep beside it.
         crate::attention_hooks::Standing::Nothing => String::new(),
@@ -363,8 +391,6 @@ pub(crate) fn apply_at(path: &Path, decision: Decision, exe: &Path, data: &Path)
         // fall back to parses as an empty document, so the refusal below never fired and the write
         // went ahead over somebody's own configuration — release audit 2026-09-16 (C-3).
         crate::attention_hooks::Standing::Unreadable => return Outcome::Refused(UNREADABLE),
-        // The same refusal, carrying the filesystem's own reason rather than this one.
-        crate::attention_hooks::Standing::Refused(reason) => return Outcome::Refused(reason),
     };
     let mut document = match existing.parse::<DocumentMut>() {
         Ok(document) => document,
@@ -397,7 +423,11 @@ pub(crate) fn apply_at(path: &Path, decision: Decision, exe: &Path, data: &Path)
         remove_from(&mut document, exe)
     };
     let _record = if install {
-        match ownership::record(data, path.parent().expect("absolute config"), "codex") {
+        match ownership::record(
+            data,
+            config.named().parent().expect("absolute config"),
+            "codex",
+        ) {
             Ok(lock) => Some(lock),
             Err(reason) => return Outcome::Refused(reason),
         }
@@ -413,18 +443,16 @@ pub(crate) fn apply_at(path: &Path, decision: Decision, exe: &Path, data: &Path)
     }
     // The atomic write, mandatory backup, and unsafe-path refusal are all
     // `attention_hooks::land`'s, said once for all three installers.
-    match crate::attention_hooks::land(
-        path,
-        &existing,
-        "toml",
-        rendered(&document, &existing).as_bytes(),
-    ) {
+    match config.land(&existing, "toml", rendered(&document, &existing).as_bytes()) {
         crate::attention_hooks::Landing::Landed => {}
         crate::attention_hooks::Landing::NoDirectory => {
             return Outcome::Refused("the codex configuration directory could not be created");
         }
         crate::attention_hooks::Landing::NoBackup => {
             return Outcome::Refused(crate::attention_hooks::NO_BACKUP);
+        }
+        crate::attention_hooks::Landing::Changed => {
+            return Outcome::Refused(crate::i18n::Text::AgentConfigChanged.text());
         }
         crate::attention_hooks::Landing::NotWritten => {
             return Outcome::Refused("the codex configuration file could not be written");
@@ -469,10 +497,15 @@ mod tests {
             .join("../../target/tb-tests")
             .join(concat!("codex-", "two-copies"));
         std::fs::create_dir_all(&root).unwrap();
-        let a = root.join("A space $ ` ' 中文.exe");
-        let b = root.join("B.exe");
-        std::fs::write(&a, b"A").unwrap();
-        std::fs::write(&b, b"B").unwrap();
+        // **Two folders, one file name.** An operand is Folio's only if its file name is one
+        // Folio installs itself under, which is how two real copies differ: same program, two
+        // places. The odd characters this fixture exists for move to the folder.
+        let a = root.join("A space $ ` ' 中文").join("folio.exe");
+        let b = root.join("B").join("folio.exe");
+        for copy in [&a, &b] {
+            std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+            std::fs::write(copy, b"a copy of Folio").unwrap();
+        }
         let path = root.join("config.toml");
         let _ = std::fs::remove_file(&path);
         assert_eq!(apply_to(&path, true, &a), Outcome::Installed);

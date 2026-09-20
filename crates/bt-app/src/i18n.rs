@@ -1956,6 +1956,7 @@ pub enum Text {
     AgentConfigLink,
     AgentConfigHardLink,
     AgentConfigReadOnly,
+    AgentConfigChanged,
     ClaudeHooksFailedToast,
     // ── the focus card's height (§7.1.6b′, user ruling 2026-08-21) ──────────
     //
@@ -4591,6 +4592,10 @@ impl Text {
                 "This file is read-only, or is not a regular file.",
                 "此文件为只读，或不是普通文件。",
             ),
+            // CHINESE PENDING — T-B follow-ups; English until owner copy review.
+            Self::AgentConfigChanged => {
+                "The file changed while Folio was working on it. Try again."
+            }
             Self::ClaudeHooksFailedToast => pick(
                 lang,
                 "Claude Code's settings were not changed",
@@ -5167,7 +5172,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 722] = [
+    pub const ALL: [Self; 723] = [
         Self::PastePathEncoding,
         Self::PastePathControl,
         Self::PastePathPowerShellQuote,
@@ -5725,6 +5730,7 @@ impl Text {
         Self::AgentConfigLink,
         Self::AgentConfigHardLink,
         Self::AgentConfigReadOnly,
+        Self::AgentConfigChanged,
         Self::ClaudeHooksFailedToast,
         Self::RowFocusCardHeight,
         Self::DescFocusCardHeight,
@@ -6035,7 +6041,10 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 0] = [];
+    const CHINESE_PENDING: [(Self, HostPlatform); 2] = [
+        (Self::AgentConfigChanged, HostPlatform::Windows),
+        (Self::AgentConfigChanged, HostPlatform::MacOs),
+    ];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────

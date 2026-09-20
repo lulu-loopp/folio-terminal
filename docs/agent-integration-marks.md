@@ -16,12 +16,27 @@ different fact and still refuses: a file this build cannot read is not an entry
 it cannot claim. Copilot's `folio.json` is written whole, so an entry that is
 not Folio's there still makes the file not Folio's, under its own sentence.
 
+**Only Folio's own name is Folio's.** The verb and the family say *a* Folio
+wrote an entry; they do not say which program runs. `folio_operand` decides
+that, and it is the one place the rule is stated: the operand's own file name
+must be one Folio has ever installed itself under — `folio.exe` on Windows
+(`bt_platform::msix::PACKAGE_EXECUTABLE`) or `folio` in the macOS bundle and on
+Linux, folded for case except on `OtherUnix`. There is no legacy name: the
+product was named on 2026-08-14 and these installers were written on
+2026-08-25. All three families ask it, through `legacy_path`, `direct_path` and
+Codex's `notify_owner`, and they ask it before judging an entry's shape, so a
+stranger's argument list is never this build's business. A copy the user
+renamed is not recognised either: its marks are left alone, which is the safe
+direction.
+
 **An operand that names no file names no copy.** A relative, placeholder or
-control-character operand cannot be resolved to a copy on this machine, so it is
-not another live Folio: it is nobody's, and nobody's is removable as a mark
-"naming a file that does not exist" (design §6.2). 0.4.2 wrote a bare
-`folio.exe` whenever `current_exe()` failed, and such a machine could otherwise
-neither install nor uninstall for ever.
+control-character operand — having passed the name test — cannot be resolved to a
+copy on this machine, so it is not another live Folio: it is nobody's, and
+nobody's is removable as a mark "naming a file that does not exist" (design
+§6.2). 0.4.2 wrote a bare `folio.exe` whenever `current_exe()` failed, and such a
+machine could otherwise neither install nor uninstall for ever. A user's own
+`"mytool" attention claude-code:Stop` is not this: it never was a copy, so it is
+never nobody's.
 
 `attention_ownership::stable_executable` is the common per-copy gate on what may
 be *written*, and it is unchanged by the two rules above. An absent, relative,
@@ -35,16 +50,30 @@ bare executable name.
 
 ## Linked configuration files
 
-Folio never writes through a link it did not resolve itself. It resolves one,
-once, in `attention_hooks::editable_target`, and the decision is
-`attention_hooks::linked_target` over injected facts: **the target must be a
-regular file inside the resolved directory the configuration path names.** Then
-that target is what is read, backed up and replaced, through `land`'s atomic
-writer — metadata-preserving where a file is being replaced rather than created.
-A target that leaves the folder, a link to a directory and a link to nothing are
-refused, and the file is left byte-identical. Copilot's whole-file removal takes
-the resolved target and then the name that led to it, because leaving either
-would leave Folio's hooks firing or leave upstream a name that loads nothing.
+Folio never writes through a link it did not resolve itself, and **one
+operation resolves once**. `attention_hooks::Config::resolve` is the only door
+and `editable_target` is private behind it; the value it returns carries the
+resolved target, and the read, the dated copy, the replace and Copilot's removal
+all take that value. Nothing below an operation's entry is handed the
+configuration path, so a link repointed between the read and the write — a
+dotfiles `stow`, a profile switch — cannot make Folio write a file it never read.
+
+The decision itself is `attention_hooks::linked_target` over injected facts:
+**the target must be a regular file inside the resolved directory the
+configuration path names.** That target is read, backed up and replaced through
+`Config::land`'s atomic writer — metadata-preserving where a file is being
+replaced rather than created. A target that leaves the folder, a link to a
+directory and a link to nothing are refused, and the file is left
+byte-identical. Copilot's whole-file removal takes the resolved target and then
+the name that led to it, because leaving either would leave Folio's hooks firing
+or leave upstream a name that loads nothing.
+
+**What is replaced is what was read.** `Config::land` reads the resolved target
+again immediately before the replace and refuses (`AgentConfigChanged`, nothing
+written and no copy kept) when it no longer matches the bytes the operation was
+given — `shell_integration::replace_profile`'s rule, for its reason: an agent
+edits its own configuration as readily as a person does. This is a narrow guard,
+not a transaction: two writers can still interleave inside the replace itself.
 
 A `~/.claude` a dotfile manager has junctioned onto a managed folder is
 therefore ordinary: it installs, and — the reason this rule exists — it
@@ -53,11 +82,19 @@ are still refused by the shared T-A predicate, on the resolved target.
 
 The settings row says so. `state()` answers `Refused(reason)` for a file this
 build will not edit, which is neither `Installed` nor `Absent`: the switch would
-otherwise read `Off` over hooks that are firing and offer a press that cannot
-happen. `row_state()` gives the row both facts from that one read, and the
-sentence under the row is the filesystem predicate's own answer, said about an
-agent's configuration file rather than about a `$PROFILE`
-(`AgentConfigLink`, `AgentConfigHardLink`, `AgentConfigReadOnly`).
+otherwise read `Off` over hooks that are firing. `row_state()` gives the row both
+facts from that one read; the sentence under the row is the filesystem
+predicate's own answer, said about an agent's configuration file rather than
+about a `$PROFILE` (`AgentConfigLink`, `AgentConfigHardLink`,
+`AgentConfigReadOnly`), and the switch itself takes no press in either direction
+while it stands there — `SettingsRow::option_enabled`, the rule `PsReadLine`
+already keeps.
+
+**Editing reformats.** Claude Code's and Copilot's files are re-serialised
+whole, so an entry Folio leaves alone comes back value-identical rather than
+byte-identical: key order and whitespace are the serialiser's. The release note
+already says it (“Updating agent hooks may reformat their JSON settings; a dated
+backup is kept”). Codex keeps `toml_edit`'s preservation.
 
 ## Current upstream schemas, checked 2026-09-20
 
