@@ -6,8 +6,9 @@ use objc2_app_kit::{
 };
 
 use crate::clipboard::{
-    Candidate, ClipboardPayload, ClipboardPort, ClipboardTypes, MAX_PICTURE_BYTES, PictureBytes,
-    PictureEncoding, read_payload,
+    Candidate, ClipboardPayload, ClipboardPort, ClipboardTypes, MACOS_PICTURE_ORDER,
+    MAX_PICTURE_BYTES, PictureBytes, PictureEncoding, PictureSource, first_offered_picture,
+    read_payload,
 };
 
 struct MacClipboard {
@@ -53,47 +54,26 @@ impl ClipboardPort for MacClipboard {
             None => Candidate::Unreadable("pasteboard text acquisition failed".into()),
         }
     }
-    /// **Both shapes, best first**, copied and not decoded.
+    /// **The better of the two shapes, and only that one**, copied and not
+    /// decoded.
     ///
     /// PNG before TIFF, for the reason the Windows arm asks for its registered
     /// `PNG` first: a source that offers it has already done the encode this
     /// paste would otherwise have to do, and every screenshot on this platform
-    /// offers it.
+    /// offers it. The order is [`MACOS_PICTURE_ORDER`] and the walk that stops at
+    /// the first answer is [`first_offered_picture`] — the same two pieces the
+    /// Windows arm uses, because the choice is the same choice.
+    ///
+    /// A TIFF of a 4K screen is about 33 MB, and copying it behind a PNG that
+    /// was going to win was 33 MB the window thread spent for nothing.
     ///
     /// A type that is advertised and then hands back nothing is not an error on
     /// its own — a pasteboard item may promise a representation it declines to
-    /// render — so the rung answers `Absent` and lets the payload fall to
-    /// silence rather than raising a card about a picture nobody asked for.
+    /// render — so the walk moves to the next shape, and the rung answers
+    /// `Absent` when neither answered, letting the payload fall to silence rather
+    /// than raising a card about a picture nobody asked for.
     fn picture(&mut self) -> Candidate<Vec<PictureBytes>> {
-        // SAFETY: the two names are AppKit's own constants, and the general pasteboard is
-        // retained through acquisition; every answer is copied before it is dropped.
-        let offered = unsafe {
-            [
-                (NSPasteboardTypePNG, PictureEncoding::Png),
-                (NSPasteboardTypeTIFF, PictureEncoding::Tiff),
-            ]
-        };
-        let mut found = Vec::new();
-        for (kind, encoding) in offered {
-            let Some(data) = self.pasteboard.dataForType(kind) else {
-                continue;
-            };
-            // Asked before it is copied (review X-4): `length` is the
-            // representation's own size and reading it costs nothing, where
-            // `to_vec` is the allocation this ceiling exists to refuse.
-            if data.is_empty() || data.len() > MAX_PICTURE_BYTES {
-                continue;
-            }
-            let bytes = data.to_vec();
-            if !bytes.is_empty() {
-                found.push(PictureBytes { encoding, bytes });
-            }
-        }
-        if found.is_empty() {
-            Candidate::Absent
-        } else {
-            Candidate::Present(found)
-        }
+        first_offered_picture(&MACOS_PICTURE_ORDER, self)
     }
     fn finish(&mut self) -> Result<(), String> {
         if self.pasteboard.changeCount() == self.before {
@@ -101,6 +81,34 @@ impl ClipboardPort for MacClipboard {
         } else {
             Err("pasteboard changed during read".into())
         }
+    }
+}
+
+impl PictureSource for MacClipboard {
+    /// AppKit has no question that separates "is this shape here" from "hand it
+    /// over" the way `IsClipboardFormatAvailable` does: `dataForType` is both,
+    /// and it answers `None` for a type the board does not carry. So the default
+    /// `true` stands and [`read`](PictureSource::read) says everything.
+    fn read(&mut self, encoding: PictureEncoding) -> Option<Vec<u8>> {
+        // SAFETY: the two names are AppKit's own constants, and the general pasteboard is
+        // retained through acquisition; the answer is copied before it is dropped.
+        let kind = unsafe {
+            match encoding {
+                PictureEncoding::Png => NSPasteboardTypePNG,
+                PictureEncoding::Tiff => NSPasteboardTypeTIFF,
+                // No pasteboard type carries a Windows DIB.
+                PictureEncoding::DibV5 | PictureEncoding::Dib => return None,
+            }
+        };
+        let data = self.pasteboard.dataForType(kind)?;
+        // Asked before it is copied (review X-4): `length` is the
+        // representation's own size and reading it costs nothing, where
+        // `to_vec` is the allocation this ceiling exists to refuse.
+        if data.is_empty() || data.len() > MAX_PICTURE_BYTES {
+            return None;
+        }
+        let bytes = data.to_vec();
+        if bytes.is_empty() { None } else { Some(bytes) }
     }
 }
 

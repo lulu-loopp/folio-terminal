@@ -19,7 +19,7 @@ use windows::{
 
 use crate::clipboard::{
     Candidate, ClipboardPayload, ClipboardPort, ClipboardTypes, MAX_PICTURE_BYTES, PictureBytes,
-    PictureEncoding, read_payload,
+    PictureEncoding, PictureSource, WINDOWS_PICTURE_ORDER, first_offered_picture, read_payload,
 };
 
 /// WinUser.h standard format identifiers.
@@ -116,49 +116,72 @@ impl ClipboardPort for WindowsClipboard {
             }
         }
     }
-    /// **Every shape the source offered, best first**, copied and not decoded.
+    /// **The best shape this source will hand over, and only that one**, copied
+    /// and not decoded.
     ///
     /// `PNG` is a registered format rather than a standard one, so it is asked
     /// for by the same name the survey registered it under — and it is asked for
     /// first, because a source that offers it has already done the encode this
-    /// paste would otherwise have to do.
+    /// paste would otherwise have to do. The order is
+    /// [`WINDOWS_PICTURE_ORDER`]; the walk that stops at the first answer is
+    /// [`first_offered_picture`].
     ///
     /// A format that is advertised and then will not render is **not** an error
     /// on its own: `GetClipboardData` renders delayed formats, and a source that
-    /// can produce a `CF_DIB` but not its own `PNG` is an ordinary source. The
-    /// rung fails only when nothing at all came back, which is what the empty
-    /// list and `Absent` say between them.
+    /// can produce a `CF_DIB` but not its own `PNG` is an ordinary source — the
+    /// walk simply moves to the next shape. The rung fails only when nothing at
+    /// all came back, which is what `Absent` says.
     fn picture(&mut self) -> Candidate<Vec<PictureBytes>> {
         // SAFETY: registering a format name that is already registered answers the same
         // identifier; the open interval this object holds covers every read below.
         let png = unsafe { RegisterClipboardFormatW(w!("PNG")) };
-        let mut found = Vec::new();
-        for (format, encoding) in [
-            (png, PictureEncoding::Png),
-            (CF_DIBV5, PictureEncoding::DibV5),
-            (CF_DIB, PictureEncoding::Dib),
-        ] {
-            if format == 0 {
-                continue;
-            }
-            // SAFETY: availability is asked before the handle is, and the interval is held.
-            if unsafe { IsClipboardFormatAvailable(format) }.is_err() {
-                continue;
-            }
-            if let Some(bytes) = global_bytes(format) {
-                found.push(PictureBytes { encoding, bytes });
-            }
-        }
-        if found.is_empty() {
-            Candidate::Absent
-        } else {
-            Candidate::Present(found)
-        }
+        first_offered_picture(&WINDOWS_PICTURE_ORDER, &mut WindowsPictures { png })
     }
     fn finish(&mut self) -> Result<(), String> {
         self.opened = false;
         // SAFETY: begin successfully opened this clipboard on the calling event-loop thread.
         unsafe { CloseClipboard() }.map_err(|_| "clipboard close failed".to_owned())
+    }
+}
+
+/// **The open clipboard, answering one picture shape at a time** for
+/// [`first_offered_picture`].
+///
+/// It holds the registered `PNG` identifier because registration is a call and
+/// the walk may ask about `Png` twice — once to see whether it is offered, once
+/// to render it.
+struct WindowsPictures {
+    /// `RegisterClipboardFormatW(w!("PNG"))`, or `0` if registration failed.
+    png: u32,
+}
+
+impl WindowsPictures {
+    /// The clipboard format identifier this shape is carried in, or `None` when
+    /// no Windows clipboard format carries it. `Tiff` is macOS' shape; a `0`
+    /// identifier is a registration that failed, which is the same answer as a
+    /// format the board does not have.
+    fn format(&self, encoding: PictureEncoding) -> Option<u32> {
+        let format = match encoding {
+            PictureEncoding::Png => self.png,
+            PictureEncoding::DibV5 => CF_DIBV5,
+            PictureEncoding::Dib => CF_DIB,
+            PictureEncoding::Tiff => return None,
+        };
+        (format != 0).then_some(format)
+    }
+}
+
+impl PictureSource for WindowsPictures {
+    fn offers(&mut self, encoding: PictureEncoding) -> bool {
+        let Some(format) = self.format(encoding) else {
+            return false;
+        };
+        // SAFETY: an availability query renders nothing and reads no content; the open
+        // interval `WindowsClipboard` holds covers it.
+        unsafe { IsClipboardFormatAvailable(format) }.is_ok()
+    }
+    fn read(&mut self, encoding: PictureEncoding) -> Option<Vec<u8>> {
+        global_bytes(self.format(encoding)?)
     }
 }
 
