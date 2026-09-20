@@ -70,6 +70,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (31, migrate_settings_v31_to_v32),
     (32, migrate_settings_v32_to_v33),
     (33, migrate_settings_v33_to_v34),
+    (34, migrate_settings_v34_to_v35),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -804,6 +805,18 @@ fn migrate_settings_v33_to_v34(mut value: Value) -> Value {
     if let Some(object) = value.as_object_mut() {
         object.insert("schema_version".to_owned(), Value::from(34));
         object.insert("option_sends_alt".to_owned(), Value::from(false));
+    }
+    value
+}
+
+/// v34 -> v35: the terminal grid's separately chosen CJK family.
+///
+/// Empty is the automatic platform chain and therefore the only honest value
+/// for a document whose reader was never offered this question.
+fn migrate_settings_v34_to_v35(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(35));
+        object.insert("terminal_cjk_font_family".to_owned(), Value::from(""));
     }
     value
 }
@@ -2675,6 +2688,27 @@ mod tests {
         let absent: crate::SettingsV1 =
             serde_json::from_value(written).expect("this key has a default");
         assert_eq!(absent.launch_opens, crate::LaunchOpensV1::NewWindow);
+    }
+
+    /// RED (issue #10) — a v34 file acquires automatic CJK selection without
+    /// changing a neighbouring preference the reader chose.
+    #[test]
+    fn real_settings_v34_to_v35_migration_adds_an_automatic_cjk_family() {
+        let migrated = migrate_value(
+            json!({
+                "schema_version": 34,
+                "terminal_font_family": "Cascadia Mono",
+                "option_sends_alt": true
+            }),
+            34,
+            35,
+            SETTINGS_MIGRATIONS,
+        )
+        .unwrap();
+        assert_eq!(migrated["schema_version"], json!(35));
+        assert_eq!(migrated["terminal_cjk_font_family"], json!(""));
+        assert_eq!(migrated["terminal_font_family"], json!("Cascadia Mono"));
+        assert_eq!(migrated["option_sends_alt"], json!(true));
     }
 
     #[test]

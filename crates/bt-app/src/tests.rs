@@ -1737,14 +1737,16 @@ fn opening_the_dialog_asks_the_machine_for_no_fonts() {
     // them: which row is ticked, how many rows there are, and what each one
     // reads.
     let ticked = settings::family_index(bt_platform::DEFAULT_MONOSPACE_FAMILY);
+    let cjk = settings::cjk_families();
+    let cjk_ticked = settings::cjk_family_index("");
     let drawn: Vec<&str> = list.iter().map(|family| family.name.as_str()).collect();
     let again = settings::monospace_families();
     assert_eq!(
         settings::monospace_scans(),
         before,
-        "the dialog read the family list {} times and walked no font \
-             collection to do it (ticked row {ticked}, {} families drawn)",
-        drawn.len() + 3,
+        "the dialog read both family lists {} times and walked no font \
+             collection to do it (ticked rows {ticked}/{cjk_ticked}, {} families drawn)",
+        drawn.len() + cjk.len() + 5,
         drawn.len(),
     );
     assert_eq!(

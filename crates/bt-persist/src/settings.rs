@@ -290,7 +290,13 @@ use serde::{Deserialize, Serialize};
 /// machine's capabilities, so a file carried from a Mac to a Windows box arrives whole and means
 /// the same thing on the day it is carried back. What decides whether the row is *shown* is
 /// `bt_app::settings::visible_rows`, where every other platform-shaped row is decided.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 34;
+///
+/// **v35 carries `terminal_cjk_font_family`**, the terminal grid's CJK face. It is the v8 font
+/// family's shape one more time: an empty string means automatic, because a file that has never
+/// been asked must follow this build's platform chain rather than pinning today's first family.
+/// The migration writes that absence of a choice, so upgrading changes only who owns the fallback
+/// decision, not what the reader said.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 35;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -316,6 +322,12 @@ pub const DEFAULT_PROFILE_UNSET: &str = "";
 /// reader already has to handle, because a family the file names may equally have
 /// been uninstalled since.
 pub const DEFAULT_TERMINAL_FONT_FAMILY: &str = "";
+
+/// The CJK family a `settings.json` that has never named one is read as.
+///
+/// Empty means the renderer's platform chain. A concrete family here would turn
+/// an automatic fallback into a choice the reader never made.
+pub const DEFAULT_TERMINAL_CJK_FONT_FAMILY: &str = "";
 
 /// The terminal font size, in logical pixels, of a file that has never named one.
 ///
@@ -699,6 +711,13 @@ pub struct SettingsV1 {
     /// unnamed case; a named family that this machine does not have degrades the
     /// same way, to the build's default face, per §5.4 逐叶降级.
     pub terminal_font_family: String,
+    /// Which installed family draws Han, kana and hangul in the terminal grid.
+    ///
+    /// Empty is automatic: the renderer walks its named platform chain. This is
+    /// separate from [`Self::terminal_font_family`] so choosing a proportional
+    /// CJK face cannot move ASCII off the monospace grid.
+    #[serde(default)]
+    pub terminal_cjk_font_family: String,
     /// How large the grid's face is drawn, in **logical** pixels — the number
     /// before the monitor's scale factor multiplies it.
     ///
@@ -1368,6 +1387,7 @@ impl Default for SettingsV1 {
             search_engine: SearchEngineV1::default(),
             language: LanguageV1::default(),
             terminal_font_family: DEFAULT_TERMINAL_FONT_FAMILY.to_owned(),
+            terminal_cjk_font_family: DEFAULT_TERMINAL_CJK_FONT_FAMILY.to_owned(),
             terminal_font_size: DEFAULT_TERMINAL_FONT_SIZE,
             psreadline_invite: PsReadLineInviteV1::default(),
             light_scheme: DEFAULT_LIGHT_SCHEME.to_owned(),
@@ -1735,9 +1755,13 @@ mod tests {
     /// machine it knows nothing about. It is `default_profile`'s ruling, and the
     /// same empty string carries it.
     #[test]
-    fn the_default_terminal_font_is_unnamed_and_sixteen_logical_pixels() {
+    fn the_default_terminal_fonts_are_unnamed_and_sixteen_logical_pixels() {
         let defaults = SettingsV1::default();
         assert_eq!(defaults.terminal_font_family, DEFAULT_TERMINAL_FONT_FAMILY);
+        assert_eq!(
+            defaults.terminal_cjk_font_family,
+            DEFAULT_TERMINAL_CJK_FONT_FAMILY
+        );
         assert_eq!(defaults.terminal_font_size, DEFAULT_TERMINAL_FONT_SIZE);
         assert_eq!(
             DEFAULT_TERMINAL_FONT_SIZE, 16,
@@ -1747,6 +1771,10 @@ mod tests {
         );
         let wire = serde_json::to_value(&defaults).unwrap();
         assert_eq!(wire["terminal_font_family"], serde_json::Value::from(""));
+        assert_eq!(
+            wire["terminal_cjk_font_family"],
+            serde_json::Value::from("")
+        );
         assert!(
             wire["terminal_font_family"].is_string(),
             "a family is named, never numbered — an index into a machine's font \
@@ -1799,20 +1827,22 @@ mod tests {
     /// persistence layer holding an opinion about the row's options.
     #[test]
     fn a_chosen_family_and_size_survive_a_round_trip_including_an_unlisted_size() {
-        for (family, size) in [
-            ("Cascadia Mono", 14u8),
-            ("MS Gothic", 24),
-            ("Consolas", 17),
-            ("", 10),
+        for (family, cjk_family, size) in [
+            ("Cascadia Mono", "Microsoft YaHei UI", 14u8),
+            ("MS Gothic", "DengXian", 24),
+            ("Consolas", "SimSun", 17),
+            ("", "", 10),
         ] {
             let settings = SettingsV1 {
                 terminal_font_family: family.to_owned(),
+                terminal_cjk_font_family: cjk_family.to_owned(),
                 terminal_font_size: size,
                 ..SettingsV1::default()
             };
             let text = serde_json::to_string(&settings).unwrap();
             let read: SettingsV1 = serde_json::from_str(&text).unwrap();
             assert_eq!(read.terminal_font_family, family);
+            assert_eq!(read.terminal_cjk_font_family, cjk_family);
             assert_eq!(read.terminal_font_size, size);
             assert_eq!(read, settings);
         }
