@@ -10,7 +10,7 @@
 #     cargo test --workspace --locked -- --ignored --list
 #
 # Why any of them are ignored at all — the policy this list exists to state.
-# Twenty-eight of the thirty are **probes**, not regressions:
+# Twenty-nine of the thirty-one are **probes**, not regressions:
 #
 #   * nineteen in `bt-pty` drive real ConPTY sessions against a real PowerShell
 #     and read what comes back. Their assertions are about host timing and about
@@ -18,7 +18,7 @@
 #     which is a question with a different right answer on every machine.
 #   * two in `bt-transcript` are the reference-resolution probes over a printed
 #     scrollback.
-#   * five in `bt-app`: one writes a picture for a person to look at, two
+#   * six in `bt-app`: one writes a picture for a person to look at, two
 #     are the large-document typing benchmarks (T-MD-TYPING-PATH; the eager one is the reference), which time
 #     the whole input-to-layout path on docs/DESIGN.md and prints a table --
 #     wall-clock on a shared machine, so it is read by a person and never
@@ -29,6 +29,9 @@
 #     person; the byte budgets it proves are asserted in the normal suite.
 #     The fifth (T-PASTE-1) measures direct MSVC CRT argv parsing against a separately
 #     compiled fixture, with no shell or window; its pure encoder fixtures run normally.
+#     The sixth (T-STALL-REPORT-FINER) times one hang-watch station enter/leave and one
+#     thread-CPU read on this machine and prints both; the accounting it costs is pinned
+#     by value tests in the normal suite.
 #   * one in `bt-math` (`minus_probe`, tests/unary_minus.rs) prints, for a handful of
 #     formulas, every run the typesetter set on this machine -- face, glyph ids,
 #     advances -- to be diffed against another machine when a glyph goes missing
@@ -69,6 +72,7 @@
 # two come off this list first.
 
 minus_probe
+hang_watch::tests::measure_cpu_sampler_and_station_cost
 highlight::tests::regenerate_the_powershell_packdump
 marks::tests::the_symbol_sheet_is_written_for_a_person_to_look_at
 paths::tests::a_scrollback_relative_reference_keeps_the_directory_it_was_printed_under

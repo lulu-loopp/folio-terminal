@@ -1080,7 +1080,10 @@ impl SettingsStore {
         }
         self.writes.record(
             SETTINGS_FILE_NAME,
-            write_settings_atomic(&self.path, &self.settings).map_err(|error| error.to_string()),
+            crate::hang_watch::during(crate::hang_watch::Station::SettingsWrite, || {
+                write_settings_atomic(&self.path, &self.settings)
+            })
+            .map_err(|error| error.to_string()),
         );
         changed
     }
@@ -1170,7 +1173,10 @@ impl KeybindingsStore {
         };
         self.writes.record(
             KEYBINDINGS_FILE_NAME,
-            write_keybindings_atomic(&self.path, &file).map_err(|error| error.to_string()),
+            crate::hang_watch::during(crate::hang_watch::Station::KeybindingsWrite, || {
+                write_keybindings_atomic(&self.path, &file)
+            })
+            .map_err(|error| error.to_string()),
         );
         changed
     }
@@ -1320,7 +1326,10 @@ impl ProfilesStore {
         }
         self.writes.record(
             PROFILES_FILE_NAME,
-            write_profiles_atomic(&self.path, &self.loaded).map_err(|error| error.to_string()),
+            crate::hang_watch::during(crate::hang_watch::Station::ProfilesWrite, || {
+                write_profiles_atomic(&self.path, &self.loaded)
+            })
+            .map_err(|error| error.to_string()),
         );
         changed
     }
