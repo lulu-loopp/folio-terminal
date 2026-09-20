@@ -12969,37 +12969,54 @@ fn shape_chrome_labels_with_cjk(
 }
 
 /// Self-report for the owner's unreproduced mixed-weight screenshot.
+/// Which face chrome's non-ASCII text landed in, **once per decision and never
+/// per glyph** (2026-09-20).
+///
+/// The first form wrote a line for every non-ASCII glyph of every label of every
+/// frame and put the character in it: one afternoon's recording grew past 3.5 GB,
+/// and a trace that is only ever supposed to hold counters was holding what was
+/// on screen. The fact worth a line is the *decision* — this face, for this
+/// requested weight, at this size — and a session makes a few dozen of those.
 fn trace_chrome_cjk_glyphs(font_system: &FontSystem, buffer: &Buffer, label: &ChromeLabel) {
     static TRACE: OnceLock<bool> = OnceLock::new();
+    static SEEN: OnceLock<
+        std::sync::Mutex<std::collections::HashSet<(glyphon::fontdb::ID, u16, u32)>>,
+    > = OnceLock::new();
     if !*TRACE.get_or_init(|| std::env::var_os("BT_PERF_TRACE").is_some_and(|v| !v.is_empty())) {
         return;
     }
+    let requested = label.weight.shaping_weight().0;
     for run in buffer.layout_runs() {
         for glyph in run.glyphs {
+            let non_ascii = label
+                .text
+                .get(glyph.start..glyph.end)
+                .is_some_and(|text| !text.is_ascii());
+            if !non_ascii {
+                continue;
+            }
+            let decision = (glyph.font_id, requested, glyph.font_size.to_bits());
+            let first = SEEN
+                .get_or_init(Default::default)
+                .lock()
+                .is_ok_and(|mut seen| seen.insert(decision));
+            if !first {
+                continue;
+            }
             let Some(face) = font_system.db().face(glyph.font_id) else {
                 continue;
             };
             let file = match &face.source {
                 glyphon::fontdb::Source::File(path)
-                | glyphon::fontdb::Source::SharedFile(path, _) => path.display().to_string(),
+                | glyphon::fontdb::Source::SharedFile(path, _) => path
+                    .file_name()
+                    .map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
                 _ => "<memory>".into(),
             };
-            for ch in label
-                .text
-                .get(glyph.start..glyph.end)
-                .unwrap_or("")
-                .chars()
-                .filter(|c| !c.is_ascii())
-            {
-                bt_viewport::trace::line(format!(
-                    "BT_PERF_TRACE chrome_cjk char={ch:?} font_id={:?} family={:?} file={file:?} face_weight={} requested_weight={} size={}",
-                    glyph.font_id,
-                    face.families,
-                    face.weight.0,
-                    label.weight.shaping_weight().0,
-                    glyph.font_size
-                ));
-            }
+            bt_viewport::trace::line(format!(
+                "BT_PERF_TRACE chrome_cjk font_id={:?} family={:?} file={file:?} face_weight={} requested_weight={requested} size={}",
+                glyph.font_id, face.families, face.weight.0, glyph.font_size
+            ));
         }
     }
 }
