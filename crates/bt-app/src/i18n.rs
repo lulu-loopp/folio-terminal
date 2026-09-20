@@ -442,7 +442,6 @@ pub enum Text {
     RowCursor,
     RowFormulas,
     RowInlineFormulas,
-    /// **CHINESE PENDING** — see [`Self::DescRepairRowBreaks`].
     RowRepairRowBreaks,
     RowGitPanel,
     /// **The Explorer verb's row** (§7.4, §7.4a), on the General page.
@@ -475,10 +474,6 @@ pub enum Text {
     DescCursor,
     DescFormulas,
     DescInlineFormulas,
-    /// **CHINESE PENDING (2026-09-20).** This entry and [`Self::RowRepairRowBreaks`] are the two
-    /// strings this branch adds, and both carry their English text in the Chinese column so that
-    /// the copywriter has one place to look and the gate below stays honest about it. They must be
-    /// written before this branch is pushed; nothing else on it is waiting on anybody.
     DescRepairRowBreaks,
     DescGitPanel,
     /// **What On does on a machine that can do everything** — the switch's line
@@ -2911,9 +2906,7 @@ impl Text {
             // the same reason they do in English.
             Self::RowFormulas => pick(lang, "Display formulas", "行间公式"),
             Self::RowInlineFormulas => pick(lang, "Inline formulas", "行内公式"),
-            // CHINESE PENDING (2026-09-20) — English stands in both columns until the copywriter
-            // has written this row and the sentence below it.
-            Self::RowRepairRowBreaks => pick(lang, "Repair row breaks", "Repair row breaks"),
+            Self::RowRepairRowBreaks => pick(lang, "Repair row breaks", "修复公式换行"),
             Self::RowGitPanel => pick(lang, "Git panel", "Git 面板"),
             Self::RowContextMenu => pick(lang, "Explorer context menu", "资源管理器菜单"),
             Self::RowTabLayout => pick(lang, "Tab layout", "标签布局"),
@@ -2946,13 +2939,10 @@ impl Text {
                 "Typesets $…$ in command output. Off, the LaTeX source is shown as printed.",
                 "排版命令输出里的 $…$。关闭时显示 LaTeX 源码原文。",
             ),
-            // CHINESE PENDING (2026-09-20) — English stands in both columns. The sentence names
-            // what a reader sees go wrong (a matrix arriving as one row) rather than the
-            // CommonMark round-trip that causes it, which is not their problem.
             Self::DescRepairRowBreaks => pick(
                 lang,
                 "Restores a row break an agent's own redraw dropped from a matrix or aligned block.",
-                "Restores a row break an agent's own redraw dropped from a matrix or aligned block.",
+                "补回 agent 重绘时从矩阵或对齐块中丢掉的换行。",
             ),
             // **What it does, then the bound on what it can do.** The second
             // sentence is the one a reader of a terminal's settings actually
