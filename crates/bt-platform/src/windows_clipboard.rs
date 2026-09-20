@@ -129,8 +129,11 @@ impl ClipboardPort for WindowsClipboard {
     /// A format that is advertised and then will not render is **not** an error
     /// on its own: `GetClipboardData` renders delayed formats, and a source that
     /// can produce a `CF_DIB` but not its own `PNG` is an ordinary source — the
-    /// walk simply moves to the next shape. The rung fails only when nothing at
-    /// all came back, which is what `Absent` says.
+    /// walk simply moves to the next shape. Neither is a format that renders
+    /// something which is not the shape it claims to be: the walk reads the
+    /// header and moves on, which is what keeps the sources that put unreadable
+    /// `PNG`s on the board pasting their `CF_DIB`. The rung fails only when
+    /// nothing at all came back, which is what `Absent` says.
     fn picture(&mut self) -> Candidate<Vec<PictureBytes>> {
         // SAFETY: registering a format name that is already registered answers the same
         // identifier; the open interval this object holds covers every read below.

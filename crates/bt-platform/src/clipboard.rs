@@ -98,9 +98,9 @@ pub trait ClipboardPort {
     fn survey(&mut self) -> Result<ClipboardTypes, String>;
     fn files(&mut self) -> Candidate<Vec<PathBuf>>;
     fn text(&mut self) -> Candidate<String>;
-    /// **One** encoding — the best one this source will hand over, chosen by the
-    /// platform's preference list through [`first_offered_picture`]. The bytes
-    /// are copied and nothing is decoded here: a screenshot is megabytes, the
+    /// **One** encoding — the best whole one this source will hand over, chosen
+    /// by the platform's preference list through [`first_offered_picture`]. The
+    /// bytes are copied and nothing is decoded here: a screenshot is megabytes, the
     /// caller is the event-loop thread, and turning those bytes into a picture is
     /// the picture worker's job.
     ///
@@ -145,25 +145,271 @@ pub trait PictureSource {
 /// stopping at the first answer copies exactly one shape and asks the source
 /// once.
 ///
-/// A shape that is present and then fails to *decode* is not this function's
-/// question: nothing is decoded here, and the clipboard is closed before the
-/// worker looks. The worker still walks whatever list it is handed
-/// (`bt_app::clipboard_picture::png_bytes`), so that behaviour is unchanged for
-/// a list of one — a source that renders a `PNG` its own decoder cannot read now
-/// ends the paste with that rung's reason instead of falling to `CF_DIB`.
+/// **The shape that is handed over is also read for shape** before the walk
+/// accepts it, by [`shape_is_intact`]. Choosing the first shape a source *renders*
+/// would have been a change to what gets pasted: sources exist — browsers,
+/// remote-desktop clients — that put a `PNG` representation on the board which
+/// no PNG decoder can read, and until this walk existed the worker one door later
+/// simply used the `CF_DIB` that had also been copied. Reading the chosen shape's
+/// header here, for a few hundred bytes and no decode, gives the walk the same
+/// answer the eager copy used to buy.
+///
+/// **A board on which nothing is intact still hands over the best thing that
+/// rendered**, rather than answering `Absent`. `Absent` here means "no picture",
+/// and the paste falls to silence; a picture that is present and broken deserves
+/// the worker's sentence about *why*, which is the sentence it gave before this
+/// change. The extra copy in that case is the old cost, paid only on the board
+/// where the old cost was the only way to an answer.
 pub fn first_offered_picture(
     order: &[PictureEncoding],
     source: &mut impl PictureSource,
 ) -> Candidate<Vec<PictureBytes>> {
+    let mut best_broken: Option<PictureBytes> = None;
     for &encoding in order {
         if !source.offers(encoding) {
             continue;
         }
-        if let Some(bytes) = source.read(encoding) {
+        let Some(bytes) = source.read(encoding) else {
+            continue;
+        };
+        if shape_is_intact(encoding, &bytes) {
             return Candidate::Present(vec![PictureBytes { encoding, bytes }]);
         }
+        if best_broken.is_none() {
+            best_broken = Some(PictureBytes { encoding, bytes });
+        }
     }
-    Candidate::Absent
+    match best_broken {
+        Some(picture) => Candidate::Present(vec![picture]),
+        None => Candidate::Absent,
+    }
+}
+
+/// **Is this byte string the shape it says it is?** — read structurally, on the
+/// window thread, in bounded work and without decoding anything.
+///
+/// Not a second decoder and not a second opinion about whether a picture is
+/// *good*: the worker's decoder remains the authority on that, and this answers
+/// the one question the walk has to ask before the clipboard closes — *is there
+/// any point preferring this representation over the next one*. It reads headers
+/// only. For a `PNG` that is the 8-byte signature, the 25-byte `IHDR` chunk and
+/// at most [`PNG_CHUNKS_BEFORE_PIXELS`] further 8-byte chunk headers looking for
+/// `IDAT`, so at most 545 bytes are examined however large the picture is; for a
+/// bitmap it is the info header, at most 124 bytes, plus arithmetic; for a TIFF
+/// it is 8 bytes. Nothing is inflated and no pixel is touched.
+#[must_use]
+pub fn shape_is_intact(encoding: PictureEncoding, bytes: &[u8]) -> bool {
+    match encoding {
+        PictureEncoding::Png => png_is_intact(bytes),
+        PictureEncoding::DibV5 | PictureEncoding::Dib => dib_is_intact(bytes),
+        PictureEncoding::Tiff => tiff_is_intact(bytes),
+    }
+}
+
+/// **The widest and tallest a representation may claim to be** before the walk
+/// stops preferring it.
+///
+/// The same number `bt_app::clipboard_picture::MAX_SIDE` refuses at, one door
+/// further in, and re-stated here for the reason [`MAX_PICTURE_BYTES`] is: the
+/// dependency runs from `bt-app` to `bt-platform`, so the door cannot read the
+/// worker's copy. Keeping the two equal is what makes the door's fall-through
+/// agree with the worker's refusal instead of preferring a shape the worker will
+/// then turn down.
+pub const MAX_PICTURE_SIDE: u32 = 16_384;
+
+/// **How far into a `PNG` the walk will look for the first `IDAT`.**
+///
+/// A real picture puts a handful of chunks before its pixels; sixty-four is far
+/// past any of them and bounds this walk at 8 bytes apiece, so a header that
+/// chains chunk after chunk cannot make the window thread walk a clipboard-sized
+/// buffer looking for pixels that are not there.
+pub const PNG_CHUNKS_BEFORE_PIXELS: usize = 64;
+
+/// A side length a real picture has: present, and inside the ceiling the worker
+/// decodes at.
+fn side_is_sane(side: u32) -> bool {
+    side > 0 && side <= MAX_PICTURE_SIDE
+}
+
+/// The eight bytes every PNG begins with (PNG spec §5.2).
+const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+
+/// **A `PNG` header, read as far as the first `IDAT`.**
+///
+/// The signature, then `IHDR` — which the spec requires to be the first chunk and
+/// to be thirteen bytes — then a walk over chunk headers until the pixels start.
+/// A truncated representation runs out of buffer during that walk and a
+/// representation that is not a PNG at all fails at the signature, which are the
+/// two shapes the sources that put unreadable `PNG`s on the clipboard produce.
+fn png_is_intact(bytes: &[u8]) -> bool {
+    let Some(rest) = bytes.strip_prefix(&PNG_SIGNATURE) else {
+        return false;
+    };
+    // 4 length + 4 type + 13 data + 4 CRC, and the length and type are fixed by
+    // the spec, so they are compared rather than parsed.
+    if !rest.starts_with(b"\x00\x00\x00\x0dIHDR") || rest.len() < 25 {
+        return false;
+    }
+    let number = |at: usize| u32::from_be_bytes(rest[at..at + 4].try_into().expect("four bytes"));
+    if !side_is_sane(number(8)) || !side_is_sane(number(12)) {
+        return false;
+    }
+    // Bit depth, colour type, compression, filter and interlace: each is a small
+    // set in the spec, and a byte outside it is a header nobody wrote (§11.2.2).
+    if !matches!(rest[16], 1 | 2 | 4 | 8 | 16)
+        || !matches!(rest[17], 0 | 2 | 3 | 4 | 6)
+        || rest[18] != 0
+        || rest[19] != 0
+        || rest[20] > 1
+    {
+        return false;
+    }
+    let mut at = 25;
+    for _ in 0..PNG_CHUNKS_BEFORE_PIXELS {
+        let Some(header) = rest.get(at..at + 8) else {
+            return false;
+        };
+        let length = u32::from_be_bytes(header[..4].try_into().expect("four bytes")) as usize;
+        let kind = &header[4..8];
+        if !kind.iter().all(u8::is_ascii_alphabetic) {
+            return false;
+        }
+        if kind == b"IDAT" {
+            // Pixels that are declared and then are not there are the truncation
+            // this walk exists to catch.
+            return length > 0 && at + 12 + length <= rest.len();
+        }
+        // The chunk's data and CRC must be inside what was copied off the board.
+        let Some(next) = length.checked_add(12).and_then(|step| at.checked_add(step)) else {
+            return false;
+        };
+        if next > rest.len() {
+            return false;
+        }
+        at = next;
+    }
+    false
+}
+
+/// **A device-independent bitmap's info header, and whether the pixels it
+/// describes fit in what was copied.**
+///
+/// The header sizes are Windows' own — 12 is `BITMAPCOREHEADER`, 40
+/// `BITMAPINFOHEADER`, 108 and 124 the V4 and V5 headers `CF_DIBV5` carries, and
+/// 52, 56 and 64 the variants `image`'s BMP decoder also reads. The arithmetic at
+/// the end is the one review X-4 named: a header is believed before the pixels
+/// are read, so a fifty-byte global claiming a large picture is a header that is
+/// lying, and the next shape is the answer to it.
+fn dib_is_intact(bytes: &[u8]) -> bool {
+    /// Uncompressed, and the two bit-field forms: the only ones whose pixel
+    /// length is arithmetic over the header.
+    const BI_RGB: u32 = 0;
+    const BI_BITFIELDS: u32 = 3;
+    const BI_ALPHABITFIELDS: u32 = 6;
+
+    let Some(size) = bytes.get(..4) else {
+        return false;
+    };
+    let header = u32::from_le_bytes(size.try_into().expect("four bytes")) as usize;
+    if !matches!(header, 12 | 40 | 52 | 56 | 64 | 108 | 124) || bytes.len() < header {
+        return false;
+    }
+    let short = |at: usize| u16::from_le_bytes(bytes[at..at + 2].try_into().expect("two bytes"));
+    let long = |at: usize| i32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"));
+    // The core header carries 16-bit dimensions; every later one carries 32-bit
+    // dimensions, of which the height may be negative for a top-down bitmap.
+    let (width, height, planes, depth, compression, entry) = if header == 12 {
+        (
+            u32::from(short(4)),
+            u32::from(short(6)),
+            short(8),
+            short(10),
+            BI_RGB,
+            3u64,
+        )
+    } else {
+        if long(4) < 0 {
+            return false;
+        }
+        (
+            long(4).unsigned_abs(),
+            long(8).unsigned_abs(),
+            short(12),
+            short(14),
+            long(16).cast_unsigned(),
+            4u64,
+        )
+    };
+    if !side_is_sane(width) || !side_is_sane(height) || planes != 1 {
+        return false;
+    }
+    if !matches!(depth, 1 | 2 | 4 | 8 | 16 | 24 | 32) {
+        return false;
+    }
+    if !matches!(compression, BI_RGB | BI_BITFIELDS | BI_ALPHABITFIELDS) {
+        // RLE4, RLE8, and a JPEG or PNG carried inside a DIB: the body's length
+        // is not arithmetic over the header, so the header is all there is to
+        // check. An unknown compression is a header nobody wrote.
+        return matches!(compression, 1 | 2 | 4 | 5);
+    }
+    // A palette is present when the header says so, and always for the depths
+    // that index one. `BITMAPINFOHEADER` puts the bit-field masks where the
+    // palette would start; the later headers carry them inside themselves.
+    let used = if header == 12 {
+        0
+    } else {
+        u64::from(long(32).cast_unsigned())
+    };
+    let colours = match (used, depth) {
+        (0, 1..=8) => 1u64 << depth,
+        (used, _) => used,
+    };
+    let masks = match (header, compression) {
+        (40, BI_BITFIELDS) => 12,
+        (40, BI_ALPHABITFIELDS) => 16,
+        _ => 0,
+    };
+    let stride = (u64::from(width) * u64::from(depth)).div_ceil(32) * 4;
+    let needed = (header as u64)
+        .saturating_add(masks)
+        .saturating_add(colours.saturating_mul(entry))
+        .saturating_add(stride.saturating_mul(u64::from(height)));
+    needed <= bytes.len() as u64
+}
+
+/// **A TIFF's eight-byte header** (TIFF 6.0 §2): the byte order, the answer 42,
+/// and a first directory that is inside what was copied.
+///
+/// macOS' `public.tiff` is the shape an AppKit copy offers, and it is the shape
+/// this walk falls to when a `public.png` beside it will not read.
+fn tiff_is_intact(bytes: &[u8]) -> bool {
+    let Some(header) = bytes.get(..8) else {
+        return false;
+    };
+    let big = match &header[..2] {
+        b"II" => false,
+        b"MM" => true,
+        _ => return false,
+    };
+    let short = |at: usize| {
+        let pair = header[at..at + 2].try_into().expect("two bytes");
+        if big {
+            u16::from_be_bytes(pair)
+        } else {
+            u16::from_le_bytes(pair)
+        }
+    };
+    let long = |at: usize| {
+        let quad = header[at..at + 4].try_into().expect("four bytes");
+        if big {
+            u32::from_be_bytes(quad)
+        } else {
+            u32::from_le_bytes(quad)
+        }
+    };
+    // The directory count is the two bytes the offset points at; a directory that
+    // starts past what was copied is a representation that was cut short.
+    short(2) == 42 && u64::from(long(4)) + 2 <= bytes.len() as u64 && long(4) >= 8
 }
 
 /// The terminal context menu may survey types on the press that opens it, never fetch content.
@@ -453,14 +699,9 @@ mod tests {
     }
 
     impl Board {
-        fn with(
-            shapes: impl IntoIterator<Item = (PictureEncoding, Option<&'static [u8]>)>,
-        ) -> Self {
+        fn with(shapes: impl IntoIterator<Item = (PictureEncoding, Option<Vec<u8>>)>) -> Self {
             Self {
-                shapes: shapes
-                    .into_iter()
-                    .map(|(encoding, bytes)| (encoding, bytes.map(<[u8]>::to_vec)))
-                    .collect(),
+                shapes: shapes.into_iter().collect(),
                 ..Self::default()
             }
         }
@@ -483,17 +724,58 @@ mod tests {
         }
     }
 
-    const PNG_BYTES: &[u8] = &[0x89, b'P', b'N', b'G', 1, 2];
-    const V5_BYTES: &[u8] = b"V5";
-    const DIB_BYTES: &[u8] = b"D";
+    /// **A structurally whole PNG**: the signature, an `IHDR` and an `IDAT` whose
+    /// pixels are there. Nothing is compressed, because nothing at the door
+    /// inflates — inside an `IDAT` the door knows only a length.
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = Vec::from(PNG_SIGNATURE);
+        bytes.extend_from_slice(b"\x00\x00\x00\x0dIHDR");
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.extend_from_slice(&height.to_be_bytes());
+        // Depth 8, truecolour with alpha, and the only compression, filter and
+        // interlace bytes the spec allows.
+        bytes.extend_from_slice(&[8, 6, 0, 0, 0]);
+        bytes.extend_from_slice(&[0; 4]); // the CRC, which the door does not check
+        bytes.extend_from_slice(&8u32.to_be_bytes());
+        bytes.extend_from_slice(b"IDAT");
+        bytes.extend_from_slice(&[0; 12]); // eight bytes of pixels and a CRC
+        bytes
+    }
+
+    /// **A structurally whole bottom-up 32-bit bitmap** under the info header of
+    /// the given size — 40 for `CF_DIB`, 124 for the V5 header `CF_DIBV5` carries.
+    fn bitmap(header: u32, width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = Vec::from(header.to_le_bytes());
+        bytes.extend_from_slice(&i32::try_from(width).expect("a test width").to_le_bytes());
+        bytes.extend_from_slice(&i32::try_from(height).expect("a test height").to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes()); // one plane
+        bytes.extend_from_slice(&32u16.to_le_bytes()); // and 32 bits of it
+        bytes.resize(header as usize, 0);
+        bytes.resize(header as usize + (width * height * 4) as usize, 0);
+        bytes
+    }
+
+    fn dib(width: u32, height: u32) -> Vec<u8> {
+        bitmap(40, width, height)
+    }
+
+    fn dib_v5(width: u32, height: u32) -> Vec<u8> {
+        bitmap(124, width, height)
+    }
+
+    /// **A structurally whole TIFF header** — little-endian, the answer 42, and a
+    /// first directory that is inside the buffer.
+    fn tiff() -> Vec<u8> {
+        Vec::from(*b"II\x2a\x00\x08\x00\x00\x00\x00\x00")
+    }
 
     /// One walk of a preference list, as the fallback cases below spell it out:
     /// what the board carries, which shapes it is asked to render, and which
     /// shape — if any — the walk comes back with.
     type Walk = (
-        &'static [(PictureEncoding, Option<&'static [u8]>)],
+        Vec<(PictureEncoding, Option<Vec<u8>>)>,
         &'static [PictureEncoding],
-        Option<(PictureEncoding, &'static [u8])>,
+        Option<(PictureEncoding, Vec<u8>)>,
     );
 
     /// **A source offering all three Windows shapes is asked to render exactly
@@ -512,9 +794,9 @@ mod tests {
     #[test]
     fn the_best_shape_on_offer_is_the_only_one_rendered() {
         let mut board = Board::with([
-            (PictureEncoding::Png, Some(PNG_BYTES)),
-            (PictureEncoding::DibV5, Some(V5_BYTES)),
-            (PictureEncoding::Dib, Some(DIB_BYTES)),
+            (PictureEncoding::Png, Some(png(8, 8))),
+            (PictureEncoding::DibV5, Some(dib_v5(8, 8))),
+            (PictureEncoding::Dib, Some(dib(8, 8))),
         ]);
         let answer = first_offered_picture(&WINDOWS_PICTURE_ORDER, &mut board);
         // The count first, because it is the fact this repair is about.
@@ -522,12 +804,12 @@ mod tests {
         assert_eq!(board.asked, [PictureEncoding::Png]);
         // The budget, by construction: the bytes of the one shape that won, never
         // the sum of the shapes that were on offer.
-        assert_eq!(board.copied, PNG_BYTES.len());
+        assert_eq!(board.copied, png(8, 8).len());
         assert_eq!(
             answer,
             Candidate::Present(vec![PictureBytes {
                 encoding: PictureEncoding::Png,
-                bytes: PNG_BYTES.to_vec(),
+                bytes: png(8, 8),
             }])
         );
     }
@@ -545,47 +827,47 @@ mod tests {
         let cases: [Walk; 5] = [
             // First choice absent: the second is asked and rendered, alone.
             (
-                &[
-                    (PictureEncoding::DibV5, Some(V5_BYTES)),
-                    (PictureEncoding::Dib, Some(DIB_BYTES)),
+                vec![
+                    (PictureEncoding::DibV5, Some(dib_v5(4, 4))),
+                    (PictureEncoding::Dib, Some(dib(4, 4))),
                 ],
                 &[PictureEncoding::DibV5],
-                Some((PictureEncoding::DibV5, V5_BYTES)),
+                Some((PictureEncoding::DibV5, dib_v5(4, 4))),
             ),
             // First choice present and unrenderable (lock failed, empty global,
             // past the ceiling): it is rendered, refuses, and the second wins.
             (
-                &[
+                vec![
                     (PictureEncoding::Png, None),
-                    (PictureEncoding::DibV5, Some(V5_BYTES)),
+                    (PictureEncoding::DibV5, Some(dib_v5(4, 4))),
                 ],
                 &[PictureEncoding::Png, PictureEncoding::DibV5],
-                Some((PictureEncoding::DibV5, V5_BYTES)),
+                Some((PictureEncoding::DibV5, dib_v5(4, 4))),
             ),
             // Two in a row refuse: the walk reaches the last shape.
             (
-                &[
+                vec![
                     (PictureEncoding::Png, None),
                     (PictureEncoding::DibV5, None),
-                    (PictureEncoding::Dib, Some(DIB_BYTES)),
+                    (PictureEncoding::Dib, Some(dib(4, 4))),
                 ],
                 &[
                     PictureEncoding::Png,
                     PictureEncoding::DibV5,
                     PictureEncoding::Dib,
                 ],
-                Some((PictureEncoding::Dib, DIB_BYTES)),
+                Some((PictureEncoding::Dib, dib(4, 4))),
             ),
             // Only the worst shape is on offer, which is every source that is not
             // a screenshot tool.
             (
-                &[(PictureEncoding::Dib, Some(DIB_BYTES))],
+                vec![(PictureEncoding::Dib, Some(dib(4, 4)))],
                 &[PictureEncoding::Dib],
-                Some((PictureEncoding::Dib, DIB_BYTES)),
+                Some((PictureEncoding::Dib, dib(4, 4))),
             ),
             // Advertised by the survey, rendered by nobody: `Absent`, as today.
             (
-                &[
+                vec![
                     (PictureEncoding::Png, None),
                     (PictureEncoding::DibV5, None),
                     (PictureEncoding::Dib, None),
@@ -599,37 +881,36 @@ mod tests {
             ),
         ];
         for (shapes, rendered, winner) in cases {
-            let mut board = Board::with(shapes.iter().copied());
+            let mut board = Board::with(shapes);
             let answer = first_offered_picture(&WINDOWS_PICTURE_ORDER, &mut board);
+            // A shape the board does not carry is asked about and never
+            // rendered: the availability query is the cheap one. The walk stops
+            // asking the moment one answers, so the questions are the preference
+            // list up to and including the winner.
+            let stop = winner
+                .as_ref()
+                .map_or(WINDOWS_PICTURE_ORDER.len(), |(encoding, _)| {
+                    WINDOWS_PICTURE_ORDER
+                        .iter()
+                        .position(|shape| shape == encoding)
+                        .expect("the winner came out of the preference list")
+                        + 1
+                });
+            assert_eq!(board.asked, WINDOWS_PICTURE_ORDER[..stop]);
+            assert_eq!(board.rendered, rendered);
             match winner {
                 Some((encoding, bytes)) => {
+                    assert_eq!(board.copied, bytes.len());
                     assert_eq!(
                         answer,
-                        Candidate::Present(vec![PictureBytes {
-                            encoding,
-                            bytes: bytes.to_vec(),
-                        }])
+                        Candidate::Present(vec![PictureBytes { encoding, bytes }])
                     );
-                    assert_eq!(board.copied, bytes.len());
                 }
                 None => {
                     assert_eq!(answer, Candidate::Absent);
                     assert_eq!(board.copied, 0);
                 }
             }
-            assert_eq!(board.rendered, rendered);
-            // A shape the board does not carry is asked about and never
-            // rendered: the availability query is the cheap one. The walk stops
-            // asking the moment one answers, so the questions are the preference
-            // list up to and including the winner.
-            let stop = winner.map_or(WINDOWS_PICTURE_ORDER.len(), |(encoding, _)| {
-                WINDOWS_PICTURE_ORDER
-                    .iter()
-                    .position(|shape| *shape == encoding)
-                    .expect("the winner came out of the preference list")
-                    + 1
-            });
-            assert_eq!(board.asked, WINDOWS_PICTURE_ORDER[..stop]);
         }
     }
 
@@ -683,9 +964,9 @@ mod tests {
                 files,
                 text,
                 board: Board::with([
-                    (PictureEncoding::Png, Some(PNG_BYTES)),
-                    (PictureEncoding::DibV5, Some(V5_BYTES)),
-                    (PictureEncoding::Dib, Some(DIB_BYTES)),
+                    (PictureEncoding::Png, Some(png(8, 8))),
+                    (PictureEncoding::DibV5, Some(dib_v5(8, 8))),
+                    (PictureEncoding::Dib, Some(dib(8, 8))),
                 ]),
             };
             assert_eq!(read_payload(&mut door), Ok(expected));
@@ -694,23 +975,309 @@ mod tests {
             assert_eq!(door.board.copied, 0);
         }
         // And when nothing else answers, the picture rung hands the worker one
-        // shape — the best one — out of the three that were on offer.
+        // shape — the best one — out of the two that were on offer.
         let mut door = Door {
             files: Candidate::Absent,
             text: Candidate::Absent,
             board: Board::with([
-                (PictureEncoding::DibV5, Some(V5_BYTES)),
-                (PictureEncoding::Dib, Some(DIB_BYTES)),
+                (PictureEncoding::DibV5, Some(dib_v5(8, 8))),
+                (PictureEncoding::Dib, Some(dib(8, 8))),
             ]),
         };
         assert_eq!(
             read_payload(&mut door),
             Ok(ClipboardPayload::Picture(vec![PictureBytes {
                 encoding: PictureEncoding::DibV5,
-                bytes: V5_BYTES.to_vec(),
+                bytes: dib_v5(8, 8),
             }]))
         );
-        assert_eq!(door.board.copied, V5_BYTES.len());
+        assert_eq!(door.board.copied, dib_v5(8, 8).len());
+    }
+
+    /// **A `PNG` that is not a PNG loses to the bitmap beside it, and costs
+    /// exactly one extra read** — the behaviour the eager copy used to buy, at
+    /// the price of a header instead of the price of every shape.
+    ///
+    /// Sources that do this are real: browsers and remote-desktop clients put a
+    /// `PNG` representation on the board that no PNG decoder will read. Before
+    /// the walk existed, all three shapes were copied and the worker quietly used
+    /// the `CF_DIB`. Choosing the first shape that merely *rendered* would have
+    /// ended those pastes; choosing the first shape that is structurally whole
+    /// does not.
+    ///
+    /// MUTATION: drop the [`shape_is_intact`] call from the walk and every case
+    /// here answers `Png` after one read.
+    #[test]
+    fn a_png_that_no_decoder_could_read_loses_to_the_bitmap_beside_it() {
+        let mut truncated = png(8, 8);
+        truncated.truncate(20); // partway through IHDR
+        let mut bad_signature = png(8, 8);
+        bad_signature[1] = b'Q';
+        let mut no_pixels = png(8, 8);
+        // An IDAT that declares eight bytes of pixels the source did not send.
+        no_pixels.truncate(no_pixels.len() - 6);
+        for broken in [
+            bad_signature,
+            truncated,
+            no_pixels,
+            png(0, 8),
+            png(8, 0),
+            png(MAX_PICTURE_SIDE + 1, 8),
+            Vec::new(),
+        ] {
+            let mut board = Board::with([
+                (PictureEncoding::Png, Some(broken.clone())),
+                (PictureEncoding::DibV5, Some(dib_v5(8, 8))),
+                (PictureEncoding::Dib, Some(dib(8, 8))),
+            ]);
+            assert_eq!(
+                first_offered_picture(&WINDOWS_PICTURE_ORDER, &mut board),
+                Candidate::Present(vec![PictureBytes {
+                    encoding: PictureEncoding::DibV5,
+                    bytes: dib_v5(8, 8),
+                }])
+            );
+            // Two reads, not three: the `CF_DIB` behind the winner is never
+            // rendered, which is the whole saving this walk exists for.
+            assert_eq!(
+                board.rendered,
+                [PictureEncoding::Png, PictureEncoding::DibV5]
+            );
+            assert_eq!(board.copied, broken.len() + dib_v5(8, 8).len());
+        }
+        // And the whole PNG that the same board would otherwise offer still costs
+        // exactly one read.
+        let mut board = Board::with([
+            (PictureEncoding::Png, Some(png(8, 8))),
+            (PictureEncoding::DibV5, Some(dib_v5(8, 8))),
+            (PictureEncoding::Dib, Some(dib(8, 8))),
+        ]);
+        assert_eq!(
+            first_offered_picture(&WINDOWS_PICTURE_ORDER, &mut board),
+            Candidate::Present(vec![PictureBytes {
+                encoding: PictureEncoding::Png,
+                bytes: png(8, 8),
+            }])
+        );
+        assert_eq!(board.rendered, [PictureEncoding::Png]);
+    }
+
+    /// **A board on which nothing is whole still hands the worker the best thing
+    /// that rendered**, so the paste ends in the worker's sentence about why and
+    /// not in silence.
+    ///
+    /// `Absent` means "no picture" and falls to `Nothing`, which is a Ctrl+V that
+    /// does nothing at all. A picture that is present and broken is not that, and
+    /// before this change the reader said so — by handing over bytes no decoder
+    /// could read and letting the decoder explain.
+    #[test]
+    fn a_board_where_nothing_is_whole_still_gives_the_worker_something_to_refuse() {
+        let broken = vec![0x89, b'P', b'N', b'G', 9, 9];
+        let mut board = Board::with([
+            (PictureEncoding::Png, Some(broken.clone())),
+            (PictureEncoding::DibV5, Some(vec![9; 40])),
+            (PictureEncoding::Dib, Some(vec![9; 40])),
+        ]);
+        assert_eq!(
+            first_offered_picture(&WINDOWS_PICTURE_ORDER, &mut board),
+            Candidate::Present(vec![PictureBytes {
+                encoding: PictureEncoding::Png,
+                bytes: broken,
+            }])
+        );
+        // Only here — the board where the old cost was the only way to an answer
+        // — is every shape still read.
+        assert_eq!(
+            board.rendered,
+            [
+                PictureEncoding::Png,
+                PictureEncoding::DibV5,
+                PictureEncoding::Dib
+            ]
+        );
+    }
+
+    /// **The macOS order falls the same way**: a `public.png` that will not read
+    /// loses to the `public.tiff` beside it, in two reads.
+    #[test]
+    fn a_broken_pasteboard_png_falls_to_the_tiff() {
+        let mut board = Board::with([
+            (PictureEncoding::Png, Some(vec![0x89, b'P', b'N', b'G'])),
+            (PictureEncoding::Tiff, Some(tiff())),
+        ]);
+        assert_eq!(
+            first_offered_picture(&MACOS_PICTURE_ORDER, &mut board),
+            Candidate::Present(vec![PictureBytes {
+                encoding: PictureEncoding::Tiff,
+                bytes: tiff(),
+            }])
+        );
+        assert_eq!(
+            board.rendered,
+            [PictureEncoding::Png, PictureEncoding::Tiff]
+        );
+        // A whole PNG on the same board is still the only shape read.
+        let mut board = Board::with([
+            (PictureEncoding::Png, Some(png(8, 8))),
+            (PictureEncoding::Tiff, Some(tiff())),
+        ]);
+        assert_eq!(
+            first_offered_picture(&MACOS_PICTURE_ORDER, &mut board),
+            Candidate::Present(vec![PictureBytes {
+                encoding: PictureEncoding::Png,
+                bytes: png(8, 8),
+            }])
+        );
+        assert_eq!(board.rendered, [PictureEncoding::Png]);
+    }
+
+    /// **What the door reads a header for, shape by shape** — each rule with the
+    /// smallest change to a whole representation that breaks it.
+    #[test]
+    fn a_header_is_read_for_shape_and_never_for_pixels() {
+        assert!(shape_is_intact(PictureEncoding::Png, &png(1, 1)));
+        assert!(shape_is_intact(
+            PictureEncoding::Png,
+            &png(MAX_PICTURE_SIDE, MAX_PICTURE_SIDE)
+        ));
+        for (rule, broken) in [
+            ("the signature", {
+                let mut bytes = png(8, 8);
+                bytes[7] = 0;
+                bytes
+            }),
+            ("IHDR is the first chunk", {
+                let mut bytes = png(8, 8);
+                bytes[12..16].copy_from_slice(b"gAMA");
+                bytes
+            }),
+            ("IHDR is thirteen bytes", {
+                let mut bytes = png(8, 8);
+                bytes[11] = 12;
+                bytes
+            }),
+            ("a bit depth the spec names", {
+                let mut bytes = png(8, 8);
+                bytes[24] = 7;
+                bytes
+            }),
+            ("a colour type the spec names", {
+                let mut bytes = png(8, 8);
+                bytes[25] = 5;
+                bytes
+            }),
+            ("the one compression method", {
+                let mut bytes = png(8, 8);
+                bytes[26] = 1;
+                bytes
+            }),
+            ("chunk types are letters", {
+                let mut bytes = png(8, 8);
+                bytes[37] = 0;
+                bytes
+            }),
+            ("the pixels are there", {
+                let mut bytes = png(8, 8);
+                bytes.pop();
+                bytes
+            }),
+        ] {
+            assert!(
+                !shape_is_intact(PictureEncoding::Png, &broken),
+                "a PNG passed without {rule}"
+            );
+        }
+        // A chunk chain that never reaches IDAT is bounded rather than walked.
+        let mut endless = Vec::from(PNG_SIGNATURE);
+        endless.extend_from_slice(&png(8, 8)[8..33]);
+        for _ in 0..PNG_CHUNKS_BEFORE_PIXELS + 1 {
+            endless.extend_from_slice(&0u32.to_be_bytes());
+            endless.extend_from_slice(b"tEXt");
+            endless.extend_from_slice(&[0; 4]);
+        }
+        assert!(!shape_is_intact(PictureEncoding::Png, &endless));
+
+        for header in [40, 108, 124] {
+            assert!(shape_is_intact(PictureEncoding::Dib, &bitmap(header, 4, 4)));
+        }
+        for (rule, broken) in [
+            ("a header size Windows defines", {
+                let mut bytes = dib(4, 4);
+                bytes[0] = 41;
+                bytes
+            }),
+            ("one plane", {
+                let mut bytes = dib(4, 4);
+                bytes[12] = 2;
+                bytes
+            }),
+            ("a bit count a bitmap has", {
+                let mut bytes = dib(4, 4);
+                bytes[14] = 7;
+                bytes
+            }),
+            ("a width", {
+                let mut bytes = dib(4, 4);
+                bytes[4..8].copy_from_slice(&0u32.to_le_bytes());
+                bytes
+            }),
+            ("a width that is not negative", {
+                let mut bytes = dib(4, 4);
+                bytes[4..8].copy_from_slice(&(-4i32).to_le_bytes());
+                bytes
+            }),
+            ("a compression Windows defines", {
+                let mut bytes = dib(4, 4);
+                bytes[16] = 9;
+                bytes
+            }),
+            ("the pixels the header describes", {
+                let mut bytes = dib(4, 4);
+                bytes.truncate(bytes.len() - 1);
+                bytes
+            }),
+            ("a header that is all there", vec![40, 0, 0, 0, 1, 2]),
+        ] {
+            assert!(
+                !shape_is_intact(PictureEncoding::Dib, &broken),
+                "a bitmap passed without {rule}"
+            );
+        }
+        // A top-down bitmap is an ordinary bitmap: the height is what may be
+        // negative, and the pixel count is its magnitude.
+        let mut top_down = dib(4, 4);
+        top_down[8..12].copy_from_slice(&(-4i32).to_le_bytes());
+        assert!(shape_is_intact(PictureEncoding::Dib, &top_down));
+        // A fifty-byte global claiming a large picture is the header review X-4
+        // named: believed, it asks for gigabytes; read, it fits nothing.
+        let mut liar = dib(4, 4);
+        liar[4..8].copy_from_slice(&4096u32.to_le_bytes());
+        liar[8..12].copy_from_slice(&4096u32.to_le_bytes());
+        assert!(!shape_is_intact(PictureEncoding::Dib, &liar));
+
+        assert!(shape_is_intact(PictureEncoding::Tiff, &tiff()));
+        assert!(shape_is_intact(
+            PictureEncoding::Tiff,
+            &[b'M', b'M', 0, 42, 0, 0, 0, 8, 0, 0]
+        ));
+        for (rule, broken) in [
+            ("a byte order", vec![b'I', b'J', 0x2a, 0, 8, 0, 0, 0, 0, 0]),
+            ("the answer 42", vec![b'I', b'I', 41, 0, 8, 0, 0, 0, 0, 0]),
+            (
+                "a directory inside the buffer",
+                vec![b'I', b'I', 0x2a, 0, 99, 0, 0, 0, 0, 0],
+            ),
+            (
+                "a directory after the header",
+                vec![b'I', b'I', 0x2a, 0, 4, 0, 0, 0, 0, 0],
+            ),
+            ("eight bytes at all", vec![b'I', b'I', 0x2a]),
+        ] {
+            assert!(
+                !shape_is_intact(PictureEncoding::Tiff, &broken),
+                "a TIFF passed without {rule}"
+            );
+        }
     }
 
     /// The acquisition door as both platform arms assemble it: the rung walk of

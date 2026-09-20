@@ -69,9 +69,10 @@ impl ClipboardPort for MacClipboard {
     ///
     /// A type that is advertised and then hands back nothing is not an error on
     /// its own — a pasteboard item may promise a representation it declines to
-    /// render — so the walk moves to the next shape, and the rung answers
-    /// `Absent` when neither answered, letting the payload fall to silence rather
-    /// than raising a card about a picture nobody asked for.
+    /// render — so the walk moves to the next shape, and so it does for a
+    /// `public.png` whose bytes are not a PNG. The rung answers `Absent` only
+    /// when neither shape answered at all, letting the payload fall to silence
+    /// rather than raising a card about a picture nobody asked for.
     fn picture(&mut self) -> Candidate<Vec<PictureBytes>> {
         first_offered_picture(&MACOS_PICTURE_ORDER, self)
     }
