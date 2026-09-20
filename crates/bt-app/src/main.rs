@@ -19122,7 +19122,7 @@ fn offer_pty_input(pty: Option<&PtySession>, bytes: &[u8], what: &'static str) -
         return Ok(PtyInput::NoChild);
     };
     match hang_watch::during(hang_watch::Station::PtyInput, || {
-        let result = pty.write(bytes);
+        let result = pty.write_with_reason(bytes, what);
         hang_watch::counters(bytes.len(), if result.is_ok() { bytes.len() } else { 0 }, 1);
         result
     }) {
@@ -112805,10 +112805,18 @@ mod pty_drain_budget_tests {
             .find("\n#[cfg(test)]\nmod tests;")
             .expect("the declaration of this file's big test module")];
         assert_eq!(
-            product.matches(&["pty.", "write("].concat()).count(),
+            product
+                .matches(&["pty.", "write_with_reason("].concat())
+                .count(),
             1,
             "one door in the product, and it is inside `write_pty_input`"
         );
+        assert_eq!(
+            product.matches(&["pty.", "write("].concat()).count(),
+            0,
+            "every product write must carry its reason into the input dump"
+        );
+        assert!(body.contains(&["pty.", "write_with_reason(bytes, what)"].concat()));
     }
 
     /// PIN — **no path reaches ConPTY with a rectangle except through the quiet window.**
