@@ -2599,9 +2599,20 @@ impl WebSeat {
                 // nothing at all. The carried mint is honoured only for the URL
                 // it was made for, so a mint left over from a page that has since
                 // been navigated away from admits nothing.
+                //
+                // **"The URL it was made for" is a question about the file, not
+                // about the string** (issue #7, 2026-09-20). This asked the
+                // mint's own `admits`, spelled as a string comparison, and the
+                // two came apart in both directions: a restored page carrying
+                // its own `#fragment` — which is what `page_destination` hands
+                // over, and what a local report's table of contents is made of
+                // — did not match the mint it arrived with and was navigated
+                // with `Mint::Nothing`, which refuses every `file:` URL there
+                // is. So the mint answers for itself here as it does at every
+                // other door.
                 let minted = if url.eq_ignore_ascii_case(BLANK_PAGE) {
                     Mint::Blank
-                } else if self.minted.target() == Some(url.as_str()) {
+                } else if self.minted.admits(url).is_some() {
                     self.minted.clone()
                 } else {
                     Mint::Nothing
@@ -3901,11 +3912,11 @@ mod machine_tests {
             .collect();
         assert!(
             source.contains(concat!(
-                "}elseifself.minted.target()==Some(url.as",
-                "_str()){self.minted.clone()"
+                "}elseifself.minted.ad",
+                "mits(url).is_some(){self.minted.clone()"
             )),
             "the mint installed is the one the caller carried, honoured only for \
-             the URL it was made for"
+             the file it was made for"
         );
         let gate = concat!("check(url,Origin::Host", "Minted(minted))");
         assert_eq!(

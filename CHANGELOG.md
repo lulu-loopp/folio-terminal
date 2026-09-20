@@ -8,6 +8,22 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **A local page or PDF whose path contains Chinese — or a space with `{`, `}`,
+  `^` or `` ` `` in the name — now opens in the preview, instead of being turned
+  away by Folio itself.** Double-clicking `报告.pdf` under `D:\文档\项目 (1)\`
+  drew Folio's own refusal card: the window had opened the file and then refused
+  it, because it was comparing two *spellings* of one path where it meant to
+  compare the path. The browser engine re-spells a local address in its own
+  form — every character outside a small set comes back percent-encoded — and
+  the two strings no longer matched. Folio now reads a local address as the file
+  it names, once, at the door, so the two spellings are one answer. The address
+  row shows the ordinary path again (`D:\文档\报告.pdf`, not `file:///D:/%E6…`),
+  links to files beside the page, in-page jumps and reload keep working, and a
+  session saved before this change still reopens its pages. Nothing that was
+  refused for a safety reason is opened now: a path that walks out of the page's
+  own folder, a network share, or an address that matches only after a spelling
+  is guessed at is refused exactly as before. Reported as issue #7.
+
 - **A PowerShell script now opens in the preview highlighted, instead of as
   plain text.** `.ps1`, `.psm1` and `.psd1` files, and a ` ```powershell `,
   ` ```pwsh ` or ` ```ps1 ` fence inside a Markdown document, get the same
