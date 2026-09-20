@@ -88409,12 +88409,17 @@ impl Runtime<'_> {
             return Ok(());
         }
         let spent = retire_spent_math_copy(&mut self.window.math_copied, now);
-        let hovered = self.hovered_math_tool();
-        let hover_moved = self
-            .window
-            .math_tools
-            .as_mut()
-            .is_some_and(|follow| follow.observe_hovered(hovered));
+        // A window with no marks asks the picture nothing: the hit test is
+        // behind the same refusal `sync_math_tools` makes.
+        let hover_moved = if self.window.math_tools.is_some() {
+            let hovered = self.hovered_math_tool();
+            self.window
+                .math_tools
+                .as_mut()
+                .is_some_and(|follow| follow.observe_hovered(hovered))
+        } else {
+            false
+        };
         let owes_frame = self.math_tools_owe_frames(now);
         // While a formula journey is moving, the present door rebuilds this
         // lane from its handed frame. At rest, a hover-ink change or a spent copy
