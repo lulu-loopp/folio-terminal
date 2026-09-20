@@ -9002,9 +9002,31 @@ pub struct SettingsLayout {
     menu_bar: Option<crate::preview::ScrollBar>,
     /// The furthest the open menu's list may be pushed up inside its body.
     menu_max_scroll: f32,
+    /// Measurements needed to reposition the picker without remeasuring the page.
+    menu_source: Option<MenuSource>,
 }
 
 impl SettingsLayout {
+    fn move_menu_to(&mut self, scroll: f32) {
+        let Some(source) = &self.menu_source else {
+            return;
+        };
+        let menu = source.layout(scroll);
+        // Placement stays in `menu_layout`, including separators and the bar.
+        // The file-verb presence was resolved with the page's content already.
+        for (acts, item) in self.menu_acts.iter_mut().zip(&menu.items) {
+            if acts.is_some() {
+                *acts = Some(MenuItemActs::placed(*item, self.scale));
+            }
+        }
+        self.menu = Some(menu.frame);
+        self.menu_body = Some(menu.body);
+        self.items = menu.items;
+        self.menu_separators = menu.separators;
+        self.menu_bar = menu.bar;
+        self.menu_max_scroll = menu.max_scroll;
+    }
+
     /// Where a row landed, or `None` when the dialog is not holding it.
     ///
     /// The `Option` is the whole point and is why this is the only way to ask:
@@ -10388,6 +10410,8 @@ pub fn layout_for_menus(
     menu_scroll: f32,
     measure: &mut dyn FnMut(&str, f32) -> f32,
 ) -> Option<SettingsLayout> {
+    #[cfg(test)]
+    LAYOUT_CALLS.set(LAYOUT_CALLS.get() + 1);
     // **Every question below goes through the memo** (see [`MeasureMemo`]): this
     // function asks the face for the same few hundred strings a few thousand
     // times, because the dialog is as tall as its tallest page and every sweep
@@ -11341,6 +11365,7 @@ pub fn layout_for_menus(
         menu_kind: active.map(|(row, _)| row),
         menu_body: popup.map(|menu| menu.body),
         menu_bar: popup.and_then(|menu| menu.bar),
+        menu_source: popup.map(|menu| menu.source.clone()),
         menu_max_scroll: popup.map_or(0.0, |menu| menu.max_scroll),
     })
 }
@@ -11984,6 +12009,7 @@ fn place_nav(items: &[SettingsCategory], nav: [f32; 4], scale: f32) -> Vec<NavLa
 /// the visible part of a whole pill rather than a shorter pill.
 #[derive(Clone, Debug)]
 struct MenuGeometry {
+    source: MenuSource,
     /// The hairlines between the runs, in the order they were asked for.
     separators: Vec<[f32; 4]>,
     frame: [f32; 4],
@@ -11997,6 +12023,37 @@ struct MenuGeometry {
     items: Vec<[f32; 4]>,
     bar: Option<crate::preview::ScrollBar>,
     max_scroll: f32,
+}
+
+/// The measured menu inputs. Scrolling runs the existing numeric placement
+/// function with these measurements, never the whole-page layout or shaper.
+#[derive(Clone, Debug, PartialEq)]
+struct MenuSource {
+    combo: [f32; 4],
+    surface: [f32; 2],
+    scale: f32,
+    border: f32,
+    option_count: usize,
+    separators_before: Vec<usize>,
+    widest_option: f32,
+    ticks: bool,
+}
+
+impl MenuSource {
+    fn layout(&self, scroll: f32) -> MenuGeometry {
+        menu_layout(
+            self.combo,
+            self.surface[0],
+            self.surface[1],
+            self.scale,
+            self.border,
+            self.option_count,
+            &self.separators_before,
+            self.widest_option,
+            self.ticks,
+            scroll,
+        )
+    }
 }
 
 /// The theme picker's popup: `min-width: 100%` and `right: 0` off the button,
@@ -12157,6 +12214,16 @@ fn menu_layout(
         scale,
     );
     MenuGeometry {
+        source: MenuSource {
+            combo,
+            surface: [surface_width, surface_height],
+            scale,
+            border,
+            option_count,
+            separators_before: separators_before.to_vec(),
+            widest_option,
+            ticks,
+        },
         separators,
         frame,
         body,
@@ -15188,9 +15255,163 @@ pub(crate) fn push_float_window(
     ));
 }
 
+#[path = "settings_geometry.rs"]
+pub mod geometry;
+
+#[cfg(test)]
+thread_local! {
+    static LAYOUT_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct SettingsPointerHarness {
+        geometry: geometry::Geometry,
+        inputs: geometry::Inputs,
+        panel: SettingsPanel,
+        repaints: usize,
+    }
+
+    impl geometry::PointerHost for SettingsPointerHarness {
+        fn settings_geometry(&mut self) -> Option<std::sync::Arc<SettingsLayout>> {
+            if !self.panel.is_open() {
+                self.geometry.clear();
+                return None;
+            }
+            // Rebuild the input description from the CURRENT panel, just like
+            // Runtime. Accidentally keying geometry on hover/focus must go red.
+            let inputs = geometry::Inputs::new(
+                self.inputs.surface,
+                self.inputs.scale,
+                self.inputs.font_revision,
+                &self.panel,
+                self.inputs.scroll,
+                self.inputs.content(),
+            );
+            self.geometry
+                .read(inputs, |inputs| inputs.layout(&mut measure))
+        }
+        fn settings_drag(&mut self, _: &SettingsLayout, _: f64, _: f64) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+        fn settings_values(&self) -> SettingsValues {
+            self.inputs.values.clone()
+        }
+        fn settings_hover(&mut self, target: SettingsTarget) -> anyhow::Result<()> {
+            if self.panel.set_hover(Some(target)) {
+                self.repaints += 1;
+                // The overlay draw is another reader in the COMPLETE operation.
+                self.settings_geometry();
+            }
+            Ok(())
+        }
+    }
+
+    fn settings_pointer_harness() -> SettingsPointerHarness {
+        let rows = visible_rows_for(
+            bt_platform::HostPlatform::Windows,
+            TabLayoutMode::Horizontal,
+        );
+        let content = content(&rows, &[]);
+        let mut panel = SettingsPanel::default();
+        panel.toggle(content);
+        panel.select_category(SettingsCategory::General);
+        let inputs = geometry::Inputs::new([1200.0, 900.0], 1.0, 0, &panel, 0.0, content);
+        SettingsPointerHarness {
+            geometry: geometry::Geometry::default(),
+            inputs,
+            panel,
+            repaints: 0,
+        }
+    }
+
+    #[test]
+    fn settings_pointer_complete_operation_layout_budget() {
+        use geometry::PointerHost;
+        let mut host = settings_pointer_harness();
+        LAYOUT_CALLS.set(0);
+        let layout = host.settings_geometry().unwrap();
+        assert_eq!(LAYOUT_CALLS.get(), 1, "opening: one layout");
+        // Move between scrim and real row targets, exercising hover repaint too.
+        let row = layout.rows[0].band;
+        for index in 0..64 {
+            let (x, y) = if index % 2 == 0 {
+                (1.0, 1.0)
+            } else {
+                (f64::from(row[0] + 2.0), f64::from(row[1] + 2.0))
+            };
+            host.settings_geometry(); // the preview-hover exclusion reader
+            assert!(geometry::pointer_moved(&mut host, x, y).unwrap());
+            host.settings_geometry(); // later chrome / keyboard / scroll reader
+        }
+        assert!(
+            host.repaints > 1,
+            "reachability: real hit test and changed hover"
+        );
+        assert_eq!(
+            LAYOUT_CALLS.get(),
+            1,
+            "64 pointer moves and their draws: zero layouts"
+        );
+        host.panel
+            .press(SettingsTarget::Combo(SettingsRow::GitPanel));
+        assert_eq!(
+            host.panel.focus(),
+            Some(SettingsTarget::Combo(SettingsRow::GitPanel))
+        );
+        host.settings_geometry();
+        assert_eq!(
+            LAYOUT_CALLS.get(),
+            1,
+            "focus alone does not change geometry"
+        );
+        host.inputs.values.key_hints = !host.inputs.values.key_hints;
+        geometry::pointer_moved(&mut host, 1.0, 1.0).unwrap();
+        host.settings_geometry();
+        assert_eq!(
+            LAYOUT_CALLS.get(),
+            2,
+            "value change and all readers: one layout"
+        );
+        for _ in 0..32 {
+            host.settings_geometry();
+        }
+        assert_eq!(
+            LAYOUT_CALLS.get(),
+            2,
+            "settled operation stays at zero work"
+        );
+        host.panel.close();
+        assert!(host.settings_geometry().is_none());
+        assert_eq!(LAYOUT_CALLS.get(), 2, "closed readers do zero work");
+        host.panel.toggle(host.inputs.content());
+        host.settings_geometry();
+        assert_eq!(LAYOUT_CALLS.get(), 3, "reopening computes once");
+    }
+
+    #[test]
+    fn settings_pointer_production_wiring_uses_the_counted_handler_and_owner() {
+        let source = include_str!("main.rs");
+        let body = |name: &str| {
+            let tail = source.split_once(name).unwrap().1;
+            tail.split("\n    fn ").next().unwrap()
+        };
+        let pointer = body("    fn pointer_moved(&mut self, position:");
+        assert!(
+            pointer.contains("settings::geometry::pointer_moved(self, position.x, position.y)?")
+        );
+        let layout = body("    fn settings_layout(&mut self)");
+        assert!(layout.contains("self.window.settings_geometry.read(inputs,"));
+        assert!(layout.contains("self.window.settings_geometry.clear();"));
+        assert_eq!(source.matches("inputs.layout(&mut measure)").count(), 1);
+        // The test host substitutes only window/GPU effects, not the handler.
+        assert!(source.contains("impl settings::geometry::PointerHost for Runtime<'_>"));
+        let content = body("    fn settings_dialog<'a>(");
+        assert!(content.contains(".advanced_reveal_sample"));
+        assert!(!content.contains("tween.sample(Instant::now()"));
+    }
 
     #[test]
     fn cjk_settings_reads_and_language_notes_do_not_enumerate_fonts() {
