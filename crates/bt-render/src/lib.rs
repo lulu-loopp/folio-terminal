@@ -1531,6 +1531,17 @@ pub struct FrameTrigger {
     pub source: FrameSource,
 }
 
+pub use wgpu::PresentMode;
+
+/// Configuration read from the live renderer and the descriptor used by its device.
+#[derive(Clone, Copy, Debug)]
+pub struct PresentConfiguration {
+    pub generation: u64,
+    pub mode: wgpu::PresentMode,
+    pub latency: u32,
+    pub wait: &'static str,
+}
+
 /// A real call boundary inside one on-screen presentation.
 ///
 /// The application uses these transitions to move its one window-thread time
@@ -1539,6 +1550,8 @@ pub struct FrameTrigger {
 /// renderer only knows where one call ends and the next begins.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PresentPhase {
+    /// Surface configuration, including resize and recovery.
+    SurfaceConfigure(u64),
     /// Shape text rows and chrome/preview labels.
     TextShaping,
     /// Rasterize glyphs and upload atlas textures.
@@ -4277,6 +4290,7 @@ pub struct GpuContext {
     /// `Device`, and `get_default_config`/`get_capabilities` must be asked of
     /// the same `Adapter`.
     instance: wgpu::Instance,
+    present_wait: wgpu::Dx12UseFrameLatencyWaitableObject,
     adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -6351,10 +6365,16 @@ impl GpuContext {
         height: u32,
         scale_factor: f64,
     ) -> Result<(Self, WindowRenderer), RenderError> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        let present_wait = descriptor
+            .backend_options
+            .dx12
+            .latency_waitable_object
+            .clone();
+        let instance = wgpu::Instance::new(descriptor);
         let kind = target.kind();
         let surface = create_surface(&instance, target)?;
-        let mut gpu = Self::bootstrap_for_surface(instance, &surface).await?;
+        let mut gpu = Self::bootstrap_for_surface(instance, &surface, present_wait).await?;
         let window =
             WindowRenderer::from_surface(&mut gpu, surface, kind, width, height, scale_factor)?;
         Ok((gpu, window))
@@ -6372,6 +6392,7 @@ impl GpuContext {
     pub async fn bootstrap_for_surface(
         instance: wgpu::Instance,
         surface: &wgpu::Surface<'static>,
+        present_wait: wgpu::Dx12UseFrameLatencyWaitableObject,
     ) -> Result<Self, RenderError> {
         let phase_started = Instant::now();
         let adapter = instance
@@ -6401,7 +6422,7 @@ impl GpuContext {
             .find(wgpu::TextureFormat::is_srgb)
             .ok_or_else(|| RenderError::Wgpu("surface has no sRGB format".to_owned()))?;
         Self::assemble(
-            instance,
+            (instance, present_wait),
             adapter,
             device,
             queue,
@@ -6473,7 +6494,13 @@ impl GpuContext {
                 RebuiltWindow::Offscreen(renderer) => offscreen.push(renderer),
             }
         }
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        let present_wait = descriptor
+            .backend_options
+            .dx12
+            .latency_waitable_object
+            .clone();
+        let instance = wgpu::Instance::new(descriptor);
         let bootstrap = if on_screen.is_empty() {
             None
         } else {
@@ -6536,6 +6563,7 @@ impl GpuContext {
             video_blank,
         } = DeviceResources::mint(&device, &queue, format);
         self.instance = instance;
+        self.present_wait = present_wait;
         self.adapter = adapter;
         self.device = device;
         self.queue = queue;
@@ -6664,7 +6692,13 @@ impl GpuContext {
         demand_fallback: bool,
         texture_ceiling: Option<u32>,
     ) -> Result<Self, RenderError> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        let present_wait = descriptor
+            .backend_options
+            .dx12
+            .latency_waitable_object
+            .clone();
+        let instance = wgpu::Instance::new(descriptor);
         let phase_started = Instant::now();
         let options = |force_fallback_adapter| wgpu::RequestAdapterOptions {
             compatible_surface: None,
@@ -6702,7 +6736,7 @@ impl GpuContext {
             .map_err(|error| RenderError::Wgpu(error.to_string()))?;
         let device_time = phase_started.elapsed();
         Self::assemble(
-            instance,
+            (instance, present_wait),
             adapter,
             device,
             queue,
@@ -6713,7 +6747,7 @@ impl GpuContext {
     }
 
     fn assemble(
-        instance: wgpu::Instance,
+        instance: (wgpu::Instance, wgpu::Dx12UseFrameLatencyWaitableObject),
         adapter: wgpu::Adapter,
         device: wgpu::Device,
         queue: wgpu::Queue,
@@ -6721,6 +6755,7 @@ impl GpuContext {
         adapter_time: Duration,
         device_time: Duration,
     ) -> Result<Self, RenderError> {
+        let (instance, present_wait) = instance;
         let max_texture_dimension_2d = device.limits().max_texture_dimension_2d;
         let phase_started = Instant::now();
         let mut font_system = terminal_font_system();
@@ -6757,6 +6792,7 @@ impl GpuContext {
         let terminal_cjk_families = resolve_terminal_cjk_families("", &mut font_system);
         Ok(Self {
             instance,
+            present_wait,
             adapter,
             device,
             queue,
@@ -8159,6 +8195,29 @@ impl WindowRenderer {
             .checked_add(u64::from(changed))
             .expect("renderer revision exhausted");
         changed
+    }
+
+    /// Numeric identity for diagnostics; no renderer snapshot or native calls.
+    #[must_use]
+    pub fn surface_generation(&self) -> u64 {
+        self.surface_generation
+    }
+
+    pub fn present_configuration(&self, gpu: &GpuContext) -> PresentConfiguration {
+        PresentConfiguration {
+            generation: self.surface_generation,
+            mode: self.config.present_mode,
+            latency: self.config.desired_maximum_frame_latency,
+            wait: if gpu.adapter.get_info().backend == wgpu::Backend::Dx12 {
+                match gpu.present_wait {
+                    wgpu::Dx12UseFrameLatencyWaitableObject::Wait => "Wait",
+                    wgpu::Dx12UseFrameLatencyWaitableObject::DontWait => "DontWait",
+                    wgpu::Dx12UseFrameLatencyWaitableObject::None => "None",
+                }
+            } else {
+                "None"
+            },
+        }
     }
 
     /// Replace **every** preview body this frame. Returns whether anything
@@ -9770,7 +9829,7 @@ impl WindowRenderer {
         // Keep the old DXGI back buffers alive while CPU shaping and GPU resource preparation run.
         // ResizeBuffers discards them; configuring only immediately before acquire/submit bounds
         // both the default-black interval and DXGI's stretch of the old frame.
-        self.configure_surface_if_needed(gpu)?;
+        self.configure_surface_if_needed(gpu, phase)?;
         phase(PresentPhase::SurfaceAcquire);
         let acquisition = self.acquire();
         phase(PresentPhase::ComposeEncode);
@@ -9780,12 +9839,15 @@ impl WindowRenderer {
                 (AcquiredFrame::Swapchain(texture), view)
             }
             SurfaceAcquisition::Suboptimal(texture) => {
-                self.configure_surface(gpu)?;
+                phase(PresentPhase::SurfaceConfigure(self.surface_generation + 1));
+                let configured = self.configure_surface(gpu);
+                phase(PresentPhase::ComposeEncode);
+                configured?;
                 let view = texture.texture.create_view(&Default::default());
                 (AcquiredFrame::Swapchain(texture), view)
             }
             SurfaceAcquisition::Failed(failure) => {
-                return self.handle_surface_failure(gpu, failure);
+                return self.handle_surface_failure(gpu, failure, phase);
             }
             SurfaceAcquisition::Offscreen(view) => (AcquiredFrame::Offscreen, view),
         };
@@ -11137,6 +11199,7 @@ impl WindowRenderer {
         &mut self,
         gpu: &GpuContext,
         failure: SurfaceFailure,
+        phase: &mut dyn FnMut(PresentPhase),
     ) -> Result<PresentOutcome, RenderError> {
         // **First, and unconditionally** — including on the fatal path, because
         // the run that ends in `SurfaceValidation` is exactly the run whose
@@ -11146,22 +11209,34 @@ impl WindowRenderer {
         // **Second, and unconditionally** — see this function's own note. The
         // frame staged its uploads before it asked for a back buffer, and it is
         // leaving without the submit that retires them.
+        phase(PresentPhase::QueueSubmit);
         gpu.queue.submit(std::iter::empty());
+        phase(PresentPhase::ComposeEncode);
         match surface_failure_policy(failure) {
             SurfaceFailurePolicy::Skip => Ok(PresentOutcome::Skipped),
             SurfaceFailurePolicy::SkipUntilVisible => Ok(PresentOutcome::SkippedNotVisible),
             SurfaceFailurePolicy::Reconfigure => {
-                self.configure_surface(gpu)?;
+                phase(PresentPhase::SurfaceConfigure(self.surface_generation + 1));
+                let configured = self.configure_surface(gpu);
+                phase(PresentPhase::ComposeEncode);
+                configured?;
                 Ok(PresentOutcome::Reconfigure)
             }
             SurfaceFailurePolicy::FatalValidation => Err(RenderError::SurfaceValidation),
         }
     }
 
-    fn configure_surface_if_needed(&mut self, gpu: &GpuContext) -> Result<(), RenderError> {
+    fn configure_surface_if_needed(
+        &mut self,
+        gpu: &GpuContext,
+        phase: &mut dyn FnMut(PresentPhase),
+    ) -> Result<(), RenderError> {
         let requested_size = (self.config.width, self.config.height);
         if self.configured_size != requested_size {
-            self.configure_surface(gpu)?;
+            phase(PresentPhase::SurfaceConfigure(self.surface_generation + 1));
+            let configured = self.configure_surface(gpu);
+            phase(PresentPhase::ComposeEncode);
+            configured?;
         }
         Ok(())
     }
