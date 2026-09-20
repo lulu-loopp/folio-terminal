@@ -247,7 +247,7 @@ fn uninstall_purge_junction_refuses_root_without_touching_target() {
     fs::create_dir_all(&scope.data[0]).unwrap();
     let junction = scope.data[0].join("escape");
     // Native PowerShell creates a junction without developer-mode symlink privileges.
-    let status = std::process::Command::new("powershell.exe")
+    let status = bt_platform::quiet_command("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", "New-Item -ItemType Junction -Path $env:FOLIO_TEST_JUNCTION -Target $env:FOLIO_TEST_TARGET -ErrorAction Stop | Out-Null"])
         .env("FOLIO_TEST_JUNCTION", &junction).env("FOLIO_TEST_TARGET", &outside).status().unwrap();
     assert!(status.success());
