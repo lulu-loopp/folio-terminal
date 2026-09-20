@@ -2507,6 +2507,7 @@ pub struct MonospaceFamily {
 }
 
 pub mod cjk;
+pub mod ime_observation;
 pub use cjk::{CjkCoverage, CjkFamily};
 
 /// **The page Windows installs fonts on**, and the door
