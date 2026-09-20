@@ -70,6 +70,7 @@
 1 shell_integration/profile_marks.rs: lock: .open
 1 shell_integration/profile_marks.rs: lock: .read
 1 shell_integration/profile_marks.rs: rewrite_recorded: Decoded::read
+1 attention_ownership.rs: record: Marks::read
 1 shell_integration/profile_runtime.rs: enable_record: Marks::read
 1 shell_integration/profile_runtime.rs: install_recorded: Marks::read
 1 shell_integration/profile_runtime.rs: operate_with: Marks::read

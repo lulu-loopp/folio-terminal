@@ -54,6 +54,8 @@
 //! one would be a build with a second copy of somebody else's file. So it refuses, out loud, and the
 //! row stays where the machine actually is.
 
+pub(crate) use crate::attention_ownership::Outcome;
+use crate::attention_ownership::{self as ownership, Decision};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -168,7 +170,33 @@ pub(crate) fn state() -> State {
     let Some(path) = config_path() else {
         return State::Absent;
     };
-    state_at(&path)
+    let state = state_at(&path);
+    if state != State::Installed {
+        return state;
+    }
+    let Some(exe) = std::env::current_exe().ok() else {
+        return State::Unreadable;
+    };
+    let Ok(text) =
+        bt_platform::file_reads::read_to_string(bt_platform::file_reads::Lane::Attention, path)
+    else {
+        return State::Unreadable;
+    };
+    let Some(value) = text.parse::<DocumentMut>().ok() else {
+        return State::Unreadable;
+    };
+    if (notify_owner(&value)
+        .ok()
+        .flatten()
+        .into_iter()
+        .collect::<Vec<_>>())
+    .iter()
+    .any(|owner| crate::explorer_menu::same_path(owner, &exe))
+    {
+        State::Installed
+    } else {
+        State::Absent
+    }
 }
 
 /// The same question about a named file, so a test can ask it without a codex installation on the
@@ -216,18 +244,29 @@ fn words_of(document: &DocumentMut) -> Option<Vec<String>> {
         .collect()
 }
 
-/// **Whether the `notify` standing in this document is one of ours.**
-///
-/// By the **verb and the family**, not by the path to the executable:
-/// [`attention_hooks::MARK`](crate::attention_hooks)'s rule, for its reason — a user who moves
-/// Folio, or who runs two builds of it, still has an entry this can recognise and take back out.
+/// Whether the exact Folio argv shape is present. `notify_owner` is the
+/// ownership decoder; all mutations additionally check its executable path.
 fn declares_folio(document: &DocumentMut) -> bool {
-    words_of(document).is_some_and(|words| {
-        words.iter().any(|word| word == ATTENTION_VERB)
-            && words
-                .iter()
-                .any(|word| word.starts_with(&format!("{CODEX}:")))
-    })
+    notify_owner(document).is_ok_and(|owner| owner.is_some())
+}
+
+/// The sole Codex attribution site: argv[0], with the exact Folio verb/event shape.
+fn notify_owner(document: &DocumentMut) -> Result<Option<PathBuf>, &'static str> {
+    if document.get(NOTIFY_KEY).is_none() {
+        return Ok(None);
+    }
+    let words = words_of(document).ok_or(UNREADABLE)?;
+    let folio = words.get(1).is_some_and(|word| word == ATTENTION_VERB)
+        && words
+            .get(2)
+            .is_some_and(|word| word.starts_with(&format!("{CODEX}:")));
+    if !folio {
+        return Ok(None);
+    }
+    if words.len() != 4 || words[2] != format!("{CODEX}:{EVENT}") || words[3] != JSON_FLAG {
+        return Err(crate::i18n::Text::AgentHooksSchemaUnknown.text());
+    }
+    Ok(Some(PathBuf::from(&words[0])))
 }
 
 /// **Whether somebody else's program is on the key.**
@@ -242,7 +281,7 @@ fn declares_somebody_else(document: &DocumentMut) -> bool {
 ///
 /// Returns whether anything changed, so that a press on an already-installed machine costs no write
 /// at all — `attention_hooks`'s rule, for `shell_integration`'s reason.
-pub(crate) fn install_into(document: &mut DocumentMut, exe: &Path) -> bool {
+fn install_into(document: &mut DocumentMut, exe: &Path) -> bool {
     if declares_somebody_else(document) {
         return false;
     }
@@ -251,10 +290,8 @@ pub(crate) fn install_into(document: &mut DocumentMut, exe: &Path) -> bool {
         array.push(word);
     }
     let written = Item::Value(Value::Array(array));
-    if document
-        .get(NOTIFY_KEY)
-        .is_some_and(|standing| standing.to_string() == written.to_string())
-    {
+    // Compare argv, not TOML decoration/quoting, so a disk round trip is a no-op.
+    if words_of(document).as_ref() == Some(&program_for(exe)) {
         return false;
     }
     document[NOTIFY_KEY] = written;
@@ -265,24 +302,15 @@ pub(crate) fn install_into(document: &mut DocumentMut, exe: &Path) -> bool {
 ///
 /// Symmetric with [`install_into`] and tested as such, byte for byte, on a document with the user's
 /// own comments and tables in it.
-pub(crate) fn remove_from(document: &mut DocumentMut) -> bool {
-    if !declares_folio(document) {
+fn remove_from(document: &mut DocumentMut, exe: &Path) -> bool {
+    if notify_owner(document)
+        .ok()
+        .flatten()
+        .is_none_or(|owner| ownership::other_live(&owner, exe) != Ok(false))
+    {
         return false;
     }
     document.remove(NOTIFY_KEY).is_some()
-}
-
-/// What happened when the row was pressed.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum Outcome {
-    /// Written. The file is now what [`State::Installed`] describes.
-    Installed,
-    /// Taken back out.
-    Removed,
-    /// Nothing to do — it was already in the state that was asked for.
-    Unchanged,
-    /// Refused, with the reason in the caller's own words.
-    Refused(&'static str),
 }
 
 /// Put Folio's `notify` in, or take it out, on this machine.
@@ -290,16 +318,23 @@ pub(crate) enum Outcome {
 /// **The file is read, changed and written whole**, and a copy of what was there is kept beside it
 /// the first time each day — `attention_hooks`'s rule, for its reason: this is somebody's own
 /// configuration file, and a build that could damage one had better be able to hand it back.
-pub(crate) fn apply(install: bool, exe: &Path) -> Outcome {
+pub(crate) fn apply(decision: Decision, exe: &Path) -> Outcome {
     let Some(path) = config_path() else {
         return Outcome::Refused("no codex configuration directory to write into");
     };
-    apply_to(&path, install, exe)
+    apply_at(&path, decision, exe, &crate::persist::storage_dir())
 }
 
 /// The same act on a named file — the seam the tests press, so that what they pin is this function
 /// and not a `config.toml` belonging to whoever runs them.
-fn apply_to(path: &Path, install: bool, exe: &Path) -> Outcome {
+pub(crate) fn apply_at(path: &Path, decision: Decision, exe: &Path, data: &Path) -> Outcome {
+    if let Err(reason) = ownership::stable_executable(Some(exe)) {
+        return Outcome::Refused(reason);
+    }
+    if !path.is_absolute() {
+        return Outcome::Refused(crate::i18n::Text::AgentHooksRootUnstable.text());
+    }
+    let install = decision.installs();
     let existing = match crate::attention_hooks::standing(path) {
         crate::attention_hooks::Standing::Text(text) => text,
         // Nothing there yet: the install creates the file, and there is nothing to keep beside it.
@@ -315,18 +350,41 @@ fn apply_to(path: &Path, install: bool, exe: &Path) -> Outcome {
         // somebody wrote, and overwriting it to add a convenience is not a trade anyone agreed to.
         Err(_) => return Outcome::Refused(UNREADABLE),
     };
+    if document.get(NOTIFY_KEY).is_some() && words_of(&document).is_none() {
+        return Outcome::Refused(UNREADABLE);
+    }
+    let paths = match notify_owner(&document) {
+        Ok(owner) => owner.into_iter().collect::<Vec<_>>(),
+        Err(reason) => return Outcome::Refused(reason),
+    };
     if install && declares_somebody_else(&document) {
         return Outcome::Refused("codex already runs a notify program of your own");
     }
+    let others = match ownership::check(&paths, exe, &decision) {
+        Ok(others) => others,
+        Err(outcome) => return outcome,
+    };
     let changed = if install {
         install_into(&mut document, exe)
     } else {
-        remove_from(&mut document)
+        remove_from(&mut document, exe)
+    };
+    let _record = if install {
+        match ownership::record(data, path.parent().expect("absolute config"), "codex") {
+            Ok(lock) => Some(lock),
+            Err(reason) => return Outcome::Refused(reason),
+        }
+    } else {
+        None
     };
     if !changed {
-        return Outcome::Unchanged;
+        return if others.is_empty() {
+            Outcome::Unchanged
+        } else {
+            Outcome::LeftOther(others)
+        };
     }
-    // The atomic write, the backup that is a precondition and the link that is followed are all
+    // The atomic write, mandatory backup, and unsafe-path refusal are all
     // `attention_hooks::land`'s, said once for all three installers.
     match crate::attention_hooks::land(
         path,
@@ -347,8 +405,10 @@ fn apply_to(path: &Path, install: bool, exe: &Path) -> Outcome {
     }
     if install {
         Outcome::Installed
-    } else {
+    } else if others.is_empty() {
         Outcome::Removed
+    } else {
+        Outcome::LeftOther(others)
     }
 }
 
@@ -376,8 +436,49 @@ fn rendered(document: &DocumentMut, existing: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn attention_two_live_copies_require_takeover_and_preserve_bytes() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/tb-tests")
+            .join(concat!("codex-", "two-copies"));
+        std::fs::create_dir_all(&root).unwrap();
+        let a = root.join("A space $ ` ' 中文.exe");
+        let b = root.join("B.exe");
+        std::fs::write(&a, b"A").unwrap();
+        std::fs::write(&b, b"B").unwrap();
+        let path = root.join("config.toml");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(apply_to(&path, true, &a), Outcome::Installed);
+        let before = std::fs::read(&path).unwrap();
+        let result = apply_to(&path, true, &b);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "another live executable must require explicit take-over: {result:?}"
+        );
+        assert_ne!(result, Outcome::Installed);
+        let result = apply_to(&path, false, &b);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "cleanup must leave a live other owner: {result:?}"
+        );
+    }
+
+    fn apply_to(path: &Path, install: bool, exe: &Path) -> Outcome {
+        apply_at(
+            path,
+            install.into(),
+            exe,
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/tb-test-marks/codex")
+                .join(path.parent().unwrap().file_name().unwrap()),
+        )
+    }
+
     fn exe() -> PathBuf {
-        PathBuf::from(r"C:\Program Files\Folio\folio.exe")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/tb-fixtures/Program Files/Folio/folio.exe")
     }
 
     /// **The consent disclosure names the file this machine will write** —
@@ -521,7 +622,7 @@ mod tests {
             written["tui"]["notification_method"].as_str() == Some("bel"),
             "and the table that was there is still the table that was there"
         );
-        assert!(remove_from(&mut document));
+        assert!(remove_from(&mut document, &exe()));
         assert_eq!(
             document.to_string(),
             original,
@@ -552,7 +653,7 @@ mod tests {
                 "the line is in what gets written"
             );
             let mut back = installed.parse::<DocumentMut>().expect("what we wrote");
-            assert!(remove_from(&mut back));
+            assert!(remove_from(&mut back, &exe()));
             assert_eq!(
                 rendered(&back, &installed),
                 original,
@@ -569,25 +670,25 @@ mod tests {
             !install_into(&mut document, &exe()),
             "an install that was already done is not a change"
         );
-        assert!(remove_from(&mut document));
+        assert!(remove_from(&mut document, &exe()));
         assert!(
-            !remove_from(&mut document),
+            !remove_from(&mut document, &exe()),
             "and neither is a removal of what is not there"
         );
     }
 
     /// Moving the executable is not a reason to lose track of the entry.
     #[test]
-    fn the_entry_is_recognised_by_what_it_does_not_by_where_folio_lives() {
+    fn a_dead_owner_can_be_replaced_after_moving_folio() {
         let mut document = installed("");
-        let moved = PathBuf::from(r"E:\portable\folio.exe");
+        let moved = exe().parent().unwrap().join("portable/folio.exe");
         assert!(
             install_into(&mut document, &moved),
             "a rewrite from a new location is a change"
         );
         assert!(document.to_string().contains("portable"));
         assert_eq!(state_of(&document), State::Installed);
-        assert!(remove_from(&mut document));
+        assert!(remove_from(&mut document, &exe()));
         assert!(!document.to_string().contains(NOTIFY_KEY));
     }
 
@@ -601,7 +702,7 @@ mod tests {
             !install_into(&mut document, &exe()),
             "installing over somebody's own program is a deletion this build cannot undo"
         );
-        assert!(!remove_from(&mut document));
+        assert!(!remove_from(&mut document, &exe()));
         assert_eq!(document.to_string(), theirs);
     }
 
@@ -690,11 +791,13 @@ mod tests {
 
     /// A scratch directory of this test's own. Never anywhere near a real `~/.codex`.
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "folio-codex-{name}-{}-{}",
-            std::process::id(),
-            crate::attention_hooks::today()
-        ));
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/tb-tests")
+            .join(format!(
+                "folio-codex-{name}-{}-{}",
+                std::process::id(),
+                crate::attention_hooks::today()
+            ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a scratch directory");
         dir

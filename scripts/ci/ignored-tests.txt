@@ -117,3 +117,7 @@ webview::webview2_runtime_probe::a_local_page_reaches_only_its_own_folder
 # T-PASTE-1: defined MSVC wmain argv consumer must be compiled separately; native acceptance
 # runs it directly with CREATE_NO_WINDOW, no clipboard, shell, keys or Folio. Pure literals run normally.
 shell_literal::tests::direct_crt_receives_the_exact_literal_after_the_program_token
+
+# T-B native config-link and executable-alias fixture needs symlink privilege.
+# The common filesystem policy is covered by T-A's injected metadata tests.
+attention_ownership::tests::attention_symlinked_configs_are_refused_and_executable_aliases_are_owned
