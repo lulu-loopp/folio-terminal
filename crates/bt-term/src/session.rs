@@ -1196,6 +1196,11 @@ pub struct MathTogglePresentation {
     /// How solid the picture is drawn, in thousandths — `1000` at the typeset face and `0` at the
     /// source, with the source text drawn over the same band at what is left.
     pub picture_opacity_milli: u16,
+    /// The travelling face: 0 is rendered, 1000 is source. This owns geometry
+    /// progress independently of the document's discrete display choice.
+    pub face_milli: u16,
+    /// The source endpoint already measured with the rows at the press.
+    pub source_width_cells: u32,
 }
 
 /// Facts accumulated while slices share one drain turn. No bytes are buffered here.
@@ -8761,12 +8766,11 @@ impl DualPlaneSession {
     ///
     /// The document is untouched by this: the block is still the one entry with an artifact height
     /// it was, and [`Self::toggle_math_source`] is still the only thing that changes which rows
-    /// this session holds. What this moves is the two numbers a frame is built from — the band's
-    /// height, which the projection reads where it reads any artifact's, and how solid the picture
-    /// is drawn, which the placement carries to the renderer — so that the frame on which the
-    /// document really changes is the frame the last presented one already was.
+    /// this session holds. Presentation carries the travelling height, picture strength and face
+    /// progress, plus the source width already measured with its rows. The renderer derives the
+    /// changing band's dimensions from those facts; the document switches only at an endpoint.
     ///
-    /// `None` puts both back, which is what the end of the change and every interruption of it do.
+    /// `None` puts presentation back, which is what the end of the change and every interruption of it do.
     pub fn set_math_toggle_presentation(&mut self, presentation: Option<MathTogglePresentation>) {
         self.math_toggle = presentation;
     }
@@ -9448,12 +9452,15 @@ impl DualPlaneSession {
             // it. Beside the other presentation facts this loop stamps on a placement
             // (`toolbar_visible`, the interior scroll, the clip), because it is one of them: the
             // document says the block is a picture, and the gesture says how much of one.
-            let picture_opacity_milli = self
+            if let Some(presentation) = self
                 .math_toggle
                 .as_ref()
                 .filter(|presentation| presentation.anchor.same_block(&placement.anchor))
-                .map_or(1000, |presentation| presentation.picture_opacity_milli);
-            placement.picture_opacity_milli = picture_opacity_milli;
+            {
+                placement.picture_opacity_milli = presentation.picture_opacity_milli;
+                placement.face_milli = Some(presentation.face_milli);
+                placement.source_width_cells = presentation.source_width_cells;
+            }
             match &placement.anchor {
                 MathBlockAnchor::History { start, .. } => {
                     let Some(record) = self.decorations.get(start) else {
@@ -9569,6 +9576,7 @@ impl DualPlaneSession {
                 // drawn at any strength, and the one the change cross-fades is the Rendered
                 // placement it is replacing.
                 picture_opacity_milli: 1000,
+                face_milli: None,
                 // Filled in for every placement at once, after the last of them exists.
                 selection_spans: Vec::new(),
             });
@@ -9661,6 +9669,7 @@ impl DualPlaneSession {
                 // drawn at any strength, and the one the change cross-fades is the Rendered
                 // placement it is replacing.
                 picture_opacity_milli: 1000,
+                face_milli: None,
                 // Filled in for every placement at once, after the last of them exists.
                 selection_spans: Vec::new(),
             });
@@ -9756,6 +9765,7 @@ impl DualPlaneSession {
                     clipped_top_rows: 0,
                     clipped_bottom_rows: 0,
                     picture_opacity_milli: 1000,
+                    face_milli: None,
                     selection_spans: Vec::new(),
                 });
             }
@@ -9856,6 +9866,7 @@ impl DualPlaneSession {
                     clipped_top_rows: 0,
                     clipped_bottom_rows: 0,
                     picture_opacity_milli: 1000,
+                    face_milli: None,
                     selection_spans: Vec::new(),
                 });
             }
@@ -17299,6 +17310,52 @@ mod tests {
                 .is_some_and(|status| status.starts_with("Formula not rendered:"))
         );
         assert!(frame.cells.iter().any(|cell| cell.text == "$"));
+    }
+
+    #[test]
+    fn math_toggle_presentation_carries_face_progress_and_its_measured_source_width() {
+        let mut session = DualPlaneSession::new(nz(16), nz(2));
+        session.feed(b"$$x^2$$\r\nnext\r\ntail").unwrap();
+        let mut task = session.take_worker_task().unwrap();
+        assert!(resolve_detection_task(&mut task));
+        assert!(session.complete_worker_result(task, Ok(synthetic_raster(24, 35))));
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_to_top();
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let anchor = frame.math_blocks[0].anchor.clone();
+        let faces = session.math_toggle_faces(&projection, &anchor).unwrap();
+        let height = (faces.rendered_height_subpixels + faces.source.height_subpixels) / 2;
+        session.set_math_toggle_presentation(Some(MathTogglePresentation {
+            anchor: anchor.clone(),
+            height_subpixels: height,
+            picture_opacity_milli: 600,
+            face_milli: 400,
+            source_width_cells: faces.source.width_cells,
+        }));
+        session.refresh_projection(&mut projection);
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let block = frame
+            .math_blocks
+            .iter()
+            .find(|p| p.anchor.same_block(&anchor))
+            .unwrap();
+        assert_eq!(block.display, MathBlockDisplay::Rendered);
+        assert_eq!(block.face_milli, Some(400));
+        assert_eq!(block.picture_opacity_milli, 600);
+        assert_eq!(block.source_width_cells, faces.source.width_cells);
+        assert_eq!(block.artifact.height_subpixels, height);
+        session.set_math_toggle_presentation(None);
+        session.refresh_projection(&mut projection);
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let block = frame
+            .math_blocks
+            .iter()
+            .find(|p| p.anchor.same_block(&anchor))
+            .unwrap();
+        assert_eq!(block.face_milli, None);
+        assert_eq!(block.source_width_cells, 0);
+        assert_eq!(block.picture_opacity_milli, 1000);
     }
 
     #[test]

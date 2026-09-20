@@ -709,7 +709,11 @@ impl BandChangingFace {
                 },
                 [4_800, 9_600],
                 true,
-                vec!["$$".to_owned(), "x^2".to_owned(), "$$".to_owned()],
+                bt_viewport::MathSourceFace {
+                    rows: vec!["$$".to_owned(), "x^2".to_owned(), "$$".to_owned()],
+                    width_cells: 3,
+                    height_subpixels: 9_600,
+                },
                 begun,
             ),
             begun,
