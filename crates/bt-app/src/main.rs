@@ -34341,7 +34341,7 @@ mod arrival_wiring_tests {
     /// names the band that would go back to hard-cutting.
     #[test]
     fn every_band_that_passes_is_handed_over_by_the_overlay_build() {
-        let body = fn_body("refresh_overlay");
+        let body = fn_body("refresh_overlay_with_formula");
         for spelling in [
             "ModalBand::Menu(Popup::Profile",
             "ModalBand::Menu(Popup::Root",
@@ -40956,6 +40956,16 @@ impl Runtime<'_> {
     /// Rebuild the chrome quads and labels from the current solve. Returns
     /// whether anything visible changed.
     fn refresh_chrome(&mut self) -> bool {
+        self.refresh_chrome_with_overlay(true)
+    }
+
+    /// Rebuild chrome while leaving the overlay to a present that already owes
+    /// a current-frame formula rebuild.
+    fn refresh_chrome_without_overlay(&mut self) -> bool {
+        self.refresh_chrome_with_overlay(false)
+    }
+
+    fn refresh_chrome_with_overlay(&mut self, include_overlay: bool) -> bool {
         // **The one heavy call in this window that borrowed whichever name
         // happened to be standing** (T-STATION-SPLIT). It is reached from two
         // hundred-odd doors — a keystroke, a hover, a press, a probe's answer,
@@ -41985,7 +41995,7 @@ impl Runtime<'_> {
         // The overlay is rebuilt from the same choke point as the chrome under
         // it, so every path that already knew to repaint on a resize, a DPI
         // change or a theme switch carries the dialog with it for free.
-        let overlay_changed = self.refresh_overlay();
+        let overlay_changed = include_overlay && self.refresh_overlay();
         hang_watch::at(leaving_station);
         chrome_changed || overlay_changed
     }
@@ -46355,6 +46365,23 @@ impl Runtime<'_> {
         // the drawing and the tween that fades it must not disagree about what
         // time it is, and two `Instant::now()` calls in one frame can.
         let now = Instant::now();
+        // Formula geometry belongs to the frame a present is about to draw. An
+        // ordinary state rebuild has no such frame in hand, so it keeps drawing
+        // the follow already placed by the last present and leaves the source
+        // face to `refresh_formula_overlay_for_present` at the glass door.
+        let formula_tools = self.formula_tool_layers(now);
+        self.refresh_overlay_with_formula(now, formula_tools)
+    }
+
+    /// Rebuild the overlay with formula lanes already derived from the frame
+    /// this present draws. Keeping the handed lanes as an argument makes the
+    /// flattened order — and therefore every `WebHole::above` index — pass
+    /// through the same builder as every other overlay rebuild.
+    fn refresh_overlay_with_formula(
+        &mut self,
+        now: Instant,
+        formula_tools: Vec<marks::OverlayLayer>,
+    ) -> bool {
         // Before anything is built, because every layer below is a function of
         // state and this is the state that the pointer, the tree and the window
         // all move.
@@ -46395,11 +46422,7 @@ impl Runtime<'_> {
             // **And, under them, the other face of a band that is changing into
             // it** (§7.1.5p ⑪): one block, one lane, and the marks stand on the
             // source text exactly as they stand on the picture it is replacing.
-            formula_tools: self
-                .formula_toggle_layers(now)
-                .into_iter()
-                .chain(self.formula_tool_layers(now))
-                .collect(),
+            formula_tools,
             rail: self.rail_overlay_layers(),
             // **Directly above the list it came out of** (§7.1.6b″). At full
             // opacity and never at the rail's fold: the fold is what a panel
@@ -85788,24 +85811,25 @@ impl Runtime<'_> {
         if !running.any() {
             return;
         }
-        // **And the marks re-read the band they ride, before the layer that
-        // draws them is built.** Their fade and their travel are sampled from
-        // the clock by the overlay build below, but *where they are travelling
-        // to* is a fact about the picture in hand — and during a change of face
-        // that is moving on every frame. This is the same look
-        // `advance_math_tools_if_due` takes, asked here so that a frame composed
-        // for somebody else takes it too (§7.1.5p ⑦ ii, ⑪). It refuses on two
-        // `Option` reads for a window with no band under the pointer.
-        let marks_moved = self.sync_math_tools(now);
         // **One rebuild and never two** (review 2026-09-18 round 2).
         // `refresh_chrome` ends in `refresh_overlay` — the overlay is rebuilt
         // from the same choke point the chrome is — so asking for both is asking
         // for two overlay builds, which is what the review measured at four
         // hundred a second. The chrome is the expensive lane, so it is asked for
         // only when something that lives *in* it is mid-flight.
+        // Formula lanes are the one overlay content deliberately not rebuilt
+        // here: their owner is the frame at the present door, after every pane
+        // has been projected. If either formula journey is what made this lane
+        // live, that present-time rebuild also carries every other overlay lane,
+        // so rebuilding here would pay for the whole stack twice.
+        let formula_present = self.math_tools_owe_frames(now) || self.window.math_toggle.is_some();
         if running.chrome {
-            self.refresh_chrome();
-        } else if running.overlay || marks_moved {
+            if formula_present {
+                self.refresh_chrome_without_overlay();
+            } else {
+                self.refresh_chrome();
+            }
+        } else if running.overlay && !formula_present {
             self.refresh_overlay();
         }
     }
@@ -88164,8 +88188,8 @@ impl Runtime<'_> {
         Ok(Some(hit))
     }
 
-    /// **Read the picture in hand against the marks on the glass**, and answer
-    /// whether the overlay owes a rebuild.
+    /// **Apply placement read from the frame this present draws to the marks**,
+    /// and answer whether the overlay owes a rebuild.
     ///
     /// The one door between the two halves of this surface: the renderer says
     /// where a named band's boxes are *on this picture*
@@ -88175,23 +88199,24 @@ impl Runtime<'_> {
     /// two marks already standing somewhere — nothing, a new target to travel
     /// to, or a different ink.
     ///
-    /// **It is asked on every turn and not only while a clock is running**
-    /// (owner's report 2026-09-14 evening). The three things it notices all
-    /// happen with no pointer event and no clock of their own: a press on `‹›`
-    /// republishes the block taller, a resize re-wraps its rows, a scale change
-    /// resizes every box — and the marks were left beside geometry that is not
-    /// there any more until the pointer left the band and came back. The cost of
-    /// asking is one early return on every frame no band is hovered, which is
-    /// almost all of them.
+    /// **It is asked at each present while a band is lit or travelling, not only
+    /// while a clock is running** (owner's reports 2026-09-14 and 2026-09-20).
+    /// A press on `‹›` republishes the block taller, a resize re-wraps its rows,
+    /// and a scale change resizes every box. The present door owns the frame for
+    /// all of those changes, so it derives placement there and hands it in.
     ///
     /// **A band the pointer has left is never re-read from a picture.** The
     /// grace running out clears [`WindowRuntime::math_hover_anchor`] a whole
     /// picture before the shell stops lighting the block, so a frame in that gap
     /// still carries a lit placement; following it would turn the exit fade
     /// round and light the marks again over a band nobody is pointing at.
-    fn sync_math_tools(&mut self, now: Instant) -> bool {
+    fn sync_math_tools(
+        &mut self,
+        now: Instant,
+        placement: Option<bt_render::MathToolBoxes>,
+    ) -> Option<bool> {
         if self.window.math_tools.is_none() && self.window.math_hover_anchor.is_none() {
-            return false;
+            return None;
         }
         let motion = self.app.motion;
         let mut changed = if self.window.math_hover_anchor.is_none() {
@@ -88199,7 +88224,7 @@ impl Runtime<'_> {
                 .math_tools
                 .as_mut()
                 .is_some_and(|follow| follow.leave(now, motion))
-        } else if let Some(boxes) = self.math_tool_placement() {
+        } else if let Some(boxes) = placement {
             let hovered = self.hovered_math_tool();
             // **A band whose own height is travelling carries its marks** rather than having them
             // travel to it (§7.1.5p ⑪): two journeys over one distance would leave the marks
@@ -88222,10 +88247,9 @@ impl Runtime<'_> {
                 true
             }
         } else {
-            // A picture that has not caught up has nothing to say about this
-            // band, and §7.1.5p ⑥'s answer to that is unchanged: it says
-            // nothing, rather than offering a neighbour. The marks stand where
-            // they are until a picture that knows the band arrives.
+            // This present's picture does not carry the named band. §7.1.5p
+            // ⑥'s re-ruled answer is still silence rather than a neighbouring
+            // block: naming the band and handing this frame are one lookup.
             false
         };
         // And a fade that has finished leaving is a surface that is gone: the
@@ -88240,7 +88264,7 @@ impl Runtime<'_> {
             self.window.math_tools = None;
             changed = true;
         }
-        changed
+        Some(changed)
     }
 
     /// **Which mark the pointer is on**, of the two the hovered band put up.
@@ -88258,8 +88282,8 @@ impl Runtime<'_> {
         }
     }
 
-    /// **Where the hovered band's marks stand on the picture in hand**, in the
-    /// surface's own pixels.
+    /// **Where the hovered band's marks stand on the frame this present draws**,
+    /// in the surface's own pixels.
     ///
     /// **The band is named, and it is named by the same anchor that lit it**
     /// (owner's report 2026-09-14, T-MATH-TOOLS-SEAT).
@@ -88268,16 +88292,13 @@ impl Runtime<'_> {
     /// block wearing the ground; handing it to the renderer is what makes the
     /// floor and the marks one answer.
     ///
-    /// This used to ask for *whichever* block in the frame was carrying
-    /// `toolbar_visible`, and that is a different question, because **the frame
-    /// read here is not the frame on the glass**: a pane keeps the picture it
-    /// last presented, and the overlay is composed from that copy while the seat
-    /// under it is drawn from the projection of the gesture that has just
-    /// happened. One frame apart, "whichever block is lit" is the block that was
-    /// lit *before* the pointer moved — which is the owner's screenshot exactly:
-    /// the ground under the matrix and the two marks beside the Gaussian above
-    /// it. Named, the stale frame simply has no lit placement under that name and
-    /// answers `None`, which is the only honest thing a stale frame can say.
+    /// Naming alone was enough while marks appeared on hover and stood still.
+    /// It stopped being enough once they travelled with a band whose height
+    /// changes: the old implementation named the right block in the last
+    /// presented frame while `redraw` drew the newly projected frame. The caller
+    /// now hands this function the exact frame set it is about to present. A
+    /// frame without the named block still answers `None`; it never substitutes
+    /// whichever neighbouring block happens to be lit.
     ///
     /// **Still the shells and not the pointer's pane**: the marks outlive the
     /// pointer by the ninety milliseconds they leave over (owner's ruling
@@ -88301,12 +88322,13 @@ impl Runtime<'_> {
     /// A seat the solver is not showing as a pane is skipped rather than ending
     /// the search: a folded seat is not the pane the band is in, and the band's
     /// own pane may be the next one in the map.
-    fn math_tool_placement(&self) -> Option<bt_render::MathToolBoxes> {
+    fn math_tool_placement<'a>(
+        &self,
+        frame_for: impl Fn(SeatId) -> Option<(bt_render::SeatViewport, &'a ViewportFrame)>,
+    ) -> Option<bt_render::MathToolBoxes> {
         let hovered = self.window.math_hover_anchor.as_ref()?;
-        let scale = self.window.renderer.metrics().scale_factor as f32;
-        let (body, mut boxes) = self.sessions.iter().find_map(|(seat, leaf)| {
-            let frame = leaf.last_presented_frame.as_ref()?;
-            let body = seats::pane_body_viewport(&self.seats, &self.seat_layout, *seat, scale)?;
+        let (body, mut boxes) = self.sessions.keys().find_map(|seat| {
+            let (body, frame) = frame_for(*seat)?;
             Some((
                 body,
                 self.window.renderer.math_tool_boxes(body, frame, hovered)?,
@@ -88362,12 +88384,10 @@ impl Runtime<'_> {
     /// left there. `refresh_overlay` answers whether the marks actually moved,
     /// so a span in which nothing changed costs a rebuild and no present.
     ///
-    /// **Two reasons to pay and only one of them is a clock.** The sync is asked
-    /// first and unconditionally, because the thing it notices — the block
-    /// changing shape under a pointer that never moved, or the pointer arriving
-    /// on one of the marks — starts no clock of its own and would otherwise wait
-    /// for the band to be left and entered again (owner's report 2026-09-14
-    /// evening).
+    /// **Two reasons to pay and only one of them is a clock.** Geometry is read
+    /// at the present door, where the frame being drawn is in hand. This turn
+    /// still observes pointer ink and copy acknowledgement, which start no
+    /// geometry clock of their own (owner's report 2026-09-14 evening).
     /// **And the copy tick comes down here too** (audit 2026-09-15, RB-1).
     ///
     /// [`WindowRuntime::math_copied`] had a writer and no reader that ever
@@ -88381,19 +88401,25 @@ impl Runtime<'_> {
     /// it for ever after. **Both halves are needed**: filtering the deadline
     /// alone would leave the tick drawn until something else repainted the band.
     fn advance_math_tools_if_due(&mut self, now: Instant) -> Result<()> {
-        // **On the window's own display frame** (owner's report 2026-09-18), and
-        // above the unconditional look for the reason the look is unconditional:
-        // what it notices is a picture that has changed, and a picture cannot
-        // change twice inside one frame of the glass. A refusal books the turn
-        // that pays it, so the second look the 2026-09-14 report is about is
-        // late by at most one frame and never lost. See
+        // **On the window's own display frame** (owner's report 2026-09-18).
+        // Geometry is deliberately absent here: the present this turn requests
+        // will derive it from the picture that present actually draws. See
         // [`Self::animation_frame_is_due`].
         if !self.animation_frame_is_due() {
             return Ok(());
         }
         let spent = retire_spent_math_copy(&mut self.window.math_copied, now);
-        let moved = self.sync_math_tools(now);
-        if (moved || spent || self.math_tools_owe_frames(now)) && self.refresh_overlay() {
+        let hovered = self.hovered_math_tool();
+        let hover_moved = self
+            .window
+            .math_tools
+            .as_mut()
+            .is_some_and(|follow| follow.observe_hovered(hovered));
+        let owes_frame = self.math_tools_owe_frames(now);
+        // While a formula journey is moving, the present door rebuilds this
+        // lane from its handed frame. At rest, a hover-ink change or a spent copy
+        // acknowledgement needs no geometry look and can rebuild immediately.
+        if owes_frame || ((hover_moved || spent) && self.refresh_overlay()) {
             self.present_chrome_change()?;
         }
         Ok(())
@@ -88466,6 +88492,39 @@ impl Runtime<'_> {
             sprites,
             ..marks::OverlayLayer::default()
         }]
+    }
+
+    /// Whether a present can carry either formula overlay lane. These are the
+    /// two `Option` reads paid by a present with no lit band and no flight; a
+    /// flight begins from the marks and therefore keeps `math_tools` alive for
+    /// its whole lifetime.
+    fn formula_overlay_is_active(&self) -> bool {
+        self.window.math_hover_anchor.is_some() || self.window.math_tools.is_some()
+    }
+
+    /// Put both formula overlay lanes on the frame this present is about to
+    /// draw. `placement` and `toggle_layers` were derived from the same handed
+    /// frame set immediately before this call, after every visible pane was
+    /// projected. A stationary band still pays its one geometry scan, but no
+    /// allocation or overlay rebuild when the answer did not move.
+    fn refresh_formula_overlay_for_present(
+        &mut self,
+        now: Instant,
+        placement: Option<bt_render::MathToolBoxes>,
+        toggle_layers: Vec<marks::OverlayLayer>,
+    ) -> bool {
+        let Some(moved) = self.sync_math_tools(now, placement) else {
+            return false;
+        };
+        let in_flight = self.window.math_toggle.is_some();
+        if !moved && !in_flight && !self.math_tools_owe_frames(now) {
+            return false;
+        }
+        let formula_tools = toggle_layers
+            .into_iter()
+            .chain(self.formula_tool_layers(now))
+            .collect();
+        self.refresh_overlay_with_formula(now, formula_tools)
     }
 
     /// Set the hovered formula on the pane the pointer is in, and clear it everywhere else.
@@ -88587,9 +88646,9 @@ impl Runtime<'_> {
     fn leave_hovered_math(&mut self, now: Instant, why: MathHoverExit) -> Result<()> {
         // **A window with no band under the pointer leaves nothing**, and that
         // matters now that this door is on every pointer move that misses a
-        // band as well as on every tab switch: everything below rebuilds the
-        // overlay and may present, and a window that has never hovered a formula
-        // must not pay for that.
+        // band as well as on every tab switch: everything below requests a
+        // present, and a window that has never hovered a formula must not pay
+        // for that.
         if self.window.math_hover_anchor.is_none()
             && self.window.math_tools.is_none()
             && self.window.math_tool_pressed.is_none()
@@ -88618,12 +88677,10 @@ impl Runtime<'_> {
             self.repaint_hovered_pane()?;
         }
         // And the first frame of that fade goes up in the same breath: the marks
-        // are an overlay layer, so nothing is on the glass until the overlay is
-        // rebuilt, and under `Motion::Reduced` this frame is the whole exit.
+        // are an overlay layer, so nothing is on the glass until the present
+        // door rebuilds it, and under `Motion::Reduced` this frame is the whole exit.
         // `hide_tooltip`'s own idiom, for a surface that goes down the same way.
-        if self.refresh_overlay() {
-            self.present_chrome_change()?;
-        }
+        self.present_chrome_change()?;
         Ok(())
     }
 
@@ -88830,11 +88887,8 @@ impl Runtime<'_> {
         }
         leaf.session.set_math_toggle_presentation(presentation);
         self.repaint_pane_change(seat)?;
-        // The other face is an overlay layer, so nothing of it is on the glass until the overlay
-        // is rebuilt — `leave_hovered_math`'s own idiom, for the same reason.
-        if self.refresh_overlay() {
-            self.present_chrome_change()?;
-        }
+        // The other face is an overlay layer. `redraw` rebuilds it only after it
+        // has projected this presentation, from the same frame it then presents.
         Ok(())
     }
 
@@ -88882,9 +88936,6 @@ impl Runtime<'_> {
             self.clear_selection();
         }
         self.repaint_pane_change(seat)?;
-        if self.refresh_overlay() {
-            self.present_chrome_change()?;
-        }
         Ok(())
     }
 
@@ -88978,11 +89029,15 @@ impl Runtime<'_> {
     /// lane because they belong to one block, and the marks stand *on* the source text exactly as
     /// they stand on the picture (§7.1.5p ⑨ ii).
     ///
-    /// Empty whenever nothing is in flight, when the fade has not left the picture yet, and when
-    /// the picture in hand does not know the band — which is §7.1.5p ⑥'s answer unchanged: a frame
-    /// that has not caught up says nothing rather than drawing this block's source over somebody
-    /// else's rows.
-    fn formula_toggle_layers(&self, now: Instant) -> Vec<marks::OverlayLayer> {
+    /// Empty whenever nothing is in flight, when the fade has not left the
+    /// picture yet, and when the handed frame does not know the named band.
+    /// This is §7.1.5p ⑥'s re-ruled answer: the band is named and the picture is
+    /// this frame's, so it says nothing rather than drawing over a neighbour.
+    fn formula_toggle_layers<'a>(
+        &self,
+        now: Instant,
+        frame_for: impl Fn(SeatId) -> Option<(bt_render::SeatViewport, &'a ViewportFrame)>,
+    ) -> Vec<marks::OverlayLayer> {
         let Some(flight) = self.window.math_toggle.as_ref() else {
             return Vec::new();
         };
@@ -88990,38 +89045,23 @@ impl Runtime<'_> {
         if opacity <= 0.0 {
             return Vec::new();
         }
-        let scale = self.window.renderer.metrics().scale_factor as f32;
         let target = flight.target();
-        let Some(index) = self.live_paste_target(target) else {
+        if self.live_paste_target(target).is_none() {
+            return Vec::new();
+        }
+        let Some((body, frame)) = frame_for(target.seat) else {
             return Vec::new();
         };
-        let Some((body, mut face)) =
-            self.window.tabs[index]
-                .sessions
-                .get(&target.seat)
-                .and_then(|leaf| {
-                    let frame = leaf.last_presented_frame.as_ref()?;
-                    let body = seats::pane_body_viewport(
-                        &self.seats,
-                        &self.seat_layout,
-                        target.seat,
-                        scale,
-                    )?;
-                    Some((
-                        body,
-                        self.window
-                            .renderer
-                            .math_band_face(body, frame, flight.anchor())?,
-                    ))
-                })
+        let Some(mut face) = self
+            .window
+            .renderer
+            .math_band_face(body, frame, flight.anchor())
         else {
             return Vec::new();
         };
         if face.display == bt_viewport::MathBlockDisplay::Source {
-            // **The picture in hand is already drawing these very rows.** A block returning to its
-            // typeset face is told at the near end, and the pane keeps the last frame it presented
-            // — so for the frame between the telling and the next present, the terminal is still
-            // painting the source itself. Laying the overlay over that would strike the same text
+            // **The frame this present draws is already drawing these very
+            // rows.** Laying the overlay over it would strike the same text
             // twice, in the same face, at the same place.
             return Vec::new();
         }
@@ -104298,6 +104338,29 @@ impl Runtime<'_> {
         // Before the frame is borrowed: this samples the tweens and re-places
         // the preview raster, both of which want the renderer mutably.
         let bodies = self.pane_draws(now);
+        // The same ownership sentence as `redraw`: this path draws the retained
+        // frames, so those retained frames are the frames handed to both formula
+        // lanes. The guard is two `Option` reads and stands before any lookup,
+        // vector build, or allocation.
+        if self.formula_overlay_is_active() {
+            let active = self.window.active_tab;
+            let frame_for = |seat| {
+                let body = bodies.iter().find(|pane| pane.seat == seat)?.viewport;
+                let frame = if seat == focused_leaf {
+                    self.window.last_presented_frame.as_ref()?
+                } else {
+                    self.window.tabs[active]
+                        .sessions
+                        .get(&seat)?
+                        .last_presented_frame
+                        .as_ref()?
+                };
+                Some((body, frame))
+            };
+            let placement = self.math_tool_placement(frame_for);
+            let toggle_layers = self.formula_toggle_layers(now, frame_for);
+            self.refresh_formula_overlay_for_present(now, placement, toggle_layers);
+        }
         // The retained picture is the same picture, but the palette and the type size under it may
         // have moved since it was presented — a theme switch re-presents without re-projecting.
         // So the pictures are re-checked here for the same reason the tweens are re-sampled.
@@ -104516,6 +104579,25 @@ impl Runtime<'_> {
                     clip: viewport,
                 }
             });
+        // **The frame this present draws owns both formula overlay lanes**
+        // (2026-09-20, T-MARKS-FRAME-IN-HAND). Every unfocused pane has now
+        // been projected, and nothing has reached the present funnel yet. Hand
+        // those exact frames to both lookups, then rebuild the overlay only when
+        // a lit or travelling band can make the answer visible.
+        if self.formula_overlay_is_active() {
+            let frame_for = |seat| {
+                if seat == focused_leaf {
+                    return Some((focused_body.viewport, &frame));
+                }
+                unfocused_frames
+                    .iter()
+                    .find(|(pane, _)| pane.seat == seat)
+                    .map(|(pane, projected)| (pane.viewport, projected))
+            };
+            let placement = self.math_tool_placement(frame_for);
+            let toggle_layers = self.formula_toggle_layers(now, frame_for);
+            self.refresh_formula_overlay_for_present(now, placement, toggle_layers);
+        }
         let table_sources = Self::table_sources(
             std::iter::once(&frame).chain(unfocused_frames.iter().map(|(_, it)| it)),
         );
@@ -106540,7 +106622,7 @@ mod git_hover_heal_tests {
     /// have been published and before anything is drawn from them.
     #[test]
     fn the_git_pages_hover_is_healed_against_the_page_it_is_drawn_from() {
-        let text = body("    fn refresh_chrome(&mut self) -> bool {");
+        let text = body("    fn refresh_chrome_with_overlay(");
         let published = text
             .find("self.window.git_pages_shown = git_pages.clone();")
             .expect("`refresh_chrome` publishes the pages the hit test reads");
@@ -107142,7 +107224,7 @@ mod hold_station_tests {
         for signature in [
             "    fn flush_wheel(&mut self) -> Result<()> {",
             "    fn flush_dropped_files(&mut self) -> Result<()> {",
-            "    fn refresh_chrome(&mut self) -> bool {",
+            "    fn refresh_chrome_with_overlay(",
             "    fn refresh_search(&mut self, forced: bool) -> Result<()> {",
         ] {
             let text = body(signature);
@@ -108436,20 +108518,20 @@ mod formula_tool_seat_tests {
         &rest[..end]
     }
 
-    /// RED — **the marks are placed under the name the ground was laid under.**
+    /// RED — **the marks are placed under the name the ground was laid under,
+    /// in the frame this present draws.**
     ///
     /// `math_hover_anchor` is the block the pointer resolved and the block
     /// `set_hovered_math` wrote into the shell; the shell lights that block, and
     /// the renderer lays the ground under whatever is lit. Handing the same name
-    /// to the boxes is what makes the floor and the marks one answer.
+    /// and the present's frame to the boxes makes floor and marks one answer.
     ///
-    /// MUTATION: ask the frame instead — `math_tool_boxes(frame)` over
-    /// `frame.math_blocks.iter().rev()`, which is what this drew until today —
-    /// and on a picture that has not caught up the answer is the block hovered
-    /// *before* the pointer moved. That is the owner's screenshot.
+    /// MUTATIONS: ask for whichever block is lit and a neighbouring block may
+    /// answer. Read `last_presented_frame` and a correctly named block still
+    /// trails the newly projected band by one present.
     #[test]
     fn the_marks_are_placed_under_the_hovered_bands_own_name() {
-        let placed = body(&["    fn math_tool", "_placement(&self)"].concat());
+        let placed = body(&["    fn math_tool", "_placement<'a>("].concat());
         assert!(
             placed.contains("self.window.math_hover_anchor.as_ref()"),
             "the band is named, and the name is the one the ground was laid under"
@@ -108459,8 +108541,8 @@ mod formula_tool_seat_tests {
             "and the name is what the boxes are asked for"
         );
         assert!(
-            placed.contains("leaf.last_presented_frame.as_ref()"),
-            "asked of the picture the pane has actually shown"
+            placed.contains("frame_for(*seat)") && !placed.contains("last_presented_frame"),
+            "asked of the frame handed in by this present:\n{placed}"
         );
         // And the lane that draws them asks nothing of the frame at all: it draws
         // what the follow says, which is what lets a mark be *between* two places
@@ -108476,24 +108558,17 @@ mod formula_tool_seat_tests {
         );
     }
 
-    /// RED — **something comes back once the picture that lit the band has
-    /// landed, and keeps paying the fade.**
+    /// RED — **the band's own turn asks for a present, and that present places
+    /// the marks from the picture it draws.**
     ///
-    /// The marks are built from a pane's *last presented* frame, and that frame
-    /// is stored after the present — so the overlay built during the gesture
-    /// that lit a band cannot contain that band's marks, and nothing in
-    /// `redraw`, `publish_frame_inner` or the strip's own animation ledger ever
-    /// rebuilt it. The band's own turn is what does, exactly as the glance
-    /// card's own turn finishes the ninety milliseconds a motionless hand
-    /// started.
+    /// The turn owns the clock, not the picture. It requests the next present;
+    /// `redraw` owns the newly projected frames and the retained path owns the
+    /// retained frames, so both derive both formula lanes immediately before
+    /// their common present funnel.
     ///
-    /// MUTATIONS: drop the call from `turn` and the marks never arrive at all —
-    /// the owner's headline. Put the sync behind the debt (`if
-    /// self.math_tools_owe_frames(now) && self.sync_math_tools(now)`) and the
-    /// evening's report comes straight back: once the fade has landed nothing
-    /// looks again, so a block that changes shape under a still pointer keeps
-    /// its marks beside geometry that is not there any more — and
-    /// `Motion::Reduced`, which owes no frame at all, would never look twice.
+    /// MUTATIONS: derive placement in the turn and it has only the previous
+    /// picture. Omit either present path and that path can reach the glass with
+    /// formula lanes owned by another frame.
     #[test]
     fn the_bands_own_turn_draws_the_marks_from_the_picture_that_lit_it() {
         assert!(
@@ -108509,46 +108584,35 @@ mod formula_tool_seat_tests {
             ]
             .concat(),
         );
-        let sync = advancer
-            .find("self.sync_math_tools(now)")
-            .expect("every turn reads the picture in hand against the marks on the glass");
-        let debt = advancer
-            .find("self.math_tools_owe_frames(now)")
-            .expect("and pays the journeys that are still running");
         assert!(
-            sync < debt,
-            "the look is unconditional and the clock is what is conditional:\n{advancer}"
-        );
-        assert!(
-            advancer.contains("self.refresh_overlay()"),
-            "and what it pays with is the overlay, rebuilt from the picture in hand"
+            advancer.contains("self.math_tools_owe_frames(now)")
+                && advancer.contains("self.present_chrome_change()?")
+                && !advancer.contains("self.math_tool_placement"),
+            "the clock asks for a present and does not pretend to own its frame:\n{advancer}"
         );
 
-        // The sync is where the three answers meet — the picture's boxes, the
-        // pointer's mark, and what the marks already on the glass should do
-        // about them.
-        let syncing = body(&["    fn sync_math", "_tools(&mut self, now: Instant)"].concat());
-        for asked in [
-            "self.math_tool_placement()",
-            "self.hovered_math_tool()",
-            "follow.follow(",
-            "follow.leave(",
+        for present in [
+            "    fn redraw(&mut self)",
+            "    fn present_retained_picture(&mut self)",
         ] {
-            assert!(syncing.contains(asked), "the sync asks {asked}:\n{syncing}");
+            let drawing = body(present);
+            let placement = drawing
+                .find("self.math_tool_placement(frame_for)")
+                .expect("the present places marks from its handed frame set");
+            let source = drawing
+                .find("self.formula_toggle_layers(now, frame_for)")
+                .expect("the same frame set places the source face");
+            let overlay = drawing
+                .find("self.refresh_formula_overlay_for_present")
+                .expect("both lanes are rebuilt together");
+            let glass = drawing
+                .find("Self::present_seats_and_commit")
+                .expect("and then that picture reaches the common funnel");
+            assert!(
+                placement < overlay && source < overlay && overlay < glass,
+                "{drawing}"
+            );
         }
-        // And a band the pointer has left is never re-read from a picture that
-        // has not caught up: that would turn the exit fade round and light the
-        // marks again over a band nobody is pointing at.
-        let leave = syncing
-            .find("self.window.math_hover_anchor.is_none()")
-            .expect("the sync asks first whether the band has been left at all");
-        assert!(
-            leave
-                < syncing
-                    .find("self.math_tool_placement()")
-                    .expect("and only then where the band is"),
-            "a left band is read from the anchor and never from the picture:\n{syncing}"
-        );
 
         // The debt itself keeps no span: the ninety milliseconds belongs to the
         // journey, which reads the tip's own.
@@ -108643,8 +108707,8 @@ mod formula_tool_seat_tests {
             .concat(),
         );
         assert!(
-            door.contains("self.refresh_overlay()"),
-            "the band and its marks go together"
+            door.contains("self.present_chrome_change()?"),
+            "the band and its marks go through the present door together"
         );
         assert!(
             door.contains("follow.leave(now, motion)"),
@@ -108824,7 +108888,7 @@ mod formula_tool_seat_tests {
         // half is `formula_tools`' own `a_band_re_entered_before_its_exit_landed_turns_round_where_
         // it_stands`; what is pinned here is that the window's own road reaches it, which is one
         // `if let`: a follow that still exists is continued and never replaced.
-        let syncing = body(&["    fn sync_math", "_tools(&mut self, now: Instant)"].concat());
+        let syncing = body(&["    fn sync_math", "_tools("].concat());
         let continued = syncing
             .find("if let Some(follow) = self.window.math_tools.as_mut() {")
             .expect("marks that are still on the glass are the marks that answer");
@@ -108909,7 +108973,7 @@ mod formula_tool_seat_tests {
         );
 
         // And a window with no band under the pointer pays nothing for any of
-        // the new doors: the leave refuses before it rebuilds an overlay, so a
+        // the new doors: the leave refuses before it requests a present, so a
         // tab switch in a window that has never hovered a formula costs what it
         // always did.
         let leaving = body(
@@ -108923,8 +108987,8 @@ mod formula_tool_seat_tests {
             .find("return Ok(());")
             .expect("a window with nothing hovered leaves nothing");
         let rebuild = leaving
-            .find("self.refresh_overlay()")
-            .expect("and one that had something rebuilds the overlay once");
+            .find("self.present_chrome_change()?")
+            .expect("and one that had something requests the present that rebuilds it");
         assert!(
             refusal < rebuild,
             "the refusal is ahead of the work it refuses:\n{leaving}"
@@ -108953,18 +109017,18 @@ mod formula_tool_seat_tests {
                 && hit.contains("math_hit_test(body, frame, position.x, position.y)"),
             "the pointer's own pane is what its band is cut to:\n{hit}"
         );
-        let placed = body(&["    fn math_tool", "_placement(&self)"].concat());
-        let resolved = "pane_body_viewport(&self.seats, &self.seat_layout, *seat, scale)";
+        let placed = body(&["    fn math_tool", "_placement<'a>("].concat());
         assert!(
-            placed.contains(resolved) && placed.contains("math_tool_boxes(body, frame, hovered)"),
-            "and the drawing is cut to the same rectangle it is then moved by:\n{placed}"
+            placed.contains("let (body, frame) = frame_for(*seat)?;")
+                && placed.contains("math_tool_boxes(body, frame, hovered)"),
+            "the present hands one pane-and-frame pair to drawing:\n{placed}"
         );
-        // One `body`, spent on the boxes and on the translation, so the two can
-        // never be two rectangles.
+        // One handed `body`, spent on the boxes and on the translation, so the
+        // two can never be two rectangles.
         assert_eq!(
-            placed.matches("pane_body_viewport(").count(),
+            placed.matches("frame_for(*seat)").count(),
             1,
-            "the pane is resolved once:\n{placed}"
+            "the pane and frame are resolved together once:\n{placed}"
         );
     }
 
@@ -109070,23 +109134,23 @@ mod formula_tool_seat_tests {
     /// RED GATE — **the other face is never struck over a picture that is already drawing it**
     /// (§7.1.5p ⑪ iii).
     ///
-    /// A block returning to its typeset face is told at the near end, and a pane keeps the last
-    /// frame it presented — so between the telling and the next present, the terminal is still
-    /// painting the `$$…$$` rows itself.
+    /// A block returning to its typeset face can already have those rows in the
+    /// frame this present draws. That handed frame, not a retained predecessor,
+    /// decides whether the overlay is redundant.
     ///
     /// MUTATION: draw the overlay whatever face the picture in hand is wearing, and for that one
     /// frame every line of the source is struck twice in the same place, which reads as the text
     /// thickening the instant the mark is pressed.
     #[test]
     fn the_source_face_is_not_struck_over_a_picture_already_drawing_it() {
-        let lane = body(&["    fn formula_toggle", "_layers(&self, now: Instant)"].concat());
+        let lane = body(&["    fn formula_toggle", "_layers<'a>("].concat());
         assert!(
             lane.contains("face.display == bt_viewport::MathBlockDisplay::Source"),
             "the lane asks which face the picture in hand is wearing:\n{lane}"
         );
         assert!(
-            lane.contains("leaf.last_presented_frame.as_ref()"),
-            "and it is the picture the pane has actually shown, as every band reader here is"
+            lane.contains("frame_for(target.seat)") && !lane.contains("last_presented_frame"),
+            "and it is the frame this present draws:\n{lane}"
         );
     }
 
@@ -109206,7 +109270,7 @@ mod formula_tool_seat_tests {
         let advance = body("    fn advance_math_toggle_if_due(&mut self, now: Instant)");
         assert!(advance.contains("flight.target()"));
         assert!(advance.contains("self.math_toggle_heights(target, &anchor)"));
-        let overlay = body("    fn formula_toggle_layers(&self, now: Instant)");
+        let overlay = body("    fn formula_toggle_layers<'a>(");
         assert!(overlay.contains("self.live_paste_target(target)"));
         assert!(!overlay.contains("self.sessions.iter()"));
     }
@@ -109258,12 +109322,23 @@ mod formula_tool_seat_tests {
         let published = present
             .find("self.repaint_pane_change(seat)?;")
             .expect("a frame of a journey is a terminal picture, not an overlay rebuild");
-        let overlay = present
-            .find("self.refresh_overlay()")
-            .expect("and the other face rides over it");
         assert!(
-            published < overlay,
-            "the band moves before the layer laid on it:\n{present}"
+            !present[published..].contains("self.refresh_overlay()"),
+            "the clock does not build a lane before the frame exists:\n{present}"
+        );
+        let redraw = body("    fn redraw(&mut self)");
+        let projected = redraw
+            .rfind("unfocused_frames.push")
+            .expect("all sibling panes are projected before formula placement");
+        let overlay = redraw
+            .find("self.refresh_formula_overlay_for_present")
+            .expect("the projected frame rebuilds both formula lanes");
+        let glass = redraw
+            .find("Self::present_seats_and_commit")
+            .expect("the same frame then reaches the glass");
+        assert!(
+            projected < overlay && overlay < glass,
+            "the band and both lanes are one terminal picture:\n{redraw}"
         );
 
         // ③ — the one caller that may skip on an unchanged digest is the wheel, and it says so by
@@ -109329,26 +109404,30 @@ mod formula_tool_seat_tests {
             "a flight in hand is carried whether or not the last turn saw one:\n{carry}"
         );
         assert!(
-            carry
-                .find("let marks_moved = self.sync_math_tools(now);")
-                .unwrap_or(usize::MAX)
-                < carry.find("if running.chrome {").unwrap_or(0),
-            "the marks re-read the band they ride before the layer that draws them is built, \
-             or they trail a block that is moving on every frame:\n{carry}"
+            !carry.contains("self.sync_math_tools(now)")
+                && !carry.contains("self.math_tool_placement"),
+            "the carry has no frame to hand to either formula lane:\n{carry}"
         );
-        // **One rebuild and never two** (review 2026-09-18 round 2). The
-        // chrome's own refresh ends in the overlay's, so a carry that asked for
-        // both asked for two overlay builds — four hundred a second on the
-        // review's schedule. The `else` is what makes that impossible rather
-        // than merely avoided.
+        // **The formula rebuild moves to the present; it is not added here.**
+        // The ordinary overlay lane is refused while a formula is lit or in
+        // flight, because `redraw` will rebuild the whole stack after projection.
         assert!(
-            carry.contains("self.refresh_chrome();") && carry.contains("} else if running.overlay"),
-            "the two rebuilds are exclusive, because the first already does the second:\n{carry}"
+            carry.contains("let formula_present =")
+                && carry.contains("running.overlay && !formula_present"),
+            "a formula journey pays for its overlay once, at the present door:\n{carry}"
         );
-        let chrome = body("    fn refresh_chrome(&mut self) -> bool {");
+        // The older chrome/overlay exclusivity remains: a chrome rebuild still
+        // ends in the overlay, so the ordinary overlay arm is an `else`.
         assert!(
-            chrome.contains("let overlay_changed = self.refresh_overlay();"),
-            "which is only true while the chrome's own refresh ends in the overlay's:\n{chrome}"
+            carry.contains("self.refresh_chrome_without_overlay();")
+                && carry.contains("self.refresh_chrome();")
+                && carry.contains("} else if running.overlay"),
+            "chrome and the ordinary overlay lane stay exclusive:\n{carry}"
+        );
+        let chrome = body("    fn refresh_chrome_with_overlay(");
+        assert!(
+            chrome.contains("include_overlay && self.refresh_overlay()"),
+            "ordinary chrome ends in the overlay while formula presents defer it:\n{chrome}"
         );
         // **And nothing is inferred from asking the gate** (review 2026-09-18
         // round 2, P1). Liveness is reported once a turn from the journeys' own
@@ -109473,7 +109552,7 @@ mod formula_tool_seat_tests {
     /// number becomes one per row.
     #[test]
     fn the_other_faces_rows_are_measured_once_per_change_and_not_once_per_frame() {
-        let lane = body(&["    fn formula_toggle", "_layers(&self, now: Instant)"].concat());
+        let lane = body(&["    fn formula_toggle", "_layers<'a>("].concat());
         assert!(
             lane.contains("flight.source_rows()"),
             "the overlay draws the rows the flight was handed when it began:\n{lane}"
@@ -109858,7 +109937,7 @@ mod focus_mode_door_tests {
     /// tree.
     #[test]
     fn the_stand_ins_thumbnail_slot_carries_the_pane_rather_than_a_hole() {
-        let pass = body("    fn refresh_chrome(");
+        let pass = body("    fn refresh_chrome_with_overlay(");
         let insert = ["focus_thumbnails", ".insert("].concat();
         let at = pass
             .find(insert.as_str())
@@ -125279,7 +125358,7 @@ mod cross_window_drag_tests {
         );
         // ③ — the slot the drop is aiming at, filled from the payload rather than
         // from a tab this window does not have.
-        let chrome = fn_body("refresh_chrome");
+        let chrome = fn_body("refresh_chrome_with_overlay");
         assert!(
             chrome.contains("foreign.pane.as_ref().map(|pane| seats::FocusThumbnail {"),
             "the visitor's slot is still handed a hole, which is the card the \
@@ -126630,7 +126709,7 @@ mod refused_preview_card_tests {
         );
         // ① the pane's dressing pass builds both of its cards there — the
         //    picture it would not draw, and the document nothing here reads.
-        let dressing = body(concat!("    fn ", "refresh_chrome("));
+        let dressing = body(concat!("    fn ", "refresh_chrome_with_overlay("));
         assert_eq!(
             dressing
                 .matches(concat!("refused_preview_card", "("))

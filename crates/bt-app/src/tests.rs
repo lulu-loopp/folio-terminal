@@ -12576,7 +12576,7 @@ fn a_page_a_modal_covers_is_drawn_as_a_kept_frame() {
     );
 
     // ③ The two places a kept frame reaches the glass.
-    let chrome = method_text(concat!("    fn ", "refresh_chrome("));
+    let chrome = method_text(concat!("    fn ", "refresh_chrome_with_overlay("));
     assert!(
         chrome.contains("icons.extend(self.page_keepsake_icons());"),
         "a docked pane draws its page's last frame in the chrome pass, \
