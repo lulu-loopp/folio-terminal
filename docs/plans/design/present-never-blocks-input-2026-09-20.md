@@ -1,5 +1,7 @@
 # Present never blocks input: a budget for the compositor's answer
 
+Status: **revision 2, 2026-09-20, after an adversarial review (verdict HOLD on options A and B as written).** Sections 1 to 7 are revision 1, left unedited so the review can be read against them; **§8 at the end supersedes them wherever they disagree.**
+
 Design only, 2026-09-20. No implementation, build, test, application launch or measurement belongs to this stage; nothing below was run. Inspected `origin/main` at `95c5883e`. Registry paths are relative to `C:/Users/Weiyi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/`; `crates/...` is this worktree. This note answers a complaint, not a ticket: *while typing, the window freezes for one to two seconds, several times an hour, and then everything catches up.*
 
 It has a predecessor. `docs/plans/design/render-handoff-2026-09-16.md` already designs option D below in full — a per-window presentation lane — and that design stands. This note is narrower and earlier: it asks what may be done **before** that lane exists, and states the rule the lane would inherit.
@@ -125,3 +127,125 @@ Only a real machine can show the rest, and exactly one line proves it. **Today**
 5. **Why `Present` blocks at all under Mailbox with two buffers.** At sync interval 0 the call should queue and return; the recorded 655–2332 ms says DWM is not releasing a buffer. Whether that is the composition visual, the shared-with-WebView2 visual tree, or the machine's own beat is not answerable by reading. (It is *not* the DirectComposition commit hiding inside the station: `Station::SwapchainPresent` brackets `wgpu::Queue::present` alone — `crates/bt-app/src/hang_watch.rs:735`, `crates/bt-render/src/lib.rs:10225` — and Folio's own `compositor.commit()` is separately stationed and appears as `compositor commit 1 ms` on the stall lines.)
 6. **The cost of `as_hal::<Dx12>()` per frame**, and whether the handle may be cached across a surface reconfigure. The doc says the handle is valid only while the swap chain is alive (`dx12/mod.rs:654-656`); the lifetime rule against a Folio `configure` is not established by reading.
 7. **Whether the third adversarial audit's scope already covers the render path**, which decides whether step 1 belongs in 0.4.3 or 0.4.4.
+
+## 8. Revision 2 — what the review changed (this section rules)
+
+An adversarial review (read-only; report at `scratchpad/design043/present-design-review-codex.md`) returned **HOLD on A and B as written**, with five blocking obligations. I re-verified every cited line in this worktree before accepting any of it; all five stand, two of them on counterexamples that are decisive. Where the review was itself wrong, that is said below. The repository's stop rule applies: a finding changes the design when it is reachable in ordinary use and breaks a hard requirement or the headline scenario; the rest is recorded.
+
+### 8.1 Corrections of fact
+
+**In revision 1:**
+- **"`SurfaceError::Timeout` … is constructed on Metal only" is false.** It is also constructed at `wgpu-hal-30.0.0/src/noop/mod.rs:215` and `vulkan/swapchain/native.rs:455,476`. True as it should have been written — *among the backends Folio ships* — and with no consequence for the design, since Folio ships neither noop nor Vulkan.
+- **"`surface acquire 1022 ms` is that constant expiring" was stated as fact and is an inference.** A station's elapsed time is not a recorded `WAIT_TIMEOUT`. CONVENTIONS rule 2 requires observation and hypothesis to be written in different places; it is marked **[inferred]** from here on, and §8.7's diagnostics exist so that nothing has to be inferred from a duration again.
+- **"B removes the single long present" overclaims**, two sentences before revision 1 itself admits the residual. Corrected in §8.5.
+- **The rollback doors would have turned the features on.** `diagnostics::switched_on` is "present and non-empty" (`crates/bt-app/src/diagnostics.rs:135-136`), so `BT_PRESENT_GATE=off` and `=0` both read as **on**. See §8.7.
+- **"A present-only helper thread is where macOS should start" is withdrawn.** On Metal the blocking call is `nextDrawable` inside *acquire*, not present (`metal/surface.rs:302`, `327-332`, with the layer's own timeout disabled at `285-288`). A helper owning only `present` moves nothing. `render-handoff-2026-09-16.md` §C already names what a macOS answer needs: the acquire handoff, the AppKit prerequisite and the shutdown ownership.
+
+**In the review:** it writes that `wgpu-types-30.0.0/src/instance.rs:67-73` "does not read environment overrides" and concludes that no environment door exists. wgpu **does** have one — `InstanceDescriptor::with_env` (`instance.rs:106-117`) chains to `Dx12UseFrameLatencyWaitableObject::from_env` (`backend.rs:883-890`), which reads `WGPU_DX12_USE_FRAME_LATENCY_WAITABLE_OBJECT`. The review's *conclusion for Folio* is nonetheless right, for a different reason I verified: Folio builds every instance with `InstanceDescriptor::new_without_display_handle()` and never calls `with_env` (`crates/bt-render/src/lib.rs:6322` `GpuContext::open`, `6444` `rebuild_after_device_loss`, `6635` `headless_on`). That matters twice — those three sites are where the option must be set, and `with_env` is the **wrong** door, because it would admit every other wgpu variable at once.
+
+### 8.2 O1 — a suppression is never a presentation
+
+Verified, and it is the sharpest finding: **`None` is matched in the same arm as `Presented`** — `crates/bt-app/src/main.rs:104854`, `outcome @ (Some(PresentOutcome::Presented(_)) | None) =>`. `None` is safe there **only** because the one thing that produces it today is the unchanged gate, which requires `conditions.visible` and an identical signature, so the glass really does hold that picture. Revision 1's `Ok(None)` for a hidden window with *changed* content breaks that precondition, and it is a wrong-picture bug.
+
+**The debt an A-shaped suppression must leave standing**, enumerated from both callers:
+
+| # | What that arm does today | Site |
+|---|---|---|
+| 1 | `presented_picture_revision = terminal_content_revision` — the licence the animation path reads before answering a tick from the screen | `main.rs:104873` |
+| 2 | `unpainted_pane_output = false` | `104878` |
+| 3 | first-visible-present DPI reconciliation marked done | `104879-104882` |
+| 4 | every painted pane's `last_presented_frame` replaced, and `mark_leaf_painted` | `104921-104931` |
+| 5 | the window's own `last_presented_frame` replaced | `104932` |
+| 6 | `rescan_pane_references` re-derives the pointer's reference list **from cells that never reached the glass** | `104937-104939` |
+| 7 | `pending_resize_present = None` — admitted resize debt discharged | `104940` |
+| 8 | `textless_frames = 0` | `104863` |
+| 9 | `chrome_present_pending`, cleared at entry to `present_retained_picture` and **not restored** by its `None` arm | `104501`, `104595` vs `104629` |
+
+Two things are already right and must stay so: `device_loss_pilot.a_frame_reached_the_glass()` is guarded by `receipt.is_some()` (`104867`), and `last_present_at` — the pacer's fact — is stamped only inside `trace_present`, which is reached only with a receipt (`104315-104320`, `104884`), so a skip already cannot poison the pacer.
+
+**The mechanism.** A does not return `Ok(None)`; it returns a new `PresentOutcome::SkippedHidden` beside `SkippedNotVisible` (`crates/bt-render/src/lib.rs:1657-1712`), mapping to `SurfaceFailurePolicy::SkipUntilVisible` (`lib.rs:4043`). One refinement of the review, which I checked: **all four non-`Presented` outcomes already preserve the debt** — the frame is re-filed by `pending_frames.publish` in every one of them (`main.rs:104961-104964`). What is unique to `SkippedNotVisible` is that `ask_again_after` returns `false` for it alone (`main.rs:113182-113215`), declining to ask for the turn that would pay the debt. A needs both properties, which is exactly that variant's shape. Both owed arms enumerate their variants explicitly, so a new variant is a compile error at every site until answered — the property this repository prefers to a hand-kept list. The existing test cannot stand in for the new ones: `a_hidden_preclear_does_not_replace_the_first_visible_present` (`present_gate.rs:169-175`) only exercises `PartialEq` on two signatures and would not notice a skip credited as glass.
+
+### 8.3 O2 — which invisibility facts may veto a present
+
+The three-probe predicate is removed from hard admission. It fails on two independent grounds, and the second is the one I would put first.
+
+**It is not a proof.** `exposure_probe_points` (`crates/bt-platform/src/lib.rs:7155-7176`) samples the centre and two quarter-insets — all three inside the window's central half — and `exposed_from_probe` (`7209-7220`) answers false when all three miss. A window covering the middle half of Folio covers all three while a wide border and the whole tab strip stay visible. The function's own doc already says it: "**It is three samples and not a proof.**"
+
+**Its errors are deliberately biased the wrong way for this use.** The same doc records a user ruling of 2026-09-01: a window whose rectangle cannot be read "is reported exposed", because "of the two wrong answers, one leaves the reader with the marks inside the window they are looking at, and the other puts a toast on a desktop they can see. Only the second is an interruption." That is a *notification* cost model. Promote the predicate to a presentation veto and a false negative stops costing a suppressed toast and starts costing a frozen window. **A predicate may not be reused across a change in the cost of being wrong** — and no added wake cures it, because the predicate itself is what is false. Two further facts close it: winit's `Occluded` is unsupported on Windows (`winit-0.30.13/src/event.rs:421`), so nothing tells Folio the cover moved; and `window_exposed` is a cached field refreshed on only three paths (`main.rs:84767-84771` per drain turn, `85489-85491` behind the animation pacer, `117503-117506` on an attention event), so a quiet window can hold a stale sample indefinitely.
+
+**Authoritative on Windows, and adopted** — each read **fresh at the attempt**, never from a cached sample:
+- **Minimised** — `IsIconic` (`platform:6943-6946`). Wake: `WM_SIZE` always produces `Resized` (`winit/platform_impl/windows/event_loop.rs:1397-1419`) and does not distinguish minimise, so the veto must be **re-read** on that event, never remembered.
+- **Zero client extent** — the current client rectangle at the attempt. Not part of `PresentConditions` today at all (`present_gate.rs:46-50`), and both resize paths already skip zero and leave the old config live (`main.rs:101481-101485`, `render:8428-8438`). Wake: a nonzero `Resized`.
+- **Hidden by Folio itself** — `window_shown`, and the quake window's `set_visible(false)` (`main.rs:39853-39858`). Folio wrote it, so Folio owns it; the show path already publishes and redraws both before and after `ShowWindow` (`39862-39892`).
+
+**Not adopted, and recorded as such:** occlusion by another window (above); **cloaked** — `DwmGetWindowAttribute(DWMWA_CLOAKED)` is read (`platform:6967-6998`) but no `EVENT_OBJECT_UNCLOAKED` subscription exists anywhere in `crates/` (verified by search), so without a named owner-thread wake it cannot be a lasting veto; **monitor asleep, session locked, RDP disconnected** — no `WM_POWERBROADCAST`, `GUID_SESSION_DISPLAY_STATUS`, `WM_WTSSESSION_CHANGE` or `WTSRegisterSessionNotification` registration exists either. All are carried in the diagnostics of §8.7 and acted on by nothing.
+
+One implementation consequence: `window_hidden` today is `is_window_minimized() || is_window_cloaked()` fused into one bit (`main.rs:25219`). **A cannot adopt minimised without splitting that bit**, since one half is authoritative and the other is not.
+
+**And the rule that covers everything not listed: unknown always permits rendering.** A reading that fails, a rectangle that cannot be had, a state with no wake — all present. The veto carries the burden of proof; the frame never does.
+
+### 8.4 O3 — B's mechanism, corrected
+
+**Revision 1's gate would have created the stall it removes.** The frame-latency waitable is a semaphore, and `WaitForSingleObject(h, 0)` is a **consuming** wait, not a peek. Under Folio's current setting — `Dx12UseFrameLatencyWaitableObject::Wait`, which is `#[default]` (`wgpu-types-30.0.0/src/backend.rs:860-873`) — an external poll consumes the credit, and `get_current_texture` then waits again on a semaphore with nothing left, for up to the hard 1000 ms, on a frame that was ready.
+
+The corrected mechanism:
+- **`DontWait` is required**, not optional (`backend.rs:869-872`; the dispatch that skips the internal wait is `wgpu-hal-30.0.0/src/dx12/mod.rs:1734-1740`). Set explicitly at all three instance sites (`render:6322`, `6444`, `6635`), never through `with_env`.
+- **`DontWait` is not a neutral baseline.** With it wgpu waits for nothing, so the frame-latency back-pressure disappears and Folio inherits it. The backend option and the gate are therefore **one switch, not two**, and any rollback must restore `Wait` on every fresh *and* rebuilt context — `rebuild_after_device_loss` is its own site.
+- **One readiness-credit owner per surface generation.** Poll only once a present is actually owed. A successful poll funds exactly one `Present`, or is retained across a recoverable pre-present failure, or is retired with its chain. Never poll again because an unchanged, hidden or coalesced path returned early. A missing or failed handle is its own outcome, not "not ready".
+- **The handle may not be cached across `configure`/`unconfigure`.** `configure` takes the old swapchain and calls `release_resources`, which frees the handle (`dx12/mod.rs:1503-1508`, `1416-1422`), then obtains a new one (`1681-1685`); `unconfigure` frees it too (`1710-1724`). `as_hal`'s guard retains the surface, not a configuration (`wgpu-30.0.0/src/api/surface.rs:224-229`). Re-fetch per generation.
+- **Ordering against configure is an open cost, not a detail.** The renderer configures immediately before acquire (`render:9705-9711`). A gate outside that can consume old-generation credit; a gate inside leaves `configure`'s own wait-for-GPU-idle on the input path (`wgpu-30.0.0/src/api/surface.rs:103-106`). Neither is free; the spike measures which.
+- **Device loss outranks all of it.** The unchanged skip is already disabled when loss is latched (`main.rs:104184`) and the gate must be too; the loss callback only records a latch (`render:6208-6219`), so the gate must not hold a dead handle or carry old identities into a rebuilt surface.
+
+### 8.5 O4 — what B promises, and what it cannot
+
+**Force-a-present-after-N-deferrals is withdrawn.** It restores exactly the multi-second block the invariant forbids, and a deadline can schedule an attempt but cannot bound `Present`.
+
+- **The promise, entire: the input path never *waits* for readiness.** Not that a picture arrives.
+- **Not promised: that `Present` returns promptly once readiness was signalled.** There is no non-blocking present on this backend — neither `DXGI_PRESENT_DO_NOT_WAIT` nor `DXGI_PRESENT_TEST` appears anywhere in wgpu-hal's DX12 path (verified by search), and Mailbox's sync interval 0 is not a guarantee. Only D closes this.
+- **Under long starvation the picture goes stale and stays stale**, while input, PTY drain and document landings stay live. That is the trade, stated plainly: a window that is behind is better than a window that is deaf. It is not silent — §8.7's freshness line says so — and whether the *user* is told is a question for the owner, not one this note settles.
+- **A landing is not bounded by one interval.** Revision 1 said a landing "may slip one interval"; under repeated deferral that is false. §7.1.5p ⑬ already makes a landing a document operation with its own unpaced deadline, and it must stay one for an arbitrarily long deferral; the owed endpoint picture is tracked separately from any frame.
+- **IME must be specified, not assumed untouched.** The caret is offered from the just-composed frame **before** slot publication (`main.rs:67343-67359`), through a throttle (`62415-62426`), into the native candidate anchor and the system caret (`84433-84441`). It is coupled to *publish*, not to a successful present — so a long deferral leaves candidates anchored to text that is not on screen. The spike names which picture owns anchoring during deferral and carries a delayed-present IME test.
+- **Budgets are aggregate.** Windows are serial on the one thread (`main.rs:113873-113885`), so per-window waits add. Budget total attempts and preparation across all windows, and require **zero polling when nothing is owed** (CONVENTIONS rule 5: a quiescent subsystem's budget is zero).
+- **Resize and uploads.** An admitted resize frame may not be erased by "newest replaces anything" (`render-handoff-2026-09-16.md` §B's protected-resize rule), and a deferral after uploads must retain or drain them and close the atlas obligation the way the failure path already does (`render:11081-11085`).
+
+### 8.6 O5 — acceptance that can see a frozen picture
+
+Revision 1's criterion — "no stall line above threshold whose largest station is present" — **is passed by a build that renders nothing**, and the tally it leaned on is process-wide (`render:4066-4072`) and printed inside a hang report that a frozen-but-responsive window never produces. It is replaced by the two lines specified in §8.7, both emitted **independently of any hang**: a per-attempt line that attributes every attempt, and a freshness line that fires precisely when the picture is old while the loop is healthy. Acceptance additionally requires a **fresh baseline recorded before any suppression is enabled**, both switch branches exercised, and — for B — a rollback test proving backend `Wait` is restored on a rebuilt context.
+
+### 8.7 Sequence and switches, revised
+
+1. **0.4.3 — diagnostics only**, and only if the final-tree audit can take them. Nothing suppresses, defers or reorders a present. Plus one recorded fact with no owner yet: **Windows runs Mailbox by inheritance** (§3), to be given an owner in 0.4.4.
+2. **0.4.4 — A redesigned** per O1/O2 and landed behind its counterexample tests (false-negative exposure, hidden changed content, shell-less retained debt, first show and quake restore, minimised and zero-extent restore, no false acknowledgment, no retry spin, an automatic fresh frame on restore). **B spiked** in the same release with `DontWait` and a **consuming-credit** fake — not injected booleans — covering first frame, unchanged frame, generation change, failure after consumption, loss and rebuild, protected resize, IME, and several real windows. Default off.
+3. **D remains the destination**, scheduled against the invariant only if post-readiness `Present` still blocks — which B cannot certify.
+
+**The per-attempt line** (`BT_PERF_TRACE`, default off, joining the existing family at `main.rs:104339`), one per attempt including those that present nothing. Native observations are kept strictly apart from the attention heuristic, and **no field infers a cause from a duration**:
+
+```
+BT_PERF_TRACE attempt win=<id> gen=<surface_gen> seq=<n> src=<Keyboard|PtyOutput|Resize|Expose> retained=<0|1>
+  outcome=<presented|unchanged|without_text|skipped|not_visible|hidden|reconfigure|failed:<kind>>
+  mode=<Mailbox|Fifo|Immediate> latency=<n> wait=<Wait|DontWait|None>
+  native_iconic=<0|1|unknown> native_cloaked=<0|1|unknown> native_client=<W>x<H> native_style_visible=<0|1>
+  folio_shown=<0|1> attention_exposed=<0|1> attention_age_us=<n>
+  configure_us=<n> acquire_us=<n> encode_us=<n> submit_us=<n> present_us=<n> commit_us=<n>
+  since_last_present_us=<n> pending_age_us=<n>
+```
+
+**The freshness line**, which is the one that catches a responsive window showing a stale picture. Emitted when a window's picture age first crosses a threshold, at decades after, and once more when a picture finally lands:
+
+```
+Folio: window <id> has shown no new picture for <n> ms — last present <n> ms ago
+  (gen <g>, seq <n>, outcome <o>); <k> attempts since, <r> of them <reason>;
+  the window thread dispatched <m> events and turned <p> times in that span
+```
+
+The last clause is the whole point: it separates *frozen picture, live input* from *frozen everything*, which is the distinction revision 1's acceptance could not make.
+
+**Switches.** 0.4.3's diagnostics are default-off through `diagnostics::switched_on`, which is the right shape for a default-off switch and needs no new code. **Any later default-on feature needs a real off door, and `switched_on` cannot be it** — it reads `off` and `0` as on. That parser is new work with its own table (unset, empty, `0`, `off`, `false`, `no`, `1`, `on`, mixed case), and it lands in the release that flips the default, not before, so no shipped build ever carries an untested off path.
+
+### 8.8 Still undetermined
+
+Revision 1's list stands — item 5, why `Present` blocks at all under Mailbox with two buffers, is still the deepest of them — less its item 6 (the handle may not be cached; §8.4) and item 7 (settled by the sequence in §8.7). Added:
+1. **Which invisibility state actually accompanied the recorded stalls.** Unchanged from revision 1, and now the entire job of 0.4.3.
+2. **Whether `IsIconic` + zero client extent + Folio's own hidden bit covers enough of the hidden cases to make A worth doing at all**, once the three-probe heuristic is out of the veto. What remains may be nearly nothing, and the diagnostics will say so before anything is built.
+3. **Whether the gate belongs before or after `configure`**, given that each placement has a wait of its own.
+4. **What wakes a cloaked window**, if cloaking is ever to become a veto.
