@@ -174,7 +174,8 @@ use bt_render::{
     WINDOW_TAB_RING_INDETERMINATE_TURNS, WINDOW_TAB_RING_SPIN_PERIOD_MS,
     WINDOW_TAB_RING_SWEEP_TRANSITION_MS, WindowRenderer, background_rgb, compose_preedit,
     current_cursor_style, foreground_rgb, frame_content_digest, frame_is_alternate_screen,
-    preview_image_extent, scheme_in_force, set_cursor_style, set_theme, theme_revision,
+    gpu_power_request, preview_image_extent, scheme_in_force, set_cursor_style, set_theme,
+    theme_revision,
 };
 use bt_term::{
     DualPlaneSession, InlineImageDecoder, MathLayoutOptions, MouseTracking, ProgressState,
@@ -242,11 +243,20 @@ const CURSOR_BLINK_PHASE: Duration = Duration::from_millis(550);
 /// Say which adapter wgpu actually selected, through the same two destinations
 /// as a slow-hold line: the bounded trace sink when one exists, and
 /// `diagnostics.log` in every resident run.
+///
+/// **The question and the answer are one line.** A machine with two GPUs can be
+/// started twice — once as the build ships, once with `BT_GPU_PREFERENCE=low` —
+/// and a recording is only comparable while it says which of the two runs it is
+/// from. So the line carries what was asked for and where that came from
+/// (`bt_render::gpu_power_request`, the one place this program decides), beside
+/// the adapter the driver answered with. It is also where a value nobody
+/// understood is reported: a switch that ignored its own spelling in silence
+/// would cost somebody a day of comparing a build against itself.
 fn note_gpu_adapter(gpu: &GpuContext) {
     let info = gpu.adapter_info();
     diagnostics::note(&format!(
         "Folio: GPU adapter name={:?} vendor=0x{:04x} device=0x{:04x} type={:?} \
-         backend={:?} driver={:?} driver_info={:?}",
+         backend={:?} driver={:?} driver_info={:?} asked={}",
         info.name,
         info.vendor,
         info.device,
@@ -254,6 +264,7 @@ fn note_gpu_adapter(gpu: &GpuContext) {
         info.backend,
         info.driver,
         info.driver_info,
+        gpu_power_request(),
     ));
 }
 
@@ -8115,11 +8126,11 @@ fn preview_block_bar_at(
 /// spans that come back are measured in the columns those expanded lines
 /// occupy, which is what the paint below indexes by.
 fn markdown_fence_highlight(lang: Option<&str>, text: &str) -> highlight::Highlighting {
-    let Some(syntax) = highlight::syntax_for_fence(lang) else {
+    let Some(grammar) = highlight::syntax_for_fence(lang) else {
         return highlight::Highlighting::default();
     };
     let lines: Vec<String> = text.lines().map(preview::expand_tabs).collect();
-    highlight::Highlighting::of(&lines, syntax)
+    highlight::Highlighting::of(&lines, grammar)
 }
 
 /// How wide a code fence insists on being: its longest line, plus its border
@@ -24552,13 +24563,13 @@ fn reference_run_rect(
 /// a seat with no way to the real browser would be §7.1.5g ②″'s complaint
 /// upside down: a reader shut out of the page's own front. So a `file:` page
 /// answers with the path underneath it, taken back off the URL by the one
-/// function that reads a URL this window minted
-/// ([`webnav::Mint::path_and_tail_of_file_url`]) — never by string surgery, and
-/// never for an address from anywhere else, which is why a page on `http` still
-/// answers `None`: it has no file to hand anybody.
+/// function that reads a `file:` URL as the path it names
+/// ([`webnav::LocalFileUrl`]) — never by string surgery, and never for an
+/// address from anywhere else, which is why a page on `http` still answers
+/// `None`: it has no file to hand anybody.
 fn preview_page_hand_off(source: &preview::PreviewSource) -> Option<PathBuf> {
     if let Some(url) = source.web_url() {
-        let (path, _tail) = webnav::Mint::path_and_tail_of_file_url(url)?;
+        let path = webnav::LocalFileUrl::parse(url)?.into_path_and_tail().0;
         return path_opens_as_a_page(&path).then_some(path);
     }
     source
@@ -24574,11 +24585,11 @@ fn preview_page_hand_off(source: &preview::PreviewSource) -> Option<PathBuf> {
 /// caution:
 ///
 /// * **A remote page has no source on this disk.** `https://example.com/a.html`
-///   answers `None` because [`webnav::Mint::path_and_tail_of_file_url`] reads
-///   only the `file:` URLs this window minted itself, and what a server sent is
-///   not a file — the bytes the engine rendered were never on this machine to be
-///   opened. Fetching them again to show them would be this window running a
-///   second, weaker browser beside the one already on the seat.
+///   answers `None` because [`webnav::LocalFileUrl`] reads `file:` URLs and
+///   nothing else, and what a server sent is not a file — the bytes the engine
+///   rendered were never on this machine to be opened. Fetching them again to
+///   show them would be this window running a second, weaker browser beside the
+///   one already on the seat.
 /// * **A `.pdf` has no text in it.** That is [`preview::PageGlance`]'s whole
 ///   judgement and it is asked here rather than restated: the page class already
 ///   carries a column saying which of its members this window can read, the
@@ -24593,7 +24604,7 @@ fn preview_page_hand_off(source: &preview::PreviewSource) -> Option<PathBuf> {
 /// without a window: this is the predicate the rail's button set is drawn from
 /// and the one the flip verb consents to, and both must be the same sentence.
 fn page_source_file(url: &str) -> Option<PathBuf> {
-    let (path, _tail) = webnav::Mint::path_and_tail_of_file_url(url)?;
+    let path = webnav::LocalFileUrl::parse(url)?.into_path_and_tail().0;
     (preview::path_page_glance(&path) == Some(preview::PageGlance::Source)).then_some(path)
 }
 
@@ -33275,7 +33286,8 @@ fn switcher_row_destination(target: &str) -> Option<String> {
 /// (section 7.9 5), for the same reason - nothing happening is more honest than
 /// a dialog about a file that is not there.
 fn page_destination(target: &str) -> Option<(String, webnav::Mint)> {
-    if let Some((path, tail)) = webnav::Mint::path_and_tail_of_file_url(target) {
+    if let Some(named) = webnav::LocalFileUrl::parse(target) {
+        let (path, tail) = named.into_path_and_tail();
         let canonical = std::fs::canonicalize(path).ok()?;
         let mint = webnav::Mint::file(&canonical).ok()?;
         let url = format!("{}{tail}", mint.target()?);
@@ -33348,8 +33360,8 @@ fn switcher_pin_is_allowed(kind: bt_persist::PinKind, target: &str) -> bool {
         return true;
     }
     page_destination(target).is_some()
-        && webnav::Mint::path_and_tail_of_file_url(target)
-            .is_none_or(|(path, _)| path_opens_as_a_page(&path))
+        && webnav::LocalFileUrl::parse(target)
+            .is_none_or(|named| path_opens_as_a_page(named.path()))
 }
 
 /// **What a switcher row keeps, and under which category** — `None` for a
@@ -38080,11 +38092,8 @@ fn files_a_tab_stands_on(tab: &TabState) -> BTreeSet<PathBuf> {
         let Some(source) = pane.buffer.as_ref() else {
             continue;
         };
-        if let Some((path, _)) = source
-            .web_url()
-            .and_then(webnav::Mint::path_and_tail_of_file_url)
-        {
-            wanted.insert(path);
+        if let Some(named) = source.web_url().and_then(webnav::LocalFileUrl::parse) {
+            wanted.insert(named.into_path_and_tail().0);
         }
     }
     wanted
@@ -53189,8 +53198,8 @@ impl Runtime<'_> {
                     "a tab's preview map is filed under that tab's own leaves"
                 );
                 let url = pane.buffer.as_ref()?.web_url()?;
-                let (named, _) = webnav::Mint::path_and_tail_of_file_url(url)?;
-                (named == path && self.window.web.contains_key(&leaf)).then_some(leaf)
+                let named = webnav::LocalFileUrl::parse(url)?;
+                (named.path() == path && self.window.web.contains_key(&leaf)).then_some(leaf)
             })
             .collect();
         for leaf in reload {
@@ -63475,7 +63484,7 @@ impl Runtime<'_> {
                 // carried before highlighting existed.
                 let highlight =
                     highlight::syntax_for_file(&name, lines.first().map(String::as_str))
-                        .map(|syntax| highlight::Highlighting::of(&lines, syntax))
+                        .map(|grammar| highlight::Highlighting::of(&lines, grammar))
                         .unwrap_or_default();
                 PreviewDocument::Text {
                     lines,
@@ -116522,6 +116531,46 @@ mod resident_run_tests {
              diagnostic in this process comes from"
         );
     }
+
+    /// **RED (A3) — `--remove-explorer-menu` is answered before anything that
+    /// would open a window, hand this launch to another Folio, or write a file.**
+    ///
+    /// The whole correctness of the flag is its position. Below
+    /// `launch_wire::hand_over` it would be sent down the pipe to a *running*
+    /// Folio, which would open a window on it and leave the uninstall hook with
+    /// nothing removed and exit `0`. Below `enter_resident_run` its one line
+    /// would go into `diagnostics.log` instead of the package manager's
+    /// transcript, and the process would have created `%APPDATA%\Folio` on the
+    /// way. Below the event loop it would be a window nobody asked for.
+    ///
+    /// MUTATION: move the block under `cli::parse(` and the first assertion
+    /// stands while the second goes red — which is the version that would have
+    /// survived review, because on a machine with no Folio running it still
+    /// works.
+    #[test]
+    fn taking_folio_out_of_explorers_menu_is_answered_before_any_of_that() {
+        let door = free_fn_body("main");
+        let at = |needle: &str| {
+            door.find(needle)
+                .unwrap_or_else(|| panic!("`main` still does `{needle}`:\n{door}"))
+        };
+        let asked = at("cli::remove_explorer_menu(");
+        let removed = at("explorer_menu::remove_from_explorer_menu()");
+        let handed_over = at("launch_wire::hand_over(");
+        let resident = at("diagnostics::enter_resident_run(");
+        let loop_built = at("EventLoop::<AppEvent>::with_user_event()");
+        assert!(
+            asked < removed && removed < handed_over,
+            "a package manager's uninstall hook must not be handed to a Folio \
+             that is already running"
+        );
+        assert!(
+            removed < resident,
+            "the one line belongs on the caller's console, not in this \
+             machine's diagnostics log"
+        );
+        assert!(removed < loop_built, "and no window is ever built for it");
+    }
 }
 
 impl ApplicationHandler<AppEvent> for FolioApp {
@@ -119777,10 +119826,9 @@ mod floated_page_tests {
     /// RED GATE ①: drop the [`preview::PageGlance::Source`] test and the `.pdf`
     /// answers with a path — a rail that draws `</>` over a report, and a press
     /// that would put an empty text buffer over a working PDF viewer. RED GATE
-    /// ②: reach for the URL's own tail instead of
-    /// [`webnav::Mint::path_and_tail_of_file_url`] (a `starts_with("file://")`
-    /// and a slice, say) and the `https` row goes green while `%20` comes back
-    /// as three characters.
+    /// ②: reach for the URL's own tail instead of [`webnav::LocalFileUrl`] (a
+    /// `starts_with` on the scheme and a slice, say) and the `https` row goes
+    /// green while `%20` comes back as three characters.
     #[test]
     fn only_a_local_page_this_window_can_read_offers_its_source() {
         use super::page_source_file;
@@ -119977,7 +120025,7 @@ mod floated_page_tests {
         // up.
         let watched = fn_body("fn files_a_tab_stands_on(tab: &TabState) -> BTreeSet<PathBuf> {");
         assert!(
-            watched.contains("path_and_tail_of_file_url"),
+            watched.contains(concat!("LocalFile", "Url::parse")),
             "which requires a local page's own file to be on the watched list"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -123338,6 +123386,29 @@ fn main() -> Result<()> {
     // answer a question about a menu item's title.
     if cli::explorer_command(std::env::args_os().skip(1)) {
         std::process::exit(explorer_menu::serve());
+    }
+    // **And the door that undoes what the other two registered**: somebody
+    // taking Folio back out of Explorer's menu, which is the one thing this
+    // program can be asked to do that has to work while the rest of it is being
+    // deleted.
+    //
+    // Above the parse for the two doorbells' reason — this launch is not opening
+    // a window and everything below would build one — and above everything the
+    // parse leads to for a reason of its own. A package manager's uninstall hook
+    // is not a person: it must not be handed over to a Folio that is already
+    // running (which would change *that* copy's idea of what is registered, in a
+    // process the hook is not waiting on), it must not write a settings file for
+    // a folder about to disappear, and it must not be met by a first-run card. It
+    // is one line of log text and an exit code.
+    //
+    // The line goes to standard output through the console door and **never to a
+    // message box**: this answer is for a transcript, and an uninstall that
+    // stopped to raise a modal nobody is in front of would be worse than an
+    // uninstall that said nothing at all.
+    if cli::remove_explorer_menu(std::env::args_os().skip(1)) {
+        let report = explorer_menu::remove_from_explorer_menu();
+        bt_platform::write_to_console(&format!("{}\n", report.line));
+        std::process::exit(report.exit_code);
     }
     // **The command line, before there is anything for it to be wrong about.**
     // `spike-win-landing.md` §8 puts slice 0 exactly here, between the panic hook

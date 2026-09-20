@@ -71,6 +71,21 @@ Finder 右键菜单的**服务**下有 **Open in Folio**——Folio 首次运行
 
 Agent 页的三个开关**默认关闭**，各自读取对应工具的配置文件并显示当前状态。新机器上配置文件不存在，三项均显示关闭。
 
+## 卸载
+
+<!-- TODO(中文文案) — 本节待译，英文原文是 docs/install.md 的 `## Uninstalling`（2026-09-20 随
+     `--remove-explorer-menu` 一并加入）。要点：Folio 在 Windows 上写到自己文件夹之外的只有资源
+     管理器右键菜单的两处登记（Windows 11 第一页那一项由 folio.msix 注册，“显示更多选项”里的经典
+     项在 HKCU\Software\Classes 下的两个键）；直接删文件不会把它们带走，因为没有安装程序、卸载时
+     也没有任何东西会跑。所以先运行 `folio.exe --remove-explorer-menu`：不开窗，打印一行说明撤掉
+     了什么、留下了什么，然后退出；属于本机另一份 Folio 的登记不动；什么都没登记也不算出错，照样
+     退出 0。然后按渠道各一行：zip 直接删文件夹；scoop 先在 `scoop prefix folio` 的目录里跑这条
+     命令再 `scoop uninstall folio`；winget 同理。Folio 记住的一切都在 `%APPDATA%\Folio`，删掉
+     就全忘、留着下个版本还能接上；唯一另一处是 PowerShell `$PROFILE` 里那一行 integration，删
+     掉那行即可。文件已经删了而菜单项还在的，把同一个下载包随便解压到哪里，在那个文件夹里跑一次
+     这条命令再删掉即可。Mac 上没有要撤的东西：Finder 的 Open in Folio 在应用包自己的 Info.plist
+     里，应用删掉就一起没了；设置在 `~/Library/Application Support/Folio`。 -->
+
 ## 已知问题
 
 - **曾有一例报告窗口上半部全黑**，发生在移至第二显示器后，尚未复现。如遇到请附上 `%APPDATA%\Folio\diagnostics.log`（Mac 上是 `~/Library/Application Support/Folio/diagnostics.log`）。

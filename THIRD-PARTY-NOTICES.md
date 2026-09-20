@@ -1102,6 +1102,105 @@ written as an arc rather than as the cubic the unminified file spells it with.
 
 ---
 
+### The PowerShell syntax grammar
+
+<https://github.com/PowerShell/EditorSyntax> — MIT,
+Copyright (c) Microsoft Corporation.
+
+`assets/syntaxes/PowerShell.sublime-syntax` is the grammar the preview reads
+`.ps1`, `.psm1` and `.psd1` files with, and `assets/syntaxes/PowerShell.packdump`
+beside it is that same grammar as the binary dump compiled into the executable
+(`crates/bt-app/src/highlight.rs`, `include_bytes!`). It is vendored because the
+grammar set this product loads — `two-face`'s — ships PowerShell only in its
+Oniguruma dumps, and this product runs syntect's pure-Rust backend.
+
+It travels through two hands, and both are named because both are in the file:
+
+| | |
+|---|---|
+| Copied from | `sharkdp/bat`, `assets/syntaxes/02_Extra/PowerShell.sublime-syntax`, at commit `a02713dc15818dd2d82d5a38b45d2cc33a4de95c` |
+| Blob | `3a452a643737f5bc95e11c8ca5e97b0b0ea6af81`, 22,202 bytes, SHA-256 `ca72d05cbb1d9ecf3588ed666d86ce9234600238b650d8a379256aebe47c5ddb` |
+| Which bat generated from | `PowerShell/EditorSyntax`, `PowerShellSyntax.tmLanguage`, at commit `742f0b5d4b60f5930c0b47fcc1f646860521296e` |
+
+**It has been modified**, in two lines, and `assets/syntaxes/README.md` states
+each one with its before, its after and why the two are the same grammar: one
+Oniguruma subroutine call written out as the character class it calls, and
+`pwsh` added to the extension list so a ` ```pwsh ` fence resolves. Nothing was
+deleted or weakened.
+
+Microsoft's licence, from the repository the grammar is generated from:
+
+``` text
+Copyright (c) Microsoft Corporation
+
+All rights reserved.
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+That repository carries a third-party notice of its own, for the project the
+grammar incorporates material from, and it is reproduced here for the same
+reason Microsoft reproduces it there:
+
+``` text
+Third Party Notices for PowerShell Editor Syntax
+
+This Microsoft Open Source project incorporates material from the project(s) listed below (“Third Party Code”). Microsoft is not the original author of the Third Party Code. Microsoft reserves all other rights not expressly granted, whether by implication, estoppel or otherwise.
+
+Copyright (c) 2011 Guillermo López-Anglada
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+And bat's, for the conversion this copy was taken from. `bat` is
+`MIT OR Apache-2.0`; the MIT half is the one reproduced:
+
+``` text
+Copyright (c) 2018-2021 bat-developers (https://github.com/sharkdp/bat).
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+---
+
 ### Ten colour schemes
 
 `assets/schemes/*.json`. Two of the ten — `folio-dark.json` and

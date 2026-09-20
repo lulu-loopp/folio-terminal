@@ -186,10 +186,20 @@ serde_json = "1"
 # not allowed to take from a library — every ink on this glass comes out of
 # `ChromePalette`, and what syntect is asked for here is the *scope* of each
 # span and nothing else.
+#
+# `yaml-load` reads a `.sublime-syntax` file, which is how `assets/syntaxes/`'s
+# vendored grammars are turned into the dumps the executable carries and how the
+# tests prove the dump beside a grammar is that grammar. It is named here rather
+# than left to feature unification: `typst-library` asks syntect for it too, so
+# today it resolves on whether Folio names it or not — and a dependency that
+# compiles because of what a *different* crate wanted is one that breaks on a day
+# nobody touched it. It adds no package to `Cargo.lock`: `yaml-rust` is already
+# there, and already in `THIRD-PARTY-NOTICES.md`, for that same reason.
 syntect = { version = "5.3", default-features = false, features = [
     "parsing",
     "default-syntaxes",
     "regex-fancy",
+    "yaml-load",
 ] }
 # The grammars Sublime's default dump does not carry — TOML, TypeScript, TSX,
 # Dockerfile and a hundred more (user ruling 2026-08-16: bundle them; a Rust

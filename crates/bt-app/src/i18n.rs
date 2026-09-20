@@ -7009,7 +7009,9 @@ impl CliText<'_> {
                      \x20 --tab             a tab in the Folio already running, not a window\n\
                      \x20 <path>            a folder opens a pane there; a file opens a preview\n\
                      \x20 -h, --help        this text\n\
-                     \x20 --version         which build this is"
+                     \x20 --version         which build this is\n\
+                     \x20 --remove-explorer-menu  take this copy of Folio out of Explorer's \
+                     right-click menu"
                 ),
                 Lang::Chinese => format!(
                     "folio [--cwd <文件夹>] [--profile <id>] [--new-window | --tab] [<路径>]\n\n\
@@ -7019,7 +7021,8 @@ impl CliText<'_> {
                      \x20 --tab             在已经开着的 Folio 里加标签，不另开窗\n\
                      \x20 <路径>            文件夹等同 --cwd，文件则打开预览\n\
                      \x20 -h, --help        显示这段说明\n\
-                     \x20 --version         显示这是哪一个构建"
+                     \x20 --version         显示这是哪一个构建\n\
+                     \x20 --remove-explorer-menu  把这份 Folio 从资源管理器的右键菜单里撤掉"
                 ),
             },
             Self::MissingValue(flag) => match lang {
@@ -8471,10 +8474,9 @@ mod tests {
             }
             .in_lang(lang);
             let lines: Vec<&str> = usage.lines().collect();
-            // Nine since `--tab` joined `--new-window` (§7.59, user ruling 2026-09-11): the
-            // summary, a blank, and one line for each of the seven things this program can be
-            // told by somebody typing.
-            assert_eq!(lines.len(), 9, "{lang:?}: {usage}");
+            // Ten since `--remove-explorer-menu` joined the list: the summary, a blank, and one
+            // line for each of the eight things this program can be told by somebody typing.
+            assert_eq!(lines.len(), 10, "{lang:?}: {usage}");
             assert!(lines[0].starts_with("folio [--cwd "), "{lang:?}");
             assert!(lines[1].is_empty(), "{lang:?}");
             for line in &lines[2..] {

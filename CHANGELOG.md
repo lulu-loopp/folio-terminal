@@ -8,6 +8,20 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Added
 
+- **`folio --remove-explorer-menu` takes Folio back out of Explorer's
+  right-click menu, without opening a window.** Both entries go: the one on
+  Windows 11's first page and the classic one under "Show more options". It is
+  the piece that was missing from every way of removing Folio — there is no
+  installer, so deleting the files left a menu entry pointing at a `folio.exe`
+  that is no longer there, and the switch that could have taken it off went with
+  the folder. A registration belonging to another copy of Folio on the same
+  machine is left exactly as it is; one whose `folio.exe` has gone is cleared,
+  because nobody is answering it. It prints one line saying what it removed and
+  what it left, exits `0` when the machine is the way you asked for it —
+  including when there was nothing to remove — and non-zero only when a removal
+  was refused, with the reason on standard error. `docs/install.md` has the
+  per-channel steps.
+
 - **Terminal settings now include a separate CJK font choice.** Automatic uses
   Folio's platform defaults, and an installed Chinese, Japanese or Korean face
   can be chosen without changing the monospace font used for ASCII.
@@ -22,11 +36,60 @@ All notable changes to Folio are recorded here. The format follows
   platform call. A stall line also carries the run's age and its own number, so
   one day's recording can show whether pauses grew as the session aged.
 
+- **The log now names the GPU Folio asked for as well as the one it got, and a
+  laptop with two can be told to try the other.** Folio has always asked for the
+  highest-performance adapter, which on a laptop with two graphics chips is the
+  discrete one; it still does, and nothing about a normal run changes. What is
+  new is that the `GPU adapter` line in `diagnostics.log` says what was asked
+  for beside what the driver answered, and that setting `BT_GPU_PREFERENCE=low`
+  for one run asks for the integrated adapter instead
+  (`docs/BT-ENVIRONMENT.md`). It is there to find out whether a particular
+  machine's long pauses belong to its discrete GPU — the same build can be run
+  both ways and the two recordings compared.
+
 ### Fixed
 
 - **Chinese terminal text no longer falls through to SimSun on Windows or
   GB18030 Bitmap on macOS.** Folio now chooses the terminal grid's CJK face
   explicitly from its platform chain.
+
+- **A local page or PDF whose path contains Chinese — or a space with `{`, `}`,
+  `^` or `` ` `` in the name — now opens in the preview, instead of being turned
+  away by Folio itself.** Double-clicking `报告.pdf` under `D:\文档\项目 (1)\`
+  drew Folio's own refusal card: the window had opened the file and then refused
+  it, because it was comparing two *spellings* of one path where it meant to
+  compare the path. The browser engine re-spells a local address in its own
+  form — every character outside a small set comes back percent-encoded — and
+  the two strings no longer matched. Folio now reads a local address as the file
+  it names, once, at the door, so the two spellings are one answer. The address
+  row shows the ordinary path again (`D:\文档\报告.pdf`, not `file:///D:/%E6…`),
+  links to files beside the page, in-page jumps and reload keep working, and a
+  session saved before this change still reopens its pages. Nothing that was
+  refused for a safety reason is opened now: a path that walks out of the page's
+  own folder, a network share, or an address that matches only after a spelling
+  is guessed at is refused exactly as before. Reported as issue #7.
+
+- **`diagnostics.log` now always opens with the line that says which build
+  wrote it.** The file a bug report arrives as is a stack of runs, and the line
+  between them carries the version, the commit and the process id. It was
+  written only by a run whose diagnostics went to that file, so a run started
+  with a trace variable set — or one whose log would not take the program's
+  output — appended its watchdog's lines to a file with no such line anywhere in
+  it, and nothing in what you sent said which Folio had written it. The line is
+  now written when the log is opened, before the run has said anything else, on
+  every kind of run.
+
+- **A PowerShell script now opens in the preview highlighted, instead of as
+  plain text.** `.ps1`, `.psm1` and `.psd1` files, and a ` ```powershell `,
+  ` ```pwsh ` or ` ```ps1 ` fence inside a Markdown document, get the same
+  keywords, strings, comments, numbers and function names every other language
+  has had — on Windows, on macOS and on Linux, with nothing new to install.
+  PowerShell was the one common language missing from the set of grammars Folio
+  carries, for a reason that was never visible from the outside: the grammar
+  needed one pattern rewritten before the pure-Rust regex engine Folio uses
+  would take it. The rewritten line, what it was, and why it means the same
+  thing are recorded in `assets/syntaxes/README.md`, beside the grammar itself.
+
 
 ## 0.4.2-preview — 2026-09-18
 
