@@ -11522,19 +11522,22 @@ struct App {
     /// than re-asked because both the row and the dialog need it and a known
     /// folder lookup is a COM call.
     psreadline_documents: Option<PathBuf>,
-    /// Which copy of Folio's module is on disk **right now** — this build's, an
-    /// older Folio build's, or none.
+    /// Last observed Folio module: `None` is unread; `Some(InstalledCopy::None)`
+    /// is a completed reading that found no Folio copy.
     ///
     /// Cached because it is nine file reads and a version-resource walk, and the
-    /// settings dialog asks on every frame it draws; refreshed at the two moments
-    /// it can change — an install and a removal — and once when the probe lands,
-    /// which is the first point at which anything wants to know.
+    /// settings dialog asks on every frame it draws. Read once when the probe
+    /// lands, after an install/removal, and on opening the Terminal page. The
+    /// App owns the slot, so additional windows do not repeat the first read.
     ///
     /// **Three answers since 2026-08-18**, and the middle one is why: a module an
     /// older Folio wrote is neither "ours" nor "somebody else's", and a `bool`
     /// made it the second, which is how it became a module this product had
     /// installed and would not remove.
-    psreadline_installed: psreadline::InstalledCopy,
+    psreadline_installed: Option<psreadline::InstalledCopy>,
+    /// Whether the ready first-run attempt has been consumed, even if no card
+    /// could open. This is an edge latch, not another agent-availability cache.
+    first_run_attempted: bool,
     /// Whether Explorer's right-click menu carries Folio's verb (§7.4).
     ///
     /// Cached for [`Self::psreadline_installed`]'s reason and no other: the
@@ -38997,7 +39000,8 @@ impl Runtime<'_> {
             scheme_source: [None, None],
             profile_programs,
             psreadline_documents: psreadline::documents_directory(),
-            psreadline_installed: psreadline::InstalledCopy::default(),
+            psreadline_installed: None,
+            first_run_attempted: false,
             // Reads the registry once and, on a machine whose `folio.exe`
             // has moved since, writes the verb again — see the field.
             context_menu_installed: context_menu::reassert(),
@@ -45911,6 +45915,33 @@ impl Runtime<'_> {
         if content.probes_psreadline(self.window.settings.category()) {
             psreadline::begin_probe();
         }
+        let psreadline_opened = self
+            .window
+            .settings
+            .take_psreadline_open_edge(content.probes_psreadline(self.window.settings.category()));
+        if psreadline_opened {
+            // An out-of-band module change becomes visible when the reader
+            // opens its page. A redraw or hover on the open page is not an edge.
+            self.psreadline_documents();
+            self.refresh_psreadline_installed();
+        }
+        // Use the refreshed fact on this very layout, including its geometry.
+        let refreshed_values = psreadline_opened.then(|| {
+            let state = self.psreadline_row_state();
+            settings::SettingsValues {
+                psreadline: state,
+                psreadline_install_available: psreadline::install_available(
+                    psreadline::probe(),
+                    state,
+                ) && self.app.psreadline_documents.is_some(),
+                psreadline_remove_available: psreadline::remove_available(state),
+                ..values.clone()
+            }
+        });
+        let content = settings::SettingsContent {
+            values: refreshed_values.as_ref().unwrap_or(&values),
+            ..content
+        };
         // The second probe on the same door and for the same argument: the page that prints which
         // copilot this machine has is the page that asks. Idempotent, and an atomic load after the
         // first call — see `attention_copilot::begin_probe`.
@@ -50032,6 +50063,7 @@ impl Runtime<'_> {
     fn adopt_profile_table(&mut self) -> Result<()> {
         self.app.profile_programs =
             profiles::ProfilePrograms::probe(&bt_pty::SystemShellEnvironment);
+        self.app.first_run_attempted = false;
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),
             source: FrameSource::Expose,
@@ -53861,21 +53893,17 @@ impl Runtime<'_> {
         psreadline::row_state(
             psreadline::probe(),
             self.app.settings_store.loaded().psreadline_invite,
-            self.app.psreadline_installed,
+            self.app.psreadline_installed.unwrap_or_default(),
         )
     }
 
     /// Re-read whether the module is on disk. Cheap enough at the three moments
     /// it is called and far too expensive on every frame — see the field.
-    fn refresh_psreadline_installed(&mut self) -> bool {
-        let installed = self
-            .app
-            .psreadline_documents
-            .as_deref()
-            .map_or(psreadline::InstalledCopy::None, psreadline::installed_copy);
-        let changed = self.app.psreadline_installed != installed;
-        self.app.psreadline_installed = installed;
-        changed
+    fn refresh_psreadline_installed(&mut self) {
+        psreadline::refresh_installed(
+            &mut self.app.psreadline_installed,
+            self.app.psreadline_documents.as_deref(),
+        );
     }
 
     /// Where this machine's `Documents` is, asked again if the launch could not
@@ -54303,17 +54331,18 @@ impl Runtime<'_> {
         if self.window.psreadline_invite.is_open() || psreadline::probe().is_none() {
             return Ok(());
         }
-        if self.refresh_psreadline_installed() {
-            // The first reading, taken when the probe lands. A module already on
-            // disk answers the question before it is asked.
-        }
+        let installed = psreadline::installed_on_probe(
+            &mut self.app.psreadline_installed,
+            self.app.psreadline_documents.as_deref(),
+            psreadline::probe(),
+        );
         // **Any Folio copy silences the invitation**, this build's or an older
         // one's: the offer is "let Folio put its module on this machine", and it
         // is already there. What the older copy is owed is an *update*, and the
         // Terminal page's row is where that is offered — an unbidden modal for a
         // patch bump would be this product interrupting a reader over its own
         // release history.
-        if self.app.psreadline_installed != psreadline::InstalledCopy::None {
+        if installed != psreadline::InstalledCopy::None {
             return Ok(());
         }
         let decision = psreadline::invite_decision(
@@ -54396,7 +54425,7 @@ impl Runtime<'_> {
     /// crash, an `Alt+F4`, or a process killed while the card is on screen must
     /// not bring it back.
     fn raise_first_run_if_due(&mut self) -> Result<()> {
-        if self.window.first_run.is_open() {
+        if self.window.first_run.is_open() || self.app.first_run_attempted {
             return Ok(());
         }
         let store = &self.app.settings_store;
@@ -54422,9 +54451,14 @@ impl Runtime<'_> {
         let copilot_on_path = self.agent_is_on_this_machine("copilot");
         if copilot_on_path {
             attention_copilot::begin_probe();
-            if !attention_copilot::probe_settled() {
-                return Ok(());
-            }
+        }
+        // The machine questions below include file reads. Consume readiness
+        // once, before asking them, even if this platform offers no card rows.
+        if !first_run::take_ready_edge(
+            &mut self.app.first_run_attempted,
+            !copilot_on_path || attention_copilot::probe_settled(),
+        ) {
+            return Ok(());
         }
         let machine = first_run::Machine {
             // Both halves of the first page: a Windows that shows one, and the
@@ -54611,6 +54645,9 @@ impl Runtime<'_> {
             }
         }
         self.window.first_run.close();
+        // Preserve the diagnostic override's ability to show another card
+        // after a gesture. Normal launches remain gated by the stored answer.
+        self.app.first_run_attempted = false;
         // **The card's anchors go out with the card.** While it was up this
         // window's whole tooltip list was its six rows (see
         // [`Self::rebuild_first_run_tip_anchors`]); leaving them standing would
@@ -105386,6 +105423,7 @@ impl Runtime<'_> {
         // because its own gate closes the moment it goes up.
         //
         // **The clock run begins here** — see [`hang_watch::Station::Clocks`].
+        // Every entry is a deadline or an edge, never a filesystem/PATH poll.
         hang_watch::at(hang_watch::Station::Clocks);
         hang_watch::during(hang_watch::Station::ClockRaiseFirstRunIfDue, || {
             self.raise_first_run_if_due()

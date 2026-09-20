@@ -918,11 +918,11 @@ pub fn install_into(documents: &Path) -> io::Result<PathBuf> {
 #[must_use]
 pub fn is_folios_copy(documents: &Path) -> bool {
     let root = module_directory(documents);
-    if !root.is_dir() {
+    if !installed_disk::is_dir(&root) {
         return false;
     }
     BUNDLED_FILES.iter().all(|(name, bytes)| {
-        std::fs::read(root.join(name)).is_ok_and(|found| found.as_slice() == *bytes)
+        installed_disk::read(&root.join(name)).is_ok_and(|found| found.as_slice() == *bytes)
     })
 }
 
@@ -945,7 +945,7 @@ pub fn is_folios_copy(documents: &Path) -> bool {
 #[must_use]
 pub fn installed_build(documents: &Path) -> Option<String> {
     let stamp = module_directory(documents).join(BUILD_STAMP_FILE);
-    let build = file_product_version(&stamp)?;
+    let build = installed_disk::product_version(&stamp)?;
     build.starts_with(&family_prefix()).then_some(build)
 }
 
@@ -977,6 +977,74 @@ pub fn installed_copy(documents: &Path) -> InstalledCopy {
         Some(build) if build == PATCHED_BUILD => InstalledCopy::None,
         Some(_) => InstalledCopy::OlderBuild,
         None => InstalledCopy::None,
+    }
+}
+
+/// Read the shared App fact after a module write or a Terminal-page visit.
+pub fn refresh_installed(cache: &mut Option<InstalledCopy>, documents: Option<&Path>) {
+    *cache = Some(documents.map_or(InstalledCopy::None, installed_copy));
+}
+
+/// The headless part of the clock-run invite check. `None` means unread, not
+/// "no module"; all windows borrow the same App-owned slot.
+pub fn installed_on_probe(
+    cache: &mut Option<InstalledCopy>,
+    documents: Option<&Path>,
+    probe: Option<Probe>,
+) -> InstalledCopy {
+    if cache.is_none() && probe.is_some() {
+        refresh_installed(cache, documents);
+    }
+    cache.unwrap_or_default()
+}
+
+/// The installed-module IO door. Tests replace all three operations on this
+/// thread; neither a real account's module nor its version resource is touched.
+mod installed_disk {
+    use super::*;
+
+    pub(super) trait Disk {
+        fn is_dir(&self, path: &Path) -> bool;
+        fn read(&self, path: &Path) -> std::io::Result<Vec<u8>>;
+        fn product_version(&self, path: &Path) -> Option<String>;
+    }
+
+    struct System;
+
+    impl Disk for System {
+        fn is_dir(&self, path: &Path) -> bool {
+            path.is_dir()
+        }
+        fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+            std::fs::read(path)
+        }
+        fn product_version(&self, path: &Path) -> Option<String> {
+            file_product_version(path)
+        }
+    }
+
+    #[cfg(test)]
+    thread_local! {
+        pub(super) static OVERRIDE: std::cell::RefCell<Option<std::rc::Rc<dyn Disk>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    fn with<R>(f: impl FnOnce(&dyn Disk) -> R) -> R {
+        #[cfg(test)]
+        if let Some(disk) = OVERRIDE.with(|slot| slot.borrow().clone()) {
+            return f(disk.as_ref());
+        }
+        f(&System)
+    }
+
+    pub(super) fn is_dir(path: &Path) -> bool {
+        with(|disk| disk.is_dir(path))
+    }
+    pub(super) fn read(path: &Path) -> std::io::Result<Vec<u8>> {
+        with(|disk| disk.read(path))
+    }
+    pub(super) fn product_version(path: &Path) -> Option<String> {
+        with(|disk| disk.product_version(path))
     }
 }
 
@@ -1204,6 +1272,246 @@ pub fn apply(
 mod tests {
     use super::*;
     use bt_persist::PsReadLineInviteV1 as State;
+
+    struct CountingDisk {
+        root: PathBuf,
+        reads: std::cell::Cell<usize>,
+        bytes: std::cell::Cell<usize>,
+        directories: std::cell::Cell<usize>,
+        versions: std::cell::Cell<usize>,
+    }
+
+    impl installed_disk::Disk for CountingDisk {
+        fn is_dir(&self, path: &Path) -> bool {
+            assert_eq!(path, self.root);
+            self.directories.set(self.directories.get() + 1);
+            true
+        }
+        fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+            assert!(
+                BUNDLED_FILES
+                    .iter()
+                    .any(|(name, _)| path == self.root.join(name))
+            );
+            self.reads.set(self.reads.get() + 1);
+            let bytes = std::fs::read(path)?;
+            self.bytes.set(self.bytes.get() + bytes.len());
+            Ok(bytes)
+        }
+        fn product_version(&self, path: &Path) -> Option<String> {
+            assert_eq!(path, self.root.join(BUILD_STAMP_FILE));
+            self.versions.set(self.versions.get() + 1);
+            Some(format!("{}0", family_prefix()))
+        }
+    }
+
+    struct DiskOverride;
+
+    impl Drop for DiskOverride {
+        fn drop(&mut self) {
+            installed_disk::OVERRIDE.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+
+    #[test]
+    fn psreadline_clock_run_reads_only_at_edges() {
+        let documents = temp_dir("clock-edges");
+        let root = module_directory(&documents);
+        std::fs::create_dir_all(&root).unwrap();
+        let fixture = vec![b'x'; 41_345];
+        std::fs::write(root.join("Changes.txt"), &fixture).unwrap();
+        let disk = std::rc::Rc::new(CountingDisk {
+            root,
+            reads: Default::default(),
+            bytes: Default::default(),
+            directories: Default::default(),
+            versions: Default::default(),
+        });
+        installed_disk::OVERRIDE.with(|slot| *slot.borrow_mut() = Some(disk.clone()));
+        let _override = DiskOverride;
+        let probe = Some(probe_at("2.0.0", ExecutionPolicy::RemoteSigned));
+        let mut app_fact = None;
+        for _ in 0..200 {
+            assert_eq!(
+                installed_on_probe(&mut app_fact, Some(&documents), None),
+                InstalledCopy::None
+            );
+        }
+        assert_eq!(disk.reads.get(), 0);
+        // Several windows borrow this one slot; no window owns a disk snapshot.
+        for _window in 0..4 {
+            for _ in 0..50 {
+                let installed = installed_on_probe(&mut app_fact, Some(&documents), probe);
+                assert_eq!(installed, InstalledCopy::OlderBuild);
+                assert_eq!(
+                    row_state(probe, State::NotAsked, installed),
+                    RowState::UpdateAvailable
+                );
+            }
+        }
+        assert_eq!(
+            disk.reads.get(),
+            1,
+            "200 invite checks must read one Changes.txt"
+        );
+        assert_eq!(disk.bytes.get(), fixture.len());
+        assert_eq!(disk.directories.get(), 1);
+        assert!(matches!(
+            apply(true, Some(&documents), RowState::UpdateAvailable, probe),
+            Outcome::Installed(_)
+        ));
+        // Runtime refreshes once after the successful writer. This time every
+        // bundled file matches: one module inspection, nine content reads.
+        refresh_installed(&mut app_fact, Some(&documents));
+        assert_eq!(disk.directories.get(), 2);
+        assert_eq!(app_fact, Some(InstalledCopy::ThisBuild));
+        assert_eq!(
+            row_state(probe, State::Installed, app_fact.unwrap()),
+            RowState::InstalledByFolio
+        );
+        assert_eq!(disk.reads.get(), 1 + BUNDLED_FILES.len());
+        // An out-of-band replacement becomes visible on opening Terminal.
+        std::fs::write(disk.root.join("Changes.txt"), &fixture).unwrap();
+        refresh_installed(&mut app_fact, Some(&documents));
+        assert_eq!(disk.directories.get(), 3);
+        assert_eq!(app_fact, Some(InstalledCopy::OlderBuild));
+        let edge_reads = 2 + BUNDLED_FILES.len();
+        let edge_bytes = 2 * fixture.len()
+            + BUNDLED_FILES
+                .iter()
+                .map(|(_, bytes)| bytes.len())
+                .sum::<usize>();
+        for _ in 0..200 {
+            installed_on_probe(&mut app_fact, Some(&documents), probe);
+        }
+        assert_eq!(disk.reads.get(), edge_reads);
+        assert_eq!(disk.directories.get(), 3);
+        assert_eq!(disk.versions.get(), 2);
+        assert_eq!(disk.bytes.get(), edge_bytes);
+        // A failed Documents lookup is a known absence, not an unread fact.
+        refresh_installed(&mut app_fact, None);
+        assert_eq!(app_fact, Some(InstalledCopy::None));
+        for _ in 0..200 {
+            assert_eq!(
+                installed_on_probe(&mut app_fact, Some(&documents), probe),
+                InstalledCopy::None
+            );
+        }
+        assert_eq!(
+            disk.reads.get(),
+            edge_reads,
+            "a failed edge never becomes a retry poll"
+        );
+        // A failed content read can still identify an older DLL. Cache that
+        // result too; the next visit/write is the only reason to ask again.
+        std::fs::remove_file(disk.root.join("Changes.txt")).unwrap();
+        refresh_installed(&mut app_fact, Some(&documents));
+        for _ in 0..200 {
+            assert_eq!(
+                installed_on_probe(&mut app_fact, Some(&documents), probe),
+                InstalledCopy::OlderBuild
+            );
+        }
+        assert_eq!(disk.reads.get(), edge_reads + 1);
+        assert_eq!(disk.directories.get(), 4);
+        assert_eq!(disk.versions.get(), 3);
+        assert_eq!(disk.bytes.get(), edge_bytes);
+        std::fs::remove_dir_all(documents).unwrap();
+    }
+
+    #[test]
+    fn psreadline_clock_run_source_has_an_unread_edge() {
+        let main = include_str!("main.rs");
+        let body = main
+            .split("    fn raise_psreadline_invite_if_due(")
+            .nth(1)
+            .unwrap()
+            .split("\n    fn ")
+            .next()
+            .unwrap();
+        assert!(
+            !body.contains("self.refresh_psreadline_installed()"),
+            "the turn must enter the shared unread gate, never refresh directly"
+        );
+        assert!(body.contains("psreadline::installed_on_probe("));
+        let source = include_str!("psreadline.rs");
+        let gate = source
+            .split("pub fn installed_on_probe(")
+            .nth(1)
+            .unwrap()
+            .split("\n}")
+            .next()
+            .unwrap();
+        assert!(gate.contains("if cache.is_none() && probe.is_some() {\n        refresh_installed(cache, documents);\n    }"));
+        assert_eq!(gate.matches("refresh_installed(").count(), 1);
+        assert!(!body.contains("installed_copy("));
+        assert!(body.contains("if installed != psreadline::InstalledCopy::None {"));
+    }
+
+    #[test]
+    fn psreadline_readers_and_refresh_edges_are_wired_to_the_app_fact() {
+        let source = include_str!("main.rs");
+        let body = |name: &str| {
+            source
+                .split_once(name)
+                .unwrap()
+                .1
+                .split("\n    fn ")
+                .next()
+                .unwrap()
+        };
+        assert!(source.contains("psreadline_installed: Option<psreadline::InstalledCopy>"));
+        let row = body("    fn psreadline_row_state(");
+        assert!(row.contains("self.app.psreadline_installed.unwrap_or_default()"));
+        assert!(!row.contains("installed_copy("));
+        let refresh = body("    fn refresh_psreadline_installed(");
+        assert!(refresh.contains("psreadline::refresh_installed("));
+        assert!(refresh.contains("&mut self.app.psreadline_installed"));
+        let apply = body("    fn apply_psreadline(");
+        assert_eq!(
+            apply
+                .matches("self.refresh_psreadline_installed();")
+                .count(),
+            2
+        );
+        for outcome in ["Outcome::Installed(root)", "Outcome::Removed(root)"] {
+            assert!(
+                apply
+                    .split_once(outcome)
+                    .unwrap()
+                    .1
+                    .split("Ok(true)")
+                    .next()
+                    .unwrap()
+                    .contains("self.refresh_psreadline_installed();")
+            );
+        }
+        let layout = body("    fn settings_layout(");
+        let compact: String = layout.split_whitespace().collect();
+        assert!(compact.contains("self.window.settings.take_psreadline_open_edge("));
+        assert!(layout.contains("if psreadline_opened {"));
+        assert_eq!(
+            layout
+                .matches("self.refresh_psreadline_installed();")
+                .count(),
+            1
+        );
+        let edge = layout
+            .split_once("if psreadline_opened {")
+            .unwrap()
+            .1
+            .split('}')
+            .next()
+            .unwrap();
+        assert!(edge.contains("self.refresh_psreadline_installed();"));
+        assert_eq!(
+            source
+                .matches("self.refresh_psreadline_installed();")
+                .count(),
+            3,
+            "only install, remove, and Terminal-page open refresh the disk fact"
+        );
+    }
 
     fn temp_dir(tag: &str) -> PathBuf {
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
