@@ -1533,7 +1533,7 @@ fn read_bounded(path: &Path, cap: u64) -> Result<Vec<u8>, BoundedRead> {
             bytes: metadata.len(),
         });
     }
-    let file = match std::fs::File::open(path) {
+    let file = match bt_platform::file_reads::open(bt_platform::file_reads::Lane::Settings, path) {
         Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(BoundedRead::NotFound),
         Err(e) => return Err(BoundedRead::Io(e.to_string())),

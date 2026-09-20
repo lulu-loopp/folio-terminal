@@ -1077,6 +1077,7 @@ windows = { version = "0.62.2", features = [
     # not one line to it or to `THIRD-PARTY-NOTICES.md`, which is
     # `docs/DESIGN.md` §8's bar.
     "Win32_UI_Input_Ime",
+    "Win32_UI_TextServices",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     # `COMDLG_FILTERSPEC` and therefore `IFileDialog::SetFileTypes`, which is

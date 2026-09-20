@@ -250,7 +250,7 @@ impl Marks {
     pub fn read(data: &Path) -> io::Result<Self> {
         let path = data.join(RECORD_FILE);
         super::refuse_profile_path(&path)?;
-        match fs::read(path) {
+        match bt_platform::file_reads::read(bt_platform::file_reads::Lane::Settings, path) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(e),
             Ok(bytes) => {

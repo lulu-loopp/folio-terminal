@@ -113,7 +113,7 @@ pub(crate) fn transcript_lede(path: &Path, limit: usize) -> Option<String> {
     let mut window = FIRST_TAIL;
     loop {
         let read = window.min(size);
-        if let Some(words) = lede_in_tail(&mut file, size - read, read < size, limit) {
+        if let Some(words) = lede_in_tail(&mut file, path, size - read, read < size, limit) {
             return Some(words);
         }
         if read == size || window >= WIDEST_TAIL {
@@ -129,10 +129,22 @@ pub(crate) fn transcript_lede(path: &Path, limit: usize) -> Option<String> {
 /// the tail of a line whose start was not read and is dropped. Dropping it is not an optimisation:
 /// half a JSON object parses as nothing, but half a *string* can parse as a whole object with the
 /// wrong contents, and the entry it would answer with is one nobody wrote.
-fn lede_in_tail(file: &mut File, from: u64, partial: bool, limit: usize) -> Option<String> {
+fn lede_in_tail(
+    file: &mut File,
+    path: &Path,
+    from: u64,
+    partial: bool,
+    limit: usize,
+) -> Option<String> {
     file.seek(SeekFrom::Start(from)).ok()?;
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).ok()?;
+    bt_platform::file_reads::Reader::new(
+        file,
+        bt_platform::file_reads::Lane::Attention,
+        Some(path),
+    )
+    .read_to_end(&mut bytes)
+    .ok()?;
     let text = String::from_utf8_lossy(&bytes);
     let mut lines = text.split('\n').collect::<Vec<_>>();
     if partial && !lines.is_empty() {

@@ -33,6 +33,15 @@ env:
 # in front of them.
 
 jobs:
+  release-script-tests:
+    runs-on: windows-2025
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Offline release build verification
+        shell: pwsh
+        run: ./scripts/release/ci-build-tests.ps1
+
   # ── the three gates that prove themselves ──────────────────────────────────
   #
   # Each of these plants a violation, demands red, and puts the file back. This

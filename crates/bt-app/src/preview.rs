@@ -7014,7 +7014,8 @@ fn read_up_to(path: &Path, limit: usize) -> HeadOutcome {
     ) {
         return HeadOutcome::Refused(PreviewRefusal::NetworkPath);
     }
-    let mut file = match std::fs::File::open(path) {
+    let mut file = match bt_platform::file_reads::open(bt_platform::file_reads::Lane::Preview, path)
+    {
         Ok(file) => file,
         Err(error) => {
             return HeadOutcome::Refused(PreviewRefusal::Fault(PreviewFault::from_io(&error)));

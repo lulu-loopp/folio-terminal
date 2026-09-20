@@ -448,28 +448,30 @@ impl MathEngine {
     /// [`convert_math`] are about *computation* rather than about reading files. A formula still
     /// may not carry code, because a loop nobody can interrupt is its own kind of harm.
     fn with_system_fonts(include_system_fonts: bool) -> Self {
-        let engine = TypstEngine::builder()
-            .main_file(TYPST_TEMPLATE)
-            .with_static_source_file_resolver([
-                (
-                    "specs/mod.typ",
-                    include_str!("../../../assets/mitex-specs/mod.typ"),
-                ),
-                (
-                    "specs/prelude.typ",
-                    include_str!("../../../assets/mitex-specs/prelude.typ"),
-                ),
-                (
-                    "specs/latex/standard.typ",
-                    include_str!("../../../assets/mitex-specs/latex/standard.typ"),
-                ),
-            ])
-            .search_fonts_with(
-                TypstKitFontOptions::default()
-                    .include_system_fonts(include_system_fonts)
-                    .include_embedded_fonts(true),
-            )
-            .build();
+        let engine = bt_platform::file_reads::opaque(bt_platform::file_reads::Lane::Fonts, || {
+            TypstEngine::builder()
+                .main_file(TYPST_TEMPLATE)
+                .with_static_source_file_resolver([
+                    (
+                        "specs/mod.typ",
+                        include_str!("../../../assets/mitex-specs/mod.typ"),
+                    ),
+                    (
+                        "specs/prelude.typ",
+                        include_str!("../../../assets/mitex-specs/prelude.typ"),
+                    ),
+                    (
+                        "specs/latex/standard.typ",
+                        include_str!("../../../assets/mitex-specs/latex/standard.typ"),
+                    ),
+                ])
+                .search_fonts_with(
+                    TypstKitFontOptions::default()
+                        .include_system_fonts(include_system_fonts)
+                        .include_embedded_fonts(true),
+                )
+                .build()
+        });
         Self { engine }
     }
 
@@ -1171,7 +1173,9 @@ fn svg_document_options() -> &'static resvg::usvg::Options<'static> {
         // enumerating the installed faces costs of the order of a hundred
         // milliseconds, and it is paid on the lane that exists to keep tens of
         // milliseconds of typesetting off the window's thread.
-        options.fontdb_mut().load_system_fonts();
+        bt_platform::file_reads::opaque(bt_platform::file_reads::Lane::Fonts, || {
+            options.fontdb_mut().load_system_fonts()
+        });
         options
     })
 }

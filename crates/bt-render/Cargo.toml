@@ -7,6 +7,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+bt-platform = { path = "../bt-platform" }
 bt-transcript = { path = "../bt-transcript" }
 bt-unicode = { path = "../bt-unicode" }
 bt-doc = { path = "../bt-doc" }

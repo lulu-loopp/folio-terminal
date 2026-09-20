@@ -2,6 +2,7 @@
 
 use std::num::NonZeroIsize;
 
+pub mod file_reads;
 pub mod ime_trace;
 
 /// Fresh native facts for a diagnostic line only. Unreadable is not false.
@@ -2526,6 +2527,7 @@ pub struct MonospaceFamily {
 }
 
 pub mod cjk;
+pub mod ime_observation;
 pub use cjk::{CjkCoverage, CjkFamily};
 
 /// **The page Windows installs fonts on**, and the door

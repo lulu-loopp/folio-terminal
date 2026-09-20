@@ -111,6 +111,8 @@ toml_edit.workspace = true
 # structs would go on passing through a field rename or a serde attribute that
 # changed the shape.
 [dev-dependencies]
+# Parse shipped source for the content-read guard; already in Cargo.lock.
+syn = { version = "2", features = ["full", "visit"] }
 # POSIX path literals are checked by an independent lexer already present in Cargo.lock.
 shlex = "=2.0.1"
 serde_json.workspace = true

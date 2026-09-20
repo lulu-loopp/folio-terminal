@@ -140,7 +140,7 @@ const MAX_DICT_DEPTH: usize = 64;
 /// without pages.
 #[must_use]
 pub fn page_count(path: &Path) -> Option<u32> {
-    let file = std::fs::File::open(path).ok()?;
+    let file = bt_platform::file_reads::open(bt_platform::file_reads::Lane::Pdf, path).ok()?;
     if let Some(count) = count_pages(file) {
         return Some(count);
     }
@@ -168,16 +168,13 @@ fn parse_page_count(bytes: Vec<u8>) -> Option<u32> {
 /// to between the two calls is a file this window may not be handed
 /// unboundedly much of.
 fn read_capped(path: &Path) -> Option<Vec<u8>> {
-    let file = std::fs::File::open(path).ok()?;
+    let file = bt_platform::file_reads::open(bt_platform::file_reads::Lane::Pdf, path).ok()?;
     let len = file.metadata().ok()?.len();
     if len == 0 || len > MAX_RASTER_BYTES {
         return None;
     }
     let mut bytes = Vec::with_capacity(usize::try_from(len).ok()?);
-    (&file)
-        .take(MAX_RASTER_BYTES)
-        .read_to_end(&mut bytes)
-        .ok()?;
+    file.take(MAX_RASTER_BYTES).read_to_end(&mut bytes).ok()?;
     Some(bytes)
 }
 

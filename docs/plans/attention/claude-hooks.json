@@ -4,8 +4,12 @@
       {
         "hooks": [
           {
+            "args": [
+              "attention",
+              "claude-code:Elicitation"
+            ],
             "async": true,
-            "command": "\"C:\\folio\\folio.exe\" attention claude-code:Elicitation",
+            "command": "C:\\folio\\folio.exe",
             "type": "command"
           }
         ]
@@ -15,8 +19,12 @@
       {
         "hooks": [
           {
+            "args": [
+              "attention",
+              "claude-code:ElicitationResult"
+            ],
             "async": true,
-            "command": "\"C:\\folio\\folio.exe\" attention claude-code:ElicitationResult",
+            "command": "C:\\folio\\folio.exe",
             "type": "command"
           }
         ]
@@ -26,8 +34,12 @@
       {
         "hooks": [
           {
+            "args": [
+              "attention",
+              "claude-code:Notification.agent_needs_input"
+            ],
             "async": true,
-            "command": "\"C:\\folio\\folio.exe\" attention claude-code:Notification.agent_needs_input",
+            "command": "C:\\folio\\folio.exe",
             "type": "command"
           }
         ],
@@ -36,8 +48,12 @@
       {
         "hooks": [
           {
+            "args": [
+              "attention",
+              "claude-code:Notification.quota_auto_resume_stale"
+            ],
             "async": true,
-            "command": "\"C:\\folio\\folio.exe\" attention claude-code:Notification.quota_auto_resume_stale",
+            "command": "C:\\folio\\folio.exe",
             "type": "command"
           }
         ],
@@ -46,8 +62,12 @@
       {
         "hooks": [
           {
+            "args": [
+              "attention",
+              "claude-code:Notification.elicitation_complete"
+            ],
             "async": true,
-            "command": "\"C:\\folio\\folio.exe\" attention claude-code:Notification.elicitation_complete",
+            "command": "C:\\folio\\folio.exe",
             "type": "command"
           }
         ],
@@ -56,8 +76,12 @@
       {
         "hooks": [
           {
+            "args": [
+              "attention",
+              "claude-code:Notification.elicitation_response"
+            ],
             "async": true,
-            "command": "\"C:\\folio\\folio.exe\" attention claude-code:Notification.elicitation_response",
+            "command": "C:\\folio\\folio.exe",
             "type": "command"
           }
         ],
@@ -66,8 +90,12 @@
       {
         "hooks": [
           {
+            "args": [
+              "attention",
+              "claude-code:Notification.agent_completed"
+            ],
             "async": true,
-            "command": "\"C:\\folio\\folio.exe\" attention claude-code:Notification.agent_completed",
+            "command": "C:\\folio\\folio.exe",
             "type": "command"
           }
         ],
@@ -76,8 +104,12 @@
       {
         "hooks": [
           {
+            "args": [
+              "attention",
+              "claude-code:Notification.quota_auto_resume_fired"
+            ],
             "async": true,
-            "command": "\"C:\\folio\\folio.exe\" attention claude-code:Notification.quota_auto_resume_fired",
+            "command": "C:\\folio\\folio.exe",
             "type": "command"
           }
         ],
@@ -86,8 +118,12 @@
       {
         "hooks": [
           {
+            "args": [
+              "attention",
+              "claude-code:Notification.quota_auto_resume_disabled"
+            ],
             "async": true,
-            "command": "\"C:\\folio\\folio.exe\" attention claude-code:Notification.quota_auto_resume_disabled",
+            "command": "C:\\folio\\folio.exe",
             "type": "command"
           }
         ],
@@ -98,8 +134,12 @@
       {
         "hooks": [
           {
+            "args": [
+              "attention",
+              "claude-code:PermissionRequest"
+            ],
             "async": true,
-            "command": "\"C:\\folio\\folio.exe\" attention claude-code:PermissionRequest",
+            "command": "C:\\folio\\folio.exe",
             "type": "command"
           }
         ]
@@ -109,8 +149,12 @@
       {
         "hooks": [
           {
+            "args": [
+              "attention",
+              "claude-code:PostToolUse"
+            ],
             "async": true,
-            "command": "\"C:\\folio\\folio.exe\" attention claude-code:PostToolUse",
+            "command": "C:\\folio\\folio.exe",
             "type": "command"
           }
         ]
@@ -120,8 +164,12 @@
       {
         "hooks": [
           {
+            "args": [
+              "attention",
+              "claude-code:SessionEnd"
+            ],
             "async": true,
-            "command": "\"C:\\folio\\folio.exe\" attention claude-code:SessionEnd",
+            "command": "C:\\folio\\folio.exe",
             "type": "command"
           }
         ]
@@ -131,8 +179,14 @@
       {
         "hooks": [
           {
+            "args": [
+              "attention",
+              "claude-code:Stop",
+              "--json",
+              "-"
+            ],
             "async": true,
-            "command": "\"C:\\folio\\folio.exe\" attention claude-code:Stop --json -",
+            "command": "C:\\folio\\folio.exe",
             "type": "command"
           }
         ]
@@ -142,8 +196,12 @@
       {
         "hooks": [
           {
+            "args": [
+              "attention",
+              "claude-code:StopFailure"
+            ],
             "async": true,
-            "command": "\"C:\\folio\\folio.exe\" attention claude-code:StopFailure",
+            "command": "C:\\folio\\folio.exe",
             "type": "command"
           }
         ]
@@ -153,8 +211,12 @@
       {
         "hooks": [
           {
+            "args": [
+              "attention",
+              "claude-code:UserPromptSubmit"
+            ],
             "async": true,
-            "command": "\"C:\\folio\\folio.exe\" attention claude-code:UserPromptSubmit",
+            "command": "C:\\folio\\folio.exe",
             "type": "command"
           }
         ]

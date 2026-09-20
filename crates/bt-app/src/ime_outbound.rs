@@ -5,8 +5,8 @@ use std::cell::Cell;
 
 pub fn install() {
     bt_platform::ime_trace::install(|message| {
-        static DUMP: trace::Dump = trace::Dump::new("BT_IME_TRACE");
-        DUMP.line(|| format!("{:?} {message}", Instant::now()));
+        // One file, one writer: the focus census (`ime_report`) owns the sink.
+        ime_report::TRACE.line(|| format!("{:?} {message}", Instant::now()));
     });
 }
 

@@ -2158,7 +2158,12 @@ fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> thread::JoinHandle<Vec<u8
         move || {
             let mut buffer = Vec::new();
             if let Some(mut pipe) = pipe {
-                let _ = pipe.read_to_end(&mut buffer);
+                let _ = bt_platform::file_reads::Reader::new(
+                    &mut pipe,
+                    bt_platform::file_reads::Lane::GitPipe,
+                    None,
+                )
+                .read_to_end(&mut buffer);
             }
             buffer
         },
