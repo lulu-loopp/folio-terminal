@@ -4523,27 +4523,56 @@ impl Text {
                 "Claude Code hook removed",
                 "已从 ~/.claude/settings.json 移除",
             ),
-            // CHINESE PENDING — T-B; English until owner copy review.
-            Self::AgentHooksExeUnknown => "The running executable’s location is unavailable.",
-            Self::AgentHooksPathPlaceholder => {
-                "This executable path contains an agent placeholder. Move Folio before installing hooks."
-            }
-            Self::AgentHooksExeUnstable => {
-                "The hook executable needs a stable absolute Unicode path."
-            }
-            Self::AgentHooksTranslocated => {
-                "Move Folio out of App Translocation before installing hooks."
-            }
-            Self::AgentHooksOwnerUnknown => "The hook executable’s owner could not be verified.",
-            Self::AgentHooksSchemaUnknown => "The hook configuration uses an unrecognized format.",
-            Self::AgentHooksRecordFailed => {
-                "The integration locations could not be recorded. Check the Folio data folder."
-            }
-            Self::AgentHooksRootUnstable => "The agent configuration needs an absolute path.",
-            Self::AgentHooksTakeOver => {
-                "Another Folio owns these hooks. Press this switch again within 30 seconds to use this copy:"
-            }
-            Self::AgentHooksLeftOther => "Hooks kept for another Folio:",
+            Self::AgentHooksExeUnknown => pick(
+                lang,
+                "The running executable’s location is unavailable.",
+                "无法获取可执行文件的位置。",
+            ),
+            Self::AgentHooksPathPlaceholder => pick(
+                lang,
+                "This executable path contains an agent placeholder. Move Folio before installing hooks.",
+                "路径含有 agent 占位符。将 Folio 移到固定位置后再安装 hook。",
+            ),
+            Self::AgentHooksExeUnstable => pick(
+                lang,
+                "The hook executable needs a stable absolute Unicode path.",
+                "hook 可执行文件需要稳定的绝对路径。",
+            ),
+            Self::AgentHooksTranslocated => pick(
+                lang,
+                "Move Folio out of App Translocation before installing hooks.",
+                "将 Folio 移出 App Translocation 后再安装 hook。",
+            ),
+            Self::AgentHooksOwnerUnknown => pick(
+                lang,
+                "The hook executable’s owner could not be verified.",
+                "无法确认 hook 可执行文件的归属。",
+            ),
+            Self::AgentHooksSchemaUnknown => pick(
+                lang,
+                "The hook configuration uses an unrecognized format.",
+                "hook 配置的格式无法识别。",
+            ),
+            Self::AgentHooksRecordFailed => pick(
+                lang,
+                "The integration locations could not be recorded. Check the Folio data folder.",
+                "无法记录整合位置。检查 Folio 数据文件夹。",
+            ),
+            Self::AgentHooksRootUnstable => pick(
+                lang,
+                "The agent configuration needs an absolute path.",
+                "agent 配置路径必须是绝对路径。",
+            ),
+            Self::AgentHooksTakeOver => pick(
+                lang,
+                "Another Folio owns these hooks. Press this switch again within 30 seconds to use this copy:",
+                "另一份 Folio 拥有这些 hook。30 秒内再按一次开关即可改用当前副本：",
+            ),
+            Self::AgentHooksLeftOther => pick(
+                lang,
+                "Hooks kept for another Folio:",
+                "已为另一份 Folio 保留 hook：",
+            ),
             Self::ClaudeHooksFailedToast => pick(
                 lang,
                 "Claude Code's settings were not changed",
@@ -5985,28 +6014,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 20] = [
-        (Self::AgentHooksPathPlaceholder, HostPlatform::Windows),
-        (Self::AgentHooksPathPlaceholder, HostPlatform::MacOs),
-        (Self::AgentHooksExeUnknown, HostPlatform::Windows),
-        (Self::AgentHooksExeUnknown, HostPlatform::MacOs),
-        (Self::AgentHooksExeUnstable, HostPlatform::Windows),
-        (Self::AgentHooksExeUnstable, HostPlatform::MacOs),
-        (Self::AgentHooksTranslocated, HostPlatform::Windows),
-        (Self::AgentHooksTranslocated, HostPlatform::MacOs),
-        (Self::AgentHooksOwnerUnknown, HostPlatform::Windows),
-        (Self::AgentHooksOwnerUnknown, HostPlatform::MacOs),
-        (Self::AgentHooksSchemaUnknown, HostPlatform::Windows),
-        (Self::AgentHooksSchemaUnknown, HostPlatform::MacOs),
-        (Self::AgentHooksRecordFailed, HostPlatform::Windows),
-        (Self::AgentHooksRecordFailed, HostPlatform::MacOs),
-        (Self::AgentHooksRootUnstable, HostPlatform::Windows),
-        (Self::AgentHooksRootUnstable, HostPlatform::MacOs),
-        (Self::AgentHooksTakeOver, HostPlatform::Windows),
-        (Self::AgentHooksTakeOver, HostPlatform::MacOs),
-        (Self::AgentHooksLeftOther, HostPlatform::Windows),
-        (Self::AgentHooksLeftOther, HostPlatform::MacOs),
-    ];
+    const CHINESE_PENDING: [(Self, HostPlatform); 0] = [];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
