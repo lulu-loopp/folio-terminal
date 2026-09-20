@@ -71,6 +71,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (32, migrate_settings_v32_to_v33),
     (33, migrate_settings_v33_to_v34),
     (34, migrate_settings_v34_to_v35),
+    (35, migrate_settings_v35_to_v36),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -817,6 +818,21 @@ fn migrate_settings_v34_to_v35(mut value: Value) -> Value {
     if let Some(object) = value.as_object_mut() {
         object.insert("schema_version".to_owned(), Value::from(35));
         object.insert("terminal_cjk_font_family".to_owned(), Value::from(""));
+    }
+    value
+}
+
+/// v35 -> v36: the row-break repair switch, defaulted **on**.
+///
+/// This is the v1 -> v2 kind of step and not the v2 -> v3 kind: there is a behaviour to carry
+/// forward. Every build that could have written a v35 document repaired an agent's eaten row
+/// separators unconditionally, with no way to say otherwise, so a reader arriving here has been
+/// seeing repaired matrices all along. `true` preserves the screen they have; `false` would be
+/// this step revoking a feature on their behalf.
+fn migrate_settings_v35_to_v36(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(36));
+        object.insert("repair_row_breaks".to_owned(), Value::from(true));
     }
     value
 }
@@ -2709,6 +2725,56 @@ mod tests {
         assert_eq!(migrated["terminal_cjk_font_family"], json!(""));
         assert_eq!(migrated["terminal_font_family"], json!("Cascadia Mono"));
         assert_eq!(migrated["option_sends_alt"], json!(true));
+    }
+
+    /// RED — **a reader upgrading past v35 keeps the repaired matrices they already had.**
+    ///
+    /// MUTATIONS:
+    /// ① write `false` and every agent-printed matrix on every upgraded machine comes back as a
+    ///    single row, on a question its reader was never asked;
+    /// ② forget the `schema_version` line and the ladder never leaves this rung;
+    /// ③ overwrite a neighbouring key and a preference somebody really did express is lost.
+    #[test]
+    fn real_settings_v35_to_v36_migration_keeps_an_existing_reader_their_repair() {
+        let migrated = migrate_value(
+            json!({
+                "schema_version": 35,
+                "display_formulas": false,
+                "terminal_cjk_font_family": "Microsoft YaHei",
+                "option_sends_alt": true
+            }),
+            35,
+            36,
+            SETTINGS_MIGRATIONS,
+        )
+        .unwrap();
+        assert_eq!(migrated["schema_version"], json!(36));
+        assert_eq!(
+            migrated["repair_row_breaks"],
+            json!(true),
+            "every build that could have written a v35 document made this repair unconditionally"
+        );
+        assert_eq!(migrated["display_formulas"], json!(false));
+        assert_eq!(
+            migrated["terminal_cjk_font_family"],
+            json!("Microsoft YaHei")
+        );
+        assert_eq!(migrated["option_sends_alt"], json!(true));
+
+        // And a v36 document that simply omits the line means the same thing, because leaving a
+        // line out is not the way a reader asks for a repair to stop.
+        let mut written = serde_json::to_value(crate::SettingsV1 {
+            repair_row_breaks: false,
+            ..crate::SettingsV1::default()
+        })
+        .expect("a settings document serialises");
+        written
+            .as_object_mut()
+            .expect("a settings document is an object")
+            .remove("repair_row_breaks");
+        let absent: crate::SettingsV1 =
+            serde_json::from_value(written).expect("this key has a default");
+        assert!(absent.repair_row_breaks);
     }
 
     #[test]

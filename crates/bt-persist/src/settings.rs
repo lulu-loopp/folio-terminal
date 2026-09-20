@@ -296,7 +296,16 @@ use serde::{Deserialize, Serialize};
 /// been asked must follow this build's platform chain rather than pinning today's first family.
 /// The migration writes that absence of a choice, so upgrading changes only who owns the fallback
 /// decision, not what the reader said.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 35;
+///
+/// **v36 carries `repair_row_breaks`**, the Rendered blocks page's switch over the detector's
+/// repair of the row separators a coding agent's own redraw of its finished answer eats.
+///
+/// **It lands on**, and that is carrying a behaviour forward rather than imposing a new one: every
+/// build that could have written a v35 document made this repair unconditionally, with no way to
+/// ask for anything else, so a reader upgrading has been watching it work for as long as they have
+/// had typeset matrices — and a migration that wrote `false` would take a working screen away from
+/// them without being asked.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 36;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -519,6 +528,7 @@ pub const DEFAULT_FOCUS_CARD_HEIGHT: u32 = 160;
 ///   "theme_mode": "System" | "Light" | "Dark",
 ///   "display_formulas": true | false,
 ///   "inline_formulas": true | false,
+///   "repair_row_breaks": true | false,
 ///   "tables": true | false,
 ///   "block_max_height": 0 | 120 | 240 | 480,
 ///   "default_profile": "pwsh" | "wsl" | "gitbash" | "cmd" | "",
@@ -581,8 +591,22 @@ pub struct SettingsV1 {
     /// who wants typeset blocks but wants every `$` in a log left alone must be
     /// able to say so, and that is one switch, not a preference we guess.
     pub inline_formulas: bool,
+    /// Whether the detector repairs the row separators that a coding agent's own
+    /// final redraw of a finished answer eats — `\\` at the end of a row comes
+    /// back as `\` — before handing a display block to the typesetter.
+    ///
+    /// Unlike the two switches above this one is not presentation policy: it
+    /// decides what *text* the typesetter is given, and it is here because the
+    /// damage it compensates for is another program's, which means the day that
+    /// program stops doing it, this stops being a repair and becomes a guess.
+    /// A reader who would rather see a formula fail than see Folio touch it must
+    /// be able to say so without waiting for a release. What the switch never
+    /// changes is the terminal's own bytes: copy and show-source answer with the
+    /// text that arrived either way.
+    #[serde(default = "default_repair_row_breaks")]
+    pub repair_row_breaks: bool,
     /// Whether a detected GFM pipe table in command output is *drawn* as a
-    /// rendered block. The third switch on the Rendered blocks page, and
+    /// rendered block. The last switch on the Rendered blocks page, and
     /// presentation policy in exactly the sense the two above it are: off leaves
     /// the scanner running and simply keeps the pipe text on screen, so turning
     /// it back on costs one frame and re-arms the same proven tables.
@@ -1372,6 +1396,13 @@ fn default_update_check() -> bool {
     true
 }
 
+/// The same door for a v36 key missing from a file this build is reading, and the same reason
+/// `false` must not be what an absent line means: `false` here is a reader who asked Folio to stop
+/// repairing an agent's eaten row separators, which is an answer nobody gives by leaving a line out.
+fn default_repair_row_breaks() -> bool {
+    true
+}
+
 impl Default for SettingsV1 {
     fn default() -> Self {
         Self {
@@ -1379,6 +1410,7 @@ impl Default for SettingsV1 {
             theme_mode: ThemeModeV1::default(),
             display_formulas: true,
             inline_formulas: true,
+            repair_row_breaks: true,
             tables: true,
             block_max_height: DEFAULT_BLOCK_MAX_HEIGHT,
             default_profile: DEFAULT_PROFILE_UNSET.to_owned(),

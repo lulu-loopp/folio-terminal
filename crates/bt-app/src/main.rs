@@ -35138,6 +35138,12 @@ struct FormulaSwitches {
     inline: bool,
     /// "Tables" - presentation only; a proven pipe table may be a block.
     tables: bool,
+    /// "Repair row breaks" — detection, and the only one of these that changes
+    /// the *text* a block is typeset from rather than whether it is drawn. Here
+    /// for this struct's own reason: a pane split off one that repairs an
+    /// agent's eaten row separators must repair them too, or one half of a split
+    /// draws a matrix and the other draws a row.
+    repair_row_breaks: bool,
     /// "Maximum height" - how tall a block may stand before it scrolls inside
     /// itself, in logical pixels, and `0` for no cap. Not a switch, and here
     /// anyway for this struct's own reason: it is a Rendered-blocks answer a new
@@ -35152,6 +35158,7 @@ impl FormulaSwitches {
             display: settings.display_formulas,
             inline: settings.inline_formulas,
             tables: settings.tables,
+            repair_row_breaks: settings.repair_row_breaks,
             max_height: settings.block_max_height,
         }
     }
@@ -35526,6 +35533,7 @@ fn create_leaf_session(
     session.set_math_layout_options(MathLayoutOptions {
         detect_image_paths: true,
         block_max_height_px: block_max_height_px(formulas.max_height),
+        restore_stripped_environment_newlines: formulas.repair_row_breaks,
         ..MathLayoutOptions::default()
     });
     // A pane born from a split must obey the switches its neighbours already
@@ -46075,6 +46083,7 @@ impl Runtime<'_> {
             sidebar: self.window.rail.mode,
             display_formulas: self.app.settings_store.loaded().display_formulas,
             inline_formulas: self.app.settings_store.loaded().inline_formulas,
+            repair_row_breaks: self.app.settings_store.loaded().repair_row_breaks,
             tables: self.app.settings_store.loaded().tables,
             block_max_height: self.app.settings_store.loaded().block_max_height,
             focus_card_height: self.app.settings_store.loaded().focus_card_height,
@@ -48627,6 +48636,9 @@ impl Runtime<'_> {
         if let Some(enabled) = settings::inline_formulas_requested(target) {
             self.apply_inline_formulas(enabled)?;
         }
+        if let Some(enabled) = settings::repair_row_breaks_requested(target) {
+            self.apply_repair_row_breaks(enabled)?;
+        }
         if let Some(enabled) = settings::git_panel_requested(target) {
             self.apply_git_panel(enabled)?;
         }
@@ -49017,6 +49029,7 @@ impl Runtime<'_> {
             | Row::FocusCardHeight
             | Row::Formulas
             | Row::InlineFormulas
+            | Row::RepairRowBreaks
             | Row::Tables
             | Row::BlockMaxHeight
             | Row::GitPanel
@@ -50947,6 +50960,39 @@ impl Runtime<'_> {
         for tab in &mut self.window.tabs {
             for (_, leaf) in tab.leaves_mut() {
                 leaf.session.set_inline_math_bands(enabled);
+            }
+        }
+        self.publish_frame(FrameTrigger {
+            occurred_at: Instant::now(),
+            source: FrameSource::Expose,
+        })?;
+        Ok(true)
+    }
+
+    /// Point the "Repair row breaks" switch at `enabled`.
+    ///
+    /// [`Self::apply_inline_formulas`]'s shape and its cost: this one gates detection too, and it
+    /// re-scans for a stronger reason than that one has. A block proven while the repair was on
+    /// holds a `render_source` carrying a separator the terminal never printed, so a session that
+    /// kept it would be showing a reader the repair they have just asked Folio to stop making.
+    /// The re-scan is asked for by installing the options — `set_math_layout_options` raises the
+    /// detection revision exactly when the detector's own answers change — rather than by a second
+    /// invalidation written here, which would be a second place to remember.
+    ///
+    /// Only this row's own field is replaced. The rest is read back off the pane so that
+    /// this row cannot quietly reset a `Maximum height` somebody set, for the reason
+    /// `math_layout_options` exists at all.
+    fn apply_repair_row_breaks(&mut self, enabled: bool) -> Result<bool> {
+        let mut settings = self.app.settings_store.loaded().clone();
+        settings.repair_row_breaks = enabled;
+        if !self.app.settings_store.store(settings) {
+            return Ok(false);
+        }
+        for tab in &mut self.window.tabs {
+            for (_, leaf) in tab.leaves_mut() {
+                let mut options = leaf.session.math_layout_options();
+                options.restore_stripped_environment_newlines = enabled;
+                leaf.session.set_math_layout_options(options);
             }
         }
         self.publish_frame(FrameTrigger {

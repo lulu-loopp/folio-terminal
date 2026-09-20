@@ -2496,11 +2496,88 @@ struct MathEnvironmentRange {
     name: String,
     content_start: usize,
     close_start: usize,
+    /// Brace-group depth in force where this environment's body begins. A row separator is a token
+    /// of the body itself, so it stands at exactly this depth; anything deeper belongs to an inner
+    /// group whose grammar this function does not know.
+    open_depth: u32,
+}
+
+/// The environments in which `\\` separates rows, and therefore the only ones in which a
+/// backslash at a row end can be read as half of one.
+///
+/// Deliberately narrower on one side and wider on the other than [`is_math_environment`], which
+/// answers a different question — what may *delimit* a display block:
+///
+/// * `equation` and `equation*` are out. They hold **one** formula and have no rows, so `\\` is
+///   not a separator there; a backslash at a line end inside one is either a real command the
+///   producer split across lines or a control space, and inventing a row break would typeset
+///   something nobody wrote.
+/// * `array` and `subarray` are in. Neither may open a display block on its own — hence their
+///   absence from [`is_math_environment`] — but both are ordinary nested tabular bodies inside
+///   `$$…$$`, and until now the scan below could not see them at all, so a damaged
+///   `\begin{array}{cc}` kept its collapsed rows.
+fn is_row_based_environment(environment: &str) -> bool {
+    matches!(
+        environment,
+        "align"
+            | "align*"
+            | "alignat"
+            | "alignat*"
+            | "aligned"
+            | "alignedat"
+            | "array"
+            | "bmatrix"
+            | "Bmatrix"
+            | "cases"
+            | "flalign"
+            | "flalign*"
+            | "gather"
+            | "gather*"
+            | "gathered"
+            | "matrix"
+            | "multline"
+            | "multline*"
+            | "pmatrix"
+            | "smallmatrix"
+            | "split"
+            | "subarray"
+            | "vmatrix"
+            | "Vmatrix"
+    )
+}
+
+/// [`environment_token`] restricted to the environments that have rows.
+fn row_environment_token(text: &str, open: bool) -> Option<(String, usize)> {
+    let prefix = if open { r"\begin{" } else { r"\end{" };
+    let rest = text.strip_prefix(prefix)?;
+    let name_end = rest.find('}')?;
+    let environment = &rest[..name_end];
+    is_row_based_environment(environment)
+        .then_some((environment.to_owned(), prefix.len() + name_end + 1))
 }
 
 /// Claude Code currently turns a LaTeX environment row separator (`\\\\`) into a bare trailing
 /// backslash. A bare `\\` at a logical-line boundary is not a LaTeX command, so restoring its
 /// missing mate is syntax recovery rather than a probabilistic content guess.
+///
+/// The recovery holds only where a row separator is a thing that can exist. Three conditions say
+/// where that is, and each one excludes a reading under which the surviving backslash means
+/// something else:
+///
+/// 1. **A row-based environment** ([`is_row_based_environment`]) must enclose the backslash. In
+///    `equation` there are no rows to separate.
+/// 2. **Brace depth zero** relative to that environment's body. A separator is a token of the
+///    body; a backslash inside `\text{…}`, `\frac{…}` or any other argument is a token of that
+///    argument, where a line break means something else entirely or nothing at all.
+/// 3. **Another row must follow** before `\end{…}`. On the body's last line a `\\` would add an
+///    empty row rather than separate two written ones, so the damage there is not recoverable —
+///    and costs nothing, because there is no row after it to be run together with.
+///
+/// What remains outside the proof is stated plainly: a producer *could* have written a lone `\`
+/// (control space) at a row end and had it survive the redraw unchanged, and this function would
+/// read it as damage. Conditions 1–3 are what make that reading a space at the right-hand edge of
+/// a row — invisible in every left-aligned column and at most one space of column width elsewhere
+/// — rather than a mathematical statement.
 ///
 /// This function only sees detector-joined logical lines. Live-grid soft wraps have already been
 /// merged before `joined_range` creates these `\n` boundaries. Original terminal source remains
@@ -2514,34 +2591,55 @@ fn restore_stripped_environment_newlines(
         return source.to_owned();
     }
 
-    let mut stack = Vec::<(String, usize)>::new();
+    let mut stack = Vec::<(String, usize, u32)>::new();
     let mut environments = Vec::<MathEnvironmentRange>::new();
+    // Brace-group depth as each logical-line boundary is passed, recorded in ascending byte order.
+    // Every `\n` in `source` is visited below — the only jumps this loop makes are over environment
+    // tokens and over an escaped brace, neither of which can contain one — so the second pass reads
+    // this back with a cursor rather than searching it.
+    let mut depth_at_newline = Vec::<(usize, u32)>::new();
+    let mut depth = 0u32;
     let mut byte = 0usize;
     while byte < source.len() {
         if source.as_bytes()[byte] != b'\\' || delimiter_is_escaped(source, byte) {
+            match source.as_bytes()[byte] {
+                b'{' => depth += 1,
+                b'}' => depth = depth.saturating_sub(1),
+                b'\n' => depth_at_newline.push((byte, depth)),
+                _ => {}
+            }
             byte += source[byte..].chars().next().map_or(1, char::len_utf8);
             continue;
         }
-        if let Some((environment, token_len)) = environment_token(&source[byte..], true) {
-            stack.push((environment, byte + token_len));
+        if let Some((environment, token_len)) = row_environment_token(&source[byte..], true) {
+            stack.push((environment, byte + token_len, depth));
             byte += token_len;
             continue;
         }
-        if let Some((environment, token_len)) = environment_token(&source[byte..], false)
+        if let Some((environment, token_len)) = row_environment_token(&source[byte..], false)
             && stack
                 .last()
-                .is_some_and(|(active, _)| *active == environment)
+                .is_some_and(|(active, _, _)| *active == environment)
         {
-            let (_, content_start) = stack.pop().expect("matching environment is active");
+            let (_, content_start, open_depth) =
+                stack.pop().expect("matching environment is active");
             environments.push(MathEnvironmentRange {
                 name: environment,
                 content_start,
                 close_start: byte,
+                open_depth,
             });
             byte += token_len;
             continue;
         }
-        byte += 1;
+        // An unescaped backslash that opens no environment begins a control sequence. Step over it,
+        // and over a brace it escapes, so `\{` is counted as the character it is rather than as a
+        // group that would leave every later row apparently one level deep.
+        byte += if matches!(source.as_bytes().get(byte + 1), Some(b'{' | b'}')) {
+            2
+        } else {
+            1
+        };
     }
     if environments.is_empty() {
         return source.to_owned();
@@ -2549,8 +2647,13 @@ fn restore_stripped_environment_newlines(
 
     let mut insertions = Vec::new();
     let mut line_start = 0usize;
+    let mut depths = depth_at_newline.iter();
     while let Some(relative_newline) = source[line_start..].find('\n') {
         let newline = line_start + relative_newline;
+        let line_depth = depths
+            .next()
+            .filter(|(recorded, _)| *recorded == newline)
+            .map(|(_, depth)| *depth);
         let line = &source[line_start..newline];
         let trimmed_end = line.trim_end().len();
         let slash = line_start + trimmed_end;
@@ -2565,9 +2668,10 @@ fn restore_stripped_environment_newlines(
             .max_by_key(|environment| environment.content_start);
         if has_bare_trailing_slash
             && active_environment.is_some_and(|environment| {
-                source[newline + 1..environment.close_start]
-                    .chars()
-                    .any(|character| !character.is_whitespace())
+                line_depth == Some(environment.open_depth)
+                    && source[newline + 1..environment.close_start]
+                        .chars()
+                        .any(|character| !character.is_whitespace())
             })
         {
             insertions.push(slash);
@@ -5790,6 +5894,219 @@ abla f",
                 .contains("x &= 0 \\\\ \ny &= 1\\\n")
         );
         assert!(!detected[0].span.render_source.contains("y &= 1\\\\\n"));
+    }
+
+    /// Detect one block out of a whole answer's worth of lines and return its span.
+    fn one_block(text: &str) -> MathOccurrence {
+        let lines: Vec<&str> = text.split('\n').collect();
+        let detected = detect_math_blocks(
+            lines
+                .iter()
+                .enumerate()
+                .map(|(index, line)| (TranscriptId(index as u64 + 1), *line)),
+        );
+        assert_eq!(detected.len(), 1, "expected exactly one block in:\n{text}");
+        detected[0].span.clone()
+    }
+
+    fn blocks_in(text: &str) -> Vec<DetectedMathBlock> {
+        let lines: Vec<&str> = text.split('\n').collect();
+        detect_math_blocks(
+            lines
+                .iter()
+                .enumerate()
+                .map(|(index, line)| (TranscriptId(index as u64 + 1), *line)),
+        )
+    }
+
+    /// The same body, with every row end damaged the way an agent's own final redraw damages it.
+    fn damaged(intact: &str) -> String {
+        intact.replace("\\\\\n", "\\\n")
+    }
+
+    /// A1 — an agent's redraw runs a finished answer through CommonMark with no math protection,
+    /// and `\\` at a line end comes out as `\`. Inside a row-based environment the damaged block
+    /// must reach the typesetter as the undamaged one does, byte for byte: identical renderer
+    /// input is the strongest available statement of "typesets identically", and it holds without
+    /// rasterising anything.
+    ///
+    /// These four shapes already passed before the row-based restriction below was written; they
+    /// are pinned here so that narrowing the rule cannot quietly take them away.
+    #[test]
+    fn a_damaged_row_end_reaches_the_typesetter_as_the_undamaged_one_does() {
+        for intact in [
+            "$$\n\\begin{aligned}\na &= b + c \\\\\nd &= e - f\n\\end{aligned}\n$$",
+            "$$\n\\begin{pmatrix}\na & b \\\\\nc & d\n\\end{pmatrix}\n$$",
+            "$$\nf(x) = \\begin{cases}\n1 & x > 0 \\\\\n0 & x = 0 \\\\\n-1 & x < 0\n\\end{cases}\n$$",
+            "$$\n\\begin{bmatrix}\nx \\\\\ny\n\\end{bmatrix}\n$$",
+        ] {
+            let broken = damaged(intact);
+            assert_ne!(broken, intact, "the fixture must actually be damaged");
+            let repaired = one_block(&broken);
+            assert_eq!(
+                repaired.render_source,
+                one_block(intact).render_source,
+                "damaged and undamaged must reach the typesetter alike:\n{broken}"
+            );
+            // A4 — copy and show-source answer with the bytes the terminal received.
+            assert_eq!(repaired.original_source, broken.trim_end_matches('\n'));
+        }
+    }
+
+    /// A1, the half that fails on `main`: `equation` holds one formula and has no rows, so there
+    /// is no row separator for a surviving backslash to be half of. Before the row-based
+    /// restriction, `render_source` here came out with `E = mc^2 \\`, which sets a row break
+    /// nobody wrote — the second assertion is the one that was red.
+    #[test]
+    fn a_single_formula_environment_gains_no_row_it_never_had() {
+        for body in [
+            "$$\n\\begin{equation}\nE = mc^2 \\\n\\qquad\\text{(rest mass)}\n\\end{equation}\n$$",
+            "$$\n\\begin{equation*}\na = b \\\nc\n\\end{equation*}\n$$",
+        ] {
+            let span = one_block(body);
+            assert!(
+                !span.render_source.contains("\\\\"),
+                "a single-formula environment must keep the bytes it was given: {}",
+                span.render_source
+            );
+            assert_eq!(
+                span.render_source,
+                restore_stripped_environment_newlines(&span.render_source, false, false),
+                "the repaired input must equal the unrepaired input"
+            );
+        }
+    }
+
+    /// A1, second half that fails on `main`: a row separator is a token of an environment's own
+    /// body. A backslash standing one brace deep belongs to whatever opened that brace —
+    /// `\text{…}` running over a line end is text, not a row — so it is left exactly as it came.
+    /// Before this restriction the `\text{ and \` line gained a `\\` and broke the argument open.
+    #[test]
+    fn a_backslash_inside_a_group_is_not_a_row_end() {
+        let inside_text = "$$\n\\begin{aligned}\na &= b \\text{ and \\\nmore text }\\\\\nc &= d\n\\end{aligned}\n$$";
+        let span = one_block(inside_text);
+        assert!(
+            span.render_source.contains("\\text{ and \\\n"),
+            "a backslash inside \\text{{}} stays a backslash: {}",
+            span.render_source
+        );
+        assert!(
+            span.render_source.contains("more text }\\\\\n"),
+            "the real separator one brace out is untouched: {}",
+            span.render_source
+        );
+
+        // The depth is counted in groups, not in backslashes: `\{` and `\}` are the characters
+        // they draw, so a row that balances them is still at the body's own depth.
+        let escaped_braces = "$$\n\\begin{aligned}\na &= \\{1\\} \\\nb &= 2\n\\end{aligned}\n$$";
+        assert_eq!(
+            one_block(escaped_braces).render_source,
+            one_block("$$\n\\begin{aligned}\na &= \\{1\\} \\\\\nb &= 2\n\\end{aligned}\n$$")
+                .render_source,
+            "an escaped brace must not read as a group"
+        );
+    }
+
+    /// A1, third half that fails on `main`: `array` and `subarray` are row-based bodies that may
+    /// not open a display block on their own, so the environment scan — which used the *delimiter*
+    /// allow-list — could not see them, and a damaged `\begin{array}{cc}` kept its rows run
+    /// together. Both assertions were red.
+    #[test]
+    fn a_nested_tabular_body_gets_its_rows_back() {
+        for intact in [
+            "$$\n\\begin{array}{cc}\na & b \\\\\nc & d\n\\end{array}\n$$",
+            "$$\n\\begin{aligned}\nM &= \\begin{array}{cc}\na & b \\\\\nc & d\n\\end{array}\n\\end{aligned}\n$$",
+        ] {
+            assert_eq!(
+                one_block(&damaged(intact)).render_source,
+                one_block(intact).render_source,
+                "a nested tabular body's rows must survive the redraw:\n{intact}"
+            );
+        }
+    }
+
+    /// A3 — the rest of the redraw's damage has no unique inverse and must be left alone. `\,`,
+    /// `\!` and `\[` all become an ordinary character that is legitimate mathematics on its own,
+    /// and a line holding only `=` is *deleted* outright (it turns the paragraph above into a
+    /// setext heading). Putting any of them back would be inventing an equation: `a , b` is a
+    /// list, `[x]` is a bracket, and nobody knows which side of a vanished `=` was which.
+    #[test]
+    fn damage_without_a_unique_inverse_is_left_exactly_as_it_arrived() {
+        for body in [
+            "$$\n\\begin{aligned}\na &= b, c \\\\\nd &= e\n\\end{aligned}\n$$",
+            "$$\nf(x; \\theta) = 1\n$$",
+            "$$\n[x] = y\n$$",
+            "$$\n\\begin{aligned}\nA &= B \\\\\nC &= D\n\\end{aligned}\n$$",
+            "$$\na ! b\n$$",
+        ] {
+            let span = one_block(body);
+            let bare = restore_stripped_environment_newlines(&span.render_source, false, false);
+            assert_eq!(
+                span.render_source, bare,
+                "nothing but a row separator is ever restored: {body}"
+            );
+        }
+    }
+
+    /// A5 — the user's switch. On, the damage is repaired; off, renderer input is the terminal's
+    /// own bytes with the delimiters removed, exactly as it was before any of this existed.
+    #[test]
+    fn the_repair_switch_decides_the_whole_of_it() {
+        let broken =
+            damaged("$$\n\\begin{aligned}\na &= b \\\\\nc &= d\n\\end{aligned}\n$$").to_owned();
+        let lines: Vec<&str> = broken.split('\n').collect();
+        let numbered = || {
+            lines
+                .iter()
+                .enumerate()
+                .map(|(index, line)| (TranscriptId(index as u64 + 1), *line))
+        };
+        let off = detect_math_blocks_with_options(
+            numbered(),
+            DetectionOptions {
+                restore_stripped_environment_newlines: false,
+                restore_stripped_inline_environment_newlines: false,
+                ..DetectionOptions::default()
+            },
+        );
+        assert_eq!(off.len(), 1);
+        assert_eq!(
+            off[0].span.render_source, "\\begin{aligned}\na &= b \\\nc &= d\n\\end{aligned}",
+            "off must hand the typesetter the damaged bytes, unchanged"
+        );
+        assert_eq!(off[0].span.original_source, broken);
+        assert!(
+            detect_math_blocks(numbered())[0]
+                .span
+                .render_source
+                .contains("a &= b \\\\\n"),
+            "on is the default"
+        );
+    }
+
+    /// A2 — Codex's redraw prints the opener of a display block as `# $$`. That marker is accepted
+    /// only where a `$$` block is what follows: an ordinary heading, and a heading that merely
+    /// mentions `$$` in its text, open nothing.
+    #[test]
+    fn an_atx_marked_opener_is_an_opener_only_when_a_closer_answers_it() {
+        let marked = blocks_in("# $$\n\\begin{aligned}\na &= b \\\\\nc &= d\n\\end{aligned}\n$$");
+        assert_eq!(marked.len(), 1, "a marked opener with a closer is a block");
+        assert_eq!(
+            marked[0].span.render_source,
+            "\\begin{aligned}\na &= b \\\\\nc &= d\n\\end{aligned}"
+        );
+
+        for text in [
+            "# $$\nprose only here\nand more of it\n",
+            "# Title\nnot math at all\n",
+            "# Costs in $$ per unit\nnot math\n$$\n",
+            "# $$ and $ in the shell\nmore prose\n$$\n",
+        ] {
+            assert!(
+                blocks_in(text).is_empty(),
+                "nothing here opens a block:\n{text}"
+            );
+        }
     }
 
     /// The completeness rule, isolated from the rest of the gates.

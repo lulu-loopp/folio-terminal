@@ -2349,6 +2349,18 @@ impl DualPlaneSession {
         self.math_layout_options
     }
 
+    /// Install `options`, and re-detect if the *detector's* answer to any question changes.
+    ///
+    /// Most of this struct is presentation — how tall a block may stand, how much air is around it
+    /// — and a pane that changes its mind about those keeps every verdict it holds. Two fields are
+    /// not: `restore_stripped_environment_newlines` and `reject_claude_code_jump_chip_overlay` are
+    /// read by [`Self::detection_options`], so a record proven under the old answer carries a
+    /// `render_source` the new answer would not have produced, and leaving it standing would show
+    /// a repaired formula to a reader who has just switched the repair off.
+    ///
+    /// The condition is asked of [`Self::detection_options`] itself rather than of a list of field
+    /// names kept beside it, because a third detection field added later would be added there and
+    /// nowhere else — and a list that has to be remembered is a list that goes stale.
     pub fn set_math_layout_options(&mut self, options: MathLayoutOptions) {
         if self.math_layout_options.detect_image_paths && !options.detect_image_paths {
             let retired = self
@@ -2361,7 +2373,13 @@ impl DualPlaneSession {
                 .collect::<BTreeSet<_>>();
             self.retire_inline_images(&retired);
         }
+        let detected_under = self.detection_options();
         self.math_layout_options = options;
+        if self.detection_options() != detected_under {
+            self.redetect(DetectionRevision(
+                self.detection_revision.0.saturating_add(1),
+            ));
+        }
     }
 
     fn detection_options(&self) -> DetectionOptions {
@@ -16024,6 +16042,41 @@ mod tests {
                 reject_claude_code_jump_chip_overlay: false,
                 inline_formulas: true,
             }
+        );
+    }
+
+    /// RED — **switching the row-break repair off has to reach the formulas already on screen.**
+    ///
+    /// A record proven while the repair was on carries a `render_source` with a separator the
+    /// terminal never received. Installing the new options without raising the detection revision
+    /// leaves that record standing, so the reader who just said "stop touching my formulas" goes
+    /// on looking at a repaired one until the block scrolls off and comes back.
+    ///
+    /// MUTATIONS: drop the revision bump in `set_math_layout_options` and the first assertion goes
+    /// red; bump it unconditionally and the second does, because a pane that only changed how tall
+    /// a block may stand would throw away every verdict it holds and re-scan its whole history.
+    #[test]
+    fn changing_a_detection_option_raises_the_detection_revision() {
+        let mut session = DualPlaneSession::new(nz(40), nz(4));
+        let before = session.detection_revision;
+        session.set_math_layout_options(MathLayoutOptions {
+            restore_stripped_environment_newlines: false,
+            ..MathLayoutOptions::default()
+        });
+        assert!(
+            session.detection_revision.0 > before.0,
+            "the detector's answers were proven under options that no longer hold"
+        );
+
+        let unchanged = session.detection_revision;
+        session.set_math_layout_options(MathLayoutOptions {
+            restore_stripped_environment_newlines: false,
+            block_max_height_px: NonZeroU32::new(240),
+            ..MathLayoutOptions::default()
+        });
+        assert_eq!(
+            session.detection_revision, unchanged,
+            "a presentation-only change re-proves nothing"
         );
     }
 

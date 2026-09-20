@@ -442,6 +442,7 @@ pub enum Text {
     RowCursor,
     RowFormulas,
     RowInlineFormulas,
+    RowRepairRowBreaks,
     RowGitPanel,
     /// **The Explorer verb's row** (§7.4, §7.4a), on the General page.
     ///
@@ -473,6 +474,7 @@ pub enum Text {
     DescCursor,
     DescFormulas,
     DescInlineFormulas,
+    DescRepairRowBreaks,
     DescGitPanel,
     /// **What On does on a machine that can do everything** — the switch's line
     /// where Windows 11 and `folio.msix` are both there (user ruling
@@ -2904,6 +2906,7 @@ impl Text {
             // the same reason they do in English.
             Self::RowFormulas => pick(lang, "Display formulas", "行间公式"),
             Self::RowInlineFormulas => pick(lang, "Inline formulas", "行内公式"),
+            Self::RowRepairRowBreaks => pick(lang, "Repair row breaks", "修复公式换行"),
             Self::RowGitPanel => pick(lang, "Git panel", "Git 面板"),
             Self::RowContextMenu => pick(lang, "Explorer context menu", "资源管理器菜单"),
             Self::RowTabLayout => pick(lang, "Tab layout", "标签布局"),
@@ -2935,6 +2938,11 @@ impl Text {
                 lang,
                 "Typesets $…$ in command output. Off, the LaTeX source is shown as printed.",
                 "排版命令输出里的 $…$。关闭时显示 LaTeX 源码原文。",
+            ),
+            Self::DescRepairRowBreaks => pick(
+                lang,
+                "Restores a row break an agent's own redraw dropped from a matrix or aligned block.",
+                "补回 agent 重绘时从矩阵或对齐块中丢掉的换行。",
             ),
             // **What it does, then the bound on what it can do.** The second
             // sentence is the one a reader of a terminal's settings actually
@@ -4998,7 +5006,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 688] = [
+    pub const ALL: [Self; 690] = [
         Self::PastePathEncoding,
         Self::PastePathControl,
         Self::PastePathPowerShellQuote,
@@ -5060,6 +5068,7 @@ impl Text {
         Self::RowCursor,
         Self::RowFormulas,
         Self::RowInlineFormulas,
+        Self::RowRepairRowBreaks,
         Self::RowGitPanel,
         Self::RowUpdateCheck,
         Self::RowContextMenu,
@@ -5076,6 +5085,7 @@ impl Text {
         Self::DescCursor,
         Self::DescFormulas,
         Self::DescInlineFormulas,
+        Self::DescRepairRowBreaks,
         Self::DescGitPanel,
         Self::DescUpdateCheck,
         Self::DescExplorerMenu,

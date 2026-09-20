@@ -8,6 +8,14 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Added
 
+- **Rendered blocks → Repair row breaks.** Folio restores the row separators a
+  coding agent's own redraw of its finished answer eats, so a matrix arrives as
+  a matrix rather than as one long row. The repair compensates for another
+  program's markdown renderer, and this row is how you say not to — the day
+  those tools stop damaging their own output, it stops being a repair. It ships
+  on, it reaches the formulas already on screen the moment it is changed, and
+  either way it never alters what copying a formula gives you.
+
 - **`folio --remove-explorer-menu` takes Folio back out of Explorer's
   right-click menu, without opening a window.** Both entries go: the one on
   Windows 11's first page and the classic one under "Show more options". It is
@@ -48,6 +56,23 @@ All notable changes to Folio are recorded here. The format follows
   both ways and the two recordings compared.
 
 ### Fixed
+
+- **A matrix an agent printed is set in the rows it was written in, in three
+  places it was not.** Coding agents redraw a finished answer through their own
+  markdown renderer, which eats the `\\` that ends a row of a matrix, an
+  `aligned` block or a `cases` block; Folio has restored those for a while.
+  Three cases were wrong. A row end inside `\text{…}` gained a row break that
+  broke the text open, because a backslash one brace deep belongs to whatever
+  opened the brace and not to the block. A line end inside `\begin{equation}`
+  gained one too, although an `equation` holds a single formula and has no rows
+  to separate — so what it drew was a row nobody wrote. And a nested
+  `\begin{array}{cc}` was not repaired at all, because the scan looked only at
+  the environments that may open a block on their own. The rest of the redraw's
+  damage is still left exactly as it arrives, and deliberately: `\,` arrives as
+  a comma, `\[` as a bracket, and a line holding only `=` is deleted outright —
+  none of those can be put back without typesetting an equation nobody wrote.
+  What is repaired is repaired for the typesetter only; copying a formula, or
+  showing its source, gives back the bytes the terminal received.
 
 - **Chinese terminal text no longer falls through to SimSun on Windows or
   GB18030 Bitmap on macOS.** Folio now chooses the terminal grid's CJK face

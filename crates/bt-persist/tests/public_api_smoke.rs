@@ -37,6 +37,7 @@ fn settings_write_then_read_round_trips_a_non_default_value() {
         tables: false,
         block_max_height: 480,
         inline_formulas: false,
+        repair_row_breaks: false,
         default_profile: "gitbash".to_owned(),
         git_panel: false,
         split_direction: SplitDirectionV1::Down,
