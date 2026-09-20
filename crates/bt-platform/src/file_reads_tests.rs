@@ -90,14 +90,7 @@ fn file_reads_top_three_never_format_directories_or_control_characters() {
     assert!(line.contains("first.png ×9"), "{line}");
     assert!(line.contains("second.png ×8"));
     assert!(line.contains("third.png ×7"));
-    for secret in [
-        "alice",
-        "Users",
-        "/home",
-        "pictures",
-        "fourth.png",
-        "\\",
-    ] {
+    for secret in ["alice", "Users", "/home", "pictures", "fourth.png", "\\"] {
         assert!(!line.contains(secret), "{line}");
     }
     ledger.add(

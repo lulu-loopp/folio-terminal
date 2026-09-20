@@ -4,6 +4,23 @@ use std::num::NonZeroIsize;
 
 pub mod file_reads;
 
+/// Fresh native facts for a diagnostic line only. Unreadable is not false.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NativePresentFacts {
+    pub iconic: Option<bool>,
+    pub cloaked: Option<bool>,
+    pub client: Option<(u32, u32)>,
+    pub style_visible: Option<bool>,
+}
+
+#[cfg(not(windows))]
+pub fn native_present_facts(_window: NativeWindow) -> NativePresentFacts {
+    NativePresentFacts::default()
+}
+
+#[cfg(windows)]
+pub use windows_impl::native_present_facts;
+
 /// **The window this process's platform knows, named without naming a
 /// platform** (M1-1).
 ///
@@ -6967,6 +6984,37 @@ mod windows_impl {
     /// **A read that fails answers `false`** — see [`cloaked_from_attribute`]
     /// for why that direction and not the other.
     pub fn is_window_cloaked(window: NativeWindow) -> bool {
+        read_window_cloaked(window).unwrap_or(false)
+    }
+
+    /// Called only while writing diagnostics, never for presentation admission.
+    pub fn native_present_facts(window: NativeWindow) -> super::NativePresentFacts {
+        use windows::Win32::UI::WindowsAndMessaging::{IsWindow, IsWindowVisible};
+        // SAFETY: the handle is borrowed from a live winit window; all calls read
+        // state only. IsWindow distinguishes unreadable state from false.
+        if !unsafe { IsWindow(Some(window.as_hwnd())) }.as_bool() {
+            return super::NativePresentFacts::default();
+        }
+        let mut rect = windows::Win32::Foundation::RECT::default();
+        // SAFETY: rect is a valid out parameter for this live window.
+        let client = unsafe { GetClientRect(window.as_hwnd(), &mut rect) }
+            .ok()
+            .map(|()| {
+                (
+                    (rect.right - rect.left).max(0) as u32,
+                    (rect.bottom - rect.top).max(0) as u32,
+                )
+            });
+        super::NativePresentFacts {
+            iconic: Some(is_window_minimized(window)),
+            cloaked: read_window_cloaked(window),
+            client,
+            // SAFETY: a read of WS_VISIBLE on the same live window.
+            style_visible: Some(unsafe { IsWindowVisible(window.as_hwnd()) }.as_bool()),
+        }
+    }
+
+    fn read_window_cloaked(window: NativeWindow) -> Option<bool> {
         let mut cloaked: u32 = 0;
         // SAFETY: `window` originates from winit's live Win32WindowHandle, and the
         // out-parameter is a `u32` matching the documented size of
@@ -6979,7 +7027,7 @@ mod windows_impl {
                 u32::try_from(size_of::<u32>()).unwrap_or(4),
             )
         };
-        cloaked_from_attribute(read.ok().map(|()| cloaked))
+        read.ok().map(|()| cloaked_from_attribute(Some(cloaked)))
     }
 
     /// What one `DWMWA_CLOAKED` reading means, with the failure policy written
