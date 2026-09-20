@@ -2,6 +2,8 @@
 
 use std::num::NonZeroIsize;
 
+pub mod ime_trace;
+
 /// Fresh native facts for a diagnostic line only. Unreadable is not false.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NativePresentFacts {
@@ -6835,7 +6837,13 @@ mod windows_impl {
         }
 
         pub fn update(&mut self, x: i32, y: i32) -> Result<(), String> {
+            crate::ime_trace::line(|| {
+                crate::ime_trace::caret_line("update", x, y, self.active, "call")
+            });
             if !active_layout_is_chinese() {
+                crate::ime_trace::line(|| {
+                    crate::ime_trace::caret_line("update", x, y, self.active, "layout_not_chinese")
+                });
                 self.destroy();
                 return Ok(());
             }
@@ -6845,23 +6853,60 @@ mod windows_impl {
             // the non-painted compatibility caret used only as an IME positioning signal.
             unsafe {
                 if !self.active {
-                    CreateCaret(self.hwnd, None, 1, 1)
-                        .map_err(|error| format!("CreateCaret(1x1) failed: {error}"))?;
+                    let created = CreateCaret(self.hwnd, None, 1, 1);
+                    crate::ime_trace::line(|| {
+                        crate::ime_trace::caret_line(
+                            "create",
+                            x,
+                            y,
+                            self.active,
+                            if created.is_ok() { "ok" } else { "error" },
+                        )
+                    });
+                    created.map_err(|error| format!("CreateCaret(1x1) failed: {error}"))?;
                     self.active = true;
                 }
-                SetCaretPos(x, y).map_err(|error| format!("SetCaretPos failed: {error}"))?;
+                let positioned = SetCaretPos(x, y);
+                crate::ime_trace::line(|| {
+                    crate::ime_trace::caret_line(
+                        "position",
+                        x,
+                        y,
+                        self.active,
+                        if positioned.is_ok() { "ok" } else { "error" },
+                    )
+                });
+                positioned.map_err(|error| format!("SetCaretPos failed: {error}"))?;
             }
             Ok(())
         }
 
         pub fn destroy(&mut self) {
+            crate::ime_trace::line(|| {
+                crate::ime_trace::caret_line(
+                    "destroy",
+                    0,
+                    0,
+                    self.active,
+                    if self.active { "call" } else { "inactive" },
+                )
+            });
             if !self.active {
                 return;
             }
             // SAFETY: this object is dropped/disabled on the same event-loop thread that created
             // the thread-affine caret. There is no borrowed memory and failure needs no recovery.
             unsafe {
-                let _ = DestroyCaret();
+                let destroyed = DestroyCaret();
+                crate::ime_trace::line(|| {
+                    crate::ime_trace::caret_line(
+                        "destroy",
+                        0,
+                        0,
+                        self.active,
+                        if destroyed.is_ok() { "ok" } else { "error" },
+                    )
+                });
             }
             self.active = false;
         }
@@ -6899,7 +6944,7 @@ mod windows_impl {
     /// no composition string to cancel and IMM32 says so; the caller's own state
     /// is cleared either way, because the app's picture of what is being
     /// composed is the app's.
-    pub fn cancel_composition() -> bool {
+    pub fn cancel_composition(reason: &'static str) -> bool {
         let Ok(hwnd) = owner_window() else {
             return false;
         };
@@ -6914,7 +6959,9 @@ mod windows_impl {
             if context.0.is_null() {
                 return false;
             }
+            crate::ime_trace::line(|| crate::ime_trace::notify_line(reason, "call", None));
             let told = ImmNotifyIME(context, NI_COMPOSITIONSTR, CPS_CANCEL, 0).as_bool();
+            crate::ime_trace::line(|| crate::ime_trace::notify_line(reason, "return", Some(told)));
             let _ = ImmReleaseContext(hwnd, context);
             told
         }
@@ -11579,7 +11626,7 @@ mod macos_ime {
 
     /// Whether an input method was told to throw its composition away.
     #[must_use]
-    pub fn cancel_composition() -> bool {
+    pub fn cancel_composition(_reason: &'static str) -> bool {
         let Some(main_thread) = MainThreadMarker::new() else {
             return false;
         };
@@ -11620,7 +11667,7 @@ mod portable_ime {
     /// the same time as the clipboard's, because it is the same defect and the
     /// same sentence closes both.
     #[must_use]
-    pub fn cancel_composition() -> bool {
+    pub fn cancel_composition(_reason: &'static str) -> bool {
         false
     }
 }

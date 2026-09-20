@@ -74,6 +74,7 @@ mod hex_peek;
 mod highlight;
 mod i18n;
 mod icons;
+mod ime_outbound;
 mod input;
 /// **Every journey this window runs, put through the worst schedule it can be
 /// given** (review round 3, 2026-09-18). A file of its own because the table is
@@ -12898,6 +12899,7 @@ struct WindowRuntime {
     /// between one wait and the next, and nothing tells this process when they
     /// do. Born `false`, which is what Windows ships.
     taskbar_auto_hidden: bool,
+    ime_outbound: ime_outbound::State,
     ime_system_caret: bt_platform::ImeSystemCaret,
     pointer_position: Option<PhysicalPosition<f64>>,
     /// **Where the pointer was last seen, kept after it has gone.**
@@ -37903,6 +37905,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         // looked at yet, and the assumption would cost a toast rather than a
         // flash.
         taskbar_auto_hidden: false,
+        ime_outbound: ime_outbound::State::default(),
         ime_system_caret,
         pointer_position: None,
         pointer_last_seen: None,
@@ -38622,6 +38625,13 @@ impl Runtime<'_> {
         );
         install_theme_class_background(&window);
         hang_watch::during(hang_watch::Station::ImeAllowed, || {
+            ime_outbound::line(|| {
+                format!(
+                    "window={} {}",
+                    u64::from(window.id()),
+                    ime_outbound::allowed_line(true, "window_construction")
+                )
+            });
             window.set_ime_allowed(true)
         });
         // Beside `set_ime_allowed` because it is the other half of the same
@@ -39279,6 +39289,13 @@ impl Runtime<'_> {
         );
         install_theme_class_background(&window);
         hang_watch::during(hang_watch::Station::ImeAllowed, || {
+            ime_outbound::line(|| {
+                format!(
+                    "window={} {}",
+                    u64::from(window.id()),
+                    ime_outbound::allowed_line(true, "window_construction")
+                )
+            });
             window.set_ime_allowed(true)
         });
         // A second window answers the Option key the way the first one does —
@@ -56175,7 +56192,7 @@ impl Runtime<'_> {
             return Ok(());
         }
         if self.window.composing == Some(ImeOwner::Shell) {
-            self.cancel_composition(ImeOwner::Shell)?;
+            self.cancel_composition(ImeOwner::Shell, "take_keyboard_into")?;
         }
         self.focused_leaf = seat;
         // The frame slot holds the pane that *was* focused. Leaving it would
@@ -61855,7 +61872,7 @@ impl Runtime<'_> {
     /// ([`ime_owner`]) — because the day those two disagree is the day a caret
     /// blinks in a shell that is not receiving the characters.
     fn keyboard_owner(&self) -> KeyboardOwner {
-        KeyboardOwner {
+        let owner = KeyboardOwner {
             rename: self.window.rename.is_some(),
             // `Menu` and `Dialog`, which own the keyboard outright while they are
             // up (§7.1.5, and the mock-up's "an open menu owns the keyboard" at
@@ -61891,7 +61908,9 @@ impl Runtime<'_> {
             // The search capsule, and only while the caret is in it.
             search: self.window.search.is_focused(),
             palette: self.window.palette.is_some(),
-        }
+        };
+        self.trace_ime_owner(owner);
+        owner
     }
 
     /// **Which field the keyboard is in, named down to the instance**
@@ -62463,7 +62482,16 @@ impl Runtime<'_> {
             return;
         };
         if let Some(area) = self.window.ime_cursor_throttle.offer(area, Instant::now()) {
-            self.apply_ime_cursor_area(area);
+            self.apply_ime_cursor_area(area, "sent");
+        } else if ime_outbound::enabled() {
+            self.trace_ime_area(
+                area,
+                if self.window.ime_cursor_throttle.pending.is_some() {
+                    "throttled"
+                } else {
+                    "unchanged"
+                },
+            );
         }
     }
 
@@ -67351,8 +67379,16 @@ impl Runtime<'_> {
             {
                 terminal_frame.status_text = Some(notice.to_owned());
             }
-            let composed = compose_preedit(&terminal_frame, self.shell_preedit())
-                .context("reject non-rectangular frame before IME composition")?;
+            let composed = if ime_outbound::enabled() {
+                let (composed, written) =
+                    bt_render::compose_preedit_traced(&terminal_frame, self.shell_preedit())
+                        .context("reject non-rectangular frame before IME composition")?;
+                self.trace_ime_frame(&terminal_frame, written);
+                composed
+            } else {
+                compose_preedit(&terminal_frame, self.shell_preedit())
+                    .context("reject non-rectangular frame before IME composition")?
+            };
             if skip_unchanged
                 && pty_drain_says_nothing_new(
                     pty_frame_is_unchanged(
@@ -84470,7 +84506,8 @@ impl Runtime<'_> {
     /// preview's is measured off the pane rectangle and is already the window's.
     /// Translating here would have applied the seat's origin to a rectangle that
     /// never had one.
-    fn apply_ime_cursor_area(&mut self, area: ImeCursorArea) {
+    fn apply_ime_cursor_area(&mut self, area: ImeCursorArea, action: &'static str) {
+        self.trace_ime_area(area, action);
         hang_watch::during(hang_watch::Station::ImeCursorArea, || {
             self.window.window.set_ime_cursor_area(
                 PhysicalPosition::new(area.x, area.y),
@@ -84478,6 +84515,9 @@ impl Runtime<'_> {
             );
         });
         let system_caret = hang_watch::during(hang_watch::Station::ImeSystemCaret, || {
+            self.trace_ime_line(|| {
+                ime_outbound::caret_line("update", "cursor_area", Some((area.x, area.y)))
+            });
             self.window.ime_system_caret.update(area.x, area.y)
         });
         if let Err(error) = system_caret {
@@ -84489,7 +84529,7 @@ impl Runtime<'_> {
 
     fn flush_ime_cursor_area(&mut self, now: Instant) {
         if let Some(area) = self.window.ime_cursor_throttle.flush_due(now) {
-            self.apply_ime_cursor_area(area);
+            self.apply_ime_cursor_area(area, "flushed");
         }
     }
 
@@ -84525,7 +84565,9 @@ impl Runtime<'_> {
         };
         self.window.ime_cursor_throttle.rearm();
         if let Some(area) = self.window.ime_cursor_throttle.offer(area, Instant::now()) {
-            self.apply_ime_cursor_area(area);
+            self.apply_ime_cursor_area(area, "reoffered");
+        } else if ime_outbound::enabled() {
+            self.trace_ime_area(area, "reoffer_throttled");
         }
     }
 
@@ -101301,9 +101343,8 @@ impl Runtime<'_> {
         // grepped, and the question "did the IME say that, or did we" has to
         // be answered from what the IME actually said. Written before any
         // routing so a swallowed event is still on the record.
-        static IME_TRACE: trace::Dump = trace::Dump::new("BT_IME_TRACE");
         hang_watch::during(hang_watch::Station::ImeTrace, || {
-            IME_TRACE.line(|| format!("{:?} {:?}", Instant::now(), event));
+            self.trace_ime_input(&event);
         });
         let composing = matches!(event, Ime::Preedit(..) | Ime::Commit(_));
         // **Which rung this composition was started in**, written above every
@@ -101327,6 +101368,7 @@ impl Runtime<'_> {
             let here = self.composition_origin_now();
             if let Some(what) = composing_event_of(&event) {
                 let ruling = composition_ruling(&self.window.composing_in, &here, what);
+                self.trace_ime_ruling(&event, &here, ruling);
                 let held = std::mem::take(&mut self.window.composing_in);
                 self.window.composing_in = held.after(ruling.next, &here);
                 if !ruling.deliver {
@@ -101473,7 +101515,7 @@ impl Runtime<'_> {
                 self.window.ime_active = false;
                 self.window.ime_cursor_throttle.reset();
                 hang_watch::during(hang_watch::Station::ImeCaretDestroy, || {
-                    self.window.ime_system_caret.destroy()
+                    self.destroy_ime_caret("ime_disabled")
                 });
                 // A composition taken away must stop being *drawn* where it was
                 // drawn. The grid is repainted by the frame below, but the
@@ -101514,7 +101556,7 @@ impl Runtime<'_> {
         let Some(started_in) = self.window.composing.take() else {
             return Ok(());
         };
-        self.cancel_composition(started_in)
+        self.cancel_composition(started_in, "settle_composition_owner")
     }
 
     /// **The one door a composition is ended through**, and everything that has
@@ -101535,9 +101577,10 @@ impl Runtime<'_> {
     /// gone. And **not** `set_ime_allowed(false)`, which looks like the same
     /// move and is not: that re-associates the input context for the whole
     /// window and drops the method's state with it.
-    fn cancel_composition(&mut self, started_in: ImeOwner) -> Result<()> {
-        // **The answer is not read, and `composing_in` is not cleared, and
-        // those two are the same decision** (review 2026-09-17 P2).
+    fn cancel_composition(&mut self, started_in: ImeOwner, reason: &'static str) -> Result<()> {
+        // **The answer does not change behaviour, and `composing_in` is not
+        // cleared: those are the same decision** (review 2026-09-17 P2).
+        // The opt-in trace records the answer without acting on it.
         // `ImmNotifyIME` answers a bool this window has no honest use for: a
         // `false` is not a state to recover from, it is an input method that
         // will send the commit anyway — §7.1.5a″ names one. So this stays a
@@ -101546,14 +101589,16 @@ impl Runtime<'_> {
         // [`composition_ruling`] discards a commit that is not that field's.
         // Clearing it here would take the barrier down at exactly the moment it
         // is needed.
-        hang_watch::during(hang_watch::Station::ImeCancel, || {
-            bt_platform::cancel_composition()
+        self.trace_ime_cancel(started_in, reason, None);
+        let told = hang_watch::during(hang_watch::Station::ImeCancel, || {
+            bt_platform::cancel_composition(reason)
         });
+        self.trace_ime_cancel(started_in, reason, Some(told));
         self.window.preedit = None;
         self.window.composing = None;
         self.window.ime_cursor_throttle.reset();
         hang_watch::during(hang_watch::Station::ImeCaretDestroy, || {
-            self.window.ime_system_caret.destroy()
+            self.destroy_ime_caret("cancel_composition")
         });
         // The field the letters were going into, if it is still standing. A
         // palette that has closed has taken its own text with it and there is
@@ -106232,7 +106277,7 @@ impl Runtime<'_> {
             self.window.window.set_visible(false)
         });
         hang_watch::during(hang_watch::Station::ImeCaretDestroy, || {
-            self.window.ime_system_caret.destroy()
+            self.destroy_ime_caret("window_teardown")
         });
         // **The page's controller is closed here, beside the children.** A
         // controller merely dropped leaves a browser process nobody points at
@@ -118179,7 +118224,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     runtime.window.ime_active = false;
                     runtime.window.ime_cursor_throttle.reset();
                     hang_watch::during(hang_watch::Station::ImeCaretDestroy, || {
-                        runtime.window.ime_system_caret.destroy()
+                        runtime.destroy_ime_caret("window_blur")
                     });
                     runtime.set_cursor_focus(false, Instant::now());
                     // **The summoned terminal goes when the keyboard does** (§7.54),
@@ -124491,6 +124536,7 @@ fn main() -> Result<()> {
     // that write these lines and none of them can name this module; see
     // `bt_viewport::trace`.
     let _trace_shutdown = trace_sink::start();
+    ime_outbound::install();
     bt_render::set_trace_writer(trace_sink::stderr_line);
     if diagnostics::switched_on(std::env::var_os("BT_STARTUP_TRACE")) {
         trace_sink::stderr_line(format!(
@@ -128807,7 +128853,7 @@ mod clipboard_path_tests {
         let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
         let door = method_text(before_this_fixture, "    fn take_keyboard_into(");
         assert!(
-            door.contains("self.cancel_composition(ImeOwner::Shell)?;"),
+            door.contains("self.cancel_composition(ImeOwner::Shell, \"take_keyboard_into\")?;"),
             "the keyboard moves between two shells without ending the \
              composition the old one was holding, so the next commit lands in \
              the new pane:\n{door}"
