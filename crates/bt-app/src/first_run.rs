@@ -60,6 +60,17 @@ pub fn due(settings_file_was_missing: bool, stored: FirstRunCardV1) -> bool {
     settings_file_was_missing && stored == FirstRunCardV1::NotShown
 }
 
+/// Consume the first ready attempt, including one that cannot show a card.
+/// The App owns this latch; profile-table adoption and answering the card rearm
+/// it. Availability itself remains owned by `ProfilePrograms`, not this latch.
+pub fn take_ready_edge(attempted: &mut bool, ready: bool) -> bool {
+    if *attempted || !ready {
+        return false;
+    }
+    *attempted = true;
+    true
+}
+
 // ── the rows a machine can honour ──────────────────────────────────────────
 
 /// Which of the six questions a row is.
@@ -3788,6 +3799,96 @@ mod tests {
                 "the line is the name and nothing else, so it says what the switch is and not \
                  what it gets you: {line:?}"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod clock_edge_tests {
+    #[test]
+    fn first_run_ready_edge_is_shared_and_rearmed_by_changes() {
+        let mut attempted = false;
+        let mut reads = 0;
+        for _ in 0..200 {
+            if super::take_ready_edge(&mut attempted, false) {
+                reads += 1;
+            }
+        }
+        assert_eq!(reads, 0, "a pending probe cannot construct a card");
+        for _window in 0..4 {
+            for _ in 0..50 {
+                if super::take_ready_edge(&mut attempted, true) {
+                    reads += 1;
+                }
+            }
+        }
+        assert_eq!(reads, 1, "even a refused/empty card consumes the attempt");
+        attempted = false; // Profile-table adoption or a completed card gesture.
+        for _ in 0..200 {
+            if super::take_ready_edge(&mut attempted, true) {
+                reads += 1;
+            }
+        }
+        assert_eq!(reads, 2);
+    }
+
+    #[test]
+    fn first_run_clock_run_disk_questions_follow_the_ready_edge() {
+        let source = include_str!("main.rs");
+        let body = source
+            .split("    fn raise_first_run_if_due(")
+            .nth(1)
+            .unwrap()
+            .split("\n    fn ")
+            .next()
+            .unwrap();
+        let edge = body
+            .find("first_run::take_ready_edge(")
+            .expect("one attempt after the probe settles");
+        let compact: String = body.split_whitespace().collect();
+        assert!(compact.contains("if!first_run::take_ready_edge(&mutself.app.first_run_attempted,!copilot_on_path||attention_copilot::probe_settled(),){returnOk(());}"));
+        for forbidden in ["std::fs::", "search_path(", "Command::"] {
+            assert!(!body.contains(forbidden));
+        }
+        for reader in [
+            "explorer_menu::package_file()",
+            "attention_hooks::state()",
+            "attention_codex::state()",
+            "attention_copilot::state()",
+        ] {
+            assert!(
+                body.find(reader).unwrap() > edge,
+                "{reader} must follow the edge"
+            );
+        }
+        // Agent availability already has one owner; never add a second PATH cache.
+        let lookup = source
+            .split("    fn agent_is_on_this_machine(")
+            .nth(1)
+            .unwrap()
+            .split("\n    fn ")
+            .next()
+            .unwrap();
+        assert!(lookup.contains("self.app.profile_programs.is_available(id)"));
+        assert!(!lookup.contains("search_path("));
+        let profiles = include_str!("profiles.rs");
+        let available = profiles
+            .split("pub fn is_available(&self, id: &str)")
+            .nth(1)
+            .unwrap()
+            .split("\n    }")
+            .next()
+            .unwrap();
+        assert!(available.contains("self.program(id).is_some()"));
+        for signature in ["    fn adopt_profile_table(", "    fn answer_first_run("] {
+            let rearm = source
+                .split_once(signature)
+                .unwrap()
+                .1
+                .split("\n    fn ")
+                .next()
+                .unwrap();
+            assert!(rearm.contains("self.app.first_run_attempted = false;"));
         }
     }
 }

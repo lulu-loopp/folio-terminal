@@ -3,6 +3,10 @@
 # Content adapters and their lane owners are checked separately in file_reads_source_tests.rs.
 1 attention_copilot.rs: run_probe: .output
 1 psreadline.rs: run_probe: .output
+# The installed-module seam: both are the seam's own verb; its production arm reads
+# through file_reads::read(Lane::Settings), so the bytes are counted.
+1 psreadline.rs: is_folios_copy: installed_disk::read
+1 psreadline.rs: read: .read
 1 main.rs: create_leaf_session: .output
 1 animation.rs: file_source_in_lane: FileAnimationSource::open
 1 animation.rs: first_frame: open

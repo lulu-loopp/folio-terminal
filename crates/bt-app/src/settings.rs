@@ -6435,6 +6435,10 @@ impl EditorSubject {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SettingsPanel {
     open: bool,
+    /// Whether this visit has consumed the PSReadLine row's disk-read edge.
+    /// Reset by the panel's own page/open/close transitions, even if no layout
+    /// was requested between closing and reopening.
+    psreadline_visit_read: bool,
     /// **Which page is up** (user ruling Q3 = A, 2026-08-17). One page per
     /// category, so this is the whole of "where am I" — and it is state on the
     /// panel rather than on the runtime because the panel is what a key press
@@ -6730,6 +6734,14 @@ impl SettingsPanel {
         self.category
     }
 
+    /// Consume the first showing of the PSReadLine row on this page visit.
+    pub fn take_psreadline_open_edge(&mut self, showing: bool) -> bool {
+        if !self.open || !showing {
+            return false;
+        }
+        !std::mem::replace(&mut self.psreadline_visit_read, true)
+    }
+
     /// Which line of the shortcut page is listening for a chord, if one is.
     #[must_use]
     pub fn recording_row(&self) -> Option<usize> {
@@ -6768,6 +6780,7 @@ impl SettingsPanel {
             return false;
         }
         self.category = category;
+        self.psreadline_visit_read = false;
         self.menu = None;
         self.menu_scroll = 0.0;
         self.recording = None;
@@ -6797,6 +6810,7 @@ impl SettingsPanel {
     /// a rail is that the way back is one word away.
     pub fn toggle(&mut self, content: SettingsContent<'_>) {
         self.open = !self.open;
+        self.psreadline_visit_read = false;
         self.menu = None;
         self.menu_scroll = 0.0;
         self.hover = None;
@@ -6868,6 +6882,7 @@ impl SettingsPanel {
     /// Shut everything, whatever was open.
     pub fn close(&mut self) {
         self.open = false;
+        self.psreadline_visit_read = false;
         self.menu = None;
         self.menu_scroll = 0.0;
         self.hover = None;
@@ -7139,6 +7154,7 @@ impl SettingsPanel {
         // existing under it.
         if !content.has_content(self.category) {
             self.category = content.first_category();
+            self.psreadline_visit_read = false;
             self.menu = None;
             self.recording = None;
             self.focus = None;
@@ -15266,6 +15282,47 @@ thread_local! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn psreadline_page_open_is_an_edge_even_without_a_closed_layout() {
+        let rows = [SettingsRow::PsReadLine];
+        let mut panel = SettingsPanel::default();
+        assert!(!panel.take_psreadline_open_edge(true));
+        panel.toggle(content(&rows, &[]));
+        assert!(panel.take_psreadline_open_edge(true));
+        for _ in 0..200 {
+            assert!(!panel.take_psreadline_open_edge(true));
+        }
+        assert!(!panel.select_category(SettingsCategory::Terminal));
+        assert!(!panel.take_psreadline_open_edge(true));
+        panel.select_category(SettingsCategory::General);
+        assert!(!panel.take_psreadline_open_edge(false));
+        panel.select_category(SettingsCategory::Terminal);
+        assert!(panel.take_psreadline_open_edge(true));
+        panel.close();
+        panel.toggle(content(&rows, &[]));
+        assert!(
+            panel.take_psreadline_open_edge(true),
+            "close/reopen needs no intervening layout"
+        );
+        panel.toggle(content(&rows, &[]));
+        assert!(!panel.take_psreadline_open_edge(true));
+        panel.toggle(content(&rows, &[]));
+        assert!(panel.take_psreadline_open_edge(true));
+        panel.select_category(SettingsCategory::General);
+        panel.keep_focus_reachable(content(&rows, &[]));
+        assert_eq!(panel.category(), SettingsCategory::Terminal);
+        assert!(
+            panel.take_psreadline_open_edge(true),
+            "fallback also opens a new visit"
+        );
+        assert!(panel.close_one_layer());
+        panel.toggle(content(&rows, &[]));
+        assert!(
+            panel.take_psreadline_open_edge(true),
+            "Escape also rearms the visit"
+        );
+    }
 
     struct SettingsPointerHarness {
         geometry: geometry::Geometry,
