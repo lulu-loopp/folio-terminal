@@ -4470,7 +4470,7 @@ impl Text {
             Self::DescPowerShellOffer => pick(
                 lang,
                 "On offers integration in PowerShell panes. Off removes Folio profile lines for this account; open shells keep their current integration.",
-                "CHINESE PENDING",
+                "PowerShell 窗格提示安装整合。关闭时移除当前账户的 Folio 整合行，已打开的 shell 保持现有整合。",
             ),
             // **The three installer rows are 「通知」 rows** (user ruling
             // 2026-08-29). 「钩子」 and 「通知程序」 named the mechanism this window
@@ -4967,53 +4967,53 @@ impl Text {
             Self::ShellProfileEncoding => pick(
                 lang,
                 "Unsupported profile encoding; expected UTF-8, UTF-8 BOM or UTF-16LE BOM.",
-                "CHINESE PENDING",
+                "$PROFILE 的编码不受支持，需要 UTF-8、UTF-8 BOM 或 UTF-16LE BOM。",
             ),
             Self::ShellMarksVersion => pick(
                 lang,
                 "Unsupported integration marks version.",
-                "CHINESE PENDING",
+                "整合记录的版本不受支持。",
             ),
             Self::ShellMarksPath => pick(
                 lang,
                 "Integration mark paths must be absolute.",
-                "CHINESE PENDING",
+                "整合记录中的路径必须是绝对路径。",
             ),
-            Self::ShellProfileUnchanged => pick(lang, "Folio profile unchanged", "CHINESE PENDING"),
+            Self::ShellProfileUnchanged => pick(lang, "Folio profile unchanged", "$PROFILE 未改动"),
             Self::ShellProfileMigrated => {
-                pick(lang, "Updated Folio profile line", "CHINESE PENDING")
+                pick(lang, "Updated Folio profile line", "已更新 $PROFILE 中的 Folio 整合行")
             }
             Self::ShellProfileRemoved => {
-                pick(lang, "Removed Folio profile line", "CHINESE PENDING")
+                pick(lang, "Removed Folio profile line", "已移除 $PROFILE 中的 Folio 整合行")
             }
-            Self::ShellProfileRefused => pick(lang, "Could not change profile", "CHINESE PENDING"),
+            Self::ShellProfileRefused => pick(lang, "Could not change profile", "无法修改 $PROFILE"),
             Self::ShellProfileProbeFailed => pick(
                 lang,
                 "Could not query this PowerShell profile within five seconds.",
-                "CHINESE PENDING",
+                "五秒内未能查到此 PowerShell 的 $PROFILE。",
             ),
             Self::ShellProfileLink => pick(
                 lang,
                 "Symbolic links and reparse points are not edited.",
-                "CHINESE PENDING",
+                "不修改符号链接和重解析点。",
             ),
             Self::ShellProfileReadOnly => pick(
                 lang,
                 "The profile is read-only or is not a regular file.",
-                "CHINESE PENDING",
+                "$PROFILE 为只读，或不是普通文件。",
             ),
             Self::ShellProfileChanged => pick(
                 lang,
                 "The profile changed during the operation; retry when the editor is finished.",
-                "CHINESE PENDING",
+                "$PROFILE 在操作期间被改动，等编辑器关闭后重试。",
             ),
             Self::ShellProfileScriptLocation => pick(
                 lang,
                 "The managed script must be under APPDATA\\Folio\\shell-integration.",
-                "CHINESE PENDING",
+                "整合脚本必须位于 APPDATA\\Folio\\shell-integration 下。",
             ),
             Self::ShellProfileNothing => {
-                pick(lang, "No Folio profile lines found.", "CHINESE PENDING")
+                pick(lang, "No Folio profile lines found.", "未找到 Folio 整合行。")
             }
             Self::ShellIntegrationPending => pick(
                 lang,
@@ -5919,36 +5919,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 28] = [
-        // T-A: English approved for implementation; Chinese is explicitly pending.
-        (Self::DescPowerShellOffer, HostPlatform::Windows),
-        (Self::DescPowerShellOffer, HostPlatform::MacOs),
-        (Self::ShellProfileEncoding, HostPlatform::Windows),
-        (Self::ShellProfileEncoding, HostPlatform::MacOs),
-        (Self::ShellMarksVersion, HostPlatform::Windows),
-        (Self::ShellMarksVersion, HostPlatform::MacOs),
-        (Self::ShellMarksPath, HostPlatform::Windows),
-        (Self::ShellMarksPath, HostPlatform::MacOs),
-        (Self::ShellProfileUnchanged, HostPlatform::Windows),
-        (Self::ShellProfileUnchanged, HostPlatform::MacOs),
-        (Self::ShellProfileMigrated, HostPlatform::Windows),
-        (Self::ShellProfileMigrated, HostPlatform::MacOs),
-        (Self::ShellProfileRemoved, HostPlatform::Windows),
-        (Self::ShellProfileRemoved, HostPlatform::MacOs),
-        (Self::ShellProfileRefused, HostPlatform::Windows),
-        (Self::ShellProfileRefused, HostPlatform::MacOs),
-        (Self::ShellProfileProbeFailed, HostPlatform::Windows),
-        (Self::ShellProfileProbeFailed, HostPlatform::MacOs),
-        (Self::ShellProfileLink, HostPlatform::Windows),
-        (Self::ShellProfileLink, HostPlatform::MacOs),
-        (Self::ShellProfileReadOnly, HostPlatform::Windows),
-        (Self::ShellProfileReadOnly, HostPlatform::MacOs),
-        (Self::ShellProfileChanged, HostPlatform::Windows),
-        (Self::ShellProfileChanged, HostPlatform::MacOs),
-        (Self::ShellProfileScriptLocation, HostPlatform::Windows),
-        (Self::ShellProfileScriptLocation, HostPlatform::MacOs),
-        (Self::ShellProfileNothing, HostPlatform::Windows),
-        (Self::ShellProfileNothing, HostPlatform::MacOs),
+    const CHINESE_PENDING: [(Self, HostPlatform); 0] = [
     ];
 }
 
@@ -7134,7 +7105,7 @@ impl CliText<'_> {
                      \x20 -h, --help        显示这段说明\n\
                      \x20 --version         显示这是哪一个构建\n\
                      \x20 --remove-explorer-menu  把这份 Folio 从资源管理器的右键菜单里撤掉\n\
-                     \x20 --remove-shell-integration  CHINESE PENDING"
+                     \x20 --remove-shell-integration  从当前账户的 PowerShell $PROFILE 移除 Folio 整合行"
                 ),
             },
             Self::MissingValue(flag) => match lang {
