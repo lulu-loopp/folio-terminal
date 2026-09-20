@@ -174,7 +174,8 @@ use bt_render::{
     WINDOW_TAB_RING_INDETERMINATE_TURNS, WINDOW_TAB_RING_SPIN_PERIOD_MS,
     WINDOW_TAB_RING_SWEEP_TRANSITION_MS, WindowRenderer, background_rgb, compose_preedit,
     current_cursor_style, foreground_rgb, frame_content_digest, frame_is_alternate_screen,
-    preview_image_extent, scheme_in_force, set_cursor_style, set_theme, theme_revision,
+    gpu_power_request, preview_image_extent, scheme_in_force, set_cursor_style, set_theme,
+    theme_revision,
 };
 use bt_term::{
     DualPlaneSession, InlineImageDecoder, MathLayoutOptions, MouseTracking, ProgressState,
@@ -242,11 +243,20 @@ const CURSOR_BLINK_PHASE: Duration = Duration::from_millis(550);
 /// Say which adapter wgpu actually selected, through the same two destinations
 /// as a slow-hold line: the bounded trace sink when one exists, and
 /// `diagnostics.log` in every resident run.
+///
+/// **The question and the answer are one line.** A machine with two GPUs can be
+/// started twice — once as the build ships, once with `BT_GPU_PREFERENCE=low` —
+/// and a recording is only comparable while it says which of the two runs it is
+/// from. So the line carries what was asked for and where that came from
+/// (`bt_render::gpu_power_request`, the one place this program decides), beside
+/// the adapter the driver answered with. It is also where a value nobody
+/// understood is reported: a switch that ignored its own spelling in silence
+/// would cost somebody a day of comparing a build against itself.
 fn note_gpu_adapter(gpu: &GpuContext) {
     let info = gpu.adapter_info();
     diagnostics::note(&format!(
         "Folio: GPU adapter name={:?} vendor=0x{:04x} device=0x{:04x} type={:?} \
-         backend={:?} driver={:?} driver_info={:?}",
+         backend={:?} driver={:?} driver_info={:?} asked={}",
         info.name,
         info.vendor,
         info.device,
@@ -254,6 +264,7 @@ fn note_gpu_adapter(gpu: &GpuContext) {
         info.backend,
         info.driver,
         info.driver_info,
+        gpu_power_request(),
     ));
 }
 
