@@ -64,20 +64,26 @@
     own `LegalCopyright`. Only read when `-ExpectSigned` is given.
 
 .PARAMETER Msix
-    Where the sparse package to check under `-ExpectSigned` is. Defaults to
-    `folio.msix` beside `-Exe`, which is where it is once somebody extracts the
-    archive — both files are in it, and the package names the executable at the
-    folder it was extracted into.
+    Where the sparse package to check under `-ExpectSigned` is. **Not needed on
+    either machine the release is checked on**: the default is `folio.msix`
+    beside `-Exe` when there is one — which is where it is once somebody extracts
+    the archive, both files in one folder, the package naming the executable at
+    the folder it was extracted into — and otherwise the release archive in
+    `-PackageDirectory`.
 
-    **It can be named in the archive rather than as a file of its own**, and on
-    the release machine it has to be: `package.ps1` leaves the archive, the bill
-    of materials and `SHA256SUMS.txt` in `target/release-package` and no loose
-    `folio.msix` anywhere, because a package downloaded on its own names a
-    folder with no `folio.exe` in it. Given the archive, this takes the package
-    out of it into `-Artifacts` and checks that copy, which is byte for byte the
-    one a recipient registers. Which of the two a path is is settled by opening
-    it rather than by its name: an msix is a zip too, so the name could not
-    settle it.
+    That second half is the release machine. `package.ps1` leaves the archive,
+    the bill of materials and `SHA256SUMS.txt` in `target/release-package` and no
+    loose `folio.msix` anywhere, because a package downloaded on its own names a
+    folder with no `folio.exe` in it — so a default that only ever looked beside
+    the executable named a path that cannot exist on the machine that made the
+    release. With neither there, `-ExpectSigned` refuses and names both places.
+
+    **It can be named in the archive rather than as a file of its own**, which is
+    what the default does and what `-Msix` may be handed. Given an archive, this
+    takes the package out of it into `-Artifacts` and checks that copy, which is
+    byte for byte the one a recipient registers. Which of the two a path is is
+    settled by opening it rather than by its name: an msix is a zip too, so the
+    name could not settle it.
 
 .PARAMETER PackageDirectory
     The directory `package.ps1` writes the release page into. Defaults to
@@ -194,6 +200,9 @@ function Resolve-PackageFile {
     finally { $archive.Dispose() }
 }
 
+if (-not $PackageDirectory) { $PackageDirectory = Join-Path $root 'target\release-package' }
+$PackageDirectory = Resolve-GivenPath $PackageDirectory
+
 if ($Msix) {
     # **A path somebody named has to be there, and is said so at the door.**
     # Naming `-Msix` is asking for that file; whether the checks that read it
@@ -210,11 +219,83 @@ if ($Msix) {
     $Msix = Resolve-PackageFile -Path $Msix -Into (Join-Path $Artifacts 'package')
 }
 else {
-    # Beside the executable, resolved from the executable rather than from
-    # `$root`: the arrangement being checked is the one a recipient has, which
-    # is one folder holding both files. Nothing is asked of it here — an
-    # ordinary unsigned build has no package beside it and is not meant to.
-    $Msix = Join-Path (Split-Path -Parent $Exe) 'folio.msix'
+    # **The default is both arrangements the package is ever in**, because there
+    # are exactly two and which one you are standing in is a property of the
+    # machine rather than of the command.
+    #
+    # Beside the executable is the recipient's: one folder holding `folio.exe`
+    # and `folio.msix`, which is what extracting the archive produces, and it is
+    # resolved from `-Exe` rather than from `$root` for that reason. On the
+    # machine that *packed* the release there is no loose copy at all —
+    # `package.ps1` packs the msix in a working directory it takes away again,
+    # because a package downloaded on its own names a folder with no `folio.exe`
+    # in it — so the package is in the archive in `-PackageDirectory` and nowhere
+    # else. That is the machine `docs/RELEASING.md`'s signed line is typed on,
+    # and defaulting to a path that cannot exist there made `-Msix` a flag the
+    # release had to be told about twice: once in the document and once by a
+    # failure. The archive is opened rather than read by name, by the same
+    # `Resolve-PackageFile` a named `-Msix` goes through, so the bytes checked
+    # are the bytes a recipient registers either way.
+    #
+    # Nothing is asked of either place here — an ordinary unsigned build has no
+    # package anywhere and is not meant to. `-ExpectSigned` is what needs one,
+    # and its refusal below names both of these.
+    # Where it looked, in the order it looked, so that a refusal names both
+    # places rather than the one this script happened to prefer.
+    $beside = Join-Path (Split-Path -Parent $Exe) 'folio.msix'
+    $msixLookedIn = @($beside)
+    if (Test-Path -LiteralPath $beside -PathType Leaf) {
+        $Msix = $beside
+    }
+    else {
+        # The versioned archive is the release's asset; `folio-windows-x64.zip`
+        # beside it is the same bytes under the name `/releases/latest/download/`
+        # resolves, so either answers and the versioned one is preferred for
+        # being the one a person names. Two versioned archives is the directory
+        # holding two releases, which is the door below's question and not a
+        # guess to make here.
+        $msixLookedIn += $PackageDirectory
+        $archives = @()
+        $stable = Join-Path $PackageDirectory 'folio-windows-x64.zip'
+        if (Test-Path -LiteralPath $PackageDirectory -PathType Container) {
+            $archives = @(Get-ChildItem -LiteralPath $PackageDirectory -File -Filter 'folio-*-windows-x64.zip')
+        }
+        if ($archives.Count -gt 1) {
+            throw ("$PackageDirectory holds $($archives.Count) release archives — " +
+                   "$(($archives | ForEach-Object { $_.Name }) -join ', ') — so which one holds " +
+                   'the package meant here is not a guess to make. Name one with -Msix.')
+        }
+        if ($archives.Count -eq 1) {
+            $Msix = Resolve-PackageFile -Path $archives[0].FullName -Into (Join-Path $Artifacts 'package')
+        }
+        elseif (Test-Path -LiteralPath $stable -PathType Leaf) {
+            $Msix = Resolve-PackageFile -Path $stable -Into (Join-Path $Artifacts 'package')
+        }
+        else {
+            # **Neither place has one**, and under `-ExpectSigned` that is a
+            # release with a file missing rather than a check that does not
+            # apply. Refused here, at the door, with everything else about the
+            # arguments and before a window has been opened — which is where a
+            # `-Msix` naming nothing is refused too, so there is one place that
+            # answers "which file is the package, and is there one".
+            #
+            # Without `-ExpectSigned` nothing is asked of it at all: an ordinary
+            # unsigned build has no package anywhere and is not meant to. The
+            # path kept is the recipient's, because that is the arrangement the
+            # signed check describes.
+            $Msix = $beside
+            if ($ExpectSigned) {
+                Write-Host 'no folio.msix was found. These are the places this looked:'
+                $msixLookedIn | ForEach-Object { Write-Host "  $_" }
+                throw ('there is no folio.msix beside the executable and no release archive ' +
+                       'holding one in the package directory. It is what puts "Open in Folio" on ' +
+                       'the right-click menu, and it ships in the archive beside the executable, ' +
+                       'so a signed release without one is a release missing a file rather than a ' +
+                       'check that does not apply. Name the package, or the archive it is in, ' +
+                       'with -Msix if it is somewhere else.')
+            }
+        }
+    }
 }
 
 # ── the door, last: the package directory holds one release and not two ──────
@@ -248,8 +329,6 @@ function Get-WorkspaceVersion {
     return $Matches[1]
 }
 
-if (-not $PackageDirectory) { $PackageDirectory = Join-Path $root 'target\release-package' }
-$PackageDirectory = Resolve-GivenPath $PackageDirectory
 if (Test-Path -LiteralPath $PackageDirectory -PathType Container) {
     # The three numbers, which is what a file name can carry: `package.ps1`
     # compares `folio.exe`'s `VERSIONINFO` against the same `[-+]`-stripped
@@ -447,12 +526,12 @@ function Test-SameDistinguishedName {
 }
 
 if ($ExpectSigned) {
-    if (-not (Test-Path -LiteralPath $Msix -PathType Leaf)) {
-        throw ("there is no folio.msix at $Msix. It is what puts ""Open in Folio"" on the " +
-               'right-click menu, and it ships in the archive beside the executable, so a signed ' +
-               'release without one is a release missing a file rather than a check that does not ' +
-               'apply. Name it with -Msix if it is somewhere else.')
-    }
+    # **That there is a package here at all was settled at the door**, for
+    # either road it came down: a `-Msix` somebody typed and a default that
+    # looked in the two places the package is ever in are both refused up there,
+    # by the block that decides which file this is. A second existence check
+    # here would be a second owner of that question and could only ever
+    # disagree with the first.
 
     # The package's own signature, held to what the executable's is held to. A
     # package signed without a time stamp registers for three days and then

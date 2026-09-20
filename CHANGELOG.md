@@ -8,6 +8,16 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **`diagnostics.log` now always opens with the line that says which build
+  wrote it.** The file a bug report arrives as is a stack of runs, and the line
+  between them carries the version, the commit and the process id. It was
+  written only by a run whose diagnostics went to that file, so a run started
+  with a trace variable set — or one whose log would not take the program's
+  output — appended its watchdog's lines to a file with no such line anywhere in
+  it, and nothing in what you sent said which Folio had written it. The line is
+  now written when the log is opened, before the run has said anything else, on
+  every kind of run.
+
 - **A PowerShell script now opens in the preview highlighted, instead of as
   plain text.** `.ps1`, `.psm1` and `.psd1` files, and a ` ```powershell `,
   ` ```pwsh ` or ` ```ps1 ` fence inside a Markdown document, get the same
