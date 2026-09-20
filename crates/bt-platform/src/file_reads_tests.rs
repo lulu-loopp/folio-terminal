@@ -76,10 +76,10 @@ fn file_reads_repeat_and_closing_line_use_supplied_minutes() {
 fn file_reads_top_three_never_format_directories_or_control_characters() {
     let ledger = Ledger::new();
     for (path, count) in [
-        (r"C:\Users\secret-user\pictures\first.png", 9),
-        ("/home/secret-user/second.png", 8),
-        ("/home/secret-user/third.png", 7),
-        ("/home/secret-user/fourth.png", 1),
+        (r"C:\Users\alice\pictures\first.png", 9),
+        ("/home/alice/second.png", 8),
+        ("/home/alice/third.png", 7),
+        ("/home/alice/fourth.png", 1),
     ] {
         for _ in 0..count {
             ledger.add(Lane::InlineImage, 3_000_000, 1, Some(Path::new(path)));
@@ -91,7 +91,7 @@ fn file_reads_top_three_never_format_directories_or_control_characters() {
     assert!(line.contains("second.png ×8"));
     assert!(line.contains("third.png ×7"));
     for secret in [
-        "secret-user",
+        "alice",
         "Users",
         "/home",
         "pictures",
