@@ -188,6 +188,12 @@ unpack the same download again anywhere, run the command from that folder, and
 delete it again — a registration whose `folio.exe` has gone is answered by
 nobody, so this clears it.
 
+If you deleted an older Folio and something it wrote is still there — a
+PowerShell that now starts with an error, hook entries in a coding agent's
+configuration, that menu row, or the settings folders —
+[`recovery-after-deleting-folio.md`](recovery-after-deleting-folio.md) takes
+each one out by hand, with no Folio needed.
+
 **On a Mac there is nothing to undo.** Finder's **Open in Folio** lives in the
 application bundle's own `Info.plist`, so it goes when Folio goes; drag the
 application to the Bin, and delete `~/Library/Application Support/Folio` if you
