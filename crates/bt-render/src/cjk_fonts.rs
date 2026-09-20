@@ -69,13 +69,16 @@ impl CjkFace {
             .all(|c| self.points.binary_search(&(c as u32)).is_ok())
     }
     fn attrs<'a>(&self, mut attrs: Attrs<'a>) -> Attrs<'a> {
-        if let Some((_, _, weight, style)) = self
+        if let Some((_, _, weight, _)) = self
             .matches
             .iter()
             .find(|(w, s, _, _)| *w == attrs.weight && *s == attrs.style)
         {
+            // The weight is the face's own; the STYLE stays what was asked. A family
+            // with no italic cut CSS-matches its upright face, and the shaper
+            // synthesises the slant only while the request still says italic
+            // (closure review F1, 2026-09-20).
             attrs.weight = *weight;
-            attrs.style = *style;
         }
         attrs
     }
@@ -246,6 +249,22 @@ pub(super) fn proportional_cjk_family<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn an_italic_request_on_an_upright_only_family_stays_italic() {
+        let face = CjkFace {
+            name: "Upright Only".into(),
+            coverage: bt_unicode::font_coverage::CjkCoverage::default(),
+            points: vec![0x4f60],
+            matches: vec![
+                (Weight::NORMAL, Style::Italic, Weight::NORMAL, Style::Normal),
+                (Weight::BOLD, Style::Italic, Weight::NORMAL, Style::Normal),
+            ],
+        };
+        let asked = Attrs::new().weight(Weight::BOLD).style(Style::Italic);
+        let given = face.attrs(asked);
+        assert_eq!(given.weight, Weight::NORMAL, "the face's own weight");
+        assert_eq!(given.style, Style::Italic, "the slant is still owed");
+    }
     fn declared(name: &str, bits: u32, points: Vec<u32>) -> Arc<CjkFace> {
         Arc::new(CjkFace {
             name: name.into(),
