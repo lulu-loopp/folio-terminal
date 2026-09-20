@@ -1943,6 +1943,16 @@ pub enum Text {
     ///
     /// One string and not four, because the four reasons are all "the file could not be written"
     /// wearing different hats and a reader takes the same action for every one of them.
+    AgentHooksExeUnknown,
+    AgentHooksExeUnstable,
+    AgentHooksPathPlaceholder,
+    AgentHooksTranslocated,
+    AgentHooksOwnerUnknown,
+    AgentHooksSchemaUnknown,
+    AgentHooksRecordFailed,
+    AgentHooksRootUnstable,
+    AgentHooksTakeOver,
+    AgentHooksLeftOther,
     ClaudeHooksFailedToast,
     // ── the focus card's height (§7.1.6b′, user ruling 2026-08-21) ──────────
     //
@@ -4513,6 +4523,27 @@ impl Text {
                 "Claude Code hook removed",
                 "已从 ~/.claude/settings.json 移除",
             ),
+            // CHINESE PENDING — T-B; English until owner copy review.
+            Self::AgentHooksExeUnknown => "The running executable’s location is unavailable.",
+            Self::AgentHooksPathPlaceholder => {
+                "This executable path contains an agent placeholder. Move Folio before installing hooks."
+            }
+            Self::AgentHooksExeUnstable => {
+                "The hook executable needs a stable absolute Unicode path."
+            }
+            Self::AgentHooksTranslocated => {
+                "Move Folio out of App Translocation before installing hooks."
+            }
+            Self::AgentHooksOwnerUnknown => "The hook executable’s owner could not be verified.",
+            Self::AgentHooksSchemaUnknown => "The hook configuration uses an unrecognized format.",
+            Self::AgentHooksRecordFailed => {
+                "The integration locations could not be recorded. Check the Folio data folder."
+            }
+            Self::AgentHooksRootUnstable => "The agent configuration needs an absolute path.",
+            Self::AgentHooksTakeOver => {
+                "Another Folio owns these hooks. Press this switch again within 30 seconds to use this copy:"
+            }
+            Self::AgentHooksLeftOther => "Hooks kept for another Folio:",
             Self::ClaudeHooksFailedToast => pick(
                 lang,
                 "Claude Code's settings were not changed",
@@ -5089,7 +5120,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 709] = [
+    pub const ALL: [Self; 719] = [
         Self::PastePathEncoding,
         Self::PastePathControl,
         Self::PastePathPowerShellQuote,
@@ -5634,6 +5665,16 @@ impl Text {
         Self::DescClaudeHooks,
         Self::ClaudeHooksAddedToast,
         Self::ClaudeHooksRemovedToast,
+        Self::AgentHooksExeUnknown,
+        Self::AgentHooksExeUnstable,
+        Self::AgentHooksPathPlaceholder,
+        Self::AgentHooksTranslocated,
+        Self::AgentHooksOwnerUnknown,
+        Self::AgentHooksSchemaUnknown,
+        Self::AgentHooksRecordFailed,
+        Self::AgentHooksRootUnstable,
+        Self::AgentHooksTakeOver,
+        Self::AgentHooksLeftOther,
         Self::ClaudeHooksFailedToast,
         Self::RowFocusCardHeight,
         Self::DescFocusCardHeight,
@@ -5944,7 +5985,28 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 0] = [];
+    const CHINESE_PENDING: [(Self, HostPlatform); 20] = [
+        (Self::AgentHooksPathPlaceholder, HostPlatform::Windows),
+        (Self::AgentHooksPathPlaceholder, HostPlatform::MacOs),
+        (Self::AgentHooksExeUnknown, HostPlatform::Windows),
+        (Self::AgentHooksExeUnknown, HostPlatform::MacOs),
+        (Self::AgentHooksExeUnstable, HostPlatform::Windows),
+        (Self::AgentHooksExeUnstable, HostPlatform::MacOs),
+        (Self::AgentHooksTranslocated, HostPlatform::Windows),
+        (Self::AgentHooksTranslocated, HostPlatform::MacOs),
+        (Self::AgentHooksOwnerUnknown, HostPlatform::Windows),
+        (Self::AgentHooksOwnerUnknown, HostPlatform::MacOs),
+        (Self::AgentHooksSchemaUnknown, HostPlatform::Windows),
+        (Self::AgentHooksSchemaUnknown, HostPlatform::MacOs),
+        (Self::AgentHooksRecordFailed, HostPlatform::Windows),
+        (Self::AgentHooksRecordFailed, HostPlatform::MacOs),
+        (Self::AgentHooksRootUnstable, HostPlatform::Windows),
+        (Self::AgentHooksRootUnstable, HostPlatform::MacOs),
+        (Self::AgentHooksTakeOver, HostPlatform::Windows),
+        (Self::AgentHooksTakeOver, HostPlatform::MacOs),
+        (Self::AgentHooksLeftOther, HostPlatform::Windows),
+        (Self::AgentHooksLeftOther, HostPlatform::MacOs),
+    ];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
@@ -6431,6 +6493,24 @@ pub fn first_run_tip_copilot(path: &str) -> String {
         Lang::English => format!("Takes a dated copy of {path}, then writes the hook."),
         Lang::Chinese => format!("先做带日期的副本，再写入 {path}"),
     }
+}
+
+/// Paths are the evidence named by the adapter, never reconstructed by the UI.
+pub(crate) fn agent_owner_notice(install: bool, owners: &[std::path::PathBuf]) -> String {
+    let text = if install {
+        Text::AgentHooksTakeOver
+    } else {
+        Text::AgentHooksLeftOther
+    };
+    format!(
+        "{}\n{}",
+        text.text(),
+        owners
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
 }
 
 /// An agent installer's refusal, carrying the reason the installer gave.

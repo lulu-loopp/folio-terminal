@@ -43,6 +43,7 @@ mod attention_codex;
 mod attention_copilot;
 mod attention_hooks;
 mod attention_map;
+mod attention_ownership;
 mod attention_trace;
 mod attention_wire;
 mod attention_words;
@@ -11590,6 +11591,8 @@ struct App {
     /// desktop — and rewriting a file belonging to another program at every launch, without being
     /// asked, is not something this build does.
     claude_hooks_installed: bool,
+    /// Short-lived consent for the Claude, Codex and Copilot rows, respectively.
+    agent_takeovers: [Option<attention_ownership::Pending>; 3],
     /// **Whether the user's own `~/.codex/config.toml` runs `folio attention` at the end of a
     /// turn**, cached exactly as the field above is and for its two reasons.
     codex_notify_installed: bool,
@@ -38997,6 +39000,7 @@ impl Runtime<'_> {
             explorer_package_asked_place: explorer_menu::ExplorerPlace::default(),
             explorer_package_announce: Announce::Everything,
             // Read once, and *only* read: see the field for why this one is not repaired.
+            agent_takeovers: Default::default(),
             claude_hooks_installed: attention_hooks::state() == attention_hooks::State::Installed,
             // The same, over codex's own file — see the field above's note, which holds word for
             // word for this one.
@@ -54120,8 +54124,20 @@ impl Runtime<'_> {
     /// The one that matters is a settings file this build cannot read: it is left exactly as it is,
     /// because it belongs to somebody who wrote it.
     fn apply_claude_hooks(&mut self, install: bool, announce: Announce) -> Result<bool> {
-        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("folio.exe"));
-        let outcome = attention_hooks::apply(install, &exe);
+        let config = attention_hooks::settings_path();
+        let decision = attention_ownership::next_decision(
+            &mut self.app.agent_takeovers[0],
+            install,
+            config.as_deref(),
+        );
+        let exe = std::env::current_exe().ok();
+        let outcome = match attention_ownership::stable_executable(exe.as_deref()) {
+            Ok(exe) => attention_hooks::apply(decision, exe),
+            Err(reason) => attention_hooks::Outcome::Refused(reason),
+        };
+        if let attention_hooks::Outcome::TakeOverRequired(owners) = &outcome {
+            self.app.agent_takeovers[0] = attention_ownership::Pending::new(config, owners.clone());
+        }
         self.app.claude_hooks_installed =
             attention_hooks::state() == attention_hooks::State::Installed;
         match outcome {
@@ -54151,6 +54167,16 @@ impl Runtime<'_> {
             // The file already said what the press asked for. Nothing was written, and a card
             // saying so would be a card about this build's bookkeeping.
             attention_hooks::Outcome::Unchanged => Ok(true),
+            attention_hooks::Outcome::TakeOverRequired(owners)
+            | attention_hooks::Outcome::LeftOther(owners) => {
+                self.toast(
+                    toast::ToastKind::Error,
+                    toast::ToastAnchor::Window,
+                    None,
+                    i18n::agent_owner_notice(install, &owners),
+                )?;
+                Ok(false)
+            }
             attention_hooks::Outcome::Refused(reason) => {
                 self.toast(
                     toast::ToastKind::Error,
@@ -54175,8 +54201,20 @@ impl Runtime<'_> {
     /// one such key in that file, so installing over it would delete a program this build cannot
     /// give back — see `attention_codex`'s header.
     fn apply_codex_notify(&mut self, install: bool, announce: Announce) -> Result<bool> {
-        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("folio.exe"));
-        let outcome = attention_codex::apply(install, &exe);
+        let config = attention_codex::config_path();
+        let decision = attention_ownership::next_decision(
+            &mut self.app.agent_takeovers[1],
+            install,
+            config.as_deref(),
+        );
+        let exe = std::env::current_exe().ok();
+        let outcome = match attention_ownership::stable_executable(exe.as_deref()) {
+            Ok(exe) => attention_codex::apply(decision, exe),
+            Err(reason) => attention_codex::Outcome::Refused(reason),
+        };
+        if let attention_codex::Outcome::TakeOverRequired(owners) = &outcome {
+            self.app.agent_takeovers[1] = attention_ownership::Pending::new(config, owners.clone());
+        }
         self.app.codex_notify_installed =
             attention_codex::state() == attention_codex::State::Installed;
         match outcome {
@@ -54205,6 +54243,16 @@ impl Runtime<'_> {
             }
             // The file already said what the press asked for.
             attention_codex::Outcome::Unchanged => Ok(true),
+            attention_codex::Outcome::TakeOverRequired(owners)
+            | attention_codex::Outcome::LeftOther(owners) => {
+                self.toast(
+                    toast::ToastKind::Error,
+                    toast::ToastAnchor::Window,
+                    None,
+                    i18n::agent_owner_notice(install, &owners),
+                )?;
+                Ok(false)
+            }
             attention_codex::Outcome::Refused(reason) => {
                 self.toast(
                     toast::ToastKind::Error,
@@ -54233,8 +54281,20 @@ impl Runtime<'_> {
     /// under the row is a fact about the machine, and a press is one of the moments a fact about
     /// the machine can have changed.
     fn apply_copilot_hooks(&mut self, install: bool, announce: Announce) -> Result<bool> {
-        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("folio.exe"));
-        let outcome = attention_copilot::apply(install, &exe);
+        let config = attention_copilot::hooks_path();
+        let decision = attention_ownership::next_decision(
+            &mut self.app.agent_takeovers[2],
+            install,
+            config.as_deref(),
+        );
+        let exe = std::env::current_exe().ok();
+        let outcome = match attention_ownership::stable_executable(exe.as_deref()) {
+            Ok(exe) => attention_copilot::apply(decision, exe),
+            Err(reason) => attention_copilot::Outcome::Refused(reason),
+        };
+        if let attention_copilot::Outcome::TakeOverRequired(owners) = &outcome {
+            self.app.agent_takeovers[2] = attention_ownership::Pending::new(config, owners.clone());
+        }
         self.app.copilot_hooks_installed =
             attention_copilot::state() == attention_copilot::State::Installed;
         self.app.copilot_readiness = attention_copilot::readiness();
@@ -54264,6 +54324,16 @@ impl Runtime<'_> {
             }
             // The directory already said what the press asked for.
             attention_copilot::Outcome::Unchanged => Ok(true),
+            attention_copilot::Outcome::TakeOverRequired(owners)
+            | attention_copilot::Outcome::LeftOther(owners) => {
+                self.toast(
+                    toast::ToastKind::Error,
+                    toast::ToastAnchor::Window,
+                    None,
+                    i18n::agent_owner_notice(install, &owners),
+                )?;
+                Ok(false)
+            }
             attention_copilot::Outcome::Refused(reason) => {
                 self.toast(
                     toast::ToastKind::Error,
@@ -124575,10 +124645,12 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 13] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 14] = [
         // The hook this build writes into somebody else's settings file names a
         // program, and a program is named differently on each platform.
         "attention_copilot.rs",
+        // Only native lock and symlink regression fixtures; ownership policy is portable.
+        "attention_ownership.rs",
         // The fixture for "an argument is not text", and nothing else — see the
         // module's own note above.
         "cli.rs",

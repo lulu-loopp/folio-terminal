@@ -110,3 +110,9 @@ both `Folio` path operands in the template above; the marker stays unchanged.
 Both exact managed spellings are recognised and removed. Migration also updates
 an owned managed line to the selected account root (for example after relocation).
 No other root, quoting style, or appended comment is admitted.
+
+T-B now writes the three `agent_config_roots` lists through
+`attention_ownership::record`, under this same lock. Agent installation records
+intent before updating its config, preserves `powershell_state`, and refuses
+when the record cannot be safely extended. See [agent integration marks](agent-integration-marks.md)
+for adapter ownership, take-over, and the T-C1 removal API.

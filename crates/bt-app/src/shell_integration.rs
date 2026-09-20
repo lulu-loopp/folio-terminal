@@ -1460,7 +1460,7 @@ enum ProfileAccess {
     Link,
 }
 
-fn refuse_profile_path(path: &Path) -> std::io::Result<()> {
+pub(crate) fn refuse_profile_path(path: &Path) -> std::io::Result<()> {
     refuse_profile_path_with(path, |component| {
         let metadata = match std::fs::symlink_metadata(component) {
             Ok(metadata) => metadata,

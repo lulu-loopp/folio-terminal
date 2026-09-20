@@ -2,35 +2,55 @@
   "hooks": {
     "agentStop": [
       {
-        "powershell": "& 'C:\\folio\\folio.exe' attention copilot:agentStop",
+        "args": [
+          "attention",
+          "copilot:agentStop"
+        ],
+        "exec": "C:\\folio\\folio.exe",
         "timeoutSec": 5,
         "type": "command"
       }
     ],
     "notification": [
       {
+        "args": [
+          "attention",
+          "copilot:notification.permission_prompt"
+        ],
+        "exec": "C:\\folio\\folio.exe",
         "matcher": "permission_prompt",
-        "powershell": "& 'C:\\folio\\folio.exe' attention copilot:notification.permission_prompt",
         "timeoutSec": 5,
         "type": "command"
       },
       {
+        "args": [
+          "attention",
+          "copilot:notification.elicitation_dialog"
+        ],
+        "exec": "C:\\folio\\folio.exe",
         "matcher": "elicitation_dialog",
-        "powershell": "& 'C:\\folio\\folio.exe' attention copilot:notification.elicitation_dialog",
         "timeoutSec": 5,
         "type": "command"
       }
     ],
     "sessionEnd": [
       {
-        "powershell": "& 'C:\\folio\\folio.exe' attention copilot:sessionEnd",
+        "args": [
+          "attention",
+          "copilot:sessionEnd"
+        ],
+        "exec": "C:\\folio\\folio.exe",
         "timeoutSec": 5,
         "type": "command"
       }
     ],
     "userPromptSubmitted": [
       {
-        "powershell": "& 'C:\\folio\\folio.exe' attention copilot:userPromptSubmitted",
+        "args": [
+          "attention",
+          "copilot:userPromptSubmitted"
+        ],
+        "exec": "C:\\folio\\folio.exe",
         "timeoutSec": 5,
         "type": "command"
       }
