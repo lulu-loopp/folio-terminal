@@ -1027,8 +1027,7 @@ fn a_wait_is_not_a_journey() {
     // deadline the whole way and no motion anywhere in it.
     for at in [Duration::ZERO, termscroll::THUMB_REST / 2] {
         assert!(
-            termscroll::fade_deadline(start, start + at, Motion::Full, Duration::from_millis(16))
-                .is_some(),
+            termscroll::fade_wait_deadline(start, start + at).is_some(),
             "the rest ends at an instant, so the loop is woken for it"
         );
         assert!(
@@ -1080,6 +1079,7 @@ fn a_wait_is_not_a_journey() {
 /// `main.rs`, read as text, for the properties that are about **where a
 /// statement stands** rather than about what it computes.
 const SOURCE: &str = include_str!("main.rs");
+const TERMSCROLL_SOURCE: &str = include_str!("termscroll.rs");
 
 /// The text of one method of `main.rs`, from its signature to the next one's.
 fn method(signature: &str) -> &'static str {
@@ -1479,9 +1479,9 @@ fn a_picture_that_arrives_between_frames_books_its_own_wake() {
     );
     for asker in [
         "    fn strip_animation_work(&self, now: Instant) -> AnimationWork {",
-        "    fn terminal_thumb_work(&self, now: Instant) -> AnimationWork {",
         "    fn drag_autoscroll_deadline(&self, now: Instant) -> Option<Instant> {",
         "    fn next_animation_frame(&self, now: Instant) -> Instant {",
+        "    fn next_animation_deadline(&self) -> Option<Instant> {",
     ] {
         let body = method(asker);
         assert!(
@@ -1489,13 +1489,38 @@ fn a_picture_that_arrives_between_frames_books_its_own_wake() {
             "this has to ask the clock that reads the display:\n{body}"
         );
     }
-    // The two that are handed the frame rather than reading it — a `PaneMotion`
-    // and a `termscroll` fade cannot see the window — take it as an argument,
-    // and `terminal_thumb_work` and the strip's fold are what pass it.
+    // PaneMotion cannot see the window, so it reports only whether a flight is
+    // live. The strip fold assigns that flight the one absolute tick derived
+    // above from this window's frame clock; the retired helper must not grow
+    // back and manufacture a renewable `now + frame` appointment of its own.
     assert!(
-        method("    fn deadline(&self, now: Instant, motion: Motion, frame: Duration)")
-            .contains("now + frame"),
-        "a pane in flight asks on the frame it is given"
+        work.contains("let pane_moving = self.window.pane_motion.is_animating(now, motion);")
+            && work.contains(
+                "let next_tick = self.strip_animation_next_tick(self.window.frame_clock.interval());"
+            )
+            && work.contains("(bar_moving || pane_moving).then_some(next_tick).flatten()"),
+        "a pane in flight is assigned the strip's absolute window-clock tick:\n{work}"
+    );
+    assert!(
+        !SOURCE.contains("fn deadline(&self, now: Instant, motion: Motion, frame: Duration)")
+            && !SOURCE.contains("self.is_animating(now, motion).then(|| now + frame)"),
+        "PaneMotion must not own a renewable query-time deadline"
+    );
+
+    // The terminal thumb has the same ownership split. `termscroll` reports
+    // the absolute end of its full-strength rest and whether the fade is live;
+    // the window assigns a live fade its shared absolute frame appointment.
+    let thumbs = method("    fn terminal_thumb_work(&self, now: Instant) -> AnimationWork {");
+    assert!(
+        thumbs.contains("if termscroll::fade_is_moving(rest, now, motion) {")
+            && thumbs.contains("self.next_animation_deadline()")
+            && thumbs.contains("termscroll::fade_wait_deadline(rest, now)"),
+        "a thumb fade rides the window clock while its owner retains the rest deadline:\n{thumbs}"
+    );
+    assert!(
+        !TERMSCROLL_SOURCE.contains("frame: Duration")
+            && !TERMSCROLL_SOURCE.contains("Some(now + frame)"),
+        "termscroll must not manufacture a renewable query-time frame"
     );
 }
 

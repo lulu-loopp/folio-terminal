@@ -60271,7 +60271,7 @@ impl Runtime<'_> {
             let due = if termscroll::fade_is_moving(rest, now, motion) {
                 self.next_animation_deadline()
             } else {
-                termscroll::fade_deadline(rest, now, motion, self.window.frame_clock.interval())
+                termscroll::fade_wait_deadline(rest, now)
             };
             if let Some(due) = due {
                 work.deadline = Some(work.deadline.map_or(due, |soonest| soonest.min(due)));

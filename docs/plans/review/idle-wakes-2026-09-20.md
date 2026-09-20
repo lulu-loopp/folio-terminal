@@ -84,3 +84,26 @@ Windows validation passed, serially and with `-j 4`:
 - Narrowed `cargo test -p bt-app --bin folio --locked -j 4` filters for the
   absolute pane wake, reduced motion, the full pane flight, tab-switch cleanup,
   and the no-query-time-renewal source gate.
+
+## CI follow-up 2
+
+The remaining journey source pin still looked up the removed
+`PaneMotion::deadline` and blessed its retired `now + frame` body. It now pins
+the fact that `strip_animation_work` maps `PaneMotion::is_animating` onto the
+strip's absolute tick read from the window `frame_clock`, and separately keeps
+the deleted renewable helper absent.
+
+The companion termscroll audit found its equivalent renewal still present but
+unreachable: `terminal_thumb_work` already used `next_animation_deadline` while
+a live fade, so the moving arm of `termscroll::fade_deadline` was exercised only
+by tests. That arm and its frame argument are removed; `fade_wait_deadline`
+retains only the state-owned end of `THUMB_REST`, while the runtime owns every
+moving-frame appointment through the same window clock.
+
+Windows validation passed, serially and with `-j 4`:
+
+- Whole suite: `cargo test -p bt-app --bin folio --locked -j 4` — 4,041 passed,
+  0 failed, 6 ignored (plus the intentional subprocess probe: 1 passed).
+- `cargo clippy -p bt-app --all-targets --locked -j 4 -- -D warnings` — passed.
+- `RUSTFLAGS="-D warnings" cargo check -p bt-app --bin folio --locked -j 4` —
+  passed.
