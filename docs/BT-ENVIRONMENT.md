@@ -56,7 +56,7 @@ added later; `BT_PTY_DUMP` and `BT_HANG_SELFTEST` deliberately do not match it.
 | `BT_WEB_DEV` | URL | Opens a preview seat at startup and navigates it to this URL. | The page is loaded, so its cache and cookies land in the WebView2 profile under `%LOCALAPPDATA%\Folio\WebView2` like any other previewed page. | off; no page is opened |
 | `BT_POWERSHELL_PROFILE` | file path, used verbatim | Redirects the shell-integration installer: the `$PROFILE` it reads and writes becomes this file instead of the real one. | The file you name is created and edited by the installer. | the real `$PROFILE`, asked of a running PowerShell |
 | `BT_PSREADLINE_DOCUMENTS` | directory path, used as a base | Redirects the bundled PSReadLine installer's Documents root. The module goes to `<dir>\WindowsPowerShell\Modules\PSReadLine\<version>\`. | Nine files are written under, and deleted from, the directory you name. | the real Documents folder |
-| `BT_UNINSTALL_ROOT` | absolute sandbox directory; empty/relative refuses | Isolates `--uninstall-cleanup` and `--purge`: data, profiles, modules, agents, temp files and instance claims resolve below this directory. Registry/MSIX/toast operations are replaced with absent sandbox readings. | Deletes only resolved sandbox data paths when `--purge` is present; never the application folder. Recorded paths outside the sandbox refuse. | real account roots and system registrations |
+| `BT_UNINSTALL_ROOT` | absolute sandbox directory; empty/relative refuses | **Read only by a debug or test build; a shipped `folio.exe` ignores it entirely** (`uninstall.rs: SANDBOX_DOOR`). Isolates `--uninstall-cleanup` and `--purge`: data, profiles, modules, agents, temp files and instance claims resolve below this directory. Registry/MSIX/toast operations are replaced with absent sandbox readings. | Deletes only resolved sandbox data paths when `--purge` is present; never the application folder. Recorded paths outside the sandbox refuse. | real account roots and system registrations |
 | `BT_PSREADLINE_PROBE` | `<version>[,<policy>]` | Makes the machine read as if it had that PSReadLine version and execution policy, so the upgrade invitation can be photographed. Redirects no write. | — | the real probe, which runs `powershell -NoProfile`. **Set-but-empty is not off here**: `=` engages the override at version `0.0.0`. |
 | `BT_FIRST_RUN_CARD` | switch | Raises the first-run card on a machine that has already answered it, so it can be photographed in a second language or looked at again. Overrides the appearance gate and nothing else: which rows are offered, what `Done` does and what is written down are exactly what they would be on a real first run. | — | off; the card appears only on a machine with no `settings.json` that has never shown it |
 | `BT_SHELL` | program path or bare name, used verbatim | Overrides the default shell program, and is what the `PowerShell` profile row resolves to. Never checked for existence; a bare name is resolved by `CreateProcess` against `PATH`, and a spawn failure falls back to `powershell.exe`. | — | `pwsh.exe` if found, else `powershell.exe` |
@@ -349,3 +349,16 @@ Temporary data is below `temp`. No registry operation is made in this mode.
 An injected root is a destructive test target when purge is requested: create a
 fresh disposable directory. Unit tests inject these paths directly and supply
 fake system readings without changing process-wide environment variables.
+
+**A release build does not read this variable at all.** Redirection there would
+not be a sandbox but a silent failure: a stray or inherited value would make a
+production cleanup report every real integration "not present" and exit 0 with
+the machine untouched, and whether the machine is clean is the one thing the
+command exists to answer. Nothing under `scripts/` sets the variable, so no
+release-binary test depends on it; `uninstall_sandbox_door_is_not_read_by_a_shipped_build`
+pins both halves. Use a debug build, or a disposable VM, to exercise the door.
+
+Two further rules the door keeps, in every build: it **creates nothing** — a data
+root that does not exist means "no marks", and it is still absent afterwards — and
+a path read from `integration-marks.json` is data, not authority, so it is checked
+for shape and kind before it is used, sandbox or no sandbox.

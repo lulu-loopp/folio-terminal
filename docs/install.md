@@ -162,7 +162,9 @@ means Folio is running or, with purge, a process still holds its data.
 
 Add `--purge` to the same command to also delete settings, sessions and browser
 data, including both Windows data roots and legacy data, or all six macOS data
-locations. Without it, your data stays. Dated recovery copies beside user
+locations. Without it, your data stays. **On macOS, Folio cannot tell whether
+another program is holding that data** — there is no equivalent of the Windows
+check — so quit Folio before you purge; the command says so as it starts. Dated recovery copies beside user
 configuration files are kept. The application folder is never deleted.
 After cleanup succeeds, delete the extracted folder or move Folio.app to the Bin;
 for a managed installation, use its package manager to remove the application.

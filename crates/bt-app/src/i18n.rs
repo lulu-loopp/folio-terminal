@@ -376,6 +376,8 @@ pub enum Text {
     CleanupLink,
     CleanupUsage,
     CleanupSystemUnknown,
+    CleanupRecorded, // CHINESE PENDING
+    CleanupMacHeld,  // CHINESE PENDING
 
     // T-PASTE-1 refusal messages; Chinese is assigned to the copy lane.
     PastePathEncoding,
@@ -2728,6 +2730,7 @@ pub enum Text {
     ShellProfileEncoding,
     ShellMarksVersion,
     ShellMarksPath,
+    ShellMarksProfileKind, // CHINESE PENDING
     ShellProfileUnchanged,
     ShellProfileMigrated,
     ShellProfileRemoved,
@@ -4653,6 +4656,11 @@ impl Text {
                 "The registration could not be read.",
                 "无法读取注册信息。",
             ),
+            Self::CleanupRecorded => "The record names a path this door will not act on.", // CHINESE PENDING
+            Self::CleanupMacHeld => {
+                "On macOS Folio cannot tell whether another program holds this data. \
+                 Quit Folio before --purge."
+            } // CHINESE PENDING
             Self::AgentHooksOwnerUnknown => pick(
                 lang,
                 "The hook executable’s owner could not be verified.",
@@ -5155,6 +5163,7 @@ impl Text {
                 "Integration mark paths must be absolute.",
                 "整合记录中的路径必须是绝对路径。",
             ),
+            Self::ShellMarksProfileKind => "A recorded $PROFILE must be a .ps1 file.", // CHINESE PENDING
             Self::ShellProfileUnchanged => pick(lang, "Folio profile unchanged", "$PROFILE 未改动"),
             Self::ShellProfileMigrated => pick(
                 lang,
@@ -5259,7 +5268,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 736] = [
+    pub const ALL: [Self; 739] = [
         Self::CleanupArchiveExit,
         Self::CleanupArchiveReady,
         Self::CleanupArchiveIncomplete,
@@ -5277,6 +5286,8 @@ impl Text {
         Self::CleanupLink,
         Self::CleanupUsage,
         Self::CleanupSystemUnknown,
+        Self::CleanupRecorded,
+        Self::CleanupMacHeld,
         Self::PastePathEncoding,
         Self::PastePathControl,
         Self::PastePathPowerShellQuote,
@@ -5985,6 +5996,7 @@ impl Text {
         Self::ShellProfileEncoding,
         Self::ShellMarksVersion,
         Self::ShellMarksPath,
+        Self::ShellMarksProfileKind,
         Self::ShellProfileUnchanged,
         Self::ShellProfileMigrated,
         Self::ShellProfileRemoved,
@@ -6141,7 +6153,14 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 0] = [];
+    const CHINESE_PENDING: [(Self, HostPlatform); 6] = [
+        (Self::CleanupRecorded, HostPlatform::Windows),
+        (Self::CleanupRecorded, HostPlatform::MacOs),
+        (Self::CleanupMacHeld, HostPlatform::Windows),
+        (Self::CleanupMacHeld, HostPlatform::MacOs),
+        (Self::ShellMarksProfileKind, HostPlatform::Windows),
+        (Self::ShellMarksProfileKind, HostPlatform::MacOs),
+    ];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────

@@ -93,6 +93,26 @@ All three reviewers kept the shape — degrade first, one door second, installer
 ### 6.4 Layer 1, as revised
 **The door.** `folio --uninstall-cleanup`: exit 0 = the machine is as asked; 1 = a removal was attempted and refused (file locked, malformed, unknown schema — left byte-identical, named on stderr); 2 = a Folio instance is running (the door refuses to act: scoop runs `pre_uninstall` BEFORE its own running-process check and then abandons the uninstall — without this, marks vanish while the app stays). `--purge` additionally requires that no Folio or WebView2 process holds the data, covers both Windows roots, the legacy root and all six macOS locations, and reports what it could not delete.
 
+**Addendum 2026-09-20 (T-C1 closure review, findings 1–5, 7a).** Four rules the door
+keeps that this section did not state, and one promise it cannot keep:
+- **An uninstaller creates nothing.** A data root that does not exist means "no marks"
+  for every per-account row; the door reads the record read-only, writes no Off record,
+  no lock and no root, and the root is still absent when the run ends.
+- **`BT_UNINSTALL_ROOT` is a test instrument.** A shipped build does not read it: a
+  redirected production cleanup would report every real mark "not present" and exit 0.
+- **A recorded path is data, not authority.** Every path read from `integration-marks.json`
+  is checked before use, in every build: absolute, no `..`, never a filesystem root, and
+  the kind of place its mark may name. Refused paths are named; exit 1.
+- **Exit 2 names the file that is held** (basename), the rule itself unchanged: any
+  process holding any file in a data root stops the whole run.
+- **macOS purge cannot detect held data.** `probe_file` is a no-op off Windows, so this
+  section's "requires that no Folio or WebView2 process holds the data" is unmet there.
+  The door does not guess: a macOS `--purge` states that it cannot tell and that Folio
+  must be quit first (the flock still covers a second native Folio; unlinking an open
+  file is safe on Unix, so this is a promise gap, not data loss).
+- A purge row reports what was observed at the check that decided the deletion, so a root
+  created after the preflight reads `removed` rather than `not present`.
+
 **Entrances, reduced:**
 1. `uninstall.cmd` in the archive and the rewritten `docs/install.md` — in 0.4.3, cleanup ONLY.
 2. Settings ▸ About ▸ "Uninstall Folio…" (0.4.4): shows what will be undone and what is kept, closes windows, runs the door, then **reveals the application folder (Windows) or the app in Finder (macOS) for the user to delete**, or names the package manager's command for a managed copy.

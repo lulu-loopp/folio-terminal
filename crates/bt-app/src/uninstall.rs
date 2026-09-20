@@ -265,23 +265,36 @@ fn english(text: Text) -> &'static str {
 }
 struct Report {
     code: i32,
+    /// What the door could not establish on this platform, said before the rows it
+    /// could. A notice is not a fate: it changes no exit code and names no mark.
+    notices: Vec<&'static str>,
     entries: Vec<Entry>,
 }
 impl Report {
     fn new(entries: Vec<Entry>) -> Self {
         Self {
             code: i32::from(entries.iter().any(|e| matches!(e.fate, Fate::Refused(_)))),
+            notices: Vec::new(),
             entries,
         }
+    }
+    fn noticing(mut self, notices: Vec<&'static str>) -> Self {
+        self.notices = notices;
+        self
     }
     fn blocked(reason: &str) -> Self {
         Self {
             code: 2,
+            notices: Vec::new(),
             entries: vec![Entry::new("Folio", Fate::Refused(reason.to_owned()))],
         }
     }
     fn stdout(&self) -> String {
-        self.entries.iter().map(Entry::line).collect()
+        self.notices
+            .iter()
+            .map(|notice| format!("{notice}\n"))
+            .chain(self.entries.iter().map(|e| e.line()))
+            .collect()
     }
     fn stderr(&self) -> String {
         self.entries
@@ -498,12 +511,13 @@ fn execute_with_claim<T>(
         for (_, root) in &scope.purge_roots {
             let result = prepare_tree(root, &scope.exe);
             if let Err(error) = &result
-                && is_busy(error)
+                && let Some(held) = held_file(error)
             {
                 return Report::blocked(&format!(
-                    "{}: {} ({error})",
+                    "{}: {} ({})",
                     english(Text::CleanupBusy),
-                    root.display()
+                    root.display(),
+                    held.display()
                 ));
             }
             prepared.push(result);
@@ -524,30 +538,30 @@ fn execute_with_claim<T>(
                 .enumerate()
                 {
                     for root in roots {
-                        if scope.sandbox.as_ref().is_none_or(|sandbox| {
-                            root.starts_with(sandbox) && !has_parent_component(&root)
-                        }) {
+                        if usable_recorded_directory(scope, &root) {
                             push_unique(&mut agents[index], root);
                         } else {
                             entries.push(Entry::new(
                                 root.display().to_string(),
-                                Fate::Refused(english(Text::CleanupRoot).to_owned()),
+                                Fate::Refused(english(Text::CleanupRecorded).to_owned()),
                             ));
                         }
                     }
                 }
                 for root in marks.psreadline_module_roots {
+                    // The module directory's own shape answers "is this a module root":
+                    // a Documents root exists only if joining the module's fixed relative
+                    // path to it spells this recorded path back.
                     match crate::psreadline::documents_for_module_root(&root) {
                         Some(path)
-                            if scope.sandbox.as_ref().is_none_or(|sandbox| {
-                                path.starts_with(sandbox) && !has_parent_component(&path)
-                            }) =>
+                            if usable_recorded_directory(scope, &root)
+                                && usable_recorded_directory(scope, &path) =>
                         {
                             push_unique(&mut documents, path)
                         }
                         _ => entries.push(Entry::new(
                             root.display().to_string(),
-                            Fate::Refused(english(Text::CleanupRoot).to_owned()),
+                            Fate::Refused(english(Text::CleanupRecorded).to_owned()),
                         )),
                     }
                 }
@@ -652,10 +666,13 @@ fn execute_with_claim<T>(
     }
     if purge {
         for ((name, root), prepared) in scope.purge_roots.iter().zip(prepared) {
-            let result = prepared.and_then(|present| {
-                // Shell removal may have persisted the account's Off decision in a root
-                // absent at preflight. Purge also removes that newly created record.
-                if prepare_tree(root, &scope.exe)? {
+            let result = prepared.and_then(|_preflight| {
+                // The preflight decides whether the run may proceed; what the row
+                // reports is what was true at the check that decided the deletion.
+                // A root created after the preflight is removed, and says `removed`;
+                // one that went away in between says `not present`.
+                let present = prepare_tree(root, &scope.exe)?;
+                if present {
                     remove_tree(root)?;
                 }
                 Ok(if present { Fate::Removed } else { Fate::Absent })
@@ -666,7 +683,42 @@ fn execute_with_claim<T>(
             ));
         }
     }
-    Report::new(entries)
+    Report::new(entries).noticing(purge_notices(bt_platform::host_platform(), purge))
+}
+
+/// What the door cannot establish on this platform, and therefore does not claim.
+///
+/// `probe_file` is a no-op off Windows (`bt-platform/src/cleanup.rs`): there is no
+/// mandatory sharing mode to ask, so §6.4's "requires that no Folio or WebView2 process
+/// holds the data" cannot be checked on macOS. The door says so rather than implying a
+/// check it did not make — the flock still covers a second native Folio, and unlinking
+/// an open file is safe on Unix, so this is a promise gap and not data loss.
+fn purge_notices(platform: HostPlatform, purge: bool) -> Vec<&'static str> {
+    if purge && platform == HostPlatform::MacOs {
+        vec![english(Text::CleanupMacHeld)]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Whether a directory read out of the account record may be used.
+///
+/// **A recorded path is data, never authority.** `integration-marks.json` is an
+/// ordinary file in the data folder; anything that can write it can name any path on
+/// the machine. So the shape is checked on every run and not only under a test sandbox
+/// (where the check is additionally containment): absolute, free of `..`, never a
+/// filesystem root, and a directory rather than a file — the door only ever joins a
+/// fixed relative name onto it, and a mark naming somebody's document names no
+/// configuration root.
+fn usable_recorded_directory(scope: &Scope, path: &Path) -> bool {
+    path.is_absolute()
+        && !has_parent_component(path)
+        && path.parent().is_some()
+        && !fs::metadata(path).is_ok_and(|meta| !meta.is_dir())
+        && scope
+            .sandbox
+            .as_ref()
+            .is_none_or(|sandbox| path.starts_with(sandbox))
 }
 
 fn has_parent_component(path: &Path) -> bool {
@@ -674,8 +726,48 @@ fn has_parent_component(path: &Path) -> bool {
         .any(|component| matches!(component, std::path::Component::ParentDir))
 }
 
-fn is_busy(error: &io::Error) -> bool {
-    matches!(error.raw_os_error(), Some(32 | 33))
+/// The file a process is holding, carried ON the error so the refusal can name it.
+///
+/// ERROR_SHARING_VIOLATION and ERROR_LOCK_VIOLATION say only that something is held;
+/// which file it was is known at the probe and nowhere else, and a message a reader
+/// cannot act on is half a refusal. The basename alone: the root is already printed
+/// beside it, and the leaf is what has to be closed.
+#[derive(Debug)]
+struct HeldFile(OsString);
+impl std::fmt::Display for HeldFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: {}",
+            english(Text::CleanupBusy),
+            self.name().display()
+        )
+    }
+}
+impl std::error::Error for HeldFile {}
+impl HeldFile {
+    fn name(&self) -> &Path {
+        Path::new(&self.0)
+    }
+}
+
+/// The rule is unchanged — any process holding any file in a data root stops the whole
+/// run — and only the sentence gains the name.
+fn named_if_busy(error: io::Error, path: &Path) -> io::Error {
+    if matches!(error.raw_os_error(), Some(32 | 33)) {
+        return io::Error::new(
+            error.kind(),
+            HeldFile(path.file_name().unwrap_or(path.as_os_str()).to_owned()),
+        );
+    }
+    error
+}
+
+fn held_file(error: &io::Error) -> Option<&Path> {
+    error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<HeldFile>())
+        .map(HeldFile::name)
 }
 /// Preflight the WHOLE tree before deleting a leaf. Links in ancestors or descendants refuse.
 /// There is no canonicalize-and-delete: that would turn a link into authority over its target.
@@ -729,7 +821,7 @@ fn inspect_tree(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
                 crate::i18n::Text::ShellProfileReadOnly.text(),
             ));
         }
-        bt_platform::cleanup::probe_file(path)?;
+        bt_platform::cleanup::probe_file(path).map_err(|e| named_if_busy(e, path))?;
     } else {
         return Err(io::Error::other(english(Text::CleanupRoot)));
     }
@@ -777,10 +869,27 @@ fn system_remove(remover: Remover) -> Vec<Entry> {
         _ => Vec::new(),
     }
 }
+/// **`BT_UNINSTALL_ROOT` is a test instrument, and a shipped build does not read it.**
+///
+/// It redirects the whole door — every data root, profile, module, agent root and temp
+/// file — into a fixture tree. In a release build that is not a sandbox but a silent
+/// failure: a stray or inherited value would make a production cleanup report every
+/// real integration "not present" and exit 0 with the machine untouched, and the one
+/// thing a person runs an uninstaller to learn is whether their machine is clean. A
+/// notice on stdout would leave the same run doing nothing; refusing to read the
+/// variable at all leaves no run that can lie. Debug and test builds keep the door (the
+/// fixture layout is in docs/BT-ENVIRONMENT.md); nothing in `scripts/` sets it, so no
+/// release-binary test relies on it.
+const SANDBOX_DOOR: bool = cfg!(any(debug_assertions, test));
+
+fn sandbox_root(honoured: bool, value: Option<OsString>) -> Option<PathBuf> {
+    value.filter(|_| honoured).map(PathBuf::from)
+}
+
 pub(crate) fn run(purge: bool) -> i32 {
     let scope = std::env::current_exe().and_then(|exe| {
-        if let Some(root) = std::env::var_os("BT_UNINSTALL_ROOT") {
-            Scope::sandbox(&PathBuf::from(root), exe)
+        if let Some(root) = sandbox_root(SANDBOX_DOOR, std::env::var_os("BT_UNINSTALL_ROOT")) {
+            Scope::sandbox(&root, exe)
         } else {
             Scope::resolve(
                 exe,

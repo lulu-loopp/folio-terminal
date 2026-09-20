@@ -14,6 +14,42 @@ fn sandbox(tag: &str) -> (PathBuf, Scope) {
     (root, scope)
 }
 
+/// The same fixture tree resolved the way production resolves it — `sandbox: None` —
+/// so that a rule claimed to hold everywhere can be tested where no sandbox contains
+/// anything. **Never purge with this scope**: its temp rows resolve to the real
+/// clipboard directory, exactly as production's do.
+fn unsandboxed(tag: &str) -> (PathBuf, Scope) {
+    let (root, _) = sandbox(tag);
+    let mapped = root.clone();
+    let scope = Scope::resolve(
+        root.join("app/folio.exe"),
+        bt_platform::host_platform(),
+        move |name| {
+            Some(
+                mapped
+                    .join(match name {
+                        "APPDATA" => "roaming",
+                        "LOCALAPPDATA" => "local",
+                        "HOME" | "USERPROFILE" => "home",
+                        "XDG_DATA_HOME" => "xdg",
+                        "BT_POWERSHELL_PROFILE" => "profiles/profile.ps1",
+                        "BT_PSREADLINE_DOCUMENTS" => "documents",
+                        "CLAUDE_CONFIG_DIR" => "home/.claude",
+                        "CODEX_HOME" => "home/.codex",
+                        "COPILOT_HOME" => "home/.copilot",
+                        _ => return None,
+                    })
+                    .into_os_string(),
+            )
+        },
+        root.join("temp"),
+        false,
+    )
+    .unwrap();
+    assert!(scope.sandbox.is_none());
+    (root, scope)
+}
+
 fn system_absent(_: Remover) -> Vec<Entry> {
     vec![Entry::new("injected registration", Fate::Absent)]
 }
@@ -241,6 +277,13 @@ fn uninstall_purge_busy_file_returns_two_before_touching_marks() {
     let report = execute(&scope, true, |_| panic!("must not reach registry"));
     assert_eq!(report.code, 2);
     assert_eq!(fs::read(profile).unwrap(), before);
+    // The rule is unchanged; the refusal names the file the reader has to close.
+    assert!(report.stderr().contains("(busy)"), "{}", report.stderr());
+    assert!(
+        report
+            .stderr()
+            .contains(&scope.data[0].display().to_string())
+    );
     drop(held);
     fs::remove_dir_all(root).unwrap();
 }
@@ -618,6 +661,171 @@ fn uninstall_archive_has_ten_files_and_cleanup_only_wrapper() {
     for forbidden in ["--purge", "rmdir", " del ", "Remove-Item"] {
         assert!(!wrapper.contains(forbidden));
     }
+}
+
+/// An uninstaller must not bring anything into existence. An account that never ran
+/// Folio has no marks to remove, and the door has to be able to say so without writing
+/// the record — or its lock, or the data root — to say it.
+#[test]
+fn uninstall_creates_nothing_on_an_account_that_never_ran_folio() {
+    let (root, _) = sandbox("pristine");
+    let account = root.join("account");
+    let scope = Scope::sandbox(&account, root.join("app/folio.exe")).unwrap();
+    assert!(!account.exists());
+    let report = execute(&scope, false, system_absent);
+    assert_eq!(report.code, 0, "{}", report.stderr());
+    assert!(
+        report.entries.iter().all(|e| e.fate == Fate::Absent),
+        "{}",
+        report.stdout()
+    );
+    assert!(!account.exists(), "cleanup created {}", account.display());
+    let purge = execute(&scope, true, system_absent);
+    assert_eq!(purge.code, 0, "{}", purge.stderr());
+    assert!(!account.exists(), "purge created {}", account.display());
+    let listing: Vec<_> = fs::read_dir(&root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(listing, ["app"], "the door left {listing:?} behind");
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// A path read out of the record is data, not authority — and the rule holds without a
+/// sandbox to contain it.
+#[test]
+fn uninstall_refuses_hostile_recorded_paths_with_no_sandbox_to_contain_them() {
+    let (root, scope) = unsandboxed("hostile");
+    seed(&scope, &scope.exe);
+    let data = scope.data[0].clone();
+    let document = root.join("home/thesis.txt");
+    fs::write(&document, b"the reader's own file").unwrap();
+    let agent = agent_path(0, &root.join("elsewhere"));
+    assert_eq!(
+        agent_apply(0, &agent, Decision::Install, &scope.exe, &data),
+        Outcome::Installed
+    );
+    let agent_before = fs::read(&agent).unwrap();
+    let documents = root.join("documents-elsewhere");
+    crate::psreadline::install_recorded(&documents, &data).unwrap();
+    let module = crate::psreadline::module_directory(&documents);
+    assert!(module.exists());
+    let hostile = [
+        root.join("home/../elsewhere"),
+        data.ancestors().last().unwrap().to_path_buf(),
+        document.clone(),
+    ];
+    let mut marks = Marks::read(&data).unwrap();
+    marks.agent_config_roots.claude = hostile.to_vec();
+    marks.psreadline_module_roots = vec![
+        root.join("home/..")
+            .join("documents-elsewhere")
+            .join(crate::psreadline::MODULE_RELATIVE_PATH)
+            .join(crate::psreadline::PATCHED_VERSION),
+    ];
+    marks.write(&data).unwrap();
+    let report = execute(&scope, false, system_absent);
+    assert_eq!(report.code, 1, "{}", report.stdout());
+    assert_eq!(fs::read(&agent).unwrap(), agent_before);
+    assert_eq!(fs::read(&document).unwrap(), b"the reader's own file");
+    assert!(module.exists(), "a recorded `..` reached a module root");
+    for refused in hostile
+        .iter()
+        .map(|path| path.display().to_string())
+        .chain(["documents-elsewhere".to_owned()])
+    {
+        assert!(report.stderr().contains(&refused), "{refused}");
+    }
+    // A relative recorded path never reaches the door: the record's own reader
+    // refuses the whole file, and every mark it names stays as it is.
+    let mut relative = serde_json::to_value(&marks).unwrap();
+    relative["agent_config_roots"]["claude"] = serde_json::json!(["relative/.claude"]);
+    let bytes = serde_json::to_vec(&relative).unwrap();
+    fs::write(
+        data.join(crate::shell_integration::profile_marks::RECORD_FILE),
+        &bytes,
+    )
+    .unwrap();
+    let report = execute(&scope, false, system_absent);
+    assert_eq!(report.code, 1, "{}", report.stdout());
+    assert_eq!(fs::read(&agent).unwrap(), agent_before);
+    assert_eq!(fs::read(&document).unwrap(), b"the reader's own file");
+    assert!(module.exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// The sandbox door is a test instrument: a shipped build does not read it, so no
+/// stray value can turn a production cleanup into a report that everything is gone.
+#[test]
+fn uninstall_sandbox_door_is_not_read_by_a_shipped_build() {
+    let value = Some(OsString::from(r"C:\scratch"));
+    assert_eq!(sandbox_root(false, value.clone()), None);
+    assert_eq!(
+        sandbox_root(true, value),
+        Some(PathBuf::from(r"C:\scratch"))
+    );
+    assert_eq!(sandbox_root(true, None), None);
+    const { assert!(SANDBOX_DOOR, "a test build keeps the door") };
+    let source = include_str!("uninstall.rs");
+    assert!(source.contains("const SANDBOX_DOOR: bool = cfg!(any(debug_assertions, test));"));
+    assert!(
+        source.contains(r#"sandbox_root(SANDBOX_DOOR, std::env::var_os("BT_UNINSTALL_ROOT"))"#)
+    );
+    for script in [
+        include_str!("../../../packaging/uninstall.cmd"),
+        include_str!("../../../scripts/release/ci-build-tests.ps1"),
+        include_str!("../../../scripts/release/cleanvm/in-guest.ps1"),
+    ] {
+        assert!(!script.contains("BT_UNINSTALL_ROOT"));
+    }
+}
+
+/// What a purge row reports is what was true at the check that decided the deletion.
+#[test]
+fn uninstall_purge_reports_the_root_it_found_at_the_deciding_check() {
+    let (root, scope) = sandbox("recreated");
+    let (name, late) = scope
+        .purge_roots
+        .iter()
+        .find_map(|(name, path)| {
+            (*name == "Local data (including WebView2)").then(|| (*name, path.clone()))
+        })
+        .unwrap();
+    assert!(!late.exists());
+    let report = execute(&scope, true, |_| {
+        // The inventory's system removers run between the preflight and the deletion.
+        fs::create_dir_all(&late).unwrap();
+        fs::write(late.join("arrived"), b"data").unwrap();
+        vec![Entry::new("injected registration", Fate::Absent)]
+    });
+    assert_eq!(report.code, 0, "{}", report.stderr());
+    assert!(!late.exists());
+    let row = report
+        .entries
+        .iter()
+        .find(|entry| entry.mark.starts_with(&format!("{name} (data)")))
+        .unwrap();
+    assert_eq!(row.fate, Fate::Removed, "{}", report.stdout());
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// macOS cannot be asked whether a file is held, so a purge there says so instead of
+/// implying a check that was never made.
+#[test]
+fn uninstall_purge_says_on_macos_that_held_data_cannot_be_told() {
+    let notice = english(Text::CleanupMacHeld);
+    assert_eq!(purge_notices(HostPlatform::MacOs, true), [notice]);
+    assert!(purge_notices(HostPlatform::MacOs, false).is_empty());
+    assert!(purge_notices(HostPlatform::Windows, true).is_empty());
+    let report = Report::new(vec![Entry::new("Roaming data (data)", Fate::Removed)])
+        .noticing(purge_notices(HostPlatform::MacOs, true));
+    assert_eq!(report.code, 0);
+    assert!(report.stdout().starts_with(&format!("{notice}\n")));
+    assert!(report.stderr().is_empty());
+    assert!(
+        include_str!("../../bt-platform/src/cleanup.rs").contains("let _ = path;"),
+        "probe_file is no longer the no-op this notice exists for"
+    );
 }
 
 #[cfg(windows)]
