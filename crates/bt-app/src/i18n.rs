@@ -2678,6 +2678,7 @@ pub enum Text {
     ShellProfileRefused,
     ShellProfileProbeFailed,
     ShellProfileLink,
+    ShellProfileHardLink,
     ShellProfileReadOnly,
     ShellProfileChanged,
     ShellProfileScriptLocation,
@@ -4461,16 +4462,11 @@ impl Text {
                 "This file was deleted. What you are reading is still here.",
                 "文件已被删除。你正在读的这一份还在。",
             ),
-            Self::RowPowerShellOffer => {
-                pick(lang, "Offer PowerShell integration", "PowerShell 整合提示")
-            }
-            // The same three things as the strip, in the same order, so a
-            // reader who read one and then looked for the switch reads one list
-            // twice rather than two lists once.
+            Self::RowPowerShellOffer => pick(lang, "PowerShell integration", "CHINESE PENDING"),
             Self::DescPowerShellOffer => pick(
                 lang,
-                "On offers integration in PowerShell panes. Off removes Folio profile lines for this account; open shells keep their current integration.",
-                "PowerShell 窗格提示安装整合。关闭时移除当前账户的 Folio 整合行，已打开的 shell 保持现有整合。",
+                "On offers setup. Off removes Folio's profile lines.",
+                "CHINESE PENDING",
             ),
             // **The three installer rows are 「通知」 rows** (user ruling
             // 2026-08-29). 「钩子」 and 「通知程序」 named the mechanism this window
@@ -4980,13 +4976,19 @@ impl Text {
                 "整合记录中的路径必须是绝对路径。",
             ),
             Self::ShellProfileUnchanged => pick(lang, "Folio profile unchanged", "$PROFILE 未改动"),
-            Self::ShellProfileMigrated => {
-                pick(lang, "Updated Folio profile line", "已更新 $PROFILE 中的 Folio 整合行")
+            Self::ShellProfileMigrated => pick(
+                lang,
+                "Updated Folio profile line",
+                "已更新 $PROFILE 中的 Folio 整合行",
+            ),
+            Self::ShellProfileRemoved => pick(
+                lang,
+                "Removed Folio profile line",
+                "已移除 $PROFILE 中的 Folio 整合行",
+            ),
+            Self::ShellProfileRefused => {
+                pick(lang, "Could not change profile", "无法修改 $PROFILE")
             }
-            Self::ShellProfileRemoved => {
-                pick(lang, "Removed Folio profile line", "已移除 $PROFILE 中的 Folio 整合行")
-            }
-            Self::ShellProfileRefused => pick(lang, "Could not change profile", "无法修改 $PROFILE"),
             Self::ShellProfileProbeFailed => pick(
                 lang,
                 "Could not query this PowerShell profile within five seconds.",
@@ -4996,6 +4998,11 @@ impl Text {
                 lang,
                 "Symbolic links and reparse points are not edited.",
                 "不修改符号链接和重解析点。",
+            ),
+            Self::ShellProfileHardLink => pick(
+                lang,
+                "This profile has hard links, possibly from a dotfile manager. Folio left it unchanged.",
+                "CHINESE PENDING",
             ),
             Self::ShellProfileReadOnly => pick(
                 lang,
@@ -5009,12 +5016,14 @@ impl Text {
             ),
             Self::ShellProfileScriptLocation => pick(
                 lang,
-                "The managed script must be under APPDATA\\Folio\\shell-integration.",
-                "整合脚本必须位于 APPDATA\\Folio\\shell-integration 下。",
+                "The script must be under APPDATA\\Folio or APPDATA\\BetterTerminal, in shell-integration.",
+                "CHINESE PENDING",
             ),
-            Self::ShellProfileNothing => {
-                pick(lang, "No Folio profile lines found.", "未找到 Folio 整合行。")
-            }
+            Self::ShellProfileNothing => pick(
+                lang,
+                "No Folio profile lines found.",
+                "未找到 Folio 整合行。",
+            ),
             Self::ShellIntegrationPending => pick(
                 lang,
                 "Takes effect in the next PowerShell session",
@@ -5070,7 +5079,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 703] = [
+    pub const ALL: [Self; 704] = [
         Self::PastePathEncoding,
         Self::PastePathControl,
         Self::PastePathPowerShellQuote,
@@ -5770,6 +5779,7 @@ impl Text {
         Self::ShellProfileRefused,
         Self::ShellProfileProbeFailed,
         Self::ShellProfileLink,
+        Self::ShellProfileHardLink,
         Self::ShellProfileReadOnly,
         Self::ShellProfileChanged,
         Self::ShellProfileScriptLocation,
@@ -5919,7 +5929,15 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 0] = [
+    const CHINESE_PENDING: [(Self, HostPlatform); 8] = [
+        (Self::RowPowerShellOffer, HostPlatform::Windows),
+        (Self::RowPowerShellOffer, HostPlatform::MacOs),
+        (Self::DescPowerShellOffer, HostPlatform::Windows),
+        (Self::DescPowerShellOffer, HostPlatform::MacOs),
+        (Self::ShellProfileHardLink, HostPlatform::Windows),
+        (Self::ShellProfileHardLink, HostPlatform::MacOs),
+        (Self::ShellProfileScriptLocation, HostPlatform::Windows),
+        (Self::ShellProfileScriptLocation, HostPlatform::MacOs),
     ];
 }
 
@@ -8356,6 +8374,18 @@ mod tests {
             }
         }
         assert_eq!(seen.len(), Text::ALL.len());
+    }
+
+    #[test]
+    fn shell_integration_followup_settings_copy_budget() {
+        let description = Text::DescPowerShellOffer.in_lang(Lang::English);
+        let lines = crate::tooltip::wrap(description, 39.0, |run| run.chars().count() as f32);
+        assert!(lines.len() <= 2, "{lines:?}");
+        assert_eq!(
+            Text::RowPowerShellOffer.in_lang(Lang::English),
+            "PowerShell integration"
+        );
+        assert!(description.contains("Off removes"));
     }
 
     #[test]

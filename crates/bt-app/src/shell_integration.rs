@@ -50,7 +50,7 @@ use crate::{
 pub mod profile_marks;
 mod profile_runtime;
 pub use profile_runtime::{
-    begin_removal, begin_startup_migration, remove_shell_integration, take_removal,
+    begin_enable, begin_removal, begin_startup_migration, remove_shell_integration, take_removal,
 };
 
 /// The script, compiled in.
@@ -1324,15 +1324,27 @@ pub fn parse_profile_answer(stdout: &str) -> Option<PathBuf> {
 /// Only exact product-owned lines establish ownership.
 #[must_use]
 pub fn profile_declares_integration(text: &str) -> bool {
-    let forms = profile_marks::Forms::new(&[]);
+    let forms = profile_marks::Forms::new(&[persist::storage_dir()
+        .join(SCRIPT_DIRECTORY)
+        .join(SCRIPT_FILE_PS1)]);
     text.lines().any(|line| forms.owns(line))
 }
 
-/// One account-wide managed form. Installation verifies that the script is
-/// at this path; no arbitrary operands enter a managed line.
+/// Default managed form for injected profile fixtures. Production resolves the
+/// account's data root before selecting either admissible spelling.
+#[cfg(test)]
 #[must_use]
 pub fn integration_line() -> String {
     profile_marks::MANAGED_LINE.to_owned()
+}
+
+fn account_managed_line(data: &Path) -> std::io::Result<&'static str> {
+    let appdata = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            std::io::Error::other(crate::i18n::Text::ShellProfileScriptLocation.text())
+        })?;
+    profile_marks::managed_line_for(data, &appdata)
 }
 
 /// Where PowerShell's script is on this machine, written out on first use.
@@ -1428,7 +1440,7 @@ fn add_profile_with_forms(
 #[derive(Clone, Copy)]
 enum ProfileAccess {
     Missing,
-    WritableFile,
+    WritableFile { links: u64 },
     ReadOnlyFile,
     Directory,
     Link,
@@ -1456,7 +1468,9 @@ fn refuse_profile_path(path: &Path) -> std::io::Result<()> {
         } else if metadata.permissions().readonly() {
             ProfileAccess::ReadOnlyFile
         } else {
-            ProfileAccess::WritableFile
+            ProfileAccess::WritableFile {
+                links: bt_platform::file_link_count(&std::fs::File::open(component)?)?,
+            }
         })
     })
 }
@@ -1467,6 +1481,9 @@ fn refuse_profile_path_with(
 ) -> std::io::Result<()> {
     for component in path.ancestors().filter(|p| !p.as_os_str().is_empty()) {
         let reason = match inspect(component)? {
+            ProfileAccess::WritableFile { links } if links > 1 => {
+                Some(crate::i18n::Text::ShellProfileHardLink)
+            }
             ProfileAccess::Link => Some(crate::i18n::Text::ShellProfileLink),
             ProfileAccess::Directory | ProfileAccess::ReadOnlyFile if component == path => {
                 Some(crate::i18n::Text::ShellProfileReadOnly)
@@ -1529,7 +1546,11 @@ fn replace_profile(
         None
     };
     refuse_profile_path(profile)?;
-    bt_persist::atomic_write(profile, bytes).map_err(std::io::Error::other)?;
+    if backup.is_some() {
+        bt_persist::atomic_replace_preserving(profile, bytes).map_err(std::io::Error::other)?;
+    } else {
+        bt_persist::atomic_write(profile, bytes).map_err(std::io::Error::other)?;
+    }
     Ok(backup)
 }
 
@@ -1711,20 +1732,11 @@ pub fn install_into_profile(
     at: std::time::SystemTime,
 ) -> std::io::Result<ProfileWrite> {
     let data = persist::storage_dir();
-    let appdata = std::env::var_os("APPDATA").map(PathBuf::from);
-    if appdata
-        .as_ref()
-        .is_none_or(|root| root.join("Folio") != data)
-    {
-        return Err(std::io::Error::other(
-            crate::i18n::Text::ShellProfileScriptLocation.text(),
-        ));
-    }
+    let line = account_managed_line(&data)?;
     let script = script_path_ps1().ok_or_else(|| {
         std::io::Error::other("the integration script could not be written to %APPDATA%")
     })?;
-    let line = integration_line();
-    profile_runtime::install_recorded(profile, &data, &script, &line, at)
+    profile_runtime::install_recorded(profile, &data, &script, line, at)
 }
 
 /// The script's own text, for the tests that check what ships.
@@ -1785,6 +1797,42 @@ mod tests {
     }
 
     #[test]
+    fn shell_integration_followup_literal_current_account_is_recognised() {
+        let script = persist::storage_dir()
+            .join(SCRIPT_DIRECTORY)
+            .join(SCRIPT_FILE_PS1);
+        assert!(profile_declares_integration(&format!(
+            ". \"{}\"",
+            script.display()
+        )));
+    }
+
+    #[test]
+    fn shell_integration_followup_hardlink_metadata_refuses_without_edit() {
+        let file = temp_dir("followup-hardlink").join("profile.ps1");
+        let original = profile_marks::LEGACY_LINE.as_bytes();
+        std::fs::write(&file, original).unwrap();
+        for links in [2, 3, 100] {
+            let result = refuse_profile_path_with(&file, |path| {
+                Ok(if path == file {
+                    ProfileAccess::WritableFile { links }
+                } else {
+                    ProfileAccess::Directory
+                })
+            })
+            .and_then(|()| {
+                add_to_profile(&file, profile_marks::MANAGED_LINE, std::time::UNIX_EPOCH)
+            });
+            assert!(result.is_err(), "hardlink count {links} must refuse");
+            assert_eq!(std::fs::read(&file).unwrap(), original);
+        }
+        assert!(
+            refuse_profile_path_with(&file, |_| Ok(ProfileAccess::WritableFile { links: 1 }))
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn shell_integration_refuses_links_at_every_path_component_without_following_them() {
         let file = Path::new("sandbox").join("redirected").join("profile.ps1");
         for linked in file.ancestors().filter(|p| !p.as_os_str().is_empty()) {
@@ -1792,7 +1840,7 @@ mod tests {
                 Ok(if path == linked {
                     ProfileAccess::Link
                 } else if path == file {
-                    ProfileAccess::WritableFile
+                    ProfileAccess::WritableFile { links: 1 }
                 } else {
                     ProfileAccess::Directory
                 })
@@ -3630,7 +3678,7 @@ mod tests {
             .1;
         let end = body.find("\n}\n").expect("its end");
         assert!(
-            body[..end].contains("bt_persist::atomic_write(profile"),
+            body[..end].contains("bt_persist::atomic_replace_preserving(profile"),
             "the profile is replaced atomically, not truncated and rewritten"
         );
         assert!(
@@ -3692,7 +3740,7 @@ mod tests {
         // The second half: a profile that declares the integration is what asks.
         let source = include_str!("shell_integration/profile_runtime.rs");
         let body = source
-            .split_once("pub fn begin_startup_migration() {")
+            .split_once("fn operate(data: &Path, action: Action) -> Report {")
             .expect("startup migration")
             .1;
         let end = body.find("\n}\n").expect("its end");

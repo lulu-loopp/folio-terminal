@@ -48702,6 +48702,15 @@ impl Runtime<'_> {
             {
                 shell_integration::begin_removal();
             }
+            if enabled
+                && self
+                    .app
+                    .settings_store
+                    .loaded()
+                    .powershell_integration_offer
+            {
+                shell_integration::begin_enable();
+            }
         }
         // The machine fact travels with the press: what the switch's `On` reaches
         // is `explorer_menu::place_when_on`'s answer about this Windows and this

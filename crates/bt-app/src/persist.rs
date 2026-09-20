@@ -1330,10 +1330,10 @@ impl ProfilesStore {
 /// and the only reason this module knows the old brand at all.
 ///
 /// It exists for one startup, on one machine, once: see [`relocate`].
-const PREVIOUS_STORAGE_NAME: &str = "BetterTerminal";
+pub(crate) const PREVIOUS_STORAGE_NAME: &str = "BetterTerminal";
 
 /// The directory the product writes under, which is its name.
-const STORAGE_NAME: &str = "Folio";
+pub(crate) const STORAGE_NAME: &str = "Folio";
 
 /// Where this build keeps its files, and whether anything has to be carried
 /// there first.

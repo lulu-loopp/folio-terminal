@@ -8,12 +8,36 @@ use std::{fs, io};
 
 pub const RECORD_FILE: &str = "integration-marks.json";
 pub const LEGACY_LINE: &str = r#". "$env:APPDATA\Folio\shell-integration\folio.ps1""#;
-pub const MANAGED_LINE: &str = r#"if (Test-Path -LiteralPath "$env:APPDATA\Folio\shell-integration\folio.ps1" -PathType Leaf) { . "$env:APPDATA\Folio\shell-integration\folio.ps1" } # Folio shell integration v1"#;
+// One template, with only the two product roots admitted.
+macro_rules! managed_line {
+    ($root:literal) => {
+        concat!(
+            r#"if (Test-Path -LiteralPath "$env:APPDATA\"#,
+            $root,
+            r#"\shell-integration\folio.ps1" -PathType Leaf) { . "$env:APPDATA\"#,
+            $root,
+            r#"\shell-integration\folio.ps1" } # Folio shell integration v1"#
+        )
+    };
+}
+pub const MANAGED_LINE: &str = managed_line!("Folio");
+pub const LEGACY_MANAGED_LINE: &str = managed_line!("BetterTerminal");
+
+pub fn managed_line_for(data: &Path, appdata: &Path) -> io::Result<&'static str> {
+    if data == appdata.join(persist::STORAGE_NAME) {
+        Ok(MANAGED_LINE)
+    } else if data == appdata.join(persist::PREVIOUS_STORAGE_NAME) {
+        Ok(LEGACY_MANAGED_LINE)
+    } else {
+        Err(io::Error::other(Text::ShellProfileScriptLocation.text()))
+    }
+}
 
 /// Exact spellings only. Literal legacy forms are generated from known script
 /// locations, never parsed out of arbitrary user code mentioning folio.ps1.
 pub struct Forms {
     legacy: Vec<String>,
+    managed: &'static str,
 }
 
 impl Forms {
@@ -28,12 +52,21 @@ impl Forms {
             let quoted = format!("'{}'", literal.replace('\'', "''"));
             legacy.push(format!(". {quoted}"));
         }
-        Self { legacy }
+        Self {
+            legacy,
+            managed: MANAGED_LINE,
+        }
+    }
+
+    pub fn targeting(mut self, managed: &'static str) -> Self {
+        self.managed = managed;
+        self
     }
 
     pub fn owns(&self, line: &str) -> bool {
         let line = line.trim();
-        line == MANAGED_LINE || self.legacy.iter().any(|known| known == line)
+        [MANAGED_LINE, LEGACY_MANAGED_LINE].contains(&line)
+            || self.legacy.iter().any(|known| known == line)
     }
 }
 
@@ -123,13 +156,13 @@ pub fn rewrite(bytes: &[u8], forms: &Forms, action: Action) -> io::Result<Option
         if action == Action::Remove {
             continue;
         }
-        if !forms.legacy.iter().any(|line| line == trimmed) {
+        if trimmed == forms.managed {
             output.push_str(raw);
             continue;
         }
         let leading = body.len() - body.trim_start().len();
         output.push_str(&body[..leading]);
-        output.push_str(MANAGED_LINE);
+        output.push_str(forms.managed);
         output.push_str(&body[body.trim_end().len()..]);
         output.push_str(&raw[body.len()..]);
     }
@@ -153,9 +186,30 @@ pub struct AgentRoots {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PowerShellState {
+    Enabled {},
+    Off { by: UserDecision, at: String },
+}
+
+impl Default for PowerShellState {
+    fn default() -> Self {
+        Self::Enabled {}
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UserDecision {
+    User,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Marks {
     pub version: u32,
+    #[serde(default)]
+    pub powershell_state: PowerShellState,
     pub powershell_profiles: Vec<PathBuf>,
     pub powershell_scripts: Vec<PathBuf>,
     pub psreadline_module_roots: Vec<PathBuf>,
@@ -166,7 +220,8 @@ pub struct Marks {
 impl Default for Marks {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: 2,
+            powershell_state: PowerShellState::Enabled {},
             powershell_profiles: Vec::new(),
             powershell_scripts: Vec::new(),
             psreadline_module_roots: Vec::new(),
@@ -184,10 +239,22 @@ impl Marks {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(e),
             Ok(bytes) => {
-                let marks: Self = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-                if marks.version != 1 {
+                let raw: serde_json::Value =
+                    serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+                let mut marks: Self =
+                    serde_json::from_value(raw.clone()).map_err(io::Error::other)?;
+                if !matches!(marks.version, 1 | 2)
+                    || (marks.version == 1 && raw.get("powershell_state").is_some())
+                    || (marks.version == 2 && raw.get("powershell_state").is_none())
+                {
                     return Err(io::Error::other(Text::ShellMarksVersion.text()));
                 }
+                if let PowerShellState::Off { at, .. } = &marks.powershell_state
+                    && crate::seed::parse_iso8601_utc(at).is_none()
+                {
+                    return Err(io::Error::other(Text::ShellMarksVersion.text()));
+                }
+                marks.version = 2;
                 if marks
                     .powershell_profiles
                     .iter()
@@ -212,6 +279,19 @@ impl Marks {
         fs::create_dir_all(data)?;
         let bytes = serde_json::to_vec_pretty(self).map_err(io::Error::other)?;
         bt_persist::atomic_write(&path, &bytes).map_err(io::Error::other)
+    }
+
+    pub fn is_off(&self) -> bool {
+        matches!(self.powershell_state, PowerShellState::Off { .. })
+    }
+
+    pub fn turn_off(&mut self, at: std::time::SystemTime) {
+        if !self.is_off() {
+            self.powershell_state = PowerShellState::Off {
+                by: UserDecision::User,
+                at: crate::seed::format_iso8601_utc(at),
+            };
+        }
     }
 
     pub fn remember(&mut self, profile: &Path, script: &Path) {
@@ -360,6 +440,47 @@ pub fn apply(paths: &[PathBuf], forms: &Forms, action: Action) -> Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_integration_followup_exactly_two_managed_roots_and_legacy_install() {
+        let appdata = super::super::tests::temp_dir("two-roots");
+        for (root, expected) in [
+            (persist::STORAGE_NAME, MANAGED_LINE),
+            (persist::PREVIOUS_STORAGE_NAME, LEGACY_MANAGED_LINE),
+        ] {
+            let data = appdata.join(root);
+            let line = managed_line_for(&data, &appdata).unwrap();
+            assert_eq!(line, expected);
+            let script = data.join("shell-integration").join("folio.ps1");
+            let forms = Forms::new(std::slice::from_ref(&script)).targeting(line);
+            let profile = appdata.join(format!("{root}.ps1"));
+            let literal = format!(". \"{}\"", script.display());
+            fs::write(&profile, &literal).unwrap();
+            super::super::profile_runtime::install_recorded(
+                &profile,
+                &data,
+                &script,
+                line,
+                std::time::UNIX_EPOCH,
+            )
+            .unwrap();
+            assert_eq!(fs::read_to_string(&profile).unwrap(), line);
+            assert!(forms.owns(MANAGED_LINE));
+            assert!(forms.owns(LEGACY_MANAGED_LINE));
+            assert!(!forms.owns(&line.replace(root, "SomeoneElse")));
+            assert!(!forms.owns(&format!("{line} # mine")));
+            assert_eq!(
+                rewrite(line.as_bytes(), &forms, Action::Migrate).unwrap(),
+                None
+            );
+            assert_eq!(
+                rewrite(line.as_bytes(), &forms, Action::Remove).unwrap(),
+                Some(vec![])
+            );
+        }
+        assert!(managed_line_for(&appdata.join("Other"), &appdata).is_err());
+        assert!(managed_line_for(&appdata.join("elsewhere").join("Folio"), &appdata).is_err());
+    }
 
     #[test]
     fn shell_integration_rewrite_table_preserves_every_other_byte() {

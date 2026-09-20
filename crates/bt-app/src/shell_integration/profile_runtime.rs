@@ -51,11 +51,6 @@ pub fn begin_startup_migration() {
                 bt_platform::ThreadPriority::BelowNormal,
                 move || {
                     let report = operate(&data, Action::Migrate);
-                    // Script upkeep belongs to startup too, not the pane's offer read.
-                    // Never writes from unit-test offer_for calls or a sandbox probe.
-                    if std::env::var_os("BT_POWERSHELL_PROFILE").is_none() {
-                        let _ = powershell_script_repaired();
-                    }
                     for refusal in report.refusals() {
                         eprintln!(
                             "BT_SHELL_PROFILE {}: {}",
@@ -114,12 +109,25 @@ pub fn remove_shell_integration() -> Report {
 }
 
 fn operate(data: &Path, action: Action) -> Report {
-    operate_with(data, action, candidates)
+    let managed = if action == Action::Remove {
+        Ok(MANAGED_LINE)
+    } else {
+        account_managed_line(data)
+    };
+    operate_with(data, action, managed, |marks| {
+        // This closure is reached only while enabled, under the same account lock
+        // as removal. Off cannot race a late script repair.
+        if action == Action::Migrate && std::env::var_os("BT_POWERSHELL_PROFILE").is_none() {
+            let _ = powershell_script_repaired();
+        }
+        candidates(marks)
+    })
 }
 
 fn operate_with(
     data: &Path,
     action: Action,
+    managed: io::Result<&'static str>,
     discover: impl FnOnce(&Marks) -> (Vec<PathBuf>, Report),
 ) -> Report {
     let record_path = data.join(RECORD_FILE);
@@ -137,13 +145,26 @@ fn operate_with(
         Ok(marks) => marks,
         Err(e) => return refused_record(e),
     };
+    if action == Action::Migrate && marks.is_off() {
+        return Report::default();
+    }
+    let managed = match managed {
+        Ok(managed) => managed,
+        Err(e) => return refused_record(e),
+    };
+    if action == Action::Remove {
+        marks.turn_off(std::time::SystemTime::now());
+        if let Err(e) = marks.write(data) {
+            return refused_record(e);
+        }
+    }
     let (paths, mut report) = discover(&marks);
     let script = script_at(data);
     let mut scripts = marks.powershell_scripts.clone();
     if !scripts.contains(&script) {
         scripts.push(script.clone());
     }
-    let forms = Forms::new(&scripts);
+    let forms = Forms::new(&scripts).targeting(managed);
 
     // Write intent before changing somebody else's file: a crash can leave an
     // extra candidate, never an unrecorded installed mark. Removal retains the
@@ -173,16 +194,22 @@ pub fn install_recorded(
     profile: &Path,
     data: &Path,
     script: &Path,
-    line: &str,
+    line: &'static str,
     at: std::time::SystemTime,
 ) -> io::Result<ProfileWrite> {
     let profile = std::path::absolute(profile)?;
     let script = std::path::absolute(script)?;
     let _lock = lock(data)?;
     let mut marks = Marks::read(data)?;
+    marks.powershell_state = PowerShellState::Enabled {};
     marks.remember(&profile, &script);
     marks.write(data)?;
-    let result = add_profile_with_forms(&profile, line, &Forms::new(&marks.powershell_scripts), at);
+    let result = add_profile_with_forms(
+        &profile,
+        line,
+        &Forms::new(&marks.powershell_scripts).targeting(line),
+        at,
+    );
     marks.profile_refusals.retain(|r| r.path != profile);
     if let Err(e) = &result {
         marks.profile_refusals.push(Refusal {
@@ -192,6 +219,37 @@ pub fn install_recorded(
     }
     marks.write(data)?;
     result
+}
+
+fn enable_record(data: &Path) -> io::Result<()> {
+    let _lock = lock(data)?;
+    let mut marks = Marks::read(data)?;
+    marks.powershell_state = PowerShellState::Enabled {};
+    marks.write(data)
+}
+
+pub fn begin_enable() {
+    let _ = bt_platform::spawn_at_priority(
+        "powershell-profile-enable",
+        bt_platform::ThreadPriority::BelowNormal,
+        || {
+            let data = persist::storage_dir();
+            if let Err(error) = enable_record(&data) {
+                let report = Report {
+                    files: vec![FileReport {
+                        path: data.join(RECORD_FILE),
+                        fate: Fate::Refused(error.to_string()),
+                    }],
+                };
+                if let Ok(mut outcome) = REMOVAL.lock() {
+                    *outcome = Some(report);
+                }
+                if let Some(wake) = WAKE.get() {
+                    wake();
+                }
+            }
+        },
+    );
 }
 
 pub fn begin_removal() {
@@ -218,6 +276,129 @@ pub fn take_removal() -> Option<Report> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn shell_integration_followup_legacy_root_keeps_working_script() {
+        let root = super::super::tests::temp_dir("followup-legacy");
+        let data = root.join("BetterTerminal");
+        let script = script_at(&data);
+        fs::create_dir_all(script.parent().unwrap()).unwrap();
+        fs::write(&script, "# working integration").unwrap();
+        let profile = root.join("profile.ps1");
+        fs::write(
+            &profile,
+            r#". "$env:APPDATA\BetterTerminal\shell-integration\folio.ps1""#,
+        )
+        .unwrap();
+        let report = operate_with(
+            &data,
+            Action::Migrate,
+            managed_line_for(&data, &root),
+            |_| (vec![profile.clone()], Report::default()),
+        );
+        assert_eq!(report.exit_code(), 0);
+        let after = fs::read_to_string(&profile).unwrap();
+        assert!(after.starts_with("if (Test-Path -LiteralPath "));
+        assert!(
+            after.contains(r#"{ . "$env:APPDATA\BetterTerminal\shell-integration\folio.ps1" }"#),
+            "{after}"
+        );
+        assert!(script.exists());
+    }
+
+    #[test]
+    fn shell_integration_followup_off_is_persisted_and_skips_discovery() {
+        let root = super::super::tests::temp_dir("followup-off");
+        let profile = root.join("profile.ps1");
+        fs::write(&profile, LEGACY_LINE).unwrap();
+        let report = operate_with(&root, Action::Remove, Ok(MANAGED_LINE), |_| {
+            (vec![profile.clone()], Report::default())
+        });
+        assert_eq!(report.exit_code(), 0);
+        let before = fs::read(root.join(RECORD_FILE)).unwrap();
+        let report = operate_with(&root, Action::Migrate, Ok(MANAGED_LINE), |_| {
+            panic!("off must not probe")
+        });
+        assert_eq!(report.exit_code(), 0);
+        assert_eq!(fs::read(root.join(RECORD_FILE)).unwrap(), before);
+        let record: serde_json::Value = serde_json::from_slice(&before).unwrap();
+        assert_eq!(record["version"], 2);
+        assert_eq!(record["powershell_state"]["state"], "off");
+        assert_eq!(record["powershell_state"]["by"], "user");
+        assert!(
+            record["powershell_state"]["at"]
+                .as_str()
+                .unwrap()
+                .ends_with('Z')
+        );
+    }
+
+    #[test]
+    fn shell_integration_followup_off_skips_script_repair_until_user_enables() {
+        let root = super::super::tests::temp_dir("off-repair");
+        let script = script_at(&root);
+        fs::create_dir_all(script.parent().unwrap()).unwrap();
+        fs::write(&script, "user's existing script").unwrap();
+        let report = operate_with(&root, Action::Remove, Ok(MANAGED_LINE), |_| {
+            (vec![], Report::default())
+        });
+        assert_eq!(report.exit_code(), 0);
+        for _ in 0..3 {
+            let mut probes = 0;
+            let mut writes = 0;
+            let report = operate_with(&root, Action::Migrate, Ok(MANAGED_LINE), |_| {
+                probes += 2;
+                writes += 1;
+                fs::write(&script, "repaired").unwrap();
+                (vec![], Report::default())
+            });
+            assert_eq!(report.exit_code(), 0);
+            assert_eq!((probes, writes), (0, 0));
+            assert_eq!(
+                fs::read_to_string(&script).unwrap(),
+                "user's existing script"
+            );
+        }
+        enable_record(&root).unwrap();
+        assert!(!Marks::read(&root).unwrap().is_off());
+        let mut reached = false;
+        operate_with(&root, Action::Migrate, Ok(MANAGED_LINE), |_| {
+            reached = true;
+            (vec![], Report::default())
+        });
+        assert!(reached);
+    }
+
+    #[test]
+    fn shell_integration_followup_schema_one_upgrades_without_losing_other_owners() {
+        let root = super::super::tests::temp_dir("schema-one");
+        let mut old = serde_json::to_value(Marks::default()).unwrap();
+        old["version"] = serde_json::json!(1);
+        old.as_object_mut().unwrap().remove("powershell_state");
+        old["agent_config_roots"]["codex"] = serde_json::json!([root.join("codex")]);
+        fs::write(root.join(RECORD_FILE), serde_json::to_vec(&old).unwrap()).unwrap();
+        let marks = Marks::read(&root).unwrap();
+        assert_eq!(marks.version, 2);
+        assert!(!marks.is_off());
+        marks.write(&root).unwrap();
+        assert_eq!(
+            Marks::read(&root).unwrap().agent_config_roots.codex,
+            vec![root.join("codex")]
+        );
+        for state in [
+            serde_json::json!({"state":"off","by":"someone","at":"2026-09-20T00:00:00Z"}),
+            serde_json::json!({"state":"off","by":"user","at":"bad date"}),
+            serde_json::json!({"state":"off","by":"user"}),
+            serde_json::json!({"state":"enabled","extra":true}),
+        ] {
+            let mut invalid = serde_json::to_value(&marks).unwrap();
+            invalid["powershell_state"] = state;
+            let bytes = serde_json::to_vec(&invalid).unwrap();
+            fs::write(root.join(RECORD_FILE), &bytes).unwrap();
+            assert!(Marks::read(&root).is_err());
+            assert_eq!(fs::read(root.join(RECORD_FILE)).unwrap(), bytes);
+        }
+    }
 
     #[test]
     fn shell_integration_never_enabled_does_not_schedule_or_probe() {
@@ -353,7 +534,7 @@ mod tests {
         readonly.set_readonly(true);
         fs::set_permissions(&profiles[1], readonly).unwrap();
         let original = fs::read(&profiles[1]).unwrap();
-        let report = operate_with(&root, Action::Migrate, |_| {
+        let report = operate_with(&root, Action::Migrate, Ok(MANAGED_LINE), |_| {
             (profiles.to_vec(), Report::default())
         });
         assert_eq!(report.exit_code(), 1);
@@ -364,7 +545,7 @@ mod tests {
         assert_eq!(marks.profile_refusals.len(), 1);
         assert_eq!(marks.profile_refusals[0].path, profiles[1]);
         fs::set_permissions(&profiles[1], permissions).unwrap();
-        let report = operate_with(&root, Action::Remove, |marks| {
+        let report = operate_with(&root, Action::Remove, Ok(MANAGED_LINE), |marks| {
             (marks.powershell_profiles.clone(), Report::default())
         });
         assert_eq!(report.exit_code(), 0);
@@ -372,7 +553,7 @@ mod tests {
             assert_eq!(fs::read(path).unwrap(), b"# mine\r\n\n");
         }
         assert!(Marks::read(&root).unwrap().profile_refusals.is_empty());
-        let report = operate_with(&root, Action::Remove, |marks| {
+        let report = operate_with(&root, Action::Remove, Ok(MANAGED_LINE), |marks| {
             (marks.powershell_profiles.clone(), Report::default())
         });
         assert!(report.files.iter().all(|f| f.fate == Fate::Unchanged));

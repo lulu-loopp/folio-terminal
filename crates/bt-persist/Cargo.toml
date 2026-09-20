@@ -7,6 +7,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+bt-platform = { path = "../bt-platform" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
