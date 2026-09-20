@@ -39,6 +39,15 @@
 #     probes ask. Run it with
 #     `cargo test -p bt-platform -- --ignored --nocapture`.
 #
+# The thirty-first is neither a probe nor a regression: it is a **writer**, like
+# the symbol sheet above it. `highlight::tests::regenerate_the_powershell_packdump`
+# rebuilds `assets/syntaxes/PowerShell.packdump` from the `.sublime-syntax`
+# beside it, and it is ignored because a test that writes into the source tree
+# must be asked for. What it would otherwise assert is asserted, in CI, by
+# `the_powershell_packdump_is_the_vendored_grammar`, which rebuilds the same
+# thing in memory and fails if the checked-in dump is not it. Run it with
+# `cargo test -p bt-app --bin folio regenerate_the_powershell_packdump -- --ignored`.
+#
 # A test that belongs in CI does not go on this list; it stops being ignored.
 #
 # **The last two are the exception, and they are on this list under protest.**
@@ -60,6 +69,7 @@
 # two come off this list first.
 
 minus_probe
+highlight::tests::regenerate_the_powershell_packdump
 marks::tests::the_symbol_sheet_is_written_for_a_person_to_look_at
 paths::tests::a_scrollback_relative_reference_keeps_the_directory_it_was_printed_under
 paths::tests::an_unquoted_path_cut_at_a_space_does_not_link_its_prefix

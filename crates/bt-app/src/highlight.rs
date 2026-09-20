@@ -192,7 +192,7 @@ impl Highlighting {
     /// scope stack that will not apply — comes back as a plain document. There
     /// is no half-highlighted state: a file whose highlighting stopped at line
     /// 200 is a file that looks broken at line 201.
-    pub fn of(lines: &[String], syntax: &SyntaxReference) -> Self {
+    pub fn of(lines: &[String], grammar: Grammar) -> Self {
         if lines.len() > HIGHLIGHT_MAX_LINES {
             return Self::default();
         }
@@ -200,8 +200,8 @@ impl Highlighting {
         if bytes > HIGHLIGHT_MAX_BYTES {
             return Self::default();
         }
-        let syntaxes = syntaxes();
-        let mut state = ParseState::new(syntax);
+        let syntaxes = grammar.set;
+        let mut state = ParseState::new(grammar.syntax);
         let mut stack = ScopeStack::new();
         let mut out = Vec::with_capacity(lines.len());
         let mut fed = String::new();
@@ -390,11 +390,111 @@ fn syntaxes() -> &'static SyntaxSet {
     SYNTAXES.get_or_init(two_face::syntax::extra_newlines)
 }
 
+/// The PowerShell grammar, as the 4.8 KB syntect dump the executable carries.
+///
+/// The **source** of it is the `.sublime-syntax` file beside it, and that is the
+/// file to edit: `assets/syntaxes/README.md` records where it came from, what it
+/// travels under and the two lines of it this repository changed. This dump is
+/// built from that file and nothing else, by an `#[ignore]`d test named in the
+/// README, and `the_powershell_packdump_is_the_vendored_grammar` rebuilds it
+/// from the source on every CI run and fails if the two have parted company — so
+/// the generated half cannot quietly become the authority.
+///
+/// A dump rather than the YAML for one reason, and it is the miss case rather
+/// than PowerShell: loading it costs 0.08 ms against the source's 60 ms, and the
+/// lookup below reaches it whenever the *first* box has no answer — a `.log`
+/// file, a ` ```output ` fence. Parsing 22 KB of YAML to tell someone their log
+/// file is not PowerShell is a stall in the window charged to a document that
+/// has nothing to do with this feature. With the dump, the only documents that
+/// pay anything for PowerShell are PowerShell documents.
+const POWERSHELL_PACKDUMP: &[u8] = include_bytes!("../../../assets/syntaxes/PowerShell.packdump");
+
+/// PowerShell, in a box of its own — loaded the first time a lookup gets past
+/// the first box, and never at all if none does.
+///
+/// It cannot go *in* [`syntaxes`]. Adding one grammar to `two-face`'s dump means
+/// `into_builder()`, and that un-links the whole set: every one of its ~250
+/// grammars is deserialised and re-linked eagerly, 244 ms on the machine this
+/// was written on, where the dump itself loads in 1 ms because syntect keeps
+/// each grammar's contexts packed until something asks for them. That cost would
+/// land on the first preview of *any* code file, in a window that has none
+/// today.
+///
+/// A box that will not load is [`None`], which is this module's existing answer
+/// for "no grammar": the document draws plain, as it did before the file was
+/// vendored. That is not a fallback bolted on here — it is the same road
+/// [`Highlighting::of`] already takes when a grammar will not parse a line —
+/// and `the_powershell_packdump_is_the_vendored_grammar` is what keeps it from
+/// ever being the road taken.
+fn powershell() -> Option<&'static SyntaxSet> {
+    static POWERSHELL: OnceLock<Option<SyntaxSet>> = OnceLock::new();
+    POWERSHELL
+        .get_or_init(|| syntect::dumps::from_reader(POWERSHELL_PACKDUMP).ok())
+        .as_ref()
+}
+
+/// A grammar, and the box it was found in.
+///
+/// The two are one value because they are one answer: syntect parses a line with
+/// a `SyntaxReference` *and* the `SyntaxSet` it belongs to, and handing it the
+/// other set is not an error it reports — it is a wrong document. Before there
+/// was a second box a caller could not get this wrong; now that there is, the
+/// lookup is the only place that knows, and it hands both halves on.
+#[derive(Clone, Copy, Debug)]
+pub struct Grammar {
+    set: &'static SyntaxSet,
+    syntax: &'static SyntaxReference,
+}
+
+impl Grammar {
+    /// This grammar's own name — `Rust`, `TOML`, `PowerShell`.
+    ///
+    /// `cfg(test)` for the reason the three readers on [`Highlighting`] are:
+    /// product code never asks which grammar answered, it hands the whole thing
+    /// to [`Highlighting::of`]. The tests have to be able to *say* which one
+    /// answered, because "the right grammar was chosen" is not observable
+    /// through a colour.
+    #[cfg(test)]
+    pub fn name(self) -> &'static str {
+        &self.syntax.name
+    }
+}
+
 /// Whether a syntax is the "no syntax" one. Plain Text is what syntect answers
 /// with for `.txt`, and answering it here would mean walking a regex engine over
 /// a document to be told every span is plain.
 fn is_plain_text(syntax: &SyntaxReference) -> bool {
     syntax.name == syntaxes().find_syntax_plain_text().name
+}
+
+/// Put one question to each box in turn and take the first answer.
+///
+/// **This is the only place that knows there is more than one box.** The order
+/// is the whole of the policy: the dump first, so every answer this window gave
+/// before PowerShell was vendored it still gives, then the vendored grammars.
+///
+/// Two details are load-bearing, and both are about not loading the second box
+/// for a question that does not need it:
+///
+/// - `or_else` rather than an iterator over both boxes. An iterator's second
+///   item is produced when the iterator is *made*, which would put the cost on
+///   every lookup in the window.
+/// - Plain Text is filtered at the **end**, after the boxes, not inside the
+///   question. syntect answers `.txt` with its Plain Text grammar, which this
+///   module treats as no grammar at all; filtering that inside the first box
+///   would turn it into a miss and send every `.txt` file on to the second one.
+///
+/// Neither is expensive any more — [`POWERSHELL_PACKDUMP`] is why — but both are
+/// the difference between "the first box answered" and "the first box was asked
+/// and then overruled", and that is worth saying once here rather than
+/// rediscovering.
+fn first_box_to_answer(
+    ask: impl Fn(&'static SyntaxSet) -> Option<&'static SyntaxReference>,
+) -> Option<Grammar> {
+    let answer = |set: &'static SyntaxSet| ask(set).map(|syntax| Grammar { set, syntax });
+    answer(syntaxes())
+        .or_else(|| powershell().and_then(answer))
+        .filter(|grammar| !is_plain_text(grammar.syntax))
 }
 
 /// The grammar a **file** is read with: its name first, then its first line.
@@ -407,19 +507,20 @@ fn is_plain_text(syntax: &SyntaxReference) -> bool {
 /// document that begins `<?xml`.
 ///
 /// `None` means plain, which is this window's behaviour before #49 and the
-/// honest answer for a language whose grammar is not in the box. The box is
+/// honest answer for a language whose grammar is not in the box. The boxes are
 /// Sublime's defaults plus bat's extras (see [`syntaxes`]) — TOML and TypeScript
-/// were the two the defaults missed, and the user ruled them in on 2026-08-16.
-pub fn syntax_for_file(name: &str, first_line: Option<&str>) -> Option<&'static SyntaxReference> {
-    let syntaxes = syntaxes();
-    let by_name = syntaxes
-        .find_syntax_by_extension(name)
-        .or_else(|| {
-            name.rsplit_once('.')
-                .and_then(|(_, extension)| syntaxes.find_syntax_by_extension(extension))
-        })
-        .or_else(|| first_line.and_then(|line| syntaxes.find_syntax_by_first_line(line)));
-    by_name.filter(|syntax| !is_plain_text(syntax))
+/// were the two the defaults missed, and the user ruled them in on 2026-08-16 —
+/// and the grammars vendored in `assets/syntaxes/` (see [`powershell`]).
+pub fn syntax_for_file(name: &str, first_line: Option<&str>) -> Option<Grammar> {
+    first_box_to_answer(|syntaxes| {
+        syntaxes
+            .find_syntax_by_extension(name)
+            .or_else(|| {
+                name.rsplit_once('.')
+                    .and_then(|(_, extension)| syntaxes.find_syntax_by_extension(extension))
+            })
+            .or_else(|| first_line.and_then(|line| syntaxes.find_syntax_by_first_line(line)))
+    })
 }
 
 /// The grammar a markdown **fence** is read with: its info string.
@@ -429,14 +530,12 @@ pub fn syntax_for_file(name: &str, first_line: Option<&str>) -> Option<&'static 
 /// grammar's own name case-insensitively, which is what makes `py` and
 /// `Python` the same request. A fence with no info string, or one naming
 /// something not in the box, is drawn in the fence's own ink as it always was.
-pub fn syntax_for_fence(info: Option<&str>) -> Option<&'static SyntaxReference> {
+pub fn syntax_for_fence(info: Option<&str>) -> Option<Grammar> {
     let info = info?.trim();
     if info.is_empty() {
         return None;
     }
-    syntaxes()
-        .find_syntax_by_token(info)
-        .filter(|syntax| !is_plain_text(syntax))
+    first_box_to_answer(|syntaxes| syntaxes.find_syntax_by_token(info))
 }
 
 #[cfg(test)]
@@ -449,6 +548,26 @@ mod tests {
 
     fn tokens(highlighting: &Highlighting, line: usize) -> Vec<HighlightToken> {
         highlighting.line(line).iter().map(|s| s.token).collect()
+    }
+
+    /// One line's spans as the text each one covers, so an assertion can name
+    /// the characters rather than count them. The columns are turned back into
+    /// bytes by the same function the painter cuts runs with.
+    fn spans<'a>(
+        highlighting: &Highlighting,
+        lines: &'a [String],
+        line: usize,
+    ) -> Vec<(&'a str, HighlightToken)> {
+        let text = &lines[line];
+        let mut out = Vec::new();
+        let mut column = 0usize;
+        for span in highlighting.line(line) {
+            let from = crate::preview_edit::byte_at_column(text, column);
+            column += span.columns;
+            let to = crate::preview_edit::byte_at_column(text, column);
+            out.push((&text[from..to], span.token));
+        }
+        out
     }
 
     /// The scope table is a *mapping*, and this is the whole of it stated
@@ -524,16 +643,16 @@ mod tests {
     #[test]
     fn a_files_grammar_is_found_by_extension_then_by_first_line() {
         assert_eq!(
-            syntax_for_file("main.rs", None).map(|s| s.name.as_str()),
+            syntax_for_file("main.rs", None).map(Grammar::name),
             Some("Rust")
         );
         assert_eq!(
-            syntax_for_file("build.py", None).map(|s| s.name.as_str()),
+            syntax_for_file("build.py", None).map(Grammar::name),
             Some("Python")
         );
         // No extension, and the first line says what it is.
         assert_eq!(
-            syntax_for_file("install", Some("#!/bin/sh")).map(|s| s.name.as_str()),
+            syntax_for_file("install", Some("#!/bin/sh")).map(Grammar::name),
             Some("Bourne Again Shell (bash)")
         );
         assert!(syntax_for_file("feed", Some("<?xml version=\"1.0\"?>")).is_some());
@@ -548,15 +667,15 @@ mod tests {
         // left them plain and the user ruled them in (2026-08-16) — bat's
         // extras carry both.
         assert_eq!(
-            syntax_for_file("Cargo.toml", None).map(|s| s.name.as_str()),
+            syntax_for_file("Cargo.toml", None).map(Grammar::name),
             Some("TOML")
         );
         assert_eq!(
-            syntax_for_file("app.ts", None).map(|s| s.name.as_str()),
+            syntax_for_file("app.ts", None).map(Grammar::name),
             Some("TypeScript")
         );
         assert_eq!(
-            syntax_for_file("App.tsx", None).map(|s| s.name.as_str()),
+            syntax_for_file("App.tsx", None).map(Grammar::name),
             Some("TypeScriptReact")
         );
     }
@@ -565,28 +684,28 @@ mod tests {
     #[test]
     fn a_fences_grammar_is_its_info_string() {
         assert_eq!(
-            syntax_for_fence(Some("rust")).map(|s| s.name.as_str()),
+            syntax_for_fence(Some("rust")).map(Grammar::name),
             Some("Rust")
         );
         // A token that is an *extension* rather than a name, which is the half
         // of `find_syntax_by_token` a fence relies on most.
         assert_eq!(
-            syntax_for_fence(Some("py")).map(|s| s.name.as_str()),
+            syntax_for_fence(Some("py")).map(Grammar::name),
             Some("Python")
         );
         // And a name, case-insensitively, with the fence's own whitespace on it.
         assert_eq!(
-            syntax_for_fence(Some("  Rust  ")).map(|s| s.name.as_str()),
+            syntax_for_fence(Some("  Rust  ")).map(Grammar::name),
             Some("Rust")
         );
         assert_eq!(
-            syntax_for_fence(Some("javascript")).map(|s| s.name.as_str()),
+            syntax_for_fence(Some("javascript")).map(Grammar::name),
             Some("JavaScript")
         );
         // TypeScript is not in Sublime's default set; bat's extras carry it
         // (user ruling 2026-08-16), so ```ts reads as what it says.
         assert_eq!(
-            syntax_for_fence(Some("ts")).map(|s| s.name.as_str()),
+            syntax_for_fence(Some("ts")).map(Grammar::name),
             Some("TypeScript")
         );
         assert!(syntax_for_fence(None).is_none());
@@ -789,5 +908,290 @@ mod tests {
         let spans: usize = (0..5_000).map(|line| highlighting.line(line).len()).sum();
         assert!(spans > 20_000, "{spans} spans over 5000 lines");
         println!("5000 lines highlighted in {elapsed:?} ({spans} spans)");
+    }
+
+    // ── the vendored grammar (issue #7) ──────────────────────────────────
+    //
+    // Four claims, separate on purpose: that the dump the binary carries is the
+    // grammar file in the repository, that every one of the grammar's patterns
+    // compiles on this backend, that the five doors reach it, and that a script
+    // drawn with it comes out in the inks a reader skims by. The first two are
+    // about the *files* and stay true whether or not anything looks them up.
+
+    /// The grammar file itself — the authority for what [`POWERSHELL_PACKDUMP`]
+    /// is supposed to contain.
+    const POWERSHELL_GRAMMAR: &str =
+        include_str!("../../../assets/syntaxes/PowerShell.sublime-syntax");
+
+    /// The grammar file as syntect reads it. syntect pre-tests every pattern
+    /// here, so this returning at all is already most of what the two tests
+    /// below assert.
+    fn powershell_definition() -> syntect::parsing::SyntaxDefinition {
+        syntect::parsing::SyntaxDefinition::load_from_str(POWERSHELL_GRAMMAR, true, None)
+            .expect("assets/syntaxes/PowerShell.sublime-syntax is a grammar syntect can build")
+    }
+
+    /// And as a set, which is the shape the dump is compared against and the
+    /// shape the regeneration writes.
+    fn powershell_from_source() -> SyntaxSet {
+        let mut builder = syntect::parsing::SyntaxSetBuilder::new();
+        builder.add(powershell_definition());
+        builder.build()
+    }
+
+    /// **The generated file is not the authority.** This rebuilds the dump's
+    /// contents from the `.sublime-syntax` beside it and demands they be the
+    /// same grammar — so an edit to the source that was never regenerated is red
+    /// here, on all three platforms, rather than a window that highlights
+    /// PowerShell the way it did last month.
+    ///
+    /// The comparison is over the grammars rather than over the dumps' bytes:
+    /// what has to hold is that the executable parses what the repository says,
+    /// and byte equality would additionally be a bet on two compressors on three
+    /// architectures agreeing, which is not this test's claim.
+    #[test]
+    fn the_powershell_packdump_is_the_vendored_grammar() {
+        let shipped: SyntaxSet = syntect::dumps::from_reader(POWERSHELL_PACKDUMP)
+            .expect("assets/syntaxes/PowerShell.packdump is a dump this syntect can read");
+        let shipped = shipped.into_builder();
+        let source = powershell_from_source().into_builder();
+        assert!(
+            shipped.syntaxes() == source.syntaxes(),
+            "assets/syntaxes/PowerShell.packdump is not what \
+             assets/syntaxes/PowerShell.sublime-syntax builds. Regenerate it:\n  \
+             cargo test -p bt-app --bin folio regenerate_the_powershell_packdump -- --ignored"
+        );
+        let syntax = powershell()
+            .and_then(|set| set.find_syntax_by_name("PowerShell"))
+            .expect("and the grammar inside it is PowerShell");
+        assert_eq!(
+            syntax.file_extensions,
+            vec!["ps1", "psm1", "psd1", "pwsh"],
+            "the extension list is what every lookup in this module is answered from"
+        );
+    }
+
+    /// Writes `assets/syntaxes/PowerShell.packdump` from the `.sublime-syntax`
+    /// beside it. The regeneration `the_powershell_packdump_is_the_vendored_grammar`
+    /// tells you to run, kept here rather than in a script because the thing that
+    /// has to agree with the dump is this crate's syntect and no other.
+    #[test]
+    #[ignore = "writes assets/syntaxes/PowerShell.packdump; run it after editing the grammar"]
+    fn regenerate_the_powershell_packdump() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/syntaxes/PowerShell.packdump"
+        );
+        let dump = syntect::dumps::dump_binary(&powershell_from_source());
+        std::fs::write(path, &dump).expect("write the dump");
+        println!("wrote {path} ({} bytes)", dump.len());
+    }
+
+    /// **Every** pattern, not the ones a sample script happens to reach.
+    ///
+    /// syntect compiles a pattern the first time a document walks into it and
+    /// `expect`s it to have been pre-tested, so a pattern this backend rejects is
+    /// a panic waiting for the right input rather than a load failure. syntect's
+    /// loader pre-tests each one as it reads it — which is why
+    /// [`powershell_definition`] returning at all is already this assertion —
+    /// and this states it directly as well, over the patterns as the grammar
+    /// stores them, so that the next person to edit the file gets a red test
+    /// naming the pattern instead of a crash in a preview.
+    #[test]
+    fn every_pattern_of_the_vendored_powershell_grammar_compiles() {
+        use syntect::parsing::Regex;
+        use syntect::parsing::syntax_definition::Pattern;
+
+        let definition = powershell_definition();
+        let mut checked = 0usize;
+        for (context, patterns) in &definition.contexts {
+            for pattern in &patterns.patterns {
+                let Pattern::Match(matcher) = pattern else {
+                    continue;
+                };
+                checked += 1;
+                if let Some(error) = Regex::try_compile(matcher.regex.regex_str()) {
+                    panic!(
+                        "context `{context}` has a pattern fancy-regex will not compile:\n  \
+                         {}\n  {error}",
+                        matcher.regex.regex_str()
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            checked, 97,
+            "the vendored grammar's pattern count — if this moved, say so in \
+             assets/syntaxes/README.md"
+        );
+    }
+
+    /// Detection, all five doors: the three extensions the grammar declares and
+    /// the three fence tokens a writer actually types.
+    ///
+    /// On `main` every one of these is `None`: `two-face` ships PowerShell only
+    /// in its Oniguruma dumps and this window runs the fancy one.
+    #[test]
+    fn a_powershell_file_and_a_powershell_fence_both_find_the_vendored_grammar() {
+        for name in ["deploy.ps1", "Tools.psm1", "Module.psd1", "Build.PS1"] {
+            assert_eq!(
+                syntax_for_file(name, None).map(Grammar::name),
+                Some("PowerShell"),
+                "{name}"
+            );
+        }
+        for token in ["powershell", "PowerShell", "ps1", "pwsh", "  powershell  "] {
+            assert_eq!(
+                syntax_for_fence(Some(token)).map(Grammar::name),
+                Some("PowerShell"),
+                "```{token}"
+            );
+        }
+        // And the second box does not answer for anything else: a language the
+        // first box already knows still comes from the first box, and an
+        // unknown one is still plain.
+        assert_eq!(
+            syntax_for_file("main.rs", None).map(Grammar::name),
+            Some("Rust")
+        );
+        assert!(syntax_for_file("notes.wibble", None).is_none());
+        assert!(syntax_for_fence(Some("wibble")).is_none());
+    }
+
+    /// A short, real script, and the spans it comes out in — stated as text
+    /// rather than as counts, because "the string is a string" is a claim about
+    /// which characters wear which ink.
+    ///
+    /// Every assertion here fails on `main`, at the `expect` on the first line:
+    /// there is no PowerShell grammar to find, so the file draws plain.
+    #[test]
+    fn a_powershell_script_yields_its_comment_keyword_string_number_and_function_runs() {
+        let lines = display(concat!(
+            "<#\n",
+            "    .SYNOPSIS\n",
+            "        Greets by name.\n",
+            "#>\n",
+            "param([string] $Name, [int] $Count = 42)\n",
+            "\n",
+            "function Get-Greeting {\n",
+            "    $stamp = Get-Date -Format \"yyyy-MM-dd\"\n",
+            "    Write-Output \"Hello, $Name! It is $($stamp).\"\n",
+            "}\n",
+            "\n",
+            "$banner = @\"\n",
+            "a here-string holding $Name\n",
+            "\"@\n",
+            "\n",
+            "Get-ChildItem | Where-Object { $_.Length -gt 1024 } | ForEach-Object { Get-Greeting }\n",
+        ));
+        let grammar = syntax_for_file("greet.ps1", None).expect("PowerShell is in the box");
+        let highlighting = Highlighting::of(&lines, grammar);
+        assert!(!highlighting.is_plain());
+
+        // The `<# … #>` block: four lines, every one of them comment, which is
+        // the state carrying across lines rather than four separate matches.
+        for line in 0..4 {
+            assert_eq!(
+                tokens(&highlighting, line),
+                vec![HighlightToken::Comment],
+                "line {line} of the comment block"
+            );
+        }
+
+        // The param block: `param` and the two type literals are keywords, 42 is
+        // a number, and `$Name` is left the body's own ink, which is this
+        // module's ruling about identifiers and not an oversight.
+        let param = spans(&highlighting, &lines, 4);
+        assert!(
+            param.contains(&("param", HighlightToken::Keyword)),
+            "{param:?}"
+        );
+        assert!(
+            param.contains(&("string", HighlightToken::Keyword)),
+            "{param:?}"
+        );
+        assert!(param.contains(&("42", HighlightToken::Number)), "{param:?}");
+        assert!(param.contains(&("Name", HighlightToken::Body)), "{param:?}");
+
+        // The declaration: `function` a keyword, the name a function.
+        let declaration = spans(&highlighting, &lines, 6);
+        assert!(
+            declaration.contains(&("function", HighlightToken::Keyword)),
+            "{declaration:?}"
+        );
+        assert!(
+            declaration.contains(&("Get-Greeting", HighlightToken::Function)),
+            "{declaration:?}"
+        );
+
+        // A cmdlet call, and a whole double-quoted string as one span.
+        let call = spans(&highlighting, &lines, 7);
+        assert!(
+            call.contains(&("Get-Date", HighlightToken::Function)),
+            "{call:?}"
+        );
+        assert!(
+            call.contains(&("\"yyyy-MM-dd\"", HighlightToken::Str)),
+            "{call:?}"
+        );
+
+        // `$()` interpolation stays *inside* the string: the outermost category
+        // wins, so a reader sees one literal rather than a string cut in three.
+        assert_eq!(
+            spans(&highlighting, &lines, 8),
+            vec![
+                ("    ", HighlightToken::Body),
+                ("Write-Output", HighlightToken::Function),
+                (" ", HighlightToken::Body),
+                ("\"Hello, $Name! It is $($stamp).\"", HighlightToken::Str),
+            ]
+        );
+
+        // The here-string: opened on one line, closed two later, a string all
+        // the way through.
+        assert!(spans(&highlighting, &lines, 11).contains(&("@\"", HighlightToken::Str)));
+        assert_eq!(
+            tokens(&highlighting, 12),
+            vec![HighlightToken::Str],
+            "the here-string's body"
+        );
+        assert_eq!(tokens(&highlighting, 13), vec![HighlightToken::Str]);
+
+        // The pipeline: three cmdlets, the `|` and `-gt` operators, one number.
+        let pipeline = spans(&highlighting, &lines, 15);
+        for cmdlet in ["Get-ChildItem", "Where-Object", "ForEach-Object"] {
+            assert!(
+                pipeline.contains(&(cmdlet, HighlightToken::Function)),
+                "{cmdlet} in {pipeline:?}"
+            );
+        }
+        assert!(
+            pipeline.contains(&("|", HighlightToken::Keyword)),
+            "{pipeline:?}"
+        );
+        assert!(
+            pipeline.contains(&("-gt", HighlightToken::Keyword)),
+            "{pipeline:?}"
+        );
+        assert!(
+            pipeline.contains(&("1024", HighlightToken::Number)),
+            "{pipeline:?}"
+        );
+        assert!(
+            pipeline.contains(&("{", HighlightToken::Punct)),
+            "{pipeline:?}"
+        );
+
+        // And the inks really are the palette's, on both grounds.
+        for palette in [bt_render::DARK_CHROME, bt_render::LIGHT_CHROME] {
+            let ink = HighlightInk {
+                palette: &palette,
+                body: palette.preview_body_text,
+            };
+            let runs = highlighting.runs(7, &lines[7], (0, 80), ink);
+            assert!(runs.iter().any(|run| run.color == palette.hl_function));
+            assert!(runs.iter().any(|run| run.color == palette.hl_string));
+            assert!(runs.iter().any(|run| run.color == palette.hl_keyword));
+        }
     }
 }
