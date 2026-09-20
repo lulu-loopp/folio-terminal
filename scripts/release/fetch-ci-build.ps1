@@ -28,7 +28,10 @@ function Invoke-GhJson {
 $login = (Invoke-GhJson @('api', 'user')).login
 if ($Account -and $login -ne $Account) { throw "gh is signed in as $login and -Account names $Account" }
 $encoded = [Uri]::EscapeDataString($Ref)
-$commit = (Invoke-GhJson @('api', "repos/$Repository/commits/$encoded")).sha
+# Only the SHA is asked for: the full commit carries every file's patch, and a patch's
+# bytes do not survive PowerShell's decoding of native output as JSON (first real run,
+# 2026-09-20: "unexpected character" inside files[0].patch).
+$commit = (Invoke-GhJson @('api', "repos/$Repository/commits/$encoded", '--jq', '{sha: .sha}')).sha
 if ($commit -notmatch '^[0-9a-f]{40}$') { throw 'GitHub did not resolve a full commit SHA' }
 $name = "folio-windows-release-$commit"
 # A dispatch's head_sha describes the workflow ref, which may differ from its
