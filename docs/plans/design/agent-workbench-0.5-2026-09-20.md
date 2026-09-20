@@ -550,6 +550,7 @@ Sources, all in the repository: Codex's and Kimi's adversarial reviews of revisi
 - **Working never ends after `kill -9`.** The pane's root is the shell, not the agent, and no process walker exists. Every asserted fact therefore carries one clock (`WAIT_TTL`, 600 s); expiry means *the evidence went stale* and establishes no other state.
 - **A denied permission left the word Waiting.** Under §13.2 the word returns to Working when the wait is withdrawn, whatever the answer was.
 - **§11.8's floor table promised a row its own recognition rule forbids.** A hookless, OSC-silent agent gets no row. The floor is: hooks, else OSC, else nothing.
+- **A pane with no hooks and no OSC still wears a dot, and it is not the ledger's.** The shipped *unread* claim (`SessionFacts::has_unseen_output`) lights for any byte that reaches an unfocused tab — a bare title write counts — for any program, and the *Turn finished* switch does not gate it (it gates the ledger's notification path only). Measured on the owner's machine, 2026-09-20: Folio's Claude Code hooks were off and the dot he took for "turn finished" was this one. So "no row" in the floor does not mean "no sign": the rail says nothing about such a pane, and its tab still says *something moved*. The first 0.5 keeps that, and does not dress it as a state.
 - **§12.4.7 is ruled, not recommended:** the action log records agents only (owner, 2026-09-20).
 
 ### 13.2 The ledger owns facts; the word is derived
