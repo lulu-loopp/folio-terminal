@@ -1,6 +1,8 @@
 # The agent workbench: Folio 0.5
 
-Status: **total design note, 2026-09-20.** This theme is 0.5; remote is 0.6 (owner, 2026-09-18). The structure and the interaction rules below are settled and are the input to ticket writing. The visual design of every surface named here is **not** settled and is not settled by this note.
+Status: **revision 2, 2026-09-20, after two independent adversarial reviews and a round of owner rulings.** **§11 at the end supersedes §§2–10 wherever they disagree**; revision 1 stands unchanged above it so the reviews can be read against it. Original status: total design note, 2026-09-20. This theme is 0.5; remote is 0.6 (owner, 2026-09-18). The structure and the interaction rules below are settled and are the input to ticket writing. The visual design of every surface named here is **not** settled and is not settled by this note.
+
+Reviews: `review-glm.md` (22 findings, 5 questions) and `review-kimi.md` (22 findings, 5 questions), both read-only, both outside the repository. Every code citation this revision relies on was re-verified in this worktree; where a review is wrong, that is said in §11.1.
 
 ## 1. Status, and how to read it
 
@@ -165,7 +167,7 @@ Transitions, and the evidence that produces each:
 - **Nothing to show = nothing drawn.** Not a grey zero.
 - Hover 350 ms opens **the list**, on the same paper as the glance card; the pointer may enter, a click pins it. **The list is sorted by urgency**, because opening it *is* the question. Rows are the same two-line component, Allow / Deny are in the row, clicking the row goes there.
 - **In the vertical layout, while the Agent rail is present, the badge is not drawn** — the rail already is that list, and one answer is not given twice. (It appears in horizontal, in cards, **or** when the side rail is collapsed.)
-- **RULED: Waiting and Done are never summed into one number.** One control and one list, yes; one number, no — "is something blocking me" and "how many finished" are different urgencies, and adding them dilutes the only real question. The badge's total counts *items*; its colour keeps the classes apart.
+- *(A sentence stood here contradicting the total, in the same section. Both reviews caught it; it was this coordinator's own withdrawn position, and the owner ruled the total. **Deleted 2026-09-20** rather than superseded, because a ticket could not have passed review against both. See §11.6.)*
 
 **OPEN (visual):** the badge itself — the owner's complaint about an earlier form was *"这个图标的位置以及圆角这些都 不对"* ("the position of this icon and the rounded corners are wrong"), and the fix came from the master's own two-month-old note on `.attn-chip`: *quiet chrome, loud dot* — the tinted pill body read as foreign furniture; the dot is the signal, the rest is ordinary caption-area chrome that behaves like the gear beside it. That correction is a **ruling of the master's**, and the new badge must be born under it, measured on a real title bar: shared centre line with the gear and the caption buttons, no resting fill, only the glyph takes the band colour.
 
@@ -348,6 +350,8 @@ The owner's principle (2026-09-20): *rulings are not law; cite the date and the 
 
 ## 10. Open questions for the owner
 
+**Superseded by §11.10.** Kept as written so the reviews and the owner's rulings can be read against the questions they answered.
+
 1. **Is the Agent rail this window's, or the whole application's?** Per-window means the title must say so and carry a dim "N more in other windows"; application-wide means clicking a row raises another window.
 2. **With no agent sessions at all, does the rail disappear entirely, or keep one header line?** It was argued both ways while quota lived in the rail head; quota has since moved to the title bar, which removes that argument.
 3. **Is a row keyed by PANE or by SESSION?** Pane (recommended): one pane one row, a restart replaces the contents, dead sessions live in `Resume ▸`. Session: a restart adds a row and the list grows without bound.
@@ -361,3 +365,150 @@ The owner's principle (2026-09-20): *rulings are not law; cite the date and the 
 11. **Select-and-comment and web driving are ruled in structure but were never drawn.** Are they in scope for a first 0.5, or does 0.5 ship the rail, Recent, the protocol and quota, with comment and driving following in 0.5.x?
 12. **Does the Recent view's row show "who" with the agent's mark?** That puts vendor marks into the files column, which has never carried one.
 13. **One divergence between the brief and the mock's record, flagged rather than resolved.** The brief proposed a house rule of the form *"in this window a number appears only when it changes what you do next"*. NOTES supports two narrower rules and not that generalisation: **a constant is noise** (the account label, §5.6) and **a badge is a badge** (§5.7); the quota chip lost its number for a stated, specific reason, not under a general law. §5 carries the narrow pair. Adopt them as they stand, or rule the general form and let the narrow ones follow from it?
+
+## 11. Revision 2 — what the reviews and the owner changed (this section rules)
+
+Both reviews broke the same load-bearing part: the row with question text and Allow / Deny, the ask strip, and the activity line all rest on data the shipped architecture deliberately refuses to carry. The owner, reading the same mock, arrived at the same place from the other side and replaced the model. What follows applies the repository's stop rule — a finding changes the design when it is reachable in ordinary use and breaks a hard requirement or the headline scenario; the rest is recorded.
+
+### 11.1 Corrections of fact
+
+Re-verified in this worktree. **The reviews are right, and about the code they are right in more detail than revision 1 was.**
+
+- **The question text does not cross the wire, by construction.** `attention_wire.rs:19-27` — the verb sends only the two fields the mapping row declares (an identifier, and a turn's last sentence); everything else in a hook payload "stays in the hook process and dies with it", because "a channel that carried payloads would be a channel worth attacking". A test pins it: a `PermissionRequest` handed `{"prompt": "secret"}` yields `text: None` (`attention_wire.rs:850-859`). `PermissionRequest` has **no field to write words in** (`attention_map.rs:1041-1047`).
+- **No hook can return a decision.** Every installed hook is `async: true`, and `attention_hooks.rs:381-386` says why in the code: `PermissionRequest` is a synchronous decision gate with a ten-minute timeout, and a blocking hook "would put this program between the user and every approval Claude Code ever asks for". Copilot's `permissionRequest` was refused for the matching reason — exit code 2 is a deny, so a crash denies somebody's tool call (`attention_map.rs`, the closed list).
+- **`PreToolUse` and `SubagentStop` are on a closed list** that a test enforces by name. There is no live sub-agent count and no todo event. Revision 1's §7 said "Todo / sub-agents: from hooks **V**"; that was an overclaim, and it becomes **absent**.
+- **`Resume` does not exist** (GLM F22): the word occurs nowhere in `i18n.rs` and there is no such menu row. Revision 1 leaned on it twice. Both leans are removed below.
+- **Nothing in the product reads a `statusLine`.** Model, context %, session cost and Anthropic quota all arrive through a channel that does not exist yet and that the user may already be using.
+- **`FOLIO_PANE` is `{tab}.{seat}` and is deliberately inert** (`main.rs:35459`, `attention_wire.rs:55-62`): it "routes nothing", because "a pane torn out to another window… has a different address afterwards". The routing credential is `FOLIO_ATTENTION` — **128 unguessable bits, minted when the pane was born, held on the leaf, gone the instant the leaf is** (`attention_wire.rs:12-18`). So §6's token is not a new primitive to invent: it is this one, extended. "A split mints, never inherits" is already true by construction, and revision 2 only has to keep it true.
+
+**Where the reviews are wrong, or where revision 1 was wrong in the reviews' favour:**
+
+- **The honesty table under-claimed twice, and the OSC lane was missed entirely.** Copilot carries thirteen verified events including two `notification` waits and `userPromptSubmitted` as a clear; pi's `agent_settled` is a mapped turn end. And `OSC_ROWS` (`attention_map.rs:748`) is a second lane **for programs that need no adapter at all**: `OSC 1337;RequestAttention yes`/`no` is a *standing, retractable* request — a genuine Waiting signal any program can raise — and `OSC 9` / `OSC 777` / `OSC 99` are announcements with words, which is how codex and pi already reach Folio. The floor for a hookless agent is therefore **not** "nothing"; it is "whatever it writes to its own tty". §11.8's table says so.
+- **Kimi F22's "§7.51 exists nowhere"** is a presentation defect, not a factual error: `DESIGN.md` §7.51 exists (line 7735) and is the right section. Revision 1 failed to qualify the reference. Fixed by spelling it `DESIGN.md §7.51` from here on.
+- **GLM F17 conflated two scopes.** Token scope (a tab, §6) and rail scope (what one person sees, §4.1) are different facts with different owners and must stay separate; the owner's ruling makes the rail application-wide **without touching the token's tab boundary**.
+- **GLM F2's process-walking objection is answered by deleting the thing that needed it**, not by a walker: see §11.8's third rung.
+
+### 11.2 The model changes: notify, and take me there
+
+**Supersedes §2.2, §4.2's Allow/Deny, §4.6's ask strip, and §4.3's action list.**
+
+**RULED (owner, 2026-09-20, arrived at independently of the reviews): there is no Allow / Deny anywhere, no ask strip and no banner in the pane, and no `⌄` on a row.** The reviews show there is no delivery path; the owner judges the banner to be Folio repeating, in its own words, a question the agent's own TUI is already asking on screen. Two reasons, one conclusion.
+
+> **Folio's first job is: notify, and take me there.**
+
+Revision 1's claim that "there are exactly TWO authoritative places to answer" is withdrawn; there is **one**, and it is the agent's own TUI in its pane. Folio's job ends at putting the person in front of it.
+
+### 11.3 The rail is the application's, and a row is a running agent
+
+**Supersedes §3's *Session* and *Row* entries, §4.1's scope, and §4.2's line one.**
+
+1. **RULED: one rail, for the whole application.** This window's rows first; then a thin rule with no words; then the other windows' rows. Clicking a row in another window raises that window and focuses that pane. **With no agents, the rail is gone entirely** — no header, no empty state. Consequence: §4.4's "the badge is not drawn while the rail is present" is now sound, and GLM F17's objection to it falls away for arrival (see §11.6 for what remains).
+2. **RULED: a row is a RUNNING AGENT.** Pane and session are *attributes* of a row, not kinds of row. Technically keyed by pane — one agent per pane at a time — which dissolves §10 Q3 and GLM F18 / Kimi F19's "the ledger's key is unruled". **When the agent exits, the row leaves.** `Exited` therefore stops being a standing row state and survives only as a transition the ledger records (§11.5), and every reliance on the non-existent `Resume` goes with it.
+3. **RULED: the row is one line.** With the activity phrase gone (no source, §11.1), `in <tab>` in the tooltip, and Allow / Deny gone, line two carried a single word; a whole line for one word is exactly what §11.4 forbids. The row is `mark · title · [ring] · [turn clock] · state word`, at the tab row's height. This is the owner's own earlier formulation — *an agent row is a tab row* — finally paid for.
+4. **RULED: the ring position belongs to OSC 9;4 progress, not to context.** §4.2's context ring leaves the row and becomes a bare number in the glance card. Reason in §11.9.
+5. **The glance card stays**, unchanged in trigger and paper: hover a rail row, 350 ms, enterable, click pins, `placeBesideRow`, never two cards at once. It is the read-only second level. **Its actions shrink to two: go there · stop.** The owner overrules revision 1's §4.3 note: for the session in view it shows everything too, files changed and last reply included.
+
+### 11.4 Fewer words
+
+**RULED (owner, 2026-09-20, as a general verdict on the mock and on this coordinator's designs):** *"字太多 … 如果能用较少的话就让人明白意思就不要多字,能不用字就能明白那就不要用,你有太多解释性的句子和词了."* Too many words; if fewer will do, use fewer; if none will do, use none; there are too many explanatory sentences.
+
+**This is §5's first house rule, above all the others**, and it is testable: **no string in this product explains the interface.** A string names a thing, states a fact, or is the user's or the agent's own words. A state is one word. A number carries no classifier and no caption. Where a picture already says it, no word says it again.
+
+Applied surface by surface — every word that remains, and why it survives:
+
+| Surface | Words that remain | Why each survives | Deleted |
+|---|---|---|---|
+| Rail | none of Folio's | the divider between this window and the others is a rule, not a label (§11.3) | the header, and `4 个会话 · 1 件在等你 · 1 件待看` |
+| Rail row | the title; one state word | the title is the agent's or the user's own; the state word is the fact | activity phrase, `in <tab>`, sub-agent count, account, model |
+| Notification | one state word; the title | the same two | every caption around them |
+| Notification, expanded | the agent's own last reply | its words, not Folio's | any label over the reply, any label over the reply field |
+| Glance card | field values only | path, branch, model name, bare numbers | every caption; the account pill unless the vendor has two accounts (§4.7 stands) |
+| Quota panel | company, account, percentage, reset times, `cannot read` | all facts | **`in use` — replaced by the marks of the agents running on that account**, which says which as well as whether |
+| Badge | a number | a count | any classifier beside it |
+| Toast | company · the number · the time | the three facts of a crossing | `账号额度已用` / `quota used up` / `恢复` as prose |
+
+The toast's three lines become `Anthropic · 80% · 19:00`, `Anthropic · 0 · 19:00`, `Anthropic · 19:00` — **proposed, not ruled**, because the third is ambiguous without its neighbours; §11.11 Q6.
+
+### 11.5 The state machine, corrected
+
+**Supersedes §3.1's row for Exited and §3.2's transition table.**
+
+- **Waiting inherits the shipped ledger's clears**, which are `UserPromptSubmit` and `Stop` / `StopFailure`, all `ClearScope::All` (`attention_map.rs:194-240`). GLM F8's stuck-Waiting case is therefore already handled for Claude Code by code that exists: answering in the TUI submits, and the submit clears. For a vendor with no clear event the wait expires on the ten-minute credential TTL (`attention_wire.rs:70-72`), which is upstream's own permission timeout. **Nothing new is needed for F8; revision 1 simply did not know the clears were there.**
+- **`Done` clears when the pane was focused while visible.** Chosen because it is the one condition the frame already decides (`Settle { active, focused }`, `attention.rs`). **This deviates from `MarkSeen`, which deliberately leaves the ledger untouched** (`attention.rs:777-778`, attention plan §10.9: "a look spends a bell, and a standing request is not a bell"). The deviation is narrow and stated: a look spends a *Done*, because Done **is** the unread bell; it still does not spend a Waiting.
+- **`Limited` leaves** on its window's `resets_at`, or on any later turn start for that account, whichever comes first (GLM F9, Kimi F11). It is not a permanent state, and a row holding it arms one timer. Note `WaitKind::Quota` and `Notification.quota_auto_resume_stale` already exist in the map — the vocabulary is in the code, unused.
+- **Failed beats Limited on one row** (GLM F10): the row's single word follows the same severity order as the badge (§11.6). The quota fact is still visible, on the account, in the panel.
+- **Out-of-order hooks are tolerated, not prevented** (Kimi F9): each event is its own `folio.exe` over an unordered pipe, so a `Stop` may land before the `PermissionRequest` it ends. Rule: **a clear with `ClearScope::All` also clears waits minted within one second after it.** Without that the pair can invert and leave a wait for a dead prompt standing until the TTL.
+- **`Exited` is a transition the ledger records, never a row state** (§11.3.2). What is knowable: root-process death always; a *sub*-process exit only through OSC 133 command-end, i.e. only where shell integration is on. **Therefore: a hookless agent started inside a shell, in a pane without shell integration, cannot be known to have exited.** Its row leaves when the pane does. This is the honest statement DESIGN §7.1.5b already made — *dead 态只看根* — and Kimi F4 is right that revision 1 ignored it.
+
+### 11.6 The badge, and Kimi F17
+
+**Supersedes the sentence deleted from §4.4.** **RULED: the badge is one dot and one number; the number is the TOTAL; the colour is the most urgent class present.** The order `Waiting → Failed → Limited → Done` is **not new** — it is DESIGN §7.1.5b's own severity order (等你回答 > 未读·失败 > bell > 未读·完成, 2026-07-18) read with today's names. Unhandled notifications accumulate here (§11.7.5).
+
+**Kimi F17 — a Waiting row scrolling out of a creation-ordered rail capped at 50 % — is answered for arrival and not for return.** The notification catches the moment it happens and the badge holds it afterwards; both are urgency-sorted, so the rail no longer has to be. But the owner ruled the badge hidden while the rail is on screen, and the rail is now on screen whenever any agent runs — so a dismissed notification for a row scrolled below the fold has no surface at all. **My view, offered as a question rather than a ruling (§11.11 Q1): a Waiting row sticks to the top edge of the rail's viewport while it waits — a sticky row, not a re-sort, so the stable order the owner asked for is untouched and the fact is never off screen.** That is a structural answer; the alternative (un-hide the badge whenever a wanting row is out of view) is a second rule about the same fact, and would be the third patch CONVENTIONS §十 rule 6 warns about.
+
+### 11.7 The notification, the reply, and the view you drag out
+
+**New. Supersedes the hover-card-with-buttons model in §4.3 and §4.4's list-with-Allow/Deny.** Recorded as the owner's design (2026-09-20). The shape is a phone's.
+
+1. **It appears when an agent needs the person and its pane is not in view.** Contents: **vendor mark · one state word · title.** Nothing else. Not in view = not the focused pane of the focused window.
+2. **It expands** to the agent's latest reply. Claude Code: from the transcript the `Stop` hook names — `attention_words` already reads a lede from a bounded tail of it (0.1–0.8 ms, measured, including a 287 MB file). Everyone else: the tail of the terminal screen, which Folio already holds.
+3. **Reply in the notification.** The person writes; Folio writes that text into the pane's input as a bracketed paste plus Enter. **This is the user typing, from another surface** — it is not a verb on the tool surface, it holds no tier, and no agent can reach it. That is the answer to Kimi F14: the typing tier governs exactly one thing, an *agent* asking Folio to type into a pane the agent did not create. **Offered only when the agent is verifiably waiting for free text**: the ledger holds no `WaitKind::Permission` or `WaitKind::Quota` for that pane, and a turn boundary was observed (Idle or Done). **Never for a permission prompt** — those want vendor-specific keystrokes, and a stale one lands in whatever is at the prompt when it arrives, which is both reviews' hazard. Any new event for that pane disarms the field.
+4. **Drag it out → a floating window that is a second, interactive view of that pane's terminal** — scroll history, type, close. **One PTY, one size**: the view shows the pane's own rows × columns, scaled or clipped, **never reflowed**. This is not new machinery in two respects: `float.rs` is already *"a form, not a feature"*, the single chassis behind DESIGN §7.0's 小窗 container, and `focus_thumb.rs` is already a live read-only second projection of a seat, with a budget. **And it is the local rehearsal for 0.6.** Checked against `docs/plans/remote/research-2026-09-10.md`: no conflict, and one direct confirmation — *"the pty has exactly one size, so somebody has to own it"* (§3.4) — plus the owner's own overturn of that document's Q6, the day it was written: **"when two clients attach to one session both see it update live and both may type (a shared view, not takeover)"**. One terminal state, several attached views, is the ruled 0.6 shape; this is its first instance, inside one process. Open: whether the dragged-out view is a float inside the window (chassis exists) or a real OS window (§11.11 Q2).
+5. **Unhandled notifications accumulate in the title-bar badge and its list** (§11.6), which is the surface already ruled.
+
+### 11.8 Data: the degradation floor, and where an account comes from
+
+**Supersedes §3.2's per-program list, §4.1's recognition ladder, and §7's table rows.** Stated honestly, as a floor:
+
+| How the agent is running | What Folio knows |
+|---|---|
+| Claude Code, hooks installed (Folio-launched, or typed into a Folio pane — the pane's env carries the credential either way) | turn start, waits with a kind, turn end with a quotable sentence. All states. |
+| Copilot CLI, hooks installed | turn start, two `notification` waits, turn end. |
+| Codex, `notify` installed | turn end and its last message. No waits, no turn start. |
+| pi | turn end, no words. |
+| Any program at all, through its own tty | `OSC 1337;RequestAttention yes`/`no` = a standing, retractable wait; `OSC 9` / `OSC 777` / `OSC 99` = an announcement with words; BEL = a bell; OSC 133 = command end. **No adapter needed.** |
+| A hookless vendor writing none of those (Kimi, OpenCode, Hermes, GLM, Gemini CLI) | the mark and the title. **No state word** — not a fake `Working` from liveness. |
+| Any agent inside WSL, ssh or tmux | **invisible in 0.5.** Not listed, not counted, documented. The credential travels in the pane's env; WSLENV forwards four variables and none of them is it (`shell_integration.rs:199-204`), a Windows named pipe is unreachable from WSL, and a remote host has no pipe at all. A **forwarding lane is reserved and named for 0.6** — `WIRE_VERSION` versions the grammar, not the transport — and is **not designed here.** |
+
+- **The third recognition rung is dropped.** "Process information" was a heuristic, which CONVENTIONS §一 forbids, and it needed a process walker that does not exist in this repository and that §6's quiescent budget forbids. Recognition is two rungs, both contracts: **a hook credential arrived from this pane**, or **this pane's tty wrote an OSC row**. Nothing else lists an agent. GLM F2 and F19's missing discovery ticket disappear with the thing that needed them.
+- **Activity, todo and sub-agent count have no source today and are absent** — not empty, absent (§7's own rule). They return only when a recorded hook payload proves otherwise.
+- **An account is attributed from the hook or statusLine child's own environment, never from the pane's spawn env.** Folio cannot read a pane's environment after spawn, and an export inside the shell never reaches it (GLM F4, Kimi F7). The hook process runs inside the agent's environment and is the only witness. **Consequence, stated: a vendor with no hook has no account attribution, so its panel shows one account.**
+- **The statusLine wrap inherits the codex precedent.** `attention_codex.rs` refuses to take over a user's own `notify` key, out loud, because uninstall could not give it back. The statusLine has the same shape, so: **if the user already has one, Folio leaves it alone, and model, context % and Anthropic quota are absent for that install.** That is a row in the table, not a footnote. Kimi F8 also notes that a Limited Anthropic session is idle, so its push never reports recovery — which is why §11.5's `Limited` leaves on a timer rather than on a push.
+
+### 11.9 The token, the record, the metrics, and the ring
+
+- **The token is attribution, not security.** One sentence, in the note and in the copy: any process running as this user can read another pane's environment, so the token proves *which pane spoke*, not *that the caller was entitled to speak*. It extends the shipped `FOLIO_ATTENTION` capability rather than inventing a second. **A split mints a fresh token and never inherits one** (already true by construction — minted on the leaf, dead with the leaf; §6 must keep it true). **Never the positional `{tab}.{seat}` spelling**, because indices are reused and a new pane would inherit a dead pane's authority. **Never in argv** (world-readable) and **never in the record.**
+- **Tier 2 is repaired** (GLM F12): typing into a pane **the agent itself created through the tool surface** is tier 2 — otherwise tier 2 grants `split` and forbids the only thing a split is for. Typing into any pane that predates the grant is the typing tier.
+- **The record and the metrics are one store, not two.** Revision 1 asserted a visible record with no owner, home, bound or retention (GLM F14, Kimi F15), and §2.5's interruption counts with no store at all (Kimi F6). Two patches for one missing fact is the shape §十 rule 6 refuses, so: **one append-only action log, owned by the app, in Folio's own data folder, one line per action (when · pane · agent · verb · outcome), size-bounded with oldest-first eviction, removed by `folio --uninstall-cleanup --purge` like any other class-O data.** Interruption counts (§2.5) are **queries over it**, not a second table — which is why §2.5 keeps its claim instead of being dropped. **No payload, no typed text, no terminal output** goes in it: the wire refuses payloads for exactly this reason, and the record must not become the channel the wire declined to be. This is ticket 8's acceptance criterion, not an open question.
+- **The context ring leaves the row** (Kimi F12). DESIGN §7.1.5b (2026-07-18) already rules a ring on this icon, and it is **OSC 9;4 progress** — an independent channel that coexists with breathing and the dot, available to any program with no adapter. Context % comes only from a statusLine that nothing reads and that many installs will refuse (§11.8). **So the one ring position on a row is the older ruling's, and context % is a bare number in the glance card.** One ring, one meaning.
+- **The quota chip's `--err` when every in-use account is exhausted stays** — owner's ruling, recorded as an owned exception to §4.5's own "a permanent red is a red nobody reads", with his reason: **for a one-account user that is the state that matters**, and nothing else is running to be warned about. Kimi F18 is recorded, not adopted. "In use" now means *a listed row exists on that account* (GLM F16), and the panel shows it with the agents' marks instead of the words (§11.4).
+
+### 11.10 §9 addendum, and §8 replaced
+
+**DESIGN §7.1.5b (user ruling, 2026-07-18) — seven session states, a severity order and an OSC 9;4 progress ring — is re-ruled here.** Premise then: states belong to a *session*, aggregated by tab and by card, and a session was a shell command. Premise now: a session is an agent, and the facts arrive from hooks rather than from the tty alone. **What survives unchanged:** the severity order (§11.6), the ring as an independent channel (§11.9), *dead 态只看根* (§11.5), and the degraded path for a pane with no OSC 133. **What is replaced:** the seven names, by §3.1's seven — `busy`→Working, `未读·完成`→Done, `未读·失败`→Failed, `等你回答`→Waiting, `bell`→Limited (the static-orange slot), `dead`→a transition rather than a state, plus Idle, which 2026-07-18 had no name for. Cheap to re-rule, because DESIGN itself records that the §7.1.5b state machine is one *"this build does not have"* (`main.rs`, `restart_shell`): nothing is being taken away from shipped code.
+
+**§8 is replaced by this sequence.** The first item ships alone and is useful, and the ledger's key is now ruled, so it no longer precedes its own schema (GLM F18, Kimi F19/F20).
+
+| # | Ticket | Why here |
+|---|---|---|
+| 1 | **Recent view** — the third view of the files column | Needs no ledger, no protocol, no vendor. Ships alone, is useful alone, and fixes "opening a preview is laborious". A small **mono** agent mark per row is the "who" (owner ruled). |
+| 2 | **The ledger, keyed by pane; one running agent per pane** | Unblocked: the key is ruled (§11.3.2). Consumes the shipped map, clears and credential; adds §11.8's floor and §11.5's out-of-order tolerance. No new surface. |
+| 3 | **The rail and the row** — application-wide, one line, stable order, glance card with two actions | The visible core. Read-only; depends on 2, on no protocol. |
+| 4 | **Notification: appear, expand, reply** | Depends on 2 for "needs me". The reply is a user gesture, so it needs no protocol either. |
+| 5 | **The badge and its list** | Where unhandled notifications go; depends on 4 being dismissible. |
+| 6 | **Quota: chip, panel, toasts** | Independent of 2–5 except for "in use" (needs 2). Carries §11.8's statusLine refusal and account attribution. |
+| 7 | **Drag out → a second view of the pane** | The one genuinely new mechanism, and the 0.6 rehearsal. After the surfaces that make it reachable. |
+| 8 | **Protocol + identity + the action log** (`folio` CLI/MCP, three tiers, the typing tier, §11.9's log) | Moved **after** the surfaces: nothing in 1–7 consumes it, and its shape is better decided once the ledger it exposes exists. Read-only verbs first. |
+| — | **Select-and-comment, and web driving** | **Not in the first 0.5** (owner). 0.5.x. Which elements may be selected and sent is a separate discussion. |
+
+Also ruled by the owner and folded in without further argument: Claude's orange at 2.91:1 on Folio Light is **accepted for now**; `Move to ▸` merges **only the two window rows**, and *Move to new tab* stays its own; a blocked **sub-agent surfaces as the parent row Waiting**, with no second level, because the owner has never seen one block.
+
+### 11.11 §10 replaced: the questions that remain
+
+1. **Does a Waiting row stick to the top of the rail's viewport while it waits?** (Recommended: yes — the one structural answer to Kimi F17 that leaves the stable order alone.)
+2. **Is the dragged-out view a float inside the window (the `float.rs` chassis exists) or a real OS window?** The second is the 0.6 shape and costs more now.
+3. **May a hookless agent be listed on the strength of an OSC row alone** — does a program that raises `OSC 1337` earn a rail row, or must a row require a known vendor mark?
+4. **When the reply field is disarmed by a new event mid-typing, is the text kept or discarded?**
+5. **Does the rail list other windows' rows when those windows are minimised or on another monitor**, or only windows on the current desktop?
+6. **The toast's three lines** — `Anthropic · 80% · 19:00`, `Anthropic · 0 · 19:00`, `Anthropic · 19:00`: is the third readable alone, or does recovery need one word?
+7. **Does the action log record what a person did through a Folio surface** (the notification reply, "go there"), or only what an agent did through the tool surface? The first makes §2.5's metrics richer and the log much larger.
