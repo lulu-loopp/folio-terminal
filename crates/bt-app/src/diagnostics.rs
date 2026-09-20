@@ -1,5 +1,8 @@
 //! **Where this process says things, and when that changes.**
 //!
+//! Presentation freshness uses `note` independently of trace routing and hangs.
+//! Its fixed numeric line formats are documented in `docs/PRESENT-DIAGNOSTICS.md`.
+//!
 //! # The fault
 //!
 //! `folio.exe` is a windows-subsystem binary (`main.rs`'s first line), so the

@@ -662,6 +662,9 @@ pub struct MathBlockPlacement {
     /// one: a frame is compared for equality on the way to the glass, and a float field would take
     /// `Eq` off this type and off [`ViewportFrame`] with it.
     pub picture_opacity_milli: u16,
+    /// Progress from the rendered face (0) to source (1000), while travelling.
+    /// Geometry derives both endpoints locally; None uses the settled display.
+    pub face_milli: Option<u16>,
     /// **The selection's own spans over the rows this block stands on**, in this frame's
     /// presentation-row coordinates — the wash a reader's drag lays on the picture
     /// (`docs/DESIGN.md` §7.1.6c-4g).
@@ -3071,6 +3074,7 @@ impl ViewportProjection {
                             // Whole, like every picture this layer places: a block mid-change is a
                             // fact about a gesture, and the session is where a gesture is known.
                             picture_opacity_milli: 1000,
+                            face_milli: None,
                             // The selection is not this layer's to know: the session fills these
                             // in once every placement of the frame exists (`decorate_math_frame`).
                             selection_spans: Vec::new(),
@@ -3218,6 +3222,7 @@ impl ViewportProjection {
                                 clipped_top_rows: 0,
                                 clipped_bottom_rows: 0,
                                 picture_opacity_milli: 1000,
+                                face_milli: None,
                                 selection_spans: Vec::new(),
                             });
                             image_top = image_top.saturating_add(artifact.height_subpixels);
@@ -3456,6 +3461,7 @@ impl ViewportProjection {
                     clipped_top_rows: live_math.clipped_top_rows,
                     clipped_bottom_rows: live_math.clipped_bottom_rows,
                     picture_opacity_milli: 1000,
+                    face_milli: None,
                     selection_spans: Vec::new(),
                 });
 
