@@ -11213,3 +11213,9 @@ A clock-run entry is a deadline or an edge, never a poll; quiescent turns do no 
 In 0.4.2 an older Folio PSReadLine copy caused the clock run to reread the 41 KB Changes.txt on every turn after the probe answered.
 The App owns one optional installed-copy fact, read on the unread probe edge, successful install/removal, and each Terminal-page opening.
 First-run availability reads ProfilePrograms; card construction consumes one ready edge, rearmed by profile changes or an answered card.
+
+### 2026-09-20 — Ending a synchronized update keeps the sequence it interrupted
+The replay tail carries two facts: the bytes a DEC 2026 block holds back, and the sequence the boundary parser is still inside.
+Everything before `parser_tail_open_start` is the first and is released when the block ends; everything from it on is the second and stays.
+One function owns that release, and it never writes `parser_sequence_open` — the boundary parser alone says whether a sequence is open.
+The deadline arm used to clear both, so a resize seeded the canonical fork at Ground and printed the rest of an escape payload onto the grid.
