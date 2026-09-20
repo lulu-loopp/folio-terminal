@@ -271,6 +271,27 @@ pub(crate) fn classic_taken_off() -> MenuFate {
     }
 }
 
+/// The cleanup door shares the existing ownership decision and remover.
+pub(crate) fn cleanup_classic() -> crate::explorer_menu::CleanupRegistration {
+    use crate::explorer_menu::CleanupRegistration;
+    let desired = desired();
+    let found = bt_platform::read_context_menu(CONTEXT_MENU_CLASSES);
+    match classic_removal(&found, desired.as_ref(), |exe| exe.is_file()) {
+        MenuRemoval::Nothing => CleanupRegistration::Absent,
+        MenuRemoval::Unanswerable => {
+            CleanupRegistration::Refused(Text::CleanupSystemUnknown.text().to_owned())
+        }
+        MenuRemoval::AnotherCopy => match registered_exe(&found) {
+            Some(path) => CleanupRegistration::Other(PathBuf::from(path)),
+            None => CleanupRegistration::Refused(Text::CleanupSystemUnknown.text().to_owned()),
+        },
+        MenuRemoval::Remove => match apply(false) {
+            Ok(()) => CleanupRegistration::Removed,
+            Err(reason) => CleanupRegistration::Refused(reason),
+        },
+    }
+}
+
 /// The first `folio.exe` the trees name, for the sentence that says whose entry
 /// was left alone.
 ///

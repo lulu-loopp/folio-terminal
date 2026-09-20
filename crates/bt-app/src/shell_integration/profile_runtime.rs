@@ -108,6 +108,17 @@ pub fn remove_shell_integration() -> Report {
     operate(&persist::storage_dir(), Action::Remove)
 }
 
+/// The cleanup door supplies its resolved data root without triggering storage migration.
+/// An explicit profile set replaces historical and probed paths, just like the sandbox env door.
+pub fn remove_shell_integration_at(data: &Path, profiles: Option<&[PathBuf]>) -> Report {
+    operate_with(data, Action::Remove, Ok(MANAGED_LINE), |marks| {
+        profiles.map_or_else(
+            || candidates(marks),
+            |paths| (paths.to_vec(), Report::default()),
+        )
+    })
+}
+
 fn operate(data: &Path, action: Action) -> Report {
     let managed = if action == Action::Remove {
         Ok(MANAGED_LINE)

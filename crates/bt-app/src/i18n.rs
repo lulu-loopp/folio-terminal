@@ -336,6 +336,48 @@ const fn pick_platform(
 /// have to be renamed with it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Text {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Printed by uninstall.cmd; the archive source pin checks this copy."
+        )
+    )]
+    CleanupArchiveExit, // CHINESE PENDING: archive script copy.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Printed by uninstall.cmd; the archive source pin checks this copy."
+        )
+    )]
+    CleanupArchiveReady, // CHINESE PENDING: archive script copy.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Printed by uninstall.cmd; the archive source pin checks this copy."
+        )
+    )]
+    CleanupArchiveIncomplete, // CHINESE PENDING: archive script copy.
+
+    CleanupRecovery, // CHINESE PENDING
+    CleanupRuntime,  // CHINESE PENDING
+
+    // CHINESE PENDING: uninstall cleanup command vocabulary.
+    CleanupRemoved,
+    CleanupAbsent,
+    CleanupLeft,
+    CleanupRefused,
+    CleanupRoot,
+    CleanupRunning,
+    CleanupBusy,
+    CleanupUnexpected,
+    CleanupApplication,
+    CleanupLink,
+    CleanupUsage,
+    CleanupSystemUnknown,
+
     // T-PASTE-1 refusal messages; Chinese is assigned to the copy lane.
     PastePathEncoding,
     PastePathControl,
@@ -4543,6 +4585,29 @@ impl Text {
                 "Move Folio out of App Translocation before installing hooks.",
                 "将 Folio 移出 App Translocation 后再安装 hook。",
             ),
+            Self::CleanupRecovery => "left (dated recovery copies of user configuration are kept)", // CHINESE PENDING
+            Self::CleanupRuntime => {
+                "left (OS runtime lock files are kept to preserve single-instance exclusion)"
+            } // CHINESE PENDING
+            Self::CleanupArchiveExit => "Cleanup exit code:", // CHINESE PENDING
+            Self::CleanupArchiveReady => {
+                "You can now delete the Folio application folder. Your settings and data were kept."
+            } // CHINESE PENDING
+            Self::CleanupArchiveIncomplete => {
+                "Cleanup did not complete. Read the result above before deleting the folder."
+            } // CHINESE PENDING
+            Self::CleanupRemoved => "removed",                // CHINESE PENDING
+            Self::CleanupAbsent => "not present",             // CHINESE PENDING
+            Self::CleanupLeft => "left (belongs to another existing copy):", // CHINESE PENDING
+            Self::CleanupRefused => "refused",                // CHINESE PENDING
+            Self::CleanupRoot => "An absolute, verified cleanup root is required.", // CHINESE PENDING
+            Self::CleanupRunning => "A Folio instance is running; nothing was changed.", // CHINESE PENDING
+            Self::CleanupBusy => "A process holds Folio data; nothing was changed", // CHINESE PENDING
+            Self::CleanupUnexpected => "The remover returned an unexpected outcome.", // CHINESE PENDING
+            Self::CleanupApplication => "The application folder cannot be purged.", // CHINESE PENDING
+            Self::CleanupLink => "A symlink or junction was found; the root was left unchanged.", // CHINESE PENDING
+            Self::CleanupUsage => "Use folio --uninstall-cleanup [--purge].", // CHINESE PENDING
+            Self::CleanupSystemUnknown => "The registration could not be read.", // CHINESE PENDING
             Self::AgentHooksOwnerUnknown => pick(
                 lang,
                 "The hook executable’s owner could not be verified.",
@@ -5149,7 +5214,24 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 719] = [
+    pub const ALL: [Self; 736] = [
+        Self::CleanupArchiveExit,
+        Self::CleanupArchiveReady,
+        Self::CleanupArchiveIncomplete,
+        Self::CleanupRecovery,
+        Self::CleanupRuntime,
+        Self::CleanupRemoved,
+        Self::CleanupAbsent,
+        Self::CleanupLeft,
+        Self::CleanupRefused,
+        Self::CleanupRoot,
+        Self::CleanupRunning,
+        Self::CleanupBusy,
+        Self::CleanupUnexpected,
+        Self::CleanupApplication,
+        Self::CleanupLink,
+        Self::CleanupUsage,
+        Self::CleanupSystemUnknown,
         Self::PastePathEncoding,
         Self::PastePathControl,
         Self::PastePathPowerShellQuote,
@@ -6014,7 +6096,42 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 0] = [];
+    const CHINESE_PENDING: [(Self, HostPlatform); 34] = [
+        (Self::CleanupArchiveExit, HostPlatform::Windows),
+        (Self::CleanupArchiveExit, HostPlatform::MacOs),
+        (Self::CleanupArchiveReady, HostPlatform::Windows),
+        (Self::CleanupArchiveReady, HostPlatform::MacOs),
+        (Self::CleanupArchiveIncomplete, HostPlatform::Windows),
+        (Self::CleanupArchiveIncomplete, HostPlatform::MacOs),
+        (Self::CleanupRecovery, HostPlatform::Windows),
+        (Self::CleanupRecovery, HostPlatform::MacOs),
+        (Self::CleanupRuntime, HostPlatform::Windows),
+        (Self::CleanupRuntime, HostPlatform::MacOs),
+        (Self::CleanupRemoved, HostPlatform::Windows),
+        (Self::CleanupRemoved, HostPlatform::MacOs),
+        (Self::CleanupAbsent, HostPlatform::Windows),
+        (Self::CleanupAbsent, HostPlatform::MacOs),
+        (Self::CleanupLeft, HostPlatform::Windows),
+        (Self::CleanupLeft, HostPlatform::MacOs),
+        (Self::CleanupRefused, HostPlatform::Windows),
+        (Self::CleanupRefused, HostPlatform::MacOs),
+        (Self::CleanupRoot, HostPlatform::Windows),
+        (Self::CleanupRoot, HostPlatform::MacOs),
+        (Self::CleanupRunning, HostPlatform::Windows),
+        (Self::CleanupRunning, HostPlatform::MacOs),
+        (Self::CleanupBusy, HostPlatform::Windows),
+        (Self::CleanupBusy, HostPlatform::MacOs),
+        (Self::CleanupUnexpected, HostPlatform::Windows),
+        (Self::CleanupUnexpected, HostPlatform::MacOs),
+        (Self::CleanupApplication, HostPlatform::Windows),
+        (Self::CleanupApplication, HostPlatform::MacOs),
+        (Self::CleanupLink, HostPlatform::Windows),
+        (Self::CleanupLink, HostPlatform::MacOs),
+        (Self::CleanupUsage, HostPlatform::Windows),
+        (Self::CleanupUsage, HostPlatform::MacOs),
+        (Self::CleanupSystemUnknown, HostPlatform::Windows),
+        (Self::CleanupSystemUnknown, HostPlatform::MacOs),
+    ];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────

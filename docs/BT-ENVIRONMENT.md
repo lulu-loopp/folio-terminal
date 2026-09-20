@@ -56,6 +56,7 @@ added later; `BT_PTY_DUMP` and `BT_HANG_SELFTEST` deliberately do not match it.
 | `BT_WEB_DEV` | URL | Opens a preview seat at startup and navigates it to this URL. | The page is loaded, so its cache and cookies land in the WebView2 profile under `%LOCALAPPDATA%\Folio\WebView2` like any other previewed page. | off; no page is opened |
 | `BT_POWERSHELL_PROFILE` | file path, used verbatim | Redirects the shell-integration installer: the `$PROFILE` it reads and writes becomes this file instead of the real one. | The file you name is created and edited by the installer. | the real `$PROFILE`, asked of a running PowerShell |
 | `BT_PSREADLINE_DOCUMENTS` | directory path, used as a base | Redirects the bundled PSReadLine installer's Documents root. The module goes to `<dir>\WindowsPowerShell\Modules\PSReadLine\<version>\`. | Nine files are written under, and deleted from, the directory you name. | the real Documents folder |
+| `BT_UNINSTALL_ROOT` | absolute sandbox directory; empty/relative refuses | Isolates `--uninstall-cleanup` and `--purge`: data, profiles, modules, agents, temp files and instance claims resolve below this directory. Registry/MSIX/toast operations are replaced with absent sandbox readings. | Deletes only resolved sandbox data paths when `--purge` is present; never the application folder. Recorded paths outside the sandbox refuse. | real account roots and system registrations |
 | `BT_PSREADLINE_PROBE` | `<version>[,<policy>]` | Makes the machine read as if it had that PSReadLine version and execution policy, so the upgrade invitation can be photographed. Redirects no write. | — | the real probe, which runs `powershell -NoProfile`. **Set-but-empty is not off here**: `=` engages the override at version `0.0.0`. |
 | `BT_FIRST_RUN_CARD` | switch | Raises the first-run card on a machine that has already answered it, so it can be photographed in a second language or looked at again. Overrides the appearance gate and nothing else: which rows are offered, what `Done` does and what is written down are exactly what they would be on a real first run. | — | off; the card appears only on a machine with no `settings.json` that has never shown it |
 | `BT_SHELL` | program path or bare name, used verbatim | Overrides the default shell program, and is what the `PowerShell` profile row resolves to. Never checked for existence; a bare name is resolved by `CreateProcess` against `PATH`, and a spawn failure falls back to `powershell.exe`. | — | `pwsh.exe` if found, else `powershell.exe` |
@@ -234,3 +235,15 @@ This is independent of `BT_PERF_TRACE` and hang detection. It rides existing
 turns and attempt completion, adds no idle wake, and prints no user text.
 See [Presentation diagnostics](PRESENT-DIAGNOSTICS.md) for field definitions,
 clock boundaries, and how to join an attempt to a stalled station.
+
+### Uninstall sandbox layout
+
+`BT_UNINSTALL_ROOT` replaces all cleanup discovery, including the real profile
+and agent overrides. Windows data is `roaming/Folio`, `roaming/BetterTerminal`
+and `local/Folio`; macOS data uses the six table entries below `home/Library`.
+The profile is `profiles/profile.ps1`, PSReadLine's Documents base is
+`documents`, and agent roots are `home/.claude`, `home/.codex`, `home/.copilot`.
+Temporary data is below `temp`. No registry operation is made in this mode.
+An injected root is a destructive test target when purge is requested: create a
+fresh disposable directory. Unit tests inject these paths directly and supply
+fake system readings without changing process-wide environment variables.

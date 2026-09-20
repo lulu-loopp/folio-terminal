@@ -149,7 +149,7 @@ then left where it is.
 
 | asset | what it is |
 | --- | --- |
-| `folio-<version>-windows-x64.zip` | the nine files, in one folder |
+| `folio-<version>-windows-x64.zip` | the ten files, in one folder |
 | `folio-windows-x64.zip` | the same bytes, under the name `/releases/latest/download/` resolves |
 | `SHA256SUMS.txt` | one line for each of the other three, in the format `sha256sum -c` reads |
 | `folio-<version>.cdx.json` | the CycloneDX bill of materials `sbom.ps1` writes |
@@ -780,7 +780,7 @@ registers against nothing.
 `ArchiveBinariesDependOnPath: true` is what turns that off. With it, winget
 extracts the whole archive into one real folder under
 `%LOCALAPPDATA%\Microsoft\WinGet\Packages\` and puts **that folder** on the
-user's `PATH`, so all nine files sit beside each other exactly as they do for
+user's `PATH`, so all ten files sit beside each other exactly as they do for
 somebody who unzipped the release by hand. It arrived in winget-cli 1.9 and is
 carried by manifest schema 1.9.0 onward; leaving it unset does not fail
 validation, it just quietly reintroduces the symlink. Do not remove it.
