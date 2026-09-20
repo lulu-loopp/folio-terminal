@@ -71,6 +71,73 @@ pub struct Footprint {
     pub working_set_bytes: u64,
 }
 
+/// Calling thread's cumulative user + kernel CPU time, in microseconds.
+/// No process-wide counters, handle ownership, allocation, or cached baseline.
+#[cfg(windows)]
+#[must_use]
+pub fn thread_cpu_us() -> Option<u64> {
+    use windows::Win32::{
+        Foundation::FILETIME,
+        System::Threading::{GetCurrentThread, GetThreadTimes},
+    };
+    let mut created = FILETIME::default();
+    let mut exited = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    // SAFETY: the pseudo-handle names this calling thread and is not owned.
+    // All four outputs are writable FILETIMEs valid for the entire call.
+    unsafe {
+        GetThreadTimes(
+            GetCurrentThread(),
+            &raw mut created,
+            &raw mut exited,
+            &raw mut kernel,
+            &raw mut user,
+        )
+    }
+    .ok()?;
+    let ticks = |t: FILETIME| (u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime);
+    Some(ticks(kernel).saturating_add(ticks(user)) / 10)
+}
+
+/// Darwin's basic thread info counts only the calling pthread. Unlike
+/// `mach_thread_self`, `pthread_mach_thread_np` does not create a send right.
+#[cfg(target_os = "macos")]
+#[must_use]
+pub fn thread_cpu_us() -> Option<u64> {
+    // SAFETY: an integer-only output struct, with the exact flavor/count;
+    // pthread_self is live throughout the call and its Mach port is borrowed.
+    let info = unsafe {
+        let mut info: libc::thread_basic_info = std::mem::zeroed();
+        let mut count = libc::THREAD_BASIC_INFO_COUNT;
+        let status = libc::thread_info(
+            libc::pthread_mach_thread_np(libc::pthread_self()),
+            libc::THREAD_BASIC_INFO as libc::thread_flavor_t,
+            std::ptr::from_mut(&mut info).cast(),
+            &raw mut count,
+        );
+        if status != libc::KERN_SUCCESS || count != libc::THREAD_BASIC_INFO_COUNT {
+            return None;
+        }
+        info
+    };
+    let micros = |time: libc::time_value_t| -> Option<u64> {
+        Some(
+            u64::try_from(time.seconds)
+                .ok()?
+                .saturating_mul(1_000_000)
+                .saturating_add(u64::try_from(time.microseconds).ok()?),
+        )
+    };
+    Some(micros(info.user_time)?.saturating_add(micros(info.system_time)?))
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+#[must_use]
+pub fn thread_cpu_us() -> Option<u64> {
+    None
+}
+
 /// **This process's page faults and resident size**, or `None` where the
 /// platform does not publish them.
 ///

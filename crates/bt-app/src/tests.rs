@@ -12348,7 +12348,7 @@ fn ten_notches_on_a_preview_alone_in_a_tab_are_ten_presents() {
              of tab is asking:\n{funnel}"
     );
     assert!(
-        funnel.contains("self.window.window.request_redraw();"),
+        funnel.contains("self.window.window.request_redraw()"),
         "what it always leaves behind is the bare request:\n{funnel}"
     );
 
@@ -12472,13 +12472,13 @@ fn an_engine_page_alone_in_a_tab_reaches_the_glass_through_the_retained_present(
         "    fn publish_frame_inner(&mut self, trigger: FrameTrigger, skip_unchanged: bool) -> Result<bool> {",
     );
     assert!(
-            publisher.contains("ifself.focused().is_none(){self.window.chrome_present_pending=true;self.window.window.request_redraw();returnOk(false);}"),
+            publisher.contains("ifself.focused().is_none(){self.window.chrome_present_pending=true;hang_watch::during(hang_watch::Station::WindowRedraw,||{self.window.window.request_redraw()});returnOk(false);}"),
             "a tab with no shell composes no terminal picture, and what it owes \
              instead is a present:\n{publisher}"
         );
     let retained = method_text("    fn present_retained_picture(&mut self) -> Result<()> {");
     assert!(
-        retained.contains("letbodies=self.pane_draws(now);"),
+        retained.contains("letbodies=hang_watch::during(hang_watch::Station::RedrawLayout,||self.pane_draws(now));"),
         "the retained present is where such a tab's panes are placed:\n{retained}"
     );
     let draws = method_text("    fn pane_draws(&mut self, now: Instant) -> Vec<PaneDraw> {");
@@ -12576,7 +12576,7 @@ fn a_page_a_modal_covers_is_drawn_as_a_kept_frame() {
     );
 
     // ③ The two places a kept frame reaches the glass.
-    let chrome = method_text(concat!("    fn ", "refresh_chrome("));
+    let chrome = method_text(concat!("    fn ", "refresh_chrome_with_overlay("));
     assert!(
         chrome.contains("icons.extend(self.page_keepsake_icons());"),
         "a docked pane draws its page's last frame in the chrome pass, \
@@ -38911,7 +38911,12 @@ fn the_disk_news_reaches_the_glass_by_both_roads() {
     );
     // The fallback's two moments (rule 4).
     assert!(
-        SOURCE.contains("runtime\n                        .ask_the_unwatched_preview_files()"),
+        SOURCE
+            .lines()
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join("\n")
+            .contains("runtime\n.ask_the_unwatched_preview_files()"),
         "a window given focus asks about the files no kernel speaks for"
     );
     let land = fn_body(concat!(

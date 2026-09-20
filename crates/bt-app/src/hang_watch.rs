@@ -90,12 +90,16 @@
 //! This is a resident facility, so the bill has to be small enough that nobody
 //! would think about turning it off:
 //!
-//! - **Per station**, [`at`] is two relaxed stores to a static — on x86-64 two
-//!   `mov`s, no fence, no branch, no clock read, no allocation. There are eight
-//!   of them, at function entries, on a loop turn that already does far more
-//!   work than that in its first line. The two stations that are not entered
-//!   this way — [`Station::Parked`] and [`Station::Woken`] — are stamped by
-//!   [`park`] and [`woke`], at the two ends of the platform's own wait.
+//! - **Per station transition**, one monotonic-clock read, relaxed atomic
+//!   accounting and a fixed-capacity call-tree lookup. An enter/leave pair has
+//!   two clock reads, no allocation and no system call. The previous ledger
+//!   already read the clock and charged exclusive time; it was not two stores.
+//!   Call-tree keys include the parent and optional pane ID, so repeated calls
+//!   do not borrow another event's milliseconds. Overflow keeps the full coarse
+//!   ledger and explicitly marks the line. Formatting stays on the watchdog.
+//! - **CPU time**, one read when a hold opens while the watch is armed, and a
+//!   second only when a slow hold is admitted to the reporting queue. Neither
+//!   sample is a process CPU counter; a failed sample prints no invented zero.
 //! - **Per turn of the loop**, [`beat`] is one `Instant::now()` (which
 //!   `about_to_wait` already calls for its own clocks) plus four stores, and
 //!   [`park`] at the other end of the turn is two more. The footprint baseline
@@ -317,7 +321,10 @@ fn slow_hold_threshold_ms() -> u64 {
 /// Held against [`Station`] by `every_station_has_a_slot_in_the_ledger`: a
 /// further variant added without widening this would have its milliseconds
 /// charged to nobody, and the line would silently stop adding up.
-const STATION_COUNT: usize = 66;
+const STATION_COUNT: usize = 194;
+
+#[path = "hang_watch_detail.rs"]
+mod detail;
 
 /// How many reports are kept. The oldest beyond this are deleted.
 ///
@@ -750,6 +757,134 @@ pub enum Station {
     CompositorSize = 64,
     /// DirectComposition's `Commit`, which publishes the presented swapchain.
     CompositorCommit = 65,
+    ImeEnabled = 66,
+    ImePreedit = 67,
+    ImeCommit = 68,
+    ImeDisabled = 69,
+    EventMoved = 70,
+    EventTheme = 71,
+    EventOccluded = 72,
+    EventCursorLeft = 73,
+    ImeAllowed = 74,
+    ImeCaretDestroy = 75,
+    PtyInput = 76,
+    ClipboardWrite = 77,
+    EventLookup = 78,
+    EventSettleApplication = 79,
+    EventRestore = 80,
+    EventOpen = 81,
+    EventQuit = 82,
+    EventShut = 83,
+    RedrawLayout = 84,
+    RedrawProjection = 85,
+    RedrawOverlay = 86,
+    RedrawTables = 87,
+    RedrawSignature = 88,
+    RetainedPicture = 89,
+    RedrawCommit = 90,
+    PresentSeats = 91,
+    DrainPlace = 92,
+    DrainFocus = 93,
+    DrainPane = 94,
+    DrainPalette = 95,
+    DrainRingStats = 96,
+    DrainKeyboardFocus = 97,
+    DrainMarks = 98,
+    DrainAttention = 99,
+    DrainRaiseAttention = 100,
+    DrainGit = 101,
+    DrainTitle = 102,
+    DrainBegin = 103,
+    DrainWake = 104,
+    DrainWatermark = 105,
+    SettingsWrite = 106,
+    PreviewSave = 107,
+    RenameDisk = 108,
+    SharedLock = 109,
+    EventGate = 110,
+    ClockRaiseFirstRunIfDue = 111,
+    ClockRaisePsreadlineInviteIfDue = 112,
+    ClockAdvanceCursorBlinkIfDue = 113,
+    ClockAdvanceRenameBlinkIfDue = 114,
+    ClockAdvanceSchemeWatch = 115,
+    ClockAdvanceStorageWatch = 116,
+    ClockAdvancePreviewWatch = 117,
+    ClockAdvanceFilesWatch = 118,
+    ClockAdvanceTabPressIfDue = 119,
+    ClockServicePictures = 120,
+    ClockAdvanceStripAnimation = 121,
+    ClockFinishSynchronizedUpdateIfDue = 122,
+    ClockFinishPtyCoalesceIfDue = 123,
+    ClockAdvanceGitWatch = 124,
+    ClockSettleCompositionOwner = 125,
+    ClockOfferImeCaret = 126,
+    ClockFlushImeCursorArea = 127,
+    ClockFinishResizeIfQuiescent = 128,
+    ClockFinishPreviewScaleIfQuiet = 129,
+    ClockAdvanceLiveMathIfDue = 130,
+    ClockActivateHyperlinkHoverIfDue = 131,
+    ClockActivatePeekIfDue = 132,
+    ClockAdvanceChevrons = 133,
+    ClockAdvancePaneMenu = 134,
+    ClockAdvanceTermMenu = 135,
+    ClockAdvanceTabMenu = 136,
+    ClockAdvanceDragSpring = 137,
+    ClockServiceDragAutoscroll = 138,
+    ClockRefreshMathHoverAgainstThePicture = 139,
+    ClockAdvanceMathToggleIfDue = 140,
+    ClockAdvanceMathToolsIfDue = 141,
+    ClockAdvanceLayoutPeekIfDue = 142,
+    ClockAdvanceTooltipIfDue = 143,
+    ClockNoteKeyHint = 144,
+    ClockAdvanceKeyHintIfDue = 145,
+    ClockNoteCardHint = 146,
+    ClockAdvanceCardHint = 147,
+    ClockAdvanceToasts = 148,
+    ClockAdvanceCommandFlash = 149,
+    ClockAdvanceCommandRails = 150,
+    ClockAdvanceTerminalThumbs = 151,
+    ClockAdvanceFilePeek = 152,
+    ClockAdvanceFloat = 153,
+    ClockRearmHoverIntents = 154,
+    ClockAdvanceFootReveal = 155,
+    ClockAdvancePageFootClocks = 156,
+    ClockAdvancePreviewNotice = 157,
+    ClockAdvancePreviewRefusal = 158,
+    AtlasUpload = 159,
+    TextShaping = 160,
+    RenderLayout = 161,
+    ImeCancel = 162,
+    DrainChannel = 163,
+    ClockFileDwell = 164,
+    ClockFileClose = 165,
+    ClockMathCopy = 166,
+    ClockWebZoom = 167,
+    ClockWebDialog = 168,
+    EventActivation = 169,
+    EventDestroyed = 170,
+    EventHoveredFile = 171,
+    EventHoverCancelled = 172,
+    EventCursorEntered = 173,
+    EventPinch = 174,
+    EventPan = 175,
+    EventDoubleTap = 176,
+    EventRotation = 177,
+    EventPressure = 178,
+    EventAxis = 179,
+    EventTouch = 180,
+    RedrawTableSources = 181,
+    RedrawSeatFrames = 182,
+    RedrawValidate = 183,
+    RedrawDispatch = 184,
+    WindowRedraw = 185,
+    WindowFocus = 186,
+    WindowVisible = 187,
+    WindowCursor = 188,
+    KeybindingsWrite = 189,
+    ProfilesWrite = 190,
+    DrainTab = 191,
+    ImeTrace = 192,
+    DiagnosticWrite = 193,
 }
 
 impl Station {
@@ -823,6 +958,134 @@ impl Station {
             Self::DrainPublish => "drain publish decision",
             Self::CompositorSize => "compositor covered size",
             Self::CompositorCommit => "compositor commit",
+            Self::ImeEnabled => "IME Enabled",
+            Self::ImePreedit => "IME Preedit",
+            Self::ImeCommit => "IME Commit",
+            Self::ImeDisabled => "IME Disabled",
+            Self::EventMoved => "moved",
+            Self::EventTheme => "theme changed",
+            Self::EventOccluded => "occluded",
+            Self::EventCursorLeft => "cursor left",
+            Self::ImeAllowed => "Window::set_ime_allowed",
+            Self::ImeCaretDestroy => "ImeSystemCaret::destroy",
+            Self::PtyInput => "PtySession::write input enqueue",
+            Self::ClipboardWrite => "clipboard write",
+            Self::EventLookup => "window runtime lookup",
+            Self::EventSettleApplication => "settle_application_change",
+            Self::EventRestore => "settle_restore_answer",
+            Self::EventOpen => "open_pending_window",
+            Self::EventQuit => "settle_quit",
+            Self::EventShut => "close window",
+            Self::RedrawLayout => "redraw layout",
+            Self::RedrawProjection => "pane projection",
+            Self::RedrawOverlay => "overlay build",
+            Self::RedrawTables => "table paints",
+            Self::RedrawSignature => "present signature",
+            Self::RetainedPicture => "present_retained_picture",
+            Self::RedrawCommit => "redraw bookkeeping",
+            Self::PresentSeats => "present_seats_and_commit",
+            Self::DrainPlace => "sample_window_place",
+            Self::DrainFocus => "Window::has_focus",
+            Self::DrainPane => "drain pane",
+            Self::DrainPalette => "terminal palette",
+            Self::DrainRingStats => "PTY ring stats",
+            Self::DrainKeyboardFocus => "terminal keyboard focus",
+            Self::DrainMarks => "command marks and outcomes",
+            Self::DrainAttention => "deliver_osc_attention",
+            Self::DrainRaiseAttention => "drain raise_attention",
+            Self::DrainGit => "reread_git_surfaces",
+            Self::DrainTitle => "Window::set_title",
+            Self::DrainBegin => "begin_feed_turn",
+            Self::DrainWake => "PTY wake accept",
+            Self::DrainWatermark => "command_marks_watermark",
+            Self::SettingsWrite => "write_settings_atomic",
+            Self::PreviewSave => "preview buffer save",
+            Self::RenameDisk => "filesystem rename",
+            Self::SharedLock => "shared lock acquisition",
+            Self::EventGate => "window event gates",
+            Self::ClockRaiseFirstRunIfDue => "first run",
+            Self::ClockRaisePsreadlineInviteIfDue => "PSReadLine invite",
+            Self::ClockAdvanceCursorBlinkIfDue => "shell caret",
+            Self::ClockAdvanceRenameBlinkIfDue => "rename caret",
+            Self::ClockAdvanceSchemeWatch => "schemes watch",
+            Self::ClockAdvanceStorageWatch => "storage watch",
+            Self::ClockAdvancePreviewWatch => "preview watch",
+            Self::ClockAdvanceFilesWatch => "files watch",
+            Self::ClockAdvanceTabPressIfDue => "tab press",
+            Self::ClockServicePictures => "pictures",
+            Self::ClockAdvanceStripAnimation => "strip animation",
+            Self::ClockFinishSynchronizedUpdateIfDue => "synchronized update",
+            Self::ClockFinishPtyCoalesceIfDue => "PTY coalesce",
+            Self::ClockAdvanceGitWatch => "git watch",
+            Self::ClockSettleCompositionOwner => "composition owner",
+            Self::ClockOfferImeCaret => "IME caret offer",
+            Self::ClockFlushImeCursorArea => "IME cursor",
+            Self::ClockFinishResizeIfQuiescent => "resize finish",
+            Self::ClockFinishPreviewScaleIfQuiet => "preview resample",
+            Self::ClockAdvanceLiveMathIfDue => "live stability",
+            Self::ClockActivateHyperlinkHoverIfDue => "hyperlink hover",
+            Self::ClockActivatePeekIfDue => "peek hover",
+            Self::ClockAdvanceChevrons => "chevrons",
+            Self::ClockAdvancePaneMenu => "pane menu",
+            Self::ClockAdvanceTermMenu => "terminal menu",
+            Self::ClockAdvanceTabMenu => "tab menu",
+            Self::ClockAdvanceDragSpring => "drag spring",
+            Self::ClockServiceDragAutoscroll => "drag auto-scroll",
+            Self::ClockRefreshMathHoverAgainstThePicture => "formula hover",
+            Self::ClockAdvanceMathToggleIfDue => "formula toggle",
+            Self::ClockAdvanceMathToolsIfDue => "formula tools",
+            Self::ClockAdvanceLayoutPeekIfDue => "layout peek",
+            Self::ClockAdvanceTooltipIfDue => "tooltip",
+            Self::ClockNoteKeyHint => "key hint intent",
+            Self::ClockAdvanceKeyHintIfDue => "key hint",
+            Self::ClockNoteCardHint => "Cards hint intent",
+            Self::ClockAdvanceCardHint => "Cards hint",
+            Self::ClockAdvanceToasts => "toast",
+            Self::ClockAdvanceCommandFlash => "command flash",
+            Self::ClockAdvanceCommandRails => "command rails",
+            Self::ClockAdvanceTerminalThumbs => "terminal thumbs",
+            Self::ClockAdvanceFilePeek => "file peek",
+            Self::ClockAdvanceFloat => "float",
+            Self::ClockRearmHoverIntents => "hover intents",
+            Self::ClockAdvanceFootReveal => "revealed foot",
+            Self::ClockAdvancePageFootClocks => "page acknowledgements",
+            Self::ClockAdvancePreviewNotice => "preview save notice",
+            Self::ClockAdvancePreviewRefusal => "preview refusal",
+            Self::AtlasUpload => "atlas upload",
+            Self::TextShaping => "text shaping",
+            Self::RenderLayout => "render layout",
+            Self::ImeCancel => "IMM/TSF cancel_composition",
+            Self::DrainChannel => "terminal reply channel receive",
+            Self::ClockFileDwell => "file-peek dwell",
+            Self::ClockFileClose => "file-peek close grace",
+            Self::ClockMathCopy => "formula-copy acknowledgement",
+            Self::ClockWebZoom => "web zoom acknowledgement",
+            Self::ClockWebDialog => "web dialog acknowledgement",
+            Self::EventActivation => "activation token",
+            Self::EventDestroyed => "destroyed",
+            Self::EventHoveredFile => "hovered file",
+            Self::EventHoverCancelled => "hovered file cancelled",
+            Self::EventCursorEntered => "cursor entered",
+            Self::EventPinch => "pinch gesture",
+            Self::EventPan => "pan gesture",
+            Self::EventDoubleTap => "double tap gesture",
+            Self::EventRotation => "rotation gesture",
+            Self::EventPressure => "touchpad pressure",
+            Self::EventAxis => "axis motion",
+            Self::EventTouch => "touch",
+            Self::RedrawTableSources => "table source collection",
+            Self::RedrawSeatFrames => "seat frame assembly",
+            Self::RedrawValidate => "redraw frame validation",
+            Self::RedrawDispatch => "dispatch decoration tasks",
+            Self::WindowRedraw => "Window::request_redraw",
+            Self::WindowFocus => "Window::focus_window",
+            Self::WindowVisible => "Window::set_visible",
+            Self::WindowCursor => "Window::set_cursor",
+            Self::KeybindingsWrite => "write_keybindings_atomic",
+            Self::ProfilesWrite => "write_profiles_atomic",
+            Self::DrainTab => "drain tab",
+            Self::ImeTrace => "IME trace::Dump::line",
+            Self::DiagnosticWrite => "stderr diagnostic write",
         }
     }
 
@@ -909,6 +1172,135 @@ impl Station {
             63 => Self::DrainPublish,
             64 => Self::CompositorSize,
             65 => Self::CompositorCommit,
+            66 => Self::ImeEnabled,
+            67 => Self::ImePreedit,
+            68 => Self::ImeCommit,
+            69 => Self::ImeDisabled,
+            70 => Self::EventMoved,
+            71 => Self::EventTheme,
+            72 => Self::EventOccluded,
+            73 => Self::EventCursorLeft,
+            74 => Self::ImeAllowed,
+            75 => Self::ImeCaretDestroy,
+            76 => Self::PtyInput,
+            77 => Self::ClipboardWrite,
+            78 => Self::EventLookup,
+            79 => Self::EventSettleApplication,
+            80 => Self::EventRestore,
+            81 => Self::EventOpen,
+            82 => Self::EventQuit,
+            83 => Self::EventShut,
+            84 => Self::RedrawLayout,
+            85 => Self::RedrawProjection,
+            86 => Self::RedrawOverlay,
+            87 => Self::RedrawTables,
+            88 => Self::RedrawSignature,
+            89 => Self::RetainedPicture,
+            90 => Self::RedrawCommit,
+            91 => Self::PresentSeats,
+            92 => Self::DrainPlace,
+            93 => Self::DrainFocus,
+            94 => Self::DrainPane,
+            95 => Self::DrainPalette,
+            96 => Self::DrainRingStats,
+            97 => Self::DrainKeyboardFocus,
+            98 => Self::DrainMarks,
+            99 => Self::DrainAttention,
+            100 => Self::DrainRaiseAttention,
+            101 => Self::DrainGit,
+            102 => Self::DrainTitle,
+            103 => Self::DrainBegin,
+            104 => Self::DrainWake,
+            105 => Self::DrainWatermark,
+            106 => Self::SettingsWrite,
+            107 => Self::PreviewSave,
+            108 => Self::RenameDisk,
+            109 => Self::SharedLock,
+            110 => Self::EventGate,
+            111 => Self::ClockRaiseFirstRunIfDue,
+            112 => Self::ClockRaisePsreadlineInviteIfDue,
+            113 => Self::ClockAdvanceCursorBlinkIfDue,
+            114 => Self::ClockAdvanceRenameBlinkIfDue,
+            115 => Self::ClockAdvanceSchemeWatch,
+            116 => Self::ClockAdvanceStorageWatch,
+            117 => Self::ClockAdvancePreviewWatch,
+            118 => Self::ClockAdvanceFilesWatch,
+            119 => Self::ClockAdvanceTabPressIfDue,
+            120 => Self::ClockServicePictures,
+            121 => Self::ClockAdvanceStripAnimation,
+            122 => Self::ClockFinishSynchronizedUpdateIfDue,
+            123 => Self::ClockFinishPtyCoalesceIfDue,
+            124 => Self::ClockAdvanceGitWatch,
+            125 => Self::ClockSettleCompositionOwner,
+            126 => Self::ClockOfferImeCaret,
+            127 => Self::ClockFlushImeCursorArea,
+            128 => Self::ClockFinishResizeIfQuiescent,
+            129 => Self::ClockFinishPreviewScaleIfQuiet,
+            130 => Self::ClockAdvanceLiveMathIfDue,
+            131 => Self::ClockActivateHyperlinkHoverIfDue,
+            132 => Self::ClockActivatePeekIfDue,
+            133 => Self::ClockAdvanceChevrons,
+            134 => Self::ClockAdvancePaneMenu,
+            135 => Self::ClockAdvanceTermMenu,
+            136 => Self::ClockAdvanceTabMenu,
+            137 => Self::ClockAdvanceDragSpring,
+            138 => Self::ClockServiceDragAutoscroll,
+            139 => Self::ClockRefreshMathHoverAgainstThePicture,
+            140 => Self::ClockAdvanceMathToggleIfDue,
+            141 => Self::ClockAdvanceMathToolsIfDue,
+            142 => Self::ClockAdvanceLayoutPeekIfDue,
+            143 => Self::ClockAdvanceTooltipIfDue,
+            144 => Self::ClockNoteKeyHint,
+            145 => Self::ClockAdvanceKeyHintIfDue,
+            146 => Self::ClockNoteCardHint,
+            147 => Self::ClockAdvanceCardHint,
+            148 => Self::ClockAdvanceToasts,
+            149 => Self::ClockAdvanceCommandFlash,
+            150 => Self::ClockAdvanceCommandRails,
+            151 => Self::ClockAdvanceTerminalThumbs,
+            152 => Self::ClockAdvanceFilePeek,
+            153 => Self::ClockAdvanceFloat,
+            154 => Self::ClockRearmHoverIntents,
+            155 => Self::ClockAdvanceFootReveal,
+            156 => Self::ClockAdvancePageFootClocks,
+            157 => Self::ClockAdvancePreviewNotice,
+            158 => Self::ClockAdvancePreviewRefusal,
+            159 => Self::AtlasUpload,
+            160 => Self::TextShaping,
+            161 => Self::RenderLayout,
+
+            162 => Self::ImeCancel,
+            163 => Self::DrainChannel,
+            164 => Self::ClockFileDwell,
+            165 => Self::ClockFileClose,
+            166 => Self::ClockMathCopy,
+            167 => Self::ClockWebZoom,
+            168 => Self::ClockWebDialog,
+            169 => Self::EventActivation,
+            170 => Self::EventDestroyed,
+            171 => Self::EventHoveredFile,
+            172 => Self::EventHoverCancelled,
+            173 => Self::EventCursorEntered,
+            174 => Self::EventPinch,
+            175 => Self::EventPan,
+            176 => Self::EventDoubleTap,
+            177 => Self::EventRotation,
+            178 => Self::EventPressure,
+            179 => Self::EventAxis,
+            180 => Self::EventTouch,
+            181 => Self::RedrawTableSources,
+            182 => Self::RedrawSeatFrames,
+            183 => Self::RedrawValidate,
+            184 => Self::RedrawDispatch,
+            185 => Self::WindowRedraw,
+            186 => Self::WindowFocus,
+            187 => Self::WindowVisible,
+            188 => Self::WindowCursor,
+            189 => Self::KeybindingsWrite,
+            190 => Self::ProfilesWrite,
+            191 => Self::DrainTab,
+            192 => Self::ImeTrace,
+            193 => Self::DiagnosticWrite,
             _ => Self::Starting,
         }
     }
@@ -1074,6 +1466,8 @@ pub struct SlowHold {
     /// What the machine's memory manager did while the hold ran, when this
     /// platform counts it and both ends were sampled. See [`Paging`].
     pub paging: Option<Paging>,
+    pub cpu_us: Option<u64>,
+    detail: detail::Tree,
 }
 
 impl SlowHold {
@@ -1116,10 +1510,26 @@ impl SlowHold {
                 .collect::<Vec<_>>()
                 .join(", ")
         };
+        let where_ = self
+            .detail
+            .line()
+            .filter(|line| !line.is_empty())
+            .unwrap_or(where_);
         let mut line = format!(
             "Folio: the window thread held control for {} ms on turn {} — {where_}",
             self.held_ms, self.turn
         );
+        if let Some(cpu_us) = self.cpu_us {
+            line.push_str(&format!(
+                " · thread CPU {}.{:03} ms / wall {} ms",
+                cpu_us / 1000,
+                cpu_us % 1000,
+                self.held_ms
+            ));
+        }
+        if self.detail.overflowed() {
+            line.push_str(" · detail capacity exceeded");
+        }
         // Appended, never interleaved, and behind a separator no station label
         // contains: every line this instrument has ever written keeps its
         // shape, and a reader who greps for `held control for` or for a station
@@ -1148,6 +1558,9 @@ impl SlowHold {
 /// allocate, and cannot be what wedges. Three atomics is the whole of it.
 #[derive(Debug)]
 pub struct Heartbeat {
+    detail: detail::Ledger,
+    cpu_time: fn() -> Option<u64>,
+    held_cpu: AtomicU64,
     origin: Instant,
     at_ms: AtomicU64,
     turn: AtomicU64,
@@ -1216,7 +1629,9 @@ impl Default for Heartbeat {
 impl Heartbeat {
     #[must_use]
     pub fn new() -> Self {
-        Self::sampling(bt_platform::mem::footprint)
+        let mut heart = Self::sampling(bt_platform::mem::footprint);
+        heart.cpu_time = armed_thread_cpu_us;
+        heart
     }
 
     /// [`Self::new`], with the footprint sampler named. See [`Self::footprint`].
@@ -1224,6 +1639,9 @@ impl Heartbeat {
     fn sampling(footprint: fn() -> Option<Footprint>) -> Self {
         Self {
             footprint,
+            detail: detail::Ledger::new(),
+            cpu_time: || None,
+            held_cpu: AtomicU64::new(0),
             held_faults: AtomicU64::new(0),
             held_working_set: AtomicU64::new(0),
             held_footprint: AtomicBool::new(false),
@@ -1295,8 +1713,14 @@ impl Heartbeat {
     /// against the last named call rather than vanishing — [`Station`]'s own
     /// rule, now counted instead of merely labelled.
     fn move_to(&self, station: Station, now_ms: u64) {
+        self.charge(station, now_ms);
+        self.detail.at(station);
+    }
+
+    fn charge(&self, station: Station, now_ms: u64) {
         let leaving = Station::from_byte(self.station.load(Ordering::Relaxed));
         let since = self.station_since_ms.load(Ordering::Relaxed);
+        self.detail.charge(now_ms.saturating_sub(since));
         self.spent_ms[leaving.slot()].fetch_add(now_ms.saturating_sub(since), Ordering::Relaxed);
         self.station_since_ms.store(now_ms, Ordering::Relaxed);
         self.station.store(station as u8, Ordering::Relaxed);
@@ -1305,6 +1729,11 @@ impl Heartbeat {
     /// **A hold begins**: the ledger is emptied, the coarse footprint baseline
     /// refreshed if needed and the clock started.
     fn open_hold(&self, now_ms: u64) {
+        self.detail.clear();
+        self.held_cpu.store(
+            (self.cpu_time)().map_or(0, |us| us.saturating_add(1)),
+            Ordering::Relaxed,
+        );
         for spent in &self.spent_ms {
             spent.store(0, Ordering::Relaxed);
         }
@@ -1410,7 +1839,14 @@ impl Heartbeat {
             && queue.len() < SLOW_HOLDS_KEPT
         {
             let stall_count = self.slow_reported.fetch_add(1, Ordering::Relaxed) + 1;
+            let baseline = self.held_cpu.load(Ordering::Relaxed);
+            let cpu_us = (baseline != 0)
+                .then(|| (self.cpu_time)())
+                .flatten()
+                .and_then(|closing| closing.checked_sub(baseline - 1));
             queue.push(SlowHold {
+                cpu_us,
+                detail: self.detail.snapshot(),
                 turn: self.turn.load(Ordering::Relaxed),
                 held_ms,
                 session_age_ms: now_ms,
@@ -1441,7 +1877,7 @@ impl Heartbeat {
         )
     }
 
-    /// **The window thread entered a named call.** Two relaxed stores.
+    /// **The window thread entered a named call.** Clocked exclusive accounting.
     ///
     /// No ordering, because none is owed: this is a hint about a thread that is
     /// still running, and a watchdog that reads a station one instruction stale
@@ -1508,6 +1944,7 @@ impl Heartbeat {
     pub fn woke_at(&self, now_ms: u64) {
         self.open_hold(now_ms);
         self.station.store(Station::Woken as u8, Ordering::Relaxed);
+        self.detail.at(Station::Woken);
         self.park.store(PARK_RUNNING, Ordering::Relaxed);
     }
 
@@ -1539,6 +1976,14 @@ impl Heartbeat {
 /// thinking about it. The origin instant is fixed at whichever of `main`'s
 /// first two calls touches it, which is before the event loop is built.
 static HEARTBEAT: LazyLock<Heartbeat> = LazyLock::new(Heartbeat::new);
+static CPU_ARMED: AtomicBool = AtomicBool::new(false);
+
+fn armed_thread_cpu_us() -> Option<u64> {
+    CPU_ARMED
+        .load(Ordering::Relaxed)
+        .then(bt_platform::mem::thread_cpu_us)
+        .flatten()
+}
 
 /// The process's heartbeat.
 #[must_use]
@@ -1552,8 +1997,73 @@ pub fn beat() {
 }
 
 /// The window thread entered `station`. See [`Heartbeat::at`].
-pub fn at(station: Station) {
-    HEARTBEAT.at(station);
+pub fn at(location: impl Into<Location>) {
+    match location.into() {
+        Location::Station(station) => HEARTBEAT.at(station),
+        Location::Resume {
+            station,
+            node,
+            scope,
+        } => HEARTBEAT.resume_at(station, node, scope, HEARTBEAT.now_ms()),
+    }
+}
+
+/// Opaque return address for an exclusive scope, including its call-tree path.
+#[derive(Clone, Copy)]
+pub enum Location {
+    Station(Station),
+    Resume {
+        station: Station,
+        node: usize,
+        scope: usize,
+    },
+}
+
+impl From<Station> for Location {
+    fn from(station: Station) -> Self {
+        Self::Station(station)
+    }
+}
+
+impl Heartbeat {
+    fn enter_at(&self, station: Station, pane: u64, now: u64) -> Location {
+        let parent = self.detail.current();
+        let scope = self.detail.scope();
+        let previous = Station::from_byte(self.station.load(Ordering::Relaxed));
+        self.charge(station, now);
+        self.park.store(PARK_RUNNING, Ordering::Relaxed);
+        self.detail.enter(station, parent, pane);
+        self.detail.set_scope(self.detail.current());
+        Location::Resume {
+            station: previous,
+            node: parent,
+            scope,
+        }
+    }
+
+    fn resume_at(&self, station: Station, node: usize, scope: usize, now: u64) {
+        self.charge(station, now);
+        self.park.store(PARK_RUNNING, Ordering::Relaxed);
+        self.detail.restore(node);
+        self.detail.set_scope(scope);
+    }
+}
+
+/// Numeric evidence only; input contents are never recorded.
+pub fn counters(bytes: usize, accepted: usize, count: usize) {
+    HEARTBEAT.detail.counters(bytes, accepted, count);
+}
+
+/// A renderer callback changes sibling phases inside one presentation scope.
+pub fn phase(station: Station) {
+    HEARTBEAT.charge(station, HEARTBEAT.now_ms());
+    HEARTBEAT.park.store(PARK_RUNNING, Ordering::Relaxed);
+    HEARTBEAT.detail.phase(station);
+}
+
+/// Enter a pane scope; the ID is part of the fixed ledger key.
+pub fn enter_pane(station: Station, pane: u64) -> Location {
+    HEARTBEAT.enter_at(station, pane.saturating_add(1), HEARTBEAT.now_ms())
 }
 
 /// **Enter `station`, and answer the one being left** so the caller can put it
@@ -1574,10 +2084,8 @@ pub fn at(station: Station) {
 /// thing this module must never do is add a `Drop` to a thread that is already
 /// in trouble.
 #[must_use]
-pub fn enter(station: Station) -> Station {
-    let leaving = HEARTBEAT.sample().station;
-    HEARTBEAT.at(station);
-    leaving
+pub fn enter(station: Station) -> Location {
+    HEARTBEAT.enter_at(station, 0, HEARTBEAT.now_ms())
 }
 
 /// Run one existing call as an exclusive child station, then resume its parent.
@@ -1588,6 +2096,14 @@ pub fn enter(station: Station) -> Station {
 /// without adding unwind work to a thread already in trouble.
 pub fn during<T>(station: Station, work: impl FnOnce() -> T) -> T {
     let parent = enter(station);
+    let output = work();
+    at(parent);
+    output
+}
+
+/// Same exclusive scope, keyed by the numeric tab/pane identity.
+pub fn during_pane<T>(station: Station, pane: u64, work: impl FnOnce() -> T) -> T {
+    let parent = enter_pane(station, pane);
     let output = work();
     at(parent);
     output
@@ -2051,6 +2567,7 @@ pub fn prune_reports(directory: &Path, keep: usize) -> std::io::Result<usize> {
 /// start because it could not arrange to diagnose itself would be a worse
 /// program than one that starts without the diagnosis.
 pub fn start(reports: PathBuf, trace_perf: bool) {
+    CPU_ARMED.store(true, Ordering::Relaxed);
     let ui_thread_id = bt_platform::hang::current_thread_id();
     // Touch the heartbeat here so its origin is the start of the run rather
     // than the first station, which makes `uptime` in a report mean what it
@@ -2373,6 +2890,190 @@ pub fn run_selftest_if_due() {}
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_cpu_sampler_answers_with_a_monotonic_thread_counter() {
+        let first = bt_platform::mem::thread_cpu_us();
+        let second = bt_platform::mem::thread_cpu_us();
+        match (first, second) {
+            (Some(first), Some(second)) => assert!(second >= first),
+            (None, None) => {} // Platforms without a thread counter omit the field.
+            _ => panic!("thread counter availability changed between adjacent reads"),
+        }
+    }
+    #[test]
+    fn event_kinds_have_distinct_value_labels_including_each_ime_variant() {
+        use super::Station;
+        use winit::event::{Ime, WindowEvent};
+        for (event, expected) in [
+            (WindowEvent::Ime(Ime::Enabled), Station::ImeEnabled),
+            (
+                WindowEvent::Ime(Ime::Preedit("中".into(), Some((3, 3)))),
+                Station::ImePreedit,
+            ),
+            (
+                WindowEvent::Ime(Ime::Commit("中".into())),
+                Station::ImeCommit,
+            ),
+            (WindowEvent::Ime(Ime::Disabled), Station::ImeDisabled),
+            (WindowEvent::CloseRequested, Station::EventClose),
+            (WindowEvent::Destroyed, Station::EventDestroyed),
+            (WindowEvent::RedrawRequested, Station::EventRedraw),
+            (WindowEvent::Occluded(true), Station::EventOccluded),
+            (WindowEvent::Occluded(false), Station::EventOccluded),
+            (WindowEvent::Focused(true), Station::EventFocus),
+            (WindowEvent::Focused(false), Station::EventFocus),
+            (
+                WindowEvent::ThemeChanged(winit::window::Theme::Dark),
+                Station::EventTheme,
+            ),
+            (
+                WindowEvent::DroppedFile("synthetic.txt".into()),
+                Station::EventFileDrop,
+            ),
+            (
+                WindowEvent::HoveredFile("synthetic.txt".into()),
+                Station::EventHoveredFile,
+            ),
+            (
+                WindowEvent::HoveredFileCancelled,
+                Station::EventHoverCancelled,
+            ),
+            (
+                WindowEvent::Resized(winit::dpi::PhysicalSize::new(1, 1)),
+                Station::EventResize,
+            ),
+            (
+                WindowEvent::Moved(winit::dpi::PhysicalPosition::new(0, 0)),
+                Station::EventMoved,
+            ),
+        ] {
+            assert_eq!(crate::window_event_station(&event), expected);
+        }
+    }
+
+    #[test]
+    fn nested_production_transitions_preserve_the_complete_exclusive_sum() {
+        use super::{Heartbeat, Location, Park, Station};
+        let heart = Heartbeat::sampling(|| None);
+        heart.woke_at(0);
+        heart.at_station(Station::Event, 10);
+        let Location::Resume {
+            station,
+            node,
+            scope,
+        } = heart.enter_at(Station::ImeCommit, 0, 20)
+        else {
+            unreachable!()
+        };
+        let Location::Resume {
+            station: caller,
+            node: call_node,
+            scope: call_scope,
+        } = heart.enter_at(Station::PtyInput, 0, 30)
+        else {
+            unreachable!()
+        };
+        heart.resume_at(caller, call_node, call_scope, 1330);
+        heart.resume_at(station, node, scope, 1340);
+        heart.park_at(Park::Indefinite, 1350);
+        let hold = heart.take_slow_holds().0.remove(0);
+        assert_eq!(hold.spent_ms.iter().sum::<u64>(), hold.held_ms);
+        assert_eq!(hold.detail.total_ms(), hold.held_ms);
+        assert_eq!(hold.held_ms, 1350);
+        assert!(hold.line().contains(
+            "window_event 20 ms (IME Commit 20 ms (PtySession::write input enqueue 1300 ms))"
+        ));
+        assert_eq!(hold.line().lines().count(), 1);
+    }
+    #[test]
+    fn thread_cpu_is_sampled_at_open_and_only_on_admitted_slow_close() {
+        use std::cell::RefCell;
+        thread_local! {
+            static CPU: RefCell<(usize, std::collections::VecDeque<Option<u64>>)> =
+                RefCell::new((0, [Some(100), Some(200), Some(3200), None, Some(4000), None].into()));
+        }
+        fn sample() -> Option<u64> {
+            CPU.with(|state| {
+                let mut state = state.borrow_mut();
+                state.0 += 1;
+                state.1.pop_front().unwrap()
+            })
+        }
+        let mut heart = super::Heartbeat::sampling(|| None);
+        heart.cpu_time = sample;
+        heart.woke_at(0);
+        heart.beat_at(1); // same hold, no second opening sample
+        heart.park_at(super::Park::Indefinite, 10);
+        assert_eq!(CPU.with(|state| state.borrow().0), 1);
+        heart.woke_at(1000);
+        heart.park_at(super::Park::Indefinite, 2300);
+        let hold = heart.take_slow_holds().0.remove(0);
+        assert_eq!(hold.cpu_us, Some(3000));
+        assert!(hold.line().contains("thread CPU 3.000 ms / wall 1300 ms"));
+        heart.woke_at(3000); // refused baseline: don't ask for an end
+        heart.park_at(super::Park::Indefinite, 4300);
+        assert_eq!(heart.take_slow_holds().0[0].cpu_us, None);
+        assert_eq!(CPU.with(|state| state.borrow().0), 4);
+        heart.woke_at(5000);
+        heart.park_at(super::Park::Indefinite, 6300); // refused end
+        assert_eq!(heart.take_slow_holds().0[0].cpu_us, None);
+        assert_eq!(CPU.with(|state| state.borrow().0), 6);
+    }
+
+    /// A measurement, never a wall-clock acceptance gate; no GUI or process control.
+    #[test]
+    #[ignore = "explicit instrumentation cost measurement"]
+    fn measure_cpu_sampler_and_station_cost() {
+        use std::hint::black_box;
+        use std::sync::atomic::Ordering;
+        let iterations = 200_000_u32;
+        let start = std::time::Instant::now();
+        for _ in 0..iterations {
+            black_box(bt_platform::mem::thread_cpu_us());
+        }
+        eprintln!(
+            "CPU sampler: {:.1} ns/read",
+            start.elapsed().as_nanos() as f64 / f64::from(iterations)
+        );
+        let heart = super::Heartbeat::sampling(|| None);
+        heart.woke_at(0);
+        // Baseline transition copied from the pre-detail ledger: no tree work.
+        // This is measurement only, not a second implementation used by tests.
+        let start = std::time::Instant::now();
+        for _ in 0..iterations {
+            let parent = black_box(heart.sample().station);
+            for station in [super::Station::PtyInput, parent] {
+                let now = heart.now_ms();
+                let leaving = super::Station::from_byte(heart.station.load(Ordering::Relaxed));
+                let since = heart.station_since_ms.load(Ordering::Relaxed);
+                heart.spent_ms[leaving.slot()]
+                    .fetch_add(now.saturating_sub(since), Ordering::Relaxed);
+                heart.station_since_ms.store(now, Ordering::Relaxed);
+                heart.station.store(station as u8, Ordering::Relaxed);
+                heart.park.store(super::PARK_RUNNING, Ordering::Relaxed);
+            }
+        }
+        eprintln!(
+            "baseline enter/leave pair: {:.1} ns",
+            start.elapsed().as_nanos() as f64 / f64::from(iterations)
+        );
+        let start = std::time::Instant::now();
+        for _ in 0..iterations {
+            let super::Location::Resume {
+                station,
+                node,
+                scope,
+            } = heart.enter_at(super::Station::PtyInput, 0, heart.now_ms())
+            else {
+                unreachable!()
+            };
+            heart.resume_at(station, node, scope, heart.now_ms());
+        }
+        eprintln!(
+            "station enter/leave pair: {:.1} ns",
+            start.elapsed().as_nanos() as f64 / f64::from(iterations)
+        );
+    }
     use std::cell::RefCell;
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -3763,6 +4464,8 @@ mod tests {
     #[test]
     fn a_hold_with_no_named_station_still_states_its_length() {
         let hold = SlowHold {
+            cpu_us: None,
+            detail: super::detail::Tree::default(),
             turn: 7,
             held_ms: 900,
             session_age_ms: 12_345,
@@ -3792,6 +4495,8 @@ mod tests {
         spent_ms[Station::Present.slot()] = 2_092;
         spent_ms[Station::Wheel.slot()] = 1_928;
         let hold = SlowHold {
+            cpu_us: None,
+            detail: super::detail::Tree::default(),
             turn: 3_937_579,
             held_ms: 4_056,
             session_age_ms: 8_404_000,
@@ -3824,6 +4529,8 @@ mod tests {
         let mut spent_ms = [0; STATION_COUNT];
         spent_ms[Station::Wheel.slot()] = 1_928;
         let hold = SlowHold {
+            cpu_us: None,
+            detail: super::detail::Tree::default(),
             turn: 3_937_579,
             held_ms: 4_056,
             session_age_ms: 8_404_000,
@@ -3845,6 +4552,8 @@ mod tests {
     #[test]
     fn a_working_set_is_printed_in_the_megabytes_a_reader_recognises() {
         let hold = |before: u64, after: u64| SlowHold {
+            cpu_us: None,
+            detail: super::detail::Tree::default(),
             turn: 0,
             held_ms: 900,
             session_age_ms: 900,

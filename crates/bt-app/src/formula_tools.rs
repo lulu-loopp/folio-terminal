@@ -507,6 +507,17 @@ impl FormulaToolFollow {
         self.hovered
     }
 
+    /// Update only which mark the pointer is on. Geometry is owned by the frame
+    /// at the present door; a pointer crossing between the two already-placed
+    /// boxes must not need an earlier picture merely to change their ink.
+    pub fn observe_hovered(&mut self, hovered: Option<FormulaTool>) -> bool {
+        if self.hovered == hovered {
+            return false;
+        }
+        self.hovered = hovered;
+        true
+    }
+
     /// How solid the marks are drawn this frame.
     #[must_use]
     pub fn opacity(&self, now: Instant, motion: Motion) -> f32 {
@@ -763,6 +774,63 @@ mod tests {
             block: [40.0, 10.0, 300.0, 59.0],
             source: [230.0, 25.0, 249.0, 44.0],
             copy: [251.0, 25.0, 270.0, 44.0],
+        }
+    }
+
+    fn production_body(signature: &str) -> &'static str {
+        let source = include_str!("main.rs");
+        let production = source
+            .split("mod formula_tool_seat_tests {")
+            .next()
+            .unwrap();
+        let start = production
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in main.rs"));
+        let rest = &production[start + signature.len()..];
+        let end = rest.find("\n    fn ").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// RED (2026-09-20, T-MARKS-FRAME-IN-HAND): the marks stand on the band in the
+    /// exact `ViewportFrame` this present draws, including the first and landing frames.
+    #[test]
+    fn the_marks_stand_on_the_band_of_the_frame_being_drawn() {
+        let placement = production_body("    fn math_tool_placement");
+        assert!(
+            placement.contains("frame_for(*seat)") && !placement.contains("last_presented_frame"),
+            "the runtime must place from the frame its caller hands it:\n{placement}"
+        );
+    }
+
+    /// RED (2026-09-20, T-MARKS-FRAME-IN-HAND): no presented mark rectangle is
+    /// borrowed from another frame, so the landing frame has nothing left to snap to.
+    #[test]
+    fn the_landing_frame_needs_no_snap() {
+        let redraw = production_body("    fn redraw(&mut self) -> Result<()> {");
+        let handed = redraw
+            .find("self.refresh_formula_overlay_for_present")
+            .expect("redraw hands its composed pane frames to the formula lanes");
+        let present = redraw
+            .find("Self::present_seats_and_commit(")
+            .expect("redraw reaches the glass through the present funnel");
+        assert!(
+            handed < present,
+            "the handoff must precede the present:\n{redraw}"
+        );
+    }
+
+    /// RED regression guard (not a reproduction): today both lanes already read the same
+    /// stale frame. This pins that after the owner changes, the source face and the marks still
+    /// read one frame — now the frame this present draws.
+    #[test]
+    fn the_source_face_and_the_marks_read_one_frame() {
+        let marks = production_body("    fn math_tool_placement");
+        let source = production_body("    fn formula_toggle_layers");
+        for (name, lane) in [("marks", marks), ("source face", source)] {
+            assert!(
+                lane.contains("frame_for(") && !lane.contains("last_presented_frame"),
+                "the {name} lane must consume the handed present frame:\n{lane}"
+            );
         }
     }
 
