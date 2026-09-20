@@ -13155,16 +13155,11 @@ struct WindowRuntime {
     /// is the honest answer: what a reader comes back to is a page in the state
     /// they put it in.
     advanced_reveal: Option<(settings::SettingsCategory, RevealTween)>,
-    /// What that group would have *drawn* on the frame it last did — the
-    /// frame-debt reading, quantised to a thousandth of the group's own height.
-    ///
-    /// It is owed for the same reason the popups' is, and the first draft went
-    /// without it and was caught on the glass: the deadline woke the loop
-    /// twelve times and every one of those turns found nothing that said the
-    /// picture had changed, so the group opened in **two** frames — the press
-    /// and whatever happened next — with two hundred milliseconds of nothing in
-    /// between. A wake-up nobody spends is not an animation.
-    advanced_reveal_drawn: Option<(settings::SettingsCategory, u16)>,
+    /// The animation clock's current geometry sample, quantised to a
+    /// thousandth of the group's height. The press seeds it and the window
+    /// clocks advance it; all layout readers use this same sample. Comparing
+    /// consecutive samples also tells the clock whether a frame is owed.
+    advanced_reveal_sample: Option<(settings::SettingsCategory, u16)>,
     /// Every notice this window is showing (user ruling, 2026-08-16).
     ///
     /// One host for the window, with each card carrying the surface it belongs
@@ -13314,6 +13309,8 @@ struct WindowRuntime {
     /// so the session file never does either — a window that reopened with a
     /// question on it would be answering one nobody asked.
     settings: settings::SettingsPanel,
+    /// The single computed Settings geometry shared by every reader in this window.
+    settings_geometry: settings::geometry::Geometry,
     /// How far the settings dialog's content is scrolled, in physical pixels.
     ///
     /// Beside the panel rather than inside it, on the same terms as
@@ -37936,7 +37933,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         passages_drawn: Vec::new(),
         settling: settling::Settling::default(),
         settling_drawn: Vec::new(),
-        advanced_reveal_drawn: None,
+        advanced_reveal_sample: None,
         foot_phrases: settling::Crossfade::default(),
         foot_phrases_drawn: Vec::new(),
         advanced_reveal: None,
@@ -37961,6 +37958,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         search_revision: 0,
         chrome_marks: marks::ChromeMarkRasters::sharing(favicons),
         settings: settings::SettingsPanel::default(),
+        settings_geometry: settings::geometry::Geometry::default(),
         profile_undo: None,
         checkout_from: None,
         checkout_undo: None,
@@ -38268,6 +38266,40 @@ fn forget_standing_answers<'a>(holders: impl Iterator<Item = &'a mut PreviewPane
         {
             picture.forget_its_pixels();
         }
+    }
+}
+
+impl settings::geometry::PointerHost for Runtime<'_> {
+    fn settings_geometry(&mut self) -> Option<Arc<settings::SettingsLayout>> {
+        self.settings_layout()
+    }
+
+    fn settings_drag(&mut self, layout: &settings::SettingsLayout, x: f64, y: f64) -> Result<bool> {
+        // Captured gestures own the pointer, even outside their original track.
+        if let Some(row) = self.window.settings_slider_drag {
+            if let Some(value) = layout.slider_at(row, x) {
+                self.apply_slider(row, value)?;
+            }
+            return Ok(true);
+        }
+        if self.window.settings_menu_bar_drag.is_some()
+            && let Some(bar) = layout.menu_bar()
+        {
+            self.drag_settings_menu_bar(&bar, PhysicalPosition::new(x, y))?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn settings_values(&self) -> settings::SettingsValues {
+        Runtime::settings_values(self)
+    }
+
+    fn settings_hover(&mut self, target: settings::SettingsTarget) -> Result<()> {
+        if self.window.settings.set_hover(Some(target)) && self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
     }
 }
 
@@ -45838,8 +45870,9 @@ impl Runtime<'_> {
     /// only the font knows it. The measuring happens here, beside the renderer,
     /// exactly as the peek strip's and the restore prompt's do, and the geometry
     /// itself stays a pure function of the numbers handed to it.
-    fn settings_layout(&mut self) -> Option<settings::SettingsLayout> {
+    fn settings_layout(&mut self) -> Option<Arc<settings::SettingsLayout>> {
         if !self.window.settings.is_open() {
+            self.window.settings_geometry.clear();
             return None;
         }
         // **The dialog's own lane** (GitHub issue #3 — see
@@ -45849,13 +45882,10 @@ impl Runtime<'_> {
         // `publish_frame_inner` happened to enclose it — two true labels, neither
         // of which named the dialog to the reader of a slow-hold line.
         let trace_start = self.app.trace_perf.then(Instant::now);
-        let leaving_station = hang_watch::enter(hang_watch::Station::Settings);
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let scale = self.window.renderer.metrics().scale_factor as f32;
-        // Read fresh every time rather than cached: the Sidebar row appears and
-        // disappears with the Tab layout combo, the shortcut lines change as the
-        // user records, and the height, the hit test and the draw all come off
-        // this one call, so all three follow it in the same frame.
+        // Content is read from its owners. Geometry is computed only when one
+        // of these inputs changes; hover, focus and redraw are readers of it.
         let (rows, shortcuts, profile_lines, scheme_files, values) = self.settings_content();
         let content =
             self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files, &values);
@@ -45889,10 +45919,14 @@ impl Runtime<'_> {
         if self.window.settings.category() == settings::SettingsCategory::General {
             update::answer_mark(&persist::storage_dir());
         }
-        let category = self.window.settings.category();
-        let menu = self.window.settings.menu();
-        let scroll = self.window.settings_scroll;
-        let menu_scroll = self.window.settings.menu_scroll();
+        let inputs = settings::geometry::Inputs::new(
+            [width as f32, height as f32],
+            scale,
+            self.window.renderer.font_revision(),
+            &self.window.settings,
+            self.window.settings_scroll,
+            content,
+        );
         // **Every picker's width is measured, not only the open one's**
         // (§7.1.6c-5): a button is as wide as its own longest option now, so the
         // geometry needs the font for every row on the page and not just for the
@@ -45902,37 +45936,29 @@ impl Runtime<'_> {
         let probes_us = trace_start.map_or(0, |start| {
             start.elapsed().as_micros().saturating_sub(content_us)
         });
-        let mut measure_us = 0;
-        let mut measure_calls = 0;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
-        let mut measure = |text: &str, size: f32| {
-            let start = trace_start.map(|_| Instant::now());
-            let width = renderer.measure_chrome_text(gpu, text, size);
-            measure_us += start.map_or(0, |start| start.elapsed().as_micros());
-            measure_calls += 1;
-            width
-        };
-        let laid = settings::layout_for_menus(
-            width as f32,
-            height as f32,
-            scale,
-            menu,
-            self.window.settings.row_menu(),
-            content,
-            category,
-            scroll,
-            menu_scroll,
-            &mut measure,
-        );
-        if let Some(start) = trace_start {
-            let total_us = start.elapsed().as_micros();
-            trace_sink::stderr_line(format!(
-                "BT_PERF_TRACE settings_layout content_us={content_us} probes_us={probes_us} measure_calls={measure_calls} measure_us={measure_us} geometry_us={} total_us={total_us}",
-                total_us.saturating_sub(content_us + probes_us + measure_us)
-            ));
-        }
-        hang_watch::at(leaving_station);
-        laid
+        self.window.settings_geometry.read(inputs, |inputs| {
+            let leaving_station = hang_watch::enter(hang_watch::Station::Settings);
+            let mut measure_us = 0;
+            let mut measure_calls = 0;
+            let mut measure = |text: &str, size: f32| {
+                let start = trace_start.map(|_| Instant::now());
+                let width = renderer.measure_chrome_text(gpu, text, size);
+                measure_us += start.map_or(0, |start| start.elapsed().as_micros());
+                measure_calls += 1;
+                width
+            };
+            let laid = inputs.layout(&mut measure);
+            if let Some(start) = trace_start {
+                let total_us = start.elapsed().as_micros();
+                trace_sink::stderr_line(format!(
+                    "BT_PERF_TRACE settings_layout content_us={content_us} probes_us={probes_us} measure_calls={measure_calls} measure_us={measure_us} geometry_us={} total_us={total_us}",
+                    total_us.saturating_sub(content_us + probes_us + measure_us)
+                ));
+            }
+            hang_watch::at(leaving_station);
+            laid
+        })
     }
 
     /// The dialog's contents this frame, for the callers that need them beside a
@@ -46029,10 +46055,12 @@ impl Runtime<'_> {
             // which is the picture this dialog drew before it could animate at
             // all — the red line the whole block is written under, said in one
             // `Option`.
-            advanced_reveal: self.window.advanced_reveal.and_then(|(page, tween)| {
-                let (reveal, moving) = tween.sample(Instant::now(), self.app.motion);
-                moving.then_some((page, reveal))
-            }),
+            // Read the animation clock's one sample. Sampling Instant::now()
+            // here would make each hit test/draw ask for different geometry.
+            advanced_reveal: self
+                .window
+                .advanced_reveal_sample
+                .map(|(page, reveal)| (page, f32::from(reveal) / 1000.0)),
             editor: self.editor_subject(),
             values,
         }
@@ -48995,6 +49023,7 @@ impl Runtime<'_> {
         };
         tween.retarget(target, now, motion);
         self.window.advanced_reveal = Some((category, tween));
+        self.window.advanced_reveal_sample = self.drawn_advanced_reveal(now);
         let mut settings = self.app.settings_store.loaded().clone();
         settings.advanced_open = open.keys();
         self.app.settings_store.store(settings);
@@ -85654,8 +85683,8 @@ impl Runtime<'_> {
         // pixel it can move a row by — `settling`'s own argument about which
         // side of the glass to be wrong on.
         let disclosed = self.drawn_advanced_reveal(now);
-        if self.window.advanced_reveal_drawn != disclosed {
-            self.window.advanced_reveal_drawn = disclosed;
+        if self.window.advanced_reveal_sample != disclosed {
+            self.window.advanced_reveal_sample = disclosed;
             owes_frame = true;
         }
         // **U8 — the panes' own debt, settled as it is asked.**
@@ -89857,30 +89886,7 @@ impl Runtime<'_> {
             self.update_chrome_hover_target(None)?;
             return Ok(());
         }
-        if let Some(layout) = self.settings_layout() {
-            // A drag owns the pointer: while a thumb is held the motion is the
-            // slider's, wherever it has wandered to, and the hover underneath is
-            // as old as the gesture. Every slider ever built keeps following the
-            // hand off its own track.
-            if let Some(row) = self.window.settings_slider_drag {
-                if let Some(value) = layout.slider_at(row, position.x) {
-                    self.apply_slider(row, value)?;
-                }
-                return Ok(());
-            }
-            // The same sentence for the picker's own bar, and for the same
-            // reason: a gesture that began on a thumb keeps following the hand
-            // wherever it wanders.
-            if self.window.settings_menu_bar_drag.is_some()
-                && let Some(bar) = layout.menu_bar()
-            {
-                self.drag_settings_menu_bar(&bar, position)?;
-                return Ok(());
-            }
-            let hover = settings::hit(&layout, &self.settings_values(), position.x, position.y);
-            if self.window.settings.set_hover(Some(hover)) && self.refresh_overlay() {
-                self.present_chrome_change()?;
-            }
+        if settings::geometry::pointer_moved(self, position.x, position.y)? {
             return Ok(());
         }
         // The quit card takes the pointer outright, scrim and all, in the order
