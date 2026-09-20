@@ -6,6 +6,12 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- **Terminal settings now include a separate CJK font choice.** Automatic uses
+  Folio's platform defaults, and an installed Chinese, Japanese or Korean face
+  can be chosen without changing the monospace font used for ASCII.
+
 ### Changed
 
 - **When Folio's window pauses, its own log now names the call it was inside.**
@@ -15,6 +21,12 @@ All notable changes to Folio are recorded here. The format follows
   detection or publication, and input turns name both the event and either IME
   platform call. A stall line also carries the run's age and its own number, so
   one day's recording can show whether pauses grew as the session aged.
+
+### Fixed
+
+- **Chinese terminal text no longer falls through to SimSun on Windows or
+  GB18030 Bitmap on macOS.** Folio now chooses the terminal grid's CJK face
+  explicitly from its platform chain.
 
 ## 0.4.2-preview — 2026-09-18
 

@@ -42,6 +42,7 @@ use glyphon::{
 };
 use thiserror::Error;
 use unicode_properties::emoji::{EmojiStatus, UnicodeEmoji};
+use unicode_script::UnicodeScript;
 use wgpu::util::DeviceExt;
 
 /// Install the process-wide trace destination before constructing a renderer.
@@ -3398,6 +3399,7 @@ impl NarrowShapingCache {
         font_system: &mut FontSystem,
         swash_cache: &mut SwashCache,
         metrics: CellMetrics,
+        cjk_families: &TerminalCjkFamilies,
     ) -> (Arc<Buffer>, f32, f32) {
         if let Some(cached) = self.entries.get(&key) {
             if self.track_perf {
@@ -3416,6 +3418,7 @@ impl NarrowShapingCache {
             font_system,
             swash_cache,
             metrics,
+            cjk_families,
             #[cfg(test)]
             &mut self.color_emoji_trial_shapes,
         );
@@ -3536,6 +3539,7 @@ impl WideShapingCache {
         font_system: &mut FontSystem,
         swash_cache: &mut SwashCache,
         metrics: CellMetrics,
+        cjk_families: &TerminalCjkFamilies,
     ) -> (Arc<Buffer>, f32, f32) {
         if let Some(cached) = self.entries.get(&key) {
             if self.track_perf {
@@ -3554,6 +3558,7 @@ impl WideShapingCache {
             font_system,
             swash_cache,
             metrics,
+            cjk_families,
             #[cfg(test)]
             &mut self.color_emoji_trial_shapes,
         );
@@ -4244,6 +4249,8 @@ pub struct GpuContext {
     font_system: FontSystem,
     /// Changes when fonts or family mappings change; scopes measurement reuse.
     font_environment_epoch: u64,
+    /// Resolved, per-script CJK families plus the user's stored preference.
+    terminal_cjk_families: TerminalCjkFamilies,
     swash_cache: SwashCache,
     /// Kept so a window — or a seat that appears mid-session (a split) — can
     /// mint its own viewport without rebuilding anything.
@@ -6577,6 +6584,7 @@ impl GpuContext {
             video_blank,
         } = DeviceResources::mint(&device, &queue, format);
         let render_resources_time = phase_started.elapsed();
+        let terminal_cjk_families = resolve_terminal_cjk_families("", &mut font_system);
         Ok(Self {
             instance,
             adapter,
@@ -6586,6 +6594,7 @@ impl GpuContext {
             max_texture_dimension_2d,
             font_system,
             font_environment_epoch: 1,
+            terminal_cjk_families,
             swash_cache,
             glyphon_cache,
             atlas,
@@ -6627,19 +6636,20 @@ impl GpuContext {
 
     /// Point the **grid's** face at a family and a size — never the chrome's.
     ///
-    /// The two halves of the Appearance block's font rows arrive together
-    /// because they cost the same thing: every measurement, every shaped run
-    /// and every composed row is derived from the pair, so changing one is
-    /// exactly as invalidating as changing both, and a caller that could change
-    /// them separately would pay twice for one visible change.
+    /// The primary face, CJK face and size from the Appearance block arrive
+    /// together because they cost the same thing: every measurement, every
+    /// shaped run and every composed row is derived from that font state, so
+    /// changing one is exactly as invalidating as changing all three, and a
+    /// caller that could change them separately would pay twice for one visible
+    /// change.
     ///
     /// **The files come in rather than being looked up here.** This renderer
     /// builds its font database from a fixed file list on purpose (see
     /// [`terminal_font_system`]) — enumerating `Fonts/` is the startup cost that
     /// design exists to avoid, and this crate has no business opening a system
     /// font collection. `bt-platform` enumerates once, when the user opens the
-    /// picker, and hands back name and paths together; an empty `files` is the
-    /// ordinary case for a family the startup list already loaded.
+    /// picker, and hands back each name and its paths together; empty file lists
+    /// are the ordinary case for families the startup list already loaded.
     ///
     /// Loading is idempotent and cheap on repeat: `fontdb` refuses a face it
     /// already holds, so re-choosing a family the user has picked before does
@@ -6654,6 +6664,8 @@ impl GpuContext {
         &mut self,
         family: &str,
         files: &[std::path::PathBuf],
+        cjk_family: &str,
+        cjk_files: &[std::path::PathBuf],
         size_logical_px: f32,
     ) {
         self.font_environment_epoch = self
@@ -6661,6 +6673,9 @@ impl GpuContext {
             .checked_add(1)
             .expect("font epoch exhausted");
         for file in files {
+            let _ = self.font_system.db_mut().load_font_file(file);
+        }
+        for file in cjk_files {
             let _ = self.font_system.db_mut().load_font_file(file);
         }
         // A file a reader picked is a file this renderer has never opened, and
@@ -6676,6 +6691,8 @@ impl GpuContext {
             family
         };
         self.font_system.db_mut().set_monospace_family(family);
+        self.terminal_cjk_families =
+            resolve_terminal_cjk_families(cjk_family, &mut self.font_system);
         self.terminal_font_size_logical_px = size_logical_px;
     }
 
@@ -6696,6 +6713,12 @@ impl GpuContext {
     #[must_use]
     pub fn terminal_font_family(&self) -> &str {
         primary_font_family(&self.font_system)
+    }
+
+    /// The active CJK preference, empty when the platform chain owns the choice.
+    #[must_use]
+    pub fn terminal_cjk_font_family(&self) -> &str {
+        &self.terminal_cjk_families.chosen
     }
 
     /// The swapchain format this context's atlas and pipelines were baked for.
@@ -8501,7 +8524,7 @@ impl WindowRenderer {
         text: &str,
         font_size_px: f32,
     ) -> f32 {
-        measure_chrome_label(
+        measure_chrome_label_with_cjk(
             &mut gpu.font_system,
             text,
             font_size_px,
@@ -8509,6 +8532,7 @@ impl WindowRenderer {
             0.0,
             false,
             true,
+            &gpu.terminal_cjk_families,
         )
     }
 
@@ -9236,11 +9260,12 @@ impl WindowRenderer {
             )
         };
 
-        let chrome_layouts = shape_chrome_labels(
+        let chrome_layouts = shape_chrome_labels_with_cjk(
             &mut gpu.font_system,
             &self.chrome_labels,
             gpu.chrome_cap_height_ratio,
             1.0,
+            &gpu.terminal_cjk_families,
         );
         if let Some(census) = census.as_mut() {
             census.record(
@@ -9426,11 +9451,12 @@ impl WindowRenderer {
             let icon_buffer = (!icon_vertices.is_empty()).then(|| {
                 gpu.vertex_buffer("modal overlay mark vertices", icon_vertices.as_slice())
             });
-            let mut layouts = shape_chrome_labels(
+            let mut layouts = shape_chrome_labels_with_cjk(
                 &mut gpu.font_system,
                 &layer.labels,
                 gpu.chrome_cap_height_ratio,
                 layer.opacity,
+                &gpu.terminal_cjk_families,
             );
             // **This layer's share of the forensic record** (user report
             // 2026-08-28). A glance card's head, its type chip and the document
@@ -10135,7 +10161,7 @@ impl WindowRenderer {
         gpu: &mut GpuContext,
         frame: &ViewportFrame,
     ) -> Result<TextPreparationStats, RenderError> {
-        prepare_text_rows(
+        prepare_text_rows_with_cjk(
             frame,
             self.metrics,
             &mut self.text_rows,
@@ -10144,6 +10170,7 @@ impl WindowRenderer {
             self.font_revision,
             theme_revision(),
             &mut gpu.font_system,
+            &gpu.terminal_cjk_families,
             &mut gpu.swash_cache,
             &mut self.narrow_shaping_cache,
             &mut self.wide_shaping_cache,
@@ -11693,7 +11720,7 @@ impl WindowRenderer {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn prepare_text_rows(
+fn prepare_text_rows_with_cjk(
     frame: &ViewportFrame,
     metrics: CellMetrics,
     text_rows: &mut Vec<Arc<ComposedRow>>,
@@ -11702,6 +11729,7 @@ fn prepare_text_rows(
     font_revision: u64,
     theme_revision: u64,
     font_system: &mut FontSystem,
+    terminal_cjk_families: &TerminalCjkFamilies,
     swash_cache: &mut SwashCache,
     narrow_shaping_cache: &mut NarrowShapingCache,
     wide_shaping_cache: &mut WideShapingCache,
@@ -11731,19 +11759,21 @@ fn prepare_text_rows(
         }
         rows_reshaped = rows_reshaped.saturating_add(1);
 
-        let narrow_glyphs = shape_narrow_glyphs(
+        let narrow_glyphs = shape_narrow_glyphs_with_cjk(
             source_cells,
             font_system,
             swash_cache,
             metrics,
             narrow_shaping_cache,
+            terminal_cjk_families,
         );
-        let wide_glyphs = shape_wide_glyphs(
+        let wide_glyphs = shape_wide_glyphs_with_cjk(
             source_cells,
             font_system,
             swash_cache,
             metrics,
             wide_shaping_cache,
+            terminal_cjk_families,
         );
         let row = Arc::new(ComposedRow {
             narrow_glyphs,
@@ -11770,19 +11800,21 @@ fn prepare_text_rows(
         } else {
             rows_reshaped = rows_reshaped.saturating_add(1);
             let row = Arc::new(ComposedRow {
-                narrow_glyphs: shape_narrow_glyphs(
+                narrow_glyphs: shape_narrow_glyphs_with_cjk(
                     &cells,
                     font_system,
                     swash_cache,
                     metrics,
                     narrow_shaping_cache,
+                    terminal_cjk_families,
                 ),
-                wide_glyphs: shape_wide_glyphs(
+                wide_glyphs: shape_wide_glyphs_with_cjk(
                     &cells,
                     font_system,
                     swash_cache,
                     metrics,
                     wide_shaping_cache,
+                    terminal_cjk_families,
                 ),
             });
             composed_row_cache.insert(key, Arc::clone(&row));
@@ -11813,6 +11845,38 @@ fn prepare_text_rows(
         narrow: narrow_shaping_cache.counters.delta_since(narrow_before),
         wide: wide_shaping_cache.counters.delta_since(wide_before),
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn prepare_text_rows(
+    frame: &ViewportFrame,
+    metrics: CellMetrics,
+    text_rows: &mut Vec<Arc<ComposedRow>>,
+    status_overlay: &mut Option<Arc<ComposedRow>>,
+    composed_row_cache: &mut ComposedRowCache,
+    font_revision: u64,
+    theme_revision: u64,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    narrow_shaping_cache: &mut NarrowShapingCache,
+    wide_shaping_cache: &mut WideShapingCache,
+) -> Result<TextPreparationStats, RenderError> {
+    let terminal_cjk_families = resolve_terminal_cjk_families("", font_system);
+    prepare_text_rows_with_cjk(
+        frame,
+        metrics,
+        text_rows,
+        status_overlay,
+        composed_row_cache,
+        font_revision,
+        theme_revision,
+        font_system,
+        &terminal_cjk_families,
+        swash_cache,
+        narrow_shaping_cache,
+        wide_shaping_cache,
+    )
 }
 
 /// A chrome rectangle in whole-surface pixels.
@@ -11996,12 +12060,16 @@ fn chrome_label_attrs(
 /// also deciding how large to draw the answer. A chrome label decides no such
 /// thing, so it asks the cheap half of the question and leaves the expensive
 /// half where the size policy that needs it lives.
-fn mono_cluster_family(cluster: &str, font_system: &mut FontSystem) -> Family<'static> {
+fn mono_cluster_family<'a>(
+    cluster: &str,
+    terminal_cjk_families: &'a TerminalCjkFamilies,
+    font_system: &mut FontSystem,
+) -> Family<'a> {
     if cluster.is_ascii() {
         return Family::Monospace;
     }
     match font_presentation_route(cluster, font_system) {
-        PresentationRoute::TerminalText => Family::Monospace,
+        PresentationRoute::TerminalText => terminal_grid_family(cluster, terminal_cjk_families),
         PresentationRoute::TextSymbol => Family::Name(TEXT_SYMBOL_FONT_FAMILY),
         PresentationRoute::ColorEmoji => {
             if font_family_available(font_system, SEGOE_COLOR_EMOJI_FONT_FAMILY) {
@@ -12025,17 +12093,18 @@ fn mono_cluster_family(cluster: &str, font_system: &mut FontSystem) -> Family<'s
 /// move a whole row of Latin onto the symbol face because one arrow stood at the
 /// end of it. The pane asks per cell; this asks per cluster, which is the same
 /// grain.
-fn mono_label_spans(
+fn mono_label_spans<'a>(
     text: &str,
+    terminal_cjk_families: &'a TerminalCjkFamilies,
     font_system: &mut FontSystem,
-) -> Option<Vec<(Range<usize>, Family<'static>)>> {
-    let mut spans: Vec<(Range<usize>, Family<'static>)> = Vec::new();
+) -> Option<Vec<(Range<usize>, Family<'a>)>> {
+    let mut spans: Vec<(Range<usize>, Family<'a>)> = Vec::new();
     let mut routed = false;
     let mut at = 0usize;
     for cluster in bt_unicode::graphemes(text) {
         let range = at..at + cluster.len();
         at = range.end;
-        let family = mono_cluster_family(cluster, font_system);
+        let family = mono_cluster_family(cluster, terminal_cjk_families, font_system);
         routed |= !matches!(family, Family::Monospace);
         match spans.last_mut() {
             Some((last, standing)) if *standing == family => last.end = range.end,
@@ -12058,8 +12127,12 @@ fn set_chrome_label_text(
     text: &str,
     attrs: &Attrs<'static>,
     mono: bool,
+    terminal_cjk_families: &TerminalCjkFamilies,
 ) {
-    match mono.then(|| mono_label_spans(text, font_system)).flatten() {
+    match mono
+        .then(|| mono_label_spans(text, terminal_cjk_families, font_system))
+        .flatten()
+    {
         Some(spans) => buffer.set_rich_text(
             spans.iter().map(|(range, family)| {
                 let mut span = attrs.clone();
@@ -12279,7 +12352,8 @@ fn measure_chrome_label(
     tabular_numerals: bool,
     mono: bool,
 ) -> f32 {
-    let Some(buffer) = shape_chrome_measurement(
+    let terminal_cjk_families = resolve_terminal_cjk_families("", font_system);
+    measure_chrome_label_with_cjk(
         font_system,
         text,
         font_size_px,
@@ -12287,6 +12361,30 @@ fn measure_chrome_label(
         letter_spacing_em,
         tabular_numerals,
         mono,
+        &terminal_cjk_families,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn measure_chrome_label_with_cjk(
+    font_system: &mut FontSystem,
+    text: &str,
+    font_size_px: f32,
+    weight: ChromeLabelWeight,
+    letter_spacing_em: f32,
+    tabular_numerals: bool,
+    mono: bool,
+    terminal_cjk_families: &TerminalCjkFamilies,
+) -> f32 {
+    let Some(buffer) = shape_chrome_measurement_with_cjk(
+        font_system,
+        text,
+        font_size_px,
+        weight,
+        letter_spacing_em,
+        tabular_numerals,
+        mono,
+        terminal_cjk_families,
     ) else {
         return 0.0;
     };
@@ -12353,6 +12451,30 @@ fn shape_chrome_measurement(
     tabular_numerals: bool,
     mono: bool,
 ) -> Option<Buffer> {
+    let terminal_cjk_families = resolve_terminal_cjk_families("", font_system);
+    shape_chrome_measurement_with_cjk(
+        font_system,
+        text,
+        font_size_px,
+        weight,
+        letter_spacing_em,
+        tabular_numerals,
+        mono,
+        &terminal_cjk_families,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn shape_chrome_measurement_with_cjk(
+    font_system: &mut FontSystem,
+    text: &str,
+    font_size_px: f32,
+    weight: ChromeLabelWeight,
+    letter_spacing_em: f32,
+    tabular_numerals: bool,
+    mono: bool,
+    terminal_cjk_families: &TerminalCjkFamilies,
+) -> Option<Buffer> {
     if text.is_empty() {
         return None;
     }
@@ -12378,6 +12500,7 @@ fn shape_chrome_measurement(
         // half. That is what the Git page's meta column was doing at every width.
         &chrome_label_attrs(weight, letter_spacing_em, tabular_numerals, mono),
         mono,
+        terminal_cjk_families,
     );
     buffer.shape_until_scroll(font_system, false);
     Some(buffer)
@@ -12393,11 +12516,29 @@ fn shape_chrome_measurement(
 /// and not of the label: a caption does not decide how faded the popup carrying
 /// it is, and a per-label field would ask all thirty-odd construction sites to
 /// answer a question only their layer can.
+#[cfg(test)]
 fn shape_chrome_labels(
     font_system: &mut FontSystem,
     labels: &[ChromeLabel],
     cap_height_ratio: f32,
     alpha: f32,
+) -> Vec<ChromeTextLayout> {
+    let terminal_cjk_families = resolve_terminal_cjk_families("", font_system);
+    shape_chrome_labels_with_cjk(
+        font_system,
+        labels,
+        cap_height_ratio,
+        alpha,
+        &terminal_cjk_families,
+    )
+}
+
+fn shape_chrome_labels_with_cjk(
+    font_system: &mut FontSystem,
+    labels: &[ChromeLabel],
+    cap_height_ratio: f32,
+    alpha: f32,
+    terminal_cjk_families: &TerminalCjkFamilies,
 ) -> Vec<ChromeTextLayout> {
     labels
         .iter()
@@ -12441,7 +12582,14 @@ fn shape_chrome_labels(
                 label.tabular_numerals,
                 label.mono,
             );
-            set_chrome_label_text(&mut buffer, font_system, &label.text, &attrs, label.mono);
+            set_chrome_label_text(
+                &mut buffer,
+                font_system,
+                &label.text,
+                &attrs,
+                label.mono,
+                terminal_cjk_families,
+            );
             buffer.shape_until_scroll(font_system, false);
             let mut text_width = shaped_line_width(&buffer);
             // **A cell of a grid is fitted to its columns and never cut by them**
@@ -14096,6 +14244,16 @@ const CJK_FALLBACK_FAMILIES: [&str; 11] = [
     "MS Gothic",
 ];
 
+/// The named CJK families a third desktop platform tries before conceding to
+/// the library-wide fallback. These are capability requests, not guarantees.
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+const OTHER_CJK_FALLBACK_FAMILIES: [&str; 4] = [
+    "Noto Sans CJK SC",
+    "Noto Sans CJK JP",
+    "Noto Sans CJK KR",
+    "WenQuanYi Zen Hei",
+];
+
 /// The files those families live in, in the order the families are read.
 ///
 /// Files rather than families for [`CHROME_SANS_FONT_FILES`]' reason: a file name
@@ -14277,6 +14435,32 @@ const MACOS_CJK_FALLBACK_FAMILIES: [&str; 6] = [
     "Apple SD Gothic Neo",
     "Hiragino Sans GB",
 ];
+
+#[cfg(target_os = "windows")]
+fn platform_cjk_fallback_families() -> &'static [&'static str] {
+    &CJK_FALLBACK_FAMILIES
+}
+
+#[cfg(target_os = "macos")]
+fn platform_cjk_fallback_families() -> &'static [&'static str] {
+    &MACOS_CJK_FALLBACK_FAMILIES
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn platform_cjk_fallback_families() -> &'static [&'static str] {
+    &OTHER_CJK_FALLBACK_FAMILIES
+}
+
+/// The single owner of the ordered families Folio permits for a CJK grid cell.
+/// A user's choice leads; automatic mode is exactly the platform chain.
+fn terminal_cjk_family_chain(chosen: &str) -> impl Iterator<Item = &str> {
+    (!chosen.is_empty()).then_some(chosen).into_iter().chain(
+        platform_cjk_fallback_families()
+            .iter()
+            .copied()
+            .filter(move |family| !family.eq_ignore_ascii_case(chosen)),
+    )
+}
 
 /// The grid's face, most wanted first. Asked of the database rather than
 /// asserted, because only one of these is guaranteed.
@@ -14476,7 +14660,7 @@ fn shape_narrow_buffer(
     font_system: &mut FontSystem,
     metrics: CellMetrics,
     em_scale: f32,
-    family: Family<'static>,
+    family: Family<'_>,
 ) -> Buffer {
     let mut buffer = Buffer::new(
         font_system,
@@ -14502,16 +14686,17 @@ fn shape_narrow_buffer(
     buffer
 }
 
-fn shape_narrow_buffer_for_key(
+fn shape_narrow_buffer_for_key<'a>(
     key: &ShapeKey,
     font_system: &mut FontSystem,
     swash_cache: &mut SwashCache,
     metrics: CellMetrics,
+    cjk_families: &'a TerminalCjkFamilies,
     #[cfg(test)] color_emoji_trial_shapes: &mut u64,
-) -> (Buffer, Family<'static>, NarrowSizePolicy) {
+) -> (Buffer, Family<'a>, NarrowSizePolicy) {
     match font_presentation_route(&key.text, font_system) {
         PresentationRoute::TerminalText => {
-            let family = Family::Monospace;
+            let family = terminal_grid_family(&key.text, cjk_families);
             (
                 shape_narrow_buffer(key, font_system, metrics, 1.0, family),
                 family,
@@ -14828,12 +15013,13 @@ fn is_primary_font_id(font_system: &FontSystem, id: glyphon::fontdb::ID) -> bool
         .is_some_and(|face| face.families.iter().any(|(family, _)| family == primary))
 }
 
-fn shape_narrow_glyphs(
+fn shape_narrow_glyphs_with_cjk(
     cells: &[CapturedCell],
     font_system: &mut FontSystem,
     swash_cache: &mut SwashCache,
     metrics: CellMetrics,
     cache: &mut NarrowShapingCache,
+    cjk_families: &TerminalCjkFamilies,
 ) -> Vec<NarrowGlyph> {
     narrow_cell_slots(cells)
         .into_iter()
@@ -14844,7 +15030,7 @@ fn shape_narrow_glyphs(
                 italic: slot.style.flags.contains(CellFlags::ITALIC),
             };
             let (buffer, left_offset_px, top_offset_px) =
-                cache.get_or_shape(key, font_system, swash_cache, metrics);
+                cache.get_or_shape(key, font_system, swash_cache, metrics, cjk_families);
             let (foreground, _) = resolve_colors(&slot.style);
             NarrowGlyph {
                 column: slot.column,
@@ -14875,12 +15061,13 @@ fn wide_cell_slots(cells: &[CapturedCell]) -> Vec<WideCellSlot> {
         .collect()
 }
 
-fn shape_wide_glyphs(
+fn shape_wide_glyphs_with_cjk(
     cells: &[CapturedCell],
     font_system: &mut FontSystem,
     swash_cache: &mut SwashCache,
     metrics: CellMetrics,
     cache: &mut WideShapingCache,
+    cjk_families: &TerminalCjkFamilies,
 ) -> Vec<WideGlyph> {
     wide_cell_slots(cells)
         .into_iter()
@@ -14891,7 +15078,7 @@ fn shape_wide_glyphs(
                 italic: slot.style.flags.contains(CellFlags::ITALIC),
             };
             let (buffer, left_offset_px, top_offset_px) =
-                cache.get_or_shape(key, font_system, swash_cache, metrics);
+                cache.get_or_shape(key, font_system, swash_cache, metrics, cjk_families);
             let (foreground, _) = resolve_colors(&slot.style);
             WideGlyph {
                 column: slot.column,
@@ -14902,6 +15089,44 @@ fn shape_wide_glyphs(
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+fn shape_narrow_glyphs(
+    cells: &[CapturedCell],
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    metrics: CellMetrics,
+    cache: &mut NarrowShapingCache,
+) -> Vec<NarrowGlyph> {
+    let cjk_families = resolve_terminal_cjk_families("", font_system);
+    shape_narrow_glyphs_with_cjk(
+        cells,
+        font_system,
+        swash_cache,
+        metrics,
+        cache,
+        &cjk_families,
+    )
+}
+
+#[cfg(test)]
+fn shape_wide_glyphs(
+    cells: &[CapturedCell],
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    metrics: CellMetrics,
+    cache: &mut WideShapingCache,
+) -> Vec<WideGlyph> {
+    let cjk_families = resolve_terminal_cjk_families("", font_system);
+    shape_wide_glyphs_with_cjk(
+        cells,
+        font_system,
+        swash_cache,
+        metrics,
+        cache,
+        &cjk_families,
+    )
 }
 
 /// How a two-cell slot sizes the face it shapes with, and therefore where the result is placed.
@@ -14922,7 +15147,7 @@ fn shape_wide_buffer(
     key: &ShapeKey,
     font_system: &mut FontSystem,
     metrics: CellMetrics,
-    family: Family<'static>,
+    family: Family<'_>,
     size_policy: WideSizePolicy,
 ) -> Buffer {
     let mut buffer = Buffer::new(
@@ -14954,19 +15179,23 @@ fn shape_wide_buffer_for_key(
     font_system: &mut FontSystem,
     swash_cache: &mut SwashCache,
     metrics: CellMetrics,
+    cjk_families: &TerminalCjkFamilies,
     #[cfg(test)] color_emoji_trial_shapes: &mut u64,
 ) -> (Buffer, WideSizePolicy) {
     match font_presentation_route(&key.text, font_system) {
-        PresentationRoute::TerminalText => (
-            shape_wide_buffer(
-                key,
-                font_system,
-                metrics,
-                Family::Monospace,
+        PresentationRoute::TerminalText => {
+            let family = terminal_grid_family(&key.text, cjk_families);
+            (
+                shape_wide_buffer(
+                    key,
+                    font_system,
+                    metrics,
+                    family,
+                    WideSizePolicy::MonospaceSlot,
+                ),
                 WideSizePolicy::MonospaceSlot,
-            ),
-            WideSizePolicy::MonospaceSlot,
-        ),
+            )
+        }
         PresentationRoute::TextSymbol => (
             shape_wide_buffer(
                 key,
@@ -15132,6 +15361,87 @@ fn primary_font_supports_text(font_system: &mut FontSystem, text: &str) -> bool 
     text.chars().all(|character| charmap.map(character) != 0)
 }
 
+fn font_family_supports_text(font_system: &mut FontSystem, family: &str, text: &str) -> bool {
+    let Some(font_id) = font_system.db().query(&glyphon::fontdb::Query {
+        families: &[Family::Name(family)],
+        weight: Weight::NORMAL,
+        stretch: Stretch::Normal,
+        style: Style::Normal,
+    }) else {
+        return false;
+    };
+    if !font_system.db().face(font_id).is_some_and(|face| {
+        face.families
+            .iter()
+            .any(|(candidate, _)| candidate.eq_ignore_ascii_case(family))
+    }) {
+        return false;
+    }
+    let Some(font) = font_system.get_font(font_id, Weight::NORMAL) else {
+        return false;
+    };
+    let charmap = font.as_swash().charmap();
+    text.chars().all(|character| charmap.map(character) != 0)
+}
+
+#[derive(Debug, Default)]
+struct TerminalCjkFamilies {
+    chosen: String,
+    han: String,
+    hiragana: String,
+    katakana: String,
+    hangul: String,
+}
+
+fn resolve_terminal_cjk_families(
+    chosen: &str,
+    font_system: &mut FontSystem,
+) -> TerminalCjkFamilies {
+    let resolve = |sample: &str, font_system: &mut FontSystem| {
+        terminal_cjk_family_chain(chosen)
+            .find(|family| font_family_supports_text(font_system, family, sample))
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let han = resolve("你", font_system);
+    let hiragana = resolve("あ", font_system);
+    let katakana = resolve("ア", font_system);
+    let hangul = resolve("한", font_system);
+    let chosen = if chosen.is_empty()
+        || ![&han, &hiragana, &katakana, &hangul]
+            .iter()
+            .any(|family| family.eq_ignore_ascii_case(chosen))
+    {
+        String::new()
+    } else {
+        chosen.to_owned()
+    };
+    TerminalCjkFamilies {
+        chosen,
+        han,
+        hiragana,
+        katakana,
+        hangul,
+    }
+}
+
+/// The face request for one terminal-grid cluster.
+///
+/// CJK scripts are always named by Folio. Only an exhausted named chain and
+/// scripts Folio does not own reach cosmic-text's library-wide fallback.
+fn terminal_grid_family<'a>(text: &str, families: &'a TerminalCjkFamilies) -> Family<'a> {
+    let family = text.chars().find_map(|character| match character.script() {
+        unicode_script::Script::Han => Some(families.han.as_str()),
+        unicode_script::Script::Hiragana => Some(families.hiragana.as_str()),
+        unicode_script::Script::Katakana => Some(families.katakana.as_str()),
+        unicode_script::Script::Hangul => Some(families.hangul.as_str()),
+        _ => None,
+    });
+    family
+        .filter(|family| !family.is_empty())
+        .map_or(Family::Monospace, Family::Name)
+}
+
 fn font_family_available(font_system: &FontSystem, family: &str) -> bool {
     font_system.db().faces().any(|face| {
         face.families
@@ -15193,7 +15503,7 @@ fn is_color_cluster_from_family_within_slot(
         && bottom <= slot_height_px + SIZE_TOLERANCE_PX
 }
 
-fn shape_attrs(key: &ShapeKey, family: Family<'static>) -> Attrs<'static> {
+fn shape_attrs<'a>(key: &ShapeKey, family: Family<'a>) -> Attrs<'a> {
     let mut attrs = Attrs::new().family(family);
     if key.bold {
         attrs = attrs.weight(Weight::BOLD);
@@ -17791,6 +18101,33 @@ mod tests {
         )
     }
 
+    fn shape_row_for_test_with_cjk(
+        cells: &[CapturedCell],
+        font_system: &mut FontSystem,
+        metrics: CellMetrics,
+        cjk_family: &str,
+    ) -> (Vec<NarrowGlyph>, Vec<WideGlyph>) {
+        let cjk_families = resolve_terminal_cjk_families(cjk_family, font_system);
+        let mut swash_cache = SwashCache::new();
+        let narrow = shape_narrow_glyphs_with_cjk(
+            cells,
+            font_system,
+            &mut swash_cache,
+            metrics,
+            &mut NarrowShapingCache::new(),
+            &cjk_families,
+        );
+        let wide = shape_wide_glyphs_with_cjk(
+            cells,
+            font_system,
+            &mut swash_cache,
+            metrics,
+            &mut WideShapingCache::new(),
+            &cjk_families,
+        );
+        (narrow, wide)
+    }
+
     fn assert_narrow_glyph_origins(glyphs: &[NarrowGlyph], metrics: CellMetrics) {
         const X_TOLERANCE: f32 = 0.0001;
 
@@ -17833,6 +18170,18 @@ mod tests {
             .and_then(|face| face.families.first())
             .map(|(family, _)| family.clone())
             .expect("glyph font has a family")
+    }
+
+    fn wide_text_cells(text: &str) -> Vec<CapturedCell> {
+        text.chars()
+            .flat_map(|character| {
+                let mut lead = CapturedCell::plain(character.to_string());
+                lead.style.flags.insert(CellFlags::WIDE_CHAR);
+                let mut spacer = CapturedCell::plain("");
+                spacer.wide_spacer = true;
+                [lead, spacer]
+            })
+            .collect()
     }
 
     fn raster_content(font_system: &mut FontSystem, buffer: &Buffer) -> glyphon::SwashContent {
@@ -21806,6 +22155,113 @@ mod tests {
         );
     }
 
+    /// RED (issue #10) — the grid, rather than cosmic-text's generic monospace
+    /// fallback walk, chooses the first installed family in Folio's CJK chain.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn grid_han_uses_the_first_available_cjk_family() {
+        let mut font_system = terminal_font_system();
+        let expected = CJK_FALLBACK_FAMILIES[0];
+        if !font_family_supports_text(&mut font_system, expected, "你好世界") {
+            eprintln!("skipped: {expected} is absent or does not cover the Han fixture");
+            return;
+        }
+        let metrics = CellMetrics::measure(&mut font_system, 1.0).unwrap();
+        let shaped = shape_wide_for_test(&wide_text_cells("你好世界"), &mut font_system, metrics);
+        assert_eq!(shaped.len(), 4);
+        for glyph in shaped.iter().map(|slot| first_layout_glyph(&slot.buffer)) {
+            assert_ne!(glyph.glyph_id, 0, "the chosen face must cover Han");
+            assert_eq!(
+                glyph_family(&font_system, &glyph),
+                expected,
+                "the grid must name the first available family in its CJK chain"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn grid_han_uses_pingfang_and_never_gb18030_bitmap() {
+        let mut font_system = terminal_font_system();
+        let expected = MACOS_CJK_FALLBACK_FAMILIES[0];
+        if !font_family_supports_text(&mut font_system, expected, "你好世界") {
+            eprintln!("skipped: {expected} is absent or does not cover the Han fixture");
+            return;
+        }
+        let metrics = CellMetrics::measure(&mut font_system, 1.0).unwrap();
+        let shaped = shape_wide_for_test(&wide_text_cells("你好世界"), &mut font_system, metrics);
+        for family in shaped
+            .iter()
+            .map(|slot| glyph_family(&font_system, &first_layout_glyph(&slot.buffer)))
+        {
+            assert_eq!(family, expected);
+            assert_ne!(family, "GB18030 Bitmap");
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn chosen_cjk_family_isolated_from_ascii_and_clears_to_automatic() {
+        let mut font_system = terminal_font_system();
+        let Some(chosen) = ["DengXian", "SimSun"]
+            .into_iter()
+            .find(|family| font_family_supports_text(&mut font_system, family, "你好世界"))
+        else {
+            eprintln!("skipped: neither DengXian nor SimSun covers the Han fixture");
+            return;
+        };
+        let Some(automatic) = CJK_FALLBACK_FAMILIES
+            .iter()
+            .copied()
+            .find(|family| font_family_supports_text(&mut font_system, family, "你好世界"))
+        else {
+            eprintln!("skipped: no automatic CJK family covers the Han fixture");
+            return;
+        };
+        let primary = primary_font_family(&font_system).to_owned();
+        let metrics = CellMetrics::measure(&mut font_system, 1.0).unwrap();
+        let mut row = vec![CapturedCell::plain("A")];
+        row.extend(wide_text_cells("你好世界"));
+
+        let (ascii, custom) = shape_row_for_test_with_cjk(&row, &mut font_system, metrics, chosen);
+        assert!(custom.iter().all(|slot| {
+            glyph_family(&font_system, &first_layout_glyph(&slot.buffer)) == chosen
+        }));
+        assert_eq!(ascii.len(), 1, "the mixed row has one narrow ASCII cell");
+        assert_eq!(
+            glyph_family(&font_system, &first_layout_glyph(&ascii[0].buffer)),
+            primary,
+            "the CJK choice must not replace the monospace role"
+        );
+
+        let (_, cleared) = shape_row_for_test_with_cjk(&row, &mut font_system, metrics, "");
+        assert!(
+            cleared.iter().all(|slot| {
+                glyph_family(&font_system, &first_layout_glyph(&slot.buffer)) == automatic
+            }),
+            "clearing the setting must restore the platform chain"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn every_cjk_script_the_grid_owns_resolves_to_a_named_family() {
+        let mut font_system = terminal_font_system();
+        let families = resolve_terminal_cjk_families("", &mut font_system);
+        for (text, resolved) in [
+            ("你", families.han.as_str()),
+            ("あ", families.hiragana.as_str()),
+            ("ア", families.katakana.as_str()),
+            ("한", families.hangul.as_str()),
+        ] {
+            assert!(!resolved.is_empty(), "no named family covers {text}");
+            assert_eq!(
+                terminal_grid_family(text, &families),
+                Family::Name(resolved)
+            );
+        }
+    }
+
     #[test]
     fn shaped_ascii_glyphs_stay_on_integer_cell_columns() {
         const COLUMNS: usize = 80;
@@ -21919,6 +22375,10 @@ mod tests {
         cjk.style.flags.insert(CellFlags::WIDE_CHAR);
         let mut fullwidth_b = CapturedCell::plain("Ｂ");
         fullwidth_b.style.flags.insert(CellFlags::WIDE_CHAR);
+        let mut kana = CapturedCell::plain("あ");
+        kana.style.flags.insert(CellFlags::WIDE_CHAR);
+        let mut emoji = CapturedCell::plain("😀");
+        emoji.style.flags.insert(CellFlags::WIDE_CHAR);
         let mut spacer = CapturedCell::plain("");
         spacer.wide_spacer = true;
         let cells = [
@@ -21927,22 +22387,26 @@ mod tests {
             CapturedCell::plain("☆"),
             cjk,
             spacer.clone(),
+            kana,
+            spacer.clone(),
             CapturedCell::plain("│"),
             fullwidth_b,
+            spacer.clone(),
+            emoji,
             spacer,
             CapturedCell::plain("|"),
         ];
         let narrow = shape_narrow_for_test(&cells, &mut font_system, metrics);
         assert_eq!(
             narrow.iter().map(|glyph| glyph.column).collect::<Vec<_>>(),
-            [0, 1, 2, 8]
+            [0, 1, 2, 12]
         );
         assert_narrow_glyph_origins(&narrow, metrics);
 
         let wide = shape_wide_for_test(&cells, &mut font_system, metrics);
         assert_eq!(
             wide.iter().map(|glyph| glyph.column).collect::<Vec<_>>(),
-            [3, 6]
+            [3, 5, 8, 10]
         );
         for glyph in wide {
             let local_x = glyph.buffer.layout_runs().next().unwrap().glyphs[0].x;
@@ -25230,8 +25694,9 @@ mod tests {
     fn a_mini_row_of_ascii_is_still_whole_columns_wide() {
         const ROW: &str = "> cargo build";
         let mut font_system = terminal_font_system();
+        let cjk_families = resolve_terminal_cjk_families("", &mut font_system);
         assert!(
-            mono_label_spans(ROW, &mut font_system).is_none(),
+            mono_label_spans(ROW, &cjk_families, &mut font_system).is_none(),
             "a row on the grid's own face is one span and asks the route nothing"
         );
         let label = mini_grid_cell_label(&mut font_system, ROW, ROW.len() as f32);
@@ -28235,7 +28700,7 @@ mod tests {
                 "and the second finds it — which is the state the change has to undo"
             );
 
-            gpu.set_terminal_font(DEFAULT_PRIMARY_FONT_FAMILY, &[], 24.0);
+            gpu.set_terminal_font(DEFAULT_PRIMARY_FONT_FAMILY, &[], "", &[], 24.0);
             let after = window.apply_font_change(&mut gpu).expect("a re-measure");
 
             assert!(
@@ -28273,7 +28738,7 @@ mod tests {
 
             // (4) — the same font again is still a full invalidation.
             let revision = window.font_revision();
-            gpu.set_terminal_font(DEFAULT_PRIMARY_FONT_FAMILY, &[], 24.0);
+            gpu.set_terminal_font(DEFAULT_PRIMARY_FONT_FAMILY, &[], "", &[], 24.0);
             window.apply_font_change(&mut gpu).expect("a re-measure");
             assert!(window.font_revision() > revision);
         }
@@ -28290,9 +28755,9 @@ mod tests {
         #[test]
         fn a_family_this_machine_does_not_have_falls_back_to_the_face_it_draws() {
             let mut gpu = context();
-            gpu.set_terminal_font("No Such Family Is Installed", &[], 16.0);
+            gpu.set_terminal_font("No Such Family Is Installed", &[], "", &[], 16.0);
             assert_eq!(gpu.terminal_font_family(), DEFAULT_PRIMARY_FONT_FAMILY);
-            gpu.set_terminal_font("", &[], 16.0);
+            gpu.set_terminal_font("", &[], "", &[], 16.0);
             assert_eq!(
                 gpu.terminal_font_family(),
                 DEFAULT_PRIMARY_FONT_FAMILY,

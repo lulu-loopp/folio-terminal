@@ -35152,6 +35152,7 @@ fn apply_stored_terminal_font(
     settings: &bt_persist::SettingsV1,
 ) -> Result<bt_render::CellMetrics> {
     let family = settings.terminal_font_family.as_str();
+    let cjk_family = settings.terminal_cjk_font_family.as_str();
     // Only enumerated when the file actually names a family. A default install
     // never opens the system font collection at startup, which is the cost
     // `bt_render::terminal_font_system` refuses to pay and this must not
@@ -35164,6 +35165,7 @@ fn apply_stored_terminal_font(
     // Settings dialog — goes through `settings::monospace_families`, which
     // cannot walk anything. See `settings::monospace_family_files`.
     let files = settings::monospace_family_files(family);
+    let cjk_files = settings::cjk_family_files(cjk_family);
     // **Clamped here and nowhere else** (review row R4-2). This is the one place
     // a stored size crosses into the renderer, and a `0` past it is an assertion
     // inside the text layer before there is a window to report it on. See
@@ -35172,6 +35174,8 @@ fn apply_stored_terminal_font(
     gpu.set_terminal_font(
         family,
         &files,
+        cjk_family,
+        &cjk_files,
         f32::from(settings::drawable_font_size(settings.terminal_font_size)),
     );
     renderer
@@ -46109,6 +46113,9 @@ impl Runtime<'_> {
             terminal_font: settings::family_index(
                 &self.app.settings_store.loaded().terminal_font_family,
             ),
+            terminal_cjk_font: settings::cjk_family_index(
+                &self.app.settings_store.loaded().terminal_cjk_font_family,
+            ),
             font_size: settings::font_size_index(
                 self.app.settings_store.loaded().terminal_font_size,
             ),
@@ -48499,7 +48506,10 @@ impl Runtime<'_> {
         // nothing that is not already coalesced and asking which way this press
         // went would be a second reading of `is_open` between two frames that
         // disagree about it.
-        settings::begin_monospace_scan(&self.app.settings_store.loaded().terminal_font_family);
+        settings::begin_monospace_scan(
+            &self.app.settings_store.loaded().terminal_font_family,
+            &self.app.settings_store.loaded().terminal_cjk_font_family,
+        );
         let (rows, shortcuts, profile_lines, scheme_files, values) = self.settings_content();
         self.window.settings.toggle(self.settings_dialog(
             &rows,
@@ -48660,7 +48670,23 @@ impl Runtime<'_> {
         }
         if let Some(family) = settings::terminal_font_requested(target) {
             let size = self.app.settings_store.loaded().terminal_font_size;
-            self.apply_terminal_font(family.to_owned(), size)?;
+            let cjk_family = self
+                .app
+                .settings_store
+                .loaded()
+                .terminal_cjk_font_family
+                .clone();
+            self.apply_terminal_font(family.to_owned(), cjk_family, size)?;
+        }
+        if let Some(cjk_family) = settings::terminal_cjk_font_requested(target) {
+            let (family, size) = {
+                let current = self.app.settings_store.loaded();
+                (
+                    current.terminal_font_family.clone(),
+                    current.terminal_font_size,
+                )
+            };
+            self.apply_terminal_font(family, cjk_family.to_owned(), size)?;
         }
         if let Some(size) = settings::font_size_requested(target) {
             let family = self
@@ -48669,7 +48695,13 @@ impl Runtime<'_> {
                 .loaded()
                 .terminal_font_family
                 .clone();
-            if self.apply_terminal_font(family, size)? {
+            let cjk_family = self
+                .app
+                .settings_store
+                .loaded()
+                .terminal_cjk_font_family
+                .clone();
+            if self.apply_terminal_font(family, cjk_family, size)? {
                 // S110's one exception to "asked once": the row whose visible
                 // consequence on an unpatched 5.1 *is* the bug the module fixes.
                 // See `psreadline::invite_decision`.
@@ -48749,6 +48781,7 @@ impl Runtime<'_> {
                 settings::SettingsRow::LightScheme => self.add_scheme(true)?,
                 settings::SettingsRow::DarkScheme => self.add_scheme(false)?,
                 settings::SettingsRow::TerminalFont => self.open_font_settings()?,
+                settings::SettingsRow::TerminalCjkFont => self.open_font_settings()?,
                 _ => {}
             },
             settings::SettingsTarget::MenuItemEdit(row, index) => {
@@ -48950,6 +48983,7 @@ impl Runtime<'_> {
             | Row::LightScheme
             | Row::DarkScheme
             | Row::TerminalFont
+            | Row::TerminalCjkFont
             | Row::FontSize
             | Row::Cursor
             | Row::TabLayout
@@ -53466,13 +53500,22 @@ impl Runtime<'_> {
     ///
     /// Returns whether anything changed. No restart card: unlike the Language
     /// row, this one takes effect where the user can see it.
-    fn apply_terminal_font(&mut self, family: String, size: u8) -> Result<bool> {
+    fn apply_terminal_font(
+        &mut self,
+        family: String,
+        cjk_family: String,
+        size: u8,
+    ) -> Result<bool> {
         let current = self.app.settings_store.loaded();
-        if current.terminal_font_family == family && current.terminal_font_size == size {
+        if current.terminal_font_family == family
+            && current.terminal_cjk_font_family == cjk_family
+            && current.terminal_font_size == size
+        {
             return Ok(false);
         }
         let mut settings = current.clone();
         settings.terminal_font_family = family;
+        settings.terminal_cjk_font_family = cjk_family;
         settings.terminal_font_size = size;
         if !self.app.settings_store.store(settings) {
             return Ok(false);

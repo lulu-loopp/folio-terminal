@@ -57,7 +57,7 @@
 
 use objc2_core_foundation::{CFArray, CFDictionary, CFNumber, CFString, CFType};
 use objc2_core_text::{
-    CTFontCollection, CTFontDescriptor, CTFontSymbolicTraits, kCTFontFamilyNameAttribute,
+    CTFont, CTFontCollection, CTFontDescriptor, CTFontSymbolicTraits, kCTFontFamilyNameAttribute,
     kCTFontSymbolicTrait, kCTFontTraitsAttribute,
 };
 
@@ -75,6 +75,40 @@ use crate::MonospaceFamily;
 #[must_use]
 pub fn monospace_font_families() -> Vec<MonospaceFamily> {
     crate::order_monospace_families(collect_monospace_families())
+}
+
+/// Every visible installed family that covers Folio's fixed CJK probe.
+#[must_use]
+pub fn cjk_font_families() -> Vec<crate::CjkFamily> {
+    crate::order_cjk_families(collect_cjk_families())
+}
+
+fn collect_cjk_families() -> Vec<crate::CjkFamily> {
+    let collection = unsafe { CTFontCollection::from_available_fonts(None) };
+    let Some(descriptors) = (unsafe { collection.matching_font_descriptors() }) else {
+        return Vec::new();
+    };
+    let descriptors: &CFArray<CTFontDescriptor> = unsafe { descriptors.cast_unchecked() };
+    let mut families = Vec::new();
+    for descriptor in descriptors.iter() {
+        let Some(name) = family_name(&descriptor) else {
+            continue;
+        };
+        if name.starts_with('.') || name.trim().is_empty() || !covers_cjk_probe(&descriptor) {
+            continue;
+        }
+        families.push(crate::CjkFamily {
+            name,
+            files: Vec::new(),
+        });
+    }
+    families
+}
+
+fn covers_cjk_probe(descriptor: &CTFontDescriptor) -> bool {
+    let font = unsafe { CTFont::with_font_descriptor(descriptor, 0.0, std::ptr::null()) };
+    let characters = unsafe { font.character_set() };
+    crate::covers_cjk_sample(|character| characters.is_character_member(character as u16))
 }
 
 /// The enumeration itself: one collection, one pass, one predicate.
