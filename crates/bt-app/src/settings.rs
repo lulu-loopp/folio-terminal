@@ -1660,6 +1660,7 @@ impl MonospaceFamilySlot {
 }
 
 static MONOSPACE_FAMILIES: MonospaceFamilySlot = MonospaceFamilySlot::new();
+static CJK_FAMILIES: MonospaceFamilySlot = MonospaceFamilySlot::new();
 
 /// **The list before anybody has asked the machine anything** — one row, and it
 /// is the family the grid falls back to.
@@ -1680,6 +1681,25 @@ fn default_families() -> &'static [bt_platform::MonospaceFamily] {
     LIST.get_or_init(|| {
         Box::leak(bt_platform::order_monospace_families(Vec::new()).into_boxed_slice())
     })
+}
+
+fn with_automatic_cjk(families: Vec<bt_platform::CjkFamily>) -> Vec<bt_platform::CjkFamily> {
+    let mut families = bt_platform::order_cjk_families(families);
+    families.retain(|family| !family.name.is_empty());
+    families.insert(
+        0,
+        bt_platform::CjkFamily {
+            name: String::new(),
+            files: Vec::new(),
+        },
+    );
+    families
+}
+
+fn automatic_cjk_families() -> &'static [bt_platform::CjkFamily] {
+    static LIST: std::sync::OnceLock<&'static [bt_platform::CjkFamily]> =
+        std::sync::OnceLock::new();
+    LIST.get_or_init(|| Box::leak(with_automatic_cjk(Vec::new()).into_boxed_slice()))
 }
 
 /// **How many times this process has walked the machine's font collection.**
@@ -1710,6 +1730,18 @@ static MONOSPACE_WAKE: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>> =
 #[must_use]
 pub fn monospace_families() -> &'static [bt_platform::MonospaceFamily] {
     MONOSPACE_FAMILIES.published()
+}
+
+/// CJK-capable families already published by the worker. The empty-name first
+/// entry is the Automatic choice and requires no font file.
+#[must_use]
+pub fn cjk_families() -> &'static [bt_platform::CjkFamily] {
+    let adopted = CJK_FAMILIES.adopted();
+    if adopted.is_empty() {
+        automatic_cjk_families()
+    } else {
+        adopted
+    }
 }
 
 /// How many font-collection walks this process has performed.
@@ -1761,8 +1793,19 @@ pub fn install_font_scan_wake(wake: impl Fn() + Send + Sync + 'static) {
 /// and a font face per family, which is exactly the cost
 /// `bt_render::terminal_font_system` refuses to pay at launch, and it must
 /// never be the reason a frame was late.
-pub fn begin_monospace_scan(in_force: &str) {
+pub fn begin_monospace_scan(in_force: &str, cjk_in_force: &str) {
     MONOSPACE_FAMILIES.seed(in_force);
+    if CJK_FAMILIES.adopted().is_empty() {
+        let named = if cjk_in_force.is_empty() {
+            Vec::new()
+        } else {
+            vec![bt_platform::CjkFamily {
+                name: cjk_in_force.to_owned(),
+                files: Vec::new(),
+            }]
+        };
+        CJK_FAMILIES.publish(with_automatic_cjk(named), false);
+    }
     if !MONOSPACE_FAMILIES.claim_scan() {
         return;
     }
@@ -1786,6 +1829,8 @@ fn scan_monospace_families() {
     loop {
         MONOSPACE_SCANS.fetch_add(1, std::sync::atomic::Ordering::Release);
         MONOSPACE_FAMILIES.offer(bt_platform::monospace_font_families());
+        MONOSPACE_SCANS.fetch_add(1, std::sync::atomic::Ordering::Release);
+        CJK_FAMILIES.offer(with_automatic_cjk(bt_platform::cjk_font_families()));
         // After the answer is in the mailbox and never before: a wake that
         // raced the offer would send the loop to adopt nothing, and the frame
         // the reader is waiting for would then be owed to a wake that is not
@@ -1807,10 +1852,13 @@ fn scan_monospace_families() {
 /// answered with the families it had last time, which is every walk but the one
 /// after somebody installs a font.
 pub fn adopt_scanned_families() -> bool {
-    let Some(families) = MONOSPACE_FAMILIES.take_offer() else {
-        return false;
-    };
-    MONOSPACE_FAMILIES.publish(families, true)
+    let monospace_changed = MONOSPACE_FAMILIES
+        .take_offer()
+        .is_some_and(|families| MONOSPACE_FAMILIES.publish(families, true));
+    let cjk_changed = CJK_FAMILIES
+        .take_offer()
+        .is_some_and(|families| CJK_FAMILIES.publish(families, true));
+    monospace_changed || cjk_changed
 }
 
 /// **The files one family's outlines live in** — the renderer's question, and
@@ -1842,6 +1890,23 @@ pub fn monospace_family_files(name: &str) -> Vec<std::path::PathBuf> {
         .unwrap_or_default()
 }
 
+/// Files needed to make a chosen CJK family available to the bounded renderer database.
+#[must_use]
+pub fn cjk_family_files(name: &str) -> Vec<std::path::PathBuf> {
+    if name.is_empty() {
+        return Vec::new();
+    }
+    if !CJK_FAMILIES.scanned() {
+        MONOSPACE_SCANS.fetch_add(1, std::sync::atomic::Ordering::Release);
+        CJK_FAMILIES.publish(with_automatic_cjk(bt_platform::cjk_font_families()), true);
+    }
+    cjk_families()
+        .iter()
+        .find(|candidate| candidate.name.eq_ignore_ascii_case(name))
+        .map(|candidate| candidate.files.clone())
+        .unwrap_or_default()
+}
+
 /// Which row of the family picker a stored family name is.
 ///
 /// A name the machine does not have resolves to the default's row, which is the
@@ -1860,6 +1925,15 @@ pub fn family_index(name: &str) -> usize {
                     .eq_ignore_ascii_case(bt_platform::DEFAULT_MONOSPACE_FAMILY)
             })
         })
+        .unwrap_or(0)
+}
+
+/// Which CJK picker row a stored family names; zero is Automatic.
+#[must_use]
+pub fn cjk_family_index(name: &str) -> usize {
+    cjk_families()
+        .iter()
+        .position(|family| family.name.eq_ignore_ascii_case(name))
         .unwrap_or(0)
 }
 
@@ -3217,6 +3291,9 @@ pub enum SettingsRow {
     /// startup — which the sans loader's two-file stack depends on. Both are
     /// argued in `docs/DESIGN.md` §7.1.6c-3b.
     TerminalFont,
+    /// The family used for Han, kana and Hangul cells; an empty choice follows
+    /// Folio's platform chain while leaving the ASCII grid face untouched.
+    TerminalCjkFont,
     /// How large that face is drawn, in logical pixels.
     ///
     /// Hot, like the family: the whole DPI path already exists to re-measure a
@@ -3490,6 +3567,7 @@ impl SettingsRow {
             | Self::SplitDirection
             | Self::MinimumContrast
             | Self::TerminalFont
+            | Self::TerminalCjkFont
             | Self::FontSize
             // The window's ground and the window's postures (§7.1.6c-4b). All
             // six are Appearance, including `Always on top`: it is not a look,
@@ -3706,6 +3784,7 @@ impl SettingsRow {
             Self::DefaultProfile => Text::RowDefaultProfile.text(),
             Self::Language => Text::RowLanguage.text(),
             Self::TerminalFont => Text::RowTerminalFont.text(),
+            Self::TerminalCjkFont => Text::RowTerminalCjkFont.text(),
             Self::FontSize => Text::RowFontSize.text(),
             Self::LightScheme => Text::RowLightScheme.text(),
             Self::DarkScheme => Text::RowDarkScheme.text(),
@@ -3916,6 +3995,7 @@ impl SettingsRow {
             // settings page reads as "all the text" and the chrome keeps its
             // own face.
             Self::TerminalFont => Text::DescTerminalFont.text(),
+            Self::TerminalCjkFont => Text::DescTerminalCjkFont.text(),
             Self::FontSize => Text::DescFontSize.text(),
             // The folder is named on the dark half alone — see the two strings.
             Self::LightScheme => Text::DescLightScheme.text(),
@@ -4134,6 +4214,7 @@ impl SettingsRow {
             | Self::LightScheme
             | Self::DarkScheme
             | Self::TerminalFont
+            | Self::TerminalCjkFont
             | Self::FontSize
             | Self::Cursor
             // An everyday row: a reader who types a word into an address field
@@ -4346,6 +4427,7 @@ impl SettingsRow {
             Self::BlockMaxHeight => BLOCK_MAX_HEIGHT_OPTIONS.len(),
             Self::Scrollback => SCROLLBACK_OPTIONS.len(),
             Self::TerminalFont => monospace_families().len(),
+            Self::TerminalCjkFont => cjk_families().len(),
             Self::FontSize => FONT_SIZE_OPTIONS.len(),
             Self::LightScheme => scheme_labels(true).len(),
             Self::DarkScheme => scheme_labels(false).len(),
@@ -4453,6 +4535,13 @@ impl SettingsRow {
             Self::TerminalFont => monospace_families()
                 .get(index)
                 .map(|family| family.name.as_str()),
+            Self::TerminalCjkFont => cjk_families().get(index).map(|family| {
+                if family.name.is_empty() {
+                    Text::OptionAutomatic.text()
+                } else {
+                    family.name.as_str()
+                }
+            }),
             Self::FontSize => FONT_SIZE_LABELS.get(index).copied(),
             // Four quantities and not one word among them, so none of the four
             // goes through the i18n table — see [`SCROLLBACK_LABELS`].
@@ -4564,6 +4653,7 @@ impl SettingsRow {
         match self {
             Self::LightScheme | Self::DarkScheme => Some(Text::AddScheme.text()),
             Self::TerminalFont => Some(Text::InstallFonts.text()),
+            Self::TerminalCjkFont => Some(Text::InstallFonts.text()),
             // No ellipsis, unlike the two above: those two open a further asking
             // and this one hands an address to the browser and is over — which
             // is also why it wears a different mark, see
@@ -4950,6 +5040,7 @@ impl SettingsRow {
                 .iter()
                 .position(|it| *it == values.language),
             Self::TerminalFont => Some(values.terminal_font),
+            Self::TerminalCjkFont => Some(values.terminal_cjk_font),
             Self::FontSize => Some(values.font_size),
             Self::LightScheme => Some(values.light_scheme),
             Self::DarkScheme => Some(values.dark_scheme),
@@ -5303,6 +5394,7 @@ fn every_row_of_the_dialog(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
         SettingsRow::LightScheme,
         SettingsRow::DarkScheme,
         SettingsRow::TerminalFont,
+        SettingsRow::TerminalCjkFont,
         SettingsRow::FontSize,
         SettingsRow::Cursor,
         SettingsRow::TabLayout,
@@ -5934,6 +6026,8 @@ pub struct SettingsValues {
     /// uninstalled since it was chosen ticks the face the grid really has. The
     /// stored name is left alone by that resolution.
     pub terminal_font: usize,
+    /// Which CJK family row is ticked; zero is Automatic.
+    pub terminal_cjk_font: usize,
     /// Which row of the size picker is ticked. An index for `terminal_font`'s
     /// reason — a size this build's list does not offer resolves to the default
     /// rather than leaving the combo blank.
@@ -6106,6 +6200,7 @@ impl SettingsValues {
             language: LanguageV1::System,
             default_profile: profiles::fallback_profile(),
             terminal_font: 0,
+            terminal_cjk_font: 0,
             font_size: font_size_index(bt_persist::DEFAULT_TERMINAL_FONT_SIZE),
             light_scheme: scheme_index(bt_persist::DEFAULT_LIGHT_SCHEME, true),
             dark_scheme: scheme_index(bt_persist::DEFAULT_DARK_SCHEME, false),
@@ -9297,6 +9392,17 @@ pub fn terminal_font_requested(target: SettingsTarget) -> Option<&'static str> {
         SettingsTarget::Choice(SettingsRow::TerminalFont, index) => monospace_families()
             .get(index)
             .map(|family| family.name.as_str()),
+        _ => None,
+    }
+}
+
+/// The CJK grid face requested by the picker; the empty string means Automatic.
+#[must_use]
+pub fn terminal_cjk_font_requested(target: SettingsTarget) -> Option<&'static str> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::TerminalCjkFont, index) => {
+            cjk_families().get(index).map(|family| family.name.as_str())
+        }
         _ => None,
     }
 }
@@ -14985,6 +15091,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_cjk_picker_is_directly_below_the_terminal_font_and_starts_automatic() {
+        let rows = every_row_of_the_dialog(TabLayoutMode::Horizontal);
+        let primary = rows
+            .iter()
+            .position(|row| *row == SettingsRow::TerminalFont)
+            .expect("the terminal font row exists");
+        assert_eq!(rows.get(primary + 1), Some(&SettingsRow::TerminalCjkFont));
+        assert_eq!(
+            SettingsRow::TerminalCjkFont.option_label(0),
+            Some(Text::OptionAutomatic.text())
+        );
+        assert_eq!(cjk_family_index(""), 0);
+    }
+
     /// One family, as the machine would report it.
     fn family(name: &str) -> bt_platform::MonospaceFamily {
         bt_platform::MonospaceFamily {
@@ -16822,8 +16943,9 @@ mod tests {
     /// Leaving them out costs nothing on the two pages that matter: `Default
     /// profile` and the summoned terminal's profile row are on pages already
     /// standing at [`COMBO_MAX_ROW_SHARE`], where no label can widen anything.
-    const MACHINE_READ_PICKERS: [SettingsRow; 5] = [
+    const MACHINE_READ_PICKERS: [SettingsRow; 6] = [
         SettingsRow::TerminalFont,
+        SettingsRow::TerminalCjkFont,
         SettingsRow::LightScheme,
         SettingsRow::DarkScheme,
         SettingsRow::DefaultProfile,
@@ -19487,10 +19609,10 @@ mod tests {
         assert_eq!(height(cursor.combo), height(theme.combo));
         assert_eq!(
             cursor.combo[1] - theme.combo[1],
-            5.0 * ROW_HEIGHT,
-            "Cursor is five identical rows under Theme — the two scheme rows \
-             (§7.1.6c-4a) and the two font rows sit between them, and every one \
-             of them is the same height. The window's ground used to be here \
+            6.0 * ROW_HEIGHT,
+            "Cursor is six identical rows under Theme — the two scheme rows \
+             (§7.1.6c-4a) and the three font rows (family, CJK family, size) sit \
+             between them, and every one of them is the same height. The window's ground used to be here \
              too; §7.1.6c-5's ruling moved its six rows under the disclosure"
         );
     }
@@ -20377,6 +20499,7 @@ mod tests {
         // drawn text fits the box, and if it gave way it gave way with an `…`
         // after a prefix of the real name.
         ellipsised.retain(|row| *row != SettingsRow::TerminalFont);
+        ellipsised.retain(|row| *row != SettingsRow::TerminalCjkFont);
         ellipsised.sort_by_key(|row| format!("{row:?}"));
         assert_eq!(
             ellipsised,
@@ -25117,6 +25240,7 @@ mod tests {
                 SettingsRow::LightScheme,
                 SettingsRow::DarkScheme,
                 SettingsRow::TerminalFont,
+                SettingsRow::TerminalCjkFont,
                 SettingsRow::FontSize,
                 SettingsRow::Cursor,
                 SettingsRow::TabLayout,
@@ -25194,6 +25318,7 @@ mod tests {
                 SettingsRow::LightScheme,
                 SettingsRow::DarkScheme,
                 SettingsRow::TerminalFont,
+                SettingsRow::TerminalCjkFont,
                 SettingsRow::FontSize,
                 SettingsRow::Cursor,
                 SettingsRow::TabLayout,

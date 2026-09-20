@@ -45,6 +45,7 @@ fn settings_write_then_read_round_trips_a_non_default_value() {
         minimum_contrast: MinimumContrastV1::Ratio45,
         language: LanguageV1::Chinese,
         terminal_font_family: "Cascadia Mono".to_owned(),
+        terminal_cjk_font_family: "Microsoft YaHei UI".to_owned(),
         terminal_font_size: 20,
         psreadline_invite: PsReadLineInviteV1::Installed,
         light_scheme: "Solarized Light".to_owned(),

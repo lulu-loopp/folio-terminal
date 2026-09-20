@@ -1150,6 +1150,13 @@ pub fn monospace_font_families() -> Vec<crate::MonospaceFamily> {
     crate::order_monospace_families(Vec::new())
 }
 
+/// No portable font-database enumeration is available on this target.
+#[cfg(not(target_os = "macos"))]
+#[must_use]
+pub fn cjk_font_families() -> Vec<crate::CjkFamily> {
+    Vec::new()
+}
+
 /// **Whether this volume treats two spellings of one name as one file.**
 ///
 /// Really answered, and really answered *per directory*, because on APFS that
