@@ -1254,10 +1254,10 @@ fn an_elapsed_time_service_is_never_gated_and_the_flood_shows_its_state() {
     );
     let turning = method("    fn turn(&mut self, now: Instant, application_clocks: bool)");
     let serviced = turning
-        .find("self.service_pictures(now);")
+        .find("self.service_pictures(now)")
         .expect("the turn services the pictures");
     let strip = turning
-        .find("self.advance_strip_animation(now)?;")
+        .find("self.advance_strip_animation(now)")
         .expect("and then the tick asks for its frame");
     assert!(
         serviced < strip,

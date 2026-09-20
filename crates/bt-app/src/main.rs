@@ -11267,9 +11267,7 @@ impl LeafWake {
 
     /// **This shell now nudges that window.**
     fn rebind(&self, signal: &PtyWakeSignal) {
-        *self
-            .signal
-            .lock()
+        *hang_watch::during(hang_watch::Station::SharedLock, || self.signal.lock())
             .unwrap_or_else(std::sync::PoisonError::into_inner) = signal.clone();
     }
 
@@ -11277,9 +11275,7 @@ impl LeafWake {
     /// it has actually moved the wake-up and not merely intended to.
     fn bit(&self) -> Arc<AtomicBool> {
         Arc::clone(
-            &self
-                .signal
-                .lock()
+            &hang_watch::during(hang_watch::Station::SharedLock, || self.signal.lock())
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .raised,
         )
@@ -19125,10 +19121,16 @@ fn offer_pty_input(pty: Option<&PtySession>, bytes: &[u8], what: &'static str) -
     let Some(pty) = pty else {
         return Ok(PtyInput::NoChild);
     };
-    match pty.write(bytes) {
+    match hang_watch::during(hang_watch::Station::PtyInput, || {
+        let result = pty.write(bytes);
+        hang_watch::counters(bytes.len(), if result.is_ok() { bytes.len() } else { 0 }, 1);
+        result
+    }) {
         Ok(()) => Ok(PtyInput::Queued),
         Err(refused @ PtyError::InputRefused { .. }) => {
-            eprintln!("{what}: {refused}");
+            hang_watch::during(hang_watch::Station::DiagnosticWrite, || {
+                eprintln!("{what}: {refused}");
+            });
             Ok(PtyInput::Refused)
         }
         Err(error) => Err(anyhow::Error::new(error).context(what)),
@@ -25604,71 +25606,73 @@ fn deliver_osc_attention(
     trace: Option<&attention_trace::Trace>,
     raised: &mut Vec<AttentionDelivery>,
 ) {
-    let reach = notify::desktop_reach(tab_is_active, place);
-    let tab_id = tab.id;
-    // Carried out of the mutable walk for `settle_attention`'s reason: the title's three-layer
-    // chain reads facts of the tab that its leaves' borrow is holding. The carried title travels
-    // with each one because it is the announcement's own field and no two arrivals share it.
-    let mut allowed: Vec<(SeatId, Option<String>, attention::Raised)> = Vec::new();
-    for (seat, leaf) in tab.leaves_mut() {
-        let Some(event) = leaf
-            .attention
-            .weak_edge(leaf.session.status().attention_request)
-        else {
-            continue;
-        };
-        let at = attention::Site {
-            tab: index,
-            seat: *seat,
-        };
-        let outcome = leaf.attention.apply(at, reach, event, next_place, now);
-        emit_attention_lines(trace, outcome.lines);
-        allowed.extend(outcome.raised.map(|one| (*seat, None, one)));
-    }
-    for (seat, notification) in announcements {
-        // The row decides, and its pin is that no sequence on this lane is ever the strong level:
-        // "a program is blocked on your input" is a sentence no OSC in existence can say, and
-        // reading one as if it could is the substitution this whole block was opened to undo.
-        if attention_map::osc_credential(attention_map::OscArrival::Notification(
-            notification.source,
-        )) != Some(attention::Credential::Announced)
-        {
-            continue;
-        }
-        let Some(leaf) = tab.sessions.get_mut(seat) else {
-            continue;
-        };
-        let words = attention_map::announced_words(notification);
-        if leaf.attention.announce(words) {
-            continue;
-        }
-        let outcome = leaf.attention.announce_turn_end(
-            attention::Site {
+    hang_watch::during(hang_watch::Station::DrainAttention, || {
+        let reach = notify::desktop_reach(tab_is_active, place);
+        let tab_id = tab.id;
+        // Carried out of the mutable walk for `settle_attention`'s reason: the title's three-layer
+        // chain reads facts of the tab that its leaves' borrow is holding. The carried title travels
+        // with each one because it is the announcement's own field and no two arrivals share it.
+        let mut allowed: Vec<(SeatId, Option<String>, attention::Raised)> = Vec::new();
+        for (seat, leaf) in tab.leaves_mut() {
+            let Some(event) = leaf
+                .attention
+                .weak_edge(leaf.session.status().attention_request)
+            else {
+                continue;
+            };
+            let at = attention::Site {
                 tab: index,
                 seat: *seat,
-            },
-            reach,
-            switches,
-            attention_map::OSC_TRANSPORT,
-            attention_map::osc_via(notification.source),
-            words,
-        );
-        emit_attention_lines(trace, outcome.lines);
-        allowed.extend(
-            outcome
-                .raised
-                .map(|one| (*seat, notification.title.clone(), one)),
-        );
-    }
-    for (seat, carried, one) in allowed {
-        raised.push(attention_delivery(
-            tab,
-            tab_id,
-            seat,
-            carried.as_deref(),
-            one,
-        ));
-    }
+            };
+            let outcome = leaf.attention.apply(at, reach, event, next_place, now);
+            emit_attention_lines(trace, outcome.lines);
+            allowed.extend(outcome.raised.map(|one| (*seat, None, one)));
+        }
+        for (seat, notification) in announcements {
+            // The row decides, and its pin is that no sequence on this lane is ever the strong level:
+            // "a program is blocked on your input" is a sentence no OSC in existence can say, and
+            // reading one as if it could is the substitution this whole block was opened to undo.
+            if attention_map::osc_credential(attention_map::OscArrival::Notification(
+                notification.source,
+            )) != Some(attention::Credential::Announced)
+            {
+                continue;
+            }
+            let Some(leaf) = tab.sessions.get_mut(seat) else {
+                continue;
+            };
+            let words = attention_map::announced_words(notification);
+            if leaf.attention.announce(words) {
+                continue;
+            }
+            let outcome = leaf.attention.announce_turn_end(
+                attention::Site {
+                    tab: index,
+                    seat: *seat,
+                },
+                reach,
+                switches,
+                attention_map::OSC_TRANSPORT,
+                attention_map::osc_via(notification.source),
+                words,
+            );
+            emit_attention_lines(trace, outcome.lines);
+            allowed.extend(
+                outcome
+                    .raised
+                    .map(|one| (*seat, notification.title.clone(), one)),
+            );
+        }
+        for (seat, carried, one) in allowed {
+            raised.push(attention_delivery(
+                tab,
+                tab_id,
+                seat,
+                carried.as_deref(),
+                one,
+            ));
+        }
+    })
 }
 
 /// **Hand every arrived message to the one pane that can have sent it.**
@@ -34253,7 +34257,7 @@ mod drag_autoscroll_wiring_tests {
     /// that never fires.
     #[test]
     fn the_auto_scroll_turns_on_the_clock_the_spring_turns_on() {
-        let tick = |name: &str| holder(&format!("self.{name}(now)?;"));
+        let tick = |name: &str| holder(&format!("self.{name}(now)"));
         assert_eq!(
             tick("service_drag_autoscroll"),
             tick("advance_drag_spring"),
@@ -37152,7 +37156,9 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
     // a list somebody has to remember to extend. The call is a comparison and a
     // nineteen-colour copy; it queues bytes only when the canvas actually moved
     // and only for a pane that asked to hear about it (DEC 2031).
-    leaf.session.set_color_palette(terminal_palette_in_force());
+    hang_watch::during(hang_watch::Station::DrainPalette, || {
+        leaf.session.set_color_palette(terminal_palette_in_force())
+    });
     let mut changed = false;
     // **One slice, and then back to the caller that is holding the clock.**
     //
@@ -37203,6 +37209,7 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
             .read_output_slice()
     });
     let bytes = slice.bytes;
+    hang_watch::counters(bytes.len(), 0, 0);
     // **Was this pane's picture under the program's own control across this slice?**
     //
     // A *counter* and not the deadline, and the difference was a defect: a 1,024-byte capped read
@@ -37221,7 +37228,9 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
                 .context("apply PTY output")
         })?;
         hang_watch::during(hang_watch::Station::DrainReplies, || -> Result<()> {
-            for reply in leaf.session.take_pty_writes() {
+            for reply in hang_watch::during(hang_watch::Station::DrainChannel, || {
+                leaf.session.take_pty_writes()
+            }) {
                 write_pty_input(
                     leaf.pty.as_ref(),
                     &reply,
@@ -37235,13 +37244,14 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
     // Asked of the ring itself rather than guessed from the chunk's length: a
     // pop that happened to return exactly one quantum may have emptied it, and a
     // pop that returned less may already have been overtaken by the reader.
-    let pending = leaf
-        .pty
-        .as_ref()
-        .expect("PTY mode checked above")
-        .ring_stats()
-        .current_bytes
-        > 0;
+    let pending = hang_watch::during(hang_watch::Station::DrainRingStats, || {
+        leaf.pty
+            .as_ref()
+            .expect("PTY mode checked above")
+            .ring_stats()
+            .current_bytes
+            > 0
+    });
     // **Where the keyboard is, told to whoever subscribed to hear it** (DEC
     // 1004; attention plan slice A0.5). Told on every turn for the palette's
     // reason one screen up — the answer is four facts a window can move in a
@@ -37253,13 +37263,17 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
     // first program, so a pane subscribes on the very turn it is born, and a
     // reconciliation that ran before the feed would owe that pane its opening
     // report until something else happened to wake the loop.
-    leaf.session.set_keyboard_focus(holds_the_keyboard);
+    hang_watch::during(hang_watch::Station::DrainKeyboardFocus, || {
+        leaf.session.set_keyboard_focus(holds_the_keyboard)
+    });
     // A canvas notification, a focus report, and any colour answer queued behind
     // them, are owed to a child that has said nothing — so the reply channel is
     // drained once more outside the read above, which only feeds when the child
     // speaks.
     hang_watch::during(hang_watch::Station::DrainReplies, || -> Result<()> {
-        for reply in leaf.session.take_pty_writes() {
+        for reply in hang_watch::during(hang_watch::Station::DrainChannel, || {
+            leaf.session.take_pty_writes()
+        }) {
             write_pty_input(
                 leaf.pty.as_ref(),
                 &reply,
@@ -37273,98 +37287,103 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
     // is watching keep an honest account of itself — the frame path cannot, and
     // never could: it runs for the focused pane of the tab on screen and for
     // nothing else.
-    leaf.output_revision = output_revision(
-        leaf.output_revision,
-        changed,
-        leaf.session.resize_finish_deadline().is_some(),
-    );
-    // **And the one line a restored pane is owed, typed at the moment there is a
-    // prompt to type it at** (§7.54e ④ and ⑤).
-    //
-    // Here for the reason the command ledger below is here: this is the one place
-    // every leaf of every tab passes through on every turn, so a pane nobody is
-    // looking at is served too — and the fact this waits on is read off that very
-    // ledger. **An open mark with nothing executed is a shell reading a line**
-    // (`OSC 133;B` seen, no `C`), which is precisely "there is a prompt and the
-    // cursor is on it"; writing before that would put the command inside a login
-    // banner, or hand it to a shell still sourcing its profile.
-    //
-    // Taken rather than read, so one prompt receives it once.
-    if leaf
-        .session
-        .command_marks()
-        .last()
-        .is_some_and(|mark| mark.executed.is_none() && mark.finished.is_none())
-        && let Some((command, submit)) = leaf.pending_typing.take()
-    {
-        let bytes = quake::typed_into_a_prompt(&command, submit);
-        if !bytes.is_empty() {
-            write_pty_input(
-                leaf.pty.as_ref(),
-                &bytes,
-                "type a restored command at the prompt",
-            )?;
+    let outcome_parent = hang_watch::enter(hang_watch::Station::DrainMarks);
+    let outcome = (|| {
+        leaf.output_revision = output_revision(
+            leaf.output_revision,
+            changed,
+            leaf.session.resize_finish_deadline().is_some(),
+        );
+        // **And the one line a restored pane is owed, typed at the moment there is a
+        // prompt to type it at** (§7.54e ④ and ⑤).
+        //
+        // Here for the reason the command ledger below is here: this is the one place
+        // every leaf of every tab passes through on every turn, so a pane nobody is
+        // looking at is served too — and the fact this waits on is read off that very
+        // ledger. **An open mark with nothing executed is a shell reading a line**
+        // (`OSC 133;B` seen, no `C`), which is precisely "there is a prompt and the
+        // cursor is on it"; writing before that would put the command inside a login
+        // banner, or hand it to a shell still sourcing its profile.
+        //
+        // Taken rather than read, so one prompt receives it once.
+        if leaf
+            .session
+            .command_marks()
+            .last()
+            .is_some_and(|mark| mark.executed.is_none() && mark.finished.is_none())
+            && let Some((command, submit)) = leaf.pending_typing.take()
+        {
+            let bytes = quake::typed_into_a_prompt(&command, submit);
+            if !bytes.is_empty() {
+                write_pty_input(
+                    leaf.pty.as_ref(),
+                    &bytes,
+                    "type a restored command at the prompt",
+                )?;
+            }
         }
-    }
-    // **A command ending is heard here or nowhere.** The ledger is the shell's
-    // own account of itself (`OSC 133;D`), and this is the one place every leaf's
-    // bytes pass through — so a `git commit` finished in a pane behind a Git page
-    // is noticed whether or not that pane is the focused one.
-    let finished = leaf
-        .session
-        .command_marks()
-        .iter()
-        .rev()
-        .find(|mark| mark.finished.is_some())
-        .map(|mark| mark.id);
-    let ended = finished > leaf.last_finished_command;
-    if ended {
-        leaf.last_finished_command = finished;
-    }
-    let name_after = leaf.name_evidence();
-    Ok(DrainOutcome {
-        // Taken here because this is the one place every leaf of every tab
-        // passes through on every turn, which is the same sentence
-        // `output_revision` and the command ledger above are written under: a
-        // pane nobody is watching is exactly the pane whose notification matters.
-        // The seat is filled in by `drain_tab_pty`, which is the level that knows
-        // it.
-        notifications: leaf
+        // **A command ending is heard here or nowhere.** The ledger is the shell's
+        // own account of itself (`OSC 133;D`), and this is the one place every leaf's
+        // bytes pass through — so a `git commit` finished in a pane behind a Git page
+        // is noticed whether or not that pane is the focused one.
+        let finished = leaf
             .session
-            .take_notifications()
-            .into_iter()
-            .map(|notification| (SeatId(0), notification))
-            .collect(),
-        command_ends: leaf
-            .session
-            .working_directory()
-            .filter(|_| ended)
-            .map(Path::to_path_buf)
-            .into_iter()
-            .collect(),
-        arrived: changed,
-        pending,
-        // **Bytes arrived and the transport did not say there was more**, folded here because a
-        // slice's read boundary is visible nowhere else — see [`crate::coalesce`]. A pane whose
-        // slice ended on a whole capped read is a pane a millisecond ahead of the rest of a
-        // burst; a pane whose slice ended anywhere else has nothing to wait for, and says so.
-        arrived_uncapped: changed && !slice.ends_capped,
-        bytes: bytes.len(),
-        // **The program named its own frame's end during this turn.** That frame is complete and
-        // must not be made to wait behind a timer — however far inside one read the naming fell.
-        sync_bracket_closed: synchronized_update_committed(sync_commits_before, &leaf.session),
-        // **A block is open on this pane.** Asked of every pane and not only the one the frame
-        // path composes: a sibling holding a block open is a sibling whose bytes the parser is
-        // withholding, and a window that waited on its account would be waiting for a program
-        // that has already said where its frame ends.
-        sync_open: leaf.session.synchronized_update_deadline().is_some(),
-        // A leaf cannot know whether it is the one the frame path will compose;
-        // that is a fact about the tab, and [`drain_tab_pty`] is where it is
-        // known and where this is filled in.
-        arrived_off_focus: false,
-        renamed: name_after != name_before,
-        moved: name_after.1 != name_before.1,
-    })
+            .command_marks()
+            .iter()
+            .rev()
+            .find(|mark| mark.finished.is_some())
+            .map(|mark| mark.id);
+        let ended = finished > leaf.last_finished_command;
+        if ended {
+            leaf.last_finished_command = finished;
+        }
+        let name_after = leaf.name_evidence();
+        Ok(DrainOutcome {
+            // Taken here because this is the one place every leaf of every tab
+            // passes through on every turn, which is the same sentence
+            // `output_revision` and the command ledger above are written under: a
+            // pane nobody is watching is exactly the pane whose notification matters.
+            // The seat is filled in by `drain_tab_pty`, which is the level that knows
+            // it.
+            notifications: leaf
+                .session
+                .take_notifications()
+                .into_iter()
+                .map(|notification| (SeatId(0), notification))
+                .collect(),
+            command_ends: leaf
+                .session
+                .working_directory()
+                .filter(|_| ended)
+                .map(Path::to_path_buf)
+                .into_iter()
+                .collect(),
+            arrived: changed,
+            pending,
+            // **Bytes arrived and the transport did not say there was more**, folded here because a
+            // slice's read boundary is visible nowhere else — see [`crate::coalesce`]. A pane whose
+            // slice ended on a whole capped read is a pane a millisecond ahead of the rest of a
+            // burst; a pane whose slice ended anywhere else has nothing to wait for, and says so.
+            arrived_uncapped: changed && !slice.ends_capped,
+            bytes: bytes.len(),
+            // **The program named its own frame's end during this turn.** That frame is complete and
+            // must not be made to wait behind a timer — however far inside one read the naming fell.
+            sync_bracket_closed: synchronized_update_committed(sync_commits_before, &leaf.session),
+            // **A block is open on this pane.** Asked of every pane and not only the one the frame
+            // path composes: a sibling holding a block open is a sibling whose bytes the parser is
+            // withholding, and a window that waited on its account would be waiting for a program
+            // that has already said where its frame ends.
+            sync_open: leaf.session.synchronized_update_deadline().is_some(),
+            // A leaf cannot know whether it is the one the frame path will compose;
+            // that is a fact about the tab, and [`drain_tab_pty`] is where it is
+            // known and where this is filled in.
+            arrived_off_focus: false,
+            renamed: name_after != name_before,
+            moved: name_after.1 != name_before.1,
+        })
+    })();
+    hang_watch::at(outcome_parent);
+    outcome
 }
 
 /// **R31's gate**: which columns owe the repository a question this frame.
@@ -37609,28 +37628,34 @@ fn drain_tab_pty(
     tab_is_active: bool,
     owner_is_a_shell: bool,
 ) -> Result<DrainOutcome> {
-    // Copied before the loop, which then holds the tab mutably. It is the one
-    // fact this loop needs that a leaf cannot supply about itself: whether the
-    // pane it just heard is the pane the frame path is going to compose.
-    let focused = tab.focused_leaf;
-    let mut outcome = DrainOutcome::default();
-    for (seat, leaf) in tab.leaves_mut() {
-        let holds_the_keyboard = seat_holds_the_keyboard(
-            window_focused,
-            tab_is_active,
-            *seat == focused,
-            owner_is_a_shell,
-        );
-        let mut leaf_outcome = drain_leaf_pty(leaf, holds_the_keyboard)?;
-        outcome.arrived_off_focus |= leaf_outcome.arrived && *seat != focused;
-        // The address a leaf cannot write on its own request, stamped by the
-        // level that holds the key it is filed under.
-        for (address, _) in &mut leaf_outcome.notifications {
-            *address = *seat;
+    hang_watch::during_pane(hang_watch::Station::DrainTab, tab.id.0, || {
+        // Copied before the loop, which then holds the tab mutably. It is the one
+        // fact this loop needs that a leaf cannot supply about itself: whether the
+        // pane it just heard is the pane the frame path is going to compose.
+        let focused = tab.focused_leaf;
+        let mut outcome = DrainOutcome::default();
+        for (seat, leaf) in tab.leaves_mut() {
+            let holds_the_keyboard = seat_holds_the_keyboard(
+                window_focused,
+                tab_is_active,
+                *seat == focused,
+                owner_is_a_shell,
+            );
+            let pane_parent = hang_watch::enter_pane(hang_watch::Station::DrainPane, seat.0);
+            let result = drain_leaf_pty(leaf, holds_the_keyboard);
+            hang_watch::counters(0, 0, 1);
+            hang_watch::at(pane_parent);
+            let mut leaf_outcome = result?;
+            outcome.arrived_off_focus |= leaf_outcome.arrived && *seat != focused;
+            // The address a leaf cannot write on its own request, stamped by the
+            // level that holds the key it is filed under.
+            for (address, _) in &mut leaf_outcome.notifications {
+                *address = *seat;
+            }
+            outcome.merge(leaf_outcome);
         }
-        outcome.merge(leaf_outcome);
-    }
-    Ok(outcome)
+        Ok(outcome)
+    })
 }
 
 /// **Everything a window is born with that is not the same in every window.**
@@ -38549,7 +38574,9 @@ impl Runtime<'_> {
                 .context("create native window")?,
         );
         install_theme_class_background(&window);
-        window.set_ime_allowed(true);
+        hang_watch::during(hang_watch::Station::ImeAllowed, || {
+            window.set_ime_allowed(true)
+        });
         // Beside `set_ime_allowed` because it is the other half of the same
         // sentence — what this window does with the keys that are not plain
         // letters — and the stored answer rather than the shipped one, so a
@@ -39204,7 +39231,9 @@ impl Runtime<'_> {
                 .context("create native window")?,
         );
         install_theme_class_background(&window);
-        window.set_ime_allowed(true);
+        hang_watch::during(hang_watch::Station::ImeAllowed, || {
+            window.set_ime_allowed(true)
+        });
         // A second window answers the Option key the way the first one does —
         // see that constructor's note. The setting is the process's, and a
         // window that opened before or after it was changed is still a window of
@@ -39818,7 +39847,9 @@ impl Runtime<'_> {
     /// visible present's dpi check reads — and a hidden window is not a window
     /// that was never shown.
     fn hide_quake_window(&mut self) -> Option<bt_platform::hotkey::Foreground> {
-        self.window.window.set_visible(false);
+        hang_watch::during(hang_watch::Station::WindowVisible, || {
+            self.window.window.set_visible(false)
+        });
         self.app.quake.hidden()
     }
 
@@ -39840,7 +39871,9 @@ impl Runtime<'_> {
         if maximized {
             self.window.window.set_maximized(true);
         }
-        self.window.window.set_visible(true);
+        hang_watch::during(hang_watch::Station::WindowVisible, || {
+            self.window.window.set_visible(true)
+        });
         self.window.window_shown = true;
         // Showing a hidden Win32 window can synchronously settle it onto a different monitor.
         // Query Win32 directly: winit's cached scale can race during initial monitor placement.
@@ -49282,7 +49315,12 @@ impl Runtime<'_> {
         let control = input::is_command_chord(self.window.modifiers);
         let paste = matches!(&event.logical_key, Key::Character(text)
             if control && matches!(text.as_str(), "v" | "V"));
-        let pasted = paste.then(|| bt_platform::clipboard_text().unwrap_or_default());
+        let pasted = paste.then(|| {
+            hang_watch::during(hang_watch::Station::ClipboardRead, || {
+                bt_platform::clipboard_text()
+            })
+            .unwrap_or_default()
+        });
         let Some(field) = self.window.settings.text_field_mut(target) else {
             return Ok(false);
         };
@@ -52225,7 +52263,9 @@ impl Runtime<'_> {
         if new.exists() && !same_path_ignoring_case(&old, &new) {
             return Ok(());
         }
-        if let Err(error) = std::fs::rename(&old, &new) {
+        if let Err(error) = hang_watch::during(hang_watch::Station::RenameDisk, || {
+            std::fs::rename(&old, &new)
+        }) {
             let anchor = surface.toast_anchor();
             return self.toast(
                 toast::ToastKind::Error,
@@ -52353,7 +52393,9 @@ impl Runtime<'_> {
         if new.exists() && !same_path_ignoring_case(&old, &new) {
             return Ok(());
         }
-        if let Err(error) = std::fs::rename(&old, &new) {
+        if let Err(error) = hang_watch::during(hang_watch::Station::RenameDisk, || {
+            std::fs::rename(&old, &new)
+        }) {
             return self.toast(
                 toast::ToastKind::Error,
                 toast::ToastAnchor::FilesColumn(leaf.seat),
@@ -62798,7 +62840,9 @@ impl Runtime<'_> {
     /// pasting it verbatim into a file written with bare newlines is how a
     /// one-line paste turns the next diff into a whole-file rewrite.
     fn paste_into_preview(&mut self) -> Result<()> {
-        let text = match bt_platform::clipboard_text() {
+        let text = match hang_watch::during(hang_watch::Station::ClipboardRead, || {
+            bt_platform::clipboard_text()
+        }) {
             Ok(text) => text,
             Err(error) => {
                 eprintln!("recoverable preview paste failure: {error}");
@@ -62896,7 +62940,7 @@ impl Runtime<'_> {
         if !buffer.dirty {
             return Ok(());
         }
-        let notice = match buffer.save() {
+        let notice = match hang_watch::during(hang_watch::Station::PreviewSave, || buffer.save()) {
             preview::SaveOutcome::Saved => preview::preview_saved_notice().to_owned(),
             preview::SaveOutcome::Conflict => preview::preview_conflict_notice().to_owned(),
             preview::SaveOutcome::Failed(error) => {
@@ -66952,7 +66996,9 @@ impl Runtime<'_> {
                 return Ok(());
             }
             self.window.chrome_present_pending = true;
-            self.window.window.request_redraw();
+            hang_watch::during(hang_watch::Station::WindowRedraw, || {
+                self.window.window.request_redraw()
+            });
             return Ok(());
         }
         self.publish_frame(FrameTrigger {
@@ -66962,175 +67008,77 @@ impl Runtime<'_> {
     }
 
     fn publish_frame_inner(&mut self, trigger: FrameTrigger, skip_unchanged: bool) -> Result<bool> {
-        hang_watch::at(hang_watch::Station::Present);
-        // **Whatever asked for this frame, it carries every journey that is
-        // running** (review 2026-09-18, P1). Above everything that reads a
-        // height, a layer or a quad, because that is the whole of what it is
-        // for: the alternative is a frame built from a sample some earlier tick
-        // left behind, and a pane printing every five milliseconds composes
-        // enough of those to hold a band still for as long as it keeps printing.
-        // Costs a window with nothing moving one `bool` and one `Option` read.
-        // See [`Self::carry_live_journeys`].
-        self.carry_live_journeys(Instant::now());
-        // **Every publish settles the PTY's debt**, and this is the one door they all come
-        // through — a keystroke's frame, an expose, a resize's, the drain's own. What has been
-        // fed is about to be on the glass, or is about to be found no different from what
-        // already is, and either answers the question the wait was asking. Cleared here rather
-        // than at each caller so that a publication path added later cannot forget: an armed
-        // deadline nobody disarms is the failure [`coalesce::Pending`] is written against.
-        self.window.pty_coalesce.settle();
-        // **The tripwire.** A frame is about to describe a tab whose seat set
-        // may have changed; if it changed without anyone carrying the change to
-        // the shells, this is the moment the two pictures diverge and the last
-        // moment anything can say so. Two `u64`s, in debug only — the cost of
-        // the third instance of a bug that has now happened twice.
-        debug_assert_eq!(
-            self.window.shells_settled_revision,
-            self.seats.structure_revision(),
-            "a seat arrived or left without `settle_seat_set_change`: the panes \
+        hang_watch::during(hang_watch::Station::Present, || {
+            // **Whatever asked for this frame, it carries every journey that is
+            // running** (review 2026-09-18, P1). Above everything that reads a
+            // height, a layer or a quad, because that is the whole of what it is
+            // for: the alternative is a frame built from a sample some earlier tick
+            // left behind, and a pane printing every five milliseconds composes
+            // enough of those to hold a band still for as long as it keeps printing.
+            // Costs a window with nothing moving one `bool` and one `Option` read.
+            // See [`Self::carry_live_journeys`].
+            self.carry_live_journeys(Instant::now());
+            // **Every publish settles the PTY's debt**, and this is the one door they all come
+            // through — a keystroke's frame, an expose, a resize's, the drain's own. What has been
+            // fed is about to be on the glass, or is about to be found no different from what
+            // already is, and either answers the question the wait was asking. Cleared here rather
+            // than at each caller so that a publication path added later cannot forget: an armed
+            // deadline nobody disarms is the failure [`coalesce::Pending`] is written against.
+            self.window.pty_coalesce.settle();
+            // **The tripwire.** A frame is about to describe a tab whose seat set
+            // may have changed; if it changed without anyone carrying the change to
+            // the shells, this is the moment the two pictures diverge and the last
+            // moment anything can say so. Two `u64`s, in debug only — the cost of
+            // the third instance of a bug that has now happened twice.
+            debug_assert_eq!(
+                self.window.shells_settled_revision,
+                self.seats.structure_revision(),
+                "a seat arrived or left without `settle_seat_set_change`: the panes \
              are about to be drawn at their new widths while their shells still \
              believe the old ones"
-        );
-        // **A tab with no shell composes no terminal picture** (§7.1.6h), and
-        // that is the whole of what this branch says. Everything below composes,
-        // holds, decorates and diffs *one shell's grid*; a folder tab has no
-        // grid, so there is nothing here for it to do and nothing it could be
-        // given a default of.
-        //
-        // It is not a frame that is skipped, though: what such a tab shows —
-        // its column, its preview, the chrome around them — is retained renderer
-        // state, and the debt it owes the glass is a **present**. So it takes the
-        // door the strip's ring and the caret's blink already take, which is the
-        // same reading [`Self::publish_chrome_frame`] makes about the same debt.
-        // Answering `false` is then literally true: no picture entered the slot.
-        if self.focused().is_none() {
-            self.window.chrome_present_pending = true;
-            self.window.window.request_redraw();
-            return Ok(false);
-        }
-        // Real-machine decoration-state trace (`BT_DECOR_TRACE=<path>`). Runs on every frame trigger
-        // — including held/skipped frames — so a persistent stuck-source block is captured even when
-        // the presented frame does not change. Zero cost when the variable is unset.
-        self.shell_mut().session.trace_decorations();
-        if matches!(trigger.source, FrameSource::Keyboard) {
-            self.shell_mut()
-                .session
-                .release_presentation_hold_for_user_input();
-        }
-        // **The search re-asks itself here, before anything is projected** — so
-        // a line that has just frozen, or a character the shell has just echoed,
-        // is inside the hit set of the very frame that is about to draw it.
-        //
-        // Not forced: this is the rebuild *output* caused, so the match the
-        // reader is standing on keeps its place (B58's first half), and the two
-        // planes that did not move are not re-scanned at all (see
-        // [`SearchScanCache`]). A frame that changed nothing about the search
-        // costs one comparison of a fifty-row scan.
-        self.refresh_search(false)?;
-        let active = self.window.active_tab;
-        let tasks = self.app.math_worker.tasks.clone();
-        let scale_tasks = self.app.math_worker.scale_tasks.clone();
-        let window = self.window_id();
-        dispatch_tab_decoration_tasks(
-            window,
-            &mut self.window.tabs[active],
-            &tasks,
-            &scale_tasks,
-            &mut self.app.math_worker_running,
-            &mut self.app.math_worker_notice_pending,
-        );
-        self.window.composed_terminal_frames =
-            self.window.composed_terminal_frames.saturating_add(1);
-        let asked_about_paths;
-        // **What the projection cost this frame** (`BT_PERF_TRACE projection`,
-        // T-MATH-TOGGLE-STUTTER). The gesture that made this worth printing is
-        // the formula source toggle: it changes the set of suppressed ids, which
-        // is the one thing that sends `project` down its rebuild road, and the
-        // question a person at the machine has to be able to answer is whether
-        // that rebuild measured the lines that changed or the whole scrollback.
-        // `lines_measured` is exactly that number. Off unless the switch is set,
-        // and the reading costs one `u64` load when it is not.
-        let trace_perf = self.app.trace_perf;
-        let measurements_before = self.shell().projection.line_text_measurements();
-        // **Which road the projection took**, beside how many lines it measured
-        // (T-MATH-MARKS-IN-SOURCE-FACE). A frame of a change of face measures no
-        // lines at all either way — the cache answers for every one of them — so
-        // `lines_measured` alone cannot tell a band moved where it stands from a
-        // band that made the whole document be pushed through two trees again.
-        let rebuilds_before = self.shell().projection.rebuilds();
-        let bands_moved_before = self.shell().projection.bands_moved();
-        let mut terminal_frame = {
-            // Bound once, to the focused leaf: `session` and `projection` are
-            // two fields of one shell, and reaching each through its own deref
-            // would be two borrows of the tab rather than one borrow of the
-            // leaf.
-            let leaf = self.window.tabs[active].shell_mut();
-            let projection_started_at = trace_perf.then(Instant::now);
-            leaf.session.refresh_projection(&mut leaf.projection);
-            let refresh_us =
-                projection_started_at.map(|started_at| started_at.elapsed().as_micros());
-            let frame = leaf
-                .session
-                .viewport_frame(&mut leaf.projection)
-                .context("project terminal grid into viewport frame")?;
-            // **Written after the frame, not before it.** The three scroll numbers
-            // are what this frame decided — where the window stands, how far it
-            // could stand, and how much of that the blank tail under the prompt is
-            // spending — and a line printed before `viewport_frame` would report
-            // the frame before this one, which is the answer to a different
-            // question than the one the reader is holding the log for. The timing
-            // is still the refresh's own, taken above.
-            if let Some(refresh_us) = refresh_us {
-                trace_sink::stderr_line(format!(
-                    "BT_PERF_TRACE projection source={:?} refresh_us={refresh_us} lines_measured={} projected_lines={} rebuilt={} band_moved={} scroll_offset_subpixels={} scroll_extent_subpixels={} bottom_relief_subpixels={}",
-                    trigger.source,
-                    leaf.projection
-                        .line_text_measurements()
-                        .saturating_sub(measurements_before),
-                    leaf.projection.projected_line_count(),
-                    leaf.projection.rebuilds().saturating_sub(rebuilds_before),
-                    leaf.projection
-                        .bands_moved()
-                        .saturating_sub(bands_moved_before),
-                    leaf.projection.scroll_offset_subpixels(),
-                    leaf.projection.scroll_extent_subpixels(),
-                    leaf.projection.bottom_relief_subpixels(),
-                ));
+            );
+            // **A tab with no shell composes no terminal picture** (§7.1.6h), and
+            // that is the whole of what this branch says. Everything below composes,
+            // holds, decorates and diffs *one shell's grid*; a folder tab has no
+            // grid, so there is nothing here for it to do and nothing it could be
+            // given a default of.
+            //
+            // It is not a frame that is skipped, though: what such a tab shows —
+            // its column, its preview, the chrome around them — is retained renderer
+            // state, and the debt it owes the glass is a **present**. So it takes the
+            // door the strip's ring and the caret's blink already take, which is the
+            // same reading [`Self::publish_chrome_frame`] makes about the same debt.
+            // Answering `false` is then literally true: no picture entered the slot.
+            if self.focused().is_none() {
+                self.window.chrome_present_pending = true;
+                hang_watch::during(hang_watch::Station::WindowRedraw, || {
+                    self.window.window.request_redraw()
+                });
+                return Ok(false);
             }
-            // The frame that drew the names is the frame that discovered which of them nobody has
-            // answered for (§7.1.5j). Taken here, one step after the projection wrote them down,
-            // because the projection is what walks every line and the session is what owns a
-            // worker.
-            asked_about_paths = leaf
-                .session
-                .absorb_printed_path_probes(&mut leaf.projection)
-                != 0;
-            frame
-        };
-        // State-driven frame hold. Review displacement holds a vanished scroll anchor during a
-        // resize reprint. Independently, an unmatched off-band stale-pending DPI record holds the
-        // previous complete formula frame while a proven primary reprint is between clear and exact
-        // source re-anchor. Both release through projection/session facts (re-anchor, explicit user
-        // takeover, or hard lifecycle retirement), never a timer.
-        if self.shell().projection.presentation_hold() && self.window.last_presented_frame.is_some()
-        {
-            if self.app.trace_perf {
-                trace_sink::stderr_line(format!(
-                    "BT_PERF_TRACE hold=presentation source={:?} review={} exact_source={}",
-                    trigger.source,
-                    u8::from(self.shell().projection.review_hold()),
-                    u8::from(self.shell().projection.exact_source_reprint_hold()),
-                ));
+            // Real-machine decoration-state trace (`BT_DECOR_TRACE=<path>`). Runs on every frame trigger
+            // — including held/skipped frames — so a persistent stuck-source block is captured even when
+            // the presented frame does not change. Zero cost when the variable is unset.
+            self.shell_mut().session.trace_decorations();
+            if matches!(trigger.source, FrameSource::Keyboard) {
+                self.shell_mut()
+                    .session
+                    .release_presentation_hold_for_user_input();
             }
-            return Ok(false);
-        }
-        if hang_watch::during(hang_watch::Station::DetectionPass, || {
-            self.shell_mut()
-                .session
-                .schedule_visible_artifacts(&terminal_frame)
-        }) != 0
-            || asked_about_paths
-        {
+            // **The search re-asks itself here, before anything is projected** — so
+            // a line that has just frozen, or a character the shell has just echoed,
+            // is inside the hit set of the very frame that is about to draw it.
+            //
+            // Not forced: this is the rebuild *output* caused, so the match the
+            // reader is standing on keeps its place (B58's first half), and the two
+            // planes that did not move are not re-scanned at all (see
+            // [`SearchScanCache`]). A frame that changed nothing about the search
+            // costs one comparison of a fifty-row scan.
+            self.refresh_search(false)?;
+            let active = self.window.active_tab;
+            let tasks = self.app.math_worker.tasks.clone();
+            let scale_tasks = self.app.math_worker.scale_tasks.clone();
+            let window = self.window_id();
             dispatch_tab_decoration_tasks(
                 window,
                 &mut self.window.tabs[active],
@@ -67139,132 +67087,237 @@ impl Runtime<'_> {
                 &mut self.app.math_worker_running,
                 &mut self.app.math_worker_notice_pending,
             );
-        }
-        // This frame's own references, scanned once for the whole of this frame's life on screen.
-        // The hover upgrade below, the Ctrl+click verb and the peek all read this one list, so no
-        // two of them can disagree about where a reference is or whether it is one. The session
-        // scanned the same frame once more when it painted the resting dots inside `viewport_frame`;
-        // collapsing the two would mean hanging the scan on the session as state, which is the very
-        // kind of thing this affordance was rebuilt to be rid of.
-        //
-        // Kept on the leaf rather than on the window, because "this frame" is one pane's frame.
-        let scan = FrameImageReferences {
-            columns: terminal_frame.columns.get(),
-            references: self.shell().session.frame_image_references(&terminal_frame),
-        };
-        self.shell_mut().frame_image_references = scan;
-        // The pointer's marks, but only if the pointer is standing in *this* pane. The link's
-        // underline and the verified reference's solid underline both follow the pointer
-        // immediately; only what a hover *reveals* — a tooltip there, a thumbnail here — waits out
-        // the 300ms settle. When the pointer is in another pane, that pane wears them and this one
-        // is left alone, which `redraw` sees to.
-        if self.window.hover_pane == Some(self.focused_leaf) {
-            let hovered_reference = self.hovered_image_reference();
-            apply_hover_marks(
-                &mut terminal_frame,
-                &self.window.hyperlink_hover,
-                hovered_reference.as_ref().map(|(_, reference)| reference),
-            );
-        }
-        // Asked first, because it answers a gesture the user has just made and
-        // is waiting on, while the two below announce a background loss that
-        // happened whenever it happened.
-        //
-        // **Held for a dwell rather than taken once.** The two notices below are
-        // one-shots and can afford to be: they report a thread that died, and a
-        // sentence about that is worth exactly one frame whenever it lands. This
-        // one is an *answer* — the user double-clicked something and this is what
-        // came back — and an answer that is gone before the next repaint is a
-        // gesture that looks like it did nothing at all. The mock-up's own
-        // click-feedback (B24) holds its word for 1300ms for the same reason.
-        if let Some((notice, shown_at)) = self.window.files_notice.clone() {
-            if Instant::now().saturating_duration_since(shown_at) < FILES_NOTICE_DWELL {
-                terminal_frame.status_text = Some(notice);
-            } else {
-                self.window.files_notice = None;
+            self.window.composed_terminal_frames =
+                self.window.composed_terminal_frames.saturating_add(1);
+            let asked_about_paths;
+            // **What the projection cost this frame** (`BT_PERF_TRACE projection`,
+            // T-MATH-TOGGLE-STUTTER). The gesture that made this worth printing is
+            // the formula source toggle: it changes the set of suppressed ids, which
+            // is the one thing that sends `project` down its rebuild road, and the
+            // question a person at the machine has to be able to answer is whether
+            // that rebuild measured the lines that changed or the whole scrollback.
+            // `lines_measured` is exactly that number. Off unless the switch is set,
+            // and the reading costs one `u64` load when it is not.
+            let trace_perf = self.app.trace_perf;
+            let measurements_before = self.shell().projection.line_text_measurements();
+            // **Which road the projection took**, beside how many lines it measured
+            // (T-MATH-MARKS-IN-SOURCE-FACE). A frame of a change of face measures no
+            // lines at all either way — the cache answers for every one of them — so
+            // `lines_measured` alone cannot tell a band moved where it stands from a
+            // band that made the whole document be pushed through two trees again.
+            let rebuilds_before = self.shell().projection.rebuilds();
+            let bands_moved_before = self.shell().projection.bands_moved();
+            let mut terminal_frame = {
+                // Bound once, to the focused leaf: `session` and `projection` are
+                // two fields of one shell, and reaching each through its own deref
+                // would be two borrows of the tab rather than one borrow of the
+                // leaf.
+                let leaf = self.window.tabs[active].shell_mut();
+                let projection_started_at = trace_perf.then(Instant::now);
+                leaf.session.refresh_projection(&mut leaf.projection);
+                let refresh_us =
+                    projection_started_at.map(|started_at| started_at.elapsed().as_micros());
+                let frame = leaf
+                    .session
+                    .viewport_frame(&mut leaf.projection)
+                    .context("project terminal grid into viewport frame")?;
+                // **Written after the frame, not before it.** The three scroll numbers
+                // are what this frame decided — where the window stands, how far it
+                // could stand, and how much of that the blank tail under the prompt is
+                // spending — and a line printed before `viewport_frame` would report
+                // the frame before this one, which is the answer to a different
+                // question than the one the reader is holding the log for. The timing
+                // is still the refresh's own, taken above.
+                if let Some(refresh_us) = refresh_us {
+                    trace_sink::stderr_line(format!(
+                        "BT_PERF_TRACE projection source={:?} refresh_us={refresh_us} lines_measured={} projected_lines={} rebuilt={} band_moved={} scroll_offset_subpixels={} scroll_extent_subpixels={} bottom_relief_subpixels={}",
+                        trigger.source,
+                        leaf.projection
+                            .line_text_measurements()
+                            .saturating_sub(measurements_before),
+                        leaf.projection.projected_line_count(),
+                        leaf.projection.rebuilds().saturating_sub(rebuilds_before),
+                        leaf.projection
+                            .bands_moved()
+                            .saturating_sub(bands_moved_before),
+                        leaf.projection.scroll_offset_subpixels(),
+                        leaf.projection.scroll_extent_subpixels(),
+                        leaf.projection.bottom_relief_subpixels(),
+                    ));
+                }
+                // The frame that drew the names is the frame that discovered which of them nobody has
+                // answered for (§7.1.5j). Taken here, one step after the projection wrote them down,
+                // because the projection is what walks every line and the session is what owns a
+                // worker.
+                asked_about_paths = leaf
+                    .session
+                    .absorb_printed_path_probes(&mut leaf.projection)
+                    != 0;
+                frame
+            };
+            // State-driven frame hold. Review displacement holds a vanished scroll anchor during a
+            // resize reprint. Independently, an unmatched off-band stale-pending DPI record holds the
+            // previous complete formula frame while a proven primary reprint is between clear and exact
+            // source re-anchor. Both release through projection/session facts (re-anchor, explicit user
+            // takeover, or hard lifecycle retirement), never a timer.
+            if self.shell().projection.presentation_hold()
+                && self.window.last_presented_frame.is_some()
+            {
+                if self.app.trace_perf {
+                    trace_sink::stderr_line(format!(
+                        "BT_PERF_TRACE hold=presentation source={:?} review={} exact_source={}",
+                        trigger.source,
+                        u8::from(self.shell().projection.review_hold()),
+                        u8::from(self.shell().projection.exact_source_reprint_hold()),
+                    ));
+                }
+                return Ok(false);
             }
-        }
-        if terminal_frame.status_text.is_none()
-            && let Some(notice) = take_math_worker_notice(&mut self.app.math_worker_notice_pending)
-        {
-            terminal_frame.status_text = Some(notice.to_owned());
-        }
-        // The same one-shot, for the same kind of loss. Asked second so that a
-        // window unlucky enough to lose both threads at once still says
-        // something rather than nothing — the formula notice wins this frame and
-        // this one keeps its flag for the next, because `take` only clears the
-        // one it actually read.
-        if terminal_frame.status_text.is_none()
-            && let Some(notice) =
-                files::take_files_worker_notice(&mut self.app.files_worker_notice_pending)
-        {
-            terminal_frame.status_text = Some(notice.to_owned());
-        }
-        // The third of the same one-shot, in the same queue and last for the
-        // same reason: each `take` clears only the flag it read, so a window
-        // that loses all three threads says all three sentences, one per frame.
-        if terminal_frame.status_text.is_none()
-            && let Some(notice) =
-                preview::take_preview_worker_notice(&mut self.app.preview_worker_notice_pending)
-        {
-            terminal_frame.status_text = Some(notice.to_owned());
-        }
-        // The fourth, in the same queue and last for the same reason.
-        if terminal_frame.status_text.is_none()
-            && let Some(notice) =
-                git::take_git_worker_notice(&mut self.app.git_worker_notice_pending)
-        {
-            terminal_frame.status_text = Some(notice.to_owned());
-        }
-        let composed = compose_preedit(&terminal_frame, self.shell_preedit())
-            .context("reject non-rectangular frame before IME composition")?;
-        if skip_unchanged
-            && pty_drain_says_nothing_new(
-                pty_frame_is_unchanged(
-                    self.window.pending_frames.pending_frame(),
-                    self.window.last_presented_frame.as_ref(),
-                    &composed.frame,
-                ),
-                self.window.unpainted_pane_output,
-            )
-        {
-            if self.app.trace_perf {
-                let digest_started = Instant::now();
-                let digest = frame_content_digest(&composed.frame);
-                let alternate_screen = frame_is_alternate_screen(&composed.frame);
-                let digest_elapsed = digest_started.elapsed();
-                trace_sink::stderr_line(format!(
-                    "BT_PERF_TRACE skip=unchanged source={:?} content_fnv={:016x} alt={} digest_us={} present_unchanged={} slot_overwrites={}",
-                    trigger.source,
-                    digest.content_fnv,
-                    u8::from(alternate_screen),
-                    digest_elapsed.as_micros(),
-                    self.window.present_gate.unchanged,
-                    self.window.pending_frames.overwrites(),
-                ));
+            if hang_watch::during(hang_watch::Station::DetectionPass, || {
+                self.shell_mut()
+                    .session
+                    .schedule_visible_artifacts(&terminal_frame)
+            }) != 0
+                || asked_about_paths
+            {
+                dispatch_tab_decoration_tasks(
+                    window,
+                    &mut self.window.tabs[active],
+                    &tasks,
+                    &scale_tasks,
+                    &mut self.app.math_worker_running,
+                    &mut self.app.math_worker_notice_pending,
+                );
             }
-            return Ok(false);
-        }
-        // The frame is offered rather than read: this is the only moment the
-        // grid's caret exists, and [`Runtime::offer_ime_caret`] decides whether
-        // the grid is the rung that owns it.
-        self.offer_ime_caret(Some(&composed.frame));
-        self.shell_mut()
-            .session
-            .record_published_frame(&composed.frame, trigger.occurred_at);
-        self.flush_resize_trace();
-        // **The one line a picture becomes newer than the glass.** Everything
-        // above this can hold, skip or decide the frame says nothing new; only
-        // a frame that actually enters the slot moves the revision the
-        // chrome-only path compares against.
-        self.window.terminal_content_revision =
-            self.window.terminal_content_revision.saturating_add(1);
-        self.window
-            .pending_frames
-            .publish(composed.frame, trigger)
-            .context("reject non-rectangular frame at publish boundary")?;
-        self.window.window.request_redraw();
-        Ok(true)
+            // This frame's own references, scanned once for the whole of this frame's life on screen.
+            // The hover upgrade below, the Ctrl+click verb and the peek all read this one list, so no
+            // two of them can disagree about where a reference is or whether it is one. The session
+            // scanned the same frame once more when it painted the resting dots inside `viewport_frame`;
+            // collapsing the two would mean hanging the scan on the session as state, which is the very
+            // kind of thing this affordance was rebuilt to be rid of.
+            //
+            // Kept on the leaf rather than on the window, because "this frame" is one pane's frame.
+            let scan = FrameImageReferences {
+                columns: terminal_frame.columns.get(),
+                references: self.shell().session.frame_image_references(&terminal_frame),
+            };
+            self.shell_mut().frame_image_references = scan;
+            // The pointer's marks, but only if the pointer is standing in *this* pane. The link's
+            // underline and the verified reference's solid underline both follow the pointer
+            // immediately; only what a hover *reveals* — a tooltip there, a thumbnail here — waits out
+            // the 300ms settle. When the pointer is in another pane, that pane wears them and this one
+            // is left alone, which `redraw` sees to.
+            if self.window.hover_pane == Some(self.focused_leaf) {
+                let hovered_reference = self.hovered_image_reference();
+                apply_hover_marks(
+                    &mut terminal_frame,
+                    &self.window.hyperlink_hover,
+                    hovered_reference.as_ref().map(|(_, reference)| reference),
+                );
+            }
+            // Asked first, because it answers a gesture the user has just made and
+            // is waiting on, while the two below announce a background loss that
+            // happened whenever it happened.
+            //
+            // **Held for a dwell rather than taken once.** The two notices below are
+            // one-shots and can afford to be: they report a thread that died, and a
+            // sentence about that is worth exactly one frame whenever it lands. This
+            // one is an *answer* — the user double-clicked something and this is what
+            // came back — and an answer that is gone before the next repaint is a
+            // gesture that looks like it did nothing at all. The mock-up's own
+            // click-feedback (B24) holds its word for 1300ms for the same reason.
+            if let Some((notice, shown_at)) = self.window.files_notice.clone() {
+                if Instant::now().saturating_duration_since(shown_at) < FILES_NOTICE_DWELL {
+                    terminal_frame.status_text = Some(notice);
+                } else {
+                    self.window.files_notice = None;
+                }
+            }
+            if terminal_frame.status_text.is_none()
+                && let Some(notice) =
+                    take_math_worker_notice(&mut self.app.math_worker_notice_pending)
+            {
+                terminal_frame.status_text = Some(notice.to_owned());
+            }
+            // The same one-shot, for the same kind of loss. Asked second so that a
+            // window unlucky enough to lose both threads at once still says
+            // something rather than nothing — the formula notice wins this frame and
+            // this one keeps its flag for the next, because `take` only clears the
+            // one it actually read.
+            if terminal_frame.status_text.is_none()
+                && let Some(notice) =
+                    files::take_files_worker_notice(&mut self.app.files_worker_notice_pending)
+            {
+                terminal_frame.status_text = Some(notice.to_owned());
+            }
+            // The third of the same one-shot, in the same queue and last for the
+            // same reason: each `take` clears only the flag it read, so a window
+            // that loses all three threads says all three sentences, one per frame.
+            if terminal_frame.status_text.is_none()
+                && let Some(notice) =
+                    preview::take_preview_worker_notice(&mut self.app.preview_worker_notice_pending)
+            {
+                terminal_frame.status_text = Some(notice.to_owned());
+            }
+            // The fourth, in the same queue and last for the same reason.
+            if terminal_frame.status_text.is_none()
+                && let Some(notice) =
+                    git::take_git_worker_notice(&mut self.app.git_worker_notice_pending)
+            {
+                terminal_frame.status_text = Some(notice.to_owned());
+            }
+            let composed = compose_preedit(&terminal_frame, self.shell_preedit())
+                .context("reject non-rectangular frame before IME composition")?;
+            if skip_unchanged
+                && pty_drain_says_nothing_new(
+                    pty_frame_is_unchanged(
+                        self.window.pending_frames.pending_frame(),
+                        self.window.last_presented_frame.as_ref(),
+                        &composed.frame,
+                    ),
+                    self.window.unpainted_pane_output,
+                )
+            {
+                if self.app.trace_perf {
+                    let digest_started = Instant::now();
+                    let digest = frame_content_digest(&composed.frame);
+                    let alternate_screen = frame_is_alternate_screen(&composed.frame);
+                    let digest_elapsed = digest_started.elapsed();
+                    trace_sink::stderr_line(format!(
+                        "BT_PERF_TRACE skip=unchanged source={:?} content_fnv={:016x} alt={} digest_us={} present_unchanged={} slot_overwrites={}",
+                        trigger.source,
+                        digest.content_fnv,
+                        u8::from(alternate_screen),
+                        digest_elapsed.as_micros(),
+                        self.window.present_gate.unchanged,
+                        self.window.pending_frames.overwrites(),
+                    ));
+                }
+                return Ok(false);
+            }
+            // The frame is offered rather than read: this is the only moment the
+            // grid's caret exists, and [`Runtime::offer_ime_caret`] decides whether
+            // the grid is the rung that owns it.
+            self.offer_ime_caret(Some(&composed.frame));
+            self.shell_mut()
+                .session
+                .record_published_frame(&composed.frame, trigger.occurred_at);
+            self.flush_resize_trace();
+            // **The one line a picture becomes newer than the glass.** Everything
+            // above this can hold, skip or decide the frame says nothing new; only
+            // a frame that actually enters the slot moves the revision the
+            // chrome-only path compares against.
+            self.window.terminal_content_revision =
+                self.window.terminal_content_revision.saturating_add(1);
+            self.window
+                .pending_frames
+                .publish(composed.frame, trigger)
+                .context("reject non-rectangular frame at publish boundary")?;
+            hang_watch::during(hang_watch::Station::WindowRedraw, || {
+                self.window.window.request_redraw()
+            });
+            Ok(true)
+        })
     }
 
     /// The address of the shell under the keyboard.
@@ -69153,9 +69206,11 @@ impl Runtime<'_> {
     /// waiting for: a copy is invisible, and a verb whose whole effect is
     /// somewhere the reader cannot see has to say that it happened.
     fn copy_from_graph(&mut self, surface: PreviewSurface, text: &str, said: &str) -> Result<()> {
-        let result = bt_platform::set_clipboard_text(text)
-            .map_err(|error| anyhow!(error))
-            .context("copy a commit's own words to the clipboard");
+        let result = hang_watch::during(hang_watch::Station::ClipboardWrite, || {
+            bt_platform::set_clipboard_text(text)
+        })
+        .map_err(|error| anyhow!(error))
+        .context("copy a commit's own words to the clipboard");
         if !recoverable_clipboard_write(result, "commit copy") {
             return Ok(());
         }
@@ -71934,8 +71989,13 @@ impl Runtime<'_> {
         // card whose dwell matured while a neighbouring pane was printing did
         // not appear, and one whose grace ran out did not leave — see
         // [`Self::animation_frame_is_due`] for the three things an advancer does.
-        let moved =
-            self.switch_file_peek(now) | self.mature_file_peek(now) | self.expire_file_peek(now);
+        let moved = self.switch_file_peek(now)
+            | hang_watch::during(hang_watch::Station::ClockFileDwell, || {
+                self.mature_file_peek(now)
+            })
+            | hang_watch::during(hang_watch::Station::ClockFileClose, || {
+                self.expire_file_peek(now)
+            });
         if !moved && !self.animation_frame_is_due() {
             return Ok(());
         }
@@ -75365,9 +75425,11 @@ impl Runtime<'_> {
         text: &str,
         said: &str,
     ) -> Result<()> {
-        let result = bt_platform::set_clipboard_text(text)
-            .map_err(|error| anyhow!(error))
-            .context("copy a repository's own words to the clipboard");
+        let result = hang_watch::during(hang_watch::Station::ClipboardWrite, || {
+            bt_platform::set_clipboard_text(text)
+        })
+        .map_err(|error| anyhow!(error))
+        .context("copy a repository's own words to the clipboard");
         if !recoverable_clipboard_write(result, "git menu copy") {
             return Ok(());
         }
@@ -79788,8 +79850,12 @@ impl Runtime<'_> {
         }
         for leaf in expired {
             if let Some(web) = self.window.web.get_mut(&leaf) {
-                web.forget_the_zoom_it_said();
-                web.forget_the_dialog_it_said();
+                hang_watch::during(hang_watch::Station::ClockWebZoom, || {
+                    web.forget_the_zoom_it_said()
+                });
+                hang_watch::during(hang_watch::Station::ClockWebDialog, || {
+                    web.forget_the_dialog_it_said()
+                });
             }
         }
         if self.refresh_chrome() {
@@ -84330,7 +84396,9 @@ impl Runtime<'_> {
             self.window.ime_system_caret.update(area.x, area.y)
         });
         if let Err(error) = system_caret {
-            eprintln!("Chinese IME system-caret update ignored: {error}");
+            hang_watch::during(hang_watch::Station::DiagnosticWrite, || {
+                eprintln!("Chinese IME system-caret update ignored: {error}");
+            });
         }
     }
 
@@ -84540,7 +84608,9 @@ impl Runtime<'_> {
         if restored {
             self.window.window.set_minimized(false);
         }
-        self.window.window.focus_window();
+        hang_watch::during(hang_watch::Station::WindowFocus, || {
+            self.window.window.focus_window()
+        });
         self.activate_tab(index, false)?;
         let seat = route.seat_id();
         if !self.window.tabs[index].sessions.contains_key(&seat) {
@@ -84582,7 +84652,9 @@ impl Runtime<'_> {
     fn drain_pty(&mut self) -> Result<()> {
         hang_watch::at(hang_watch::Station::Drain);
         // Lowered first: see [`PtyWakeSignal::accept`].
-        self.window.pty_wake.accept();
+        hang_watch::during(hang_watch::Station::DrainWake, || {
+            self.window.pty_wake.accept()
+        });
         let mut active_changed = false;
         let mut active_uncapped = false;
         let mut active_sync_closed = false;
@@ -84638,12 +84710,18 @@ impl Runtime<'_> {
         // the ones [`Self::command_rail_layers`] draws a rail for. A seat that
         // arrives or leaves is a change to the tree, which already refreshes the
         // overlay on its own road.
-        let marks_before = self.command_marks_watermark();
-        let window_focused = self.window.window.has_focus();
+        let marks_before = hang_watch::during(hang_watch::Station::DrainWatermark, || {
+            self.command_marks_watermark()
+        });
+        let window_focused = hang_watch::during(hang_watch::Station::DrainFocus, || {
+            self.window.window.has_focus()
+        });
         // **Asked of the window on the same turn and for the same reason** (`attention` plan §5.2):
         // it is a fact about where this window is, and a cached answer taken at the last
         // transition is a cached answer about a window that has since been minimised.
-        let place = sample_window_place(&self.window.window, window_focused);
+        let place = hang_watch::during(hang_watch::Station::DrainPlace, || {
+            sample_window_place(&self.window.window, window_focused)
+        });
         self.window.window_hidden = place.hidden;
         self.window.window_exposed = place.exposed;
         self.window.taskbar_auto_hidden = place.taskbar_is_auto_hidden;
@@ -84698,7 +84776,9 @@ impl Runtime<'_> {
             &mut self.window.tabs,
             |tab| {
                 for (_, leaf) in tab.leaves_mut() {
-                    leaf.session.begin_feed_turn();
+                    hang_watch::during(hang_watch::Station::DrainBegin, || {
+                        leaf.session.begin_feed_turn()
+                    });
                 }
             },
             |tab| {
@@ -84806,7 +84886,9 @@ impl Runtime<'_> {
         if pending {
             self.window.pty_wake.raise();
         }
-        self.raise_attention(raised)?;
+        hang_watch::during(hang_watch::Station::DrainRaiseAttention, || {
+            self.raise_attention(raised)
+        })?;
         // Raised before anything below can publish, because it is what that
         // publish's own gate reads. Only the tab on screen: a pane of a tab
         // nobody is looking at is not painted by any pass, and its backlog is
@@ -84835,10 +84917,14 @@ impl Runtime<'_> {
         // watcher, no timer, and nothing at all for a command that ended
         // somewhere else. See [`git_surfaces_wanting_reread`].
         if !command_ends.is_empty() {
-            self.reread_git_surfaces(Some(&command_ends))?;
+            hang_watch::during(hang_watch::Station::DrainGit, || {
+                self.reread_git_surfaces(Some(&command_ends))
+            })?;
         }
         if chrome_changed {
-            self.window.window.set_title(&self.display_title());
+            hang_watch::during(hang_watch::Station::DrainTitle, || {
+                self.window.window.set_title(&self.display_title())
+            });
             self.refresh_chrome();
             if !active_changed {
                 self.present_chrome_change()?;
@@ -84859,7 +84945,11 @@ impl Runtime<'_> {
         // landed after it had stopped — every command that runs longer than the
         // breath, which is every command anybody watches a rail for — was not
         // drawn until the reader moved the pointer or pressed a key.
-        if self.command_marks_watermark() != marks_before && self.refresh_overlay() {
+        if hang_watch::during(hang_watch::Station::DrainWatermark, || {
+            self.command_marks_watermark()
+        }) != marks_before
+            && self.refresh_overlay()
+        {
             self.present_chrome_change()?;
         }
         if active_changed {
@@ -87287,7 +87377,9 @@ impl Runtime<'_> {
     /// the focused pane for a neighbour owes marks to the neighbour and owes their removal to the
     /// pane it left.
     fn repaint_hovered_pane(&mut self) -> Result<()> {
-        self.window.window.request_redraw();
+        hang_watch::during(hang_watch::Station::WindowRedraw, || {
+            self.window.window.request_redraw()
+        });
         self.publish_interaction_frame()
     }
 
@@ -87384,7 +87476,9 @@ impl Runtime<'_> {
                 )
                 .context("re-present the on-screen frame for a peek overlay change")?;
         }
-        self.window.window.request_redraw();
+        hang_watch::during(hang_watch::Station::WindowRedraw, || {
+            self.window.window.request_redraw()
+        });
         Ok(())
     }
 
@@ -88408,7 +88502,9 @@ impl Runtime<'_> {
         if !self.animation_frame_is_due() {
             return Ok(());
         }
-        let spent = retire_spent_math_copy(&mut self.window.math_copied, now);
+        let spent = hang_watch::during(hang_watch::Station::ClockMathCopy, || {
+            retire_spent_math_copy(&mut self.window.math_copied, now)
+        });
         // A window with no marks asks the picture nothing: the hit test is
         // behind the same refusal `sync_math_tools` makes.
         let hover_moved = if self.window.math_tools.is_some() {
@@ -89115,9 +89211,11 @@ impl Runtime<'_> {
         else {
             return;
         };
-        let result = bt_platform::set_clipboard_text(source)
-            .map_err(|error| anyhow!(error))
-            .context("copy original LaTeX source to clipboard");
+        let result = hang_watch::during(hang_watch::Station::ClipboardWrite, || {
+            bt_platform::set_clipboard_text(source)
+        })
+        .map_err(|error| anyhow!(error))
+        .context("copy original LaTeX source to clipboard");
         // **Only a copy that landed says it landed** (owner's ruling 2026-09-14
         // ②). The bool this helper already returned was being thrown away, and
         // a tick on a clipboard the window could not reach would be the one
@@ -89225,7 +89323,9 @@ impl Runtime<'_> {
                 .publish(frame, trigger)
                 .context("re-present the on-screen frame for an unfocused pane")?;
         }
-        self.window.window.request_redraw();
+        hang_watch::during(hang_watch::Station::WindowRedraw, || {
+            self.window.window.request_redraw()
+        });
         Ok(())
     }
 
@@ -90929,7 +91029,9 @@ impl Runtime<'_> {
             .and(self.window.web_cursor)
             .and_then(web_page_cursor)
         {
-            self.window.window.set_cursor(cursor);
+            hang_watch::during(hang_watch::Station::WindowCursor, || {
+                self.window.window.set_cursor(cursor)
+            });
             return;
         }
         self.window.window.set_cursor(pointer_cursor(
@@ -91047,7 +91149,9 @@ impl Runtime<'_> {
                 )
                 .context("re-present the on-screen frame for a seat chrome change")?;
         }
-        self.window.window.request_redraw();
+        hang_watch::during(hang_watch::Station::WindowRedraw, || {
+            self.window.window.request_redraw()
+        });
         Ok(())
     }
 
@@ -97572,11 +97676,13 @@ impl Runtime<'_> {
     /// itself, and a box that raised a card about it would be interrupting a
     /// reader mid-query to report an event they can simply repeat.
     fn clipboard_line(&self) -> String {
-        bt_platform::clipboard_text()
-            .ok()
-            .as_deref()
-            .map(text_field::one_line)
-            .unwrap_or_default()
+        hang_watch::during(hang_watch::Station::ClipboardRead, || {
+            bt_platform::clipboard_text()
+        })
+        .ok()
+        .as_deref()
+        .map(text_field::one_line)
+        .unwrap_or_default()
     }
 
     /// Composition in the palette's field.
@@ -101017,7 +101123,9 @@ impl Runtime<'_> {
         // be answered from what the IME actually said. Written before any
         // routing so a swallowed event is still on the record.
         static IME_TRACE: trace::Dump = trace::Dump::new("BT_IME_TRACE");
-        IME_TRACE.line(|| format!("{:?} {:?}", Instant::now(), event));
+        hang_watch::during(hang_watch::Station::ImeTrace, || {
+            IME_TRACE.line(|| format!("{:?} {:?}", Instant::now(), event));
+        });
         let composing = matches!(event, Ime::Preedit(..) | Ime::Commit(_));
         // **Which rung this composition was started in**, written above every
         // one of them so that the answer is the same one that routes the letters
@@ -101185,7 +101293,9 @@ impl Runtime<'_> {
                 // refused the cancel says before sending the commit anyway.
                 self.window.ime_active = false;
                 self.window.ime_cursor_throttle.reset();
-                self.window.ime_system_caret.destroy();
+                hang_watch::during(hang_watch::Station::ImeCaretDestroy, || {
+                    self.window.ime_system_caret.destroy()
+                });
                 // A composition taken away must stop being *drawn* where it was
                 // drawn. The grid is repainted by the frame below, but the
                 // preview paints from the same field on its own pass and would
@@ -101257,11 +101367,15 @@ impl Runtime<'_> {
         // [`composition_ruling`] discards a commit that is not that field's.
         // Clearing it here would take the barrier down at exactly the moment it
         // is needed.
-        bt_platform::cancel_composition();
+        hang_watch::during(hang_watch::Station::ImeCancel, || {
+            bt_platform::cancel_composition()
+        });
         self.window.preedit = None;
         self.window.composing = None;
         self.window.ime_cursor_throttle.reset();
-        self.window.ime_system_caret.destroy();
+        hang_watch::during(hang_watch::Station::ImeCaretDestroy, || {
+            self.window.ime_system_caret.destroy()
+        });
         // The field the letters were going into, if it is still standing. A
         // palette that has closed has taken its own text with it and there is
         // nothing here to clear; a search capsule left open with the keyboard
@@ -103058,9 +103172,11 @@ impl Runtime<'_> {
     /// Put one string on the clipboard, through the door every other copy in
     /// this window uses.
     fn copy_text_to_clipboard(&mut self, text: &str) {
-        let result = bt_platform::set_clipboard_text(text)
-            .map_err(|error| anyhow!(error))
-            .context("copy a refused address to the clipboard");
+        let result = hang_watch::during(hang_watch::Station::ClipboardWrite, || {
+            bt_platform::set_clipboard_text(text)
+        })
+        .map_err(|error| anyhow!(error))
+        .context("copy a refused address to the clipboard");
         let _ = recoverable_clipboard_write(result, "web address copy");
     }
 
@@ -104007,106 +104123,114 @@ impl Runtime<'_> {
         seat_frames: &[bt_render::SeatFrame<'_>],
         intent: PresentIntent,
     ) -> Result<Option<PresentOutcome>> {
-        let PresentIntent {
-            trigger,
-            mut signature,
-        } = intent;
-        let FrameTraces {
-            preview,
-            census,
-            gate,
-            trace_perf,
-            slot_overwrites,
-            conditions,
-        } = traces;
-        if gpu.device_loss().is_none() && gate.unchanged(&signature, conditions) {
-            trace_unchanged_present(
-                trace_perf,
+        hang_watch::during(hang_watch::Station::PresentSeats, || {
+            let PresentIntent {
+                trigger,
+                mut signature,
+            } = intent;
+            let FrameTraces {
+                preview,
+                census,
                 gate,
-                trigger.source,
-                seat_frames.first().map(|seat| seat.frame),
+                trace_perf,
                 slot_overwrites,
-            );
-            return Ok(None);
-        }
-        // Failure, textless presentation, or even a failed commit must not
-        // leave an old signature claiming that the surface is still complete.
-        gate.invalidate();
-        // **What the frame is allowed to cost to measure**, decided at the one
-        // funnel because that is the one place every frame passes. Counting a
-        // frame's demand on the glyph atlas means rasterizing each distinct
-        // glyph a second time to learn its size, so it is off unless
-        // `BT_GLYPH_CENSUS` names a file to write it to; setting the flag is a
-        // bool store and asking the gate is a `OnceLock` read.
-        renderer.set_glyph_census(glyph_trace::wanted());
-        let outcome = renderer.present_frame_with_phases(gpu, seat_frames, trigger, |phase| {
-            hang_watch::at(match phase {
-                PresentPhase::ComposeEncode => hang_watch::Station::RenderCompose,
-                PresentPhase::SurfaceAcquire => hang_watch::Station::SurfaceAcquire,
-                PresentPhase::QueueSubmit => hang_watch::Station::QueueSubmit,
-                PresentPhase::Present => hang_watch::Station::SwapchainPresent,
-                PresentPhase::Complete => hang_watch::Station::Present,
-            });
-        })?;
-        // **What this frame did with the documents on it** — the one funnel is
-        // also the one place that can say it, and it says it only when the
-        // answer moved (`BT_PREVIEW_TRACE`).
-        preview_trace::frame(
-            preview_trace::global(),
-            preview,
-            renderer.preview_text_frame(),
-        );
-        // **And what it asked the shared glyph atlas for** (`BT_GLYPH_CENSUS`,
-        // `docs/DESIGN.md` §7.1.3m) — the ceiling §7.1.3l could only measure by
-        // hand, measurable on the machine that meets it.
-        glyph_trace::frame(glyph_trace::global(), census, renderer.glyph_census());
-        // A textless present is still a present: an image went to the swapchain,
-        // so the composition tree has to publish it or the glass keeps showing a
-        // picture the swapchain no longer holds. What that frame *owes* is a
-        // different question, and it is answered by the callers below.
-        if matches!(
-            outcome,
-            PresentOutcome::Presented(_) | PresentOutcome::PresentedWithoutText(_)
-        ) {
-            // **The skirt shrinks in the same commit the picture grows in.**
-            // The swapchain has just been reconfigured and presented, so this
-            // is the first instant its new rectangle is true; publishing the
-            // two apart would either leave the strip transparent for one more
-            // frame or lay the window's ground under a clear that already
-            // carries it, and a 60% window would read at 84% along the strip
-            // (§7.1.6c-4b). The present funnel is the only place both facts
-            // are in hand at once, which is why it is here and not beside the
-            // resize handler.
-            let (covered_width, covered_height) = renderer.presented_swapchain_size();
-            hang_watch::during(hang_watch::Station::CompositorSize, || {
-                compositor
-                    .set_covered_size(covered_width, covered_height)
-                    .map_err(|error| anyhow!(error))
-                    .context("tell the window's ground how much of it the swapchain covers")
-            })?;
-            hang_watch::during(hang_watch::Station::CompositorCommit, || {
-                compositor
-                    .commit()
-                    .map_err(|error| anyhow!(error))
-                    .context("publish the presented frame to the window's composition tree")
-            })?;
-            // **The frame that withdraws the skirt has to be asked for.** The
-            // ground under the strip is sized against the picture of the
-            // *previous* present, because a present queues an image rather than
-            // showing one, so it can only ever be withdrawn by a later frame —
-            // and a window that fell idle the instant a resize ended would have
-            // no later frame. Self-terminating: the frame this asks for is the
-            // one that makes the answer `false`.
-            if compositor.skirt_covers_anything() {
-                window.request_redraw();
+                conditions,
+            } = traces;
+            if gpu.device_loss().is_none() && gate.unchanged(&signature, conditions) {
+                trace_unchanged_present(
+                    trace_perf,
+                    gate,
+                    trigger.source,
+                    seat_frames.first().map(|seat| seat.frame),
+                    slot_overwrites,
+                );
+                return Ok(None);
             }
-        }
-        if matches!(outcome, PresentOutcome::Presented(_)) {
-            // A successful resize may configure the surface inside this call.
-            signature.renderer = renderer.present_state();
-            gate.presented(signature);
-        }
-        Ok(Some(outcome))
+            // Failure, textless presentation, or even a failed commit must not
+            // leave an old signature claiming that the surface is still complete.
+            gate.invalidate();
+            // **What the frame is allowed to cost to measure**, decided at the one
+            // funnel because that is the one place every frame passes. Counting a
+            // frame's demand on the glyph atlas means rasterizing each distinct
+            // glyph a second time to learn its size, so it is off unless
+            // `BT_GLYPH_CENSUS` names a file to write it to; setting the flag is a
+            // bool store and asking the gate is a `OnceLock` read.
+            renderer.set_glyph_census(glyph_trace::wanted());
+            let present_parent = hang_watch::enter(hang_watch::Station::RenderCompose);
+            let outcome =
+                renderer.present_frame_with_phases(gpu, seat_frames, trigger, |phase| {
+                    hang_watch::phase(match phase {
+                        PresentPhase::ComposeEncode => hang_watch::Station::RenderCompose,
+                        PresentPhase::TextShaping => hang_watch::Station::TextShaping,
+                        PresentPhase::AtlasUpload => hang_watch::Station::AtlasUpload,
+                        PresentPhase::Layout => hang_watch::Station::RenderLayout,
+                        PresentPhase::SurfaceAcquire => hang_watch::Station::SurfaceAcquire,
+                        PresentPhase::QueueSubmit => hang_watch::Station::QueueSubmit,
+                        PresentPhase::Present => hang_watch::Station::SwapchainPresent,
+                        PresentPhase::Complete => hang_watch::Station::RenderCompose,
+                    });
+                })?;
+            // **What this frame did with the documents on it** — the one funnel is
+            // also the one place that can say it, and it says it only when the
+            // answer moved (`BT_PREVIEW_TRACE`).
+            hang_watch::at(present_parent);
+            preview_trace::frame(
+                preview_trace::global(),
+                preview,
+                renderer.preview_text_frame(),
+            );
+            // **And what it asked the shared glyph atlas for** (`BT_GLYPH_CENSUS`,
+            // `docs/DESIGN.md` §7.1.3m) — the ceiling §7.1.3l could only measure by
+            // hand, measurable on the machine that meets it.
+            glyph_trace::frame(glyph_trace::global(), census, renderer.glyph_census());
+            // A textless present is still a present: an image went to the swapchain,
+            // so the composition tree has to publish it or the glass keeps showing a
+            // picture the swapchain no longer holds. What that frame *owes* is a
+            // different question, and it is answered by the callers below.
+            if matches!(
+                outcome,
+                PresentOutcome::Presented(_) | PresentOutcome::PresentedWithoutText(_)
+            ) {
+                // **The skirt shrinks in the same commit the picture grows in.**
+                // The swapchain has just been reconfigured and presented, so this
+                // is the first instant its new rectangle is true; publishing the
+                // two apart would either leave the strip transparent for one more
+                // frame or lay the window's ground under a clear that already
+                // carries it, and a 60% window would read at 84% along the strip
+                // (§7.1.6c-4b). The present funnel is the only place both facts
+                // are in hand at once, which is why it is here and not beside the
+                // resize handler.
+                let (covered_width, covered_height) = renderer.presented_swapchain_size();
+                hang_watch::during(hang_watch::Station::CompositorSize, || {
+                    compositor
+                        .set_covered_size(covered_width, covered_height)
+                        .map_err(|error| anyhow!(error))
+                        .context("tell the window's ground how much of it the swapchain covers")
+                })?;
+                hang_watch::during(hang_watch::Station::CompositorCommit, || {
+                    compositor
+                        .commit()
+                        .map_err(|error| anyhow!(error))
+                        .context("publish the presented frame to the window's composition tree")
+                })?;
+                // **The frame that withdraws the skirt has to be asked for.** The
+                // ground under the strip is sized against the picture of the
+                // *previous* present, because a present queues an image rather than
+                // showing one, so it can only ever be withdrawn by a later frame —
+                // and a window that fell idle the instant a resize ended would have
+                // no later frame. Self-terminating: the frame this asks for is the
+                // one that makes the answer `false`.
+                if compositor.skirt_covers_anything() {
+                    window.request_redraw();
+                }
+            }
+            if matches!(outcome, PresentOutcome::Presented(_)) {
+                // A successful resize may configure the surface inside this call.
+                signature.renderer = renderer.present_state();
+                gate.presented(signature);
+            }
+            Ok(Some(outcome))
+        })
     }
 
     /// **What one present cost, printed once for every present this window
@@ -104328,132 +104452,145 @@ impl Runtime<'_> {
     /// this instant. See [`chrome_tick_reuses_picture`] for why that is a
     /// complete account of what an animation tick can have moved.
     fn present_retained_picture(&mut self) -> Result<()> {
-        self.window.chrome_present_pending = false;
-        // **A tab with a shell that has never presented has nothing to keep**,
-        // which is what this guard has always said. A tab with *no* shell always
-        // has something to keep — its column, its preview, the chrome around
-        // them are all retained renderer state — and for it this is not the
-        // fallback path but the **only** path: `publish_frame_inner` composes no
-        // terminal picture for it and sends it here (§7.1.6h).
-        if self.focused().is_some() && self.window.last_presented_frame.is_none() {
-            return Ok(());
-        }
-        let focused_leaf = self.focused_leaf;
-        let now = Instant::now();
-        // Before the frame is borrowed: this samples the tweens and re-places
-        // the preview raster, both of which want the renderer mutably.
-        let bodies = self.pane_draws(now);
-        // The same ownership sentence as `redraw`: this path draws the retained
-        // frames, so those retained frames are the frames handed to both formula
-        // lanes. The guard is two `Option` reads and stands before any lookup,
-        // vector build, or allocation.
-        if self.formula_overlay_is_active() {
-            let active = self.window.active_tab;
-            let frame_for = |seat| {
-                let body = bodies.iter().find(|pane| pane.seat == seat)?.viewport;
-                let frame = if seat == focused_leaf {
-                    self.window.last_presented_frame.as_ref()?
-                } else {
-                    self.window.tabs[active]
-                        .sessions
-                        .get(&seat)?
-                        .last_presented_frame
-                        .as_ref()?
+        hang_watch::during(hang_watch::Station::RetainedPicture, || {
+            self.window.chrome_present_pending = false;
+            // **A tab with a shell that has never presented has nothing to keep**,
+            // which is what this guard has always said. A tab with *no* shell always
+            // has something to keep — its column, its preview, the chrome around
+            // them are all retained renderer state — and for it this is not the
+            // fallback path but the **only** path: `publish_frame_inner` composes no
+            // terminal picture for it and sends it here (§7.1.6h).
+            if self.focused().is_some() && self.window.last_presented_frame.is_none() {
+                return Ok(());
+            }
+            let focused_leaf = self.focused_leaf;
+            let now = Instant::now();
+            // Before the frame is borrowed: this samples the tweens and re-places
+            // the preview raster, both of which want the renderer mutably.
+            let bodies =
+                hang_watch::during(hang_watch::Station::RedrawLayout, || self.pane_draws(now));
+            // The same ownership sentence as `redraw`: this path draws the retained
+            // frames, so those retained frames are the frames handed to both formula
+            // lanes. The guard is two `Option` reads and stands before any lookup,
+            // vector build, or allocation.
+            if self.formula_overlay_is_active() {
+                let active = self.window.active_tab;
+                let frame_for = |seat| {
+                    let body = bodies.iter().find(|pane| pane.seat == seat)?.viewport;
+                    let frame = if seat == focused_leaf {
+                        self.window.last_presented_frame.as_ref()?
+                    } else {
+                        self.window.tabs[active]
+                            .sessions
+                            .get(&seat)?
+                            .last_presented_frame
+                            .as_ref()?
+                    };
+                    Some((body, frame))
                 };
-                Some((body, frame))
+                let placement = hang_watch::during(hang_watch::Station::RedrawOverlay, || {
+                    self.math_tool_placement(frame_for)
+                });
+                let toggle_layers = hang_watch::during(hang_watch::Station::RedrawOverlay, || {
+                    self.formula_toggle_layers(now, frame_for)
+                });
+                hang_watch::during(hang_watch::Station::RedrawOverlay, || {
+                    self.refresh_formula_overlay_for_present(now, placement, toggle_layers)
+                });
+            }
+            // The retained picture is the same picture, but the palette and the type size under it may
+            // have moved since it was presented — a theme switch re-presents without re-projecting.
+            // So the pictures are re-checked here for the same reason the tweens are re-sampled.
+            let table_sources = Self::table_sources(
+                self.window.last_presented_frame.iter().chain(
+                    self.window.tabs[self.window.active_tab]
+                        .sessions
+                        .values()
+                        .filter_map(|leaf| leaf.last_presented_frame.as_ref()),
+                ),
+            );
+            hang_watch::during(hang_watch::Station::RedrawTables, || {
+                self.refresh_table_paints(&table_sources)
+            });
+            let (seat_ids, seat_frames) = Self::retained_seats(
+                &self.window.tabs[self.window.active_tab],
+                self.window
+                    .last_presented_frame
+                    .as_ref()
+                    .filter(|_| self.focused().is_some()),
+                &bodies,
+                focused_leaf,
+                self.window.renderer.seat_viewport(),
+                self.keyboard_owner_is_a_shell(),
+            );
+            let signature = self.present_signature(&seat_ids, &seat_frames);
+            let conditions = self.present_conditions(FrameSource::Expose);
+            let trigger = FrameTrigger {
+                occurred_at: now,
+                source: FrameSource::Expose,
             };
-            let placement = self.math_tool_placement(frame_for);
-            let toggle_layers = self.formula_toggle_layers(now, frame_for);
-            self.refresh_formula_overlay_for_present(now, placement, toggle_layers);
-        }
-        // The retained picture is the same picture, but the palette and the type size under it may
-        // have moved since it was presented — a theme switch re-presents without re-projecting.
-        // So the pictures are re-checked here for the same reason the tweens are re-sampled.
-        let table_sources = Self::table_sources(
-            self.window.last_presented_frame.iter().chain(
-                self.window.tabs[self.window.active_tab]
-                    .sessions
-                    .values()
-                    .filter_map(|leaf| leaf.last_presented_frame.as_ref()),
-            ),
-        );
-        self.refresh_table_paints(&table_sources);
-        let (seat_ids, seat_frames) = Self::retained_seats(
-            &self.window.tabs[self.window.active_tab],
-            self.window
-                .last_presented_frame
-                .as_ref()
-                .filter(|_| self.focused().is_some()),
-            &bodies,
-            focused_leaf,
-            self.window.renderer.seat_viewport(),
-            self.keyboard_owner_is_a_shell(),
-        );
-        let signature = self.present_signature(&seat_ids, &seat_frames);
-        let conditions = self.present_conditions(FrameSource::Expose);
-        let trigger = FrameTrigger {
-            occurred_at: now,
-            source: FrameSource::Expose,
-        };
-        match Self::present_seats_and_commit(
-            &mut self.app.gpu,
-            &mut self.window.renderer,
-            &self.window.compositor,
-            &self.window.window,
-            FrameTraces {
-                gate: &mut self.window.present_gate,
-                trace_perf: self.app.trace_perf,
-                slot_overwrites: self.window.pending_frames.overwrites(),
-                conditions,
-                preview: &mut self.window.preview_trace_echo,
-                census: &mut self.window.glyph_census_echo,
-            },
-            &seat_frames,
-            PresentIntent { trigger, signature },
-        )
-        .context("re-present the retained terminal picture")?
-        {
-            None => Ok(()),
-            Some(PresentOutcome::Presented(receipt)) => {
-                self.window.textless_frames = 0;
-                // A picture on the glass is the only proof a device is real, and
-                // it is what closes a device-loss episode — see
-                // [`DeviceLossPilot::a_frame_reached_the_glass`] for the livelock
-                // that stands behind that sentence.
-                self.app.device_loss_pilot.a_frame_reached_the_glass();
-                // **The same line the composed path prints** — see
-                // [`Self::trace_present`] for why it has to be printed here as
-                // well, and for what a tab with no shell looked like to the
-                // instrument while it was not.
-                self.trace_present(trigger.source, receipt, true);
-                Ok(())
-            }
-            // The swapchain was not ready. The picture is unchanged and still
-            // owed, so the debt is simply re-filed — there is no frame to put
-            // back in the slot, which is the whole point of this path.
-            //
-            // A frame that reached the glass without its characters is owed for
-            // the same reason and re-filed the same way: what is on the glass is
-            // not the picture this window means to be showing, and the atlas the
-            // renderer trimmed on its way out has room for it next time.
-            //
-            // A window that is not on screen re-files the debt with the rest of
-            // them — the picture it owes is unchanged by being invisible — and
-            // differs only in that `may_ask_again` will not ask for the turn
-            // that pays it. See [`ask_again_after`].
-            Some(
-                outcome @ (PresentOutcome::PresentedWithoutText(_)
-                | PresentOutcome::Skipped
-                | PresentOutcome::SkippedNotVisible
-                | PresentOutcome::Reconfigure),
-            ) => {
-                self.window.chrome_present_pending = true;
-                if self.window.may_ask_again(&outcome) {
-                    self.window.window.request_redraw();
+            match Self::present_seats_and_commit(
+                &mut self.app.gpu,
+                &mut self.window.renderer,
+                &self.window.compositor,
+                &self.window.window,
+                FrameTraces {
+                    gate: &mut self.window.present_gate,
+                    trace_perf: self.app.trace_perf,
+                    slot_overwrites: self.window.pending_frames.overwrites(),
+                    conditions,
+                    preview: &mut self.window.preview_trace_echo,
+                    census: &mut self.window.glyph_census_echo,
+                },
+                &seat_frames,
+                PresentIntent { trigger, signature },
+            )
+            .context("re-present the retained terminal picture")?
+            {
+                None => Ok(()),
+                Some(PresentOutcome::Presented(receipt)) => {
+                    self.window.textless_frames = 0;
+                    // A picture on the glass is the only proof a device is real, and
+                    // it is what closes a device-loss episode — see
+                    // [`DeviceLossPilot::a_frame_reached_the_glass`] for the livelock
+                    // that stands behind that sentence.
+                    self.app.device_loss_pilot.a_frame_reached_the_glass();
+                    // **The same line the composed path prints** — see
+                    // [`Self::trace_present`] for why it has to be printed here as
+                    // well, and for what a tab with no shell looked like to the
+                    // instrument while it was not.
+                    self.trace_present(trigger.source, receipt, true);
+                    Ok(())
                 }
-                Ok(())
+                // The swapchain was not ready. The picture is unchanged and still
+                // owed, so the debt is simply re-filed — there is no frame to put
+                // back in the slot, which is the whole point of this path.
+                //
+                // A frame that reached the glass without its characters is owed for
+                // the same reason and re-filed the same way: what is on the glass is
+                // not the picture this window means to be showing, and the atlas the
+                // renderer trimmed on its way out has room for it next time.
+                //
+                // A window that is not on screen re-files the debt with the rest of
+                // them — the picture it owes is unchanged by being invisible — and
+                // differs only in that `may_ask_again` will not ask for the turn
+                // that pays it. See [`ask_again_after`].
+                Some(
+                    outcome @ (PresentOutcome::PresentedWithoutText(_)
+                    | PresentOutcome::Skipped
+                    | PresentOutcome::SkippedNotVisible
+                    | PresentOutcome::Reconfigure),
+                ) => {
+                    self.window.chrome_present_pending = true;
+                    if self.window.may_ask_again(&outcome) {
+                        hang_watch::during(hang_watch::Station::WindowRedraw, || {
+                            self.window.window.request_redraw()
+                        });
+                    }
+                    Ok(())
+                }
             }
-        }
+        })
     }
 
     fn redraw(&mut self) -> Result<()> {
@@ -104471,6 +104608,7 @@ impl Runtime<'_> {
         };
         // A composed frame supersedes any chrome-only debt: it is about to be
         // presented, chrome and all.
+        let validation_parent = hang_watch::enter(hang_watch::Station::RedrawValidate);
         self.window.chrome_present_pending = false;
         if let Some(expected) = self.pending_resize_present {
             ensure!(
@@ -104502,12 +104640,13 @@ impl Runtime<'_> {
         // handed the renderer — so the slice is N = 1 and the command stream is
         // the one that was always issued. The loop is not a second path; it is
         // the same path counted.
+        hang_watch::at(validation_parent);
         let focused_leaf = self.focused_leaf;
         // U8 — one instant for the whole frame, as everywhere else a tween is
         // read: two panes of one present sampled at two times would be two
         // frames of the same animation composited together.
         let now = Instant::now();
-        let bodies = self.pane_draws(now);
+        let bodies = hang_watch::during(hang_watch::Station::RedrawLayout, || self.pane_draws(now));
         let active = self.window.active_tab;
         // The pointer's marks belong to the pane the pointer is in, focused or not, so an
         // unfocused pane that is being hovered is projected *and then decorated* — the same two
@@ -104526,6 +104665,8 @@ impl Runtime<'_> {
         // below, because the dispatcher wants the tab and this loop is holding a
         // leaf of it.
         let mut owes_the_engine = false;
+        let projection_parent = hang_watch::enter(hang_watch::Station::RedrawProjection);
+        hang_watch::counters(0, 0, bodies.len());
         for pane in &bodies {
             if pane.seat == focused_leaf {
                 continue;
@@ -104559,6 +104700,8 @@ impl Runtime<'_> {
             }
             unfocused_frames.push((*pane, projected));
         }
+        hang_watch::at(projection_parent);
+        let dispatch_parent = hang_watch::enter(hang_watch::Station::RedrawDispatch);
         if owes_the_engine {
             let tasks = self.app.math_worker.tasks.clone();
             let scale_tasks = self.app.math_worker.scale_tasks.clone();
@@ -104572,6 +104715,8 @@ impl Runtime<'_> {
                 &mut self.app.math_worker_notice_pending,
             );
         }
+        hang_watch::at(dispatch_parent);
+        let assembly_parent = hang_watch::enter(hang_watch::Station::RedrawSeatFrames);
         let focused_body = bodies
             .iter()
             .find(|pane| pane.seat == focused_leaf)
@@ -104599,14 +104744,22 @@ impl Runtime<'_> {
                     .find(|(pane, _)| pane.seat == seat)
                     .map(|(pane, projected)| (pane.viewport, projected))
             };
-            let placement = self.math_tool_placement(frame_for);
-            let toggle_layers = self.formula_toggle_layers(now, frame_for);
-            self.refresh_formula_overlay_for_present(now, placement, toggle_layers);
+            let placement = hang_watch::during(hang_watch::Station::RedrawOverlay, || {
+                self.math_tool_placement(frame_for)
+            });
+            let toggle_layers = hang_watch::during(hang_watch::Station::RedrawOverlay, || {
+                self.formula_toggle_layers(now, frame_for)
+            });
+            hang_watch::during(hang_watch::Station::RedrawOverlay, || {
+                self.refresh_formula_overlay_for_present(now, placement, toggle_layers)
+            });
         }
         let table_sources = Self::table_sources(
             std::iter::once(&frame).chain(unfocused_frames.iter().map(|(_, it)| it)),
         );
-        self.refresh_table_paints(&table_sources);
+        hang_watch::during(hang_watch::Station::RedrawTables, || {
+            self.refresh_table_paints(&table_sources)
+        });
         let mut seat_frames = Vec::with_capacity(unfocused_frames.len() + 1);
         seat_frames.push(bt_render::SeatFrame {
             seat: focused_body.viewport,
@@ -104630,8 +104783,11 @@ impl Runtime<'_> {
         let seat_ids: Vec<_> = std::iter::once(focused_leaf)
             .chain(unfocused_frames.iter().map(|(pane, _)| pane.seat))
             .collect();
-        let signature = self.present_signature(&seat_ids, &seat_frames);
+        let signature = hang_watch::during(hang_watch::Station::RedrawSignature, || {
+            self.present_signature(&seat_ids, &seat_frames)
+        });
         let conditions = self.present_conditions(trigger.source);
+        hang_watch::at(assembly_parent);
         match Self::present_seats_and_commit(
             &mut self.app.gpu,
             &mut self.window.renderer,
@@ -104651,6 +104807,7 @@ impl Runtime<'_> {
         .context("render terminal frame")?
         {
             outcome @ (Some(PresentOutcome::Presented(_)) | None) => {
+                let commit_parent = hang_watch::enter(hang_watch::Station::RedrawCommit);
                 let receipt = outcome.and_then(|outcome| match outcome {
                     PresentOutcome::Presented(receipt) => Some(receipt),
                     _ => unreachable!(),
@@ -104736,6 +104893,7 @@ impl Runtime<'_> {
                     self.rescan_pane_references(seat);
                 }
                 self.pending_resize_present = None;
+                hang_watch::at(commit_parent);
             }
             // The frame is still owed, so it goes back in the slot and the
             // window asks for another turn. `PresentedWithoutText` joins the two
@@ -104760,7 +104918,9 @@ impl Runtime<'_> {
                     .publish(frame, trigger)
                     .context("reject non-rectangular frame during redraw retry")?;
                 if self.window.may_ask_again(&outcome) {
-                    self.window.window.request_redraw();
+                    hang_watch::during(hang_watch::Station::WindowRedraw, || {
+                        self.window.window.request_redraw()
+                    });
                 }
             }
         }
@@ -104863,29 +105023,45 @@ impl Runtime<'_> {
         //
         // **The clock run begins here** — see [`hang_watch::Station::Clocks`].
         hang_watch::at(hang_watch::Station::Clocks);
-        self.raise_first_run_if_due()?;
-        self.raise_psreadline_invite_if_due()?;
-        self.advance_cursor_blink_if_due(now)?;
+        hang_watch::during(hang_watch::Station::ClockRaiseFirstRunIfDue, || {
+            self.raise_first_run_if_due()
+        })?;
+        hang_watch::during(hang_watch::Station::ClockRaisePsreadlineInviteIfDue, || {
+            self.raise_psreadline_invite_if_due()
+        })?;
+        hang_watch::during(hang_watch::Station::ClockAdvanceCursorBlinkIfDue, || {
+            self.advance_cursor_blink_if_due(now)
+        })?;
         if application_clocks {
             // A poll of the world outside this process, put back on the clock
             // run's name the moment it returns (T-STATION-SPLIT).
             let leaving = hang_watch::enter(hang_watch::Station::Watches);
-            self.advance_scheme_watch(now)?;
-            self.advance_storage_watch(now)?;
+            hang_watch::during(hang_watch::Station::ClockAdvanceSchemeWatch, || {
+                self.advance_scheme_watch(now)
+            })?;
+            hang_watch::during(hang_watch::Station::ClockAdvanceStorageWatch, || {
+                self.advance_storage_watch(now)
+            })?;
             hang_watch::at(leaving);
         }
-        self.advance_rename_blink_if_due(now)?;
+        hang_watch::during(hang_watch::Station::ClockAdvanceRenameBlinkIfDue, || {
+            self.advance_rename_blink_if_due(now)
+        })?;
         // The preview seats' own watch (W2 slice 5). This window's and not the
         // application's - see [`WindowRuntime::preview_watch`] - and beside the
         // two above because it is the same shape: a clock that asks for a
         // wake-up only while it is holding news, over subscriptions that are
         // brought level with what the seats are showing on the same turn.
         hang_watch::at(hang_watch::Station::Watches);
-        self.advance_preview_watch(now)?;
+        hang_watch::during(hang_watch::Station::ClockAdvancePreviewWatch, || {
+            self.advance_preview_watch(now)
+        })?;
         // And the file trees', beside it and on the same terms: this window's
         // and not the application's, because which folders are on the glass is a
         // question only a window can answer.
-        self.advance_files_watch(now)?;
+        hang_watch::during(hang_watch::Station::ClockAdvanceFilesWatch, || {
+            self.advance_files_watch(now)
+        })?;
         // The hosted page's own clock: the wait for a browser process to say it
         // has gone. **The only backstop on the graceful path**, where
         // `ProcessFailed` does not arrive at all and `BrowserProcessExited`
@@ -104895,24 +105071,35 @@ impl Runtime<'_> {
         // activates a tab, and the strip that is redrawn afterwards should be
         // the one the switch produced.
         hang_watch::at(hang_watch::Station::Clocks);
-        self.advance_tab_press_if_due(now)?;
+        hang_watch::during(hang_watch::Station::ClockAdvanceTabPressIfDue, || {
+            self.advance_tab_press_if_due(now)
+        })?;
         // **The pictures are serviced before anything can be refused** (closure
         // review O4, 2026-09-18). A decoder pumped and a decoded animation's
         // clock walked are not this window asking the glass for a frame — they
         // are state being brought up to `now` — and the tick below can be turned
         // away by any neighbouring pane that is printing. See
         // [`Self::service_pictures`], which the head of every compose calls too.
-        self.service_pictures(now);
-        self.advance_strip_animation(now)?;
+        hang_watch::during(hang_watch::Station::ClockServicePictures, || {
+            self.service_pictures(now)
+        });
+        hang_watch::during(hang_watch::Station::ClockAdvanceStripAnimation, || {
+            self.advance_strip_animation(now)
+        })?;
         // A screenful of held-back output arriving at once, under its own name
         // rather than the web page's — see [`hang_watch::Station::SyncUpdate`].
         hang_watch::at(hang_watch::Station::SyncUpdate);
-        self.finish_synchronized_update_if_due(now)?;
+        hang_watch::during(
+            hang_watch::Station::ClockFinishSynchronizedUpdateIfDue,
+            || self.finish_synchronized_update_if_due(now),
+        )?;
         // The other road on which a pane's picture moves with no byte passing through the drain:
         // the bounded wait for the rest of a burst, run out. Beside the sync-update release
         // because it is the same kind of thing and must not be forgotten on any turn — see
         // [`coalesce::Pending`].
-        self.finish_pty_coalesce_if_due(now)?;
+        hang_watch::during(hang_watch::Station::ClockFinishPtyCoalesceIfDue, || {
+            self.finish_pty_coalesce_if_due(now)
+        })?;
         // The watcher's own clock (R31's D), beside the rest of this window's:
         // it asks for a wake-up only while it is holding news, and the
         // subscriptions it keeps level with the screen are dropped here the turn
@@ -104925,7 +105112,9 @@ impl Runtime<'_> {
         // those pages own.
         if application_clocks {
             hang_watch::at(hang_watch::Station::Watches);
-            self.advance_git_watch(now)?;
+            hang_watch::during(hang_watch::Station::ClockAdvanceGitWatch, || {
+                self.advance_git_watch(now)
+            })?;
             // `flush_if_due` stamps [`hang_watch::Station::Autosave`] itself,
             // and since T-STATION-SPLIT that name covers the file it writes and
             // nothing else: the clock run below says its own name on the very
@@ -104952,14 +105141,31 @@ impl Runtime<'_> {
         // `session flush_if_due`, the last station entered above — a lane that
         // writes one small file and had nothing to do with any of them.
         hang_watch::at(hang_watch::Station::Clocks);
-        self.settle_composition_owner()?;
-        self.offer_ime_caret(None);
-        self.flush_ime_cursor_area(now);
-        self.finish_resize_if_quiescent(now)?;
-        self.finish_preview_scale_if_quiet(now)?;
-        self.advance_live_math_if_due(now)?;
-        self.activate_hyperlink_hover_if_due(now)?;
-        self.activate_peek_if_due(now)?;
+        hang_watch::during(hang_watch::Station::ClockSettleCompositionOwner, || {
+            self.settle_composition_owner()
+        })?;
+        hang_watch::during(hang_watch::Station::ClockOfferImeCaret, || {
+            self.offer_ime_caret(None)
+        });
+        hang_watch::during(hang_watch::Station::ClockFlushImeCursorArea, || {
+            self.flush_ime_cursor_area(now)
+        });
+        hang_watch::during(hang_watch::Station::ClockFinishResizeIfQuiescent, || {
+            self.finish_resize_if_quiescent(now)
+        })?;
+        hang_watch::during(hang_watch::Station::ClockFinishPreviewScaleIfQuiet, || {
+            self.finish_preview_scale_if_quiet(now)
+        })?;
+        hang_watch::during(hang_watch::Station::ClockAdvanceLiveMathIfDue, || {
+            self.advance_live_math_if_due(now)
+        })?;
+        hang_watch::during(
+            hang_watch::Station::ClockActivateHyperlinkHoverIfDue,
+            || self.activate_hyperlink_hover_if_due(now),
+        )?;
+        hang_watch::during(hang_watch::Station::ClockActivatePeekIfDue, || {
+            self.activate_peek_if_due(now)
+        })?;
         // Who holds the glass **before** this pass's clocks run, so that the
         // tail below can tell "nothing was hovering" from "something was and its
         // grace just ran out". See [`Self::rearm_hover_intents`].
@@ -104967,22 +105173,32 @@ impl Runtime<'_> {
         // Both `⌄` clocks, and the pane menu's own two. Above the tip's, on the
         // layout peek's precedent and for its reason: a menu that has matured is
         // already on screen when the tip asks whether it has anything to explain.
-        self.advance_chevrons(now)?;
-        self.advance_pane_menu(now)?;
+        hang_watch::during(hang_watch::Station::ClockAdvanceChevrons, || {
+            self.advance_chevrons(now)
+        })?;
+        hang_watch::during(hang_watch::Station::ClockAdvancePaneMenu, || {
+            self.advance_pane_menu(now)
+        })?;
         // And the terminal menu's, which since §7.1.6i's floor owns the same two
         // clocks in the same one slot. The two menus are never up together (E61:
         // the opener closes the others), so this is a second reader of the same
         // rule rather than a second rule.
-        self.advance_term_menu(now)?;
+        hang_watch::during(hang_watch::Station::ClockAdvanceTermMenu, || {
+            self.advance_term_menu(now)
+        })?;
         // And a tab menu's, which owns the same two clocks in the same one slot
         // for the same reason. A third reader of one rule rather than a third
         // rule.
-        self.advance_tab_menu(now)?;
+        hang_watch::during(hang_watch::Station::ClockAdvanceTabMenu, || {
+            self.advance_tab_menu(now)
+        })?;
         // And the drag's own rest, beside them because it is the same shape and
         // the same quarter second (§7.1.6k). Below them rather than above: a
         // spring takes a whole tab off the screen, and the two menus above have
         // already been retired by the drag that armed this one.
-        self.advance_drag_spring(now)?;
+        hang_watch::during(hang_watch::Station::ClockAdvanceDragSpring, || {
+            self.advance_drag_spring(now)
+        })?;
         // And the drag's other clock, which is the same shape once more: a hand
         // that has stopped at the edge of a list (缺陷 #188). Below the spring
         // rather than above it, and the order is load-bearing: a spring that
@@ -104990,7 +105206,9 @@ impl Runtime<'_> {
         // auto-scroll's own re-survey should be struck against the stage the
         // window is actually showing rather than the one it was showing a line
         // ago.
-        self.service_drag_autoscroll(now)?;
+        hang_watch::during(hang_watch::Station::ClockServiceDragAutoscroll, || {
+            self.service_drag_autoscroll(now)
+        })?;
         // **And what the pointer is on, re-read against the picture that is
         // actually on the glass** (owner's report 2026-09-18). The band under a
         // resting hand can stop being under it without the hand doing anything,
@@ -105001,22 +105219,33 @@ impl Runtime<'_> {
         // that stopped being under a motionless pointer is let go on the turn
         // that noticed rather than half a second later. See
         // [`Self::refresh_math_hover_against_the_picture`].
-        self.refresh_math_hover_against_the_picture(now)?;
+        hang_watch::during(
+            hang_watch::Station::ClockRefreshMathHoverAgainstThePicture,
+            || self.refresh_math_hover_against_the_picture(now),
+        )?;
         // And the band that is changing face, **ahead** of the marks: the
         // journey this pays for moves the block's own rectangle, and the marks
         // ride that rectangle's right-hand midline (§7.1.5p ⑨ ii, ⑪) — so the
         // picture they follow should be the one this turn has just asked for
         // rather than the one before it.
-        self.advance_math_toggle_if_due(now)?;
+        hang_watch::during(hang_watch::Station::ClockAdvanceMathToggleIfDue, || {
+            self.advance_math_toggle_if_due(now)
+        })?;
         // And the band's marks, beside the clock that takes them down: the fade
         // they are climbing, and the second look they owe the picture that lit
         // the band they belong to (owner's report 2026-09-14).
-        self.advance_math_tools_if_due(now)?;
+        hang_watch::during(hang_watch::Station::ClockAdvanceMathToolsIfDue, || {
+            self.advance_math_tools_if_due(now)
+        })?;
         // Ahead of the tip's own promotion, so §6's ordering is structural and
         // not merely a consequence of 350 being less than 380: on the frame both
         // came due, the peek is already showing when the tip asks.
-        self.advance_layout_peek_if_due(now)?;
-        self.advance_tooltip_if_due(now)?;
+        hang_watch::during(hang_watch::Station::ClockAdvanceLayoutPeekIfDue, || {
+            self.advance_layout_peek_if_due(now)
+        })?;
+        hang_watch::during(hang_watch::Station::ClockAdvanceTooltipIfDue, || {
+            self.advance_tooltip_if_due(now)
+        })?;
         // The hint card's 800ms and its fade, beside the tip's and after it:
         // the two are the same shape — a clock armed by a hand that has stopped
         // — and this one is the outer of the pair, so a window where both came
@@ -105027,57 +105256,87 @@ impl Runtime<'_> {
         // press on the settings row — so `note_key_hint` is asked on every turn
         // and not only from `ModifiersChanged`; it re-arms a hold that was
         // refused and takes down a card whose window has stopped offering.
-        self.note_key_hint(now)?;
-        self.advance_key_hint_if_due(now)?;
+        hang_watch::during(hang_watch::Station::ClockNoteKeyHint, || {
+            self.note_key_hint(now)
+        })?;
+        hang_watch::during(hang_watch::Station::ClockAdvanceKeyHintIfDue, || {
+            self.advance_key_hint_if_due(now)
+        })?;
         // The Cards column's own one-time bubble, beside the hint card because
         // the two are the same kind of surface — and asked on every turn for the
         // same reason: the thing that raises it is the *column being on screen*,
         // which is a fact about the posture rather than an event, and a window
         // that opened straight into Cards never sent one.
-        self.note_card_hint(now)?;
-        self.advance_card_hint(now)?;
+        hang_watch::during(hang_watch::Station::ClockNoteCardHint, || {
+            self.note_card_hint(now)
+        })?;
+        hang_watch::during(hang_watch::Station::ClockAdvanceCardHint, || {
+            self.advance_card_hint(now)
+        })?;
         // The notices' three clocks, beside the tip's and after it: a card that
         // has just left frees the pixels the tip may be about to be laid over.
-        self.advance_toasts(now)?;
+        hang_watch::during(hang_watch::Station::ClockAdvanceToasts, || {
+            self.advance_toasts(now)
+        })?;
         // The jump's row flash, beside the notices' clocks: it is the same shape —
         // a fade that runs itself out with the pointer and the keyboard both
         // still, and that nothing else in the window would wake the loop to draw.
-        self.advance_command_flash(now)?;
+        hang_watch::during(hang_watch::Station::ClockAdvanceCommandFlash, || {
+            self.advance_command_flash(now)
+        })?;
         // And the rail's own three, beside the flash because they are the same
         // shape: a hand resting on a rail moves nothing and no other clock in this
         // window would wake the loop to finish the crest it started.
-        self.advance_command_rails(now)?;
+        hang_watch::during(hang_watch::Station::ClockAdvanceCommandRails, || {
+            self.advance_command_rails(now)
+        })?;
         // The scroll thumb's rest and fade, beside the rail's clocks because it
         // is the same shape once more, and on the same pane's own edge (P2-9
         // slice 1).
-        self.advance_terminal_thumbs(now)?;
+        hang_watch::during(hang_watch::Station::ClockAdvanceTerminalThumbs, || {
+            self.advance_terminal_thumbs(now)
+        })?;
         // The glance card's own 350ms, beside the layout peek's and for the same
         // reason it stands where it does: it is a *peek*, and a peek that has
         // matured is already on screen when everything above it asks.
-        self.advance_file_peek(now)?;
+        hang_watch::during(hang_watch::Station::ClockAdvanceFilePeek, || {
+            self.advance_file_peek(now)
+        })?;
         // The float's two clocks and its entrance. After the tip's, because a
         // maturing intent can *open* a window over whatever the tip was about to
         // explain, and the frame both are due on should show that in the order
         // they will actually be drawn.
-        self.advance_float(now)?;
+        hang_watch::during(hang_watch::Station::ClockAdvanceFloat, || {
+            self.advance_float(now)
+        })?;
         // **The glass came free while the hand stood still.** Below every clock
         // that can retire a hover panel and above nothing that arms one, because
         // that is exactly the instant the refusals handed out on the last
         // pointer move stopped being true. Costs nothing on a pass where nobody
         // was hovering, which is almost every pass.
         if glass_was.is_some() && self.hover_float_up().is_none() {
-            self.rearm_hover_intents(now)?;
+            hang_watch::during(hang_watch::Station::ClockRearmHoverIntents, || {
+                self.rearm_hover_intents(now)
+            })?;
         }
         // And the foot's own 1300ms, whichever strip is wearing it. Its own step
         // because the two feet are drawn into two different surfaces — see
         // `advance_foot_reveal`.
-        self.advance_foot_reveal(now)?;
+        hang_watch::during(hang_watch::Station::ClockAdvanceFootReveal, || {
+            self.advance_foot_reveal(now)
+        })?;
         // And a page's magnification, on the same clock and for the same reason
         // it is its own step: what has to be rebuilt is the pane the page is in.
-        self.advance_page_foot_clocks(now)?;
+        hang_watch::during(hang_watch::Station::ClockAdvancePageFootClocks, || {
+            self.advance_page_foot_clocks(now)
+        })?;
         // And the preview's own acknowledgement, on the same 1300ms clock.
-        self.advance_preview_notice(now)?;
-        self.advance_preview_refusal(now)?;
+        hang_watch::during(hang_watch::Station::ClockAdvancePreviewNotice, || {
+            self.advance_preview_notice(now)
+        })?;
+        hang_watch::during(hang_watch::Station::ClockAdvancePreviewRefusal, || {
+            self.advance_preview_refusal(now)
+        })?;
         // Service the PTY gate after every other due task that can mutate session state, then carry
         // the deadline derived from that exact sample into the control-flow decision below.
         let pty_resize_deadline = self.flush_pending_pty_resize(now)?;
@@ -105605,8 +105864,12 @@ impl Runtime<'_> {
         // cannot hold the foreground. So the hide moves down here, where every
         // road that ends a window already meets — the ordinary close, the quit's
         // retirement, `exiting`, and the failure stop.
-        self.window.window.set_visible(false);
-        self.window.ime_system_caret.destroy();
+        hang_watch::during(hang_watch::Station::WindowVisible, || {
+            self.window.window.set_visible(false)
+        });
+        hang_watch::during(hang_watch::Station::ImeCaretDestroy, || {
+            self.window.ime_system_caret.destroy()
+        });
         // **The page's controller is closed here, beside the children.** A
         // controller merely dropped leaves a browser process nobody points at
         // for as long as the environment lives — which for the last window is
@@ -107143,13 +107406,11 @@ mod hold_station_tests {
 
     /// The `WindowEvent` kinds a match answers, read off its arm heads.
     ///
-    /// The twelve-space indent is the whole of the reading: it is what
-    /// separates an arm from a mention of one in a comment beside it and from
-    /// the guard above the match, both of which stand in this dispatcher and
-    /// neither of which is an arm.
+    /// An arm starts with the kind after whitespace; comments and the guards
+    /// above the match do not. The enclosing timing closure adds an indent.
     fn arms(text: &str) -> Vec<&str> {
         text.lines()
-            .filter_map(|line| line.strip_prefix("            WindowEvent::"))
+            .filter_map(|line| line.trim_start().strip_prefix("WindowEvent::"))
             .map(|kind| {
                 let end = kind
                     .find(|character: char| !character.is_alphanumeric() && character != '_')
@@ -107173,10 +107434,10 @@ mod hold_station_tests {
             ("Station::DpiSettle", "self.settle_deferred_dpi()?;"),
             ("Station::Pickers", "self.apply_math_context_menu_result();"),
             ("Station::PaneRows", "self.settle_pane_notices()?;"),
-            ("Station::Clocks", "self.raise_first_run_if_due()?;"),
+            ("Station::Clocks", "self.raise_first_run_if_due()"),
             (
                 "Station::SyncUpdate",
-                "self.finish_synchronized_update_if_due(now)?;",
+                "self.finish_synchronized_update_if_due(now)",
             ),
             ("Station::Deadlines", "let startup_deadline ="),
         ];
@@ -107252,9 +107513,9 @@ mod hold_station_tests {
             event.contains("hang_watch::at(hang_watch::Station::Event);"),
             "the event's own name has left the door it is about"
         );
-        // And the handler underneath it, which *is* scoped: opened over the
-        // match alone and handed back before the application doors below it.
-        let opened = "hang_watch::enter(window_event_station(&event))";
+        // One scope covers the entire dispatch, including early-return gates
+        // and the application doors. `during` owns the restoration.
+        let opened = "hang_watch::during(window_event_station(&event), || {";
         assert_eq!(
             event.matches(opened).count(),
             1,
@@ -107263,9 +107524,8 @@ mod hold_station_tests {
         );
         assert_eq!(
             event.matches("hang_watch::at(leaving_station);").count(),
-            1,
-            "the handler's name is never handed back, so the dispatch below the \
-             match runs under it"
+            0,
+            "manual restoration must not duplicate the closure's return"
         );
     }
 
@@ -108578,7 +108838,7 @@ mod formula_tool_seat_tests {
     fn the_bands_own_turn_draws_the_marks_from_the_picture_that_lit_it() {
         assert!(
             body("    fn turn(&mut self, now: Instant, application_clocks: bool)")
-                .contains("self.advance_math_tools_if_due(now)?;"),
+                .contains("self.advance_math_tools_if_due(now)"),
             "the band's marks take a turn like every other hover this window fades in"
         );
 
@@ -108784,10 +109044,10 @@ mod formula_tool_seat_tests {
 
         let turning = body("    fn turn(&mut self, now: Instant, application_clocks: bool)");
         let asked = turning
-            .find("self.refresh_math_hover_against_the_picture(now)?;")
+            .find("self.refresh_math_hover_against_the_picture(now)")
             .expect("every turn re-reads the band under a pointer that has not moved");
         let paid = turning
-            .find("self.advance_math_toggle_if_due(now)?;")
+            .find("self.advance_math_toggle_if_due(now)")
             .expect("and then pays the journeys that answer depends on");
         assert!(
             asked < paid,
@@ -109088,10 +109348,10 @@ mod formula_tool_seat_tests {
         // The turn pays the journey's frames, ahead of the marks that ride the rectangle it moves.
         let turning = body("    fn turn(&mut self, now: Instant, application_clocks: bool)");
         let toggle = turning
-            .find("self.advance_math_toggle_if_due(now)?;")
+            .find("self.advance_math_toggle_if_due(now)")
             .expect("a change of face takes a turn like every other motion in this window");
         let marks = turning
-            .find("self.advance_math_tools_if_due(now)?;")
+            .find("self.advance_math_tools_if_due(now)")
             .expect("and so do the marks beside it");
         assert!(
             toggle < marks,
@@ -112123,7 +112383,7 @@ mod pty_drain_budget_tests {
         );
 
         assert!(
-            method_body("turn").contains("self.finish_pty_coalesce_if_due(now)?;"),
+            method_body("turn").contains("self.finish_pty_coalesce_if_due(now)"),
             "a wait that has run out is paid on the very next turn, whatever woke it"
         );
         assert!(
@@ -112227,7 +112487,7 @@ mod pty_drain_budget_tests {
         let scope = body.find("in_drain_feed_turn(").unwrap();
         let slices = body.find("let pending = loop {").unwrap();
         assert!(scope < slices);
-        assert_eq!(body.matches("leaf.session.begin_feed_turn();").count(), 1);
+        assert_eq!(body.matches("leaf.session.begin_feed_turn()").count(), 1);
         assert_eq!(body.matches("leaf.session.end_feed_turn();").count(), 1);
         assert!(body[slices..].contains("let pending = drain_result?;"));
     }
@@ -113123,7 +113383,7 @@ mod textless_present_tests {
             ))
             .expect("the event loop answers the window that came back on screen");
         let arm = &SOURCE[woken..];
-        let end = arm.find("\n            _ => Ok(())").unwrap_or(arm.len());
+        let end = arm.find("_ => Ok(())").expect("the dispatch default arm");
         assert_eq!(
             arm[..end].matches("publish_frame").count(),
             1,
@@ -116746,11 +117006,15 @@ mod resident_run_tests {
              comparison is not a comparison: {reads:?}"
         );
         let asked = drain
-            .find(&["command_marks", "_watermark() != "].concat())
+            .rfind(&["command_marks", "_watermark()"].concat())
             .expect("the drain compares the two readings");
         let published = drain
             .find("publish_pty_drain_frame")
             .expect("the drain publishes the frame the output produced");
+        assert!(
+            drain[asked..published].contains("}) != marks_before"),
+            "the instrumented second reading is compared with the first"
+        );
         assert!(
             asked < published,
             "the overlay is brought level after the frame that should have \
@@ -117260,378 +117524,400 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         event: WindowEvent,
     ) {
         hang_watch::at(hang_watch::Station::Event);
-        // **The one line the whole slice is about.** winit stamps the id of the
-        // window the event happened to; before this, the loop compared it against
-        // the only window there was and dropped anything else. Now it is a
-        // lookup, and an id that is not open is a window that has already gone.
-        if !self.windows.contains(window_id) {
-            return;
-        }
-        // **A retiring window answers nothing** (multiwindow slice E2 phase ④).
-        // It is hidden, its shells are shut and its picture is written; whatever
-        // the platform still has queued for it is about a window that is on its
-        // way out, and running a redraw or a key through it would be this process
-        // doing work on behalf of something that no longer exists.
-        if self
-            .app
-            .as_ref()
-            .and_then(|app| app.quit.as_ref())
-            .is_some_and(quit::Quit::is_retiring)
-        {
-            return;
-        }
-        // **And a window that has been closed answers nothing either** (§7.35),
-        // on the retirement's own reasoning one window down: it is off the
-        // screen, its shells are shut and its controllers have been told to go,
-        // so every message still addressed to it — a stray `WM_CLOSE`, a focus
-        // change as the window under it comes forward — is about a window the
-        // reader has already let go of.
-        if self.is_leaving(window_id) {
-            return;
-        }
-        let Some(mut runtime) = self.runtime(window_id) else {
-            return;
-        };
-        // **A burst of notches is spent before anything that is not a notch.**
-        // See [`WheelBurst`]: the wheel accumulates so that a run of detents
-        // costs one frame instead of one frame each, and this is the line that
-        // keeps that from being a reordering — whatever arrives next answers the
-        // window the wheel has already moved.
-        if !matches!(event, WindowEvent::MouseWheel { .. })
-            && let Err(error) = runtime.flush_wheel()
-        {
-            self.fail(event_loop, error);
-            return;
-        }
-        // **And a drop is spent before anything that is not another file of the
-        // same drop**, on the line above's own reasoning (GitHub issue #1 ②).
-        // The batch is one command line going into a shell, so an event that
-        // reaches the same shell — a keystroke, most of all — must not overtake
-        // it. It is also what makes the drop's routing honest: the pointer
-        // position the batch is hit-tested against cannot have moved between the
-        // drop and this flush, because the event that would have moved it is the
-        // event that flushes first.
-        if !matches!(event, WindowEvent::DroppedFile(_))
-            && let Err(error) = runtime.flush_dropped_files()
-        {
-            self.fail(event_loop, error);
-            return;
-        }
-        // Whether this event asked the window to shut, answered before the
-        // borrow is given back: `raise_dirty_gate` is the one gate that has to be
-        // able to *stop* the event, which is why it is asked here rather than
-        // inside the close — past that line the window is gone, and a question
-        // asked after the answer is worthless.
-        let mut shutting = false;
-        // **The handler this event is about to be given to, named before it is
-        // given** — see [`window_event_station`]. Opened here and not at the
-        // door above, so the lookup, the three gates and the wheel burst stay
-        // the event's own; handed back at the foot of the match, on
-        // [`hang_watch::enter`]'s rule, so the four application doors under it
-        // belong to the dispatch and not to the handler.
-        let leaving_station = hang_watch::enter(window_event_station(&event));
-        let result = match event {
-            // **The summoned terminal's `×` means hide, and it means it by
-            // setting the chord's own bit** (§7.54e ②, user ruling 2026-09-05:
-            // 「窗上只留一个 ×,语义 = 隐藏,和热键完全一致…合并后必须同一条代码
-            // 路径」).
-            //
-            // Not "the same behaviour" and not "a call to the same function":
-            // **the same bit**. `quake.press()` is what a `WM_HOTKEY` leaves
-            // behind, and `settle_quake` on the next turn reads it, sees the
-            // window is up, and dismisses — hiding it, handing the keyboard back
-            // to whatever it came down over. There is no second road for the two
-            // to drift apart on, which is the whole of what the ruling asks for.
-            //
-            // **The dirty gate is not raised, and that is correct rather than
-            // skipped**: gate ③ exists because a *shut* loses unsaved preview
-            // buffers, and this window is not shutting. Its tabs, its shells and
-            // its buffers are all still there a chord away. Ending the session is
-            // `exit` in the shell or `Close tab` on the tab, and both of those
-            // raise every gate they always did.
-            //
-            // **Only while it is on the screen.** A `WM_CLOSE` delivered to the
-            // hidden summon is not a reader pressing its `×` — there is no `×` to
-            // press — it is the run ending, and it closes exactly as it did.
-            WindowEvent::CloseRequested
-                if runtime.is_quake_window() && runtime.app.quake.is_showing() =>
+        hang_watch::during(window_event_station(&event), || {
+            // **The one line the whole slice is about.** winit stamps the id of the
+            // window the event happened to; before this, the loop compared it against
+            // the only window there was and dropped anything else. Now it is a
+            // lookup, and an id that is not open is a window that has already gone.
+            if !self.windows.contains(window_id) {
+                return;
+            }
+            // **A retiring window answers nothing** (multiwindow slice E2 phase ④).
+            // It is hidden, its shells are shut and its picture is written; whatever
+            // the platform still has queued for it is about a window that is on its
+            // way out, and running a redraw or a key through it would be this process
+            // doing work on behalf of something that no longer exists.
+            if self
+                .app
+                .as_ref()
+                .and_then(|app| app.quit.as_ref())
+                .is_some_and(quit::Quit::is_retiring)
             {
-                runtime.app.quake.press();
-                Ok(())
+                return;
             }
-            WindowEvent::CloseRequested => {
-                // **Gate ③ (P125).** "Dirty preview buffers do not survive a shut
-                // — plans carry paths, never content — so shutting asks, the same
-                // honesty as closing a tab."
-                match runtime.raise_dirty_gate(restore::GateRequest::Shut) {
-                    Ok(true) => Ok(()),
-                    Ok(false) => {
-                        shutting = true;
-                        Ok(())
-                    }
-                    Err(error) => Err(error),
-                }
+            // **And a window that has been closed answers nothing either** (§7.35),
+            // on the retirement's own reasoning one window down: it is off the
+            // screen, its shells are shut and its controllers have been told to go,
+            // so every message still addressed to it — a stray `WM_CLOSE`, a focus
+            // change as the window under it comes forward — is about a window the
+            // reader has already let go of.
+            if self.is_leaving(window_id) {
+                return;
             }
-            // **`is_synthetic` is read and not discarded** (§7.54d). It is the
-            // one bit that separates a key the reader pressed at this window
-            // from winit's report of what their hand was already holding when
-            // the window took the keyboard, and a window this program can summon
-            // *under a hand still on the chord* is a window that receives the
-            // second kind.
-            WindowEvent::KeyboardInput {
-                event,
-                is_synthetic,
-                ..
-            } => runtime.keyboard_input(&event, is_synthetic),
-            WindowEvent::Ime(event) => runtime.ime_input(event),
-            WindowEvent::ModifiersChanged(modifiers) => {
-                // **The one door every modifier state in this process comes
-                // through**, which is why Q9's ruling is applied here and
-                // nowhere else (M1-7). With Option ruled to be text, an Option
-                // that winit reports as `Alt` is a modifier nobody is holding —
-                // see `input::effective_modifiers`, which says the whole of it.
-                // **And the reported state is kept beside it**, because the
-                // sentence above is about text and one reader is not asking
-                // about text (§13.33 ①). Written first and from the same
-                // argument, so the two can never be a turn apart.
-                runtime.window.modifiers_held = modifiers.state();
-                runtime.window.modifiers = input::effective_modifiers(
-                    modifiers.state(),
-                    runtime.app.settings_store.loaded().option_sends_alt,
-                    bt_platform::host_platform(),
-                );
-                // The pointing hand over a link is a statement about `Ctrl` as
-                // much as about where the pointer is (§7.1.5g), and `Ctrl` moves
-                // while the pointer does not. Without this the shape would only
-                // ever catch up on the next mouse move, which is to say: after
-                // the hand had already decided whether to press.
-                runtime.apply_pointer_cursor();
-                // **The hint card's one input** (§7.1.5e′). winit reports the
-                // whole modifier state on every press and release of one, so
-                // this is the only line in the window that has to tell the card
-                // anything about the keys — there is no hook, no second opinion
-                // about what is down, and nothing to keep level with
-                // `window.modifiers` because it is read from it one statement
-                // after it is written.
-                runtime.note_key_hint(Instant::now())
+            let Some(mut runtime) =
+                hang_watch::during(hang_watch::Station::EventLookup, || self.runtime(window_id))
+            else {
+                return;
+            };
+            // **A burst of notches is spent before anything that is not a notch.**
+            // See [`WheelBurst`]: the wheel accumulates so that a run of detents
+            // costs one frame instead of one frame each, and this is the line that
+            // keeps that from being a reordering — whatever arrives next answers the
+            // window the wheel has already moved.
+            if !matches!(event, WindowEvent::MouseWheel { .. })
+                && let Err(error) = runtime.flush_wheel()
+            {
+                self.fail(event_loop, error);
+                return;
             }
-            WindowEvent::CursorMoved { position, .. } => runtime.pointer_moved(position),
-            WindowEvent::CursorLeft { .. } => runtime.pointer_left(),
-            WindowEvent::MouseInput { state, button, .. } => runtime.mouse_input(state, button),
-            WindowEvent::MouseWheel { delta, .. } => runtime.queue_wheel(delta),
-            // **A file let go of over this window** (GitHub issue #1 ②). One
-            // event per file and no marker between drops, so the path is
-            // written down here and the batch is spent at the turn boundary —
-            // [`Runtime::flush_dropped_files`], and [`WheelBurst`]'s reasoning
-            // one gesture over.
-            //
-            // **And the cursor is read here too, on the file that opens the
-            // batch** (release review 0.4.2 X-10): this arm runs inside the
-            // platform's delivery of the release, which is the only instant at
-            // which where the cursor is and where the file was let go of are the
-            // same point. See [`Runtime::collect_dropped_file`].
-            //
-            // `HoveredFile` and `HoveredFileCancelled` are not answered at all.
-            // They would be the drop affordance, and what an external drag
-            // should light up is a question nobody has answered. §7.1.1's
-            // 2026-09-16 revision answered it for the *internal* drag and for
-            // that one alone — an edge band that draws the split preview, a
-            // middle that writes `Paste path` on the box — and it is precisely
-            // the feedback that carries the ruling. Inventing a second set of
-            // zones here, for a gesture winit reports without a position, would
-            // be this window answering the harder half for itself.
-            WindowEvent::DroppedFile(path) => {
-                runtime.collect_dropped_file(path);
-                Ok(())
+            // **And a drop is spent before anything that is not another file of the
+            // same drop**, on the line above's own reasoning (GitHub issue #1 ②).
+            // The batch is one command line going into a shell, so an event that
+            // reaches the same shell — a keystroke, most of all — must not overtake
+            // it. It is also what makes the drop's routing honest: the pointer
+            // position the batch is hit-tested against cannot have moved between the
+            // drop and this flush, because the event that would have moved it is the
+            // event that flushes first.
+            if !matches!(event, WindowEvent::DroppedFile(_))
+                && let Err(error) = runtime.flush_dropped_files()
+            {
+                self.fail(event_loop, error);
+                return;
             }
-            WindowEvent::Resized(size) => runtime.resized(size),
-            // **The engine is told the window moved** (§7.7 ⑩, user report
-            // 2026-08-25). The pages are drawn through DirectComposition and
-            // get no window messages of their own, so the only thing that knows
-            // where a page's own menus and dialogs belong on screen is the
-            // parent window's position — and the only way the engine learns it
-            // has changed is this call. Said on the window's own move rather
-            // than on a page's clock: a window can be dragged with nothing on
-            // the glass but a shell, and the engine still has to be right the
-            // next time a page is opened in it.
-            WindowEvent::Moved(_) => runtime.window_moved(),
-            WindowEvent::ScaleFactorChanged { .. } => runtime.scale_factor_changed(),
-            // The payload is deliberately dropped: `os_theme_changed` asks the
-            // one reader this process trusts rather than taking a second
-            // opinion off the event (§7.46 ②).
-            WindowEvent::ThemeChanged(_) => runtime.os_theme_changed().map(|_| ()),
-            WindowEvent::RedrawRequested => runtime.redraw(),
-            WindowEvent::Focused(false) => {
-                // Losing the window is a blur, and blur commits (J102). The
-                // mock-up's editor is a real focusable element and gets this
-                // from the DOM; here it has to be said. A press that was still
-                // being held goes with it — the button-up will arrive to a
-                // window that is no longer listening.
-                let committed = runtime.finish_rename(RenameExit::Blur);
-                // K129. Losing the window is losing the Win32 mouse capture, and
-                // capture loss is this platform's `pointercancel`: the pointer
-                // stream ends with no button-up to end it. It is the only such
-                // signal winit surfaces — there is no `WM_CAPTURECHANGED` event —
-                // and an un-torn-down drag would leave a tab floating over a strip
-                // nobody is holding any more. Same path as Esc: never mind.
-                // F72: the same capture loss ends a divider drag, and ends it
-                // the same way — restoring the one ratio it had been moving.
-                // Left holding the button over a window that is no longer
-                // listening, the gesture was never finished, and a drag nobody
-                // finished did not choose a ratio.
-                let cancelled = runtime
-                    .cancel_drag()
-                    .and_then(|tab| runtime.cancel_divider_drag().map(|split| tab || split));
-                runtime.window.tab_press = None;
-                runtime.window.pane_press = None;
-                runtime.window.row_press = None;
-                // P149's `window blur`: a glance is about where the pointer is,
-                // and a window that is not listening has no pointer.
-                runtime.hide_file_peek();
-                // And §7.1.5e′'s: a card about the keys under your hands is a
-                // card about a keyboard this window no longer has. `hide` and
-                // not `spend` — nothing was pressed, so a hand that comes back
-                // still holding `Ctrl` is answered again.
-                runtime.window.key_hint.hide();
-                // **And the command palette** (DESIGN.md §7.55): 失焦即收. It is
-                // a box for aiming at something *now*, and a window the reader
-                // has left is a window they are not aiming at — coming back to
-                // a half-typed query over a stale list would be this product
-                // holding a question nobody is still asking. It is the one
-                // popup that goes here, and the difference is real: every other
-                // one is anchored to a control the reader can see and come back
-                // to, while this one is anchored to an intent.
-                let _ = runtime.close_command_palette();
-                runtime.window.tab_clicks.interrupt();
-                // Do not cancel or synthesize anything: IMM32 may synchronously deliver a partial
-                // Commit during this transition, and the product decision is to accept it.
-                runtime.window.ime_active = false;
-                runtime.window.ime_cursor_throttle.reset();
-                runtime.window.ime_system_caret.destroy();
-                runtime.set_cursor_focus(false, Instant::now());
-                // **The summoned terminal goes when the keyboard does** (§7.54),
-                // and it goes on the *next* turn: hiding a window inside the
-                // event that says it lost the focus is asking Windows to move the
-                // focus while it is telling you about the focus. A bit and a turn
-                // — see `FolioApp::settle_quake`, where every other thing this
-                // window does out of the ordinary is also spent.
+            // Whether this event asked the window to shut, answered before the
+            // borrow is given back: `raise_dirty_gate` is the one gate that has to be
+            // able to *stop* the event, which is why it is asked here rather than
+            // inside the close — past that line the window is gone, and a question
+            // asked after the answer is worthless.
+            let mut shutting = false;
+            // **The handler this event is about to be given to, named before it is
+            // given** — see [`window_event_station`]. Opened here and not at the
+            // door above, so the lookup, the three gates and the wheel burst stay
+            // the event's own; handed back at the foot of the match, on
+            // [`hang_watch::enter`]'s rule, so the four application doors under it
+            // belong to the dispatch and not to the handler.
+            let result = match event {
+                // **The summoned terminal's `×` means hide, and it means it by
+                // setting the chord's own bit** (§7.54e ②, user ruling 2026-09-05:
+                // 「窗上只留一个 ×,语义 = 隐藏,和热键完全一致…合并后必须同一条代码
+                // 路径」).
                 //
-                // The switch is read there and not here for the same reason the
-                // hide is: what this arm knows is that the keyboard left, which
-                // is true whatever the row says. Only a window that is actually
-                // on the screen leaves a bit, because a blur that arrives after
-                // it has gone is a blur about nothing - hiding it is what moved
-                // the focus in the first place.
-                if runtime.is_quake_window() && runtime.app.quake.is_showing() {
-                    runtime.app.quake.note_blur();
-                }
-                committed.and(cancelled.map(|_| ())).and_then(|()| {
-                    runtime.publish_frame(FrameTrigger {
-                        occurred_at: Instant::now(),
-                        source: FrameSource::Expose,
-                    })
-                })
-            }
-            WindowEvent::Focused(true) => {
-                // **R31's third invalidation moment, B: the window came back.**
-                // Whatever happened while it was away happened in another process
-                // — an editor saving, a `git` run in another terminal, a
-                // checkout by a build script — and left no cwd and no marker for
-                // this window to have noticed. Coming back is the moment a reader
-                // looks at the page again, so it is the moment the page is
-                // entitled to be true; it is a gesture at the window and not a
-                // timer, which is the whole of what R31 forbids.
+                // Not "the same behaviour" and not "a call to the same function":
+                // **the same bit**. `quake.press()` is what a `WM_HOTKEY` leaves
+                // behind, and `settle_quake` on the next turn reads it, sees the
+                // window is up, and dismisses — hiding it, handing the keyboard back
+                // to whatever it came down over. There is no second road for the two
+                // to drift apart on, which is the whole of what the ruling asks for.
                 //
-                // On the transition and not on the event: this is asked before
-                // `set_cursor_focus`, which is where `window_focused` is written,
-                // so a platform that re-announced a focus this window already had
-                // would not spend a `git status` on it. No debounce beyond that —
-                // there is no observed flap to debounce, and a timer put in
-                // against one would be exactly the machine this rule is about.
-                let regained = !runtime.window.window_focused;
-                // **The one place the visit order is written** (§7.59). On the
-                // transition and not on the event, which is `regained`'s own
-                // rule read one line down: a platform that re-announced a focus
-                // this window already had must not move it up the list, because
-                // then "most recently active" would mean "most recently
-                // re-announced" on the machines that do that.
-                if regained {
-                    runtime.note_this_window_was_visited();
-                }
-                runtime.set_cursor_focus(true, Instant::now());
-                let reread = if regained {
-                    // And the documents whose folders no kernel would speak for
-                    // (user ruling 2026-08-29). The same sentence as the line
-                    // below it, about the same moment, for the same reason —
-                    // and it costs nothing at all on a window whose files are
-                    // all on a disk this process could subscribe to.
-                    runtime
-                        .ask_the_unwatched_preview_files()
-                        .and_then(|()| runtime.reread_git_surfaces(None))
-                } else {
+                // **The dirty gate is not raised, and that is correct rather than
+                // skipped**: gate ③ exists because a *shut* loses unsaved preview
+                // buffers, and this window is not shutting. Its tabs, its shells and
+                // its buffers are all still there a chord away. Ending the session is
+                // `exit` in the shell or `Close tab` on the tab, and both of those
+                // raise every gate they always did.
+                //
+                // **Only while it is on the screen.** A `WM_CLOSE` delivered to the
+                // hidden summon is not a reader pressing its `×` — there is no `×` to
+                // press — it is the run ending, and it closes exactly as it did.
+                WindowEvent::CloseRequested
+                    if runtime.is_quake_window() && runtime.app.quake.is_showing() =>
+                {
+                    runtime.app.quake.press();
                     Ok(())
-                };
-                reread.and_then(|()| {
-                    runtime.publish_frame(FrameTrigger {
-                        occurred_at: Instant::now(),
-                        source: FrameSource::Expose,
+                }
+                WindowEvent::CloseRequested => {
+                    // **Gate ③ (P125).** "Dirty preview buffers do not survive a shut
+                    // — plans carry paths, never content — so shutting asks, the same
+                    // honesty as closing a tab."
+                    match runtime.raise_dirty_gate(restore::GateRequest::Shut) {
+                        Ok(true) => Ok(()),
+                        Ok(false) => {
+                            shutting = true;
+                            Ok(())
+                        }
+                        Err(error) => Err(error),
+                    }
+                }
+                // **`is_synthetic` is read and not discarded** (§7.54d). It is the
+                // one bit that separates a key the reader pressed at this window
+                // from winit's report of what their hand was already holding when
+                // the window took the keyboard, and a window this program can summon
+                // *under a hand still on the chord* is a window that receives the
+                // second kind.
+                WindowEvent::KeyboardInput {
+                    event,
+                    is_synthetic,
+                    ..
+                } => runtime.keyboard_input(&event, is_synthetic),
+                WindowEvent::Ime(event) => runtime.ime_input(event),
+                WindowEvent::ModifiersChanged(modifiers) => {
+                    // **The one door every modifier state in this process comes
+                    // through**, which is why Q9's ruling is applied here and
+                    // nowhere else (M1-7). With Option ruled to be text, an Option
+                    // that winit reports as `Alt` is a modifier nobody is holding —
+                    // see `input::effective_modifiers`, which says the whole of it.
+                    // **And the reported state is kept beside it**, because the
+                    // sentence above is about text and one reader is not asking
+                    // about text (§13.33 ①). Written first and from the same
+                    // argument, so the two can never be a turn apart.
+                    runtime.window.modifiers_held = modifiers.state();
+                    runtime.window.modifiers = input::effective_modifiers(
+                        modifiers.state(),
+                        runtime.app.settings_store.loaded().option_sends_alt,
+                        bt_platform::host_platform(),
+                    );
+                    // The pointing hand over a link is a statement about `Ctrl` as
+                    // much as about where the pointer is (§7.1.5g), and `Ctrl` moves
+                    // while the pointer does not. Without this the shape would only
+                    // ever catch up on the next mouse move, which is to say: after
+                    // the hand had already decided whether to press.
+                    runtime.apply_pointer_cursor();
+                    // **The hint card's one input** (§7.1.5e′). winit reports the
+                    // whole modifier state on every press and release of one, so
+                    // this is the only line in the window that has to tell the card
+                    // anything about the keys — there is no hook, no second opinion
+                    // about what is down, and nothing to keep level with
+                    // `window.modifiers` because it is read from it one statement
+                    // after it is written.
+                    runtime.note_key_hint(Instant::now())
+                }
+                WindowEvent::CursorMoved { position, .. } => runtime.pointer_moved(position),
+                WindowEvent::CursorLeft { .. } => runtime.pointer_left(),
+                WindowEvent::MouseInput { state, button, .. } => runtime.mouse_input(state, button),
+                WindowEvent::MouseWheel { delta, .. } => runtime.queue_wheel(delta),
+                // **A file let go of over this window** (GitHub issue #1 ②). One
+                // event per file and no marker between drops, so the path is
+                // written down here and the batch is spent at the turn boundary —
+                // [`Runtime::flush_dropped_files`], and [`WheelBurst`]'s reasoning
+                // one gesture over.
+                //
+                // **And the cursor is read here too, on the file that opens the
+                // batch** (release review 0.4.2 X-10): this arm runs inside the
+                // platform's delivery of the release, which is the only instant at
+                // which where the cursor is and where the file was let go of are the
+                // same point. See [`Runtime::collect_dropped_file`].
+                //
+                // `HoveredFile` and `HoveredFileCancelled` are not answered at all.
+                // They would be the drop affordance, and what an external drag
+                // should light up is a question nobody has answered. §7.1.1's
+                // 2026-09-16 revision answered it for the *internal* drag and for
+                // that one alone — an edge band that draws the split preview, a
+                // middle that writes `Paste path` on the box — and it is precisely
+                // the feedback that carries the ruling. Inventing a second set of
+                // zones here, for a gesture winit reports without a position, would
+                // be this window answering the harder half for itself.
+                WindowEvent::DroppedFile(path) => {
+                    runtime.collect_dropped_file(path);
+                    Ok(())
+                }
+                WindowEvent::Resized(size) => runtime.resized(size),
+                // **The engine is told the window moved** (§7.7 ⑩, user report
+                // 2026-08-25). The pages are drawn through DirectComposition and
+                // get no window messages of their own, so the only thing that knows
+                // where a page's own menus and dialogs belong on screen is the
+                // parent window's position — and the only way the engine learns it
+                // has changed is this call. Said on the window's own move rather
+                // than on a page's clock: a window can be dragged with nothing on
+                // the glass but a shell, and the engine still has to be right the
+                // next time a page is opened in it.
+                WindowEvent::Moved(_) => runtime.window_moved(),
+                WindowEvent::ScaleFactorChanged { .. } => runtime.scale_factor_changed(),
+                // The payload is deliberately dropped: `os_theme_changed` asks the
+                // one reader this process trusts rather than taking a second
+                // opinion off the event (§7.46 ②).
+                WindowEvent::ThemeChanged(_) => runtime.os_theme_changed().map(|_| ()),
+                WindowEvent::RedrawRequested => runtime.redraw(),
+                WindowEvent::Focused(false) => {
+                    // Losing the window is a blur, and blur commits (J102). The
+                    // mock-up's editor is a real focusable element and gets this
+                    // from the DOM; here it has to be said. A press that was still
+                    // being held goes with it — the button-up will arrive to a
+                    // window that is no longer listening.
+                    let committed = runtime.finish_rename(RenameExit::Blur);
+                    // K129. Losing the window is losing the Win32 mouse capture, and
+                    // capture loss is this platform's `pointercancel`: the pointer
+                    // stream ends with no button-up to end it. It is the only such
+                    // signal winit surfaces — there is no `WM_CAPTURECHANGED` event —
+                    // and an un-torn-down drag would leave a tab floating over a strip
+                    // nobody is holding any more. Same path as Esc: never mind.
+                    // F72: the same capture loss ends a divider drag, and ends it
+                    // the same way — restoring the one ratio it had been moving.
+                    // Left holding the button over a window that is no longer
+                    // listening, the gesture was never finished, and a drag nobody
+                    // finished did not choose a ratio.
+                    let cancelled = runtime
+                        .cancel_drag()
+                        .and_then(|tab| runtime.cancel_divider_drag().map(|split| tab || split));
+                    runtime.window.tab_press = None;
+                    runtime.window.pane_press = None;
+                    runtime.window.row_press = None;
+                    // P149's `window blur`: a glance is about where the pointer is,
+                    // and a window that is not listening has no pointer.
+                    runtime.hide_file_peek();
+                    // And §7.1.5e′'s: a card about the keys under your hands is a
+                    // card about a keyboard this window no longer has. `hide` and
+                    // not `spend` — nothing was pressed, so a hand that comes back
+                    // still holding `Ctrl` is answered again.
+                    runtime.window.key_hint.hide();
+                    // **And the command palette** (DESIGN.md §7.55): 失焦即收. It is
+                    // a box for aiming at something *now*, and a window the reader
+                    // has left is a window they are not aiming at — coming back to
+                    // a half-typed query over a stale list would be this product
+                    // holding a question nobody is still asking. It is the one
+                    // popup that goes here, and the difference is real: every other
+                    // one is anchored to a control the reader can see and come back
+                    // to, while this one is anchored to an intent.
+                    let _ = runtime.close_command_palette();
+                    runtime.window.tab_clicks.interrupt();
+                    // Do not cancel or synthesize anything: IMM32 may synchronously deliver a partial
+                    // Commit during this transition, and the product decision is to accept it.
+                    runtime.window.ime_active = false;
+                    runtime.window.ime_cursor_throttle.reset();
+                    hang_watch::during(hang_watch::Station::ImeCaretDestroy, || {
+                        runtime.window.ime_system_caret.destroy()
+                    });
+                    runtime.set_cursor_focus(false, Instant::now());
+                    // **The summoned terminal goes when the keyboard does** (§7.54),
+                    // and it goes on the *next* turn: hiding a window inside the
+                    // event that says it lost the focus is asking Windows to move the
+                    // focus while it is telling you about the focus. A bit and a turn
+                    // — see `FolioApp::settle_quake`, where every other thing this
+                    // window does out of the ordinary is also spent.
+                    //
+                    // The switch is read there and not here for the same reason the
+                    // hide is: what this arm knows is that the keyboard left, which
+                    // is true whatever the row says. Only a window that is actually
+                    // on the screen leaves a bit, because a blur that arrives after
+                    // it has gone is a blur about nothing - hiding it is what moved
+                    // the focus in the first place.
+                    if runtime.is_quake_window() && runtime.app.quake.is_showing() {
+                        runtime.app.quake.note_blur();
+                    }
+                    committed.and(cancelled.map(|_| ())).and_then(|()| {
+                        runtime.publish_frame(FrameTrigger {
+                            occurred_at: Instant::now(),
+                            source: FrameSource::Expose,
+                        })
                     })
+                }
+                WindowEvent::Focused(true) => {
+                    // **R31's third invalidation moment, B: the window came back.**
+                    // Whatever happened while it was away happened in another process
+                    // — an editor saving, a `git` run in another terminal, a
+                    // checkout by a build script — and left no cwd and no marker for
+                    // this window to have noticed. Coming back is the moment a reader
+                    // looks at the page again, so it is the moment the page is
+                    // entitled to be true; it is a gesture at the window and not a
+                    // timer, which is the whole of what R31 forbids.
+                    //
+                    // On the transition and not on the event: this is asked before
+                    // `set_cursor_focus`, which is where `window_focused` is written,
+                    // so a platform that re-announced a focus this window already had
+                    // would not spend a `git status` on it. No debounce beyond that —
+                    // there is no observed flap to debounce, and a timer put in
+                    // against one would be exactly the machine this rule is about.
+                    let regained = !runtime.window.window_focused;
+                    // **The one place the visit order is written** (§7.59). On the
+                    // transition and not on the event, which is `regained`'s own
+                    // rule read one line down: a platform that re-announced a focus
+                    // this window already had must not move it up the list, because
+                    // then "most recently active" would mean "most recently
+                    // re-announced" on the machines that do that.
+                    if regained {
+                        runtime.note_this_window_was_visited();
+                    }
+                    runtime.set_cursor_focus(true, Instant::now());
+                    let reread = if regained {
+                        // And the documents whose folders no kernel would speak for
+                        // (user ruling 2026-08-29). The same sentence as the line
+                        // below it, about the same moment, for the same reason —
+                        // and it costs nothing at all on a window whose files are
+                        // all on a disk this process could subscribe to.
+                        runtime
+                            .ask_the_unwatched_preview_files()
+                            .and_then(|()| runtime.reread_git_surfaces(None))
+                    } else {
+                        Ok(())
+                    };
+                    reread.and_then(|()| {
+                        runtime.publish_frame(FrameTrigger {
+                            occurred_at: Instant::now(),
+                            source: FrameSource::Expose,
+                        })
+                    })
+                }
+                // **The window is on screen again, and this is the one turn that
+                // owes it a picture** (GitHub issue #5).
+                //
+                // It always composed and published one frame here — `publish_frame`
+                // requests exactly one redraw — and since a skip caused by occlusion
+                // stopped asking for turns of its own ([`ask_again_after`]), this is
+                // the event that pays whatever the window went dark owing. winit
+                // raises it from `windowDidChangeOcclusionState:`, off the same
+                // `NSWindowOcclusionState::Visible` bit that `wgpu-hal`'s Metal
+                // surface tests before it refuses an acquire, so the moment it
+                // arrives is exactly the moment the acquire starts succeeding.
+                //
+                // `Occluded(true)` is deliberately not handled: a window does not
+                // need to be told it has gone dark. The frame path finds out by
+                // being refused, which is the only reading that cannot be stale.
+                WindowEvent::Occluded(false) => runtime.publish_frame(FrameTrigger {
+                    occurred_at: Instant::now(),
+                    source: FrameSource::Expose,
+                }),
+                _ => Ok(()),
+            };
+            // The gate's own `Discard`, spent here rather than inside the answer: the
+            // shut belongs to the event loop, and re-requesting it means closing goes
+            // through the one door it always went through instead of a second one
+            // opened for the gate.
+            shutting |= std::mem::take(&mut runtime.window.window_close_requested);
+            let result = if shutting {
+                result.and(hang_watch::during(hang_watch::Station::EventShut, || {
+                    self.close(window_id)
+                }))
+            } else {
+                result
+            };
+            // Whatever this event changed about the *application*, handed to the
+            // windows that were not this one. Before the door below, because a window
+            // opened after a settings row was pressed reads that row's stored value
+            // when it is built and would then be handed the same change twice.
+            let result = result.and_then(|()| {
+                hang_watch::during(hang_watch::Station::EventSettleApplication, || {
+                    self.settle_application_change()
                 })
+            });
+            // The prompt's one answer, if this event was it — before the door below,
+            // because accepting is one of the three things that queues a window.
+            let result = result.and_then(|()| {
+                hang_watch::during(hang_watch::Station::EventRestore, || {
+                    self.settle_restore_answer()
+                })
+            });
+            // And the door the other way round: a window this window's keyboard asked
+            // for. After the shut, because a chord cannot both close this window and
+            // open another, and asking in this order means a failure to open never
+            // leaves a window that should have been shut standing.
+            let result = result.and_then(|()| {
+                hang_watch::during(hang_watch::Station::EventOpen, || {
+                    self.open_pending_window(event_loop)
+                })
+            });
+            // And the whole application's own door, last: `Ctrl+Shift+Q` records a
+            // debt inside one window and what it starts belongs to the process.
+            // After the shut above, on that door's own reasoning — a chord cannot
+            // both close this window and quit — and after the open, so that a window
+            // queued by the same turn is in the registry before it is photographed.
+            let result = result.and_then(|()| {
+                hang_watch::during(hang_watch::Station::EventQuit, || {
+                    self.settle_quit(event_loop)
+                })
+            });
+            if let Err(error) = result {
+                self.fail(event_loop, error);
             }
-            // **The window is on screen again, and this is the one turn that
-            // owes it a picture** (GitHub issue #5).
-            //
-            // It always composed and published one frame here — `publish_frame`
-            // requests exactly one redraw — and since a skip caused by occlusion
-            // stopped asking for turns of its own ([`ask_again_after`]), this is
-            // the event that pays whatever the window went dark owing. winit
-            // raises it from `windowDidChangeOcclusionState:`, off the same
-            // `NSWindowOcclusionState::Visible` bit that `wgpu-hal`'s Metal
-            // surface tests before it refuses an acquire, so the moment it
-            // arrives is exactly the moment the acquire starts succeeding.
-            //
-            // `Occluded(true)` is deliberately not handled: a window does not
-            // need to be told it has gone dark. The frame path finds out by
-            // being refused, which is the only reading that cannot be stale.
-            WindowEvent::Occluded(false) => runtime.publish_frame(FrameTrigger {
-                occurred_at: Instant::now(),
-                source: FrameSource::Expose,
-            }),
-            _ => Ok(()),
-        };
-        hang_watch::at(leaving_station);
-        // The gate's own `Discard`, spent here rather than inside the answer: the
-        // shut belongs to the event loop, and re-requesting it means closing goes
-        // through the one door it always went through instead of a second one
-        // opened for the gate.
-        shutting |= std::mem::take(&mut runtime.window.window_close_requested);
-        let result = if shutting {
-            result.and(self.close(window_id))
-        } else {
-            result
-        };
-        // Whatever this event changed about the *application*, handed to the
-        // windows that were not this one. Before the door below, because a window
-        // opened after a settings row was pressed reads that row's stored value
-        // when it is built and would then be handed the same change twice.
-        let result = result.and_then(|()| self.settle_application_change());
-        // The prompt's one answer, if this event was it — before the door below,
-        // because accepting is one of the three things that queues a window.
-        let result = result.and_then(|()| self.settle_restore_answer());
-        // And the door the other way round: a window this window's keyboard asked
-        // for. After the shut, because a chord cannot both close this window and
-        // open another, and asking in this order means a failure to open never
-        // leaves a window that should have been shut standing.
-        let result = result.and_then(|()| self.open_pending_window(event_loop));
-        // And the whole application's own door, last: `Ctrl+Shift+Q` records a
-        // debt inside one window and what it starts belongs to the process.
-        // After the shut above, on that door's own reasoning — a chord cannot
-        // both close this window and quit — and after the open, so that a window
-        // queued by the same turn is in the registry before it is photographed.
-        let result = result.and_then(|()| self.settle_quit(event_loop));
-        if let Err(error) = result {
-            self.fail(event_loop, error);
-        }
+        });
     }
 
     /// **The pulse, the turn, and the note of where this thread is going.**
@@ -117708,30 +117994,43 @@ impl ApplicationHandler<AppEvent> for FolioApp {
 /// it takes the event by reference so the naming happens before the match moves
 /// it.
 ///
-/// **The kinds that answer [`hang_watch::Station::EventOther`] are the ones
-/// this window does nothing for.** The match ends in `_ => Ok(())`, and an
-/// event that falls through it has cost this process a lookup and a comparison;
-/// a station apiece for the rest of winit's list would be a dozen names that
-/// can never be the answer, standing in front of the twelve that can.
+/// Exhaustive, including the dispatcher's ignored kinds: adding a winit kind
+/// requires a label at compile time. The single enclosing `during` scope names
+/// gates, early returns, the match, and application follow-up work alike.
 fn window_event_station(event: &WindowEvent) -> hang_watch::Station {
     use hang_watch::Station;
     match event {
         WindowEvent::CloseRequested => Station::EventClose,
         WindowEvent::KeyboardInput { .. } => Station::EventKey,
-        WindowEvent::Ime(_) => Station::EventIme,
+        WindowEvent::Ime(Ime::Enabled) => Station::ImeEnabled,
+        WindowEvent::Ime(Ime::Preedit(..)) => Station::ImePreedit,
+        WindowEvent::Ime(Ime::Commit(_)) => Station::ImeCommit,
+        WindowEvent::Ime(Ime::Disabled) => Station::ImeDisabled,
         WindowEvent::ModifiersChanged(_) => Station::EventModifiers,
-        WindowEvent::CursorMoved { .. } | WindowEvent::CursorLeft { .. } => Station::EventPointer,
+        WindowEvent::CursorMoved { .. } => Station::EventPointer,
+        WindowEvent::CursorLeft { .. } => Station::EventCursorLeft,
         WindowEvent::MouseInput { .. } => Station::EventMouse,
         WindowEvent::MouseWheel { .. } => Station::EventWheel,
         WindowEvent::Resized(_) => Station::EventResize,
         WindowEvent::ScaleFactorChanged { .. } => Station::EventScale,
-        WindowEvent::Moved(_) | WindowEvent::ThemeChanged(_) | WindowEvent::Occluded(_) => {
-            Station::EventWindow
-        }
+        WindowEvent::Moved(_) => Station::EventMoved,
+        WindowEvent::ThemeChanged(_) => Station::EventTheme,
+        WindowEvent::Occluded(_) => Station::EventOccluded,
         WindowEvent::RedrawRequested => Station::EventRedraw,
         WindowEvent::Focused(_) => Station::EventFocus,
         WindowEvent::DroppedFile(_) => Station::EventFileDrop,
-        _ => Station::EventOther,
+        WindowEvent::ActivationTokenDone { .. } => Station::EventActivation,
+        WindowEvent::Destroyed => Station::EventDestroyed,
+        WindowEvent::HoveredFile(_) => Station::EventHoveredFile,
+        WindowEvent::HoveredFileCancelled => Station::EventHoverCancelled,
+        WindowEvent::CursorEntered { .. } => Station::EventCursorEntered,
+        WindowEvent::PinchGesture { .. } => Station::EventPinch,
+        WindowEvent::PanGesture { .. } => Station::EventPan,
+        WindowEvent::DoubleTapGesture { .. } => Station::EventDoubleTap,
+        WindowEvent::RotationGesture { .. } => Station::EventRotation,
+        WindowEvent::TouchpadPressure { .. } => Station::EventPressure,
+        WindowEvent::AxisMotion { .. } => Station::EventAxis,
+        WindowEvent::Touch(_) => Station::EventTouch,
     }
 }
 
@@ -117845,9 +118144,11 @@ fn write_selection_text(
 }
 
 fn write_terminal_clipboard_text(text: &str) -> Result<()> {
-    bt_platform::set_clipboard_text(text)
-        .map_err(|error| anyhow!(error))
-        .context("write terminal selection to clipboard")
+    hang_watch::during(hang_watch::Station::ClipboardWrite, || {
+        bt_platform::set_clipboard_text(text)
+    })
+    .map_err(|error| anyhow!(error))
+    .context("write terminal selection to clipboard")
 }
 
 /// **The copy tick's own clock, read in one place** (audit 2026-09-15, RB-1).
