@@ -49012,6 +49012,7 @@ impl Runtime<'_> {
             | Row::FocusCardHeight
             | Row::Formulas
             | Row::InlineFormulas
+            | Row::RepairRowBreaks
             | Row::Tables
             | Row::BlockMaxHeight
             | Row::GitPanel
