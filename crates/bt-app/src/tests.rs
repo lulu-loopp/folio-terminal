@@ -23170,18 +23170,25 @@ fn a_pane_s_frame_debt_is_paid_in_drawn_boxes() {
     );
 }
 
-/// PIN — the deadline is `None` when nothing is moving and `Some` while
-/// something is, on the same terms as [`Runtime::strip_animation_work`].
+/// PIN — the pane wake is `None` when nothing is moving and the strip's
+/// absolute animation appointment while something is, on the same terms as
+/// [`Runtime::strip_animation_work`].
 ///
 /// `None` is the important half: it is what lets the loop fall back to
 /// `ControlFlow::Wait` and the process go genuinely idle once the split has
 /// settled.
 #[test]
-fn the_pane_deadline_asks_for_wake_ups_only_while_something_is_moving() {
+fn the_pane_wake_uses_one_absolute_appointment_only_while_something_is_moving() {
     let now = Instant::now();
+    let next_animation_deadline = now + pace::DEFAULT_FRAME_INTERVAL;
+    let wake = |panes: &PaneMotion, at: Instant, preference: Motion| {
+        panes
+            .is_animating(at, preference)
+            .then_some(next_animation_deadline)
+    };
     let mut motion = PaneMotion::default();
     assert_eq!(
-        motion.deadline(now, Motion::Full, pace::DEFAULT_FRAME_INTERVAL),
+        wake(&motion, now, Motion::Full),
         None,
         "a tab whose panes are all at rest asks for no wake-ups at all"
     );
@@ -23192,21 +23199,15 @@ fn the_pane_deadline_asks_for_wake_ups_only_while_something_is_moving() {
         (SeatId(2), [50.0, 0.0, 100.0, 100.0]),
     ];
     motion.begin(&before, &after, now, Motion::Full);
+    let first = wake(&motion, now, Motion::Full);
+    let second = wake(&motion, now + PANE_FLIP / 2, Motion::Full);
+    assert_eq!(first, Some(next_animation_deadline));
     assert_eq!(
-        motion.deadline(now, Motion::Full, pace::DEFAULT_FRAME_INTERVAL),
-        Some(now + pace::DEFAULT_FRAME_INTERVAL)
+        second, first,
+        "an unchanged flight keeps the same absolute appointment when queried later"
     );
     assert_eq!(
-        motion.deadline(
-            now + PANE_FLIP / 2,
-            Motion::Full,
-            pace::DEFAULT_FRAME_INTERVAL
-        ),
-        Some(now + PANE_FLIP / 2 + pace::DEFAULT_FRAME_INTERVAL),
-        "halfway through, both halves of the split are still moving"
-    );
-    assert_eq!(
-        motion.deadline(now + PANE_FLIP, Motion::Full, pace::DEFAULT_FRAME_INTERVAL),
+        wake(&motion, now + PANE_FLIP, Motion::Full),
         None,
         "and once the split lands, the loop may sleep"
     );
@@ -23217,7 +23218,7 @@ fn the_pane_deadline_asks_for_wake_ups_only_while_something_is_moving() {
     let mut reduced = PaneMotion::default();
     reduced.begin(&before, &after, now, Motion::Reduced);
     assert_eq!(
-        reduced.deadline(now, Motion::Reduced, pace::DEFAULT_FRAME_INTERVAL),
+        wake(&reduced, now, Motion::Reduced),
         None,
         "reduced motion has no frames to ask for"
     );
@@ -23676,7 +23677,7 @@ fn an_in_flight_pane_animation_asks_conpty_for_no_resize_at_all() {
 /// Verified rather than assumed: "there are no tweens under Reduced" is a
 /// property of [`PaneFlip::displace`] storing no `started`, and the three
 /// things that follow from it — identity transform, settled debt, no
-/// deadline — are each a separate consumer that could have read the clock
+/// animation liveness — are each a separate consumer that could have read the clock
 /// for itself.
 #[test]
 fn reduced_motion_lands_every_pane_at_once_and_asks_for_no_frames() {
@@ -23708,11 +23709,6 @@ fn reduced_motion_lands_every_pane_at_once_and_asks_for_no_frames() {
     assert_eq!((content, clip), (body, body));
 
     assert!(!motion.is_animating(now, Motion::Reduced));
-    assert_eq!(
-        motion.deadline(now, Motion::Reduced, pace::DEFAULT_FRAME_INTERVAL),
-        None,
-        "no deadline is asked for, so the loop goes back to `ControlFlow::Wait`"
-    );
     assert!(
         motion.settle_frame_debt(&pane_rects_of(&after), now, Motion::Reduced),
         "the layout it landed on has still never been drawn"
@@ -23728,14 +23724,15 @@ fn reduced_motion_lands_every_pane_at_once_and_asks_for_no_frames() {
 }
 
 /// PIN — U8. The flight is drawn on every frame it has, including its last,
-/// and stops asking afterwards.
+/// and is no longer live afterwards.
 ///
-/// The two questions kept apart: [`PaneMotion::deadline`] answers "wake me
-/// again" and [`PaneMotion::settle_frame_debt`] answers "draw this one", and
-/// they part company on exactly the frame the FLIP reaches identity — where
-/// nothing is moving any more and the pane has still not been drawn in the
-/// box the solver gave it. This walks the whole flight at the wake-up
-/// cadence the loop actually uses and checks both ends.
+/// The two questions kept apart: [`PaneMotion::is_animating`] answers whether
+/// the shared absolute animation appointment belongs in the wake fold and
+/// [`PaneMotion::settle_frame_debt`] answers "draw this one". They part company
+/// on exactly the frame the FLIP reaches identity — where nothing is moving any
+/// more and the pane has still not been drawn in the box the solver gave it.
+/// This walks the whole flight at the wake-up cadence the loop actually uses
+/// and checks both ends.
 #[test]
 fn a_pane_flight_requests_a_redraw_on_every_frame_it_has_and_none_after_it_lands() {
     let now = Instant::now();
@@ -23752,12 +23749,6 @@ fn a_pane_flight_requests_a_redraw_on_every_frame_it_has_and_none_after_it_lands
     let mut at = now;
     loop {
         let moving = motion.is_animating(at, Motion::Full);
-        let deadline = motion.deadline(at, Motion::Full, pace::DEFAULT_FRAME_INTERVAL);
-        assert_eq!(
-            deadline.is_some(),
-            moving,
-            "a wake-up is asked for exactly while something is moving"
-        );
         if motion.settle_frame_debt(&pane_rects_of(&after), at, Motion::Full) {
             drawn += 1;
         }
@@ -23790,9 +23781,8 @@ fn a_pane_flight_requests_a_redraw_on_every_frame_it_has_and_none_after_it_lands
         "the flight ends with the pane recorded as drawn in the box the \
              solver gave it"
     );
-    assert_eq!(
-        motion.deadline(at, Motion::Full, pace::DEFAULT_FRAME_INTERVAL),
-        None,
+    assert!(
+        !motion.is_animating(at, Motion::Full),
         "and once it is drawn the window may go genuinely idle"
     );
     assert!(
@@ -24600,10 +24590,6 @@ fn switching_tabs_drops_the_flight_and_adopts_the_arriving_tabs_own_revision() {
     let revision = arriving_tab.structure_revision();
 
     assert!(!motion.is_animating(now, Motion::Full));
-    assert_eq!(
-        motion.deadline(now, Motion::Full, pace::DEFAULT_FRAME_INTERVAL),
-        None
-    );
     assert_eq!(
         motion.transform_of(survivor, now, Motion::Full),
         PaneTransform::IDENTITY,
@@ -48037,5 +48023,113 @@ fn a_hole_is_only_cut_where_a_floor_already_stands() {
         super::hole_for(super::webhost::WebPresence::Hidden, true, None),
         None,
         "a hidden page is cut a hole anyway"
+    );
+}
+
+/// Reading a periodic appointment does not move it; only spending it does.
+/// This is the startup poll's instance of the deadline-fold rule.
+#[test]
+fn an_unchanged_periodic_owner_answers_the_same_absolute_instant() {
+    let epoch = Instant::now();
+    let mut appointment = epoch + STARTUP_PTY_POLL_INTERVAL;
+    let first = appointment;
+    let second = appointment;
+    assert_eq!(first, second, "two reads did not rebase the startup poll");
+
+    advance_periodic_deadline(
+        &mut appointment,
+        epoch + STARTUP_PTY_POLL_INTERVAL,
+        STARTUP_PTY_POLL_INTERVAL,
+    );
+    assert_eq!(
+        appointment,
+        epoch + STARTUP_PTY_POLL_INTERVAL * 2,
+        "the owner advances exactly when its appointment is spent",
+    );
+}
+
+/// The named fold preserves both the absolute winner and its evidence label.
+/// Supplying the same owner snapshots at two different query instants has no
+/// place from which to manufacture a different answer.
+#[test]
+fn an_unchanged_deadline_fold_answers_the_same_named_instant() {
+    let epoch = Instant::now();
+    let names = ["later", "winner", "absent"];
+    let entries = [Some(epoch + Duration::from_secs(2)), Some(epoch), None];
+    let ask = |_now| earliest_named_deadline(names, entries);
+    let first = ask(epoch);
+    let second = ask(epoch + Duration::from_secs(1));
+    assert_eq!(first, Some(("winner", epoch)));
+    assert_eq!(second, first);
+}
+
+/// Red gates for every query-time renewal that was an entry in the baseline
+/// fold. The names make a failure identify all entries sharing that source;
+/// the behavioral tests in `pace`, `debounce`, and above pin their replacement.
+#[test]
+fn deadline_owners_do_not_manufacture_appointments_from_the_query_time() {
+    let runtime = include_str!("main.rs");
+    let function = |signature: &str| {
+        let rest = runtime
+            .split_once(signature)
+            .unwrap_or_else(|| panic!("missing production function `{signature}`"))
+            .1;
+        &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+    };
+    for (owners, retired_form) in [
+        ("startup poll", "map(|delay| now + delay)"),
+        (
+            "strip, tooltip, key hint, Cards hint, toast, command flash, command rails, terminal thumbs, file peek, file-peek close and dwell, float, formula tools, formula toggle, refused frame",
+            "next_animation_frame(now)",
+        ),
+        (
+            "strip animation",
+            "now + self.window.frame_clock.interval()",
+        ),
+        ("pane motion fold entry", "pane_motion.deadline("),
+    ] {
+        assert!(
+            !runtime.contains(retired_form),
+            "{owners} still renew from the fold query time via `{retired_form}`",
+        );
+    }
+    let drag = function("    fn drag_autoscroll_deadline(");
+    assert!(
+        !drag.contains(".map_or(now") && !drag.contains(".unwrap_or(now"),
+        "drag auto-scroll still renews from the fold query time:\n{drag}",
+    );
+    assert!(
+        !include_str!("persist.rs").contains("Instant::now() + SESSION_DEBOUNCE"),
+        "session save still renews from the time its deadline is queried",
+    );
+}
+
+/// The macOS menu memo is decided entirely from inputs. An unchanged turn is
+/// rejected here, before plan construction and before any AppKit call.
+#[test]
+fn unchanged_main_menu_inputs_are_silent_before_appkit() {
+    let shortcuts = shortcuts::Shortcuts::defaults();
+    let focus = Some(shortcuts::Focus::default());
+    let memo = MainMenuInputs::new(&shortcuts, focus);
+    assert!(memo.matches(&shortcuts, focus));
+
+    let mut rebound = shortcuts.clone();
+    rebound.set("new-tab", None);
+    assert!(
+        !memo.matches(&rebound, focus),
+        "a rebound chord rebuilds the menu"
+    );
+    assert!(
+        !memo.matches(&shortcuts, None),
+        "a focus change rebuilds the menu"
+    );
+
+    let stale_language = MainMenuInputs {
+        language_revision: memo.language_revision.wrapping_sub(1),
+        ..memo
+    };
+    assert!(
+        !stale_language.matches(&shortcuts, focus),
+        "a language revision rebuilds the menu",
     );
 }

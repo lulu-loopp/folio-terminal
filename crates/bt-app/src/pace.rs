@@ -243,16 +243,25 @@ impl FrameClock {
         moved
     }
 
-    /// **The next instant an animation in this window may draw**, never earlier
-    /// than now.
+    /// **The next instant an animation in this window may draw.**
     ///
     /// A window that has never presented is owed its first frame immediately:
     /// there is no picture on the glass to be a frame behind.
     #[must_use]
     pub fn next_frame(&self, last_present: Option<Instant>, now: Instant) -> Instant {
-        last_present
-            .map_or(now, |last| last + self.interval)
-            .max(now)
+        last_present.map_or(now, |last| last + self.interval)
+    }
+
+    /// **The absolute deadline owned by the last picture on the glass.**
+    ///
+    /// Unlike [`Self::next_frame`], this has no `now` fallback: a window that
+    /// has never presented is already admitted by [`Self::is_due`], so its
+    /// current turn must ask for the first picture rather than book a timer for
+    /// "now". Once a picture exists, asking twice without another present gives
+    /// the same instant even after that instant has passed.
+    #[must_use]
+    pub fn deadline(&self, last_present: Option<Instant>) -> Option<Instant> {
+        last_present.map(|last| last + self.interval)
     }
 
     /// Whether the display has moved on since the last picture reached it.
@@ -455,6 +464,18 @@ mod tests {
             clock.is_due(presented, booked),
             "the instant the gate books is an instant the gate admits"
         );
+    }
+
+    /// RED — **a deadline is owned by the picture that established its epoch,
+    /// not by the turn that asks for it.**
+    #[test]
+    fn asking_twice_without_a_present_returns_the_same_frame_deadline() {
+        let clock = clock_at(60_000);
+        let presented = Instant::now();
+        let due = presented + clock.interval();
+        assert_eq!(clock.deadline(Some(presented)), Some(due));
+        assert_eq!(clock.deadline(Some(presented)), Some(due));
+        assert_eq!(clock.deadline(None), None);
     }
 
     /// RED — **a refused turn books the turn that pays it, and a turn that

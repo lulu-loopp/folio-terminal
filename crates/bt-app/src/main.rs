@@ -12649,6 +12649,9 @@ struct WindowRuntime {
     window_shown: bool,
     first_visible_present_dpi_checked: bool,
     first_text_presented: bool,
+    /// The next absolute pre-prompt PTY poll. Querying the deadline never moves
+    /// it; the turn that reaches it advances it after draining the PTY.
+    startup_poll_at: Instant,
     last_presented_frame: Option<ViewportFrame>,
     /// How many times a terminal picture has been *composed and published*.
     ///
@@ -16409,6 +16412,22 @@ fn window_minimum_changed(applied: &mut Option<(i64, i64)>, next: (i64, i64)) ->
 
 fn earliest_deadline<const N: usize>(deadlines: [Option<Instant>; N]) -> Option<Instant> {
     deadlines.into_iter().flatten().min()
+}
+
+/// The earliest appointment together with the owner that supplied it.
+///
+/// Keeping the names beside the fold, rather than reconstructing them after the
+/// fact, makes the idle probe report evidence: ties retain the first entry, just
+/// as [`Iterator::min`] did before the entries were named.
+fn earliest_named_deadline<const N: usize>(
+    names: [&'static str; N],
+    deadlines: [Option<Instant>; N],
+) -> Option<(&'static str, Instant)> {
+    names
+        .into_iter()
+        .zip(deadlines)
+        .filter_map(|(name, deadline)| deadline.map(|at| (name, at)))
+        .min_by_key(|(_, at)| *at)
 }
 
 impl TabState {
@@ -27925,8 +27944,8 @@ impl PaneMotion {
     /// animation in a race with the seat id being reused.
     ///
     /// Tweens that have nothing to do are not stored. Under reduced motion that
-    /// is all of them, which is what makes [`Self::deadline`] answer `None` for
-    /// a preference rather than for a timeout.
+    /// is all of them, which is what makes [`Self::is_animating`] answer `false`
+    /// for a preference rather than for a timeout.
     fn begin(
         &mut self,
         before: &[(SeatId, [f32; 4])],
@@ -27990,17 +28009,6 @@ impl PaneMotion {
             .iter()
             .filter_map(|pane| pane.tween)
             .any(|tween| tween.is_animating(now, motion))
-    }
-
-    /// When these panes next need waking, or `None` when none of them is moving.
-    ///
-    /// The same shape and the same `None` as [`Runtime::strip_animation_work`]'s
-    /// own deadline,
-    /// for the same reason: it is what lets `about_to_wait` fall back to
-    /// `ControlFlow::Wait` once a split has settled, instead of holding a 60fps
-    /// loop open for a window that is doing nothing.
-    fn deadline(&self, now: Instant, motion: Motion, frame: Duration) -> Option<Instant> {
-        self.is_animating(now, motion).then(|| now + frame)
     }
 
     /// Drop the tweens that have finished, so a landed pane stops being carried.
@@ -37807,6 +37815,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         window_shown: false,
         first_visible_present_dpi_checked: false,
         first_text_presented: false,
+        startup_poll_at: Instant::now() + STARTUP_PTY_POLL_INTERVAL,
         last_presented_frame: None,
         present_gate: present_gate::PresentGate::default(),
         terminal_content_revision: 0,
@@ -42529,13 +42538,19 @@ impl Runtime<'_> {
     /// When this window next has tooltip work: the settle deadline, or the next
     /// frame of a fade that has not landed.
     fn tooltip_deadline(&self, now: Instant) -> Option<Instant> {
+        let next_frame = self.next_animation_deadline();
         if self.tooltip_owes_frame(now) {
-            return Some(self.next_animation_frame(now));
+            return next_frame;
         }
-        self.window
-            .tooltip
-            .deadline(now, self.app.motion, self.window.frame_clock.interval())
-            .map(|deadline| deadline.max(self.next_animation_frame(now)))
+        let owner =
+            self.window
+                .tooltip
+                .deadline(now, self.app.motion, self.window.frame_clock.interval());
+        if self.window.tooltip.is_fading(now, self.app.motion) {
+            next_frame
+        } else {
+            owner.map(|deadline| self.clamp_animation_deadline(deadline))
+        }
     }
 
     /// Note what the pointer is over — and in which face it would be answered,
@@ -42761,13 +42776,10 @@ impl Runtime<'_> {
     /// When this window next has notice work: an entrance landing, a life running
     /// out, an exit finishing — or this instant, when a frame is already owed.
     fn toast_deadline(&self, now: Instant) -> Option<Instant> {
-        if self.toasts_owe_frame(now) {
-            return Some(self.next_animation_frame(now));
+        if self.toasts_owe_frame(now) || self.window.toasts.is_animating(now, self.app.motion) {
+            return self.next_animation_deadline();
         }
-        self.window
-            .toasts
-            .deadline(now, self.app.motion)
-            .map(|deadline| deadline.max(self.next_animation_frame(now)))
+        self.window.toasts.deadline(now, self.app.motion)
     }
 
     /// Move every card's clock on, and pay the frames the movement owes.
@@ -43160,19 +43172,12 @@ impl Runtime<'_> {
         let flash = self.window.command_flash.as_ref().filter(|flash| {
             cmdrail::flash_is_running(now.saturating_duration_since(flash.started))
         })?;
-        Some(
-            match self.app.motion {
-                Motion::Reduced => flash.started + cmdrail::JUMP_FLASH,
-                Motion::Full => self.next_animation_frame(now),
+        match self.app.motion {
+            Motion::Reduced => {
+                Some(self.clamp_animation_deadline(flash.started + cmdrail::JUMP_FLASH))
             }
-            // The reduced-motion arm is a clock rather than a frame, and it is
-            // clamped for the reason every clock behind the gate is: the turn
-            // that spends it is a turn the gate has to admit, so a wake-up
-            // earlier than the glass will take a picture is a wake-up that
-            // would be turned away and re-armed. See
-            // [`Self::animation_frame_is_due`].
-            .max(self.next_animation_frame(now)),
-        )
+            Motion::Full => self.next_animation_deadline(),
+        }
     }
 
     /// Pay the flash's frames, and let it go when it is over.
@@ -47879,13 +47884,19 @@ impl Runtime<'_> {
     /// the fade's frames until it lands — and nothing at all for a window whose
     /// hands are empty.
     fn key_hint_deadline(&self, now: Instant) -> Option<Instant> {
+        let next_frame = self.next_animation_deadline();
         if self.key_hint_owes_frame(now) {
-            return Some(self.next_animation_frame(now));
+            return next_frame;
         }
-        self.window
-            .key_hint
-            .deadline(now, self.app.motion, self.window.frame_clock.interval())
-            .map(|deadline| deadline.max(self.next_animation_frame(now)))
+        let owner =
+            self.window
+                .key_hint
+                .deadline(now, self.app.motion, self.window.frame_clock.interval());
+        if self.window.key_hint.is_fading(now, self.app.motion) {
+            next_frame
+        } else {
+            owner.map(|deadline| self.clamp_animation_deadline(deadline))
+        }
     }
 
     /// Note what the modifiers are now, and repaint if the answer moved a card.
@@ -48088,10 +48099,16 @@ impl Runtime<'_> {
     /// moving, and the end of the four seconds. Nothing at all for a window
     /// whose reader has already been told (§7.21).
     fn card_hint_deadline(&self, now: Instant) -> Option<Instant> {
-        self.window
-            .card_hint
-            .deadline(now, self.app.motion, self.window.frame_clock.interval())
-            .map(|deadline| deadline.max(self.next_animation_frame(now)))
+        let owner = self.window.card_hint.deadline(
+            now,
+            self.app.motion,
+            self.window.frame_clock.interval(),
+        )?;
+        if self.window.card_hint.nudge_moving(now, self.app.motion) {
+            self.next_animation_deadline().map(|frame| frame.min(owner))
+        } else {
+            Some(owner)
+        }
     }
 
     /// The `˅`'s verb: show the profile list, or put away the one on screen.
@@ -60294,19 +60311,16 @@ impl Runtime<'_> {
             );
         let mut work = AnimationWork::default();
         for rest in rests {
-            if let Some(due) =
-                termscroll::fade_deadline(rest, now, motion, self.window.frame_clock.interval())
-            {
+            let due = if termscroll::fade_is_moving(rest, now, motion) {
+                self.next_animation_deadline()
+            } else {
+                termscroll::fade_wait_deadline(rest, now)
+            };
+            if let Some(due) = due {
                 work.deadline = Some(work.deadline.map_or(due, |soonest| soonest.min(due)));
             }
             work.moving |= termscroll::fade_is_moving(rest, now, motion);
         }
-        // On the window's own frame, like every other fade it draws
-        // (owner's report 2026-09-18): the turn that pays this is a turn
-        // [`Self::animation_frame_is_due`] has to admit.
-        work.deadline = work
-            .deadline
-            .map(|deadline| deadline.max(self.next_animation_frame(now)));
         work
     }
 
@@ -71817,11 +71831,11 @@ impl Runtime<'_> {
     /// the card leaves in one frame, so there is no exit to schedule.
     fn file_peek_deadline(&self, now: Instant) -> Option<Instant> {
         if self.file_peek_owes_frame(now) {
-            return Some(self.next_animation_frame(now));
+            return self.next_animation_deadline();
         }
         let clock = self.window.file_peek.as_ref()?.clock;
         if let Some(due) = clock.due() {
-            return Some(due.max(self.next_animation_frame(now)));
+            return Some(self.clamp_animation_deadline(due));
         }
         let shown = clock.shown_at()?;
         self.animating_deadline(
@@ -77410,7 +77424,7 @@ impl Runtime<'_> {
     /// The auto-scroll's next wake-up, for the loop's set (缺陷 #188).
     ///
     /// Clamped to the window's own display frame on
-    /// [`Runtime::next_animation_frame`]'s terms: asking for anything sooner
+    /// [`Runtime::next_animation_deadline`]'s terms: asking for anything sooner
     /// would wake the loop to integrate a few microseconds and re-arm the same
     /// deadline, which is a spin wearing a schedule's clothes.
     ///
@@ -77428,14 +77442,13 @@ impl Runtime<'_> {
         if speed == 0.0 {
             return None;
         }
-        Some(
-            self.window
-                .drag
-                .as_ref()
-                .and_then(|drag| drag.autoscroll_ticked_at)
-                .map_or(now, |last| last + self.window.frame_clock.interval())
-                .max(self.next_animation_frame(now)),
-        )
+        let tick = self
+            .window
+            .drag
+            .as_ref()
+            .and_then(|drag| drag.autoscroll_ticked_at)?
+            + self.window.frame_clock.interval();
+        Some(self.clamp_animation_deadline(tick))
     }
 
     /// Which files flyout — if any — this point would raise.
@@ -80829,15 +80842,17 @@ impl Runtime<'_> {
     /// The float's next appointment.
     fn float_deadline(&self, now: Instant) -> Option<Instant> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
-        self.window
-            .float
-            .deadline(
-                now,
-                self.app.motion,
-                scale,
-                self.window.frame_clock.interval(),
-            )
-            .map(|deadline| deadline.max(self.next_animation_frame(now)))
+        let owner = self.window.float.deadline(
+            now,
+            self.app.motion,
+            scale,
+            self.window.frame_clock.interval(),
+        )?;
+        if self.window.float.is_animating(now, self.app.motion, scale) {
+            self.next_animation_deadline().map(|frame| frame.min(owner))
+        } else {
+            Some(owner)
+        }
     }
 
     /// The tabs whose own triggers opened the floats on screen — `.vtab.shown`'s
@@ -85534,17 +85549,20 @@ impl Runtime<'_> {
     /// Every animation deadline this window reports is clamped to it. Reporting
     /// an earlier one would wake the loop to be turned away by the rate gate
     /// and then re-arm the same deadline — a spin dressed as a schedule.
-    fn strip_animation_next_tick(&self, now: Instant) -> Instant {
-        self.window
+    fn strip_animation_next_tick(&self, interval: Duration) -> Option<Instant> {
+        let strip = self
+            .window
             .strip_animation_ticked_at
-            .map_or(now, |last| last + self.window.frame_clock.interval())
-            .max(now)
-            // And never before the glass will take one either: the ring is one
-            // of the window's animations and draws on the window's frame, so a
-            // tick that is due by the strip's own clock and not by the
-            // display's is a wake-up that would be turned away again. See
-            // [`Self::next_animation_frame`].
-            .max(self.next_animation_frame(now))
+            .map(|last| last + interval);
+        match (strip, self.next_animation_deadline()) {
+            (Some(strip), Some(frame)) => Some(strip.max(frame)),
+            (Some(strip), None) => Some(strip),
+            (None, Some(frame)) => Some(frame),
+            // Before either epoch exists the current turn is admitted and is
+            // responsible for asking for the first picture. There is no timer
+            // state to retain yet, so asking again must still answer `None`.
+            (None, None) => None,
+        }
     }
 
     /// **Read the rate of the display this window is on**, and say so in the
@@ -85569,24 +85587,30 @@ impl Runtime<'_> {
         }
     }
 
-    /// **The next instant an animation in this window may draw**, and the one
-    /// answer every animated deadline in the fold is clamped to (owner's report
-    /// 2026-09-18).
-    ///
-    /// The last present plus one display frame — never *now* plus a frame, which
-    /// is the arithmetic this replaces and the whole of what was wrong with it:
-    /// `now` is the instant this turn began, and a turn begins whenever anything
-    /// at all happens, including the present the previous turn asked for. An
-    /// animation that adds a frame to that is asking for a frame from the moment
-    /// it was last looked at rather than from the moment the glass was last
-    /// written, and on a platform whose present does not block — Windows, where
-    /// the DXGI acquire costs 10–50 µs and hands a back buffer straight back —
-    /// nothing else was throttling it. See [`crate::pace`] for the two
-    /// recordings this is measured from.
+    /// The absolute frame appointment owned by the last successful present.
+    /// This is the one answer every animated deadline in the fold is clamped to:
+    /// never `now + frame`, always the epoch of a picture that reached the glass.
+    fn next_animation_deadline(&self) -> Option<Instant> {
+        self.window
+            .frame_clock
+            .deadline(self.window.last_present_at)
+    }
+
+    /// The gate's live answer, retained separately from the deadline getter:
+    /// before the first present the current turn is due immediately, while the
+    /// fold has no absolute frame epoch to retain yet.
+    #[allow(dead_code)]
     fn next_animation_frame(&self, now: Instant) -> Instant {
         self.window
             .frame_clock
             .next_frame(self.window.last_present_at, now)
+    }
+
+    /// A state clock spent behind the frame gate cannot run before the glass is
+    /// ready, but the clamp itself must remain an absolute instant.
+    fn clamp_animation_deadline(&self, deadline: Instant) -> Instant {
+        self.next_animation_deadline()
+            .map_or(deadline, |frame| deadline.max(frame))
     }
 
     /// **The next frame an animation that is still running is owed**, and
@@ -85598,13 +85622,14 @@ impl Runtime<'_> {
     /// judgement and is all it is asked for; when the loop should next look is
     /// not a question any single animation is in a position to answer.
     fn animating_deadline(&self, owes: bool, now: Instant) -> Option<Instant> {
-        owes.then(|| self.next_animation_frame(now))
+        let _ = now;
+        owes.then(|| self.next_animation_deadline()).flatten()
     }
 
     /// **Whether an animation may draw its frame on this turn**, and the gate
     /// that books the turn it may draw on when the answer is no.
     ///
-    /// The other half of [`Self::next_animation_frame`], and neither half works
+    /// The other half of [`Self::next_animation_deadline`], and neither half works
     /// alone. The deadline says when the loop should be woken; this says what a
     /// turn that was *not* woken by it may do — and the loop is turned by
     /// everything, so without this an animation still advances at whatever rate
@@ -85909,6 +85934,9 @@ impl Runtime<'_> {
         // [`RevealTween::owes_a_wake`].
         let rail_waiting =
             self.window.rail.draws_icon_rail() && self.window.rail_text.owes_a_wake(now, motion);
+        let rail_wait_deadline = rail_waiting
+            .then_some(self.window.rail_text.started)
+            .flatten();
         // U8 — the active tab's panes, on the same terms and with the same
         // `None`: a window whose split has settled asks for no wake-ups at all,
         // and under reduced motion there was never a tween to ask for one.
@@ -86077,25 +86105,35 @@ impl Runtime<'_> {
         // window says when it will pay it — the same shape the pacer's own
         // refusal takes ([`pace::FrameClock::refuse`]).
         let pictures_owe = self.window.pictures_owe_a_frame;
+        let pane_moving = self.window.pane_motion.is_animating(now, motion);
+        let next_tick = self.strip_animation_next_tick(self.window.frame_clock.interval());
+        let paced_strip = strip_moving || pictures_owe;
+        let strip_wake = earliest_deadline([
+            paced_strip.then_some(next_tick).flatten(),
+            rail_wait_deadline,
+        ]);
+        // The bar's intent and dwell are absolute owner clocks. Its fade and a
+        // pane's flight instead ride the strip's absolute tick; their old
+        // `now + frame` answers are deliberately not entries in the wake fold.
+        let bar_wait = (!bar_moving)
+            .then_some(bar_deadline)
+            .flatten()
+            .map(|deadline| next_tick.map_or(deadline, |tick| deadline.max(tick)));
         AnimationWork {
             deadline: [
                 (strip_moving || rail_waiting || pictures_owe)
-                    .then(|| now + self.window.frame_clock.interval()),
-                bar_deadline,
-                self.window
-                    .pane_motion
-                    .deadline(now, motion, self.window.frame_clock.interval()),
+                    .then_some(strip_wake)
+                    .flatten(),
+                (bar_moving || pane_moving).then_some(next_tick).flatten(),
+                bar_wait,
             ]
             .into_iter()
             .flatten()
-            .min()
-            // Clamped to the gate that will actually admit the tick. See
-            // [`Self::strip_animation_next_tick`].
-            .map(|deadline| deadline.max(self.strip_animation_next_tick(now))),
+            .min(),
             // The two the fold expresses as deadlines of their own, asked here
             // as the predicates they are made of: the panes' own tween, and the
             // bar's fade without the two waits its deadline also carries.
-            moving: strip_moving || bar_moving || self.window.pane_motion.is_animating(now, motion),
+            moving: strip_moving || bar_moving || pane_moving,
         }
     }
 
@@ -104658,6 +104696,13 @@ impl Runtime<'_> {
         self.apply_folder_pick_result()?;
         self.apply_image_pick_result()?;
         self.drain_pty()?;
+        if !self.window.first_text_presented && now >= self.window.startup_poll_at {
+            advance_periodic_deadline(
+                &mut self.window.startup_poll_at,
+                now,
+                STARTUP_PTY_POLL_INTERVAL,
+            );
+        }
         // **Directly after the drain**, because the two facts it reads are what
         // the drain has just moved: whether a shell has spoken for the first
         // time, and whether an OSC 133 has landed. Polled here rather than
@@ -104924,8 +104969,8 @@ impl Runtime<'_> {
         let terminal_thumb_deadline = terminal_thumbs.deadline;
         let running = self.running_journeys(now, strip_animation.moving, terminal_thumbs.moving);
         self.window.frame_clock.note_running(running);
-        let startup_deadline =
-            startup_poll_delay(self.window.first_text_presented).map(|delay| now + delay);
+        let startup_deadline = startup_poll_delay(self.window.first_text_presented)
+            .map(|_| self.window.startup_poll_at);
         // Every leaf, not every tab's focused leaf: an unfocused pane runs its own resize
         // transaction and owes its own PSReadLine repair, so its quiescence is its own deadline to
         // wake for. Reading this through the tab's deref asked only the pane holding the keyboard,
@@ -104957,7 +105002,58 @@ impl Runtime<'_> {
         // printed the block is often not the one holding the keyboard. See
         // [`Self::live_stability_deadline`].
         let live_stability_deadline = self.live_stability_deadline();
-        let wake_deadline = earliest_deadline([
+        const DEADLINE_OWNERS: [&str; 49] = [
+            "startup poll",
+            "IME cursor",
+            "shell caret",
+            "tab press",
+            "rename caret",
+            "strip animation",
+            "web teardown",
+            "PTY resize",
+            "resize finish",
+            "synchronized update",
+            "live stability",
+            "PTY coalesce",
+            "attention credential",
+            "tooltip",
+            "key hint",
+            "Cards hint",
+            "toast",
+            "command flash",
+            "command rails",
+            "terminal thumbs",
+            "layout peek",
+            "file peek",
+            "file-peek close grace",
+            "file-peek dwell",
+            "float",
+            "revealed foot",
+            "web zoom acknowledgement",
+            "web dialog acknowledgement",
+            "preview save notice",
+            "preview refusal",
+            "chevrons",
+            "pane menu",
+            "terminal menu",
+            "tab menu",
+            "drag spring",
+            "drag auto-scroll",
+            "hyperlink hover",
+            "peek hover",
+            "formula tools",
+            "formula toggle",
+            "formula-copy acknowledgement",
+            "preview resample",
+            "session save",
+            "schemes watch",
+            "storage watch",
+            "git watch",
+            "preview watch",
+            "files watch",
+            "refused frame",
+        ];
+        let deadlines = [
             startup_deadline,
             self.window.ime_cursor_throttle.deadline(),
             // Only while a shell holds the keyboard: a frozen caret owes no
@@ -105054,7 +105150,7 @@ impl Runtime<'_> {
                 .file_peek
                 .as_ref()
                 .and_then(|peek| peek.closing_at)
-                .map(|closing| closing.max(self.next_animation_frame(now))),
+                .map(|closing| self.clamp_animation_deadline(closing)),
             // And the dwell's own 350ms, which is the one clock in this window
             // that has to fire under a pointer that is not moving at all — a
             // hand resting on another row sends no events, so without this wake
@@ -105064,7 +105160,7 @@ impl Runtime<'_> {
                 .as_ref()
                 .and_then(|peek| peek.dwell.as_ref())
                 .and_then(|dwell| dwell.clock.due())
-                .map(|due| due.max(self.next_animation_frame(now))),
+                .map(|due| self.clamp_animation_deadline(due)),
             // The intent's 180ms, the grace's 220/420, and the entrance's own
             // frames until it lands. A window with no float and no hovered
             // trigger reports nothing and costs no wake-ups at all.
@@ -105200,8 +105296,26 @@ impl Runtime<'_> {
             self.window
                 .frame_clock
                 .owes_a_frame()
-                .then(|| self.next_animation_frame(now)),
-        ]);
+                .then(|| self.next_animation_deadline())
+                .flatten(),
+        ];
+        let wake = earliest_named_deadline(DEADLINE_OWNERS, deadlines);
+        if self.app.trace_perf
+            && !running.any()
+            && !self.window.frame_clock.owes_a_frame()
+            && self.window.pending_frames.pending_frame().is_none()
+            && !self.window.chrome_present_pending
+            && !self.window.pictures_owe_a_frame
+            && !self.window.cards.owes_frame()
+            && let Some((owner, at)) = wake
+            && at.saturating_duration_since(now) < Duration::from_millis(100)
+        {
+            trace_sink::stderr_line(format!(
+                "BT_PERF_TRACE idle_wake owner={owner:?} in_us={}",
+                at.saturating_duration_since(now).as_micros(),
+            ));
+        }
+        let wake_deadline = wake.map(|(_, at)| at);
         self.reap_exited_tabs()?;
         Ok(wake_deadline)
     }
@@ -113185,6 +113299,32 @@ struct FolioApp {
     /// reaches AppKit at all — `with_default_menu(false)` is what makes that
     /// chord Folio's.
     termination: Option<bt_platform::TerminationAnswer>,
+    /// Inputs from which the installed macOS menu was derived. Compared before
+    /// allocating a fresh plan or crossing into AppKit.
+    main_menu_inputs: Option<MainMenuInputs>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MainMenuInputs {
+    shortcuts: shortcuts::Shortcuts,
+    focus: Option<shortcuts::Focus>,
+    language_revision: u64,
+}
+
+impl MainMenuInputs {
+    fn new(shortcuts: &shortcuts::Shortcuts, focus: Option<shortcuts::Focus>) -> Self {
+        Self {
+            shortcuts: shortcuts.clone(),
+            focus,
+            language_revision: i18n::lang_revision(),
+        }
+    }
+
+    fn matches(&self, shortcuts: &shortcuts::Shortcuts, focus: Option<shortcuts::Focus>) -> bool {
+        self.shortcuts == *shortcuts
+            && self.focus == focus
+            && self.language_revision == i18n::lang_revision()
+    }
 }
 
 /// **The process's one device and every window standing on it**, handed to the
@@ -113248,6 +113388,7 @@ impl FolioApp {
             cli,
             delegate,
             termination: None,
+            main_menu_inputs: None,
         }
     }
 
@@ -115009,9 +115150,9 @@ impl FolioApp {
     /// three, and a hook missed is a bar that draws yesterday's key.
     ///
     /// It costs nothing where there is no bar. `is_installed` is a constant
-    /// `false` off macOS, so the walk of the table below never happens there;
-    /// on a Mac a plan equal to the one on the screen is one comparison and no
-    /// AppKit at all.
+    /// `false` off macOS, so the table is not read there; on a Mac unchanged
+    /// shortcut, focus, and language inputs are rejected before plan allocation
+    /// and before AppKit.
     fn refresh_main_menu(&mut self) {
         if !bt_platform::menu::is_installed() {
             return;
@@ -115023,9 +115164,18 @@ impl FolioApp {
         let Some(app) = self.app.as_ref() else {
             return;
         };
+        if self
+            .main_menu_inputs
+            .as_ref()
+            .is_some_and(|memo| memo.matches(&app.shortcuts, focus))
+        {
+            return;
+        }
         let plan = menubar::plan(&app.shortcuts, focus);
         if let Err(error) = bt_platform::menu::refresh(&plan) {
             eprintln!("recoverable menu bar failure: {error}");
+        } else {
+            self.main_menu_inputs = Some(MainMenuInputs::new(&app.shortcuts, focus));
         }
     }
 
@@ -115081,6 +115231,8 @@ impl FolioApp {
         });
         if let Err(error) = bt_platform::menu::install(&plan, send) {
             eprintln!("recoverable menu bar failure: {error}");
+        } else {
+            self.main_menu_inputs = Some(MainMenuInputs::new(&app.shortcuts, focus));
         }
     }
 
@@ -118056,6 +118208,17 @@ fn protocol_mouse_button(button: MouseButton) -> Option<input::MouseProtocolButt
 
 fn startup_poll_delay(first_text_presented: bool) -> Option<std::time::Duration> {
     (!first_text_presented).then_some(STARTUP_PTY_POLL_INTERVAL)
+}
+
+/// Move a periodic owner's absolute appointment past the turn that just spent
+/// it. Merely reading the appointment never calls this function.
+fn advance_periodic_deadline(next: &mut Instant, now: Instant, interval: Duration) {
+    if *next > now {
+        return;
+    }
+    let missed = now.saturating_duration_since(*next).as_nanos() / interval.as_nanos() + 1;
+    let steps = u32::try_from(missed).unwrap_or(u32::MAX);
+    *next += interval * steps;
 }
 
 /// The longest a tab's name may be: `TITLE_MAX` (`docs/design/ui-mockup.html` line

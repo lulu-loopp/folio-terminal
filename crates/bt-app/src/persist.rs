@@ -732,9 +732,7 @@ impl SessionStore {
 
     /// When the event loop should wake to write, if it should.
     pub fn deadline(&self) -> Option<Instant> {
-        self.debouncer
-            .is_dirty()
-            .then(|| Instant::now() + SESSION_DEBOUNCE)
+        self.debouncer.deadline(SESSION_DEBOUNCE)
     }
 
     /// **Take the answers the writer has brought back, and hand it the document if the quiet

@@ -98,11 +98,9 @@
 //!   [`park`] and [`woke`], at the two ends of the platform's own wait.
 //! - **Per turn of the loop**, [`beat`] is one `Instant::now()` (which
 //!   `about_to_wait` already calls for its own clocks) plus four stores, and
-//!   [`park`] at the other end of the turn is two more — **plus the one kernel
-//!   query a hold opens with** ([`Heartbeat::open_footprint`], which is where
-//!   the reason it cannot be deferred is written down). It is the one kernel
-//!   query this facility deliberately makes on the window thread, it is made on
-//!   a turn that already carries a frame and a platform round trip, and a
+//!   [`park`] at the other end of the turn is two more. The footprint baseline
+//!   is cached for [`FOOTPRINT_SAMPLE_INTERVAL`], bounding its one kernel query
+//!   to four a second even when a platform spuriously spins its run loop. A
 //!   parked thread makes none of them: no hold is open, so nothing is sampled.
 //! - **Per two seconds, forever**, the watchdog does one `Instant::now()`, four
 //!   atomic loads and a comparison, then sleeps again. **Zero allocation**: the
@@ -192,13 +190,12 @@
 //! counters below, the log could not tell them apart.
 //!
 //! So a hold now also carries [`Paging`]: the process's page faults and
-//! resident size, sampled at the two ends of the hold and appended to the line
-//! after a middle dot. The sampling rule is the one thing worth stating twice —
-//! **the opening sample is taken at every hold and the closing one only at a
-//! hold that is being reported**, because *slow* is not known until a hold ends
-//! and a baseline read after the paging is over measures nothing. See
-//! [`Heartbeat::open_footprint`] for why the two cheaper-looking designs both
-//! print `faults +0` on the holds they exist for.
+//! resident size, sampled around the hold and appended to the line after a
+//! middle dot. The opening baseline is at most
+//! [`FOOTPRINT_SAMPLE_INTERVAL`] old; the closing sample is taken only for a
+//! hold that is being reported. *Slow* is not known until a hold ends, while a
+//! baseline read after the paging is over measures nothing. See
+//! [`Heartbeat::open_footprint`] for the bounded compromise.
 //!
 //! The watchdog runs in the `BelowNormal` band with every other worker (§1.4).
 //! That is the right band even though its job is to run when the window thread
@@ -292,6 +289,10 @@ const STARTUP_THRESHOLD: Duration = Duration::from_secs(30);
 /// perf-resilience work was 1.25 s, and that was a debug build under a 24-way
 /// `cargo`, which is exactly the kind of hold worth a line).
 const SLOW_HOLD_THRESHOLD: Duration = Duration::from_millis(500);
+/// A footprint baseline may be this old when a hold opens. Half the slow-hold
+/// threshold keeps the attribution useful while bounding the platform query to
+/// four calls a second during a busy or spuriously woken loop.
+const FOOTPRINT_SAMPLE_INTERVAL: Duration = Duration::from_millis(250);
 
 /// How many slow holds may wait for the watchdog to write them.
 ///
@@ -1201,6 +1202,9 @@ pub struct Heartbeat {
     /// in either number, because both of them have legitimate values everywhere
     /// in their range and a platform with no arm answers nothing at all.
     held_footprint: AtomicBool,
+    /// When the cached opening footprint was sampled, plus one; zero means no
+    /// sample has yet been attempted.
+    footprint_sampled_at_ms: AtomicU64,
 }
 
 impl Default for Heartbeat {
@@ -1223,6 +1227,7 @@ impl Heartbeat {
             held_faults: AtomicU64::new(0),
             held_working_set: AtomicU64::new(0),
             held_footprint: AtomicBool::new(false),
+            footprint_sampled_at_ms: AtomicU64::new(0),
             origin: Instant::now(),
             at_ms: AtomicU64::new(0),
             turn: AtomicU64::new(0),
@@ -1297,21 +1302,19 @@ impl Heartbeat {
         self.station.store(station as u8, Ordering::Relaxed);
     }
 
-    /// **A hold begins**: the ledger is emptied, the footprint taken and the
-    /// clock started.
+    /// **A hold begins**: the ledger is emptied, the coarse footprint baseline
+    /// refreshed if needed and the clock started.
     fn open_hold(&self, now_ms: u64) {
         for spent in &self.spent_ms {
             spent.store(0, Ordering::Relaxed);
         }
-        self.open_footprint();
+        self.open_footprint(now_ms);
         self.station_since_ms.store(now_ms, Ordering::Relaxed);
         self.held_since_ms
             .store(now_ms.saturating_add(1), Ordering::Relaxed);
     }
 
-    /// **The one system call this instrument makes on an ordinary turn**, and
-    /// it is made here — at the opening of every hold, slow or not — because
-    /// there is no later moment that could have it.
+    /// **Refresh the coarse opening baseline when it is old.**
     ///
     /// The tempting design is to sample only the holds that turn out to be
     /// reported, and it cannot be built: *slow* is a fact about a hold that is
@@ -1330,13 +1333,20 @@ impl Heartbeat {
     ///   a fault counter it reads is a fact about the moment *it* woke rather
     ///   than about either end of somebody else's hold.
     ///
-    /// So the bill is one kernel query per hold — a hold being a turn of the
-    /// loop — against a turn that already carries a frame, a drain and a
-    /// platform round trip, and nothing whatever on the turns in between,
-    /// because a parked thread opens no hold. The other end,
+    /// The opening sample is therefore allowed to precede its hold by at most
+    /// [`FOOTPRINT_SAMPLE_INTERVAL`], half the threshold that makes a hold worth
+    /// reporting. That bounded attribution error is preferable to a kernel call
+    /// on every harmless run-loop iteration. The other end,
     /// [`Self::close_footprint`], is on the reporting path alone and is reached
     /// by roughly none of them.
-    fn open_footprint(&self) {
+    fn open_footprint(&self, now_ms: u64) {
+        let sampled = self.footprint_sampled_at_ms.load(Ordering::Relaxed);
+        let age = now_ms.saturating_sub(sampled.saturating_sub(1));
+        if sampled != 0
+            && age < u64::try_from(FOOTPRINT_SAMPLE_INTERVAL.as_millis()).unwrap_or(u64::MAX)
+        {
+            return;
+        }
         if let Some(footprint) = (self.footprint)() {
             self.held_faults.store(footprint.faults, Ordering::Relaxed);
             self.held_working_set
@@ -1345,6 +1355,8 @@ impl Heartbeat {
         } else {
             self.held_footprint.store(false, Ordering::Relaxed);
         }
+        self.footprint_sampled_at_ms
+            .store(now_ms.saturating_add(1), Ordering::Relaxed);
     }
 
     /// **The second sample, taken only for a hold that is already going to be
@@ -3901,13 +3913,13 @@ mod tests {
         );
     }
 
-    /// **An ordinary hold is sampled once and never asks again** — the cost
-    /// rule, stated as a number rather than as a comment.
+    /// **An ordinary hold refreshes the coarse sample when it is old and never
+    /// asks on the reporting path** — the cost rule, stated as a number rather
+    /// than as a comment.
     ///
-    /// Sixty turns a second each pay the opening query, because *slow* is not
-    /// known until a hold ends and a baseline taken later measures nothing (see
-    /// [`Heartbeat::open_footprint`]). What none of them pay is the second one:
-    /// it lives past the threshold check, on the path that produces a line.
+    /// The first hold pays the opening query; rapid followers reuse it. What an
+    /// ordinary hold never pays is the second query: it lives past the threshold
+    /// check, on the path that produces a line.
     ///
     /// MUTATION: move `close_footprint` above that check and this reads 2.
     #[test]
@@ -3932,6 +3944,28 @@ mod tests {
             3,
             "the slow one opened with a sample and closed with a second",
         );
+    }
+
+    /// A busy or spuriously woken run loop does not turn the diagnostic into
+    /// another wake-time platform call. The boundary itself refreshes so the
+    /// baseline used by a report is never older than the advertised interval.
+    #[test]
+    fn rapid_holds_share_one_coarse_opening_sample() {
+        queue_footprints(&[(10, 1024), (20, 2048)]);
+        let heart = Heartbeat::sampling(fake_footprint);
+        for now_ms in [1_000, 1_010, 1_100, 1_249] {
+            heart.woke_at(now_ms);
+            heart.park_at(Park::Indefinite, now_ms + 1);
+        }
+        assert_eq!(
+            footprints_asked(),
+            1,
+            "the cached sample covers the interval"
+        );
+
+        heart.woke_at(1_250);
+        heart.park_at(Park::Indefinite, 1_251);
+        assert_eq!(footprints_asked(), 2, "the boundary refreshes the baseline");
     }
 
     /// **A platform that counts nothing says nothing**, and a hold whose

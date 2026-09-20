@@ -424,7 +424,7 @@ pub fn visibility(
 /// **Whether a thumb whose last reason ended at `rest` is actually fading at
 /// `now`** (review round 3, 2026-09-18).
 ///
-/// [`fade_deadline`]'s second half on its own, and the two must not be confused
+/// [`fade_wait_deadline`]'s complement, and the two must not be confused
 /// for the reason [`visibility`] gives one line above the branch: **a wait is
 /// not a transition.** The nine hundred milliseconds of [`THUMB_REST`] is a bar
 /// standing at full strength with nothing about it changing, and the window read
@@ -441,34 +441,28 @@ pub fn fade_is_moving(rest: Instant, now: Instant, motion: Motion) -> bool {
     (THUMB_REST..THUMB_REST + THUMB_FADE).contains(&since)
 }
 
-/// When a thumb whose last reason ended at `rest` next owes a frame.
+/// When a thumb whose last reason ended at `rest` next needs waking from its
+/// full-strength rest.
 ///
 /// The **same** two durations [`visibility`] reads, deliberately shared rather
 /// than restated: the deadline that wakes the loop and the paint that runs when
 /// it does have to agree exactly, or the window either spins for ever on a bar
-/// that has finished or leaves one half-faded on the glass. `None` once the fade
-/// has landed, which is what makes a resting terminal cost no wake-ups at all.
+/// that has finished or leaves one at full strength until something else moves.
+/// Once the fade begins this answers `None`: `Runtime::terminal_thumb_work`
+/// owns its frame appointments through the window's absolute animation deadline.
 ///
-/// **`frame` is the window's display frame** (closure review 2, 2026-09-18):
-/// this asked for a flat sixteen milliseconds of its own, which on a 144 Hz
-/// panel is a fade drawn in nine steps where every other surface in the window
-/// gets thirteen. One window, one rate, read from the glass — see
-/// `crate::pace::FrameClock::interval`.
+/// Keeping the wait here and the moving frames in the window is deliberate
+/// (CI follow-up 2, 2026-09-20): this module cannot see the window's frame clock,
+/// and manufacturing `now + frame` here would renew the appointment every time
+/// the fold asks. One window, one absolute rate, read from the glass — see
+/// `crate::pace::FrameClock::deadline`.
 #[must_use]
-pub fn fade_deadline(
-    rest: Instant,
-    now: Instant,
-    motion: Motion,
-    frame: Duration,
-) -> Option<Instant> {
+pub fn fade_wait_deadline(rest: Instant, now: Instant) -> Option<Instant> {
     let since = now.saturating_duration_since(rest);
     if since < THUMB_REST {
         return Some(rest + THUMB_REST);
     }
-    if motion == Motion::Reduced || since >= THUMB_REST + THUMB_FADE {
-        return None;
-    }
-    Some(now + frame)
+    None
 }
 
 /// The mark, on a layer of its own.
@@ -1057,53 +1051,30 @@ mod tests {
         );
     }
 
-    /// The deadline and the paint read the same two durations, so a window stops
-    /// waking exactly when there is nothing left to draw.
+    /// The wait deadline and the paint read the same rest duration, so the fade
+    /// starts even when nothing else would wake the window.
     ///
-    /// **And the frames it asks for are the window's, not sixteen milliseconds
-    /// of its own** (closure review 2, 2026-09-18): one window, one rate, so a
-    /// 144 Hz panel draws this fade in the same number of steps it draws every
-    /// other fade in the window.
+    /// The fade's frames belong to `Runtime::terminal_thumb_work`, where the
+    /// window's absolute animation deadline is available; this owner reports
+    /// only the transition from waiting to moving.
     #[test]
-    fn the_fade_asks_for_frames_until_it_lands_and_not_one_after() {
+    fn the_fade_wait_wakes_once_when_the_rest_ends() {
         let rest = Instant::now();
-        let frame = Duration::from_millis(16);
         assert_eq!(
-            fade_deadline(rest, rest, Motion::Full, frame),
+            fade_wait_deadline(rest, rest),
             Some(rest + THUMB_REST),
             "the first wake-up owed is the end of the rest"
         );
-        assert!(
-            fade_deadline(rest, rest + THUMB_REST, Motion::Full, frame).is_some(),
-            "the fade's own frames follow it"
+        assert_eq!(
+            fade_wait_deadline(rest, rest + THUMB_REST),
+            None,
+            "once the fade begins, its frames belong to the window"
         );
         assert_eq!(
-            fade_deadline(rest, rest + THUMB_REST + THUMB_FADE, Motion::Full, frame),
+            fade_wait_deadline(rest, rest + THUMB_REST + THUMB_FADE),
             None,
-            "and a landed fade owes nothing"
+            "and a landed fade owes no owner wake"
         );
-        assert_eq!(
-            fade_deadline(rest, rest + THUMB_REST, Motion::Reduced, frame),
-            None,
-            "under reduced motion there was never a fade to wake for"
-        );
-
-        // The rate is the caller's, all the way through: a display twice as fast
-        // is asked for frames twice as often, and the rest in front of the fade
-        // is a wait and is not asked at any rate at all.
-        let midway = rest + THUMB_REST + THUMB_FADE / 2;
-        for hz in [Duration::from_millis(16), Duration::from_nanos(6_944_444)] {
-            assert_eq!(
-                fade_deadline(rest, midway, Motion::Full, hz),
-                Some(midway + hz),
-                "the fade asks for the next frame of the display it is on"
-            );
-            assert_eq!(
-                fade_deadline(rest, rest, Motion::Full, hz),
-                Some(rest + THUMB_REST),
-                "and the rest ends when it ends, whatever the display is doing"
-            );
-        }
     }
 
     /// The hit test agrees with the picture — the property the shared shape

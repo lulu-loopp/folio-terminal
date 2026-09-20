@@ -38,6 +38,14 @@ impl Debouncer {
         self.dirty_since.is_some()
     }
 
+    /// The absolute end of the current quiet window.
+    ///
+    /// It is derived from the change that armed the debounce, so asking again
+    /// without another [`Self::mark_dirty`] returns the same instant.
+    pub fn deadline(&self, debounce: Duration) -> Option<Instant> {
+        self.dirty_since.map(|since| since + debounce)
+    }
+
     /// True when there is a pending change *and* at least `debounce` has
     /// elapsed since the most recent [`Self::mark_dirty`] call, as measured
     /// against the caller-supplied `now`. Never true with no pending change.
@@ -91,6 +99,17 @@ mod tests {
         // The old deadline (t0 + 1s) has passed, but the window restarted at t1.
         assert!(!debouncer.should_flush(t0 + Duration::from_millis(1000), window));
         assert!(debouncer.should_flush(t1 + Duration::from_secs(1), window));
+    }
+
+    #[test]
+    fn the_deadline_belongs_to_the_change_that_armed_it() {
+        let mut debouncer = Debouncer::new();
+        let changed = Instant::now();
+        let window = Duration::from_millis(1500);
+        assert_eq!(debouncer.deadline(window), None);
+        debouncer.mark_dirty(changed);
+        assert_eq!(debouncer.deadline(window), Some(changed + window));
+        assert_eq!(debouncer.deadline(window), Some(changed + window));
     }
 
     #[test]
