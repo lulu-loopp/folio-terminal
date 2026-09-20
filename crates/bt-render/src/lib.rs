@@ -374,6 +374,16 @@ pub struct MathToolBoxes {
     pub copy: [f32; 4],
 }
 
+/// Per-present diagnostic values, derived from the same geometry as the ground
+/// and the seats. Never retained by the renderer or consulted for placement.
+#[derive(Clone, Debug)]
+pub struct MathBandTrace {
+    pub seat: MathToolBoxes,
+    pub ink_right: f32,
+    pub height_subpixels: i64,
+    pub picture_opacity_milli: u16,
+}
+
 /// **Where one named band's rows stand**, in the pane body's own pixels — see
 /// [`WindowRenderer::math_band_face`].
 ///
@@ -455,7 +465,7 @@ fn math_band_face_for(
 /// placement — and walking it backwards for "whichever was last" is precisely
 /// the reading this ticket removed: it answers with *some* block on a frame
 /// where the named one is not lit, and some block is not this block.
-fn math_tool_boxes_for(
+pub fn math_tool_boxes_for(
     metrics: CellMetrics,
     seat: SeatViewport,
     frame: &ViewportFrame,
@@ -576,26 +586,36 @@ fn math_block_geometry_px(
         band_top + placement.content_offset_subpixels as f32 / SUBPIXELS_PER_PX as f32
     };
     let clip_height = placement.clip_height_subpixels.max(1) as f32 / SUBPIXELS_PER_PX as f32;
-    let scaled_width = if placement.display == MathBlockDisplay::Source {
-        // **The longest row this pane laid the source out on**, and nothing added to it. It carried
-        // `+ 4` from M1.9b, which was room for the two verbs drawn inside the box in that
-        // milestone; the room they need is stated once now, in `math_block_ground_bounds`' right
-        // inset, and adding it here as well would be a block reserving the same cells twice.
-        //
-        // **The rows and not `placement.source`** (owner's ruling 2026-09-16,
-        // T-MATH-SOURCE-BAND-HUGS-TEXT). That field is the block's pre-wrap original grid text,
-        // `$$` delimiters and all — neither the rows the pane cut nor anything drawn — so a block
-        // whose source wrapped was measured long and a block whose `$$` line was its longest was
-        // measured by a delimiter. `MathBlockPlacement::source_width_cells` is the rows themselves,
-        // counted in columns, which is what the ink of a source face actually is.
-        placement.source_width_cells.max(1) as f32 * metrics.cell_width_px
-    } else {
-        placement.artifact.width_px as f32 * placement.artifact.render_scale_milli as f32 / 1000.0
+    let face = placement.face_milli.map_or_else(
+        || {
+            if placement.display == MathBlockDisplay::Source {
+                1.0
+            } else {
+                0.0
+            }
+        },
+        |milli| f32::from(milli.min(1000)) / 1000.0,
+    );
+    let across = |rendered: f32, source: f32| {
+        if face == 0.0 {
+            rendered
+        } else if face == 1.0 {
+            source
+        } else {
+            rendered + (source - rendered) * face
+        }
     };
-    let scaled_height = if placement.display == MathBlockDisplay::Source {
-        clip_height
+    let rendered_width =
+        placement.artifact.width_px as f32 * placement.artifact.render_scale_milli as f32 / 1000.0;
+    let source_width = placement.source_width_cells.max(1) as f32 * metrics.cell_width_px;
+    let scaled_width = across(rendered_width, source_width);
+    let rendered_height =
+        placement.artifact.height_px as f32 * placement.artifact.render_scale_milli as f32 / 1000.0;
+    let scaled_height = across(rendered_height, clip_height);
+    let top = if placement.face_milli.is_some() {
+        across(top, band_top)
     } else {
-        placement.artifact.height_px as f32 * placement.artifact.render_scale_milli as f32 / 1000.0
+        top
     };
     let ([visible_top, visible_bottom], [clip_top, clip_bottom]) = math_vertical_bounds(
         placement.artifact.mode,
@@ -606,14 +626,26 @@ fn math_block_geometry_px(
         scaled_height,
         clip_height,
     );
-    let (visible_left, visible_right) = math_horizontal_bounds(
+    // Source rows begin at column zero. Both the band's own inset and the
+    // raster's bearing travel to that endpoint; keeping either until the face
+    // flips would leave a smaller version of the same landing discontinuity.
+    let rendered_left = math_block_left_px(
         metrics,
-        seat.width,
-        frame.columns,
         placement.left_subpixels,
-        scaled_width,
-        math_block_takes_the_left_indent(placement),
-    )?;
+        math_block_is_a_band(placement),
+    );
+    let source_left = math_block_left_px(
+        metrics,
+        if placement.face_milli.is_some() {
+            0
+        } else {
+            placement.left_subpixels
+        },
+        false,
+    );
+    let left = across(rendered_left, source_left);
+    let (visible_left, visible_right) =
+        math_horizontal_bounds(metrics, seat.width, frame.columns, left, scaled_width)?;
     if visible_right <= visible_left || visible_bottom <= visible_top {
         return None;
     }
@@ -945,7 +977,7 @@ impl CellMetrics {
     /// and every headless probe means by "the grid", and threading a size
     /// through thirty call sites to say 16 each time would bury the one place
     /// where the number is not 16.
-    fn measure(font_system: &mut FontSystem, scale_factor: f64) -> Result<Self, RenderError> {
+    pub fn measure(font_system: &mut FontSystem, scale_factor: f64) -> Result<Self, RenderError> {
         Self::measure_at(
             font_system,
             scale_factor,
@@ -7810,6 +7842,38 @@ impl WindowRenderer {
             trace_perf,
             perf_frame: 0,
             perf_trace_us: 0,
+        })
+    }
+
+    /// The sequence used by this renderer's BT_PERF_TRACE frame line.
+    pub fn perf_frame(&self) -> u64 {
+        self.perf_frame
+    }
+
+    /// Read diagnostics from this present's named, lit band. No GPU access.
+    pub fn math_band_trace(
+        &self,
+        seat: SeatViewport,
+        frame: &ViewportFrame,
+        named: &MathBlockAnchor,
+    ) -> Option<MathBandTrace> {
+        let placement = frame.math_blocks.iter().find(|placement| {
+            placement.artifact.kind == bt_viewport::RgbaArtifactKind::Math
+                && placement.toolbar_visible
+                && placement.anchor.same_block(named)
+        })?;
+        let geometry = math_block_geometry_px(self.metrics, seat, frame, placement)?;
+        Some(MathBandTrace {
+            seat: MathToolBoxes {
+                anchor: placement.anchor.clone(),
+                display: placement.display,
+                block: geometry.block,
+                source: geometry.eye?,
+                copy: geometry.copy?,
+            },
+            ink_right: geometry.ink[2],
+            height_subpixels: placement.clip_height_subpixels,
+            picture_opacity_milli: placement.picture_opacity_milli,
         })
     }
 
@@ -16585,14 +16649,12 @@ fn math_horizontal_bounds(
     metrics: CellMetrics,
     surface_width: u32,
     columns: NonZeroU32,
-    left_subpixels: i64,
+    block_left: f32,
     scaled_width: f32,
-    takes_the_indent: bool,
 ) -> Option<(f32, f32)> {
     let pane_left = metrics.padding_px;
     let pane_right =
         (pane_left + columns.get() as f32 * metrics.cell_width_px).min(surface_width as f32);
-    let block_left = math_block_left_px(metrics, left_subpixels, takes_the_indent);
     let visible_left = block_left.max(pane_left);
     let visible_right = (block_left + scaled_width).min(pane_right);
     (visible_right > visible_left).then_some((visible_left, visible_right))
@@ -17610,6 +17672,7 @@ mod tests {
             clipped_top_rows: 0,
             clipped_bottom_rows: 0,
             picture_opacity_milli: 1000,
+            face_milli: None,
             selection_spans: Vec::new(),
         }
     }
@@ -17746,18 +17809,22 @@ mod tests {
             metrics,
             200,
             NonZeroU32::new(10).unwrap(),
-            inset_subpixels,
+            math_block_left_px(metrics, inset_subpixels, false),
             40.0,
-            false,
         )
         .unwrap();
         let expected_left = metrics.padding_px + 5.0;
         assert!((visible_left - expected_left).abs() <= 1.0);
 
         // A rendered block gets a small left indent so its tight-cropped ink lines up with text.
-        let (rendered_left, _) =
-            math_horizontal_bounds(metrics, 200, NonZeroU32::new(10).unwrap(), 0, 40.0, true)
-                .unwrap();
+        let (rendered_left, _) = math_horizontal_bounds(
+            metrics,
+            200,
+            NonZeroU32::new(10).unwrap(),
+            math_block_left_px(metrics, 0, true),
+            40.0,
+        )
+        .unwrap();
         assert!(rendered_left > metrics.padding_px + 1.0);
 
         let hit = [visible_left, 10.0, visible_right, 30.0];
@@ -17791,8 +17858,11 @@ mod tests {
         // 60 columns is wider than this seat holds: padding + 60 * 18 = 1096.
         let columns = NonZeroU32::new(60).unwrap();
         let (left, right) = math_horizontal_bounds(
-            metrics, SEAT_WIDTH, columns, 0, 4000.0, // an image far wider than either extent
-            true,
+            metrics,
+            SEAT_WIDTH,
+            columns,
+            math_block_left_px(metrics, 0, true),
+            4000.0, // an image far wider than either extent
         )
         .expect("a visible band");
         assert!(left >= metrics.padding_px);
@@ -17814,8 +17884,14 @@ mod tests {
             toolbar_left + total
         );
         // Red gate: the same call against the window extent does escape.
-        let (_, window_right) =
-            math_horizontal_bounds(metrics, WINDOW_WIDTH, columns, 0, 4000.0, true).unwrap();
+        let (_, window_right) = math_horizontal_bounds(
+            metrics,
+            WINDOW_WIDTH,
+            columns,
+            math_block_left_px(metrics, 0, true),
+            4000.0,
+        )
+        .unwrap();
         assert!(
             window_right > SEAT_WIDTH as f32,
             "the pin would pass even if a draw site read the window"
@@ -20187,6 +20263,7 @@ mod tests {
         for opening in [
             "pub fn math_tool_boxes(",
             "pub fn math_band_face(",
+            "pub fn math_band_trace(",
             "pub fn math_hit_test(",
             "fn math_failure_geometry(",
         ] {
@@ -20241,81 +20318,51 @@ mod tests {
         );
     }
 
-    fn travelling_band_frames() -> Vec<ViewportFrame> {
-        [40_i64, 52, 68, 80]
-            .into_iter()
-            .map(|height_px| {
-                let mut frame = seat_test_frame(0);
-                let placement = &mut frame.math_blocks[0];
-                placement.clip_height_subpixels = height_px * SUBPIXELS_PER_PX;
-                placement.artifact.height_subpixels = height_px * SUBPIXELS_PER_PX;
-                placement.artifact.height_px = height_px as u32;
-                frame
-            })
-            .collect()
-    }
-
-    /// VALUE (2026-09-20, T-MARKS-FRAME-IN-HAND): every placed pair is derived
-    /// from the same changing `ViewportFrame` whose band it stands on, including
-    /// the first and landing frames. The bt-app test with this name pins the
-    /// handoff into this pure function.
+    /// Both endpoints and every intermediate frame are the geometry the product
+    /// draws. Unequal source/raster widths expose the old face-branch snap.
     #[test]
-    fn the_marks_stand_on_the_band_of_the_frame_being_drawn() {
-        let frames = travelling_band_frames();
-        let anchor = frames[0].math_blocks[0].anchor.clone();
-        for (index, frame) in frames.iter().enumerate() {
-            let placed = math_tool_boxes_for(fade_metrics(), seat_test_seat(), frame, &anchor)
-                .expect("the changing frame carries its named lit band");
-            let band = math_band_face_for(fade_metrics(), seat_test_seat(), frame, &anchor)
-                .expect("the changing frame carries its named band");
-            assert_eq!(placed.block, band.block, "frame {index}");
-        }
-    }
-
-    /// VALUE (2026-09-20, T-MARKS-FRAME-IN-HAND): no frame's mark rectangles
-    /// equal rectangles derived from another height, including at the landing.
-    #[test]
-    fn the_landing_frame_needs_no_snap() {
-        let frames = travelling_band_frames();
-        let anchor = frames[0].math_blocks[0].anchor.clone();
-        let placed: Vec<_> = frames
-            .iter()
-            .map(|frame| {
-                math_tool_boxes_for(fade_metrics(), seat_test_seat(), frame, &anchor).unwrap()
-            })
-            .collect();
-        for (index, boxes) in placed.iter().enumerate() {
-            for (other, stale) in placed
-                .iter()
-                .enumerate()
-                .filter(|(other, _)| *other != index)
-            {
-                assert_ne!(
-                    boxes.source, stale.source,
-                    "frame {index} borrowed frame {other}'s source mark"
-                );
-                assert_ne!(
-                    boxes.copy, stale.copy,
-                    "frame {index} borrowed frame {other}'s copy mark"
-                );
+    fn math_band_edges_travel_continuously_across_both_faces() {
+        for to_source in [true, false] {
+            let mut frame = seat_test_frame(0);
+            frame.math_blocks[0].source_width_cells = 6;
+            frame.math_blocks[0].left_subpixels = 2 * SUBPIXELS_PER_PX;
+            let mut widths = Vec::new();
+            let mut edges = Vec::new();
+            for step in 0..=1000 {
+                let face = if to_source { step } else { 1000 - step };
+                let p = &mut frame.math_blocks[0];
+                p.display = if face == 1000 {
+                    MathBlockDisplay::Source
+                } else {
+                    MathBlockDisplay::Rendered
+                };
+                p.left_subpixels = if p.display == MathBlockDisplay::Source {
+                    0
+                } else {
+                    2 * SUBPIXELS_PER_PX
+                };
+                p.picture_opacity_milli = 1000 - face;
+                p.face_milli = if step == 0 || step == 1000 {
+                    None
+                } else {
+                    Some(face)
+                };
+                p.clip_height_subpixels = (40_000 + i64::from(face) * 40) * SUBPIXELS_PER_PX / 1000;
+                let geometry = seat_test_geometry(&frame, 0);
+                edges.push([geometry.block[0], geometry.block[2]]);
+                widths.push(geometry.block[2] - geometry.block[0]);
             }
-        }
-    }
-
-    /// VALUE regression guard, not a reproduction (2026-09-20,
-    /// T-MARKS-FRAME-IN-HAND): the old code already read both lanes from one
-    /// stale frame. This preserves their agreement while the owner moves to the
-    /// frame being drawn.
-    #[test]
-    fn the_source_face_and_the_marks_read_one_frame() {
-        let frames = travelling_band_frames();
-        let anchor = frames[0].math_blocks[0].anchor.clone();
-        for (index, frame) in frames.iter().enumerate() {
-            let marks = math_tool_boxes_for(fade_metrics(), seat_test_seat(), frame, &anchor)
-                .expect("the frame carries its marks");
-            let face = math_band_face_for(fade_metrics(), seat_test_seat(), frame, &anchor)
-                .expect("the frame carries its source-face geometry");
-            assert_eq!(marks.block, face.block, "frame {index}");
+            let sign = if to_source { -1.0 } else { 1.0 };
+            for pair in edges.windows(2) {
+                for axis in 0..2 {
+                    assert!(sign * (pair[1][axis] - pair[0][axis]) >= -0.001);
+                    assert!(
+                        (pair[1][axis] - pair[0][axis]).abs() <= 1.0,
+                        "one-frame edge flip: {pair:?}, direction={to_source}"
+                    );
+                }
+            }
+            assert!((widths[1000] - widths[999]).abs() <= 1.0);
         }
     }
 
