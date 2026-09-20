@@ -538,3 +538,63 @@ Also ruled by the owner and folded in without further argument: Claude's orange 
 5. Other windows' rows when minimised or elsewhere. **Recommended: listed.** The rail is the application's (§11.3); a window's placement is not a fact about its agents.
 6. The toast's third line. Open.
 7. **The action log records agents only. Recommended, and the owner's worry is answered elsewhere.** The worry (2026-09-20): with two pages or two browsers open, a person acts on one and the agent cannot tell which. That is a question about *current state*, and a history of the person's clicks is the wrong instrument for it — the agent would have to replay a log to learn what one read would tell it. **The instrument is the tool surface's read verbs plus a revision on every addressable thing**: an agent's write names the revision it read; a surface the person touched since has moved on; Folio refuses the stale write and the agent reads again. The log stays small, holds nothing a person typed, and §2.5's interruption counts still come from it (a notification shown and a pane focused are Folio's own events, not the person's content). Web driving is outside the first 0.5 (§11.10), so this binds when that ticket is written.
+
+## 13. Revision 4 — two more reviews, a survey, and the owner's rulings (this section rules over §12 and §11 where they differ)
+
+Sources, all in the repository: Codex's and Kimi's adversarial reviews of revision 3 (`docs/plans/review/agent-workbench-0.5-review3-{codex,kimi}-2026-09-20.md`, 22 findings each), their triage against the code (`…-review3-triage-2026-09-20.md`: 44 findings → 27 issues → 7 rules; its §B lists where the reviewers were wrong), and the survey of terminal agents (`docs/plans/agents/agent-survey-2026-09-20.md`).
+
+### 13.1 Corrections of fact
+
+- **§11.5's one-second forward clear is wrong as written.** `UserPromptSubmit` is `ClearScope::All` with `begins_turn: true`; a permission asked 100 ms after a submit would be deleted. **The tolerance is a property of the clear's `begins_turn` column: `false` forgives one second after it, `true` forgives nothing.**
+- **§11.5's answer to the stuck Waiting was wrong.** Approving a tool is not a prompt submission, and six gestures (an arrow key among them) already acknowledge. See §13.2.
+- **Working never ends after `kill -9`.** The pane's root is the shell, not the agent, and no process walker exists. Every asserted fact therefore carries one clock (`WAIT_TTL`, 600 s); expiry means *the evidence went stale* and establishes no other state.
+- **A denied permission left the word Waiting.** Under §13.2 the word returns to Working when the wait is withdrawn, whatever the answer was.
+- **§11.8's floor table promised a row its own recognition rule forbids.** A hookless, OSC-silent agent gets no row. The floor is: hooks, else OSC, else nothing.
+- **§12.4.7 is ruled, not recommended:** the action log records agents only (owner, 2026-09-20).
+
+### 13.2 The ledger owns facts; the word is derived
+
+**Replaces the state machine of §3.2/§11.5 with one rule.** The ledger holds five independent facts, each with one owner and one expiry: agent lifetime · turn phase · outstanding waits · the acknowledgement watermark · account quota (plus the last turn's outcome). **The row's word and the pane's dot are computed from them every frame and stored nowhere.** Waiting is shown while a wait is asserted *and* unacknowledged. Focusing a pane acknowledges; it never resolves a wait, recovers quota, or changes an outcome.
+
+Three lifecycles, never one: **a notification** (ends by dismissal or by itself), **a dot** (ends when the pane is focused), **a wait** (ends when its producer says so). Mute touches the first alone.
+
+**"Focused pane" has one definition, application-wide:** the shipped `seat_holds_the_keyboard` — window focused, tab active, seat the focused leaf, the keyboard owner this terminal view. **A pane's address is `{TabId, SeatId, incarnation}` plus an agent-lifetime epoch**, and the window id when it crosses windows; positional indices never leave a frame.
+
+### 13.3 The owner's rulings (2026-09-20, evening)
+
+1. **No reply in the notification in the first 0.5.** It returns in 0.5.x as one paste-only mechanism together with select-and-comment (no Enter sent, the agent's own draft preserved). Cutting it removes four blocking findings: input readiness cannot be proven from absence of evidence, `Elicitation` was missed, and `sanitize_paste` maps `\n`→`\r` with bracketing conditional on the child's 2004 mode, so a multi-line reply into an unbracketed child submits itself line by line.
+2. **Waiting and Failed always raise a notification; Done follows the shipped *Turn finished* switch.** *(Recommended; the owner asked what the switch is and has not yet confirmed. He runs agents with permissions bypassed, so for him nearly every notification is a Done — the switch is what he already lives by.)*
+3. **Drag-out is 0.5.x.** Nothing depends on it, and its open questions (scroll owner, selection, composition owner, mouse modes, which view answers a query, resize, the source pane closing) are all about input ownership that no earlier ticket settles.
+4. **Select-and-comment is 0.5.x.** It does not conflict with copy-on-select: release still copies; the comment is a separate command (context menu and a key), takes the text from the selection and never from the clipboard, freezes the quotation into a Folio-owned draft, binds to the agent lifetime it was selected in, and sends no Enter. In a mouse-reporting TUI the existing Shift-selection is the local gesture.
+5. **No Stop, and no "go there" button.** A notification exists because the agent has already stopped, so there is nothing to stop; **clicking the notification, or a rail row, *is* going there.** Stopping a working agent is a keystroke in its own pane, where its meaning is unambiguous.
+6. **Mute silences the notification only** — not the dot, and never Failed.
+7. **The badge counts every window's dots**, as the rail lists every window's agents. **Where a notification appears: in the focused Folio window; if none is focused, as a system notification; if system notifications are off, in every Folio window.** One notification is **one object with several views**: handled anywhere, gone everywhere. **The badge's list and the pop-up are the same component** — whatever one can do, the other can, in the same release.
+8. **The recovery toast says one word, not a time** — `Anthropic · recovered`. *(Recommended; not yet confirmed.)* The other two keep their numbers: `Anthropic · 80% · 19:00`, `Anthropic · 0 · 19:00`.
+
+### 13.4 Marks
+
+Anthropic's terms allow naming Claude Code in plain text and forbid its logos "as part of your own product"; eight vendors publish no brand page. **Every vendor's slot is a replaceable glyph plus the name in text.** Proposed by the owner, pending his look at the sheet: **Claude's glyph is U+2733, the eight-spoked asterisk Claude Code puts in its own title, drawn by Folio** — strictly eight equal spokes, `currentColor`, never orange, no hand-drawn irregularity: a Unicode symbol, not a rendition of their mark. A neutral letter-seal system stands behind it for any vendor whose mark may not be drawn. Lookalikes are refused everywhere: resemblance is the test, and an altered mark fails it twice.
+
+### 13.5 Which agents
+
+The list had grown from whatever was mentioned in conversation. The survey replaces that: **Tier A** Codex, Claude Code, Copilot CLI, Gemini CLI; **B** Qwen Code, CodeBuddy, Kimi Code, Cursor CLI; **C** (floor and a glyph) OpenCode, pi, Crush, Amp, Cline, Droid, Goose, Aider; **D** iFlow, Trae, and GLM/DeepSeek as adapters — their official path *is* a Claude Code process. Three consequences:
+
+- **A family costs rows and a config template, not code.** Qwen Code, CodeBuddy and iFlow rebuilt their event layers on Claude Code's pattern; parameterising `attention_hooks.rs` (config-root variable, file path, event-name aliases) covers about seven vendors.
+- **Gemini CLI is the real gap and its own ticket, after the first 0.5**: its hook is a shell string with no `args[]` form, which `docs/agent-integration-marks.md` refuses to write.
+- **No OSC convention replaces adapters, and ACP cannot attach to a TUI already running.** Vendors pick their notification protocol from terminal allowlists Folio is not on — to be measured, not quoted, before any ticket relies on it. "Folio as an ACP client" is a 0.6/0.7 lane; its registry's per-agent icons are usable now.
+
+### 13.6 The first 0.5, in order
+
+Each ticket has one acceptance gate that runs with no vendor installed (the triage's §E.2 gives them in full).
+
+| # | Ticket |
+|---|---|
+| 1 | Recent view, and the marks pipeline |
+| 2 | The ledger, keyed as §13.2; with it, the append log sink (no payload field in the record type) |
+| 3 | The rail and the row |
+| 4 | Notification: appear · expand · click to go there |
+| 5 | The badge and its list (the same component as 4) |
+| 6a | The statusLine lane: wrap or refuse, byte-identical on uninstall |
+| 6b | Quota: chip, panel, toasts — a bucket reads available / exhausted / **unknown**; crossing `resets_at` yields unknown, not recovered |
+| 8 | Protocol, read verbs only; every read returns a revision |
+| — | **0.5.x:** reply, drag-out, select-and-comment, mutating verbs and the typing tier, web driving, Gemini CLI |
