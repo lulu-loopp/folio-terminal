@@ -45,6 +45,12 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **An idle Folio window now lets the event loop sleep.** Wake-up deadlines are
+  retained as absolute appointments owned by the event that armed them instead
+  of being renewed from each loop turn; unchanged macOS menu inputs also stop
+  before entering AppKit, and memory diagnostics no longer query the platform
+  on every wake.
+
 - **A PowerShell script now opens in the preview highlighted, instead of as
   plain text.** `.ps1`, `.psm1` and `.psd1` files, and a ` ```powershell `,
   ` ```pwsh ` or ` ```ps1 ` fence inside a Markdown document, get the same

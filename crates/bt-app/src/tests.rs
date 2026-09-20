@@ -48037,3 +48037,111 @@ fn a_hole_is_only_cut_where_a_floor_already_stands() {
         "a hidden page is cut a hole anyway"
     );
 }
+
+/// Reading a periodic appointment does not move it; only spending it does.
+/// This is the startup poll's instance of the deadline-fold rule.
+#[test]
+fn an_unchanged_periodic_owner_answers_the_same_absolute_instant() {
+    let epoch = Instant::now();
+    let mut appointment = epoch + STARTUP_PTY_POLL_INTERVAL;
+    let first = appointment;
+    let second = appointment;
+    assert_eq!(first, second, "two reads did not rebase the startup poll");
+
+    advance_periodic_deadline(
+        &mut appointment,
+        epoch + STARTUP_PTY_POLL_INTERVAL,
+        STARTUP_PTY_POLL_INTERVAL,
+    );
+    assert_eq!(
+        appointment,
+        epoch + STARTUP_PTY_POLL_INTERVAL * 2,
+        "the owner advances exactly when its appointment is spent",
+    );
+}
+
+/// The named fold preserves both the absolute winner and its evidence label.
+/// Supplying the same owner snapshots at two different query instants has no
+/// place from which to manufacture a different answer.
+#[test]
+fn an_unchanged_deadline_fold_answers_the_same_named_instant() {
+    let epoch = Instant::now();
+    let names = ["later", "winner", "absent"];
+    let entries = [Some(epoch + Duration::from_secs(2)), Some(epoch), None];
+    let ask = |_now| earliest_named_deadline(names, entries);
+    let first = ask(epoch);
+    let second = ask(epoch + Duration::from_secs(1));
+    assert_eq!(first, Some(("winner", epoch)));
+    assert_eq!(second, first);
+}
+
+/// Red gates for every query-time renewal that was an entry in the baseline
+/// fold. The names make a failure identify all entries sharing that source;
+/// the behavioral tests in `pace`, `debounce`, and above pin their replacement.
+#[test]
+fn deadline_owners_do_not_manufacture_appointments_from_the_query_time() {
+    let runtime = include_str!("main.rs");
+    let function = |signature: &str| {
+        let rest = runtime
+            .split_once(signature)
+            .unwrap_or_else(|| panic!("missing production function `{signature}`"))
+            .1;
+        &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+    };
+    for (owners, retired_form) in [
+        ("startup poll", "map(|delay| now + delay)"),
+        (
+            "strip, tooltip, key hint, Cards hint, toast, command flash, command rails, terminal thumbs, file peek, file-peek close and dwell, float, formula tools, formula toggle, refused frame",
+            "next_animation_frame(now)",
+        ),
+        (
+            "strip animation",
+            "now + self.window.frame_clock.interval()",
+        ),
+        ("pane motion fold entry", "pane_motion.deadline("),
+    ] {
+        assert!(
+            !runtime.contains(retired_form),
+            "{owners} still renew from the fold query time via `{retired_form}`",
+        );
+    }
+    let drag = function("    fn drag_autoscroll_deadline(");
+    assert!(
+        !drag.contains(".map_or(now") && !drag.contains(".unwrap_or(now"),
+        "drag auto-scroll still renews from the fold query time:\n{drag}",
+    );
+    assert!(
+        !include_str!("persist.rs").contains("Instant::now() + SESSION_DEBOUNCE"),
+        "session save still renews from the time its deadline is queried",
+    );
+}
+
+/// The macOS menu memo is decided entirely from inputs. An unchanged turn is
+/// rejected here, before plan construction and before any AppKit call.
+#[test]
+fn unchanged_main_menu_inputs_are_silent_before_appkit() {
+    let shortcuts = shortcuts::Shortcuts::defaults();
+    let focus = Some(shortcuts::Focus::default());
+    let memo = MainMenuInputs::new(&shortcuts, focus);
+    assert!(memo.matches(&shortcuts, focus));
+
+    let mut rebound = shortcuts.clone();
+    rebound.set("new-tab", None);
+    assert!(
+        !memo.matches(&rebound, focus),
+        "a rebound chord rebuilds the menu"
+    );
+    assert!(
+        !memo.matches(&shortcuts, None),
+        "a focus change rebuilds the menu"
+    );
+
+    let stale_language = MainMenuInputs {
+        language_revision: memo.language_revision.wrapping_sub(1),
+        ..memo
+    };
+    assert!(
+        !stale_language.matches(&shortcuts, focus),
+        "a language revision rebuilds the menu",
+    );
+}
