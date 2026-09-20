@@ -8115,11 +8115,11 @@ fn preview_block_bar_at(
 /// spans that come back are measured in the columns those expanded lines
 /// occupy, which is what the paint below indexes by.
 fn markdown_fence_highlight(lang: Option<&str>, text: &str) -> highlight::Highlighting {
-    let Some(syntax) = highlight::syntax_for_fence(lang) else {
+    let Some(grammar) = highlight::syntax_for_fence(lang) else {
         return highlight::Highlighting::default();
     };
     let lines: Vec<String> = text.lines().map(preview::expand_tabs).collect();
-    highlight::Highlighting::of(&lines, syntax)
+    highlight::Highlighting::of(&lines, grammar)
 }
 
 /// How wide a code fence insists on being: its longest line, plus its border
@@ -63432,7 +63432,7 @@ impl Runtime<'_> {
                 // carried before highlighting existed.
                 let highlight =
                     highlight::syntax_for_file(&name, lines.first().map(String::as_str))
-                        .map(|syntax| highlight::Highlighting::of(&lines, syntax))
+                        .map(|grammar| highlight::Highlighting::of(&lines, grammar))
                         .unwrap_or_default();
                 PreviewDocument::Text {
                     lines,

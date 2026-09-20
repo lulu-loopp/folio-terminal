@@ -53,7 +53,7 @@ try {
                     "docs/install.md", "docs/install.zh-CN.md")
     $skipExt = @(".ttf", ".otf", ".pfb", ".icc", ".nupkg", ".zip", ".png", ".jpg",
                  ".jpeg", ".ico", ".pdf", ".dll", ".exe", ".recording", ".btcr",
-                 ".woff", ".woff2", ".mp4", ".webm")
+                 ".woff", ".woff2", ".mp4", ".webm", ".packdump")
 
     # The only account names a fixture may spell out.
     $placeholders = @("alice", "bob", "user", "users", "me", "dev", "you", "x", "a",

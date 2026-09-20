@@ -6,6 +6,19 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Fixed
+
+- **A PowerShell script now opens in the preview highlighted, instead of as
+  plain text.** `.ps1`, `.psm1` and `.psd1` files, and a ` ```powershell `,
+  ` ```pwsh ` or ` ```ps1 ` fence inside a Markdown document, get the same
+  keywords, strings, comments, numbers and function names every other language
+  has had — on Windows, on macOS and on Linux, with nothing new to install.
+  PowerShell was the one common language missing from the set of grammars Folio
+  carries, for a reason that was never visible from the outside: the grammar
+  needed one pattern rewritten before the pure-Rust regex engine Folio uses
+  would take it. The rewritten line, what it was, and why it means the same
+  thing are recorded in `assets/syntaxes/README.md`, beside the grammar itself.
+
 ### Changed
 
 - **When Folio's window pauses, its own log now names the call it was inside.**

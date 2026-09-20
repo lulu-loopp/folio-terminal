@@ -45501,7 +45501,7 @@ fn highlighted_text_document(name: &str, body: &str, columns: Option<usize>) -> 
         None => preview_edit::WrapLayout::unwrapped(&lines),
     };
     let highlight = highlight::syntax_for_file(name, lines.first().map(String::as_str))
-        .map(|syntax| highlight::Highlighting::of(&lines, syntax))
+        .map(|grammar| highlight::Highlighting::of(&lines, grammar))
         .unwrap_or_default();
     PreviewDocument::Text {
         lines,

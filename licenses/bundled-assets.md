@@ -165,6 +165,49 @@ written as an arc rather than as the cubic the unminified file spells it with.
 
 ---
 
+### The PowerShell syntax grammar
+
+<https://github.com/PowerShell/EditorSyntax> — MIT,
+Copyright (c) Microsoft Corporation.
+
+`assets/syntaxes/PowerShell.sublime-syntax` is the grammar the preview reads
+`.ps1`, `.psm1` and `.psd1` files with, and `assets/syntaxes/PowerShell.packdump`
+beside it is that same grammar as the binary dump compiled into the executable
+(`crates/bt-app/src/highlight.rs`, `include_bytes!`). It is vendored because the
+grammar set this product loads — `two-face`'s — ships PowerShell only in its
+Oniguruma dumps, and this product runs syntect's pure-Rust backend.
+
+It travels through two hands, and both are named because both are in the file:
+
+| | |
+|---|---|
+| Copied from | `sharkdp/bat`, `assets/syntaxes/02_Extra/PowerShell.sublime-syntax`, at commit `a02713dc15818dd2d82d5a38b45d2cc33a4de95c` |
+| Blob | `3a452a643737f5bc95e11c8ca5e97b0b0ea6af81`, 22,202 bytes, SHA-256 `ca72d05cbb1d9ecf3588ed666d86ce9234600238b650d8a379256aebe47c5ddb` |
+| Which bat generated from | `PowerShell/EditorSyntax`, `PowerShellSyntax.tmLanguage`, at commit `742f0b5d4b60f5930c0b47fcc1f646860521296e` |
+
+**It has been modified**, in two lines, and `assets/syntaxes/README.md` states
+each one with its before, its after and why the two are the same grammar: one
+Oniguruma subroutine call written out as the character class it calls, and
+`pwsh` added to the extension list so a ` ```pwsh ` fence resolves. Nothing was
+deleted or weakened.
+
+Microsoft's licence, from the repository the grammar is generated from:
+
+<!-- verbatim: licenses/powershell-editorsyntax-LICENSE.txt -->
+
+That repository carries a third-party notice of its own, for the project the
+grammar incorporates material from, and it is reproduced here for the same
+reason Microsoft reproduces it there:
+
+<!-- verbatim: licenses/powershell-editorsyntax-NOTICES.txt -->
+
+And bat's, for the conversion this copy was taken from. `bat` is
+`MIT OR Apache-2.0`; the MIT half is the one reproduced:
+
+<!-- verbatim: licenses/bat-LICENSE-MIT.txt -->
+
+---
+
 ### Ten colour schemes
 
 `assets/schemes/*.json`. Two of the ten — `folio-dark.json` and
