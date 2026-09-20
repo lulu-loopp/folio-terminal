@@ -58,6 +58,9 @@ mod dir_news;
 mod explorer_menu;
 mod favicon;
 mod file_peek;
+mod file_reads;
+#[cfg(test)]
+mod file_reads_source_tests;
 mod files;
 mod files_watch;
 mod first_run;
@@ -1647,10 +1650,13 @@ fn peek_pixels(
             animated: true,
         });
     }
-    decoder.decode(bt_term::InlineImageTask {
-        occurrence_id: 0,
-        source: bt_term::InlineImageSource::LocalPath(path.to_owned()),
-    })
+    decoder.decode_in_lane(
+        bt_term::InlineImageTask {
+            occurrence_id: 0,
+            source: bt_term::InlineImageSource::LocalPath(path.to_owned()),
+        },
+        bt_platform::file_reads::Lane::Peek,
+    )
 }
 
 struct MathWorker {
@@ -115431,6 +115437,12 @@ impl FolioApp {
     /// X-4's first rule.
     fn settle_app_delegate_events(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
         for event in app_delegate_wire::take() {
+            if !matches!(
+                event.kind,
+                bt_platform::AppDelegateEventKind::LastWindowClosed
+            ) {
+                bt_platform::file_reads::input();
+            }
             let origin = event.origin;
             match event.kind {
                 bt_platform::AppDelegateEventKind::Reopen { .. } => {
@@ -117614,6 +117626,12 @@ impl ApplicationHandler<AppEvent> for FolioApp {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
+        if matches!(
+            event,
+            AppEvent::QuakeSummoned | AppEvent::NotificationClicked
+        ) {
+            bt_platform::file_reads::input();
+        }
         present_diagnostics::event();
         // **The lane this wake belongs to, named before it is spent** — see
         // [`AppEvent::station`]. Paired with the `at` below rather than left
@@ -117965,6 +117983,9 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         window_id: WindowId,
         event: WindowEvent,
     ) {
+        if file_reads::is_user_input(&event) {
+            bt_platform::file_reads::input();
+        }
         present_diagnostics::event();
         hang_watch::at(hang_watch::Station::Event);
         hang_watch::during(window_event_station(&event), || {
@@ -124072,7 +124093,7 @@ fn probe_input(value: Option<std::ffi::OsString>) -> Result<Option<Vec<u8>>> {
     let Some(path) = diagnostics::named_file(value) else {
         return Ok(None);
     };
-    std::fs::read(&path)
+    bt_platform::file_reads::read(bt_platform::file_reads::Lane::Other, &path)
         .with_context(|| format!("read BT_PROBE_INPUT {}", path.display()))
         .map(Some)
 }

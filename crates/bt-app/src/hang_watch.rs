@@ -2612,7 +2612,7 @@ pub fn start(reports: PathBuf, trace_perf: bool) {
     if let Err(error) = bt_platform::spawn_at_priority(
         "bt-hang-watch",
         bt_platform::ThreadPriority::BelowNormal,
-        move || watch_forever(reports, ui_thread_id, threshold),
+        move || watch_forever(reports, ui_thread_id, threshold, trace_perf),
     ) {
         crate::diagnostics::note(&format!("Folio could not start its hang watchdog: {error}"));
     }
@@ -2674,8 +2674,9 @@ pub fn can_come_round(now_ms: u64, pulse: Pulse, allowance_ms: u64) -> bool {
 /// `threshold` is [`start`]'s answer and not this thread's: see
 /// [`TRACED_HANG_THRESHOLD`] for which run gets which, and for why the reading
 /// is not taken here.
-fn watch_forever(reports: PathBuf, ui_thread_id: u32, threshold: Duration) {
+fn watch_forever(reports: PathBuf, ui_thread_id: u32, threshold: Duration, trace_perf: bool) {
     let mut watch = HangWatch::new(threshold, STARTUP_THRESHOLD);
+    let mut reads = crate::file_reads::Clock::default();
     // The file the stall in progress was reported to, so its healing line lands
     // in the same file rather than in a second one nobody would connect to it.
     let mut open_report: Option<PathBuf> = None;
@@ -2700,7 +2701,8 @@ fn watch_forever(reports: PathBuf, ui_thread_id: u32, threshold: Duration) {
         let mut reported: Option<String> = None;
         // Four atomic loads and a clock read. This is the entire steady-state
         // cost of the facility.
-        match watch.poll(heart.now_ms(), heart.sample(), &mut ask) {
+        let now_ms = heart.now_ms();
+        match watch.poll(now_ms, heart.sample(), &mut ask) {
             // `Excused` says nothing out loud on purpose: a window that is being
             // dragged answers this every two seconds, and a diagnostic that
             // narrated it would be a log full of a program working.
@@ -2759,6 +2761,14 @@ fn watch_forever(reports: PathBuf, ui_thread_id: u32, threshold: Duration) {
         if let Some(said) = reported {
             crate::diagnostics::note(&said);
         }
+        reads.tick(
+            now_ms,
+            trace_perf,
+            &bt_platform::file_reads::LEDGER,
+            bt_platform::file_reads::take_input,
+            |line| crate::diagnostics::note(&line),
+            crate::trace_sink::stderr_line,
+        );
     }
 }
 

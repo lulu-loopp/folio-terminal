@@ -7,6 +7,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+bt-platform = { path = "../bt-platform" }
 bt-doc = { path = "../bt-doc" }
 mitex.workspace = true
 mitex-lexer = "=0.2.4"

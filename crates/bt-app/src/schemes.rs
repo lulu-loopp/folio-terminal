@@ -784,7 +784,8 @@ fn read_scheme_file(path: &Path) -> Result<String, String> {
         Ok(_) => {}
         Err(error) => return Err(format!("the file could not be read: {error}")),
     }
-    std::fs::read_to_string(path).map_err(|error| format!("the file could not be read: {error}"))
+    bt_platform::file_reads::read_to_string(bt_platform::file_reads::Lane::Settings, path)
+        .map_err(|error| format!("the file could not be read: {error}"))
 }
 
 fn user_sources() -> impl Iterator<Item = SchemeSource> {

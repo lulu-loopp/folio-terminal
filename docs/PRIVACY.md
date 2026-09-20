@@ -82,6 +82,12 @@ rm -rf ~/Library/Application\ Support/Folio/diagnostics*.log \
        ~/Library/Application\ Support/Folio/hang-reports
 ```
 
+The local diagnostics log can also contain file-read totals by lane and up to
+three repeatedly read file **basenames**. The file-read ledger never writes
+parent directories or file contents; it clears its bounded name table each
+minute. Basenames may still be meaningful, so review them before attaching a
+log to an issue. These diagnostics are not sent anywhere automatically.
+
 ### The web preview's profile
 
 A separate place from the directory above, and where it is depends on the

@@ -442,7 +442,10 @@ fn run_probe() -> Probe {
     };
     let output = command
         .args(["-NoProfile", "-NonInteractive", "-Command", PROBE_COMMAND])
-        .output();
+        .output()
+        .inspect(|output| {
+            bt_platform::file_reads::pipe_output(bt_platform::file_reads::Lane::Settings, output)
+        });
     let Ok(output) = output else {
         return Probe::default();
     };
@@ -1016,7 +1019,9 @@ mod installed_disk {
             path.is_dir()
         }
         fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
-            std::fs::read(path)
+            // Through the read ledger: this is the door that ran away on
+            // 2026-09-20, and the tripwire has to be able to see it.
+            bt_platform::file_reads::read(bt_platform::file_reads::Lane::Settings, path)
         }
         fn product_version(&self, path: &Path) -> Option<String> {
             file_product_version(path)
