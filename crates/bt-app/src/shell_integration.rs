@@ -1321,13 +1321,27 @@ pub fn parse_profile_answer(stdout: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// Only exact product-owned lines establish ownership.
+/// Whether this profile's text already dot-sources the script.
+///
+/// **A string criterion, and deliberately a loose one**: it recognises the line
+/// this product writes *and* the line a reader wrote themselves, pointing at a
+/// checkout, a copy, or anywhere else — because what the offer must not do is
+/// appear in front of somebody who has already installed the integration their
+/// own way. The file name is the whole of the evidence; the path in front of it
+/// is theirs.
+///
+/// **A commented line is not an installation.** The script's own header carries
+/// a worked example of the line behind a `#`, so a reader who pasted the header
+/// into their profile would otherwise read as installed while their shell went
+/// on emitting nothing — silence about the one machine that needs the offer.
+///
+/// Offer evidence only; editing and recording must use `profile_marks::Forms::owns`.
 #[must_use]
-pub fn profile_declares_integration(text: &str) -> bool {
-    let forms = profile_marks::Forms::new(&[persist::storage_dir()
-        .join(SCRIPT_DIRECTORY)
-        .join(SCRIPT_FILE_PS1)]);
-    text.lines().any(|line| forms.owns(line))
+pub fn profile_suppresses_integration_offer(text: &str) -> bool {
+    text.lines().any(|line| {
+        let line = line.trim_start();
+        !line.starts_with('#') && line.to_ascii_lowercase().contains(SCRIPT_FILE_PS1)
+    })
 }
 
 /// Default managed form for injected profile fixtures. Production resolves the
@@ -1679,7 +1693,7 @@ impl Offer {
 #[must_use]
 pub fn offer_for(profile: &Path) -> Offer {
     match std::fs::read(profile).and_then(|bytes| profile_marks::Decoded::read(&bytes)) {
-        Ok(decoded) if profile_declares_integration(&decoded.text) => Offer::Silent,
+        Ok(decoded) if profile_suppresses_integration_offer(&decoded.text) => Offer::Silent,
         Ok(_) | Err(_) => Offer::Owed(profile.to_path_buf()),
     }
 }
@@ -1801,10 +1815,10 @@ mod tests {
         let script = persist::storage_dir()
             .join(SCRIPT_DIRECTORY)
             .join(SCRIPT_FILE_PS1);
-        assert!(profile_declares_integration(&format!(
-            ". \"{}\"",
-            script.display()
-        )));
+        assert!(
+            profile_marks::Forms::new(std::slice::from_ref(&script))
+                .owns(&format!(". \"{}\"", script.display()))
+        );
     }
 
     #[test]
@@ -1964,8 +1978,8 @@ mod tests {
 
     #[test]
     fn shell_integration_managed_line_is_guarded_and_user_code_is_not_ours() {
-        assert!(!profile_declares_integration(". D:\\tools\\folio.ps1"));
-        assert!(!profile_declares_integration("# my note about folio.ps1"));
+        assert!(!profile_marks::Forms::new(&[]).owns(". D:\\tools\\folio.ps1"));
+        assert!(!profile_marks::Forms::new(&[]).owns("# my note about folio.ps1"));
         let line = integration_line();
         assert!(line.starts_with("if (Test-Path -LiteralPath "));
         assert!(line.ends_with("# Folio shell integration v1"));
@@ -3474,15 +3488,17 @@ mod tests {
     /// silent about the very machine that needs the offer.
     #[test]
     fn only_a_live_line_counts_as_an_installed_integration() {
-        assert!(profile_declares_integration(profile_marks::LEGACY_LINE));
-        assert!(profile_declares_integration(profile_marks::MANAGED_LINE));
-        for user in [
-            r". 'D:\Developer\folio-terminal\scripts\shell-integration\FOLIO.PS1'",
-            "# my note about folio.ps1",
-            "\r\n",
-            "",
-        ] {
-            assert!(!profile_declares_integration(user), "{user}");
+        assert!(profile_suppresses_integration_offer(
+            profile_marks::LEGACY_LINE
+        ));
+        assert!(profile_suppresses_integration_offer(
+            profile_marks::MANAGED_LINE
+        ));
+        assert!(profile_suppresses_integration_offer(
+            r". 'D:\Developer\folio-terminal\scripts\shell-integration\FOLIO.PS1'"
+        ));
+        for user in ["# my note about folio.ps1", "\r\n", ""] {
+            assert!(!profile_suppresses_integration_offer(user), "{user}");
         }
     }
 
@@ -3551,7 +3567,7 @@ mod tests {
             "one blank line between what was theirs and what is ours, in the \
              line ending the file already uses"
         );
-        assert!(profile_declares_integration(
+        assert!(profile_suppresses_integration_offer(
             &std::fs::read_to_string(&profile).unwrap()
         ));
     }
