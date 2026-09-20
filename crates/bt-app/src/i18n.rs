@@ -465,6 +465,11 @@ pub enum Text {
     /// whole complaint a reader would have.
     RowTerminalFont,
     RowTerminalCjkFont,
+    CjkSimplified,
+    CjkTraditional,
+    CjkJapanese,
+    CjkKorean,
+    CjkUndeclared,
     RowFontSize,
     /// The Terminal page's first row, and therefore the row that puts that page
     /// in the rail at all.
@@ -2915,6 +2920,16 @@ impl Text {
             Self::RowDefaultProfile => pick(lang, "Default profile", "默认配置文件"),
             Self::RowLanguage => pick(lang, "Language", "语言"),
             Self::RowTerminalFont => pick(lang, "Terminal font", "终端字体"),
+            // CHINESE PENDING — owner 2026-09-20: use the reader's term for
+            // Chinese font; describe Chinese, Japanese and Korean terminal text.
+            // Keep the current translation until the copywriter's pass.
+            Self::CjkSimplified => pick(lang, "Simplified Chinese", "CHINESE PENDING"),
+            Self::CjkTraditional => pick(lang, "Traditional Chinese", "CHINESE PENDING"),
+            Self::CjkJapanese => pick(lang, "Japanese", "CHINESE PENDING"),
+            Self::CjkKorean => pick(lang, "Korean", "CHINESE PENDING"),
+            Self::CjkUndeclared => pick(lang, "CJK (language undeclared)", "CHINESE PENDING"),
+            // CHINESE PENDING — owner 2026-09-20 requests 「中文字体」.
+            // The copywriter will name Chinese, Japanese and Korean terminal text in the description.
             Self::RowTerminalCjkFont => pick(lang, "CJK font", "中日韩字体"),
             Self::RowFontSize => pick(lang, "Font size", "字号"),
             Self::RowPsReadLine => pick(lang, "PSReadLine patch", "PSReadLine 补丁"),
@@ -3055,6 +3070,8 @@ impl Text {
                 "The font terminal text is drawn in. Tabs, menus and this dialog keep their own.",
                 "终端文字使用的字体。标签、菜单和这个对话框保持各自的字体。",
             ),
+            // CHINESE PENDING — owner 2026-09-20: the face is used for Chinese,
+            // Japanese and Korean text in the terminal. Preserve current copy.
             Self::DescTerminalCjkFont => pick(
                 lang,
                 "The font for CJK text. Automatic is the platform's default.",
@@ -5006,7 +5023,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 690] = [
+    pub const ALL: [Self; 695] = [
         Self::PastePathEncoding,
         Self::PastePathControl,
         Self::PastePathPowerShellQuote,
@@ -5079,6 +5096,11 @@ impl Text {
         Self::RowLanguage,
         Self::RowTerminalFont,
         Self::RowTerminalCjkFont,
+        Self::CjkSimplified,
+        Self::CjkTraditional,
+        Self::CjkJapanese,
+        Self::CjkKorean,
+        Self::CjkUndeclared,
         Self::RowFontSize,
         Self::RowPsReadLine,
         Self::DescTheme,

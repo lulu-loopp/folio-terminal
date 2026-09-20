@@ -362,6 +362,7 @@ version = "0.4.2"
 dependencies = [
  "block2 0.6.2",
  "bt-transcript",
+ "bt-unicode",
  "libc",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
@@ -376,6 +377,7 @@ dependencies = [
  "objc2-uniform-type-identifiers 0.3.2",
  "objc2-user-notifications 0.3.2",
  "objc2-web-kit",
+ "ttf-parser",
  "webview2-com",
  "windows",
  "windows-core",
@@ -447,6 +449,7 @@ dependencies = [
 name = "bt-unicode"
 version = "0.4.2"
 dependencies = [
+ "ttf-parser",
  "unicode-segmentation",
  "unicode-width",
 ]

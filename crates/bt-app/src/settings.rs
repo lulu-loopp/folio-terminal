@@ -1660,7 +1660,94 @@ impl MonospaceFamilySlot {
 }
 
 static MONOSPACE_FAMILIES: MonospaceFamilySlot = MonospaceFamilySlot::new();
-static CJK_FAMILIES: MonospaceFamilySlot = MonospaceFamilySlot::new();
+// Both language projections are published together. Switching UI language
+// selects an already sorted list; it never opens a font collection.
+struct CjkFamilySlot {
+    published: std::sync::RwLock<(bool, [&'static [bt_platform::CjkFamily]; 2])>,
+    offered: std::sync::Mutex<Option<Vec<bt_platform::CjkFamily>>>,
+}
+impl CjkFamilySlot {
+    const fn new() -> Self {
+        Self {
+            published: std::sync::RwLock::new((false, [&[], &[]])),
+            offered: std::sync::Mutex::new(None),
+        }
+    }
+    fn adopted(&self) -> &'static [bt_platform::CjkFamily] {
+        self.published
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .1[crate::i18n::current().index()]
+    }
+    fn scanned(&self) -> bool {
+        self.published
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .0
+    }
+    fn publish(&self, families: Vec<bt_platform::CjkFamily>, scanned: bool) -> bool {
+        let en = with_automatic_cjk(bt_platform::cjk::order_for_language(
+            families.clone(),
+            "en-US",
+        ));
+        let zh = with_automatic_cjk(bt_platform::cjk::order_for_language(families, "zh-CN"));
+        let mut held = self
+            .published
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held.0 |= scanned;
+        if held.1[0] == en && held.1[1] == zh {
+            return false;
+        }
+        held.1 = [
+            Box::leak(en.into_boxed_slice()),
+            Box::leak(zh.into_boxed_slice()),
+        ];
+        true
+    }
+    fn offer(&self, families: Vec<bt_platform::CjkFamily>) {
+        *self
+            .offered
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(families);
+    }
+    fn take_offer(&self) -> Option<Vec<bt_platform::CjkFamily>> {
+        self.offered
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+}
+static CJK_FAMILIES: CjkFamilySlot = CjkFamilySlot::new();
+
+fn cjk_ui_locale() -> &'static str {
+    match crate::i18n::current() {
+        crate::i18n::Lang::English => "en-US",
+        crate::i18n::Lang::Chinese => "zh-CN",
+    }
+}
+
+fn cjk_language_note(
+    family: &bt_platform::CjkFamily,
+    lang: crate::i18n::Lang,
+) -> Option<&'static str> {
+    let c = family.coverage;
+    if family.name.is_empty() || (lang == crate::i18n::Lang::Chinese && c.simplified) {
+        return None;
+    }
+    let text = if c.simplified {
+        Text::CjkSimplified
+    } else if c.traditional {
+        Text::CjkTraditional
+    } else if c.japanese {
+        Text::CjkJapanese
+    } else if c.korean {
+        Text::CjkKorean
+    } else {
+        Text::CjkUndeclared
+    };
+    Some(text.in_lang(lang))
+}
 
 /// **The list before anybody has asked the machine anything** — one row, and it
 /// is the family the grid falls back to.
@@ -1686,13 +1773,7 @@ fn default_families() -> &'static [bt_platform::MonospaceFamily] {
 fn with_automatic_cjk(families: Vec<bt_platform::CjkFamily>) -> Vec<bt_platform::CjkFamily> {
     let mut families = bt_platform::order_cjk_families(families);
     families.retain(|family| !family.name.is_empty());
-    families.insert(
-        0,
-        bt_platform::CjkFamily {
-            name: String::new(),
-            files: Vec::new(),
-        },
-    );
+    families.insert(0, bt_platform::CjkFamily::default());
     families
 }
 
@@ -1801,7 +1882,7 @@ pub fn begin_monospace_scan(in_force: &str, cjk_in_force: &str) {
         } else {
             vec![bt_platform::CjkFamily {
                 name: cjk_in_force.to_owned(),
-                files: Vec::new(),
+                ..Default::default()
             }]
         };
         CJK_FAMILIES.publish(with_automatic_cjk(named), false);
@@ -1829,8 +1910,19 @@ fn scan_monospace_families() {
     loop {
         MONOSPACE_SCANS.fetch_add(1, std::sync::atomic::Ordering::Release);
         MONOSPACE_FAMILIES.offer(bt_platform::monospace_font_families());
-        MONOSPACE_SCANS.fetch_add(1, std::sync::atomic::Ordering::Release);
-        CJK_FAMILIES.offer(with_automatic_cjk(bt_platform::cjk_font_families()));
+        if !CJK_FAMILIES.scanned() {
+            MONOSPACE_SCANS.fetch_add(1, std::sync::atomic::Ordering::Release);
+            let start = std::time::Instant::now();
+            let families = bt_platform::cjk_font_families();
+            if std::env::var_os("BT_PERF_TRACE").is_some_and(|v| !v.is_empty()) {
+                crate::trace_sink::stderr_line(format!(
+                    "BT_PERF_TRACE cjk_enumeration_us={} families={}",
+                    start.elapsed().as_micros(),
+                    families.len()
+                ));
+            }
+            CJK_FAMILIES.offer(with_automatic_cjk(families));
+        }
         // After the answer is in the mailbox and never before: a wake that
         // raced the offer would send the loop to adopt nothing, and the frame
         // the reader is waiting for would then be owed to a wake that is not
@@ -1890,19 +1982,20 @@ pub fn monospace_family_files(name: &str) -> Vec<std::path::PathBuf> {
         .unwrap_or_default()
 }
 
-/// Files needed to make a chosen CJK family available to the bounded renderer database.
+/// Files already published by the font worker. A cold stored selection starts
+/// the worker and is applied again on FontsScanned; no window-thread enumeration.
 #[must_use]
 pub fn cjk_family_files(name: &str) -> Vec<std::path::PathBuf> {
     if name.is_empty() {
         return Vec::new();
     }
     if !CJK_FAMILIES.scanned() {
-        MONOSPACE_SCANS.fetch_add(1, std::sync::atomic::Ordering::Release);
-        CJK_FAMILIES.publish(with_automatic_cjk(bt_platform::cjk_font_families()), true);
+        begin_monospace_scan("", name);
+        return Vec::new();
     }
     cjk_families()
         .iter()
-        .find(|candidate| candidate.name.eq_ignore_ascii_case(name))
+        .find(|candidate| candidate.has_name(name))
         .map(|candidate| candidate.files.clone())
         .unwrap_or_default()
 }
@@ -1933,7 +2026,7 @@ pub fn family_index(name: &str) -> usize {
 pub fn cjk_family_index(name: &str) -> usize {
     cjk_families()
         .iter()
-        .position(|family| family.name.eq_ignore_ascii_case(name))
+        .position(|family| family.has_name(name))
         .unwrap_or(0)
 }
 
@@ -4539,7 +4632,7 @@ impl SettingsRow {
                 if family.name.is_empty() {
                     Text::OptionAutomatic.text()
                 } else {
-                    family.name.as_str()
+                    family.display_name(cjk_ui_locale())
                 }
             }),
             Self::FontSize => FONT_SIZE_LABELS.get(index).copied(),
@@ -11128,6 +11221,17 @@ pub fn layout_for_menus(
         // popup that grew when the pointer crossed a row would be a list that
         // moves under the pointer.
         let mut widest = widest_option(row, scale, measure) + option_icon_advance(row, scale);
+        if row == SettingsRow::TerminalCjkFont {
+            for family in cjk_families() {
+                if let Some(note) = cjk_language_note(family, crate::i18n::current()) {
+                    widest = widest.max(
+                        measure(family.display_name(cjk_ui_locale()), font)
+                            + px(ITEM_GAP_LOGICAL_PX)
+                            + measure(note, font),
+                    );
+                }
+            }
+        }
         if let Some(label) = action {
             widest = widest.max(measure(label, font));
         }
@@ -13079,13 +13183,40 @@ pub fn build(
                 }
                 menu_stack.sprites.push(sprite);
             }
+            let note = (row == SettingsRow::TerminalCjkFont)
+                .then(|| cjk_families().get(index))
+                .flatten()
+                .and_then(|family| cjk_language_note(family, crate::i18n::current()));
+            let note_width = note.map_or(0.0, |note| {
+                measure(note, px(COMBO_FONT_LOGICAL_PX)) + px(ITEM_GAP_LOGICAL_PX)
+            });
+            if let Some(note) = note {
+                menu_stack.labels.push(ChromeLabel {
+                    mono: false,
+                    text: note.to_owned(),
+                    rect: [
+                        (item[2] - px(ITEM_PADDING_X_LOGICAL_PX) - note_width).max(text_left),
+                        item[1],
+                        item[2] - px(ITEM_PADDING_X_LOGICAL_PX),
+                        item[3],
+                    ],
+                    font_size_px: px(COMBO_FONT_LOGICAL_PX),
+                    color: palette.menu_item_hint_text,
+                    align_right: true,
+                    align_center: false,
+                    letter_spacing_em: 0.0,
+                    weight: ChromeLabelWeight::Regular,
+                    tabular_numerals: false,
+                    clip: Some(*item),
+                });
+            }
             menu_stack.labels.push(ChromeLabel {
                 mono: false,
                 text: label.to_owned(),
                 rect: [
                     text_left,
                     item[1],
-                    item[2] - px(ITEM_PADDING_X_LOGICAL_PX),
+                    (item[2] - px(ITEM_PADDING_X_LOGICAL_PX) - note_width).max(text_left),
                     item[3],
                 ],
                 font_size_px: px(COMBO_FONT_LOGICAL_PX),
@@ -15060,6 +15191,133 @@ pub(crate) fn push_float_window(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cjk_settings_reads_and_language_notes_do_not_enumerate_fonts() {
+        let before = monospace_scans();
+        for _ in 0..3 {
+            let _ = cjk_family_index("saved family");
+            for (i, family) in cjk_families().iter().enumerate() {
+                let _ = SettingsRow::TerminalCjkFont.option_label(i);
+                let _ = cjk_language_note(family, crate::i18n::Lang::Chinese);
+            }
+        }
+        assert_eq!(before, monospace_scans());
+        let source = include_str!("settings.rs");
+        let files = source
+            .split("pub fn cjk_family_files(")
+            .nth(1)
+            .unwrap()
+            .split("/// Which row")
+            .next()
+            .unwrap();
+        assert!(!files.contains("bt_platform::cjk_font_families()"));
+        assert!(files.contains("begin_monospace_scan"));
+    }
+    #[test]
+    fn cjk_settings_foreign_language_note_comes_from_declared_coverage() {
+        let jp = bt_platform::CjkFamily {
+            name: "Japanese face".into(),
+            coverage: bt_platform::CjkCoverage::from_code_pages(1 << 17),
+            ..Default::default()
+        };
+        let sc = bt_platform::CjkFamily {
+            name: "Chinese face".into(),
+            coverage: bt_platform::CjkCoverage::from_code_pages(1 << 18),
+            ..Default::default()
+        };
+        assert_eq!(
+            cjk_language_note(&jp, crate::i18n::Lang::English),
+            Some("Japanese")
+        );
+        assert_eq!(cjk_language_note(&sc, crate::i18n::Lang::Chinese), None);
+        assert_eq!(
+            cjk_language_note(&jp, crate::i18n::Lang::Chinese),
+            Some(Text::CjkJapanese.in_lang(crate::i18n::Lang::Chinese))
+        );
+        assert_eq!(
+            cjk_language_note(
+                &bt_platform::CjkFamily::default(),
+                crate::i18n::Lang::English
+            ),
+            None
+        );
+    }
+    #[test]
+    fn cjk_settings_publication_keeps_both_language_views_and_stored_names() {
+        let slot = CjkFamilySlot::new();
+        let family = bt_platform::CjkFamily {
+            name: "Stored family".into(),
+            localized_names: vec![("zh-CN".into(), "Localized family".into())],
+            coverage: bt_platform::CjkCoverage::from_code_pages(1 << 18),
+            ..Default::default()
+        };
+        slot.offer(vec![family]);
+        assert!(slot.adopted().is_empty());
+        assert!(slot.publish(slot.take_offer().unwrap(), true));
+        assert!(slot.scanned());
+        let held = slot.published.read().unwrap();
+        assert_eq!(held.1[0][0].name, "");
+        assert_eq!(held.1[1][1].display_name("zh-CN"), "Localized family");
+        assert!(held.1[1][1].has_name("Stored family"));
+    }
+    /// One-off headless timing probe. No window, GPU, clipboard or input.
+    #[test]
+    #[ignore = "explicit timing run only; publishes a real font list and switches the test process language"]
+    fn cjk_settings_layout_timing_probe() {
+        let families = std::thread::spawn(bt_platform::cjk_font_families)
+            .join()
+            .unwrap();
+        CJK_FAMILIES.publish(families, true);
+        let mut fonts = bt_render::preview_measure_font_system();
+        let rows = every_row_of_the_dialog(TabLayoutMode::Horizontal);
+        let content = content(&rows, &[]);
+        for lang in [crate::i18n::Lang::English, crate::i18n::Lang::Chinese] {
+            crate::i18n::install(lang);
+            for pass in 0..2 {
+                let start = std::time::Instant::now();
+                let mut shape_us = 0;
+                let mut calls = 0;
+                let mut measure = |text: &str, size: f32| {
+                    let at = std::time::Instant::now();
+                    let width = bt_render::measure_preview_paragraph_width(
+                        &mut fonts,
+                        &[bt_render::PreviewRun {
+                            text: text.into(),
+                            color: [255; 3],
+                            mono: false,
+                            bold: false,
+                            italic: false,
+                            font_scale: 1.0,
+                            inline_box_px: None,
+                        }],
+                        size,
+                        size * 1.4,
+                    );
+                    shape_us += at.elapsed().as_micros();
+                    calls += 1;
+                    width
+                };
+                let layout = layout_for_menus(
+                    2048.0,
+                    1152.0,
+                    2.0,
+                    None,
+                    None,
+                    content,
+                    SettingsCategory::General,
+                    0.0,
+                    0.0,
+                    &mut measure,
+                );
+                assert!(layout.is_some());
+                eprintln!(
+                    "BT_PERF_TRACE cjk_settings_layout lang={lang:?} pass={pass} total_us={} shape_us={shape_us} calls={calls}",
+                    start.elapsed().as_micros()
+                );
+            }
+        }
+    }
 
     /// RED — **the family the picker promises is the family the grid draws**
     /// (M2-4).

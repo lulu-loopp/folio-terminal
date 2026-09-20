@@ -1,5 +1,7 @@
 //! Folio's single cell-width oracle.
 
+pub mod font_coverage;
+
 use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
 use unicode_width::UnicodeWidthStr;
 

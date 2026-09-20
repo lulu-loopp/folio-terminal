@@ -1115,3 +1115,7 @@ libc = "0.2"
 todo = "deny"
 unimplemented = "deny"
 dbg_macro = "deny"
+
+[dependencies]
+ttf-parser.workspace = true
+bt-unicode = { path = "../bt-unicode" }
