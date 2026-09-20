@@ -24563,13 +24563,13 @@ fn reference_run_rect(
 /// a seat with no way to the real browser would be §7.1.5g ②″'s complaint
 /// upside down: a reader shut out of the page's own front. So a `file:` page
 /// answers with the path underneath it, taken back off the URL by the one
-/// function that reads a URL this window minted
-/// ([`webnav::Mint::path_and_tail_of_file_url`]) — never by string surgery, and
-/// never for an address from anywhere else, which is why a page on `http` still
-/// answers `None`: it has no file to hand anybody.
+/// function that reads a `file:` URL as the path it names
+/// ([`webnav::LocalFileUrl`]) — never by string surgery, and never for an
+/// address from anywhere else, which is why a page on `http` still answers
+/// `None`: it has no file to hand anybody.
 fn preview_page_hand_off(source: &preview::PreviewSource) -> Option<PathBuf> {
     if let Some(url) = source.web_url() {
-        let (path, _tail) = webnav::Mint::path_and_tail_of_file_url(url)?;
+        let path = webnav::LocalFileUrl::parse(url)?.into_path_and_tail().0;
         return path_opens_as_a_page(&path).then_some(path);
     }
     source
@@ -24585,11 +24585,11 @@ fn preview_page_hand_off(source: &preview::PreviewSource) -> Option<PathBuf> {
 /// caution:
 ///
 /// * **A remote page has no source on this disk.** `https://example.com/a.html`
-///   answers `None` because [`webnav::Mint::path_and_tail_of_file_url`] reads
-///   only the `file:` URLs this window minted itself, and what a server sent is
-///   not a file — the bytes the engine rendered were never on this machine to be
-///   opened. Fetching them again to show them would be this window running a
-///   second, weaker browser beside the one already on the seat.
+///   answers `None` because [`webnav::LocalFileUrl`] reads `file:` URLs and
+///   nothing else, and what a server sent is not a file — the bytes the engine
+///   rendered were never on this machine to be opened. Fetching them again to
+///   show them would be this window running a second, weaker browser beside the
+///   one already on the seat.
 /// * **A `.pdf` has no text in it.** That is [`preview::PageGlance`]'s whole
 ///   judgement and it is asked here rather than restated: the page class already
 ///   carries a column saying which of its members this window can read, the
@@ -24604,7 +24604,7 @@ fn preview_page_hand_off(source: &preview::PreviewSource) -> Option<PathBuf> {
 /// without a window: this is the predicate the rail's button set is drawn from
 /// and the one the flip verb consents to, and both must be the same sentence.
 fn page_source_file(url: &str) -> Option<PathBuf> {
-    let (path, _tail) = webnav::Mint::path_and_tail_of_file_url(url)?;
+    let path = webnav::LocalFileUrl::parse(url)?.into_path_and_tail().0;
     (preview::path_page_glance(&path) == Some(preview::PageGlance::Source)).then_some(path)
 }
 
@@ -33286,7 +33286,8 @@ fn switcher_row_destination(target: &str) -> Option<String> {
 /// (section 7.9 5), for the same reason - nothing happening is more honest than
 /// a dialog about a file that is not there.
 fn page_destination(target: &str) -> Option<(String, webnav::Mint)> {
-    if let Some((path, tail)) = webnav::Mint::path_and_tail_of_file_url(target) {
+    if let Some(named) = webnav::LocalFileUrl::parse(target) {
+        let (path, tail) = named.into_path_and_tail();
         let canonical = std::fs::canonicalize(path).ok()?;
         let mint = webnav::Mint::file(&canonical).ok()?;
         let url = format!("{}{tail}", mint.target()?);
@@ -33359,8 +33360,8 @@ fn switcher_pin_is_allowed(kind: bt_persist::PinKind, target: &str) -> bool {
         return true;
     }
     page_destination(target).is_some()
-        && webnav::Mint::path_and_tail_of_file_url(target)
-            .is_none_or(|(path, _)| path_opens_as_a_page(&path))
+        && webnav::LocalFileUrl::parse(target)
+            .is_none_or(|named| path_opens_as_a_page(named.path()))
 }
 
 /// **What a switcher row keeps, and under which category** — `None` for a
@@ -38087,11 +38088,8 @@ fn files_a_tab_stands_on(tab: &TabState) -> BTreeSet<PathBuf> {
         let Some(source) = pane.buffer.as_ref() else {
             continue;
         };
-        if let Some((path, _)) = source
-            .web_url()
-            .and_then(webnav::Mint::path_and_tail_of_file_url)
-        {
-            wanted.insert(path);
+        if let Some(named) = source.web_url().and_then(webnav::LocalFileUrl::parse) {
+            wanted.insert(named.into_path_and_tail().0);
         }
     }
     wanted
@@ -53166,8 +53164,8 @@ impl Runtime<'_> {
                     "a tab's preview map is filed under that tab's own leaves"
                 );
                 let url = pane.buffer.as_ref()?.web_url()?;
-                let (named, _) = webnav::Mint::path_and_tail_of_file_url(url)?;
-                (named == path && self.window.web.contains_key(&leaf)).then_some(leaf)
+                let named = webnav::LocalFileUrl::parse(url)?;
+                (named.path() == path && self.window.web.contains_key(&leaf)).then_some(leaf)
             })
             .collect();
         for leaf in reload {
@@ -119785,10 +119783,9 @@ mod floated_page_tests {
     /// RED GATE ①: drop the [`preview::PageGlance::Source`] test and the `.pdf`
     /// answers with a path — a rail that draws `</>` over a report, and a press
     /// that would put an empty text buffer over a working PDF viewer. RED GATE
-    /// ②: reach for the URL's own tail instead of
-    /// [`webnav::Mint::path_and_tail_of_file_url`] (a `starts_with("file://")`
-    /// and a slice, say) and the `https` row goes green while `%20` comes back
-    /// as three characters.
+    /// ②: reach for the URL's own tail instead of [`webnav::LocalFileUrl`] (a
+    /// `starts_with` on the scheme and a slice, say) and the `https` row goes
+    /// green while `%20` comes back as three characters.
     #[test]
     fn only_a_local_page_this_window_can_read_offers_its_source() {
         use super::page_source_file;
@@ -119985,7 +119982,7 @@ mod floated_page_tests {
         // up.
         let watched = fn_body("fn files_a_tab_stands_on(tab: &TabState) -> BTreeSet<PathBuf> {");
         assert!(
-            watched.contains("path_and_tail_of_file_url"),
+            watched.contains(concat!("LocalFile", "Url::parse")),
             "which requires a local page's own file to be on the watched list"
         );
         let _ = std::fs::remove_dir_all(&dir);
