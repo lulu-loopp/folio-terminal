@@ -60,6 +60,8 @@ Arrays with separators — the state this repair restores — are correct.
 
 `bt-app` is not compiled here, by the ticket's instruction: its Settings row, i18n entries and
 wiring are mirrored from `display_formulas` and checked by eye against every match arm and every
-fixed-size array (`Text::ALL` 685 → 687). CI sees them first, and two things may be red — the
+fixed-size array; after merging main's CJK font row, `Text::ALL`'s 690 entries were counted rather
+than reckoned from 688 + 2. Its `repair_row_breaks` key is `settings.json` schema **v36**, main's
+`terminal_cjk_font_family` having taken v35. CI sees bt-app first, and two things may be red — the
 Han-character gate, deliberately, until the copy lands, and `fits.max_scroll() == 0.0`, which now
 measures a five-row Rendered blocks page where its comment said four.
