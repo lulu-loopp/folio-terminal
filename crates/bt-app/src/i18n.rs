@@ -2912,8 +2912,7 @@ impl Text {
             Self::RowDefaultProfile => pick(lang, "Default profile", "默认配置文件"),
             Self::RowLanguage => pick(lang, "Language", "语言"),
             Self::RowTerminalFont => pick(lang, "Terminal font", "终端字体"),
-            // zh: pending copywriter
-            Self::RowTerminalCjkFont => pick(lang, "CJK font", "CJK font"),
+            Self::RowTerminalCjkFont => pick(lang, "CJK font", "中日韩字体"),
             Self::RowFontSize => pick(lang, "Font size", "字号"),
             Self::RowPsReadLine => pick(lang, "PSReadLine patch", "PSReadLine 补丁"),
 
@@ -3048,11 +3047,10 @@ impl Text {
                 "The font terminal text is drawn in. Tabs, menus and this dialog keep their own.",
                 "终端文字使用的字体。标签、菜单和这个对话框保持各自的字体。",
             ),
-            // zh: pending copywriter
             Self::DescTerminalCjkFont => pick(
                 lang,
-                "Choose the font used for Chinese, Japanese and Korean text. Automatic uses the system default.",
-                "Choose the font used for Chinese, Japanese and Korean text. Automatic uses the system default.",
+                "The font used for Chinese, Japanese and Korean text. Automatic picks the platform's default for these scripts.",
+                "中日韩文字使用的字体。设为自动时使用系统默认。",
             ),
             Self::DescFontSize => pick(
                 lang,
@@ -3142,8 +3140,7 @@ impl Text {
             Self::OptionFitTile => pick(lang, "Tile", "平铺"),
 
             Self::OptionSystem => pick(lang, "System", "系统"),
-            // zh: pending copywriter
-            Self::OptionAutomatic => pick(lang, "Automatic", "Automatic"),
+            Self::OptionAutomatic => pick(lang, "Automatic", "自动"),
             Self::OptionLight => pick(lang, "Light", "浅色"),
             Self::OptionDark => pick(lang, "Dark", "深色"),
             Self::OptionCursorBar => pick(lang, "Bar", "竖线"),

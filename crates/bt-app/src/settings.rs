@@ -19568,10 +19568,10 @@ mod tests {
         assert_eq!(height(cursor.combo), height(theme.combo));
         assert_eq!(
             cursor.combo[1] - theme.combo[1],
-            5.0 * ROW_HEIGHT,
-            "Cursor is five identical rows under Theme — the two scheme rows \
-             (§7.1.6c-4a) and the two font rows sit between them, and every one \
-             of them is the same height. The window's ground used to be here \
+            6.0 * ROW_HEIGHT,
+            "Cursor is six identical rows under Theme — the two scheme rows \
+             (§7.1.6c-4a) and the three font rows (family, CJK family, size) sit \
+             between them, and every one of them is the same height. The window's ground used to be here \
              too; §7.1.6c-5's ruling moved its six rows under the disclosure"
         );
     }
