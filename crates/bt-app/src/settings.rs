@@ -2876,7 +2876,20 @@ pub enum SettingsRow {
     /// who wants typeset blocks with every `$` in a log left alone has to be
     /// able to say exactly that.
     InlineFormulas,
-    /// The third switch of the Rendered blocks page (2026-08-18): whether a GFM pipe table a
+    /// **The one row on this page that is not about Folio.** Coding agents
+    /// redraw a finished answer through their own CommonMark renderer, which
+    /// eats the `\\` that ends a row of a matrix or an aligned block; the
+    /// detector puts it back where that is the only reading, and this row is how
+    /// a reader says not to. Under the two switches it depends on — there is
+    /// nothing to repair in a block that is not being typeset — and above
+    /// `Tables`, which is about a different kind of block entirely.
+    ///
+    /// It is a row and not a constant because the damage belongs to another
+    /// program: the day that program stops doing it, this stops being a repair
+    /// and becomes a guess, and a reader must not have to wait for a release of
+    /// Folio to say so.
+    RepairRowBreaks,
+    /// The last switch of the Rendered blocks page (2026-08-18): whether a GFM pipe table a
     /// program printed is drawn as a table. Its own row for the reason `InlineFormulas` has one —
     /// a pipe is ordinary punctuation and a `$$` is not, so the two carry different risk and a
     /// reader must be able to answer them separately.
@@ -3516,9 +3529,11 @@ impl SettingsRow {
             | Self::TurnEndNotifications => SettingsCategory::Agents,
             // The mock-up files what typesetting does to a block under "Rendered
             // blocks" (2570), beside that page's own Maximum height row.
-            Self::Formulas | Self::InlineFormulas | Self::Tables | Self::BlockMaxHeight => {
-                SettingsCategory::RenderedBlocks
-            }
+            Self::Formulas
+            | Self::InlineFormulas
+            | Self::RepairRowBreaks
+            | Self::Tables
+            | Self::BlockMaxHeight => SettingsCategory::RenderedBlocks,
             // Both were headings over one row apiece — `FILES` and `STARTUP` —
             // and both are the same kind of question: not a look, not a block, no
             // page of their own to fill. See [`SettingsCategory::General`].
@@ -3659,6 +3674,7 @@ impl SettingsRow {
             Self::Cursor => Text::RowCursor.text(),
             Self::Formulas => Text::RowFormulas.text(),
             Self::InlineFormulas => Text::RowInlineFormulas.text(),
+            Self::RepairRowBreaks => Text::RowRepairRowBreaks.text(),
             Self::Tables => Text::RowTables.text(),
             Self::BlockMaxHeight => Text::RowBlockMaxHeight.text(),
             Self::Scrollback => Text::RowScrollback.text(),
@@ -3769,6 +3785,10 @@ impl SettingsRow {
             // typeset, and a user who reads only this line should not go away
             // expecting one to be.
             Self::InlineFormulas => Text::DescInlineFormulas.text(),
+            // Names the damage a reader can see on their own screen — a matrix
+            // that arrived as one row — and not the CommonMark round-trip that
+            // causes it, which is another program's business and not theirs.
+            Self::RepairRowBreaks => Text::DescRepairRowBreaks.text(),
             // Says "in command output" for the reason the row above it does, and says "the pipe
             // text" because a reader who is told only that tables stop being drawn will expect
             // them to disappear rather than to go back to being what the program printed.
@@ -4091,7 +4111,7 @@ impl SettingsRow {
     /// **`General`, `Terminal` and `Rendered blocks` have no advanced rows**, and
     /// the reasoning is per row rather than per page: `Language`, `Git panel`
     /// and `Default profile` are the three questions that page exists to answer;
-    /// the three switches *are* the Rendered blocks page; and the
+    /// the switches *are* the Rendered blocks page; and the
     /// PSReadLine row is expert in subject and elementary in purpose — it is the
     /// one row in the dialog that repairs something the reader has already seen
     /// go wrong, so it is the last row that may be hidden. The Shortcuts page is
@@ -4140,6 +4160,7 @@ impl SettingsRow {
             | Self::Sidebar
             | Self::Formulas
             | Self::InlineFormulas
+            | Self::RepairRowBreaks
             | Self::Tables
             | Self::BlockMaxHeight
             | Self::GitPanel
@@ -4302,6 +4323,7 @@ impl SettingsRow {
             Self::Cursor => CURSOR_OPTIONS.len(),
             Self::Formulas
             | Self::InlineFormulas
+            | Self::RepairRowBreaks
             | Self::Tables
             | Self::GitPanel
             | Self::KeyHints
@@ -4397,6 +4419,7 @@ impl SettingsRow {
             Self::Cursor => CURSOR_OPTIONS.get(index).copied().map(cursor_label),
             Self::Formulas
             | Self::InlineFormulas
+            | Self::RepairRowBreaks
             | Self::Tables
             | Self::GitPanel
             | Self::KeyHints
@@ -4807,6 +4830,9 @@ impl SettingsRow {
             Self::InlineFormulas => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.inline_formulas),
+            Self::RepairRowBreaks => FORMULA_OPTIONS
+                .iter()
+                .position(|it| *it == values.repair_row_breaks),
             Self::Tables => FORMULA_OPTIONS.iter().position(|it| *it == values.tables),
             // **`None` for a height this build's list does not offer**, which is
             // the honest reading and not a fallback: `bt_persist` deliberately
@@ -5341,6 +5367,7 @@ fn every_row_of_the_dialog(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     // ── the other three pages, none of which has an advanced row ──
     rows.push(SettingsRow::Formulas);
     rows.push(SettingsRow::InlineFormulas);
+    rows.push(SettingsRow::RepairRowBreaks);
     rows.push(SettingsRow::Tables);
     rows.push(SettingsRow::BlockMaxHeight);
     rows.push(SettingsRow::Language);
@@ -5765,6 +5792,9 @@ pub struct SettingsValues {
     pub focus_card_height: u32,
     pub display_formulas: bool,
     pub inline_formulas: bool,
+    /// Whether the detector puts back the row separators a coding agent's own
+    /// redraw of its finished answer eats before a display block is typeset.
+    pub repair_row_breaks: bool,
     /// Whether a proven markdown table in command output is drawn as a block.
     pub tables: bool,
     /// How tall a rendered block may stand before it scrolls inside itself, in
@@ -6041,6 +6071,7 @@ impl SettingsValues {
             sidebar: RailMode::Expanded,
             display_formulas: true,
             inline_formulas: true,
+            repair_row_breaks: true,
             tables: true,
             block_max_height: bt_persist::DEFAULT_BLOCK_MAX_HEIGHT,
             scrollback_lines: bt_persist::DEFAULT_SCROLLBACK_LINES,
@@ -9183,6 +9214,16 @@ pub fn line_wrapping_requested(target: SettingsTarget) -> Option<bool> {
 pub fn inline_formulas_requested(target: SettingsTarget) -> Option<bool> {
     match target {
         SettingsTarget::Choice(SettingsRow::InlineFormulas, index) => {
+            FORMULA_OPTIONS.get(index).copied()
+        }
+        _ => None,
+    }
+}
+
+#[must_use]
+pub fn repair_row_breaks_requested(target: SettingsTarget) -> Option<bool> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::RepairRowBreaks, index) => {
             FORMULA_OPTIONS.get(index).copied()
         }
         _ => None,
@@ -19950,7 +19991,7 @@ mod tests {
         // 2026-08-21: §7.1.6b′ had already pushed the vertical one 32px past 600
         // with focus mode's row, and the card-height row added that day carried
         // the horizontal one over too, so the fits example moved to a short page.
-        // Rendered blocks holds four everyday rows and sits well under the cap.
+        // Rendered blocks holds five everyday rows and sits well under the cap.
         let fits = shaped(
             SettingsCategory::RenderedBlocks,
             AdvancedOpen::default(),
@@ -19959,7 +20000,7 @@ mod tests {
         assert_eq!(
             fits.max_scroll(),
             0.0,
-            "a four-row everyday page fits a {}px dialog with room to spare",
+            "a five-row everyday page fits a {}px dialog with room to spare",
             DIALOG_MAX_HEIGHT_LOGICAL_PX
         );
         // **And the one that no longer fits says so by exactly its overflow.**
@@ -22819,7 +22860,7 @@ mod tests {
         assert_eq!(
             SettingsRow::Tables.category(),
             SettingsCategory::RenderedBlocks,
-            "it stands with the two formula switches, which is where the reader looks for it"
+            "it stands with the formula switches, which is where the reader looks for it"
         );
         assert!(
             !SettingsRow::Tables.advanced(),
@@ -22833,11 +22874,64 @@ mod tests {
             vec![
                 SettingsRow::Formulas,
                 SettingsRow::InlineFormulas,
+                SettingsRow::RepairRowBreaks,
                 SettingsRow::Tables,
                 SettingsRow::BlockMaxHeight
             ],
-            "and it stands last of the three switches, under the two it is a \
-             variant of — with the page's one measurement below all three"
+            "and it stands last of the switches, under the two it is a \
+             variant of and under the repair those two depend on — with the \
+             page's one measurement below all of them"
+        );
+    }
+
+    /// PIN: the row-break repair's own items ask for that setting and nothing else asks for it.
+    ///
+    /// The neighbours matter more here than on most rows: this switch and the two above it are
+    /// three `On`/`Off` pickers in a column, and a picker wired to the row above it would read
+    /// correctly and do the wrong thing.
+    #[test]
+    fn only_the_repair_rows_items_ask_for_the_repair_setting() {
+        assert_eq!(
+            repair_row_breaks_requested(SettingsTarget::Choice(SettingsRow::RepairRowBreaks, 0)),
+            Some(true)
+        );
+        assert_eq!(
+            repair_row_breaks_requested(SettingsTarget::Choice(SettingsRow::RepairRowBreaks, 1)),
+            Some(false)
+        );
+        assert_eq!(
+            repair_row_breaks_requested(SettingsTarget::Choice(SettingsRow::RepairRowBreaks, 2)),
+            None,
+            "there is no third option to ask for"
+        );
+        for target in [
+            SettingsTarget::Choice(SettingsRow::Formulas, 0),
+            SettingsTarget::Choice(SettingsRow::InlineFormulas, 0),
+            SettingsTarget::Choice(SettingsRow::Tables, 0),
+            SettingsTarget::Combo(SettingsRow::RepairRowBreaks),
+            SettingsTarget::Scrim,
+        ] {
+            assert_eq!(repair_row_breaks_requested(target), None, "{target:?}");
+        }
+        for asked in [
+            display_formulas_requested(SettingsTarget::Choice(SettingsRow::RepairRowBreaks, 0)),
+            inline_formulas_requested(SettingsTarget::Choice(SettingsRow::RepairRowBreaks, 0)),
+            tables_requested(SettingsTarget::Choice(SettingsRow::RepairRowBreaks, 0)),
+        ] {
+            assert_eq!(asked, None, "no neighbour is moved by this row");
+        }
+        assert_eq!(
+            SettingsRow::RepairRowBreaks.category(),
+            SettingsCategory::RenderedBlocks
+        );
+        assert!(!SettingsRow::RepairRowBreaks.advanced());
+        assert_eq!(
+            SettingsRow::RepairRowBreaks.selected_index(&SettingsValues {
+                repair_row_breaks: false,
+                ..SettingsValues::sample()
+            }),
+            Some(1),
+            "Off is the second item, as it is for every switch on this page"
         );
     }
 
@@ -22948,7 +23042,7 @@ mod tests {
                 .into_iter()
                 .rfind(|row| row.category() == SettingsCategory::RenderedBlocks),
             Some(SettingsRow::BlockMaxHeight),
-            "and it stands under the three switches: they say whether a block \
+            "and it stands under the four switches: they say whether a block \
              is drawn at all, and this says how much room one may take"
         );
     }
@@ -25043,6 +25137,7 @@ mod tests {
                 SettingsRow::MinimumContrast,
                 SettingsRow::Formulas,
                 SettingsRow::InlineFormulas,
+                SettingsRow::RepairRowBreaks,
                 SettingsRow::Tables,
                 SettingsRow::BlockMaxHeight,
                 SettingsRow::Language,
@@ -25115,6 +25210,7 @@ mod tests {
                 SettingsRow::MinimumContrast,
                 SettingsRow::Formulas,
                 SettingsRow::InlineFormulas,
+                SettingsRow::RepairRowBreaks,
                 SettingsRow::Tables,
                 SettingsRow::BlockMaxHeight,
                 SettingsRow::Language,

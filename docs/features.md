@@ -40,6 +40,17 @@ The LaTeX a command prints is typeset where it was printed.
   typeset a moment ago falls back to whatever text survived. That is the
   renderer's doing, not the terminal's; a formula the agent writes to a
   markdown file arrives whole, and the preview pane typesets it.
+- Two of those the terminal puts right, because only one thing they can have
+  been is left. A `\\` that ended a row of a matrix, an `aligned` block or a
+  `cases` block is restored, so the block is set in the rows it was written in;
+  and a `# $$` line is read as the block opener it is whenever a closing `$$`
+  answers it. **Rendered blocks → Repair row breaks** turns the first of those
+  off. The rest are not repaired and will not be: `,` is as good a comma as `\,`
+  was a thin space, `[x]` is as good a bracket as `\[x\]` was a display, and a
+  deleted `=` leaves nobody able to say which side of it was which — putting any
+  of them back would be typesetting an equation nobody wrote.
+- Whatever the terminal repairs, it repairs for the typesetter only. Copying a
+  formula, or showing its source, gives back the bytes the terminal received.
 
 ## Made for agents
 
