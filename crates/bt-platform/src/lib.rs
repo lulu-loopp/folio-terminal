@@ -2506,22 +2506,8 @@ pub struct MonospaceFamily {
     pub files: Vec<std::path::PathBuf>,
 }
 
-/// One installed family whose regular face covers the CJK picker probe.
-///
-/// It has the same name-and-files payload as a terminal family, but unlike the
-/// monospace picker it is selected by coverage, never by fixed-pitch metadata.
-pub type CjkFamily = MonospaceFamily;
-
-/// Small cross-script probe used to decide whether a family belongs in the CJK picker.
-pub const CJK_COVERAGE_SAMPLE: [char; 6] = ['你', '好', '日', '本', '語', '한'];
-
-/// Whether one face covers a useful script-sized part of the picker probe.
-/// Han faces must cover all five Han points; a Hangul face may answer the
-/// Hangul point instead. The renderer checks each cared-about script against
-/// the selected family, so a Chinese choice cannot draw Korean by accident.
-fn covers_cjk_sample(mut covers: impl FnMut(char) -> bool) -> bool {
-    CJK_COVERAGE_SAMPLE[..5].iter().copied().all(&mut covers) || covers(CJK_COVERAGE_SAMPLE[5])
-}
+pub mod cjk;
+pub use cjk::{CjkCoverage, CjkFamily};
 
 /// **The page Windows installs fonts on**, and the door
 /// `open_system_fonts_page` knocks on first (user ruling 2026-08-19).
@@ -3076,15 +3062,8 @@ pub fn order_monospace_families(mut families: Vec<MonospaceFamily>) -> Vec<Monos
 
 /// Sort and de-duplicate installed CJK-capable families for the picker.
 #[must_use]
-pub fn order_cjk_families(mut families: Vec<CjkFamily>) -> Vec<CjkFamily> {
-    families.sort_by(|a, b| {
-        a.name
-            .to_lowercase()
-            .cmp(&b.name.to_lowercase())
-            .then_with(|| a.name.cmp(&b.name))
-    });
-    families.dedup_by(|a, b| a.name.eq_ignore_ascii_case(&b.name));
-    families
+pub fn order_cjk_families(families: Vec<CjkFamily>) -> Vec<CjkFamily> {
+    cjk::order_for_language(families, "en-US")
 }
 
 /// Sampling this process's own window thread while it is not answering.
@@ -7999,11 +7978,44 @@ mod windows_impl {
         super::order_monospace_families(collect_monospace_families().unwrap_or_default())
     }
 
-    /// Every installed family whose regular collection faces cover the fixed
-    /// Han and Hangul probe used by the CJK picker.
+    /// Installed families with font-declared CJK coverage (or whole-block cmap
+    /// evidence), localized names and loadable files. Enumerated once per process.
     #[must_use]
     pub fn cjk_font_families() -> Vec<super::CjkFamily> {
-        super::order_cjk_families(collect_cjk_families().unwrap_or_default())
+        static FAMILIES: std::sync::OnceLock<Vec<super::CjkFamily>> = std::sync::OnceLock::new();
+        FAMILIES
+            .get_or_init(|| super::order_cjk_families(collect_cjk_families().unwrap_or_default()))
+            .clone()
+    }
+
+    /// Copy a DirectWrite-owned table before releasing its table context.
+    fn cjk_font_table(face: &IDWriteFontFace, tag: &[u8; 4]) -> Option<Vec<u8>> {
+        let mut data = std::ptr::null_mut();
+        let mut size = 0;
+        let mut context = std::ptr::null_mut();
+        let mut exists = windows::core::BOOL(0);
+        unsafe {
+            face.TryGetFontTable(
+                u32::from_le_bytes(*tag),
+                &mut data,
+                &mut size,
+                &mut context,
+                &mut exists,
+            )
+        }
+        .ok()?;
+        if !exists.as_bool() {
+            return None;
+        }
+        if data.is_null() || size == 0 {
+            unsafe { face.ReleaseFontTable(context) };
+            return None;
+        }
+        // SAFETY: DirectWrite holds this nonempty table until ReleaseFontTable below.
+        let bytes =
+            unsafe { std::slice::from_raw_parts(data.cast::<u8>(), size as usize) }.to_vec();
+        unsafe { face.ReleaseFontTable(context) };
+        Some(bytes)
     }
 
     fn collect_cjk_families() -> windows::core::Result<Vec<super::CjkFamily>> {
@@ -8013,45 +8025,76 @@ mod windows_impl {
         let Some(collection) = collection else {
             return Ok(Vec::new());
         };
-
+        use windows::Win32::Graphics::DirectWrite::{
+            DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL,
+        };
         let locale = super::os_ui_language();
         let mut families = Vec::new();
         for index in 0..unsafe { collection.GetFontFamilyCount() } {
             let Ok(family) = (unsafe { collection.GetFontFamily(index) }) else {
                 continue;
             };
+            let Ok(font) = (unsafe {
+                family.GetFirstMatchingFont(
+                    DWRITE_FONT_WEIGHT_NORMAL,
+                    DWRITE_FONT_STRETCH_NORMAL,
+                    DWRITE_FONT_STYLE_NORMAL,
+                )
+            }) else {
+                continue;
+            };
+            let Ok(face) = (unsafe { font.CreateFontFace() }) else {
+                continue;
+            };
+            let os2 = cjk_font_table(&face, b"OS/2");
+            let cmap = cjk_font_table(&face, b"cmap");
+            let coverage = super::CjkCoverage::from_tables(os2.as_deref(), cmap.as_deref());
+            if !coverage.any() {
+                continue;
+            }
             let mut files = Vec::new();
-            let mut covers_probe = false;
             for face_index in 0..unsafe { family.GetFontCount() } {
-                let Ok(font) = (unsafe { family.GetFont(face_index) }) else {
-                    continue;
-                };
-                let covers_face = super::covers_cjk_sample(|character| {
-                    unsafe { font.HasCharacter(character as u32) }
-                        .is_ok_and(|covered| covered.as_bool())
-                });
-                if !covers_face {
-                    continue;
-                }
-                covers_probe = true;
-                let Ok(face) = (unsafe { font.CreateFontFace() }) else {
-                    continue;
-                };
-                for path in font_face_files(&face) {
-                    if !files.contains(&path) {
-                        files.push(path);
+                if let Ok(face) = unsafe { family.GetFont(face_index) }
+                    .and_then(|font| unsafe { font.CreateFontFace() })
+                {
+                    for path in font_face_files(&face) {
+                        if !files.contains(&path) {
+                            files.push(path);
+                        }
                     }
                 }
             }
-            if !covers_probe || files.is_empty() {
+            if files.is_empty() {
                 continue;
             }
             let Ok(names) = (unsafe { family.GetFamilyNames() }) else {
                 continue;
             };
-            if let Some(name) = localized_string(&names, &locale) {
-                families.push(super::CjkFamily { name, files });
+            // Keep the pre-ticket stored identifier. Display is independently
+            // selected from the font's name records in the application's language.
+            let Some(name) = localized_string(&names, &locale) else {
+                continue;
+            };
+            let mut localized_names = Vec::new();
+            for i in 0..unsafe { names.GetCount() } {
+                let Ok(length) = (unsafe { names.GetLocaleNameLength(i) }) else {
+                    continue;
+                };
+                let mut locale = vec![0u16; length as usize + 1];
+                if unsafe { names.GetLocaleName(i, &mut locale) }.is_err() {
+                    continue;
+                }
+                let locale = String::from_utf16_lossy(&locale[..length as usize]);
+                if let Some(text) = localized_string(&names, &locale) {
+                    localized_names.push((locale, text));
+                }
             }
+            families.push(super::CjkFamily {
+                name,
+                files,
+                localized_names,
+                coverage,
+            });
         }
         Ok(families)
     }
@@ -15950,11 +15993,23 @@ mod monospace_family_tests {
     #[test]
     fn the_cjk_family_list_is_sorted_and_deduplicated_without_a_synthetic_face() {
         let ordered = order_cjk_families(vec![
-            named("SimSun"),
-            named("Microsoft YaHei UI"),
-            named("simsun"),
+            super::CjkFamily {
+                name: "SimSun".into(),
+                ..Default::default()
+            },
+            super::CjkFamily {
+                name: "Microsoft YaHei UI".into(),
+                ..Default::default()
+            },
+            super::CjkFamily {
+                name: "simsun".into(),
+                ..Default::default()
+            },
         ]);
-        assert_eq!(names(&ordered), vec!["Microsoft YaHei UI", "SimSun"]);
+        assert_eq!(
+            ordered.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+            vec!["Microsoft YaHei UI", "SimSun"]
+        );
         assert!(ordered.iter().all(|family| !family.name.is_empty()));
     }
 
@@ -16118,7 +16173,13 @@ mod monospace_enumeration_tests {
 
     #[test]
     fn the_machines_cjk_families_are_named_and_locatable() {
+        let started = std::time::Instant::now();
         let families = cjk_font_families();
+        eprintln!(
+            "BT_PERF_TRACE cjk_enumeration_us={} families={}",
+            started.elapsed().as_micros(),
+            families.len()
+        );
         assert!(
             !families.is_empty(),
             "Windows exposes at least one CJK family"

@@ -35196,6 +35196,9 @@ fn apply_stored_terminal_font(
     // Settings dialog — goes through `settings::monospace_families`, which
     // cannot walk anything. See `settings::monospace_family_files`.
     let files = settings::monospace_family_files(family);
+    // CJK discovery is worker-only, including a cold stored selection. The
+    // bounded startup fonts can satisfy built-in names immediately; otherwise
+    // FontsScanned reapplies the stored setting to every window after adoption.
     let cjk_files = settings::cjk_family_files(cjk_family);
     // **Clamped here and nowhere else** (review row R4-2). This is the one place
     // a stored size crosses into the renderer, and a `0` past it is an assertion
@@ -45845,6 +45848,7 @@ impl Runtime<'_> {
         // milliseconds it spends were charged to whichever of `window_event` and
         // `publish_frame_inner` happened to enclose it — two true labels, neither
         // of which named the dialog to the reader of a slow-hold line.
+        let trace_start = self.app.trace_perf.then(Instant::now);
         let leaving_station = hang_watch::enter(hang_watch::Station::Settings);
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let scale = self.window.renderer.metrics().scale_factor as f32;
@@ -45855,6 +45859,7 @@ impl Runtime<'_> {
         let (rows, shortcuts, profile_lines, scheme_files, values) = self.settings_content();
         let content =
             self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files, &values);
+        let content_us = trace_start.map_or(0, |start| start.elapsed().as_micros());
         // **The probe's second trigger** (§7.1.6c-5), and it is here because this
         // is the one place that knows which page is being shown *and* is reached
         // by every road to showing it — the gear, a press on the rail, an arrow
@@ -45894,8 +45899,19 @@ impl Runtime<'_> {
         // popup. Handed over as a closure for `build`'s own reason — the
         // renderer owns the face, and the geometry stays a pure function of what
         // it is told.
+        let probes_us = trace_start.map_or(0, |start| {
+            start.elapsed().as_micros().saturating_sub(content_us)
+        });
+        let mut measure_us = 0;
+        let mut measure_calls = 0;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
-        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
+        let mut measure = |text: &str, size: f32| {
+            let start = trace_start.map(|_| Instant::now());
+            let width = renderer.measure_chrome_text(gpu, text, size);
+            measure_us += start.map_or(0, |start| start.elapsed().as_micros());
+            measure_calls += 1;
+            width
+        };
         let laid = settings::layout_for_menus(
             width as f32,
             height as f32,
@@ -45908,6 +45924,13 @@ impl Runtime<'_> {
             menu_scroll,
             &mut measure,
         );
+        if let Some(start) = trace_start {
+            let total_us = start.elapsed().as_micros();
+            trace_sink::stderr_line(format!(
+                "BT_PERF_TRACE settings_layout content_us={content_us} probes_us={probes_us} measure_calls={measure_calls} measure_us={measure_us} geometry_us={} total_us={total_us}",
+                total_us.saturating_sub(content_us + probes_us + measure_us)
+            ));
+        }
         hang_watch::at(leaving_station);
         laid
     }
@@ -117419,6 +117442,10 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             AppEvent::FontsScanned => {
                 if settings::adopt_scanned_families() {
                     self.for_each_window(|runtime| {
+                        let chosen = &runtime.app.settings_store.loaded().terminal_cjk_font_family;
+                        if !chosen.is_empty() && !settings::cjk_family_files(chosen).is_empty() {
+                            runtime.adopt_terminal_font()?;
+                        }
                         if runtime.refresh_chrome() {
                             runtime.present_chrome_change()
                         } else {

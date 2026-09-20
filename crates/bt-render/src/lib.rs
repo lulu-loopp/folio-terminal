@@ -1,5 +1,7 @@
 //! wgpu + cosmic-text rendering for viewport-owned terminal frames.
 
+mod cjk_fonts;
+use cjk_fonts::{CjkFace, FontSystem, match_cjk_attrs, proportional_cjk_family};
 mod contrast;
 mod glyph_census;
 pub mod glyph_probe;
@@ -35,9 +37,8 @@ use bt_viewport::{
 };
 use bytemuck::{Pod, Zeroable};
 use glyphon::{
-    Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, PrepareError, Resolution, Shaping,
-    Stretch, Style, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
-    Wrap,
+    Attrs, Buffer, Cache, Color, Family, Metrics, PrepareError, Resolution, Shaping, Stretch,
+    Style, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight, Wrap,
     cosmic_text::{Cursor, Fallback, FeatureTag, FontFeatures},
 };
 use thiserror::Error;
@@ -8692,7 +8693,7 @@ impl WindowRenderer {
         letter_spacing_em: f32,
         tabular_numerals: bool,
     ) -> f32 {
-        measure_chrome_label(
+        measure_chrome_label_with_cjk(
             &mut gpu.font_system,
             text,
             font_size_px,
@@ -8700,6 +8701,7 @@ impl WindowRenderer {
             letter_spacing_em,
             tabular_numerals,
             false,
+            &gpu.terminal_cjk_families,
         )
     }
 
@@ -8741,7 +8743,7 @@ impl WindowRenderer {
         letter_spacing_em: f32,
         tabular_numerals: bool,
     ) -> ChromeTextAdvances {
-        chrome_label_advances(
+        chrome_label_advances_with_cjk(
             &mut gpu.font_system,
             text,
             font_size_px,
@@ -8749,6 +8751,7 @@ impl WindowRenderer {
             letter_spacing_em,
             tabular_numerals,
             false,
+            &gpu.terminal_cjk_families,
         )
     }
 
@@ -12277,15 +12280,34 @@ fn set_chrome_label_text(
     mono: bool,
     terminal_cjk_families: &TerminalCjkFamilies,
 ) {
-    match mono
-        .then(|| mono_label_spans(text, terminal_cjk_families, font_system))
-        .flatten()
-    {
+    if text.is_ascii() {
+        buffer.set_text(text, attrs, Shaping::Advanced, None);
+        return;
+    }
+    let catalogue = font_system.cjk_catalog();
+    let spans = if mono {
+        mono_label_spans(text, terminal_cjk_families, font_system)
+    } else {
+        let mut at = 0;
+        let mut routed = false;
+        let spans = bt_unicode::graphemes(text)
+            .map(|cluster| {
+                let range = at..at + cluster.len();
+                at = range.end;
+                let family =
+                    proportional_cjk_family(cluster, &catalogue).unwrap_or(Family::SansSerif);
+                routed |= matches!(family, Family::Name(_));
+                (range, family)
+            })
+            .collect::<Vec<_>>();
+        routed.then_some(spans)
+    };
+    match spans {
         Some(spans) => buffer.set_rich_text(
             spans.iter().map(|(range, family)| {
                 let mut span = attrs.clone();
                 span.family = *family;
-                (&text[range.clone()], span)
+                (&text[range.clone()], match_cjk_attrs(font_system, span))
             }),
             attrs,
             Shaping::Advanced,
@@ -12491,6 +12513,7 @@ impl ChromeTextAdvances {
 /// The caller of the hour is the tab's pane-count badge, which the mock-up sizes
 /// as `max(min-width, text + padding)` (`.panecount`, lines 292-304): the badge
 /// cannot know its own width without knowing the number's.
+#[cfg(test)]
 fn measure_chrome_label(
     font_system: &mut FontSystem,
     text: &str,
@@ -12551,6 +12574,7 @@ fn measure_chrome_label_with_cjk(
 /// the sibling function answers. A caller that wants both gets them for the
 /// price of one pass, which is the whole point: a box that asked for a width
 /// and four offsets used to shape five times.
+#[cfg(test)]
 fn chrome_label_advances(
     font_system: &mut FontSystem,
     text: &str,
@@ -12560,7 +12584,8 @@ fn chrome_label_advances(
     tabular_numerals: bool,
     mono: bool,
 ) -> ChromeTextAdvances {
-    let Some(buffer) = shape_chrome_measurement(
+    let cjk = resolve_terminal_cjk_families("", font_system);
+    chrome_label_advances_with_cjk(
         font_system,
         text,
         font_size_px,
@@ -12568,6 +12593,30 @@ fn chrome_label_advances(
         letter_spacing_em,
         tabular_numerals,
         mono,
+        &cjk,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn chrome_label_advances_with_cjk(
+    font_system: &mut FontSystem,
+    text: &str,
+    font_size_px: f32,
+    weight: ChromeLabelWeight,
+    letter_spacing_em: f32,
+    tabular_numerals: bool,
+    mono: bool,
+    terminal_cjk_families: &TerminalCjkFamilies,
+) -> ChromeTextAdvances {
+    let Some(buffer) = shape_chrome_measurement_with_cjk(
+        font_system,
+        text,
+        font_size_px,
+        weight,
+        letter_spacing_em,
+        tabular_numerals,
+        mono,
+        terminal_cjk_families,
     ) else {
         return ChromeTextAdvances::empty();
     };
@@ -12586,30 +12635,6 @@ fn chrome_label_advances(
             .fold(0.0_f32, f32::max),
     ));
     ChromeTextAdvances::from_stops(stops)
-}
-
-/// The buffer both measurements read, shaped once — `None` for a string with
-/// nothing in it, which has no width and no boundaries but its own.
-fn shape_chrome_measurement(
-    font_system: &mut FontSystem,
-    text: &str,
-    font_size_px: f32,
-    weight: ChromeLabelWeight,
-    letter_spacing_em: f32,
-    tabular_numerals: bool,
-    mono: bool,
-) -> Option<Buffer> {
-    let terminal_cjk_families = resolve_terminal_cjk_families("", font_system);
-    shape_chrome_measurement_with_cjk(
-        font_system,
-        text,
-        font_size_px,
-        weight,
-        letter_spacing_em,
-        tabular_numerals,
-        mono,
-        &terminal_cjk_families,
-    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -12750,6 +12775,7 @@ fn shape_chrome_labels_with_cjk(
                 buffer.shape_until_scroll(font_system, false);
                 text_width = shaped_line_width(&buffer);
             }
+            trace_chrome_cjk_glyphs(font_system, &buffer, label);
             let left = if label.align_center {
                 (label.rect[0] + (width - text_width) / 2.0).max(label.rect[0])
             } else if label.align_right {
@@ -12801,6 +12827,42 @@ fn shape_chrome_labels_with_cjk(
             }
         })
         .collect()
+}
+
+/// Self-report for the owner's unreproduced mixed-weight screenshot.
+fn trace_chrome_cjk_glyphs(font_system: &FontSystem, buffer: &Buffer, label: &ChromeLabel) {
+    static TRACE: OnceLock<bool> = OnceLock::new();
+    if !*TRACE.get_or_init(|| std::env::var_os("BT_PERF_TRACE").is_some_and(|v| !v.is_empty())) {
+        return;
+    }
+    for run in buffer.layout_runs() {
+        for glyph in run.glyphs {
+            let Some(face) = font_system.db().face(glyph.font_id) else {
+                continue;
+            };
+            let file = match &face.source {
+                glyphon::fontdb::Source::File(path)
+                | glyphon::fontdb::Source::SharedFile(path, _) => path.display().to_string(),
+                _ => "<memory>".into(),
+            };
+            for ch in label
+                .text
+                .get(glyph.start..glyph.end)
+                .unwrap_or("")
+                .chars()
+                .filter(|c| !c.is_ascii())
+            {
+                bt_viewport::trace::line(format!(
+                    "BT_PERF_TRACE chrome_cjk char={ch:?} font_id={:?} family={:?} file={file:?} face_weight={} requested_weight={} size={}",
+                    glyph.font_id,
+                    face.families,
+                    face.weight.0,
+                    label.weight.shaping_weight().0,
+                    glyph.font_size
+                ));
+            }
+        }
+    }
 }
 
 /// The shaping attributes one preview run is set with.
@@ -12945,6 +13007,7 @@ fn shape_preview_paragraph(font_system: &mut FontSystem, paragraph: &PreviewPara
     let cells = preview_grid_cells(&paragraph.runs, advance);
     let resting = vec![0.0_f32; cells.len()];
     set_preview_grid_cells(
+        font_system,
         &mut buffer,
         &paragraph.runs,
         &cells,
@@ -12959,6 +13022,7 @@ fn shape_preview_paragraph(font_system: &mut FontSystem, paragraph: &PreviewPara
         .any(|tracking| tracking.abs() > f32::EPSILON)
     {
         set_preview_grid_cells(
+            font_system,
             &mut buffer,
             &paragraph.runs,
             &cells,
@@ -13034,6 +13098,7 @@ fn preview_grid_cells(runs: &[PreviewRun], advance: f32) -> Vec<PreviewGridCell>
 /// run because the tracking is per cell — and the shaping is unchanged by that,
 /// for the reason [`shape_preview_paragraph`] states.
 fn set_preview_grid_cells(
+    font_system: &FontSystem,
     buffer: &mut Buffer,
     runs: &[PreviewRun],
     cells: &[PreviewGridCell],
@@ -13041,6 +13106,7 @@ fn set_preview_grid_cells(
     letter_spacing_em: f32,
     metrics: Metrics,
 ) {
+    let catalogue = font_system.cjk_catalog();
     let default = preview_run_attrs(false, false, false, letter_spacing_em);
     buffer.set_rich_text(
         cells.iter().enumerate().map(|(index, cell)| {
@@ -13059,7 +13125,11 @@ fn set_preview_grid_cells(
                     metrics.line_height,
                 ));
             }
-            (&preview_run_text(run)[cell.text.clone()], attrs)
+            let text = &preview_run_text(run)[cell.text.clone()];
+            if let Some(family) = proportional_cjk_family(text, &catalogue) {
+                attrs.family = family;
+            }
+            (text, match_cjk_attrs(font_system, attrs))
         }),
         &default,
         Shaping::Advanced,
@@ -13352,8 +13422,9 @@ fn set_preview_runs(
         })
         .collect();
     let default = preview_run_attrs(false, false, false, letter_spacing_em);
+    let catalogue = font_system.cjk_catalog();
     buffer.set_rich_text(
-        runs.iter().zip(&boxes).map(|(run, tracking)| {
+        runs.iter().zip(&boxes).flat_map(|(run, tracking)| {
             let [r, g, b] = run.color;
             let mut attrs = preview_run_attrs(run.mono, run.bold, run.italic, letter_spacing_em)
                 .color(Color::rgba(r, g, b, 255));
@@ -13369,7 +13440,18 @@ fn set_preview_runs(
             if let Some(tracking) = tracking {
                 attrs = attrs.letter_spacing(*tracking);
             }
-            (preview_run_text(run), attrs)
+            if preview_run_text(run).is_ascii() {
+                return vec![(preview_run_text(run), attrs)];
+            }
+            bt_unicode::graphemes(preview_run_text(run))
+                .map(|cluster| {
+                    let mut attrs = attrs.clone();
+                    if let Some(family) = proportional_cjk_family(cluster, &catalogue) {
+                        attrs.family = family;
+                    }
+                    (cluster, match_cjk_attrs(font_system, attrs))
+                })
+                .collect::<Vec<_>>()
         }),
         &default,
         Shaping::Advanced,
@@ -14353,7 +14435,8 @@ fn drop_faces_with_no_scalable_em(db: &mut glyphon::fontdb::Database) -> usize {
 ///
 /// So the chain is written down. It is read in this order, first face present on
 /// the machine wins, and it is the same order for every ideograph the window
-/// draws:
+/// draws on this proportional surface. Coordinator ruling, 2026-09-20: this
+/// order is retained for chrome/previews; the grid has its own chain below:
 ///
 /// 1. `Microsoft YaHei UI` — Simplified Chinese, the UI cut, and Windows' own
 ///    interface face since 7. The product's Chinese is 简体, so this is the face
@@ -14391,6 +14474,37 @@ const CJK_FALLBACK_FAMILIES: [&str; 11] = [
     "NSimSun",
     "MS Gothic",
 ];
+
+/// Grid-only chain. Owner and coordinator ruling, 2026-09-20: NSimSun is
+/// the face the Windows terminal drew through 0.4.2, and the owner prefers
+/// its outlines in the grid. The 2026-09-19 serif-at-12px objection applies
+/// to proportional chrome, not this surface. Monospace labels follow the grid;
+/// proportional chrome and previews retain CJK_FALLBACK_FAMILIES unchanged.
+#[cfg(target_os = "windows")]
+const GRID_CJK_FALLBACK_FAMILIES: [&str; 11] = [
+    "NSimSun",
+    "Microsoft YaHei UI",
+    "Microsoft YaHei",
+    "DengXian",
+    "Microsoft JhengHei UI",
+    "Microsoft JhengHei",
+    "Yu Gothic UI",
+    "Meiryo UI",
+    "Malgun Gothic",
+    "SimSun",
+    "MS Gothic",
+];
+
+fn grid_cjk_fallback_families() -> &'static [&'static str] {
+    #[cfg(target_os = "windows")]
+    {
+        &GRID_CJK_FALLBACK_FAMILIES
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        platform_cjk_fallback_families()
+    }
+}
 
 /// The named CJK families a third desktop platform tries before conceding to
 /// the library-wide fallback. These are capability requests, not guarantees.
@@ -14603,7 +14717,7 @@ fn platform_cjk_fallback_families() -> &'static [&'static str] {
 /// A user's choice leads; automatic mode is exactly the platform chain.
 fn terminal_cjk_family_chain(chosen: &str) -> impl Iterator<Item = &str> {
     (!chosen.is_empty()).then_some(chosen).into_iter().chain(
-        platform_cjk_fallback_families()
+        grid_cjk_fallback_families()
             .iter()
             .copied()
             .filter(move |family| !family.eq_ignore_ascii_case(chosen)),
@@ -14820,7 +14934,7 @@ fn shape_narrow_buffer(
     // so the shaping buffer itself must stay horizontally unbounded.
     buffer.set_size(None, Some(metrics.cell_height_px));
     buffer.set_monospace_width(None);
-    let mut attrs = shape_attrs(key, family).metrics(Metrics::new(
+    let mut attrs = match_cjk_attrs(font_system, shape_attrs(key, family)).metrics(Metrics::new(
         metrics.font_size_px * em_scale,
         metrics.cell_height_px,
     ));
@@ -15317,6 +15431,7 @@ fn shape_wide_buffer(
             shape_attrs(key, family).metrics(Metrics::new(em_px, metrics.cell_height_px))
         }
     };
+    let attrs = match_cjk_attrs(font_system, attrs);
     buffer.set_text(&key.text, &attrs, Shaping::Advanced, None);
     buffer.shape_until_scroll(font_system, false);
     buffer
@@ -15509,6 +15624,7 @@ fn primary_font_supports_text(font_system: &mut FontSystem, text: &str) -> bool 
     text.chars().all(|character| charmap.map(character) != 0)
 }
 
+#[cfg(test)]
 fn font_family_supports_text(font_system: &mut FontSystem, family: &str, text: &str) -> bool {
     let Some(font_id) = font_system.db().query(&glyphon::fontdb::Query {
         families: &[Family::Name(family)],
@@ -15539,55 +15655,128 @@ struct TerminalCjkFamilies {
     hiragana: String,
     katakana: String,
     hangul: String,
+    candidates: Vec<Arc<CjkFace>>,
 }
 
-fn resolve_terminal_cjk_families(
+fn resolve_cjk_chain<'a>(
     chosen: &str,
-    font_system: &mut FontSystem,
+    chain: impl Iterator<Item = &'a str>,
+    installed: &[Arc<CjkFace>],
+    simplified_first: bool,
 ) -> TerminalCjkFamilies {
-    let resolve = |sample: &str, font_system: &mut FontSystem| {
-        terminal_cjk_family_chain(chosen)
-            .find(|family| font_family_supports_text(font_system, family, sample))
-            .unwrap_or_default()
-            .to_owned()
-    };
-    let han = resolve("你", font_system);
-    let hiragana = resolve("あ", font_system);
-    let katakana = resolve("ア", font_system);
-    let hangul = resolve("한", font_system);
-    let chosen = if chosen.is_empty()
-        || ![&han, &hiragana, &katakana, &hangul]
+    let mut candidates: Vec<_> = chain
+        .filter_map(|name| {
+            installed
+                .iter()
+                .find(|f| f.name.eq_ignore_ascii_case(name))
+                .cloned()
+        })
+        .collect();
+    // A deliberately chosen Japanese face is honoured. Automatic Han favours
+    // a declared Simplified face over a Japanese-only face, even if reordered
+    // platform data puts the latter first. Other scripts keep their chain order.
+    let han_owner = candidates
+        .iter()
+        .find(|f| !chosen.is_empty() && f.name.eq_ignore_ascii_case(chosen) && f.coverage.han)
+        .or_else(|| {
+            simplified_first
+                .then(|| candidates.iter().find(|f| f.coverage.simplified))
+                .flatten()
+        })
+        .or_else(|| candidates.iter().find(|f| f.coverage.han));
+    let han = han_owner.map_or_else(String::new, |f| f.name.clone());
+    let resolve = |accept: fn(bt_unicode::font_coverage::CjkCoverage) -> bool| {
+        candidates
             .iter()
-            .any(|family| family.eq_ignore_ascii_case(chosen))
-    {
-        String::new()
-    } else {
-        chosen.to_owned()
+            .find(|f| accept(f.coverage))
+            .map_or_else(String::new, |f| f.name.clone())
     };
+    let hiragana = resolve(|c| c.hiragana);
+    let katakana = resolve(|c| c.katakana);
+    let hangul = resolve(|c| c.hangul);
+    let chosen = if [&han, &hiragana, &katakana, &hangul]
+        .iter()
+        .any(|f| f.eq_ignore_ascii_case(chosen))
+    {
+        chosen.to_owned()
+    } else {
+        String::new()
+    };
+    candidates.shrink_to_fit();
     TerminalCjkFamilies {
         chosen,
         han,
         hiragana,
         katakana,
         hangul,
+        candidates,
     }
 }
 
-/// The face request for one terminal-grid cluster.
-///
-/// CJK scripts are always named by Folio. Only an exhausted named chain and
-/// scripts Folio does not own reach cosmic-text's library-wide fallback.
+fn resolve_terminal_cjk_families(
+    chosen: &str,
+    font_system: &mut FontSystem,
+) -> TerminalCjkFamilies {
+    resolve_cjk_chain(
+        chosen,
+        terminal_cjk_family_chain(chosen),
+        &font_system.cjk_catalog().faces,
+        true,
+    )
+}
+
+/// Weight and style never enter ownership. Font declarations decide the script
+/// owner; the cached cmap decides whether it can draw the actual cluster.
+/// A Japanese face may own Han yet lack a Simplified-only ideograph. Such a
+/// cluster falls to the next family in Folio's chain declaring Simplified;
+/// that is a DIFFERENT face and will look different, a stated font limitation.
 fn terminal_grid_family<'a>(text: &str, families: &'a TerminalCjkFamilies) -> Family<'a> {
-    let family = text.chars().find_map(|character| match character.script() {
-        unicode_script::Script::Han => Some(families.han.as_str()),
-        unicode_script::Script::Hiragana => Some(families.hiragana.as_str()),
-        unicode_script::Script::Katakana => Some(families.katakana.as_str()),
-        unicode_script::Script::Hangul => Some(families.hangul.as_str()),
-        _ => None,
+    let script = text.chars().map(|c| c.script()).find(|s| {
+        matches!(
+            s,
+            unicode_script::Script::Han
+                | unicode_script::Script::Hiragana
+                | unicode_script::Script::Katakana
+                | unicode_script::Script::Hangul
+        )
     });
-    family
-        .filter(|family| !family.is_empty())
-        .map_or(Family::Monospace, Family::Name)
+    let name = match script {
+        Some(unicode_script::Script::Han) => &families.han,
+        Some(unicode_script::Script::Hiragana) => &families.hiragana,
+        Some(unicode_script::Script::Katakana) => &families.katakana,
+        Some(unicode_script::Script::Hangul) => &families.hangul,
+        _ => return Family::Monospace,
+    };
+    if let Some(owner) = families
+        .candidates
+        .iter()
+        .find(|f| f.name == *name && f.covers(text))
+    {
+        return Family::Name(&owner.name);
+    }
+    let qualifies = |f: &&Arc<CjkFace>| match script {
+        Some(unicode_script::Script::Han) => f.coverage.han,
+        Some(unicode_script::Script::Hiragana) => f.coverage.hiragana,
+        Some(unicode_script::Script::Katakana) => f.coverage.katakana,
+        Some(unicode_script::Script::Hangul) => f.coverage.hangul,
+        _ => false,
+    };
+    let fallback = (script == Some(unicode_script::Script::Han))
+        .then(|| {
+            families
+                .candidates
+                .iter()
+                .find(|f| f.coverage.simplified && f.covers(text))
+        })
+        .flatten()
+        .or_else(|| {
+            families
+                .candidates
+                .iter()
+                .filter(qualifies)
+                .find(|f| f.covers(text))
+        });
+    fallback.map_or(Family::Monospace, |f| Family::Name(&f.name))
 }
 
 fn font_family_available(font_system: &FontSystem, family: &str) -> bool {
@@ -22388,7 +22577,7 @@ mod tests {
     #[test]
     fn grid_han_uses_the_first_available_cjk_family() {
         let mut font_system = terminal_font_system();
-        let expected = CJK_FALLBACK_FAMILIES[0];
+        let expected = GRID_CJK_FALLBACK_FAMILIES[0];
         if !font_family_supports_text(&mut font_system, expected, "你好世界") {
             eprintln!("skipped: {expected} is absent or does not cover the Han fixture");
             return;
@@ -22437,7 +22626,7 @@ mod tests {
             eprintln!("skipped: neither DengXian nor SimSun covers the Han fixture");
             return;
         };
-        let Some(automatic) = CJK_FALLBACK_FAMILIES
+        let Some(automatic) = GRID_CJK_FALLBACK_FAMILIES
             .iter()
             .copied()
             .find(|family| font_family_supports_text(&mut font_system, family, "你好世界"))
@@ -30603,6 +30792,295 @@ mod tests {
                 "and nothing was repaired on the way out: a re-pack on a device this \
                  broken mints an atlas every later frame would take its ink from"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod cjk_picker_regressions {
+    use super::*;
+    fn synthetic() -> FontSystem {
+        let mut db = glyphon::fontdb::Database::new();
+        for bytes in [
+            include_bytes!("../tests/fonts/Test-Escape700.ttf").as_slice(),
+            include_bytes!("../tests/fonts/Test-Other400.ttf").as_slice(),
+            include_bytes!("../tests/fonts/Test-CJK400.ttf").as_slice(),
+            include_bytes!("../tests/fonts/Test-CJK700.ttf").as_slice(),
+            include_bytes!("../tests/fonts/Test-Sans400.ttf").as_slice(),
+        ] {
+            db.load_font_data(bytes.to_vec());
+        }
+        let faces: Vec<_> = db
+            .faces()
+            .filter(|f| f.families[0].0 == "Test CJK")
+            .cloned()
+            .collect();
+        for mut face in faces {
+            db.remove_face(face.id);
+            for name in platform_cjk_fallback_families()
+                .iter()
+                .filter(|name| **name != "NSimSun")
+            {
+                face.families.push((
+                    (*name).into(),
+                    glyphon::fontdb::Language::English_UnitedStates,
+                ));
+            }
+            db.push_face_info(face);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let mut face = db
+                .faces()
+                .find(|f| f.families[0].0 == "Test Other")
+                .unwrap()
+                .clone();
+            db.remove_face(face.id);
+            face.families.push((
+                "NSimSun".into(),
+                glyphon::fontdb::Language::English_UnitedStates,
+            ));
+            db.push_face_info(face);
+        }
+        db.set_sans_serif_family("Test Sans");
+        FontSystem::new_with_locale_and_db_and_fallback("en-US".into(), db, TestFallback)
+    }
+    #[derive(Debug)]
+    struct TestFallback;
+    impl Fallback for TestFallback {
+        fn common_fallback(&self) -> &[&'static str] {
+            &[]
+        }
+        fn forbidden_fallback(&self) -> &[&'static str] {
+            &[]
+        }
+        fn script_fallback(&self, _: unicode_script::Script, _: &str) -> &[&'static str] {
+            &["Test CJK"]
+        }
+    }
+    fn families(buffer: &Buffer, fs: &FontSystem) -> Vec<String> {
+        buffer
+            .layout_runs()
+            .flat_map(|r| r.glyphs.iter())
+            .map(|g| {
+                assert_ne!(g.glyph_id, 0);
+                fs.db().face(g.font_id).unwrap().families[0].0.clone()
+            })
+            .collect()
+    }
+    #[test]
+    fn cjk_proportional_family_survives_every_label_weight() {
+        let mut fs = synthetic();
+        let grid = resolve_terminal_cjk_families("", &mut fs);
+        for weight in [
+            Weight::NORMAL,
+            Weight::MEDIUM,
+            Weight::SEMIBOLD,
+            Weight::BOLD,
+        ] {
+            let mut b = Buffer::new(&mut fs, Metrics::new(14.0, 20.0));
+            let attrs =
+                chrome_label_attrs(ChromeLabelWeight::Regular, 0.0, false, false).weight(weight);
+            set_chrome_label_text(&mut b, &mut fs, "你", &attrs, false, &grid);
+            b.shape_until_scroll(&mut fs, false);
+            assert_eq!(families(&b, &fs), ["Test CJK"], "{weight:?}");
+            let glyph = b.layout_runs().next().unwrap().glyphs.first().unwrap();
+            assert_eq!(
+                fs.db().face(glyph.font_id).unwrap().weight,
+                if weight.0 <= 500 {
+                    Weight::NORMAL
+                } else {
+                    Weight::BOLD
+                }
+            );
+        }
+    }
+    #[test]
+    fn cjk_preview_bold_run_keeps_proportional_family() {
+        let mut fs = synthetic();
+        for mono in [false, true] {
+            for bold in [false, true] {
+                for italic in [false, true] {
+                    let paragraph = PreviewParagraph {
+                        runs: vec![PreviewRun {
+                            text: "你".into(),
+                            color: [255; 3],
+                            mono,
+                            bold,
+                            italic,
+                            font_scale: 1.0,
+                            inline_box_px: None,
+                        }],
+                        rect: [0.0, 0.0, 100.0, 30.0],
+                        font_size_px: 14.0,
+                        line_height_px: 20.0,
+                        wrap: false,
+                        letter_spacing_em: 0.0,
+                        align_right: false,
+                        align_center: false,
+                        cell_advance: mono.then_some(10.0),
+                    };
+                    let b = shape_preview_paragraph(&mut fs, &paragraph);
+                    assert_eq!(
+                        families(&b, &fs),
+                        ["Test CJK"],
+                        "mono={mono} bold={bold} italic={italic}"
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn cjk_mono_label_measures_the_selected_family_it_draws() {
+        let mut fs = synthetic();
+        let selected = resolve_terminal_cjk_families("Test Other", &mut fs);
+        let measured = shape_chrome_measurement_with_cjk(
+            &mut fs,
+            "你",
+            14.0,
+            ChromeLabelWeight::Medium,
+            0.0,
+            false,
+            true,
+            &selected,
+        )
+        .unwrap();
+        let label = ChromeLabel {
+            text: "你".into(),
+            rect: [0.0, 0.0, 100.0, 30.0],
+            font_size_px: 14.0,
+            color: [255; 3],
+            mono: true,
+            weight: ChromeLabelWeight::Medium,
+            align_right: false,
+            align_center: false,
+            letter_spacing_em: 0.0,
+            tabular_numerals: false,
+            clip: None,
+        };
+        let drawn = shape_chrome_labels_with_cjk(&mut fs, &[label], 0.7, 1.0, &selected);
+        assert_eq!(families(&measured, &fs), ["Test Other"]);
+        assert_eq!(families(&drawn[0].buffer, &fs), families(&measured, &fs));
+        assert_eq!(
+            shaped_line_width(&drawn[0].buffer),
+            shaped_line_width(&measured)
+        );
+        let advances = chrome_label_advances_with_cjk(
+            &mut fs,
+            "你",
+            14.0,
+            ChromeLabelWeight::Medium,
+            0.0,
+            false,
+            true,
+            &selected,
+        );
+        assert_eq!(advances.width(), shaped_line_width(&measured));
+    }
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn cjk_stored_family_identifier_keeps_the_same_face() {
+        let mut fs = synthetic();
+        let mut ids = Vec::new();
+        // The old stored name and the font's other family record name the same face.
+        for saved in ["NSimSun", "Test Other"] {
+            let cjk = resolve_terminal_cjk_families(saved, &mut fs);
+            assert_eq!(cjk.chosen, saved);
+            let b = shape_chrome_measurement_with_cjk(
+                &mut fs,
+                "你",
+                14.0,
+                ChromeLabelWeight::Medium,
+                0.0,
+                false,
+                true,
+                &cjk,
+            )
+            .unwrap();
+            assert_eq!(families(&b, &fs), ["Test Other"]);
+            ids.push(b.layout_runs().next().unwrap().glyphs[0].font_id);
+        }
+        assert_eq!(ids[0], ids[1]);
+    }
+    #[test]
+    fn cjk_catalog_is_reused_until_the_font_database_changes() {
+        let mut fs = synthetic();
+        let initial = fs.cjk_catalog();
+        let grid = resolve_terminal_cjk_families("Test Other", &mut fs);
+        let mut buffer = Buffer::new(&mut fs, Metrics::new(14.0, 20.0));
+        set_chrome_label_text(
+            &mut buffer,
+            &mut fs,
+            "你",
+            &chrome_label_attrs(ChromeLabelWeight::Medium, 0.0, false, false),
+            false,
+            &grid,
+        );
+        assert!(Arc::ptr_eq(&initial, &fs.cjk_catalog()));
+        fs.db_mut().set_sans_serif_family("Test Sans");
+        assert!(!Arc::ptr_eq(&initial, &fs.cjk_catalog()));
+    }
+    #[test]
+    fn cjk_settings_measurement_timing_probe() {
+        let mut fs = terminal_font_system();
+        for pass in 0..2 {
+            let start = Instant::now();
+            for _ in 0..10 {
+                for text in [
+                    "Microsoft YaHei UI",
+                    "Yu Gothic UI",
+                    "NSimSun",
+                    "Simplified Chinese",
+                    "General",
+                    "Automatic",
+                    "Cascadia Mono",
+                    "Consolas",
+                ] {
+                    let _ = measure_chrome_label(
+                        &mut fs,
+                        text,
+                        26.0,
+                        ChromeLabelWeight::Regular,
+                        0.0,
+                        false,
+                        false,
+                    );
+                }
+            }
+            eprintln!(
+                "BT_PERF_TRACE cjk_settings_measurement pass={pass} labels=80 elapsed_us={}",
+                start.elapsed().as_micros()
+            );
+        }
+    }
+    #[test]
+    fn cjk_chosen_regular_only_family_survives_bold_italic() {
+        let mut fs = synthetic();
+        let cjk = resolve_terminal_cjk_families("Test Other", &mut fs);
+        for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
+            let key = ShapeKey {
+                text: "你".into(),
+                bold,
+                italic,
+            };
+            let b = shape_narrow_buffer(
+                &key,
+                &mut fs,
+                CellMetrics {
+                    cell_width_px: 10.0,
+                    cell_height_px: 20.0,
+                    font_size_px: 16.0,
+                    padding_px: 0.0,
+                    scale_factor: 1.0,
+                    ascii_baseline_px: 16.0,
+                    primary_advance_px: 10.0,
+                    primary_cap_height_px: 12.0,
+                    primary_cap_center_y_px: 6.0,
+                },
+                1.0,
+                terminal_grid_family("你", &cjk),
+            );
+            assert_eq!(families(&b, &fs), ["Test Other"]);
         }
     }
 }

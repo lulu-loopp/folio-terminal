@@ -77,38 +77,77 @@ pub fn monospace_font_families() -> Vec<MonospaceFamily> {
     crate::order_monospace_families(collect_monospace_families())
 }
 
-/// Every visible installed family that covers Folio's fixed CJK probe.
+/// Every visible CJK family, read once on the font worker.
 #[must_use]
 pub fn cjk_font_families() -> Vec<crate::CjkFamily> {
-    crate::order_cjk_families(collect_cjk_families())
+    static FAMILIES: std::sync::OnceLock<Vec<crate::CjkFamily>> = std::sync::OnceLock::new();
+    FAMILIES
+        .get_or_init(|| crate::order_cjk_families(collect_cjk_families()))
+        .clone()
 }
 
 fn collect_cjk_families() -> Vec<crate::CjkFamily> {
+    use objc2_core_text::{CTFontTableOptions, kCTFontFamilyNameKey};
     let collection = unsafe { CTFontCollection::from_available_fonts(None) };
     let Some(descriptors) = (unsafe { collection.matching_font_descriptors() }) else {
         return Vec::new();
     };
     let descriptors: &CFArray<CTFontDescriptor> = unsafe { descriptors.cast_unchecked() };
     let mut families = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for descriptor in descriptors.iter() {
         let Some(name) = family_name(&descriptor) else {
             continue;
         };
-        if name.starts_with('.') || name.trim().is_empty() || !covers_cjk_probe(&descriptor) {
+        if name.starts_with('.') || name.trim().is_empty() || !seen.insert(name.clone()) {
             continue;
+        }
+        let font = unsafe { CTFont::with_font_descriptor(&descriptor, 0.0, std::ptr::null()) };
+        let table = |tag: &[u8; 4]| {
+            unsafe { font.table(u32::from_be_bytes(*tag), CTFontTableOptions::NoOptions) }
+                .map(|data| unsafe { data.as_bytes_unchecked() }.to_vec())
+        };
+        let os2 = table(b"OS/2");
+        let cmap = table(b"cmap");
+        let coverage = crate::CjkCoverage::from_tables(os2.as_deref(), cmap.as_deref());
+        if !coverage.any() {
+            continue;
+        }
+        let mut localized_names = Vec::new();
+        // CoreText's own localized name API supplies its native UI-language
+        // answer. Explicit name-table records handle an app language different
+        // from macOS, without changing the process-global language preferences.
+        if let Some(localized) =
+            unsafe { font.localized_name(kCTFontFamilyNameKey, std::ptr::null_mut()) }
+        {
+            localized_names.push((crate::os_ui_language(), localized.to_string()));
+        }
+        if let Some(bytes) = table(b"name")
+            && let Some(names) = ttf_parser::name::Table::parse(&bytes)
+        {
+            for record in names.names {
+                if record.name_id != ttf_parser::name_id::FAMILY {
+                    continue;
+                }
+                let locale = match record.language_id {
+                    0x0804 => "zh-CN",
+                    0x0409 => "en-US",
+                    _ => continue,
+                };
+                if let Some(text) = record.to_string() {
+                    localized_names.retain(|(lang, _)| lang != locale);
+                    localized_names.push((locale.into(), text));
+                }
+            }
         }
         families.push(crate::CjkFamily {
             name,
             files: Vec::new(),
+            localized_names,
+            coverage,
         });
     }
     families
-}
-
-fn covers_cjk_probe(descriptor: &CTFontDescriptor) -> bool {
-    let font = unsafe { CTFont::with_font_descriptor(descriptor, 0.0, std::ptr::null()) };
-    let characters = unsafe { font.character_set() };
-    crate::covers_cjk_sample(|character| characters.is_character_member(character as u16))
 }
 
 /// The enumeration itself: one collection, one pass, one predicate.
