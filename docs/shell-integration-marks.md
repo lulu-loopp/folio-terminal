@@ -30,6 +30,14 @@ Each root/path array contains strings. `profile_refusals` contains objects with
 and replaced by the next operation. The other fields are historical locations,
 including locations already cleaned. They are discovery candidates, not proof
 that a mark still exists. Only exact file contents establish that fact.
+Discovery alone never adds a profile to `powershell_profiles`: migration/removal
+records an exact owned mark before editing it; inaccessible candidates are kept
+in `profile_refusals` for retry. A hand-written installation is left untouched
+and suppresses the offer, but is not a Folio-written mark. Old records remain
+readable and their historical paths remain discovery candidates, not ownership.
+`enabled` permits upkeep; it is not evidence that Folio installed a mark. Startup
+that finds only unowned profiles does not create a record merely for discovery.
+An explicit Off still records the user decision, even with nothing to remove.
 
 `powershell_scripts` supplies the exact literal operands older Folio versions
 could write. It does not grant ownership of arbitrary lines mentioning a script.

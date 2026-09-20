@@ -143,7 +143,18 @@ fn invalid_encoding() -> io::Error {
 /// None means byte-identical. Each line keeps its own terminator; removal
 /// consumes only the owned line's terminator, never a neighbouring blank line.
 pub fn rewrite(bytes: &[u8], forms: &Forms, action: Action) -> io::Result<Option<Vec<u8>>> {
+    rewrite_recorded(bytes, forms, action, || Ok(()))
+}
+
+/// Record an exact owned mark before any replacement, using this same scan.
+fn rewrite_recorded(
+    bytes: &[u8],
+    forms: &Forms,
+    action: Action,
+    record_owned: impl FnOnce() -> io::Result<()>,
+) -> io::Result<Option<Vec<u8>>> {
     let decoded = Decoded::read(bytes)?;
+    let mut owns_mark = false;
     let mut output = String::new();
     for raw in decoded.text.split_inclusive('\n') {
         let body = raw.strip_suffix('\n').unwrap_or(raw);
@@ -153,6 +164,7 @@ pub fn rewrite(bytes: &[u8], forms: &Forms, action: Action) -> io::Result<Option
             output.push_str(raw);
             continue;
         }
+        owns_mark = true;
         if action == Action::Remove {
             continue;
         }
@@ -165,6 +177,9 @@ pub fn rewrite(bytes: &[u8], forms: &Forms, action: Action) -> io::Result<Option
         output.push_str(forms.managed);
         output.push_str(&body[body.trim_end().len()..]);
         output.push_str(&raw[body.len()..]);
+    }
+    if owns_mark {
+        record_owned()?;
     }
     let output = decoded.encode(&output);
     Ok((output != bytes).then_some(output))
@@ -364,6 +379,7 @@ impl Report {
     pub fn text(&self, refused: bool) -> String {
         self.files
             .iter()
+            .filter(|f| f.fate != Fate::Unchanged)
             .filter(|f| matches!(f.fate, Fate::Refused(_)) == refused)
             .map(|f| {
                 let (label, reason) = match &f.fate {
@@ -386,16 +402,28 @@ impl Report {
 
 /// Pure multi-file plan, including injected refusals. A refusal never hides
 /// another file's decision. The applier below consumes these same decisions.
+#[cfg(test)]
 pub fn plan(
     inputs: Vec<(PathBuf, Result<Vec<u8>, String>)>,
     forms: &Forms,
     action: Action,
 ) -> Vec<(FileReport, Option<Vec<u8>>)> {
+    plan_recorded(inputs, forms, action, &mut |_| Ok(()))
+}
+
+fn plan_recorded(
+    inputs: Vec<(PathBuf, Result<Vec<u8>, String>)>,
+    forms: &Forms,
+    action: Action,
+    record_owned: &mut impl FnMut(&Path) -> io::Result<()>,
+) -> Vec<(FileReport, Option<Vec<u8>>)> {
     inputs
         .into_iter()
         .map(|(path, input)| {
-            let result =
-                input.and_then(|bytes| rewrite(&bytes, forms, action).map_err(|e| e.to_string()));
+            let result = input.and_then(|bytes| {
+                rewrite_recorded(&bytes, forms, action, || record_owned(&path))
+                    .map_err(|e| e.to_string())
+            });
             let (fate, bytes) = match result {
                 Err(reason) => (Fate::Refused(reason), None),
                 Ok(None) => (Fate::Unchanged, None),
@@ -413,7 +441,17 @@ pub fn plan(
         .collect()
 }
 
+#[cfg(test)]
 pub fn apply(paths: &[PathBuf], forms: &Forms, action: Action) -> Report {
+    apply_recorded(paths, forms, action, |_| Ok(()))
+}
+
+pub fn apply_recorded(
+    paths: &[PathBuf],
+    forms: &Forms,
+    action: Action,
+    mut record_owned: impl FnMut(&Path) -> io::Result<()>,
+) -> Report {
     let mut report = Report::default();
     for path in paths {
         let before = super::read_profile_for_edit(path);
@@ -421,9 +459,14 @@ pub fn apply(paths: &[PathBuf], forms: &Forms, action: Action) -> Report {
             .as_ref()
             .map(|b| b.clone().unwrap_or_default())
             .map_err(ToString::to_string);
-        let (mut file, replacement) = plan(vec![(path.clone(), input)], forms, action)
-            .pop()
-            .unwrap();
+        let (mut file, replacement) = plan_recorded(
+            vec![(path.clone(), input)],
+            forms,
+            action,
+            &mut record_owned,
+        )
+        .pop()
+        .unwrap();
         if let Some(bytes) = replacement {
             let original = before.unwrap().unwrap_or_default();
             let result =
@@ -440,6 +483,29 @@ pub fn apply(paths: &[PathBuf], forms: &Forms, action: Action) -> Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_integration_record_failure_prevents_owned_profile_edit() {
+        let root = super::super::tests::temp_dir("owned-record-failure");
+        let profile = root.join("profile.ps1");
+        fs::write(&profile, LEGACY_LINE).unwrap();
+        let mut calls = 0;
+        let report = apply_recorded(
+            std::slice::from_ref(&profile),
+            &Forms::new(&[]),
+            Action::Migrate,
+            |path| {
+                calls += 1;
+                assert_eq!(path, profile);
+                assert_eq!(fs::read(path).unwrap(), LEGACY_LINE.as_bytes());
+                Err(io::Error::other("record unavailable"))
+            },
+        );
+        assert_eq!(calls, 1);
+        assert_eq!(report.exit_code(), 1);
+        assert_eq!(fs::read(&profile).unwrap(), LEGACY_LINE.as_bytes());
+        assert!(report.text(true).contains("record unavailable"));
+    }
 
     #[test]
     fn shell_integration_followup_exactly_two_managed_roots_and_legacy_install() {

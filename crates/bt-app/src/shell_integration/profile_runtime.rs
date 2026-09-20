@@ -166,16 +166,16 @@ fn operate_with(
     }
     let forms = Forms::new(&scripts).targeting(managed);
 
-    // Write intent before changing somebody else's file: a crash can leave an
-    // extra candidate, never an unrecorded installed mark. Removal retains the
-    // locations too, so a later retry can revisit a locked/missing file.
-    for path in &paths {
-        marks.remember(path, &script);
-    }
-    if let Err(e) = marks.write(data) {
-        return refused_record(e);
-    }
-    report.files.extend(apply(&paths, &forms, action).files);
+    // Discovery is not ownership. Remember only an exact mark encountered by
+    // the applier's existing scan, before it can replace the profile. Retain old
+    // record locations as historical retry candidates, never as edit authority.
+    report.files.extend(
+        apply_recorded(&paths, &forms, action, |path| {
+            marks.remember(path, &script);
+            marks.write(data)
+        })
+        .files,
+    );
     // Probe refusals name executables, not profiles. They are reported on this
     // run, and retried through discovery, never treated as profile candidates.
     marks.profile_refusals = report
@@ -183,7 +183,11 @@ fn operate_with(
         .into_iter()
         .filter(|r| paths.contains(&r.path))
         .collect();
-    if let Err(e) = marks.write(data) {
+    // Merely discovering a hand-written installation must not create an
+    // enabled record. Existing records and explicit Off decisions still persist.
+    if (record_path.exists() || !marks.profile_refusals.is_empty())
+        && let Err(e) = marks.write(data)
+    {
         report.files.extend(refused_record(e).files);
     }
     report
@@ -276,6 +280,96 @@ pub fn take_removal() -> Option<Report> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn shell_integration_offer_predicate_never_grants_write_ownership() {
+        let source = include_str!("../shell_integration.rs");
+        let offer = source
+            .split_once("pub fn offer_for(profile: &Path) -> Offer {")
+            .unwrap()
+            .1
+            .split_once("\n}\n")
+            .unwrap()
+            .0;
+        assert!(offer.contains("profile_suppresses_integration_offer(&decoded.text)"));
+        let writer = source
+            .split_once("fn add_profile_with_forms(")
+            .unwrap()
+            .1
+            .split_once("\n}\n")
+            .unwrap()
+            .0;
+        assert!(writer.contains("forms.owns("));
+        assert!(!writer.contains("profile_suppresses_integration_offer"));
+        let marks = include_str!("profile_marks.rs");
+        assert!(!marks.contains("profile_suppresses_integration_offer"));
+    }
+
+    #[test]
+    fn shell_integration_old_enabled_record_is_read_without_claiming_user_code() {
+        let root = super::super::tests::temp_dir("old-enabled-handwritten");
+        let profile = root.join("profile.ps1");
+        let original = b". 'D:\\x\\folio.ps1'\r\n";
+        fs::write(&profile, original).unwrap();
+        let mut old = Marks::default();
+        old.remember(&profile, &script_at(&root));
+        old.write(&root).unwrap();
+        assert!(!Marks::read(&root).unwrap().is_off());
+        let report = operate_with(&root, Action::Remove, Ok(MANAGED_LINE), |marks| {
+            (marks.powershell_profiles.clone(), Report::default())
+        });
+        assert_eq!(report.exit_code(), 0);
+        assert_eq!(fs::read(&profile).unwrap(), original);
+        assert!(report.text(false).is_empty());
+        assert!(Marks::read(&root).unwrap().is_off());
+    }
+
+    #[test]
+    fn shell_integration_offer_respects_handwritten_installation() {
+        let root = super::super::tests::temp_dir("offer-loose");
+        let profile = root.join("profile.ps1");
+        for line in [r". 'D:\x\folio.ps1'", r". 'D:\x\FOLIO.PS1'", MANAGED_LINE] {
+            fs::write(&profile, line).unwrap();
+            assert_eq!(offer_for(&profile), Offer::Silent, "{line}");
+        }
+        fs::write(&profile, "  # . 'D:\\x\\folio.ps1'\r\n").unwrap();
+        assert_eq!(offer_for(&profile), Offer::Owed(profile));
+    }
+
+    #[test]
+    fn shell_integration_handwritten_profile_is_not_a_recorded_mark() {
+        let root = super::super::tests::temp_dir("handwritten-record");
+        let profile = root.join("profile.ps1");
+        let original = b". 'D:\\x\\folio.ps1'\r\n";
+        fs::write(&profile, original).unwrap();
+        let report = operate_with(&root, Action::Migrate, Ok(MANAGED_LINE), |_| {
+            (vec![profile.clone()], Report::default())
+        });
+        assert_eq!(report.exit_code(), 0);
+        assert_eq!(report.files[0].fate, Fate::Unchanged);
+        assert_eq!(fs::read(&profile).unwrap(), original);
+        assert!(Marks::read(&root).unwrap().powershell_profiles.is_empty());
+        assert!(!root.join(RECORD_FILE).exists());
+    }
+
+    #[test]
+    fn shell_integration_handwritten_off_reports_nothing_and_preserves_bytes() {
+        let root = super::super::tests::temp_dir("handwritten-off");
+        let profile = root.join("profile.ps1");
+        let original = b". 'D:\\x\\folio.ps1'\r\n";
+        fs::write(&profile, original).unwrap();
+        let report = operate_with(&root, Action::Remove, Ok(MANAGED_LINE), |_| {
+            (vec![profile.clone()], Report::default())
+        });
+        assert_eq!(report.exit_code(), 0);
+        assert_eq!(report.files[0].fate, Fate::Unchanged);
+        assert_eq!(fs::read(&profile).unwrap(), original);
+        // Both settings and CLI map an empty successful report to ShellProfileNothing.
+        assert!(report.text(false).is_empty());
+        let marks = Marks::read(&root).unwrap();
+        assert!(marks.is_off());
+        assert!(marks.powershell_profiles.is_empty());
+    }
 
     #[test]
     fn shell_integration_followup_legacy_root_keeps_working_script() {
@@ -541,12 +635,14 @@ mod tests {
         assert_eq!(report.files[0].fate, Fate::Migrated);
         assert_eq!(fs::read(&profiles[1]).unwrap(), original);
         let marks = Marks::read(&root).unwrap();
-        assert_eq!(marks.powershell_profiles, profiles);
+        assert_eq!(marks.powershell_profiles, vec![profiles[0].clone()]);
         assert_eq!(marks.profile_refusals.len(), 1);
         assert_eq!(marks.profile_refusals[0].path, profiles[1]);
         fs::set_permissions(&profiles[1], permissions).unwrap();
         let report = operate_with(&root, Action::Remove, Ok(MANAGED_LINE), |marks| {
-            (marks.powershell_profiles.clone(), Report::default())
+            let mut paths = marks.powershell_profiles.clone();
+            paths.extend(marks.profile_refusals.iter().map(|r| r.path.clone()));
+            (paths, Report::default())
         });
         assert_eq!(report.exit_code(), 0);
         for path in &profiles {
