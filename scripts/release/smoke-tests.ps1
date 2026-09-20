@@ -115,6 +115,36 @@ New-Zip -Path $archive -Files @{
 $package = Join-Path $scratch 'folio.msix'
 New-Zip -Path $package -Files @{ 'AppxManifest.xml' = '<Package />' }
 
+# **A package directory, with this release's archive in it**, for the three
+# cases about the default. The version is read out of the workspace manifest
+# rather than written here, because `smoke.ps1`'s own door refuses a package
+# directory carrying a version other than the one being released — a fixture
+# with a made-up number in its name would be refused by that check instead of
+# reaching the one under test, and a fixture that pinned today's number would
+# have to be edited every release.
+$manifestText = [IO.File]::ReadAllText((Join-Path $root 'Cargo.toml'))
+if ($manifestText -notmatch '(?ms)^\[workspace\.package\](.*?)^\[') {
+    throw 'Cargo.toml has no [workspace.package] table'
+}
+if ($Matches[1] -notmatch '(?m)^\s*version\s*=\s*"([^"]+)"') {
+    throw '[workspace.package] declares no version'
+}
+$releasing = ($Matches[1] -split '[-+]')[0]
+
+# The release machine's arrangement: an archive with the package inside it, and
+# no loose `folio.msix` anywhere.
+$releasePackage = Join-Path $scratch 'release-package'
+[IO.Directory]::CreateDirectory($releasePackage) | Out-Null
+$releaseEntry = "folio-$releasing/folio.msix"
+New-Zip -Path (Join-Path $releasePackage "folio-$releasing-windows-x64.zip") -Files @{
+    "folio-$releasing\folio.msix" = 'the package, out of the release archive'
+    "folio-$releasing\folio.exe"  = 'not started by any case here'
+}
+
+# And an empty one, for the case where neither place has a package.
+$emptyPackage = Join-Path $scratch 'empty-package'
+[IO.Directory]::CreateDirectory($emptyPackage) | Out-Null
+
 # A zip that is neither, which is what a mistyped path most often turns out to
 # be — a source archive, a downloads folder's worth of something else.
 $strangerZip = Join-Path $scratch 'stranger.zip'
@@ -199,7 +229,13 @@ Test-Case 'a relative -Exe that is there is made absolute too' {
     # into its own error. So what is asserted is that the *only* spelling in
     # the report is the absolute one — with every occurrence of it struck out,
     # nothing relative is left to have been carried this far.
-    $result = Invoke-Smoke -StandingIn $scratch -Parameters @{ Exe = 'pkg\folio.exe'; ExpectSigned = $true }
+    #
+    # `-PackageDirectory` is the release machine's, so that the door finds a
+    # package and this case is refused by the signature it is about rather than
+    # by there being nothing to check.
+    $result = Invoke-Smoke -StandingIn $scratch -Parameters @{
+        Exe = 'pkg\folio.exe'; ExpectSigned = $true
+        Artifacts = (Join-Path $scratch 'relative-exe'); PackageDirectory = $releasePackage }
     if ($result.ExitCode -eq 0) { throw 'it exited 0' }
     if ($result.Flat -notmatch [regex]::Escape($stubExe)) {
         throw "the refusal named something other than $stubExe : $($result.Text)"
@@ -274,6 +310,70 @@ Test-Case 'a -Msix naming a zip with no package in it is refused at the door' {
     }
 }
 
+# ── the default, which is both arrangements the package is ever in ───────────
+#
+# `-Msix` used to default to `folio.msix` beside `-Exe` and nowhere else, which
+# is the recipient's arrangement and does not exist on the machine that packs
+# the release: `package.ps1` leaves the package inside the archive and no loose
+# copy at all. So the documented signed line had to name `-Msix` explicitly, and
+# on the 0.4.2 release it was run without one and refused (defect D2,
+# `docs/plans/review/release-scripts-2026-09-20.md`).
+#
+# The first two cases are stopped by the executable's signature, which is the
+# check *after* the door — so reaching it is the statement that the door settled
+# which file the package was. The third is refused at the door itself.
+
+Test-Case 'with no -Msix, a package beside the executable is the one used' {
+    $beside = Join-Path $scratch 'pkg\folio.msix'
+    Copy-Item -LiteralPath $package -Destination $beside -Force
+    $artifacts = Join-Path $scratch 'default-beside'
+    try {
+        $result = Invoke-Smoke -StandingIn $scratch -Parameters @{
+            Exe = $stubExe; ExpectSigned = $true; Artifacts = $artifacts
+            PackageDirectory = $releasePackage }
+        if ($result.ExitCode -eq 0) { throw 'it exited 0' }
+        if ($result.Flat -match 'out of folio-') {
+            throw "it went to the archive although there was a package beside the exe: $($result.Text)"
+        }
+        if (Test-Path -LiteralPath (Join-Path $artifacts 'package')) {
+            throw 'a package that was already beside the executable was copied somewhere first'
+        }
+    }
+    finally { Remove-Item -LiteralPath $beside -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'with no -Msix and no package beside the exe, the release archive is read' {
+    # The release machine, running the line `docs/RELEASING.md` prints with no
+    # `-Msix` on it at all.
+    $artifacts = Join-Path $scratch 'default-archive'
+    $result = Invoke-Smoke -StandingIn $scratch -Parameters @{
+        Exe = $stubExe; ExpectSigned = $true; Artifacts = $artifacts
+        PackageDirectory = $releasePackage }
+    if ($result.ExitCode -eq 0) { throw 'it exited 0' }
+    if ($result.Flat -notmatch [regex]::Escape($releaseEntry)) {
+        throw "it did not say which entry it took the package out of: $($result.Text)"
+    }
+    $taken = Join-Path $artifacts 'package\folio.msix'
+    if (-not (Test-Path -LiteralPath $taken -PathType Leaf)) {
+        throw "no package was written to $taken : $($result.Text)"
+    }
+    if ([IO.File]::ReadAllText($taken) -ne 'the package, out of the release archive') {
+        throw 'what was taken out of the archive is not what went into it'
+    }
+}
+
+Test-Case 'with no package in either place, the refusal names both of them' {
+    $result = Invoke-Smoke -StandingIn $scratch -Parameters @{
+        Exe = $stubExe; ExpectSigned = $true; Artifacts = (Join-Path $scratch 'default-neither')
+        PackageDirectory = $emptyPackage }
+    if ($result.ExitCode -eq 0) { throw 'it exited 0' }
+    foreach ($place in @((Join-Path $scratch 'pkg\folio.msix'), $emptyPackage)) {
+        if ($result.Flat -notmatch [regex]::Escape($place)) {
+            throw "the refusal did not name $place : $($result.Text)"
+        }
+    }
+}
+
 Test-Case 'an absolute path is passed through as it was written' {
     $absent = Join-Path $scratch 'absent\folio.exe'
     $result = Invoke-Smoke -StandingIn $scratch -Parameters @{ Exe = $absent }
@@ -290,3 +390,8 @@ if ($failures.Count -gt 0) {
     throw "$($failures.Count) of $ran case(s) failed: $($failures -join '; ')"
 }
 Write-Host "$ran cases, all green."
+# Every case runs `smoke.ps1` in a child that is *meant* to refuse, so the last
+# thing `$LASTEXITCODE` holds is one of those refusals. A green run of this file
+# that exits 1 is the same failure as a refusal that exits 0, read the other way
+# round.
+exit 0

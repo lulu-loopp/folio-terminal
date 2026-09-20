@@ -102,7 +102,7 @@ run by hand exactly as it runs there:
 | script | what it produces |
 | --- | --- |
 | `scripts/release/sbom.ps1` | the bill of materials, written into the output directory |
-| `scripts/release/package.ps1` | `folio-<version>-windows-x64.zip`, with `folio.msix` and the executable both in it, a copy of it called `folio-windows-x64.zip`, and `SHA256SUMS.txt` over everything beside it — **after emptying the output directory**, apart from that bill of materials |
+| `scripts/release/package.ps1` | `folio-<version>-windows-x64.zip`, with `folio.msix` and the executable both in it, a copy of it called `folio-windows-x64.zip`, and `SHA256SUMS.txt` over everything beside it — **after emptying the output directory**, apart from that bill of materials, and refusing to empty one that holds anything this lane did not write |
 | `scripts/release/smoke.ps1` | starts the executable that was built and checks the seven things a green build can still be broken about, and refuses an output directory holding a file from another release |
 
 ## What gets published
@@ -126,6 +126,14 @@ generated, so everything goes — the one exception is this version's
 after `package.ps1` has run**, and `smoke.ps1` is the second net: it refuses to
 run at all if the directory holds a file whose name carries a version other than
 the one in `Cargo.toml`.
+
+**And it empties what this lane writes, by name.** The archive, the copy of it
+under the stable name, `SHA256SUMS.txt`, a `folio-<version>.cdx.json`, the three
+macOS assets and the two directories the packing step works in: anything else in
+that directory is refused with its own name rather than deleted, because
+`-Output` is a parameter and the day somebody points it at a folder of their own
+is the day "empty the previous release" would have meant "empty that folder".
+Move the stranger out, or point `-Output` somewhere this lane owns.
 
 The workflow builds the same directory on a runner and keeps it as a workflow
 artifact. That copy is unsigned and its file names are identical, so it is never
@@ -177,11 +185,14 @@ about the one part of that script a green release does not exercise: the paths
 it is handed. It builds nothing, signs nothing and starts nothing — each case
 runs `smoke.ps1` in a child shell that was started in the repository and then
 walked into a scratch folder, which is the one arrangement under which a
-relative path has two answers, and reads the path the refusal names. Three of
-its cases are about the other question the door answers — whether the file
-`-Msix` names is the package or the archive the package ships in — and they
-build a zip of each shape rather than describing one. Run it after changing how
-`smoke.ps1` reads its arguments.
+relative path has two answers, and reads the path the refusal names. Six of its
+cases are about the other question the door answers — which file the package is
+— and they build a zip of each shape rather than describing one: a `-Msix`
+naming the archive, one naming the package, one naming a zip that is neither,
+and the three the default takes when no `-Msix` is given at all (a package
+beside the executable, the archive in the package directory, and neither, where
+the refusal has to name both places). Run it after changing how `smoke.ps1`
+reads its arguments.
 
 Everything below is about the one step that is not in that workflow, because it
 needs a person: signing.
@@ -298,9 +309,13 @@ az login --scope "https://management.core.windows.net//.default"   # once per fe
 cargo build --release
 ./scripts/release/sbom.ps1
 ./scripts/release/package.ps1 -Sign
-./scripts/release/smoke.ps1 -Exe target/release/folio.exe -ExpectSigned `
-    -Msix target/release-package/folio-0.4.2-windows-x64.zip
+./scripts/release/smoke.ps1 -Exe target/release/folio.exe -ExpectSigned
 ```
+
+**Four lines, each run once, with nothing to fill in.** There is no version in
+any of them: the one in `Cargo.toml` is read by every step that needs it, and a
+recipe carrying a number is a recipe that is wrong from the day after it is
+written.
 
 `package.ps1 -Sign` signs `folio.exe` where the build left it and `folio.msix`
 where it packed it, *before* the archive is built and before `SHA256SUMS.txt` is
@@ -313,14 +328,22 @@ file it clears away. So run `sbom.ps1` first — the order above is the order �
 and do not put anything in that directory before this line: it is emptied, and
 the macOS assets belong there after it, not before.
 
-`-Msix` is needed on that last line and nowhere else, and on the release machine
-it names the **archive**. `smoke.ps1` looks for the package beside the
-executable, because that is where it is for everybody who receives one — the
-archive holds both files in one folder. On the machine that packed it there is
-no loose copy at all: the package is in the zip and nowhere else, so the zip is
-what is named, and `smoke.ps1` takes the package out of it into `-Artifacts` and
-checks those bytes. It settles which of the two it was handed by opening the
-file rather than by reading its name, because an msix is a zip as well.
+**`-Msix` is not passed, because `smoke.ps1` looks in both places the package is
+ever in.** Beside the executable is where it is for everybody who receives one —
+the archive holds both files in one folder — and on the machine that packed the
+release there is no loose copy at all: the package is in the zip and nowhere
+else. So the default is the loose `folio.msix` beside `-Exe` when there is one,
+and otherwise the release archive in `-PackageDirectory`, out of which the
+package is taken into `-Artifacts` and those bytes checked. It settles which of
+the two it was handed by opening the file rather than by reading its name,
+because an msix is a zip as well. With neither there, `-ExpectSigned` refuses at
+the door and names both places it looked.
+
+That default is the repair for the 0.4.2 run, where the documented line was
+typed without `-Msix` and refused with a path — `target/release/folio.msix` —
+that cannot exist on a machine that has just packed a release. `-Msix` is still
+read, and it is the way to check a package that is somewhere else: an extracted
+download, a `dist/` build, an archive fetched from a workflow run.
 
 A relative path there is read from the directory the shell is standing in, and
 so are `-Exe` and `-Artifacts`: all three are made absolute before anything
@@ -442,7 +465,13 @@ The whole order, both platforms, with the four things 0.4.0 was caught out by
 written into the steps they belong to:
 
 1. **The Mac lane** — build, `bundle.sh`, `sign.sh --no-spctl`, `notarize.sh`,
-   `dmg.sh`, the rename, `checksums.sh`. Gatekeeper is asked **once**, by
+   `dmg.sh`, the rename, `checksums.sh`. **The owner runs this half themselves,
+   at the Mac, in Terminal** — not over ssh and not from an agent's session:
+   `codesign` reaches into a keychain, and a session that has not unlocked one
+   is answered `errSecInternalComponent` however many times it is retried (and
+   `notarytool` with `keychainLocked`). Everything before `sign.sh` and the
+   whole of the Windows lane can be driven from anywhere; from `sign.sh` to
+   `checksums.sh` is a person at the machine. Gatekeeper is asked **once**, by
    `notarize.sh` after it staples, and that assessment is the one that must
    pass; `sign.sh`'s own is informational and never fatal. `bundle.sh` refuses a
    binary that is not this version at this commit, and a bundle missing any of
@@ -459,24 +488,44 @@ written into the steps they belong to:
    the three from the Mac — and every version in a name is this release's.
    Re-run `smoke.ps1` if anything was moved in or out since it last ran: it
    refuses a directory carrying another release's version.
-5. **`gh release create`**, below, over that directory. The body is **copied
-   from the file in `docs/plans/release/`**, with its first line — the banner
-   saying what the file is — dropped; see **Release note shape**.
-6. **winget**, and **the Homebrew tap** — `cask.sh`, under **macOS** above. Both
-   name the release page, so both come after it exists.
+5. **`gh release create --draft`**, below, over that directory. The body is
+   **copied from the file in `docs/plans/release/`**, with its first line — the
+   banner saying what the file is — dropped; see **Release note shape**.
+6. **Verify the assets on the draft, before the button.** **A published release
+   is immutable in every way that matters**: the tag is what `/releases/latest`
+   and every link in the note resolve through, the checksum files and the two
+   distribution manifests are all about these exact bytes, and an asset replaced
+   afterwards is an asset some people already have under a hash that no longer
+   matches. Deleting the release and making it again is not a repair either —
+   the tag has been fetched, the download counters reset, and anyone who
+   installed in between has a build nothing describes. So the draft is where the
+   file list, the version in every name, the note's links and the checksums are
+   read; the button is the last irreversible thing in this document.
+7. **winget**, and **the two distribution manifests** —
+   `scripts/release/update-manifests.ps1`, under **Distribution manifests**
+   below. All of them name the release page, so all of them come after it
+   exists.
 
 ```powershell
+# The version is read and not typed. It is in [workspace.package], and the tag,
+# the title and the note's file name are all built out of that one line — which
+# is the same rule the scripts follow and the reason none of them takes a
+# version on the command line.
+$manifest = Get-Content -Raw Cargo.toml
+$version = [regex]::Match($manifest, '(?ms)^\[workspace\.package\].*?^\s*version\s*=\s*"([^"]+)"').Groups[1].Value
+$tag = "v$version-preview"
+
 # The body, which is the repo file with its first line — the banner saying what
 # the file is — and the blank line after it taken off. See **Release note
 # shape** below.
-$note = 'docs/plans/release/release-note-v0.4.2-preview.md'
+$note = "docs/plans/release/release-note-$tag.md"
 $body = Join-Path ([IO.Path]::GetTempPath()) 'folio-release-body.md'
 [IO.File]::WriteAllText($body, (((Get-Content -LiteralPath $note) | Select-Object -Skip 2) -join "`n") + "`n")
 
 $assets = @(Get-ChildItem target/release-package -File | ForEach-Object { $_.FullName })
-$arguments = @('release', 'create', 'v0.4.2-preview') + $assets + @(
+$arguments = @('release', 'create', $tag) + $assets + @(
     '--draft',
-    '--title', 'Folio 0.4.2',
+    '--title', "Folio $version",
     '--notes-file', $body)
 & gh @arguments
 ```
@@ -549,6 +598,55 @@ The shape, in order:
 A `## Known issues` list, when there is one, goes between **Changes** and the
 `<details>` block, under the same rule as everything above it: short bullets,
 one line each.
+
+## Distribution manifests
+
+Two repositories describe this release's assets to a package manager, and both
+are updated after the release page exists, because both name it:
+
+| | |
+| --- | --- |
+| `lulu-loopp/homebrew-folio` | `Casks/folio.rb`, read by `brew install --cask lulu-loopp/folio/folio`. `version` and `sha256` change; the URL is built out of `version`. |
+| `lulu-loopp/scoop-folio` | `bucket/folio.json`, read by `scoop install folio`. `version`, the 64-bit `url`, `hash` and `extract_dir` change. |
+
+**One command prints both, and nothing is written without `-Apply`:**
+
+```powershell
+./scripts/release/update-manifests.ps1 -Version <version>            # from target/release-package
+./scripts/release/update-manifests.ps1 -Version <version> -FromRelease   # from the release page
+```
+
+It reads the two manifests as they stand — from their repositories, so a `zap`
+path or a `notes` line somebody added since survives — and replaces only the
+values above, each of which has to be there exactly once or nothing is printed.
+**Every hash is copied out of `SHA256SUMS.txt` and `SHA256SUMS-macos.txt`**,
+which are the hashes over the bytes that were uploaded; nothing is recomputed
+from a second download, for the reason winget's `InstallerSha256` follows the
+same rule. The scoop URL and `extract_dir` are rendered from that file's own
+`autoupdate` templates — which is what `checkver -u` would do, on a machine that
+had scoop — and the rendered URL is checked against the tag, so a release tagged
+some other way stops here instead of being described by a page that is not
+there.
+
+Run it with no `-Apply` and read what it prints. Then, from an account that may
+push to both:
+
+```powershell
+./scripts/release/update-manifests.ps1 -Version <version> -FromRelease -Apply -Account <login>
+```
+
+`-Apply` refuses unless `gh` is signed in as an account with push permission on
+both repositories, and each write is made over the blob this run read, so a file
+edited in between is a refused write rather than a lost edit. No credential is
+in this repository: the authorisation is whatever `gh auth status` already has.
+
+Check them afterwards — `brew fetch --cask lulu-loopp/folio/folio` downloads the
+image and compares the hash, so it either agrees with the release page or says
+which of the two is wrong.
+
+`scripts/release/macos/cask.sh` remains the one-file route for the cask alone,
+and is what **macOS ▸ The Homebrew tap** below describes; it is the answer to
+"there is no tap yet" and to a cask being edited on the Mac.
 
 ## The sparse MSIX package
 
@@ -1009,6 +1107,12 @@ anything. Until they are changed, `brew` installs the previous release.
 **This is the last step, and it happens after the release page is published**,
 because the URL the cask names has to resolve and the hash has to be the hash of
 the file that was uploaded.
+
+**The ordinary way to do it is `update-manifests.ps1`** — see **Distribution
+manifests** above, which does this file and the scoop bucket in one command from
+the Windows machine. What follows is the same edit made on the Mac, one file at
+a time, and it is what `update-manifests.ps1` is a copy of rather than the other
+way round.
 
 ```sh
 gh api repos/lulu-loopp/homebrew-folio/contents/Casks/folio.rb --jq .content \
