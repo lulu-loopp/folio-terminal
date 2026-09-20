@@ -4462,11 +4462,11 @@ impl Text {
                 "This file was deleted. What you are reading is still here.",
                 "文件已被删除。你正在读的这一份还在。",
             ),
-            Self::RowPowerShellOffer => pick(lang, "PowerShell integration", "CHINESE PENDING"),
+            Self::RowPowerShellOffer => pick(lang, "PowerShell integration", "PowerShell 整合"),
             Self::DescPowerShellOffer => pick(
                 lang,
                 "On offers setup. Off removes Folio's profile lines.",
-                "CHINESE PENDING",
+                "开启时提示安装整合。关闭时移除 Folio 整合行。",
             ),
             // **The three installer rows are 「通知」 rows** (user ruling
             // 2026-08-29). 「钩子」 and 「通知程序」 named the mechanism this window
@@ -5002,7 +5002,7 @@ impl Text {
             Self::ShellProfileHardLink => pick(
                 lang,
                 "This profile has hard links, possibly from a dotfile manager. Folio left it unchanged.",
-                "CHINESE PENDING",
+                "$PROFILE 存在硬链接，可能来自配置文件管理工具。Folio 未做修改。",
             ),
             Self::ShellProfileReadOnly => pick(
                 lang,
@@ -5017,7 +5017,7 @@ impl Text {
             Self::ShellProfileScriptLocation => pick(
                 lang,
                 "The script must be under APPDATA\\Folio or APPDATA\\BetterTerminal, in shell-integration.",
-                "CHINESE PENDING",
+                "脚本必须位于 APPDATA\\Folio 或 APPDATA\\BetterTerminal 的 shell-integration 下。",
             ),
             Self::ShellProfileNothing => pick(
                 lang,
@@ -5929,16 +5929,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 8] = [
-        (Self::RowPowerShellOffer, HostPlatform::Windows),
-        (Self::RowPowerShellOffer, HostPlatform::MacOs),
-        (Self::DescPowerShellOffer, HostPlatform::Windows),
-        (Self::DescPowerShellOffer, HostPlatform::MacOs),
-        (Self::ShellProfileHardLink, HostPlatform::Windows),
-        (Self::ShellProfileHardLink, HostPlatform::MacOs),
-        (Self::ShellProfileScriptLocation, HostPlatform::Windows),
-        (Self::ShellProfileScriptLocation, HostPlatform::MacOs),
-    ];
+    const CHINESE_PENDING: [(Self, HostPlatform); 0] = [];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
