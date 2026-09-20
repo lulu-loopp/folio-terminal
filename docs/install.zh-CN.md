@@ -86,6 +86,8 @@ Agent 页的三个开关**默认关闭**，各自读取对应工具的配置文�
      这条命令再删掉即可。Mac 上没有要撤的东西：Finder 的 Open in Folio 在应用包自己的 Info.plist
      里，应用删掉就一起没了；设置在 `~/Library/Application Support/Folio`。 -->
 
+如果你删除了旧版 Folio 后仍有残留——PowerShell 一打开就报错、编程 agent 配置里的钩子条目、右键菜单项、设置文件夹——[`recovery-after-deleting-folio.zh-CN.md`](recovery-after-deleting-folio.zh-CN.md) 逐项说明如何手动清除，不需要 Folio。
+
 ## 已知问题
 
 - **曾有一例报告窗口上半部全黑**，发生在移至第二显示器后，尚未复现。如遇到请附上 `%APPDATA%\Folio\diagnostics.log`（Mac 上是 `~/Library/Application Support/Folio/diagnostics.log`）。
