@@ -277,7 +277,9 @@ pub fn linked_gitdir(root: &Path) -> Option<PathBuf> {
     if !marker.is_file() {
         return None;
     }
-    let text = std::fs::read_to_string(&marker).ok()?;
+    let text =
+        bt_platform::file_reads::read_to_string(bt_platform::file_reads::Lane::Settings, &marker)
+            .ok()?;
     let named = text
         .lines()
         .find_map(|line| line.strip_prefix("gitdir:"))?

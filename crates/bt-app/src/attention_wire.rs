@@ -613,10 +613,13 @@ fn payload_on_stdin() -> Option<String> {
     std::thread::spawn(move || {
         use std::io::Read;
         let mut bytes = Vec::new();
-        let read = std::io::stdin()
-            .lock()
-            .take(MAX_PAYLOAD_BYTES)
-            .read_to_end(&mut bytes);
+        let read = bt_platform::file_reads::Reader::new(
+            std::io::stdin().lock(),
+            bt_platform::file_reads::Lane::Attention,
+            None,
+        )
+        .take(MAX_PAYLOAD_BYTES)
+        .read_to_end(&mut bytes);
         let _ = sender.send(read.ok().map(|_| bytes));
     });
     let bytes = payload.recv_timeout(STDIN_BUDGET).ok()??;

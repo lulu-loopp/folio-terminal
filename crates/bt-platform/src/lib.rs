@@ -2,6 +2,8 @@
 
 use std::num::NonZeroIsize;
 
+pub mod file_reads;
+
 /// Fresh native facts for a diagnostic line only. Unreadable is not false.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NativePresentFacts {

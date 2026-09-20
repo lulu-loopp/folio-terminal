@@ -602,7 +602,10 @@ fn read_first_frame(
         attributes
             .SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1)
             .ok()?;
-        let reader = MFCreateSourceReaderFromURL(url, &attributes).ok()?;
+        let reader = crate::file_reads::opaque(crate::file_reads::Lane::Peek, || {
+            MFCreateSourceReaderFromURL(url, &attributes)
+        })
+        .ok()?;
         lap(&mut cost.open);
 
         // Nothing but the video. An audio stream that is still selected is a

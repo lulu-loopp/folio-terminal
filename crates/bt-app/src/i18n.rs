@@ -1943,6 +1943,16 @@ pub enum Text {
     ///
     /// One string and not four, because the four reasons are all "the file could not be written"
     /// wearing different hats and a reader takes the same action for every one of them.
+    AgentHooksExeUnknown,
+    AgentHooksExeUnstable,
+    AgentHooksPathPlaceholder,
+    AgentHooksTranslocated,
+    AgentHooksOwnerUnknown,
+    AgentHooksSchemaUnknown,
+    AgentHooksRecordFailed,
+    AgentHooksRootUnstable,
+    AgentHooksTakeOver,
+    AgentHooksLeftOther,
     ClaudeHooksFailedToast,
     // ── the focus card's height (§7.1.6b′, user ruling 2026-08-21) ──────────
     //
@@ -4513,6 +4523,56 @@ impl Text {
                 "Claude Code hook removed",
                 "已从 ~/.claude/settings.json 移除",
             ),
+            Self::AgentHooksExeUnknown => pick(
+                lang,
+                "The running executable’s location is unavailable.",
+                "无法获取可执行文件的位置。",
+            ),
+            Self::AgentHooksPathPlaceholder => pick(
+                lang,
+                "This executable path contains an agent placeholder. Move Folio before installing hooks.",
+                "路径含有 agent 占位符。将 Folio 移到固定位置后再安装 hook。",
+            ),
+            Self::AgentHooksExeUnstable => pick(
+                lang,
+                "The hook executable needs a stable absolute Unicode path.",
+                "hook 可执行文件需要稳定的绝对路径。",
+            ),
+            Self::AgentHooksTranslocated => pick(
+                lang,
+                "Move Folio out of App Translocation before installing hooks.",
+                "将 Folio 移出 App Translocation 后再安装 hook。",
+            ),
+            Self::AgentHooksOwnerUnknown => pick(
+                lang,
+                "The hook executable’s owner could not be verified.",
+                "无法确认 hook 可执行文件的归属。",
+            ),
+            Self::AgentHooksSchemaUnknown => pick(
+                lang,
+                "The hook configuration uses an unrecognized format.",
+                "hook 配置的格式无法识别。",
+            ),
+            Self::AgentHooksRecordFailed => pick(
+                lang,
+                "The integration locations could not be recorded. Check the Folio data folder.",
+                "无法记录整合位置。检查 Folio 数据文件夹。",
+            ),
+            Self::AgentHooksRootUnstable => pick(
+                lang,
+                "The agent configuration needs an absolute path.",
+                "agent 配置路径必须是绝对路径。",
+            ),
+            Self::AgentHooksTakeOver => pick(
+                lang,
+                "Another Folio owns these hooks. Press this switch again within 30 seconds to use this copy:",
+                "另一份 Folio 拥有这些 hook。30 秒内再按一次开关即可改用当前副本：",
+            ),
+            Self::AgentHooksLeftOther => pick(
+                lang,
+                "Hooks kept for another Folio:",
+                "已为另一份 Folio 保留 hook：",
+            ),
             Self::ClaudeHooksFailedToast => pick(
                 lang,
                 "Claude Code's settings were not changed",
@@ -5089,7 +5149,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 709] = [
+    pub const ALL: [Self; 719] = [
         Self::PastePathEncoding,
         Self::PastePathControl,
         Self::PastePathPowerShellQuote,
@@ -5634,6 +5694,16 @@ impl Text {
         Self::DescClaudeHooks,
         Self::ClaudeHooksAddedToast,
         Self::ClaudeHooksRemovedToast,
+        Self::AgentHooksExeUnknown,
+        Self::AgentHooksExeUnstable,
+        Self::AgentHooksPathPlaceholder,
+        Self::AgentHooksTranslocated,
+        Self::AgentHooksOwnerUnknown,
+        Self::AgentHooksSchemaUnknown,
+        Self::AgentHooksRecordFailed,
+        Self::AgentHooksRootUnstable,
+        Self::AgentHooksTakeOver,
+        Self::AgentHooksLeftOther,
         Self::ClaudeHooksFailedToast,
         Self::RowFocusCardHeight,
         Self::DescFocusCardHeight,
@@ -6431,6 +6501,24 @@ pub fn first_run_tip_copilot(path: &str) -> String {
         Lang::English => format!("Takes a dated copy of {path}, then writes the hook."),
         Lang::Chinese => format!("先做带日期的副本，再写入 {path}"),
     }
+}
+
+/// Paths are the evidence named by the adapter, never reconstructed by the UI.
+pub(crate) fn agent_owner_notice(install: bool, owners: &[std::path::PathBuf]) -> String {
+    let text = if install {
+        Text::AgentHooksTakeOver
+    } else {
+        Text::AgentHooksLeftOther
+    };
+    format!(
+        "{}\n{}",
+        text.text(),
+        owners
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
 }
 
 /// An agent installer's refusal, carrying the reason the installer gave.

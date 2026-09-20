@@ -6879,10 +6879,14 @@ impl GpuContext {
             .checked_add(1)
             .expect("font epoch exhausted");
         for file in files {
-            let _ = self.font_system.db_mut().load_font_file(file);
+            let _ = bt_platform::file_reads::opaque(bt_platform::file_reads::Lane::Fonts, || {
+                self.font_system.db_mut().load_font_file(file)
+            });
         }
         for file in cjk_files {
-            let _ = self.font_system.db_mut().load_font_file(file);
+            let _ = bt_platform::file_reads::opaque(bt_platform::file_reads::Lane::Fonts, || {
+                self.font_system.db_mut().load_font_file(file)
+            });
         }
         // A file a reader picked is a file this renderer has never opened, and
         // the one thing it may not be is a face with no em ([`drop_faces_with_no_scalable_em`]).
@@ -12969,37 +12973,54 @@ fn shape_chrome_labels_with_cjk(
 }
 
 /// Self-report for the owner's unreproduced mixed-weight screenshot.
+/// Which face chrome's non-ASCII text landed in, **once per decision and never
+/// per glyph** (2026-09-20).
+///
+/// The first form wrote a line for every non-ASCII glyph of every label of every
+/// frame and put the character in it: one afternoon's recording grew past 3.5 GB,
+/// and a trace that is only ever supposed to hold counters was holding what was
+/// on screen. The fact worth a line is the *decision* — this face, for this
+/// requested weight, at this size — and a session makes a few dozen of those.
 fn trace_chrome_cjk_glyphs(font_system: &FontSystem, buffer: &Buffer, label: &ChromeLabel) {
     static TRACE: OnceLock<bool> = OnceLock::new();
+    static SEEN: OnceLock<
+        std::sync::Mutex<std::collections::HashSet<(glyphon::fontdb::ID, u16, u32)>>,
+    > = OnceLock::new();
     if !*TRACE.get_or_init(|| std::env::var_os("BT_PERF_TRACE").is_some_and(|v| !v.is_empty())) {
         return;
     }
+    let requested = label.weight.shaping_weight().0;
     for run in buffer.layout_runs() {
         for glyph in run.glyphs {
+            let non_ascii = label
+                .text
+                .get(glyph.start..glyph.end)
+                .is_some_and(|text| !text.is_ascii());
+            if !non_ascii {
+                continue;
+            }
+            let decision = (glyph.font_id, requested, glyph.font_size.to_bits());
+            let first = SEEN
+                .get_or_init(Default::default)
+                .lock()
+                .is_ok_and(|mut seen| seen.insert(decision));
+            if !first {
+                continue;
+            }
             let Some(face) = font_system.db().face(glyph.font_id) else {
                 continue;
             };
             let file = match &face.source {
                 glyphon::fontdb::Source::File(path)
-                | glyphon::fontdb::Source::SharedFile(path, _) => path.display().to_string(),
+                | glyphon::fontdb::Source::SharedFile(path, _) => path
+                    .file_name()
+                    .map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
                 _ => "<memory>".into(),
             };
-            for ch in label
-                .text
-                .get(glyph.start..glyph.end)
-                .unwrap_or("")
-                .chars()
-                .filter(|c| !c.is_ascii())
-            {
-                bt_viewport::trace::line(format!(
-                    "BT_PERF_TRACE chrome_cjk char={ch:?} font_id={:?} family={:?} file={file:?} face_weight={} requested_weight={} size={}",
-                    glyph.font_id,
-                    face.families,
-                    face.weight.0,
-                    label.weight.shaping_weight().0,
-                    glyph.font_size
-                ));
-            }
+            bt_viewport::trace::line(format!(
+                "BT_PERF_TRACE chrome_cjk font_id={:?} family={:?} file={file:?} face_weight={} requested_weight={requested} size={}",
+                glyph.font_id, face.families, face.weight.0, glyph.font_size
+            ));
         }
     }
 }
@@ -14748,10 +14769,14 @@ fn terminal_font_system() -> FontSystem {
         "seguiemj.ttf",
         "seguisym.ttf",
     ] {
-        let _ = db.load_font_file(fonts.join(file));
+        let _ = bt_platform::file_reads::opaque(bt_platform::file_reads::Lane::Fonts, || {
+            db.load_font_file(fonts.join(file))
+        });
     }
     for file in CJK_FALLBACK_FONT_FILES {
-        let _ = db.load_font_file(fonts.join(file));
+        let _ = bt_platform::file_reads::opaque(bt_platform::file_reads::Lane::Fonts, || {
+            db.load_font_file(fonts.join(file))
+        });
     }
     drop_faces_with_no_scalable_em(&mut db);
     db.set_monospace_family(DEFAULT_PRIMARY_FONT_FAMILY);
@@ -14790,7 +14815,11 @@ const CHROME_SANS_FONT_FILES: [&str; 2] = ["SegUIVar.ttf", "segoeui.ttf"];
 fn load_chrome_sans_family(db: &mut glyphon::fontdb::Database, fonts: &std::path::Path) {
     for file in CHROME_SANS_FONT_FILES {
         let first_new_face = db.len();
-        if db.load_font_file(fonts.join(file)).is_err() {
+        if bt_platform::file_reads::opaque(bt_platform::file_reads::Lane::Fonts, || {
+            db.load_font_file(fonts.join(file))
+        })
+        .is_err()
+        {
             continue;
         }
         let Some(family) = db
@@ -14999,7 +15028,9 @@ fn terminal_font_system() -> FontSystem {
     db.load_font_source(glyphon::fontdb::Source::Binary(Arc::new(
         NOTO_COLOR_EMOJI_BYTES,
     )));
-    db.load_system_fonts();
+    bt_platform::file_reads::opaque(bt_platform::file_reads::Lane::Fonts, || {
+        db.load_system_fonts()
+    });
     // **Before any family is chosen**, because the choice this crate makes is
     // only in force if the database cannot answer it with something nobody
     // chose — see [`drop_faces_with_no_scalable_em`], which is the whole of M2-5's font

@@ -382,6 +382,7 @@ pub trait AnimationSource: Read + Send {
 /// keeps the bytes readable until it is dropped.
 pub struct FileAnimationSource {
     file: std::fs::File,
+    read_lane: bt_platform::file_reads::Lane,
     path: std::path::PathBuf,
     opened_as: AnimationStamp,
     /// How much of this pass has been handed out, against
@@ -398,6 +399,13 @@ impl FileAnimationSource {
     ///
     /// The open itself. Nothing else is read here.
     pub fn open(path: &Path) -> std::io::Result<Self> {
+        Self::open_in_lane(path, bt_platform::file_reads::Lane::Animation)
+    }
+
+    fn open_in_lane(
+        path: &Path,
+        read_lane: bt_platform::file_reads::Lane,
+    ) -> std::io::Result<Self> {
         let file = std::fs::File::open(path)?;
         // **Asked of the handle and not of the name**, which is the same
         // discipline the length has always been read under: a stat of the name
@@ -409,6 +417,7 @@ impl FileAnimationSource {
         let metadata = file.metadata()?;
         Ok(Self {
             file,
+            read_lane,
             path: path.to_owned(),
             opened_as: AnimationStamp {
                 modified: metadata.modified().ok(),
@@ -439,6 +448,14 @@ impl Read for FileAnimationSource {
             .len()
             .min(usize::try_from(room).unwrap_or(usize::MAX));
         let read = self.file.read(&mut buffer[..want])?;
+        if read > 0 {
+            bt_platform::file_reads::LEDGER.add(
+                self.read_lane,
+                read as u64,
+                u64::from(self.read == 0),
+                Some(&self.path),
+            );
+        }
         self.read += read as u64;
         Ok(read)
     }
@@ -710,10 +727,22 @@ pub fn decode(path: &Path) -> Result<Animation, AnimationRefusal> {
 /// 2026-09-12 the cap is a sanity bound rather than a memory one, because the
 /// bytes are not kept. See [`MAX_ANIMATION_FILE_BYTES`].
 fn file_source(path: &Path) -> Result<Box<dyn AnimationSource>, AnimationRefusal> {
+    file_source_in_lane(path, bt_platform::file_reads::Lane::Animation)
+}
+
+fn file_source_in_lane(
+    path: &Path,
+    lane: bt_platform::file_reads::Lane,
+) -> Result<Box<dyn AnimationSource>, AnimationRefusal> {
     if !path_names_an_animation(path) {
         return Err(AnimationRefusal::NotAnAnimation);
     }
-    let source = FileAnimationSource::open(path).map_err(|_| AnimationRefusal::Undecodable)?;
+    let source = if lane == bt_platform::file_reads::Lane::Animation {
+        FileAnimationSource::open(path)
+    } else {
+        FileAnimationSource::open_in_lane(path, lane)
+    }
+    .map_err(|_| AnimationRefusal::Undecodable)?;
     if source.stamp().length > MAX_ANIMATION_FILE_BYTES {
         return Err(AnimationRefusal::FileTooLong);
     }
@@ -776,7 +805,7 @@ pub fn first_frame(path: &Path) -> Option<AnimationStill> {
     ) {
         return None;
     }
-    let source = file_source(path).ok()?;
+    let source = file_source_in_lane(path, bt_platform::file_reads::Lane::Peek).ok()?;
     let stamp = source.opened_as();
     let (mut cursor, width_px, height_px) = open(source).ok()?;
     let frame = cursor.next_frames(1).into_iter().next()?;
