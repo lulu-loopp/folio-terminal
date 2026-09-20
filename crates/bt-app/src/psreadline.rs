@@ -442,7 +442,10 @@ fn run_probe() -> Probe {
     };
     let output = command
         .args(["-NoProfile", "-NonInteractive", "-Command", PROBE_COMMAND])
-        .output();
+        .output()
+        .inspect(|output| {
+            bt_platform::file_reads::pipe_output(bt_platform::file_reads::Lane::Settings, output)
+        });
     let Ok(output) = output else {
         return Probe::default();
     };
@@ -922,7 +925,8 @@ pub fn is_folios_copy(documents: &Path) -> bool {
         return false;
     }
     BUNDLED_FILES.iter().all(|(name, bytes)| {
-        std::fs::read(root.join(name)).is_ok_and(|found| found.as_slice() == *bytes)
+        bt_platform::file_reads::read(bt_platform::file_reads::Lane::Settings, root.join(name))
+            .is_ok_and(|found| found.as_slice() == *bytes)
     })
 }
 

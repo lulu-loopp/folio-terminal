@@ -301,11 +301,11 @@ fn a_line_the_read_began_inside_is_never_quoted() {
     // The fixture is only worth anything if the fragment really does parse — otherwise this would
     // be asserting that JSON is picky rather than that the read drops what it began inside.
     assert_eq!(
-        lede_in_tail(&mut handle, inside, false, LIMIT).as_deref(),
+        lede_in_tail(&mut handle, file.path(), inside, false, LIMIT).as_deref(),
         Some("Half a line.")
     );
     assert_eq!(
-        lede_in_tail(&mut handle, inside, true, LIMIT),
+        lede_in_tail(&mut handle, file.path(), inside, true, LIMIT),
         None,
         "a read that began inside a line holds nothing but that line's tail"
     );

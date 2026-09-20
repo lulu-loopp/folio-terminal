@@ -1060,7 +1060,10 @@ impl Machinery {
             // [`can_play_types`] wants: a source would make it load a file in
             // order to answer a question about a type.
             if let Some(url) = url
-                && engine.SetSource(url).is_err()
+                && crate::file_reads::opaque(crate::file_reads::Lane::Animation, || {
+                    engine.SetSource(url)
+                })
+                .is_err()
             {
                 // The engine exists and nobody is going to pump it, so this is
                 // the one place its `Shutdown` can come from.

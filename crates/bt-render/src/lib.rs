@@ -6811,10 +6811,14 @@ impl GpuContext {
             .checked_add(1)
             .expect("font epoch exhausted");
         for file in files {
-            let _ = self.font_system.db_mut().load_font_file(file);
+            let _ = bt_platform::file_reads::opaque(bt_platform::file_reads::Lane::Fonts, || {
+                self.font_system.db_mut().load_font_file(file)
+            });
         }
         for file in cjk_files {
-            let _ = self.font_system.db_mut().load_font_file(file);
+            let _ = bt_platform::file_reads::opaque(bt_platform::file_reads::Lane::Fonts, || {
+                self.font_system.db_mut().load_font_file(file)
+            });
         }
         // A file a reader picked is a file this renderer has never opened, and
         // the one thing it may not be is a face with no em ([`drop_faces_with_no_scalable_em`]).
@@ -14609,10 +14613,14 @@ fn terminal_font_system() -> FontSystem {
         "seguiemj.ttf",
         "seguisym.ttf",
     ] {
-        let _ = db.load_font_file(fonts.join(file));
+        let _ = bt_platform::file_reads::opaque(bt_platform::file_reads::Lane::Fonts, || {
+            db.load_font_file(fonts.join(file))
+        });
     }
     for file in CJK_FALLBACK_FONT_FILES {
-        let _ = db.load_font_file(fonts.join(file));
+        let _ = bt_platform::file_reads::opaque(bt_platform::file_reads::Lane::Fonts, || {
+            db.load_font_file(fonts.join(file))
+        });
     }
     drop_faces_with_no_scalable_em(&mut db);
     db.set_monospace_family(DEFAULT_PRIMARY_FONT_FAMILY);
@@ -14651,7 +14659,11 @@ const CHROME_SANS_FONT_FILES: [&str; 2] = ["SegUIVar.ttf", "segoeui.ttf"];
 fn load_chrome_sans_family(db: &mut glyphon::fontdb::Database, fonts: &std::path::Path) {
     for file in CHROME_SANS_FONT_FILES {
         let first_new_face = db.len();
-        if db.load_font_file(fonts.join(file)).is_err() {
+        if bt_platform::file_reads::opaque(bt_platform::file_reads::Lane::Fonts, || {
+            db.load_font_file(fonts.join(file))
+        })
+        .is_err()
+        {
             continue;
         }
         let Some(family) = db
@@ -14860,7 +14872,9 @@ fn terminal_font_system() -> FontSystem {
     db.load_font_source(glyphon::fontdb::Source::Binary(Arc::new(
         NOTO_COLOR_EMOJI_BYTES,
     )));
-    db.load_system_fonts();
+    bt_platform::file_reads::opaque(bt_platform::file_reads::Lane::Fonts, || {
+        db.load_system_fonts()
+    });
     // **Before any family is chosen**, because the choice this crate makes is
     // only in force if the database cannot answer it with something nobody
     // chose — see [`drop_faces_with_no_scalable_em`], which is the whole of M2-5's font

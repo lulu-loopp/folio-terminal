@@ -545,9 +545,12 @@ impl Claim {
                 // this. The stamp inside says which, and a claim whose stamp
                 // cannot be read at all is one whose writer did not survive
                 // writing it.
-                let held_since = std::fs::read_to_string(path)
-                    .ok()
-                    .and_then(|text| text.trim().parse::<u64>().ok());
+                let held_since = bt_platform::file_reads::read_to_string(
+                    bt_platform::file_reads::Lane::Settings,
+                    path,
+                )
+                .ok()
+                .and_then(|text| text.trim().parse::<u64>().ok());
                 let abandoned = match held_since {
                     None => true,
                     Some(stamp) => now_ms < stamp || now_ms - stamp > CLAIM_STALE_MS,

@@ -284,6 +284,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shlex",
+ "syn 2.0.119",
  "syntect",
  "toml_edit 0.22.27",
  "two-face",
@@ -333,6 +334,7 @@ name = "bt-math"
 version = "0.4.2"
 dependencies = [
  "bt-doc",
+ "bt-platform",
  "mitex",
  "mitex-lexer",
  "mitex-spec-gen",
@@ -403,6 +405,7 @@ dependencies = [
  "bt-detect",
  "bt-doc",
  "bt-math",
+ "bt-platform",
  "bt-term",
  "bt-transcript",
  "bt-unicode",

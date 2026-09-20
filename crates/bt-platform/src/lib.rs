@@ -2,6 +2,8 @@
 
 use std::num::NonZeroIsize;
 
+pub mod file_reads;
+
 /// **The window this process's platform knows, named without naming a
 /// platform** (M1-1).
 ///
