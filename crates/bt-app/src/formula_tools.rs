@@ -377,6 +377,9 @@ pub struct FormulaToolFollow {
     /// `[the band, the source mark's box, the copy mark's box]`, in the
     /// surface's own pixels.
     place: Ease<[[f32; 4]; 3]>,
+    /// The next frame without a flight is still its landing frame. This is a
+    /// receipt, not a clock: consuming it cannot create animation debt.
+    ride_landing: bool,
     /// How solid they are drawn: `0 -> 1` on arrival, `-> 0` on leaving.
     opacity: Ease<f32>,
     /// The mark under the pointer, if it is on one.
@@ -392,6 +395,7 @@ impl FormulaToolFollow {
             anchor: boxes.anchor.clone(),
             display: boxes.display,
             place: Ease::settled([boxes.block, boxes.source, boxes.copy], now),
+            ride_landing: false,
             opacity: Ease {
                 from: 0.0,
                 to: 1.0,
@@ -420,6 +424,11 @@ impl FormulaToolFollow {
         if !self.anchor.same_block(&boxes.anchor) {
             *self = Self::arriving(boxes, hovered, now);
             return true;
+        }
+        if std::mem::take(&mut self.ride_landing) {
+            let changed = self.ride(boxes, hovered, now, motion);
+            self.ride_landing = false;
+            return changed;
         }
         // Kept as the picture spells it: `same_block` is the identity, and the
         // inline run inside an anchor belongs to the frame rather than to the
@@ -464,8 +473,10 @@ impl FormulaToolFollow {
     ) -> bool {
         if !self.anchor.same_block(&boxes.anchor) {
             *self = Self::arriving(boxes, hovered, now);
+            self.ride_landing = true;
             return true;
         }
+        self.ride_landing = true;
         self.anchor = boxes.anchor.clone();
         let place = [boxes.block, boxes.source, boxes.copy];
         let mut changed = self.place.at(now, motion) != place;
@@ -482,6 +493,22 @@ impl FormulaToolFollow {
         changed
     }
 
+    /// Settlement leaves the named marks a receipt even if an interruption
+    /// lands before the first travelling present. No other band can inherit it.
+    pub fn finish_ride(&mut self, anchor: &MathBlockAnchor) {
+        self.ride_landing = self.anchor.same_block(anchor);
+    }
+
+    #[must_use]
+    pub fn is_riding(&self, anchor: &MathBlockAnchor, in_flight: bool) -> bool {
+        in_flight || (self.ride_landing && self.anchor.same_block(anchor))
+    }
+
+    /// The present consumes the receipt even when its named band is absent.
+    pub fn finish_landing_frame(&mut self) -> bool {
+        std::mem::take(&mut self.ride_landing)
+    }
+
     /// The band is not hovered any more: the marks go out over the same span.
     ///
     /// **This is the half of §7.1.5p ② the owner revised on the evening of
@@ -491,6 +518,7 @@ impl FormulaToolFollow {
     /// lighting it, and what fades is the two marks, over the ninety
     /// milliseconds they arrived on.
     pub fn leave(&mut self, now: Instant, motion: Motion) -> bool {
+        self.ride_landing = false;
         self.opacity.retarget(0.0, now, motion)
     }
 
@@ -593,21 +621,21 @@ pub struct FormulaToggleMotion {
     /// The rows the source face draws while it is still an overlay — the pane's own answer
     /// (`bt_viewport::ViewportProjection::math_source_face`), which is the same answer the height
     /// this is travelling to was measured from.
-    source_rows: Vec<String>,
+    source_face: bt_viewport::MathSourceFace,
 }
 
 impl FormulaToggleMotion {
     /// The change begins.
     ///
     /// `heights` is `[the typeset face's band height, the source rows' height]`, both in subpixels
-    /// and both measured by the pane the block is in; `source_rows` is what those rows say.
+    /// and both measured by the pane the block is in; `source_face` carries those rows and their measured width.
     #[must_use]
     pub fn begin(
         target: PasteTarget,
         anchor: MathBlockAnchor,
         heights: [i64; 2],
         to_source: bool,
-        source_rows: Vec<String>,
+        source_face: bt_viewport::MathSourceFace,
         now: Instant,
     ) -> Self {
         let [rendered, source] = heights.map(|height| height.max(1) as f32);
@@ -626,7 +654,7 @@ impl FormulaToggleMotion {
                 to,
                 since: now,
             },
-            source_rows,
+            source_face,
         }
     }
 
@@ -645,13 +673,13 @@ impl FormulaToggleMotion {
     pub fn reverse(
         &mut self,
         heights: [i64; 2],
-        source_rows: Vec<String>,
+        source_face: bt_viewport::MathSourceFace,
         now: Instant,
         motion: Motion,
     ) {
         let [rendered, source] = heights.map(|height| height.max(1) as f32);
         self.to_source = !self.to_source;
-        self.source_rows = source_rows;
+        self.source_face = source_face;
         let to = if self.to_source {
             [source, 1.0]
         } else {
@@ -734,10 +762,22 @@ impl FormulaToggleMotion {
         ((1.0 - self.source_opacity(now, motion)) * 1000.0).round() as u16
     }
 
+    /// Geometry and opacity sample the same journey, but geometry never reads
+    /// opacity as its authority: future fading changes must not change the seat.
+    #[must_use]
+    pub fn face_milli(&self, now: Instant, motion: Motion) -> u16 {
+        (self.source_opacity(now, motion) * 1000.0).round() as u16
+    }
+
+    #[must_use]
+    pub fn source_width_cells(&self) -> u32 {
+        self.source_face.width_cells
+    }
+
     /// The rows the source face draws while it is an overlay.
     #[must_use]
     pub fn source_rows(&self) -> &[String] {
-        &self.source_rows
+        &self.source_face.rows
     }
 
     /// **Whether this still owes the glass a frame** — and under [`Motion::Reduced`] it never does,
@@ -753,6 +793,139 @@ impl FormulaToggleMotion {
 mod tests {
     use super::*;
     use bt_render::{DARK_CHROME, LIGHT_CHROME};
+
+    /// A synthetic placement on a real viewport frame, using the production
+    /// CPU geometry API. No device, window, sleeps or timer advances are needed.
+    fn landing_frame() -> (
+        bt_render::CellMetrics,
+        bt_render::SeatViewport,
+        bt_viewport::ViewportFrame,
+    ) {
+        use bt_viewport::{MathBlockPlacement, ProjectedMathArtifact, RgbaArtifactKind};
+        let mut fonts = bt_render::preview_measure_font_system();
+        let metrics = bt_render::CellMetrics::measure(&mut fonts, 1.0).unwrap();
+        let session = bt_term::DualPlaneSession::new(
+            std::num::NonZeroU32::new(80).unwrap(),
+            std::num::NonZeroU32::new(20).unwrap(),
+        );
+        let mut projection = session.new_projection(session.layout_key());
+        let mut frame = session.viewport_frame(&mut projection).unwrap();
+        let height = 6 * metrics.cell_height_subpixels().get();
+        frame.math_blocks.push(MathBlockPlacement {
+            start: bt_transcript::TranscriptId(1),
+            anchor: boxes(MathBlockDisplay::Rendered).anchor,
+            source: "$$x^2$$".to_owned(),
+            artifact: ProjectedMathArtifact {
+                inline_runs: Vec::new(),
+                key: "landing-fixture".to_owned(),
+                end: bt_transcript::TranscriptId(1),
+                rgba: std::sync::Arc::from([0_u8; 4]),
+                width_px: (20.0 * metrics.cell_width_px) as u32,
+                height_px: (height / 1024) as u32,
+                height_subpixels: height,
+                baseline_subpixels: 0,
+                mode: bt_detect::MathMode::Display,
+                kind: RgbaArtifactKind::Math,
+                vertical_padding_subpixels: 0,
+                render_scale_milli: 1000,
+                source: "x^2".to_owned(),
+            },
+            top_subpixels: 0,
+            left_subpixels: 2 * 1024,
+            content_offset_subpixels: 0,
+            clip_height_subpixels: height,
+            display: MathBlockDisplay::Rendered,
+            source_width_cells: 6,
+            horizontal_overflow: bt_viewport::BlockOverflowOwner::Block,
+            horizontal_scroll_px: 0,
+            vertical_scroll_px: 0,
+            toolbar_visible: true,
+            occluded_source_rows: 0,
+            occluded_visible_rows: Vec::new(),
+            live_occurrence_id: None,
+            frozen_prefix_rows: 0,
+            clipped_top_rows: 0,
+            clipped_bottom_rows: 0,
+            picture_opacity_milli: 1000,
+            face_milli: None,
+            selection_spans: Vec::new(),
+        });
+        (metrics, bt_render::SeatViewport::whole(1000, 1000), frame)
+    }
+
+    #[test]
+    fn the_marks_do_not_travel_after_the_band_has_landed() {
+        let t0 = Instant::now();
+        let (metrics, pane, fixture) = landing_frame();
+        let mut landings = Vec::new();
+        for to_source in [true, false] {
+            let mut frame = fixture.clone();
+            let anchor = frame.math_blocks[0].anchor.clone();
+            let heights = [6, 4].map(|rows| rows * metrics.cell_height_subpixels().get());
+            let journey = FormulaToggleMotion::begin(
+                flight(to_source, t0).target(),
+                anchor.clone(),
+                heights,
+                to_source,
+                bt_viewport::MathSourceFace {
+                    rows: vec!["$$x^2$$".to_owned()],
+                    width_cells: 6,
+                    height_subpixels: heights[1],
+                },
+                t0,
+            );
+            let block = &mut frame.math_blocks[0];
+            block.display = if to_source {
+                MathBlockDisplay::Rendered
+            } else {
+                MathBlockDisplay::Source
+            };
+            block.left_subpixels = if to_source { 2 * 1024 } else { 0 };
+            block.clip_height_subpixels = journey.height_subpixels(t0, Motion::Full);
+            let start = bt_render::math_tool_boxes_for(metrics, pane, &frame, &anchor).unwrap();
+            let mut marks = FormulaToolFollow::arriving(&start, None, t0 - tooltip::TOOLTIP_FADE);
+            let mut last_width = 0.0;
+            for ms in [0, 25, 50, 75, 89] {
+                let now = t0 + std::time::Duration::from_millis(ms);
+                let block = &mut frame.math_blocks[0];
+                block.display = MathBlockDisplay::Rendered;
+                block.left_subpixels = 2 * 1024;
+                block.face_milli = Some(journey.face_milli(now, Motion::Full));
+                block.picture_opacity_milli = journey.picture_opacity_milli(now, Motion::Full);
+                block.clip_height_subpixels = journey.height_subpixels(now, Motion::Full);
+                let seat = bt_render::math_tool_boxes_for(metrics, pane, &frame, &anchor).unwrap();
+                marks.ride(&seat, None, now, Motion::Full);
+                assert_eq!(marks.placed(now, Motion::Full), seat);
+                last_width = seat.block[2] - seat.block[0];
+            }
+            let landed = t0 + tooltip::TOOLTIP_FADE;
+            let block = &mut frame.math_blocks[0];
+            block.display = if to_source {
+                MathBlockDisplay::Source
+            } else {
+                MathBlockDisplay::Rendered
+            };
+            block.left_subpixels = if to_source { 0 } else { 2 * 1024 };
+            block.face_milli = None;
+            block.clip_height_subpixels = journey.height_subpixels(landed, Motion::Full);
+            let end = bt_render::math_tool_boxes_for(metrics, pane, &frame, &anchor).unwrap();
+            // Settlement takes the flight before this frame. The first follow
+            // consumes the receipt left by ride, so it cannot start another ease.
+            marks.follow(&end, None, landed, Motion::Full);
+            landings.push((
+                to_source,
+                marks.placed(landed, Motion::Full) == end,
+                marks.owes_frames(landed, Motion::Full),
+            ));
+            assert!((last_width - (end.block[2] - end.block[0])).abs() <= 1.0);
+            assert!(!marks.follow(&end, None, landed + tooltip::TOOLTIP_FADE, Motion::Full));
+        }
+        assert_eq!(
+            landings,
+            [(true, true, false), (false, true, false)],
+            "(to_source, exactly_seated, owes_frames) at the landing instant"
+        );
+    }
 
     /// A band with its two marks where the renderer now seats them: **inside the
     /// block, in the room it keeps at its right edge, on its midline** (owner's
@@ -775,6 +948,111 @@ mod tests {
             source: [230.0, 25.0, 249.0, 44.0],
             copy: [251.0, 25.0, 270.0, 44.0],
         }
+    }
+
+    #[test]
+    fn formula_landing_receipt_is_spent_once_and_cannot_reach_a_neighbour() {
+        let now = Instant::now();
+        let start = boxes(MathBlockDisplay::Rendered);
+        let mut marks = FormulaToolFollow::arriving(&start, None, now - tooltip::TOOLTIP_FADE);
+        let end = source_band();
+        // Resize/interrupt before the first travelling frame still lands directly.
+        marks.finish_ride(&start.anchor);
+        assert!(marks.is_riding(&end.anchor, false));
+        marks.follow(&end, None, now, Motion::Full);
+        assert_eq!(marks.placed(now, Motion::Full), end);
+        assert!(!marks.owes_frames(now, Motion::Full));
+        assert!(!marks.is_riding(&end.anchor, false));
+        // A later re-wrap is an ordinary follow, proving the receipt is one-use.
+        marks.follow(&start, None, now, Motion::Full);
+        assert!(marks.owes_frames(now, Motion::Full));
+        assert_ne!(marks.placed(now, Motion::Full).block, start.block);
+        // A frame without the named band consumes the landing too.
+        marks.ride(&start, None, now, Motion::Full);
+        assert!(marks.finish_landing_frame());
+        assert!(!marks.finish_landing_frame());
+        assert!(!marks.is_riding(&start.anchor, false));
+        let mut neighbour = start.clone();
+        neighbour.anchor = bt_viewport::MathBlockAnchor::History {
+            run: None,
+            start: bt_transcript::TranscriptId(99),
+            end: bt_transcript::TranscriptId(99),
+        };
+        marks.finish_ride(&neighbour.anchor);
+        assert!(!marks.is_riding(&start.anchor, false));
+        marks.ride(&start, None, now, Motion::Full);
+        marks.leave(now, Motion::Full);
+        assert!(!marks.is_riding(&start.anchor, false));
+    }
+
+    #[test]
+    fn formula_present_uses_one_guard_and_consumes_the_landing_receipt() {
+        let guard = production_body("    fn formula_overlay_is_active(");
+        assert!(guard.contains(
+            "self.window.math_hover_anchor.is_some() || self.window.math_tools.is_some()"
+        ));
+        let carry = production_body("    fn carry_live_journeys(");
+        assert!(carry.contains("let formula_present = self.formula_overlay_is_active();"));
+        assert!(carry.contains("formula_overlay_owed |= running.chrome || running.overlay"));
+        let refresh = production_body("    fn refresh_formula_overlay_for_present(");
+        assert!(refresh.contains("std::mem::take(&mut self.window.formula_overlay_owed)"));
+        assert!(refresh.contains("if !carried && !moved && !in_flight"));
+        let settle = production_body("    fn settle_math_toggle(");
+        assert!(
+            settle.find("follow.finish_ride(flight.anchor())").unwrap()
+                < settle.find("self.repaint_pane_change(seat)").unwrap()
+        );
+        let sync = production_body("    fn sync_math_tools(");
+        assert!(sync.contains("follow.is_riding(&boxes.anchor, riding)"));
+        assert!(sync.contains("changed |= follow.finish_landing_frame()"));
+        for signature in [
+            "    fn redraw(&mut self)",
+            "    fn present_retained_picture(&mut self)",
+        ] {
+            let present = production_body(signature);
+            let guard = present.find("if self.formula_overlay_is_active()").unwrap();
+            assert!(
+                guard
+                    < present
+                        .find("self.math_band_trace_for_present(frame_for)")
+                        .unwrap()
+            );
+            assert!(guard < present.find("self.math_tool_placement(frame_for)").unwrap());
+            assert!(
+                present
+                    .find("self.refresh_formula_overlay_for_present")
+                    .unwrap()
+                    < present
+                        .find("self.math_band_trace_line(now, trace)")
+                        .unwrap()
+            );
+            assert!(
+                present.find("Self::present_seats_and_commit").unwrap()
+                    < present
+                        .find("self.trace_math_band(math_band_trace)")
+                        .unwrap()
+            );
+        }
+        let trace_line = production_body("    fn math_band_trace_line(");
+        assert!(
+            trace_line.contains("seat=none display=none"),
+            "departing marks still get one self-report even without a lit band"
+        );
+        let trace = production_body("    fn math_band_trace_for_present");
+        assert!(
+            trace.find("if !self.app.trace_perf").unwrap()
+                < trace.find("self.sessions.keys()").unwrap()
+        );
+        // R5/R6: each closure pairs a seat's frame with that seat's body, with
+        // the same focused fallback the retained-seat builder actually draws.
+        let retained = production_body("    fn present_retained_picture(");
+        assert!(retained.contains("find(|pane| pane.seat == seat)"));
+        assert!(retained.contains(".then(|| self.window.renderer.seat_viewport())"));
+        assert!(retained.contains(".get(&seat)?"));
+        let redraw = production_body("    fn redraw(");
+        assert!(redraw.contains("return Some((focused_body.viewport, &frame));"));
+        assert!(redraw.contains("find(|(pane, _)| pane.seat == seat)"));
+        assert!(redraw.contains(".map(|(pane, projected)| (pane.viewport, projected))"));
     }
 
     fn production_body(signature: &str) -> &'static str {
@@ -1772,18 +2050,10 @@ mod tests {
     /// **when the change lands, the marks settle on the source band's own rect and keep nothing of
     /// the rect they rode.**
     ///
-    /// The ride settles the placement on every frame of the flight, which is right — the block's
-    /// height is the journey and easing towards a box that is itself easing is two journeys over
-    /// one distance. What that leaves is a placement *settled on the last rect of the flight*, and
-    /// the flight's last rect is the band as an **artifact**: the picture's region, at the height
-    /// it travelled to. The document is told on that same frame and the band becomes rows, whose
-    /// region is a different rectangle — so the handover from `ride` back to `follow` is the one
-    /// place a typeset rect can be left standing under a source face, which is the owner's
-    /// screenshot: marks short of the block's right edge and low of its middle.
-    ///
-    /// MUTATIONS: settle the ride and never follow again (drop `follow`'s `retarget`) and ② holds
-    /// the ridden rect for ever. Let `ride` go on running after the flight is over — the `riding`
-    /// test in `sync_math_tools` — and ② holds it too, one frame at a time.
+    /// The old pin waited another full span after settlement before inspecting
+    /// the marks. T-MARKS-LANDING makes that same assertion on the landing
+    /// instant: no old rectangle may survive it, even if interruption changed
+    /// the endpoint by much more than the last travelling frame's distance.
     #[test]
     fn the_marks_settle_on_the_source_bands_own_rect_when_the_change_lands() {
         let now = Instant::now();
@@ -1797,11 +2067,10 @@ mod tests {
         assert!(follow.ride(&travelling, None, settled, Motion::Full));
         assert_eq!(follow.placed(settled, Motion::Full).block, travelling.block);
 
-        // ② It lands. The document has been told, the band is rows, and the marks travel to the
-        //    rect those rows stand on — exactly, with nothing of the flight's left in it.
+        // ② The landing settles on the rows' own rect in this very frame.
         let landed = source_band();
         assert!(follow.follow(&landed, None, settled, Motion::Full));
-        let arrived = settled + tooltip::TOOLTIP_FADE;
+        let arrived = settled;
         let placed = follow.placed(arrived, Motion::Full);
         assert_eq!(
             placed.block, landed.block,
@@ -1853,6 +2122,14 @@ mod tests {
         .collect()
     }
 
+    fn source_face() -> bt_viewport::MathSourceFace {
+        bt_viewport::MathSourceFace {
+            height_subpixels: HEIGHTS[1],
+            width_cells: 28,
+            rows: source_lines(),
+        }
+    }
+
     fn flight(to_source: bool, now: Instant) -> FormulaToggleMotion {
         FormulaToggleMotion::begin(
             PasteTarget {
@@ -1863,7 +2140,7 @@ mod tests {
             flight_anchor(),
             HEIGHTS,
             to_source,
-            source_lines(),
+            source_face(),
             now,
         )
     }
@@ -2081,7 +2358,7 @@ mod tests {
 
         let at_the_press = leaving.height_subpixels(half, Motion::Full);
         let fade_at_the_press = leaving.source_opacity(half, Motion::Full);
-        leaving.reverse(HEIGHTS, source_lines(), half, Motion::Full);
+        leaving.reverse(HEIGHTS, source_face(), half, Motion::Full);
 
         assert_eq!(
             leaving.height_subpixels(half, Motion::Full),
