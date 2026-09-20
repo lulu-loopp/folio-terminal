@@ -369,6 +369,9 @@ objc2-uniform-type-identifiers = { version = "0.3", default-features = false, fe
     "UTType",
 ] }
 objc2-core-text = { version = "0.3", default-features = false, features = [
+    # A descriptor's cmap, used to keep the CJK picker to families that cover
+    # Folio's fixed Han and Hangul probe.
+    "CTFont",
     # `CTFontCollectionCreateFromAvailableFonts` and
     # `CTFontCollectionCreateMatchingFontDescriptors` — the database and its
     # contents.
