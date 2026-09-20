@@ -321,7 +321,7 @@ fn slow_hold_threshold_ms() -> u64 {
 /// Held against [`Station`] by `every_station_has_a_slot_in_the_ledger`: a
 /// further variant added without widening this would have its milliseconds
 /// charged to nobody, and the line would silently stop adding up.
-const STATION_COUNT: usize = 194;
+const STATION_COUNT: usize = 195;
 
 #[path = "hang_watch_detail.rs"]
 mod detail;
@@ -885,6 +885,7 @@ pub enum Station {
     DrainTab = 191,
     ImeTrace = 192,
     DiagnosticWrite = 193,
+    SurfaceConfigure = 194,
 }
 
 impl Station {
@@ -1085,6 +1086,7 @@ impl Station {
             Self::ProfilesWrite => "write_profiles_atomic",
             Self::DrainTab => "drain tab",
             Self::ImeTrace => "IME trace::Dump::line",
+            Self::SurfaceConfigure => "surface configure",
             Self::DiagnosticWrite => "stderr diagnostic write",
         }
     }
@@ -1301,6 +1303,7 @@ impl Station {
             191 => Self::DrainTab,
             192 => Self::ImeTrace,
             193 => Self::DiagnosticWrite,
+            194 => Self::SurfaceConfigure,
             _ => Self::Starting,
         }
     }
@@ -2049,6 +2052,34 @@ impl Heartbeat {
     }
 }
 
+/// Attribute subsequent present stations without formatting on the window thread.
+pub fn present_attempt(window: u64, generation: u64, sequence: u64) {
+    HEARTBEAT.detail.attempt([window, generation, sequence]);
+}
+
+pub fn present_generation(generation: u64) {
+    HEARTBEAT.detail.generation(generation);
+}
+pub fn end_present_attempt() {
+    HEARTBEAT.detail.attempt([0; 3]);
+}
+
+fn present_progress(station: Station) -> &'static str {
+    match station {
+        Station::SurfaceConfigure => "in_progress:configure",
+        Station::SurfaceAcquire => "in_progress:acquire",
+        Station::QueueSubmit => "in_progress:submit",
+        Station::SwapchainPresent => "in_progress:present",
+        Station::CompositorSize | Station::CompositorCommit => "in_progress:commit",
+        Station::RenderCompose
+        | Station::TextShaping
+        | Station::AtlasUpload
+        | Station::RenderLayout => "in_progress:encode",
+        Station::RedrawCommit => "in_progress:acknowledge",
+        _ => "in_progress:prepare",
+    }
+}
+
 /// Numeric evidence only; input contents are never recorded.
 pub fn counters(bytes: usize, accepted: usize, count: usize) {
     HEARTBEAT.detail.counters(bytes, accepted, count);
@@ -2771,6 +2802,7 @@ fn write_report(reports: &Path, ui_thread_id: u32, stall: Stall, uptime_ms: u64)
     } = stall;
     // **The suspend happens here and nowhere else.** Everything above is
     // arithmetic; everything below is formatting.
+    let attempt = HEARTBEAT.detail.active_attempt().unwrap_or_default();
     let stack = bt_platform::hang::capture_thread_stack(ui_thread_id, MAX_FRAMES);
     let timestamp = utc_timestamp(SystemTime::now());
     let facts = ReportFacts {
@@ -2787,13 +2819,16 @@ fn write_report(reports: &Path, ui_thread_id: u32, stall: Stall, uptime_ms: u64)
         stack: &stack,
         surfaces: bt_render::surface_failure_tally(),
     };
-    let body = render_report(&facts);
+    let mut body = render_report(&facts);
+    if !attempt.is_empty() {
+        body.push_str(&format!("\npresent attempt:{attempt}\n"));
+    }
     // Created lazily: a run that never hangs never makes this directory.
     if let Err(error) = fs::create_dir_all(reports) {
         return Reported {
             path: None,
             said: format!(
-                "Folio saw its window thread stop for {} at {station} but could not create {}: \
+                "Folio saw its window thread stop for {} at {station}{attempt} but could not create {}: \
                  {error}",
                 seconds(silent_ms),
                 reports.display()
@@ -2805,14 +2840,14 @@ fn write_report(reports: &Path, ui_thread_id: u32, stall: Stall, uptime_ms: u64)
     match File::create(&path).and_then(|mut file| file.write_all(body.as_bytes())) {
         Ok(()) => Reported {
             said: format!(
-                "Folio's window thread has not answered for {}; last station {station}. Report: {}",
+                "Folio's window thread has not answered for {}; last station {station}{attempt}. Report: {}",
                 seconds(silent_ms),
                 path.display()
             ),
             path: Some(path),
         },
         Err(error) => Reported {
-            said: format!("Folio could not write {}: {error}", path.display()),
+            said: format!("Folio could not write {}: {error}{attempt}", path.display()),
             path: None,
         },
     }
