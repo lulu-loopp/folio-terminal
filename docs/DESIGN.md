@@ -11207,3 +11207,9 @@ An outside user on v0.3.0-preview reported two things in one issue. Clicking the
 **The page's Chinese is owed.** All thirteen strings were written in English with the page and are listed in `Text::CHINESE_PENDING`, which is the convention this repository already had for copy the copywriter has not reached yet: the gate that refuses an untranslated entry names them until the rewrite lands, so what ships in Chinese is loud rather than silent.
 
 *(本节英文,待中文文案改写。)*
+
+### 2026-09-20 — Clock-run disk reads
+A clock-run entry is a deadline or an edge, never a poll; quiescent turns do no filesystem, registry, PATH-search, or process-start work.
+In 0.4.2 an older Folio PSReadLine copy caused the clock run to reread the 41 KB Changes.txt on every turn after the probe answered.
+The App owns one optional installed-copy fact, read on the unread probe edge, successful install/removal, and each Terminal-page opening.
+First-run availability reads ProfilePrograms; card construction consumes one ready edge, rearmed by profile changes or an answered card.

@@ -1207,13 +1207,31 @@ pub fn compose_preedit(
     frame: &ViewportFrame,
     preedit: Option<&Preedit>,
 ) -> Result<ComposedFrame, FrameShapeError> {
+    compose_preedit_inner::<false>(frame, preedit).map(|(composed, _)| composed)
+}
+
+/// Same compositor, with an observation at the cell-write site for BT_IME_TRACE.
+pub fn compose_preedit_traced(
+    frame: &ViewportFrame,
+    preedit: Option<&Preedit>,
+) -> Result<(ComposedFrame, bool), FrameShapeError> {
+    compose_preedit_inner::<true>(frame, preedit)
+}
+
+fn compose_preedit_inner<const TRACE: bool>(
+    frame: &ViewportFrame,
+    preedit: Option<&Preedit>,
+) -> Result<(ComposedFrame, bool), FrameShapeError> {
     frame.validate_shape()?;
     let Some(preedit) = preedit.filter(|preedit| !preedit.text.is_empty() && frame.cursor.visible)
     else {
-        return Ok(ComposedFrame {
-            frame: frame.clone(),
-            ime_caret: frame.cursor,
-        });
+        return Ok((
+            ComposedFrame {
+                frame: frame.clone(),
+                ime_caret: frame.cursor,
+            },
+            false,
+        ));
     };
 
     let mut composed = frame.clone();
@@ -1235,12 +1253,15 @@ pub fn compose_preedit(
         column: drawn.map_or(0, |column| column.0),
         visible: drawn.is_some(),
     };
-    overlay_preedit_cells(&mut composed, preedit);
+    let written = overlay_preedit_cells::<TRACE>(&mut composed, preedit);
     composed.cursor = ime_caret;
-    Ok(ComposedFrame {
-        frame: composed,
-        ime_caret,
-    })
+    Ok((
+        ComposedFrame {
+            frame: composed,
+            ime_caret,
+        },
+        written,
+    ))
 }
 
 /// The frame's caret back in the grid's own columns.
@@ -1307,7 +1328,8 @@ fn advance_grid_position(
 /// through `frame.horizontal`; one whose grid column the window does not show is stepped over
 /// rather than drawn, and a combining mark then joins whichever lead cell was drawn last — never a
 /// cell belonging to a cluster nobody put on screen.
-fn overlay_preedit_cells(frame: &mut ViewportFrame, preedit: &Preedit) {
+fn overlay_preedit_cells<const TRACE: bool>(frame: &mut ViewportFrame, preedit: &Preedit) -> bool {
+    let mut written = false;
     let columns = frame.columns.get() as usize;
     // IME remains bounded to the PTY grid in phase A. Moving it into a partially visible
     // presentation row belongs to the cursor/IME debt carried into the pixel-offset phase.
@@ -1354,6 +1376,9 @@ fn overlay_preedit_cells(frame: &mut ViewportFrame, preedit: &Preedit) {
                 cell.style.flags.insert(CellFlags::WIDE_CHAR);
             }
             frame.cells[index] = cell;
+            if TRACE {
+                written = true;
+            }
             previous_lead = Some(index);
 
             if let Some(spacer_index) = spacer_index {
@@ -1369,6 +1394,7 @@ fn overlay_preedit_cells(frame: &mut ViewportFrame, preedit: &Preedit) {
             column %= columns;
         }
     }
+    written
 }
 
 /// Let go of every wide character the composition is about to cover half of.
@@ -22007,6 +22033,61 @@ mod tests {
         assert_eq!((slots[0].column, slots[0].text.as_str()), (0, "A"));
         assert_eq!((slots[1].column, slots[1].text.as_str()), (2, "B"));
         assert_ne!(slots[0].style, slots[1].style);
+    }
+
+    #[test]
+    fn ime_trace_observes_actual_preedit_writes_without_changing_frames() {
+        let mut frame = ViewportFrame {
+            columns: NonZeroU32::new(8).unwrap(),
+            horizontal: HorizontalProjection::unscrolled(8),
+            grid_rows: NonZeroU32::new(2).unwrap(),
+            rows: NonZeroU32::new(2).unwrap(),
+            presentation_offset_subpixels: 0,
+            cells: vec![CapturedCell::plain(""); 16],
+            cursor: bt_viewport::GridCursor {
+                row: 0,
+                column: 2,
+                visible: true,
+            },
+            cell_anchors: test_cell_anchors(16),
+            row_map: test_row_map(2),
+            selection_spans: Vec::new(),
+            search_spans: Vec::new(),
+            current_search_spans: Vec::new(),
+            math_blocks: Vec::new(),
+            math_failures: Vec::new(),
+            status_text: None,
+            viewport_origin: FrameViewportOrigin::Bottom,
+            scroll_offset_rows: 0,
+            layout_key: bt_doc_layout_key(8),
+            view_generation: bt_doc::ViewGeneration(1),
+        };
+        for (text, visible, expected) in [
+            ("synthetic", true, true),
+            ("synthetic", false, false),
+            ("", true, false),
+            ("\u{0301}", true, false),
+        ] {
+            frame.cursor.visible = visible;
+            let preedit = Preedit {
+                text: text.to_owned(),
+                cursor_byte: None,
+            };
+            let ordinary = compose_preedit(&frame, Some(&preedit)).unwrap();
+            let (traced, written) = compose_preedit_traced(&frame, Some(&preedit)).unwrap();
+            assert_eq!(written, expected);
+            assert_eq!(ordinary.frame, traced.frame);
+            assert_eq!(ordinary.ime_caret, traced.ime_caret);
+        }
+        assert!(!compose_preedit_traced(&frame, None).unwrap().1);
+        // A wide cluster at the final grid cell wraps outside the grid and writes nothing.
+        frame.cursor.row = 1;
+        frame.cursor.column = 7;
+        let wide = Preedit {
+            text: "\u{1f600}".to_owned(),
+            cursor_byte: None,
+        };
+        assert!(!compose_preedit_traced(&frame, Some(&wide)).unwrap().1);
     }
 
     #[test]
