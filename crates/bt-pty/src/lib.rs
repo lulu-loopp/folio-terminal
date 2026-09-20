@@ -114,6 +114,9 @@ pub const LAST_RESORT_SHELL: &str = WINDOWS_POWERSHELL;
 pub const LAST_RESORT_SHELL: &str = shell::BOURNE_SHELL;
 const READER_CHUNK_BYTES: usize = 16 * 1024;
 const PTY_DUMP_ENV: &str = "BT_PTY_DUMP";
+/// Explicit opt-in only, including release builds. This records your keystrokes, including
+/// anything typed at a password prompt; for a diagnosis you run yourself, never to be shared unread.
+const PTY_INPUT_DUMP_ENV: &str = "BT_PTY_INPUT_DUMP";
 
 /// The name this terminal announces itself under, in `TERM_PROGRAM`.
 ///
@@ -132,8 +135,9 @@ const PTY_DUMP_ENV: &str = "BT_PTY_DUMP";
 pub const TERM_PROGRAM: &str = "Folio";
 const TERM_PROGRAM_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Diagnostic-only byte sink for **one** ConPTY reader. The main file is byte-for-byte suitable for
-/// `BT_PROBE_INPUT`; the adjacent `.chunks` file preserves reader arrival boundaries and timing.
+/// Diagnostic-only byte sink for **one** pane stream. Receive recordings are byte-for-byte
+/// suitable for `BT_PROBE_INPUT`; their `.chunks` files preserve reader boundaries and timing.
+/// Input recordings use the same files, clock and publisher, with labelled write boundaries.
 ///
 /// **One recorder per pane, and therefore one file per pane.** `BT_PTY_DUMP` names a file, and
 /// every [`PtySession::spawn`] used to open *that* file with a truncating create — so the moment a
@@ -146,7 +150,7 @@ const TERM_PROGRAM_VERSION: &str = env!("CARGO_PKG_VERSION");
 ///
 /// **A recording that caught nothing must not look like a recording that never ran.** The byte file
 /// is replay input and stays byte-exact, so it has nowhere to say anything and an empty one is
-/// genuinely zero bytes; the manifest is where the recording says whose it is ([`PtyDump::create`]'s
+/// genuinely zero bytes; the manifest is where the recording says whose it is ([`PtyDump::create_at`]'s
 /// `# SESSION` line: which recording of which process, and when it began) and where it says the
 /// stream ended with nothing in hand (`# END`). Both are `#` comments, which every existing
 /// manifest parser already skips.
@@ -155,6 +159,7 @@ struct PtyDump {
     bytes: File,
     chunks: File,
     started: Instant,
+    ordinal: u64,
     sequence: u64,
     total_bytes: u64,
     /// False once the stream has ended, which is how the publisher thread learns to stop.
@@ -193,15 +198,47 @@ const PTY_DUMP_PUBLISH_INTERVAL: Duration = Duration::from_millis(200);
 static PTY_DUMP_RECORDINGS: AtomicU64 = AtomicU64::new(0);
 
 impl PtyDump {
-    fn from_environment() -> Result<Option<Self>, PtyError> {
-        let Some(path) = pty_dump_path(std::env::var_os(PTY_DUMP_ENV)) else {
-            return Ok(None);
+    fn from_environment() -> Result<(Option<Self>, Option<Self>), PtyError> {
+        Self::from_paths(
+            pty_dump_path(std::env::var_os(PTY_DUMP_ENV)),
+            pty_dump_path(std::env::var_os(PTY_INPUT_DUMP_ENV)),
+            || (Instant::now(), unix_millis()),
+        )
+    }
+
+    fn from_paths(
+        output: Option<PathBuf>,
+        input: Option<PathBuf>,
+        clock: impl FnOnce() -> (Instant, u128),
+    ) -> Result<(Option<Self>, Option<Self>), PtyError> {
+        if output.is_none() && input.is_none() {
+            return Ok((None, None));
+        }
+        let ordinal = PTY_DUMP_RECORDINGS.fetch_add(1, Ordering::Relaxed);
+        let (started, started_unix_ms) = clock();
+        let open = |base: PathBuf| {
+            Self::create_at(
+                &pty_dump_session_path(&base, ordinal),
+                ordinal,
+                started,
+                started_unix_ms,
+            )
         };
-        Self::open(&path).map(Some)
+        let output = output.map(open).transpose()?;
+        // A separate suffix also prevents an input path equal to the output path from truncating it.
+        let input = input
+            .map(|base| {
+                let mut path = base.into_os_string();
+                path.push(".in");
+                open(PathBuf::from(path))
+            })
+            .transpose()?;
+        Ok((output, input))
     }
 
     /// Open this run's next recording under `base` — the named path for the first, a name beside
     /// it for every pane after that.
+    #[cfg(test)]
     fn open(base: &Path) -> Result<Self, PtyError> {
         let ordinal = PTY_DUMP_RECORDINGS.fetch_add(1, Ordering::Relaxed);
         Self::create(&pty_dump_session_path(base, ordinal), ordinal)
@@ -213,7 +250,17 @@ impl PtyDump {
         &self.path
     }
 
+    #[cfg(test)]
     fn create(path: &Path, ordinal: u64) -> Result<Self, PtyError> {
+        Self::create_at(path, ordinal, Instant::now(), unix_millis())
+    }
+
+    fn create_at(
+        path: &Path,
+        ordinal: u64,
+        started: Instant,
+        started_unix_ms: u128,
+    ) -> Result<Self, PtyError> {
         let bytes = File::create(path)?;
         let mut chunks = File::create(pty_dump_chunks_path(path))?;
         writeln!(chunks, "# BT_PTY_DUMP_CHUNKS_V1 sequence elapsed_us bytes")?;
@@ -225,14 +272,15 @@ impl PtyDump {
             chunks,
             "# SESSION ordinal={ordinal} pid={} started_unix_ms={} bytes={}",
             std::process::id(),
-            unix_millis(),
+            started_unix_ms,
             path.display()
         )?;
         let dump = Self {
             path: path.to_path_buf(),
             bytes,
             chunks,
-            started: Instant::now(),
+            started,
+            ordinal,
             sequence: 0,
             total_bytes: 0,
             live: Arc::new(AtomicBool::new(true)),
@@ -263,6 +311,32 @@ impl PtyDump {
         self.total_bytes = self
             .total_bytes
             .saturating_add(chunk.len().try_into().unwrap_or(u64::MAX));
+        Ok(())
+    }
+
+    /// One queued input write. The raw sidecar stays byte-exact; the manifest is self-contained.
+    fn write_input_at(
+        &mut self,
+        bytes: &[u8],
+        reason: &str,
+        elapsed_us: u64,
+    ) -> std::io::Result<()> {
+        self.bytes.write_all(bytes)?;
+        // Assemble a line only when tracing is enabled, avoiding a file syscall per hex digit.
+        use std::fmt::Write as _;
+        let mut hex = String::with_capacity(bytes.len().saturating_mul(2));
+        for byte in bytes {
+            write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
+        }
+        writeln!(
+            self.chunks,
+            "{} {elapsed_us} {} pane={} reason={reason:?} hex={hex}",
+            self.sequence,
+            bytes.len(),
+            self.ordinal
+        )?;
+        self.sequence = self.sequence.saturating_add(1);
+        self.total_bytes = self.total_bytes.saturating_add(bytes.len() as u64);
         Ok(())
     }
 
@@ -1455,6 +1529,7 @@ pub struct PtySession {
     conpty_source: ConPtySource,
     /// Shared with the reader thread so `resize` can interleave `# RESIZE` markers with chunks.
     dump: Option<Arc<Mutex<PtyDump>>>,
+    input_dump: Option<Mutex<PtyDump>>,
     /// Set once, only when a spawn had to fall back to [`LAST_RESORT_SHELL`] after the
     /// resolved shell failed to start. `Runtime` turns it into the pane's first line, then
     /// discards it.
@@ -1798,7 +1873,9 @@ impl PtySession {
     }
 
     pub fn spawn(command: PtyCommand, size: PtySize, wake: OutputWake) -> Result<Self, PtyError> {
-        let dump = PtyDump::from_environment()?.map(|dump| Arc::new(Mutex::new(dump)));
+        let (dump, input_dump) = PtyDump::from_environment()?;
+        let dump = dump.map(|dump| Arc::new(Mutex::new(dump)));
+        let input_dump = input_dump.map(Mutex::new);
         let conpty_source = conpty_source();
         let strip_inherited_no_color = command.strips_inherited_no_color();
         let environment = command.resolved_environment();
@@ -1853,13 +1930,15 @@ impl PtySession {
             writer: Some(writer_thread),
             conpty_source,
             dump,
+            input_dump,
             shell_fallback: None,
         })
     }
 
     /// Hand one write to this session's child. **Returns in the time of one lock**, whatever the
     /// child is doing with its standard input — see [`InputRing`] for why that is a correctness
-    /// property of the window and not a nicety.
+    /// property of the window and not a nicety. Explicit input recording adds diagnostic file
+    /// writes; see [`Self::write_with_reason`].
     ///
     /// `&self` rather than `&mut self`, and the change is honest rather than cosmetic: there is
     /// no longer any per-session writer state a caller could race, only a queue with a lock
@@ -1870,7 +1949,24 @@ impl PtySession {
     /// already waiting. Ending the process over the second would be answering a wedged shell by
     /// taking every other pane down with it.
     pub fn write(&self, bytes: &[u8]) -> Result<(), PtyError> {
-        self.input.try_push(bytes)
+        self.write_with_reason(bytes, "unlabelled input")
+    }
+
+    /// Queue input with its caller's diagnostic reason. `BT_PTY_INPUT_DUMP` is off unless
+    /// explicitly set; it records your keystrokes, including anything typed at a password
+    /// prompt; for a diagnosis you run yourself, never to be shared unread.
+    /// A line means queued for the writer, not proof that the child read it. When unset,
+    /// instrumentation costs one Option read, with no clock, allocation, lock or file access.
+    pub fn write_with_reason(&self, bytes: &[u8], reason: &'static str) -> Result<(), PtyError> {
+        self.input.try_push(bytes)?;
+        if let Some(dump) = &self.input_dump {
+            let mut dump = dump.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let elapsed_us = u64::try_from(dump.started.elapsed().as_micros()).unwrap_or(u64::MAX);
+            if let Err(error) = dump.write_input_at(bytes, reason, elapsed_us) {
+                eprintln!("BT_PTY_INPUT_DUMP write failed: {error}");
+            }
+        }
+        Ok(())
     }
 
     /// What is queued for the child and how close it is to the ceiling.
@@ -2089,6 +2185,14 @@ impl PtySession {
 
 impl Drop for PtySession {
     fn drop(&mut self) {
+        if let Some(dump) = self.input_dump.take() {
+            let mut dump = dump
+                .into_inner()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Err(error) = dump.finish() {
+                eprintln!("BT_PTY_INPUT_DUMP finish failed: {error}");
+            }
+        }
         let _ = self.shutdown();
     }
 }
@@ -2938,6 +3042,152 @@ mod tests {
     }
 
     #[test]
+    fn input_dump_unset_does_not_open_files_or_construct_a_clock() {
+        let (output, input) = PtyDump::from_paths(None, None, || {
+            panic!("disabled dumps must not even construct their clock")
+        })
+        .unwrap();
+        assert!(output.is_none());
+        assert!(input.is_none());
+        assert!(pty_dump_path(Some(std::ffi::OsString::new())).is_none());
+    }
+
+    #[test]
+    fn input_dump_and_output_share_one_pane_and_clock() {
+        let path = std::env::temp_dir().join(format!("bt-input-clock-{}", std::process::id()));
+        let origin = Instant::now();
+        let (output, input) =
+            PtyDump::from_paths(Some(path.clone()), Some(path), || (origin, 9876)).unwrap();
+        let mut output = output.unwrap();
+        let mut input = input.unwrap();
+        assert_eq!(output.started, origin);
+        assert_eq!(input.started, origin);
+        assert_eq!(output.ordinal, input.ordinal);
+        assert_ne!(output.path, input.path);
+        for dump in [&mut output, &mut input] {
+            assert!(
+                std::fs::read_to_string(pty_dump_chunks_path(&dump.path))
+                    .unwrap()
+                    .contains("started_unix_ms=9876")
+            );
+            dump.finish().unwrap();
+            std::fs::remove_file(&dump.path).unwrap();
+            std::fs::remove_file(pty_dump_chunks_path(&dump.path)).unwrap();
+        }
+    }
+
+    #[test]
+    fn input_dump_off_write_path_has_only_the_option_gate() {
+        let source = include_str!("lib.rs");
+        let start = source.find("    pub fn write_with_reason(").unwrap();
+        let body = &source[start..];
+        let body = &body[..body.find("\n    }\n").unwrap()];
+        let (ordinary, enabled) = body
+            .split_once("if let Some(dump) = &self.input_dump {")
+            .unwrap();
+        assert!(ordinary.contains("self.input.try_push(bytes)?;"));
+        for work in [
+            "elapsed()",
+            "lock()",
+            "write_input_at",
+            "String::",
+            "format!",
+            "var_os",
+        ] {
+            assert!(
+                !ordinary.contains(work),
+                "disabled input dump performed {work}"
+            );
+        }
+        assert!(enabled.contains("dump.write_input_at(bytes, reason, elapsed_us)"));
+        let disabled_tail = enabled.rsplit_once("\n        }").unwrap().1.trim();
+        assert_eq!(disabled_tail, "Ok(())");
+    }
+
+    #[test]
+    fn input_dump_is_reached_by_labelled_and_plain_session_writes() {
+        let path = std::env::temp_dir().join(format!("bt-input-writes-{}", std::process::id()));
+        let dump = PtyDump::create_at(&path, 3, Instant::now(), 1234).unwrap();
+        // No process or pipe: exercise the product queue and recording door with synthetic bytes.
+        let session = PtySession {
+            master: None,
+            child: None,
+            exited: None,
+            output: Arc::new(OutputRing::new(NonZeroUsize::new(32).unwrap())),
+            input: Arc::new(InputRing::new(NonZeroUsize::new(32).unwrap())),
+            reader: None,
+            writer: None,
+            conpty_source: conpty_source(),
+            dump: None,
+            input_dump: Some(Mutex::new(dump)),
+            shell_fallback: None,
+        };
+        session.write_with_reason(b"a", "keyboard input").unwrap();
+        session.write(b"b").unwrap();
+        assert!(matches!(
+            session.write_with_reason(&[0; 33], "too large"),
+            Err(PtyError::InputRefused { .. })
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), b"ab");
+        let manifest = std::fs::read_to_string(pty_dump_chunks_path(&path)).unwrap();
+        let lines: Vec<_> = manifest
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .collect();
+        assert_eq!(lines.len(), 2);
+        for (line, expected) in lines.iter().zip([
+            "1 pane=3 reason=\"keyboard input\" hex=61",
+            "1 pane=3 reason=\"unlabelled input\" hex=62",
+        ]) {
+            assert!(line.ends_with(expected));
+            assert!(
+                line.split_whitespace()
+                    .nth(1)
+                    .unwrap()
+                    .parse::<u64>()
+                    .is_ok()
+            );
+        }
+        drop(session);
+        assert!(
+            std::fs::read_to_string(pty_dump_chunks_path(&path))
+                .unwrap()
+                .contains("# END chunks=2 bytes=2")
+        );
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(pty_dump_chunks_path(&path)).unwrap();
+    }
+
+    #[test]
+    fn input_dump_records_each_write_with_time_pane_reason_and_exact_bytes() {
+        let path = std::env::temp_dir().join(format!("bt-input-dump-{}", std::process::id()));
+        let mut dump = PtyDump::create_at(&path, 17, Instant::now(), 1234).unwrap();
+        dump.write_input_at(b"a\r\n\0\xff", "keyboard input", 42)
+            .unwrap();
+        dump.write_input_at(b"\x1b[O", "terminal protocol reply", 43)
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"a\r\n\0\xff\x1b[O");
+        let manifest = std::fs::read_to_string(pty_dump_chunks_path(&path)).unwrap();
+        let lines: Vec<_> = manifest
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "0 42 5 pane=17 reason=\"keyboard input\" hex=610d0a00ff",
+                "1 43 3 pane=17 reason=\"terminal protocol reply\" hex=1b5b4f",
+            ]
+        );
+        assert!(manifest.contains("started_unix_ms=1234"));
+        dump.finish().unwrap();
+        drop(dump);
+        // The publisher owns cloned handles briefly; files permit deletion while open.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(pty_dump_chunks_path(&path)).unwrap();
+    }
+
+    #[test]
     fn pty_dump_is_an_exact_byte_sidecar_with_replayable_chunk_metadata() {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -3510,7 +3760,7 @@ mod tests {
     #[test]
     fn the_only_thread_that_meets_the_pipe_is_the_writer_thread() {
         const SOURCE: &str = include_str!("lib.rs");
-        let head = "\n    pub fn write(&self, bytes: &[u8]) -> Result<(), PtyError> {";
+        let head = "\n    pub fn write_with_reason(&self, bytes: &[u8], reason: &'static str) -> Result<(), PtyError> {";
         let start = SOURCE
             .find(head)
             .expect("`PtySession::write` takes `&self` and answers a `PtyError`")

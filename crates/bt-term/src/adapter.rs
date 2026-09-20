@@ -426,10 +426,10 @@ pub struct TerminalAdapter {
     announced_focus: AnnouncedFocus,
 }
 
-/// What a DEC 1004 subscriber has been told about where the keyboard is.
+/// What the current DEC 1004 subscriber believes about where the keyboard is.
 ///
 /// **Three states and not a `bool`**, because "nobody has been told anything
-/// yet" is the state every pane is born in and the one the *initial* report is
+/// yet" is the state every pane is born in and the one an initial absence report is
 /// owed to. A pane that opens in a background tab, or in a window that is not
 /// the foreground one, is already without the keyboard when its child
 /// subscribes; an implementation that only ever answered a `focused → not
@@ -452,8 +452,9 @@ pub struct TerminalAdapter {
 ///    for focus events, and at the moment of the opening report the client had
 ///    not yet started. Treating the ask as the subscription edge is what puts the
 ///    opening report *after* the child is listening. The cost of the reading is
-///    one repeated report per ask; the cost of the other reading is that the
-///    opening report is never heard by anyone.
+///    one repeated absence report per ask; the cost of the other reading is that
+///    the opening absence report is never heard by anyone. Presence needs no
+///    opening report: a new subscriber already assumes it (2026-09-20).
 ///
 /// This is deliberately the opposite of [`TerminalAdapter::announced_canvas`],
 /// which is kept up to date whether or not anybody is listening: a program can
@@ -463,7 +464,7 @@ pub struct TerminalAdapter {
 enum AnnouncedFocus {
     /// Nothing has been said to whoever is subscribed now.
     Unknown,
-    /// It was last told the keyboard is here.
+    /// The subscriber believes the keyboard is here, by default or by report.
     Focused,
     /// It was last told the keyboard is elsewhere.
     Unfocused,
@@ -721,9 +722,9 @@ impl TerminalAdapter {
     /// **Only a change is reported.** DEC 1004 is a report of transitions —
     /// `CSI I` when the keyboard arrives, `CSI O` when it leaves — so a level
     /// re-sent every turn would be this terminal typing at its child sixty times
-    /// a second. The first call after a subscription is a change by definition
-    /// ([`AnnouncedFocus::Unknown`]), which is how a pane born in the background
-    /// learns it is in the background.
+    /// a second. A new subscriber assumes presence: [`AnnouncedFocus::Unknown`]
+    /// plus focused records that level silently. Unknown plus unfocused sends
+    /// `CSI O`, so a pane born in the background learns it is in the background.
     ///
     /// A program that did not subscribe is told nothing, for the reason 2031's
     /// notification is withheld from one: the sequence would be read as ordinary
@@ -741,7 +742,13 @@ impl TerminalAdapter {
         if self.announced_focus == standing {
             return;
         }
+        let opening_focus = self.announced_focus == AnnouncedFocus::Unknown && focused;
         self.announced_focus = standing;
+        if opening_focus {
+            // A new subscriber already assumes presence. ConPTY also re-enables 1004
+            // at teardown, when an opening CSI I can become literal cooked input.
+            return;
+        }
         let report: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
         self.listener
             .pty_writes
@@ -2831,6 +2838,31 @@ mod tests {
         assert_eq!(terminal.take_pty_writes(), vec![b"\x1b[?997;1n".to_vec()]);
     }
 
+    #[test]
+    fn a_fresh_subscription_in_a_focused_pane_is_told_nothing() {
+        let mut terminal = TerminalAdapter::new(nz(8), nz(3));
+        terminal.set_keyboard_focus(true);
+        terminal.feed(b"\x1b[?1004h");
+        terminal.set_keyboard_focus(true);
+        assert!(terminal.take_pty_writes().is_empty());
+        terminal.set_keyboard_focus(false);
+        assert_eq!(terminal.take_pty_writes(), vec![b"\x1b[O".to_vec()]);
+        terminal.set_keyboard_focus(true);
+        assert_eq!(terminal.take_pty_writes(), vec![b"\x1b[I".to_vec()]);
+    }
+
+    #[test]
+    fn a_teardown_that_conpty_re_enables_does_not_type_at_the_pane() {
+        let mut terminal = TerminalAdapter::new(nz(8), nz(3));
+        terminal.feed(b"\x1b[?1004h");
+        terminal.set_keyboard_focus(true);
+        terminal.take_pty_writes();
+        // One synthetic teardown read; there is no service between disable and enable.
+        terminal.feed(b"\x1b[>4m\x1b[<u\x1b[?1004l\x1b[?1004h\x1b[?2031l\x1b[?2004l");
+        terminal.set_keyboard_focus(true);
+        assert!(terminal.take_pty_writes().is_empty());
+    }
+
     /// RED GATE (attention block, slice A0.5) — **a pane that subscribed to
     /// focus reporting is told when the keyboard arrives and when it leaves.**
     ///
@@ -2846,10 +2878,9 @@ mod tests {
         let mut terminal = TerminalAdapter::new(nz(8), nz(3));
         terminal.feed(b"\x1b[?1004h");
         assert!(terminal.focus_reporting());
-        // The first answer after a subscription is owed whichever way it falls:
-        // this pane has the keyboard, and nobody had told it so.
+        // A fresh subscriber already assumes presence. Only a contrary level is owed.
         terminal.set_keyboard_focus(true);
-        assert_eq!(terminal.take_pty_writes(), vec![b"\x1b[I".to_vec()]);
+        assert!(terminal.take_pty_writes().is_empty());
 
         // A level repeated is not a transition and says nothing.
         terminal.set_keyboard_focus(true);
