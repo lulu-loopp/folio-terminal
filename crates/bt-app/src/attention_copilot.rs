@@ -187,6 +187,10 @@ pub(crate) enum State {
     /// There is a file at our name and it could not be read as JSON. **Not** "absent": writing over
     /// a file this build cannot parse would destroy something somebody wrote by hand.
     Unreadable,
+    /// There is a readable file and **this build will not edit it**, for the reason carried: a
+    /// link out of the agent's own folder, a file shared by hard links, or a read-only one. See
+    /// `attention_hooks::Standing::Refused`.
+    Refused(&'static str),
 }
 
 /// The directory copilot keeps user configuration in, as **this environment** says it.
@@ -289,6 +293,20 @@ pub(crate) fn state() -> State {
     }
 }
 
+/// **The settings row's two facts, out of one read of the file.**
+///
+/// Whether this copy's marks are in it, and — when this build will not edit it at all — the reason
+/// the row says in place of `Off`. Two answers to "what does the row show" derived from one
+/// `State` rather than two reads, because a second read is a second answer (closure review R1).
+#[must_use]
+pub(crate) fn row_state() -> (bool, Option<&'static str>) {
+    match state() {
+        State::Installed => (true, None),
+        State::Refused(reason) => (false, Some(reason)),
+        State::Absent | State::Unreadable => (false, None),
+    }
+}
+
 /// The same question about a named file, so a test can ask it without a copilot installation on the
 /// machine it runs on.
 #[must_use]
@@ -299,6 +317,8 @@ fn state_at(path: &Path) -> State {
         // **Not `Absent`.** There is a file, and a row that said "not installed" about it would
         // offer to write over one this build never read.
         crate::attention_hooks::Standing::Unreadable => return State::Unreadable,
+        // Nor `Unreadable`: this one was read, and the row says why it is not ours to change.
+        crate::attention_hooks::Standing::Refused(reason) => return State::Refused(reason),
         crate::attention_hooks::Standing::Text(text) => text,
     };
     if text.trim().is_empty() {
@@ -452,8 +472,14 @@ fn owners(document: &Value) -> Result<Vec<PathBuf>, &'static str> {
             .as_array()
             .ok_or(crate::i18n::Text::AgentHooksSchemaUnknown.text())?
         {
+            // **Ownership is per entry** (closure review R4): an entry this build cannot decode is
+            // not Folio's, which is the same fact about this file as an entry that is plainly
+            // somebody else's — Folio's own hook file is written whole, so one entry that is not
+            // ours makes the file not ours, and it is left alone under its own sentence.
             paths.push(
-                entry_owner(entry)?
+                entry_owner(entry)
+                    .ok()
+                    .flatten()
                     .ok_or("a hook file of your own already stands under that name")?,
             );
         }
@@ -609,6 +635,8 @@ pub(crate) fn apply_at(path: &Path, decision: Decision, exe: &Path, data: &Path)
         // build cannot tell whose it is. Release audit 2026-09-16 (C-3), the same conflation the
         // other two installers held.
         crate::attention_hooks::Standing::Unreadable => return Outcome::Refused(UNREADABLE),
+        // The same refusal, carrying the filesystem's own reason rather than this one.
+        crate::attention_hooks::Standing::Refused(reason) => return Outcome::Refused(reason),
     };
     let standing = if existing.trim().is_empty() {
         None
@@ -700,8 +728,20 @@ pub(crate) fn apply_at(path: &Path, decision: Decision, exe: &Path, data: &Path)
         // **The whole file goes**, which is what "install then uninstall is the identity" means
         // when the file is one this build created: there was nothing there, and there is nothing
         // there again. The directory stays, because copilot's directory is not ours to remove.
-        if std::fs::remove_file(path).is_err() {
+        //
+        // Under every name that delivers it, which is `land`'s resolution: where this path is a
+        // link Folio resolved, the target is the file upstream loads — leaving it would leave
+        // Folio's hooks firing, and leaving the link alone would leave upstream a name that loads
+        // nothing. The second removal is best effort because the first may already have taken the
+        // only file there was (closure review R1).
+        let Ok(target) = crate::attention_hooks::editable_target(path) else {
             return Outcome::Refused("the copilot hook file could not be removed");
+        };
+        if std::fs::remove_file(&target).is_err() {
+            return Outcome::Refused("the copilot hook file could not be removed");
+        }
+        if target != path {
+            let _ = std::fs::remove_file(path);
         }
         Outcome::Removed
     }

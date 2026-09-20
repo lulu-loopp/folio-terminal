@@ -1467,7 +1467,20 @@ enum ProfileAccess {
 }
 
 pub(crate) fn refuse_profile_path(path: &Path) -> std::io::Result<()> {
-    refuse_profile_path_with(path, |component| {
+    match profile_path_reason(path)? {
+        Some(reason) => Err(std::io::Error::other(reason.text())),
+        None => Ok(()),
+    }
+}
+
+/// **The same predicate, with its answer rather than an error.**
+///
+/// Which of the three the filesystem said is a fact a caller may need: the agents' installers
+/// resolve a link they can account for and say which refusal they are standing on, and a sentence
+/// flattened to "this build cannot read it" was true of none of them (closure review R1). The
+/// profile writer keeps the refusal it always had, by asking this and throwing the answer away.
+pub(crate) fn profile_path_reason(path: &Path) -> std::io::Result<Option<crate::i18n::Text>> {
+    profile_path_reason_with(path, |component| {
         let metadata = match std::fs::symlink_metadata(component) {
             Ok(metadata) => metadata,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -1495,10 +1508,25 @@ pub(crate) fn refuse_profile_path(path: &Path) -> std::io::Result<()> {
     })
 }
 
+/// The injected-metadata seam, in the refusing shape the two fixtures below press.
+///
+/// Test-only since the agents' installers began asking for the answer rather than for an error:
+/// production has one caller of the decision and it is [`profile_path_reason`].
+#[cfg(test)]
 fn refuse_profile_path_with(
     path: &Path,
     inspect: impl Fn(&Path) -> std::io::Result<ProfileAccess>,
 ) -> std::io::Result<()> {
+    match profile_path_reason_with(path, inspect)? {
+        Some(reason) => Err(std::io::Error::other(reason.text())),
+        None => Ok(()),
+    }
+}
+
+fn profile_path_reason_with(
+    path: &Path,
+    inspect: impl Fn(&Path) -> std::io::Result<ProfileAccess>,
+) -> std::io::Result<Option<crate::i18n::Text>> {
     for component in path.ancestors().filter(|p| !p.as_os_str().is_empty()) {
         let reason = match inspect(component)? {
             ProfileAccess::WritableFile { links } if links > 1 => {
@@ -1510,11 +1538,11 @@ fn refuse_profile_path_with(
             }
             _ => None,
         };
-        if let Some(reason) = reason {
-            return Err(std::io::Error::other(reason.text()));
+        if reason.is_some() {
+            return Ok(reason);
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 fn read_profile_for_edit(profile: &Path) -> std::io::Result<Option<Vec<u8>>> {

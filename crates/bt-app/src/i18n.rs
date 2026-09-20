@@ -1953,6 +1953,9 @@ pub enum Text {
     AgentHooksRootUnstable,
     AgentHooksTakeOver,
     AgentHooksLeftOther,
+    AgentConfigLink,
+    AgentConfigHardLink,
+    AgentConfigReadOnly,
     ClaudeHooksFailedToast,
     // ── the focus card's height (§7.1.6b′, user ruling 2026-08-21) ──────────
     //
@@ -4573,6 +4576,17 @@ impl Text {
                 "Hooks kept for another Folio:",
                 "已为另一份 Folio 保留 hook：",
             ),
+            // CHINESE PENDING — T-B follow-ups; English until owner copy review.
+            //
+            // The three answers the shared filesystem predicate gives about a file, said about an
+            // agent's configuration rather than about a PowerShell profile. One sentence each and
+            // not one between them: "this build cannot read it" was untrue of every one of them,
+            // and a reader told that goes looking for a corrupt document (closure review R1).
+            Self::AgentConfigLink => "This file is a link Folio will not write through.",
+            Self::AgentConfigHardLink => {
+                "This file has hard links, possibly from a dotfile manager. Folio left it unchanged."
+            }
+            Self::AgentConfigReadOnly => "This file is read-only, or is not a regular file.",
             Self::ClaudeHooksFailedToast => pick(
                 lang,
                 "Claude Code's settings were not changed",
@@ -5149,7 +5163,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 719] = [
+    pub const ALL: [Self; 722] = [
         Self::PastePathEncoding,
         Self::PastePathControl,
         Self::PastePathPowerShellQuote,
@@ -5704,6 +5718,9 @@ impl Text {
         Self::AgentHooksRootUnstable,
         Self::AgentHooksTakeOver,
         Self::AgentHooksLeftOther,
+        Self::AgentConfigLink,
+        Self::AgentConfigHardLink,
+        Self::AgentConfigReadOnly,
         Self::ClaudeHooksFailedToast,
         Self::RowFocusCardHeight,
         Self::DescFocusCardHeight,
@@ -6014,7 +6031,14 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 0] = [];
+    const CHINESE_PENDING: [(Self, HostPlatform); 6] = [
+        (Self::AgentConfigLink, HostPlatform::Windows),
+        (Self::AgentConfigLink, HostPlatform::MacOs),
+        (Self::AgentConfigHardLink, HostPlatform::Windows),
+        (Self::AgentConfigHardLink, HostPlatform::MacOs),
+        (Self::AgentConfigReadOnly, HostPlatform::Windows),
+        (Self::AgentConfigReadOnly, HostPlatform::MacOs),
+    ];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────

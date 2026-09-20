@@ -4010,12 +4010,20 @@ impl SettingsRow {
             // is written, and where. The second is there because a reader who
             // does not know a terminal is about to edit a file belonging to
             // another program has been told something they would want to know.
-            Self::ClaudeHooks => Text::DescClaudeHooks.text(),
+            // **Not a constant either**, and the reason is the row above's: when the file is one
+            // this build will not edit — a link out of the agent's own folder, a file shared by
+            // hard links, a read-only one — the switch beside it has nothing true to say, so the
+            // sentence says what the machine is instead (closure review R1).
+            Self::ClaudeHooks => {
+                values.agent_config_refusals[0].unwrap_or(Text::DescClaudeHooks.text())
+            }
             // Two facts and no third, the row above's shape: what is written and
             // where, then which of the two things an agent can say this one
             // carries — because a reader who installs it expecting a dot on a
             // waiting pane has been told something that is not true.
-            Self::CodexNotify => Text::DescCodexNotify.text(),
+            Self::CodexNotify => {
+                values.agent_config_refusals[1].unwrap_or(Text::DescCodexNotify.text())
+            }
             // **Not a constant, and it is the row above's two facts plus a third
             // that is only sometimes true**: a copilot older than `1.0.26`
             // reported a permission prompt for tool calls nobody was ever asked
@@ -4024,9 +4032,9 @@ impl SettingsRow {
             // to fix before the switch means anything, so the sentence says which
             // one they are looking at instead of describing a switch that would
             // not work. See `attention_copilot::row_description`.
-            Self::CopilotHooks => {
+            Self::CopilotHooks => values.agent_config_refusals[2].unwrap_or_else(|| {
                 crate::attention_copilot::row_description(values.copilot_readiness)
-            }
+            }),
             // Says what Off *does* rather than what it hides, because what it
             // does is the reason to reach for it: no page, no chord, and no `git`
             // process started on your behalf.
@@ -6083,6 +6091,15 @@ pub struct SettingsValues {
     /// `attention_copilot::begin_probe`, and `SettingsRow::description`'s own note on why a
     /// sentence that varies with the machine may still only ever be one of a few literals.
     pub copilot_readiness: crate::attention_copilot::Readiness,
+    /// **Why each agent's configuration file will not be edited, when it will not be** — Claude
+    /// Code, codex, copilot, the order `App::agent_takeovers` keeps.
+    ///
+    /// The three switches above answer "are this copy's marks in that file". This answers the
+    /// question that has no `On`/`Off`: a file that is a link out of the agent's own folder,
+    /// shared by hard links or read-only is not a file whose hooks are off, and the row says which
+    /// instead of offering a press that cannot happen (closure review R1). Handed in for
+    /// `copilot_readiness`'s reason — the answer is a file on disk and this row is drawn per frame.
+    pub agent_config_refusals: [Option<&'static str>; 3],
     /// Whether the releases page is asked once a day (§7.51).
     pub update_check: bool,
     /// Which way a split with no direction of its own cuts.
@@ -6285,6 +6302,7 @@ impl SettingsValues {
             codex_notify: false,
             copilot_hooks: false,
             copilot_readiness: crate::attention_copilot::Readiness::Unknown,
+            agent_config_refusals: [None; 3],
             update_check: true,
             split_direction: SplitDirectionV1::Auto,
             search_engine: SearchEngineV1::DuckDuckGo,
@@ -24073,6 +24091,51 @@ mod tests {
     ///
     /// MUTATION: return the plain sentence for `TooOld` and the switch invites an
     /// install that puts a standing wait on a pane nobody is waiting at.
+    /// **A row whose file this build will not edit says which, instead of reading `Off`** (closure
+    /// review R1).
+    ///
+    /// A `~/.claude` a dotfile manager has linked out of the agent's own folder is not a machine
+    /// whose hooks are off: they may be firing this minute, and the switch has no honest position
+    /// for that. So the sentence under it carries the filesystem's own answer, for all three
+    /// families, and the ordinary machine is untouched.
+    ///
+    /// MUTATION: drop the refusal from any of the three arms and that row goes back to describing
+    /// a press that cannot happen.
+    #[test]
+    fn attention_rows_say_why_a_configuration_will_not_be_edited() {
+        let refused = crate::i18n::Text::AgentConfigLink.text();
+        for (index, row, plain) in [
+            (0, SettingsRow::ClaudeHooks, Text::DescClaudeHooks.text()),
+            (1, SettingsRow::CodexNotify, Text::DescCodexNotify.text()),
+            (
+                2,
+                SettingsRow::CopilotHooks,
+                crate::attention_copilot::row_description(
+                    crate::attention_copilot::Readiness::Unknown,
+                ),
+            ),
+        ] {
+            assert_eq!(row.description(&values()), plain);
+            let mut refusals = [None; 3];
+            refusals[index] = Some(refused);
+            assert_eq!(
+                row.description(&SettingsValues {
+                    agent_config_refusals: refusals,
+                    ..values()
+                }),
+                refused
+            );
+            // And it is that row's own answer, not a sentence the three share.
+            assert_eq!(
+                row.description(&SettingsValues {
+                    agent_config_refusals: [None, None, None],
+                    ..values()
+                }),
+                plain
+            );
+        }
+    }
+
     #[test]
     fn only_the_copilot_rows_items_ask_for_it_and_its_sentence_reads_the_machine() {
         use crate::attention_copilot::Readiness;

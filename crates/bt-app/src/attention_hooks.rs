@@ -69,6 +69,11 @@ pub(crate) enum State {
     /// There is a file and it could not be read as settings. **Not** "absent": writing over a file
     /// this build cannot parse would destroy configuration somebody wrote by hand.
     Unreadable,
+    /// There is a readable file and **this build will not edit it**, for the reason carried: it is
+    /// a link out of the agent's own folder, it is shared by hard links, or it is read-only. A row
+    /// that read `Off` about this would be offering a press that cannot happen, over hooks that
+    /// may be firing this minute (closure review R1).
+    Refused(&'static str),
 }
 
 /// The directory Claude Code keeps user configuration in, as **this environment** says it.
@@ -169,6 +174,20 @@ pub(crate) fn state() -> State {
     }
 }
 
+/// **The settings row's two facts, out of one read of the file.**
+///
+/// Whether this copy's marks are in it, and — when this build will not edit it at all — the reason
+/// the row says in place of `Off`. Two answers to "what does the row show" derived from one
+/// `State` rather than two reads, because a second read is a second answer (closure review R1).
+#[must_use]
+pub(crate) fn row_state() -> (bool, Option<&'static str>) {
+    match state() {
+        State::Installed => (true, None),
+        State::Refused(reason) => (false, Some(reason)),
+        State::Absent | State::Unreadable => (false, None),
+    }
+}
+
 /// The same question about a named file, so a test can ask it without a settings file on the
 /// machine it runs on.
 #[must_use]
@@ -179,6 +198,8 @@ fn state_at(path: &Path) -> State {
         // **Not `Absent`.** There is a file, and a row that said "not installed" about it would
         // offer to write over one this build never read. See [`standing`].
         Standing::Unreadable => return State::Unreadable,
+        // Nor `Unreadable`: this one was read, and the row says why it is not ours to change.
+        Standing::Refused(reason) => return State::Refused(reason),
         Standing::Text(text) => text,
     };
     if text.trim().is_empty() {
@@ -306,16 +327,23 @@ fn owners(settings: &Value) -> Result<Vec<PathBuf>, &'static str> {
                 if !hook.is_object() {
                     return Err(crate::i18n::Text::AgentHooksSchemaUnknown.text());
                 }
-                if let Some(owner) = hook_owner(hook)? {
-                    if group.as_object().is_none_or(|o| {
-                        o.keys()
-                            .any(|k| !["matcher", "hooks"].contains(&k.as_str()))
-                    }) || group.get("matcher").is_some_and(|v| !v.is_string())
-                    {
-                        return Err(crate::i18n::Text::AgentHooksSchemaUnknown.text());
-                    }
-                    found.push(owner);
+                // **Ownership is per entry.** An entry this build cannot decode is not Folio's: it
+                // is left exactly where it is, and it has no say over the entries beside it. One
+                // hand-written `"mytool attention claude-code:Stop"` used to refuse every edit to
+                // the whole file, install and remove alike — a second state nobody could get out
+                // of (closure review R4). The document's own shape, above and below, is still a
+                // refusal: that is a file this build cannot read, not an entry it cannot claim.
+                let Ok(Some(owner)) = hook_owner(hook) else {
+                    continue;
+                };
+                if group.as_object().is_none_or(|o| {
+                    o.keys()
+                        .any(|k| !["matcher", "hooks"].contains(&k.as_str()))
+                }) || group.get("matcher").is_some_and(|v| !v.is_string())
+                {
+                    return Err(crate::i18n::Text::AgentHooksSchemaUnknown.text());
                 }
+                found.push(owner);
             }
         }
     }
@@ -481,6 +509,8 @@ pub(crate) fn apply_at(path: &Path, decision: Decision, exe: &Path, data: &Path)
         Standing::Nothing => String::new(),
         // Refused rather than replaced, exactly as an unparseable file is — see [`standing`].
         Standing::Unreadable => return Outcome::Refused(UNREADABLE),
+        // The same refusal, carrying the filesystem's own reason rather than this one.
+        Standing::Refused(reason) => return Outcome::Refused(reason),
     };
     let mut settings = if existing.trim().is_empty() {
         Value::Object(Map::new())
@@ -573,6 +603,101 @@ pub(crate) enum Standing {
     Text(String),
     /// There is something at that path and this build could not read it. **Never written over.**
     Unreadable,
+    /// There is a file there, it can be read, and **this build will not edit it** — it is a link
+    /// out of the agent's own folder, it is shared by hard links, or it is read-only. The sentence
+    /// is the filesystem predicate's own, because each of the three is a different thing to do
+    /// about (closure review R1).
+    Refused(&'static str),
+}
+
+/// **Which file a configuration path names, for reading and for writing.**
+///
+/// Design §6.3 refuses to write *through* a link, and the T-A predicate enforces that by refusing
+/// any path with a link anywhere along it. Taken alone that rule strands the ordinary dotfiles
+/// machine — `~/.claude` junctioned onto a managed folder — in the one state this whole design
+/// exists to abolish: hooks installed by 0.4.2 still firing, a row reading `Off`, and no press
+/// that can take them out (closure review R1).
+///
+/// So the link is resolved **once, here**, and what comes back is bounded: the target must be a
+/// regular file inside the resolved directory the path names. Then Folio is not writing through a
+/// link at all — it is writing to a file it resolved itself, in the agent's own folder. A target
+/// that leaves that folder, a link that resolves to nothing, and every other answer the predicate
+/// gives (a hard link, a read-only file, a directory) are refused with their own reason, and the
+/// file is left byte-identical.
+pub(crate) fn editable_target(path: &Path) -> Result<PathBuf, Standing> {
+    let reason = match crate::shell_integration::profile_path_reason(path) {
+        Ok(None) => return Ok(path.to_path_buf()),
+        Ok(Some(reason)) => reason,
+        // The walk itself failed — an ancestor this account may not even ask about. That is not a
+        // file this build declines to edit, it is one it could not look at, and `Unreadable` has
+        // been the honest answer to it since the 2026-09-16 audit.
+        Err(_) => return Err(Standing::Unreadable),
+    };
+    if reason != crate::i18n::Text::ShellProfileLink {
+        return Err(Standing::Refused(agent_reason(reason)));
+    }
+    let root = path
+        .parent()
+        .and_then(|parent| std::fs::canonicalize(parent).ok());
+    let resolved = std::fs::canonicalize(path).ok();
+    let regular = resolved
+        .as_deref()
+        .and_then(|target| std::fs::symlink_metadata(target).ok())
+        .is_some_and(|metadata| metadata.is_file());
+    let target = linked_target(&Resolution {
+        root: root.as_deref(),
+        resolved: resolved.as_deref(),
+        regular,
+    })
+    .map_err(Standing::Refused)?;
+    // The resolved target carries no link of its own, so what this can still answer is a hard
+    // link, a read-only file or a directory — the refusals §6.3 keeps.
+    match crate::shell_integration::profile_path_reason(&target) {
+        Ok(None) => Ok(target),
+        Ok(Some(reason)) => Err(Standing::Refused(agent_reason(reason))),
+        Err(_) => Err(Standing::Unreadable),
+    }
+}
+
+/// The filesystem's answers about a linked path, handed to [`linked_target`] rather than asked for
+/// inside it — so the rule can be tested on an account that is not allowed to create a link.
+pub(crate) struct Resolution<'a> {
+    /// The directory the path names, resolved once. `None` when it does not resolve.
+    pub root: Option<&'a Path>,
+    /// What the path itself resolves to. `None` when it resolves to nothing.
+    pub resolved: Option<&'a Path>,
+    /// Whether that target is a regular file.
+    pub regular: bool,
+}
+
+/// **The file a link names, when Folio will edit it.**
+///
+/// One question with one answer: is the thing at the end of this link a regular file inside the
+/// directory the configuration path names? Everything else — a target somewhere else on the disk,
+/// a link to a directory, a link to nothing — is a link Folio will not write through, and says so.
+pub(crate) fn linked_target(facts: &Resolution) -> Result<PathBuf, &'static str> {
+    let refused = crate::i18n::Text::AgentConfigLink.text();
+    let (Some(root), Some(resolved)) = (facts.root, facts.resolved) else {
+        return Err(refused);
+    };
+    if facts.regular && resolved.starts_with(root) {
+        Ok(resolved.to_path_buf())
+    } else {
+        Err(refused)
+    }
+}
+
+/// The same three facts about an agent's configuration file rather than about a `$PROFILE`.
+///
+/// A sentence naming the wrong file is a sentence a reader acts on, so the profile's wording does
+/// not travel: the mapping is one to one, and nothing is flattened on the way.
+fn agent_reason(reason: crate::i18n::Text) -> &'static str {
+    match reason {
+        crate::i18n::Text::ShellProfileLink => crate::i18n::Text::AgentConfigLink,
+        crate::i18n::Text::ShellProfileHardLink => crate::i18n::Text::AgentConfigHardLink,
+        _ => crate::i18n::Text::AgentConfigReadOnly,
+    }
+    .text()
 }
 
 /// Read a configuration file the way all three installers have to read one.
@@ -582,10 +707,14 @@ pub(crate) enum Standing {
 /// UTF-8, a directory standing under the file's name. None of them is a file that is not there,
 /// and that is the only state in which writing a fresh one loses nothing.
 pub(crate) fn standing(path: &Path) -> Standing {
-    if crate::shell_integration::refuse_profile_path(path).is_err() {
-        return Standing::Unreadable;
-    }
-    match bt_platform::file_reads::read_to_string(bt_platform::file_reads::Lane::Attention, path) {
+    let target = match editable_target(path) {
+        Ok(target) => target,
+        // **Not `Nothing`, and mostly not `Unreadable` either.** There is a file, it can be read,
+        // and this build will not edit it — a third thing, and the row above says which (§6.3, R1).
+        Err(standing) => return standing,
+    };
+    match bt_platform::file_reads::read_to_string(bt_platform::file_reads::Lane::Attention, target)
+    {
         Ok(text) => Standing::Text(text),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Standing::Nothing,
         Err(_) => Standing::Unreadable,
@@ -625,19 +754,20 @@ pub(crate) enum Landing {
 /// otherwise overwrite the copy of what was there before the first one, which is the one copy that
 /// matters.
 ///
-/// ③ Links/reparse points (including ancestors), hard links and read-only paths
-/// are refused by the shared T-A filesystem predicate before reading and writing.
-/// A locked file fails without replacement. Revision 2 deliberately supersedes
-/// the former link-following policy.
+/// ③ **The bytes go to the file [`editable_target`] resolved, and nowhere else.** A link is
+/// followed exactly once, by this build, and only to a regular file inside the folder the
+/// configuration path names; hard links, read-only paths and anything that is not a regular file
+/// are refused by the shared T-A filesystem predicate before reading and writing. A locked file
+/// fails without replacement. Revision 2 deliberately supersedes the former link-following policy,
+/// and closure review R1 is what bounds the resolution rather than abolishing it.
 ///
 /// `extension` is the target's own extension — `settings.json` with `"json"` gives
 /// `settings.json.bak-20260827`. `existing` is what was read off the file, empty when there was
 /// nothing there.
 pub(crate) fn land(path: &Path, existing: &str, extension: &str, bytes: &[u8]) -> Landing {
-    if crate::shell_integration::refuse_profile_path(path).is_err() {
+    let Ok(target) = editable_target(path) else {
         return Landing::NotWritten;
-    }
-    let target = path.to_path_buf();
+    };
     if let Some(parent) = target.parent()
         && !parent.as_os_str().is_empty()
         && std::fs::create_dir_all(parent).is_err()
@@ -653,6 +783,16 @@ pub(crate) fn land(path: &Path, existing: &str, extension: &str, bytes: &[u8]) -
         if !backup.is_file() && std::fs::write(&backup, existing).is_err() {
             return Landing::NoBackup;
         }
+        // **Somebody else's file keeps its own metadata.** The rename behind `atomic_write`
+        // discards the target's ACL, creation time and alternate streams on Windows and takes this
+        // process's ownership and umask on Unix — which matters most for exactly the file this
+        // resolution reaches, one a dotfile manager shares (review R8). `shell_integration`'s
+        // writer has made this distinction since T-A: a file that exists is replaced, a file that
+        // does not is created.
+        if bt_persist::atomic_replace_preserving(&target, bytes).is_err() {
+            return Landing::NotWritten;
+        }
+        return Landing::Landed;
     }
     if bt_persist::atomic_write(&target, bytes).is_err() {
         return Landing::NotWritten;

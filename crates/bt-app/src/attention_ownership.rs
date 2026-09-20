@@ -67,13 +67,29 @@ pub(crate) enum Outcome {
 /// The single gate for writing per-copy marks; no PATH-relative fallback.
 pub(crate) fn stable_executable(exe: Option<&Path>) -> Result<&Path, &'static str> {
     let exe = exe.ok_or(crate::i18n::Text::AgentHooksExeUnknown.text())?;
-    let text = literal_absolute_path(exe)?;
-    let normalized = text.replace('\\', "/");
-    if normalized.starts_with("/private/var/folders/") && normalized.contains("/AppTranslocation/")
-    {
+    // **Before the absolute-path gate**, so that the quarantine is named on every platform rather
+    // than only where macOS's spelling of a path happens to satisfy `is_absolute`.
+    if translocated(exe) {
         return Err(crate::i18n::Text::AgentHooksTranslocated.text());
     }
+    literal_absolute_path(exe)?;
     Ok(exe)
+}
+
+/// **Whether a path stands in macOS's App Translocation quarantine.**
+///
+/// The `AppTranslocation` component is the fact and the leading directory was a spelling:
+/// `current_exe()` on macOS hands back `_NSGetExecutablePath`'s string uncanonicalised, and `/var`
+/// is a symbolic link to `/private/var`, so the same executable is reported as
+/// `/private/var/folders/…/AppTranslocation/…` or `/var/folders/…/AppTranslocation/…`. A prefix
+/// test passes the second one through and installs hooks naming a copy macOS deletes when the
+/// quarantine is released (closure review R7).
+///
+/// A pure predicate over a path, so the rule is testable on machines that have no such directory.
+#[must_use]
+pub(crate) fn translocated(path: &Path) -> bool {
+    path.components()
+        .any(|component| component.as_os_str() == "AppTranslocation")
 }
 
 fn literal_absolute_path(path: &Path) -> Result<&str, &'static str> {
@@ -91,10 +107,19 @@ fn literal_absolute_path(path: &Path) -> Result<&str, &'static str> {
 }
 
 /// Errors are not evidence of death. Path comparison has the Explorer owner's semantics.
+///
+/// **An operand that does not literally name a file names no copy**, and no copy is nobody: it is
+/// not another live Folio, so the mark is removable as one "naming a file that does not exist"
+/// (design §6.2). 0.4.2 wrote a bare `folio.exe` whenever `current_exe()` failed, and a machine
+/// carrying one could neither install nor uninstall for ever — the operand was an error rather
+/// than an answer (closure review R3). The gate that keeps such an operand from being *written*
+/// is [`stable_executable`], and it stays exactly where it is.
 pub(crate) fn other_live(owner: &Path, exe: &Path) -> Result<bool, &'static str> {
     // An old translocated operand may be dead and cleanable. Translocation
     // prohibits creating a new mark from there, not removing an obsolete mark.
-    literal_absolute_path(owner)?;
+    if literal_absolute_path(owner).is_err() {
+        return Ok(false);
+    }
     if crate::explorer_menu::same_path(owner, exe) {
         return Ok(false);
     }
@@ -589,41 +614,313 @@ mod tests {
         }
     }
 
+    /// The exact entry 0.4.2 wrote whenever `current_exe()` failed, per family.
+    fn relative_operand_fixture(family: &str) -> String {
+        match family {
+            "claude" => serde_json::to_string(&serde_json::json!({"hooks":{"Stop":[{"hooks":[
+                {"type":"command","command":"\"folio.exe\" attention claude-code:Stop --json -","async":true}
+            ]}]}}))
+            .unwrap(),
+            "codex" => {
+                "notify = [\"folio.exe\", \"attention\", \"codex:agent-turn-complete\", \"--json\"]\n"
+                    .to_owned()
+            }
+            _ => serde_json::to_string(&serde_json::json!({"version":1,"hooks":{"agentStop":[
+                {"type":"command","exec":"folio.exe","args":["attention","copilot:agentStop"],"timeoutSec":5}
+            ]}}))
+            .unwrap(),
+        }
+    }
+
+    /// RED (closure review R3) — **a relative operand names no copy, so it is nobody's.**
+    ///
+    /// `"folio.exe" attention claude-code:Stop --json -` is what 0.4.2 wrote when `current_exe()`
+    /// failed. It cannot be resolved to a file on this machine, so it is not another live Folio;
+    /// a mark that names no file is removable (design §6.2), and a machine carrying one must not
+    /// be frozen out of installing or uninstalling for ever.
+    ///
+    /// RED GATE: put `literal_absolute_path(owner)?` back at the top of [`other_live`] and every
+    /// assertion here becomes `Refused`.
     #[test]
-    #[ignore = "requires Windows symlink privilege; shared injected path-refusal tests run normally"]
-    fn attention_symlinked_configs_are_refused_and_executable_aliases_are_owned() {
+    fn attention_relative_operand_names_nobody_and_is_removable() {
+        assert_eq!(
+            other_live(Path::new("folio.exe"), Path::new("/opt/folio/folio")),
+            Ok(false)
+        );
+        for (family, file, apply) in adapters() {
+            let root = root(&format!("relative-{family}"));
+            // Not `folio.exe`: this copy's own name must not be able to satisfy the assertion
+            // below that the operand naming nobody is gone.
+            let exe = root.join("this-copy.exe");
+            fs::write(&exe, b"exe").unwrap();
+            let data = root.join("data");
+            let fixture = relative_operand_fixture(family);
+            for (name, decision, expected) in [
+                ("remove", Decision::Remove, Outcome::Removed),
+                ("install", Decision::Install, Outcome::Installed),
+            ] {
+                let path = root.join(name).join(file);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(&path, &fixture).unwrap();
+                assert_eq!(apply(&path, decision, &exe, &data), expected, "{family}");
+            }
+            // And the entry that named nobody is gone rather than kept beside ours.
+            let after = fs::read_to_string(root.join("install").join(file)).unwrap();
+            assert!(!after.contains("folio.exe"), "{family}: {after}");
+        }
+    }
+
+    /// RED (closure review R4) — **one entry Folio cannot read does not speak for the others.**
+    ///
+    /// A hand-written `"mytool attention claude-code:Stop"` wears Folio's verb without Folio's
+    /// quoting, so no copy can be decoded from it. It is therefore not Folio's, it is left exactly
+    /// where it is, and it has no say over the well-formed entry beside it.
+    ///
+    /// RED GATE: make `owners()` propagate a per-entry decode error again and removal of the
+    /// neighbour becomes `Refused`.
+    #[test]
+    fn attention_an_unparseable_entry_does_not_veto_its_neighbours() {
+        let root = root("stranger-claude");
+        let exe = root.join("folio.exe");
+        fs::write(&exe, b"exe").unwrap();
+        let path = root.join("settings.json");
+        let stranger = serde_json::json!({
+            "type": "command",
+            "command": "mytool attention claude-code:Stop"
+        });
+        let ours = serde_json::json!({
+            "type": "command",
+            "command": exe,
+            "args": ["attention", "claude-code:Stop"],
+            "async": true
+        });
+        let original = serde_json::json!({"hooks":{"Stop":[{"hooks":[stranger, ours]}]}});
+        fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+        assert_eq!(
+            crate::attention_hooks::apply_at(&path, Decision::Remove, &exe, &root.join("data")),
+            Outcome::Removed
+        );
+        let written: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            written["hooks"]["Stop"][0]["hooks"],
+            serde_json::json!([stranger])
+        );
+    }
+
+    /// RED (closure review R7) — **App Translocation is a path component, not a prefix.**
+    ///
+    /// `current_exe()` on macOS hands back `_NSGetExecutablePath`'s string uncanonicalised, so the
+    /// same file is reported as `/var/folders/…` or `/private/var/folders/…` — `/var` is a link to
+    /// `/private/var`. The component is the fact; the prefix was a spelling.
+    ///
+    /// RED GATE: require the `/private/var/folders/` prefix again and the second spelling installs
+    /// hooks from a copy macOS will delete.
+    #[test]
+    fn attention_translocation_is_a_path_component_on_every_platform() {
+        for spelling in [
+            "/private/var/folders/qx/T/AppTranslocation/00-UUID/d/Folio.app/Contents/MacOS/folio",
+            "/var/folders/qx/T/AppTranslocation/00-UUID/d/Folio.app/Contents/MacOS/folio",
+        ] {
+            assert_eq!(
+                stable_executable(Some(Path::new(spelling))),
+                Err(crate::i18n::Text::AgentHooksTranslocated.text()),
+                "{spelling}"
+            );
+            assert!(translocated(Path::new(spelling)));
+        }
+        // A folder whose name merely begins with the word is not the quarantine, and a copy that
+        // is nowhere near one installs.
+        assert!(!translocated(Path::new(
+            "/Users/alice/AppTranslocationNotes/Folio.app/Contents/MacOS/folio"
+        )));
+        assert!(!translocated(Path::new(
+            "/Applications/Folio.app/Contents/MacOS/folio"
+        )));
+    }
+
+    /// RED (closure review R1) — **a file Folio will not edit is named, not flattened.**
+    ///
+    /// "this build cannot read it" is not true of a file that is perfectly readable and merely
+    /// protected, and a row that says it sends the reader looking for a corrupt document. The
+    /// refusal the filesystem predicate gave is the one the reader is shown.
+    ///
+    /// RED GATE: send the predicate's answer back through `Standing::Unreadable` and every
+    /// sentence here becomes "not one this build can read".
+    #[test]
+    fn attention_a_protected_config_names_its_own_reason() {
+        let unreadable = [
+            "the settings file is not one this build can read",
+            "the codex configuration file is not one this build can read",
+            "the copilot hook file is not one this build can read",
+        ];
+        for (family, file, apply) in adapters() {
+            let root = root(&format!("protected-{family}"));
+            let exe = root.join("folio.exe");
+            fs::write(&exe, b"exe").unwrap();
+            let data = root.join("data");
+            let path = root.join("config").join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let _ = fs::remove_file(&path);
+            assert_eq!(
+                apply(&path, Decision::Install, &exe, &data),
+                Outcome::Installed
+            );
+            let bytes = fs::read(&path).unwrap();
+            let writable = fs::metadata(&path).unwrap().permissions();
+            let mut readonly = writable.clone();
+            readonly.set_readonly(true);
+            fs::set_permissions(&path, readonly).unwrap();
+            let refused = apply(&path, Decision::Remove, &exe, &data);
+            let after = fs::read(&path).unwrap();
+            // Restored before the assertions, not after them: a panic in between would leave the
+            // fixture read-only and every later run of this test dead on its `write` (review R14).
+            fs::set_permissions(&path, writable).unwrap();
+            assert_eq!(after, bytes, "{family}");
+            let Outcome::Refused(reason) = refused else {
+                panic!("{family}: a read-only file is refused, not {refused:?}");
+            };
+            assert!(!unreadable.contains(&reason), "{family}: {reason}");
+            assert_eq!(
+                reason,
+                crate::i18n::Text::AgentConfigReadOnly.text(),
+                "{family}"
+            );
+        }
+    }
+
+    /// **Which file a linked configuration path names** — the decision, over the filesystem's
+    /// answers rather than over a filesystem, so that the rule this machine cannot demonstrate
+    /// (creating a link needs a privilege this account may not have) is still pinned here.
+    ///
+    /// The one question: is the thing at the end of the link a regular file inside the directory
+    /// the configuration path names? A dotfiles machine whose whole `~/.claude` is junctioned onto
+    /// a managed folder answers yes and is editable, which is the state 0.4.2 installed into and
+    /// 0.4.3 must be able to leave (closure review R1).
+    #[test]
+    fn attention_a_link_is_followed_only_inside_the_agents_own_folder() {
+        use crate::attention_hooks::{Resolution, linked_target};
+        let refused = Err(crate::i18n::Text::AgentConfigLink.text());
+        let inside = PathBuf::from("/dotfiles/.claude/settings.json");
+        assert_eq!(
+            linked_target(&Resolution {
+                root: Some(Path::new("/dotfiles/.claude")),
+                resolved: Some(&inside),
+                regular: true,
+            }),
+            Ok(inside.clone())
+        );
+        // Out of the folder: a link Folio will not write through, whatever stands at the far end.
+        assert_eq!(
+            linked_target(&Resolution {
+                root: Some(Path::new("/home/alice/.claude")),
+                resolved: Some(Path::new("/etc/passwd")),
+                regular: true,
+            }),
+            refused
+        );
+        // Inside it, but not a file: a directory, a device, a pipe.
+        assert_eq!(
+            linked_target(&Resolution {
+                root: Some(Path::new("/dotfiles/.claude")),
+                resolved: Some(&inside),
+                regular: false,
+            }),
+            refused
+        );
+        // A link to nothing, and a directory that does not resolve at all.
+        assert_eq!(
+            linked_target(&Resolution {
+                root: Some(Path::new("/dotfiles/.claude")),
+                resolved: None,
+                regular: false,
+            }),
+            refused
+        );
+        assert_eq!(
+            linked_target(&Resolution {
+                root: None,
+                resolved: Some(&inside),
+                regular: true,
+            }),
+            refused
+        );
+    }
+
+    /// **The same decision against a real link**, for the machine that has the privilege to make
+    /// one (closure review R1).
+    ///
+    /// Two links per family and one rule between them: the one whose target stands in the
+    /// directory the configuration path names is resolved once and *edited at its target*, so the
+    /// dotfiles machine can install and — the reason this ticket exists — uninstall; the one
+    /// pointing out of that directory is refused, and both the link and its target come through
+    /// byte-identical.
+    #[test]
+    #[ignore = "requires Windows symlink privilege; the injected-facts decision test runs everywhere"]
+    fn attention_a_linked_config_is_edited_at_its_target_inside_the_agents_folder() {
         for (family, file, apply) in adapters() {
             let root = root(&format!("symlink-{family}"));
             let exe = root.join("folio.exe");
             fs::write(&exe, b"exe").unwrap();
+            let data = root.join("data");
             let path = root.join(file);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            let target = root.join("real-config");
-            let _ = fs::remove_file(&path);
-            fs::write(&target, b"user content").unwrap();
-            #[cfg(windows)]
-            let linked = std::os::windows::fs::symlink_file(&target, &path);
-            #[cfg(unix)]
-            let linked = std::os::unix::fs::symlink(&target, &path);
-            linked.expect("symlink tests require developer mode on Windows");
+            let folder = path.parent().unwrap().to_path_buf();
+            fs::create_dir_all(&folder).unwrap();
+            let link = |target: &Path, at: &Path| {
+                let _ = fs::remove_file(at);
+                #[cfg(windows)]
+                let made = std::os::windows::fs::symlink_file(target, at);
+                #[cfg(unix)]
+                let made = std::os::unix::fs::symlink(target, at);
+                made.expect("symlink tests require developer mode on Windows");
+            };
+            let is_link = |at: &Path| fs::symlink_metadata(at).unwrap().file_type().is_symlink();
+
+            // ① A dotfile manager's own copy, beside the file it stands in for.
+            let managed = folder.join("managed-config");
+            fs::write(&managed, b"").unwrap();
+            link(&managed, &path);
+            assert_eq!(
+                apply(&path, Decision::Install, &exe, &data),
+                Outcome::Installed,
+                "{family}"
+            );
+            assert!(
+                fs::read_to_string(&managed).unwrap().contains("attention"),
+                "{family}: the target is what was written"
+            );
+            assert!(is_link(&path), "{family}: the link itself is untouched");
+            assert_eq!(
+                apply(&path, Decision::Remove, &exe, &data),
+                Outcome::Removed
+            );
+            // Copilot's whole file goes, under both of its names; the other two hand the document
+            // back. Either way nothing of Folio's is left behind to fire.
+            assert!(
+                fs::read_to_string(&managed)
+                    .map(|text| !text.contains("attention"))
+                    .unwrap_or(true),
+                "{family}: the hooks left with the removal"
+            );
+
+            // ② A target outside the folder the configuration path names. Never written through.
+            let outside = root.join("elsewhere");
+            fs::create_dir_all(&outside).unwrap();
+            let theirs = outside.join("somebody-elses-config");
+            fs::write(&theirs, b"user content").unwrap();
+            link(&theirs, &path);
             for decision in [Decision::Install, Decision::Remove] {
-                assert!(matches!(
-                    apply(&path, decision, &exe, &root.join("data")),
-                    Outcome::Refused(_)
-                ));
-                assert_eq!(fs::read(&target).unwrap(), b"user content");
-                assert!(
-                    fs::symlink_metadata(&path)
-                        .unwrap()
-                        .file_type()
-                        .is_symlink()
+                assert_eq!(
+                    apply(&path, decision, &exe, &data),
+                    Outcome::Refused(crate::i18n::Text::AgentConfigLink.text()),
+                    "{family}"
                 );
+                assert_eq!(fs::read(&theirs).unwrap(), b"user content");
+                assert!(is_link(&path));
             }
-            fs::remove_file(&path).unwrap();
-            #[cfg(windows)]
-            std::os::windows::fs::symlink_file(&exe, &path).unwrap();
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(&exe, &path).unwrap();
+
+            // And a link is still compared as the file it names when it is an *executable*
+            // operand: an alias of this copy is this copy.
+            link(&exe, &path);
             assert_eq!(other_live(&path, &exe), Ok(false));
             fs::remove_file(&path).unwrap();
         }

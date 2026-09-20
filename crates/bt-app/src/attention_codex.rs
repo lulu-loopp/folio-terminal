@@ -104,6 +104,10 @@ pub(crate) enum State {
     /// There is a file and it could not be read as TOML. **Not** "absent": writing over a file this
     /// build cannot parse would destroy configuration somebody wrote by hand.
     Unreadable,
+    /// There is a readable file and **this build will not edit it**, for the reason carried: a
+    /// link out of the agent's own folder, a file shared by hard links, or a read-only one. See
+    /// `attention_hooks::Standing::Refused`.
+    Refused(&'static str),
 }
 
 /// The directory codex keeps user configuration in, as **this environment** says it.
@@ -199,6 +203,20 @@ pub(crate) fn state() -> State {
     }
 }
 
+/// **The settings row's two facts, out of one read of the file.**
+///
+/// Whether this copy's marks are in it, and — when this build will not edit it at all — the reason
+/// the row says in place of `Off`. Two answers to "what does the row show" derived from one
+/// `State` rather than two reads, because a second read is a second answer (closure review R1).
+#[must_use]
+pub(crate) fn row_state() -> (bool, Option<&'static str>) {
+    match state() {
+        State::Installed => (true, None),
+        State::Refused(reason) => (false, Some(reason)),
+        State::Absent | State::Unreadable => (false, None),
+    }
+}
+
 /// The same question about a named file, so a test can ask it without a codex installation on the
 /// machine it runs on.
 #[must_use]
@@ -209,6 +227,8 @@ fn state_at(path: &Path) -> State {
         // **Not `Absent`.** There is a file, and a row that said "not installed" about it would
         // offer to write over one this build never read.
         crate::attention_hooks::Standing::Unreadable => return State::Unreadable,
+        // Nor `Unreadable`: this one was read, and the row says why it is not ours to change.
+        crate::attention_hooks::Standing::Refused(reason) => return State::Refused(reason),
         crate::attention_hooks::Standing::Text(text) => text,
     };
     match text.parse::<DocumentMut>() {
@@ -343,6 +363,8 @@ pub(crate) fn apply_at(path: &Path, decision: Decision, exe: &Path, data: &Path)
         // fall back to parses as an empty document, so the refusal below never fired and the write
         // went ahead over somebody's own configuration — release audit 2026-09-16 (C-3).
         crate::attention_hooks::Standing::Unreadable => return Outcome::Refused(UNREADABLE),
+        // The same refusal, carrying the filesystem's own reason rather than this one.
+        crate::attention_hooks::Standing::Refused(reason) => return Outcome::Refused(reason),
     };
     let mut document = match existing.parse::<DocumentMut>() {
         Ok(document) => document,
@@ -353,10 +375,15 @@ pub(crate) fn apply_at(path: &Path, decision: Decision, exe: &Path, data: &Path)
     if document.get(NOTIFY_KEY).is_some() && words_of(&document).is_none() {
         return Outcome::Refused(UNREADABLE);
     }
-    let paths = match notify_owner(&document) {
-        Ok(owner) => owner.into_iter().collect::<Vec<_>>(),
-        Err(reason) => return Outcome::Refused(reason),
-    };
+    // **Ownership is per entry** (closure review R4), and this family's entry is the whole key: a
+    // `notify` wearing Folio's verb in a shape this build cannot decode is not Folio's, which is
+    // the answer [`declares_folio`] and [`remove_from`] have always given about it. An install
+    // over it is refused below as somebody else's program; a removal leaves it alone.
+    let paths = notify_owner(&document)
+        .ok()
+        .flatten()
+        .into_iter()
+        .collect::<Vec<_>>();
     if install && declares_somebody_else(&document) {
         return Outcome::Refused("codex already runs a notify program of your own");
     }

@@ -11604,6 +11604,15 @@ struct App {
     /// desktop — and rewriting a file belonging to another program at every launch, without being
     /// asked, is not something this build does.
     claude_hooks_installed: bool,
+    /// **Why each agent's configuration file will not be edited, when it will not be** — the
+    /// `agent_takeovers` order, Claude Code then codex then copilot.
+    ///
+    /// Beside the switch rather than inside it, because it is the other half of one read: a file
+    /// that is a link out of the agent's folder, shared by hard links or read-only is not a file
+    /// whose hooks are off, and a row that said `Off` about it would offer a press that cannot
+    /// happen over hooks that may be firing (closure review R1). Written wherever the switch
+    /// beside it is written, out of the same `row_state()` call, so the two cannot disagree.
+    agent_config_refusals: [Option<&'static str>; 3],
     /// Short-lived consent for the Claude, Codex and Copilot rows, respectively.
     agent_takeovers: [Option<attention_ownership::Pending>; 3],
     /// **Whether the user's own `~/.codex/config.toml` runs `folio attention` at the end of a
@@ -38996,6 +39005,12 @@ impl Runtime<'_> {
         let file_index_worker = palette_index::IndexWorker::spawn(proxy.clone())?;
         let preview_worker = preview::PreviewWorker::spawn(proxy.clone())?;
         let git_worker = git::GitWorker::spawn(proxy.clone())?;
+        // **One read per family, and both of the row's facts come out of it**: whether this copy's
+        // marks are in that file, and — when the file is one this build will not edit — the reason
+        // the row has to say instead of `Off` (closure review R1).
+        let claude_row = attention_hooks::row_state();
+        let codex_row = attention_codex::row_state();
+        let copilot_row = attention_copilot::row_state();
         let mut app = App {
             ime_first_focus_seen: false,
             gpu,
@@ -39043,15 +39058,15 @@ impl Runtime<'_> {
             explorer_package_announce: Announce::Everything,
             // Read once, and *only* read: see the field for why this one is not repaired.
             agent_takeovers: Default::default(),
-            claude_hooks_installed: attention_hooks::state() == attention_hooks::State::Installed,
+            claude_hooks_installed: claude_row.0,
             // The same, over codex's own file — see the field above's note, which holds word for
             // word for this one.
-            codex_notify_installed: attention_codex::state() == attention_codex::State::Installed,
+            codex_notify_installed: codex_row.0,
             // And again over copilot's own hooks directory. The readiness beside it starts at
             // `Unknown` on every machine, because the probe that could better it has not been
             // started — nothing has shown the page it is printed on yet.
-            copilot_hooks_installed: attention_copilot::state()
-                == attention_copilot::State::Installed,
+            copilot_hooks_installed: copilot_row.0,
+            agent_config_refusals: [claude_row.1, codex_row.1, copilot_row.1],
             copilot_readiness: attention_copilot::readiness(),
             // Nobody has been asked yet, which is the only thing a launch can
             // truthfully say about it — see the field.
@@ -46312,6 +46327,10 @@ impl Runtime<'_> {
             claude_hooks: self.app.claude_hooks_installed,
             // And the same again, over codex's own file.
             codex_notify: self.app.codex_notify_installed,
+            // The other half of the same three reads: why a file will not be edited, when the
+            // answer is not `Off` at all. Handed in, never asked for here — the three sentences
+            // are read off the disk and this runs on every frame the dialog is up.
+            agent_config_refusals: self.app.agent_config_refusals,
             // And over copilot's own hooks directory, with the second fact this one needs beside
             // it: whether the copilot on this machine can carry the signal at all.
             copilot_hooks: self.app.copilot_hooks_installed,
@@ -54222,8 +54241,10 @@ impl Runtime<'_> {
         if let attention_hooks::Outcome::TakeOverRequired(owners) = &outcome {
             self.app.agent_takeovers[0] = attention_ownership::Pending::new(config, owners.clone());
         }
-        self.app.claude_hooks_installed =
-            attention_hooks::state() == attention_hooks::State::Installed;
+        (
+            self.app.claude_hooks_installed,
+            self.app.agent_config_refusals[0],
+        ) = attention_hooks::row_state();
         match outcome {
             attention_hooks::Outcome::Installed | attention_hooks::Outcome::Removed
                 if announce == Announce::OnlyFailures =>
@@ -54299,8 +54320,10 @@ impl Runtime<'_> {
         if let attention_codex::Outcome::TakeOverRequired(owners) = &outcome {
             self.app.agent_takeovers[1] = attention_ownership::Pending::new(config, owners.clone());
         }
-        self.app.codex_notify_installed =
-            attention_codex::state() == attention_codex::State::Installed;
+        (
+            self.app.codex_notify_installed,
+            self.app.agent_config_refusals[1],
+        ) = attention_codex::row_state();
         match outcome {
             attention_codex::Outcome::Installed | attention_codex::Outcome::Removed
                 if announce == Announce::OnlyFailures =>
@@ -54379,8 +54402,10 @@ impl Runtime<'_> {
         if let attention_copilot::Outcome::TakeOverRequired(owners) = &outcome {
             self.app.agent_takeovers[2] = attention_ownership::Pending::new(config, owners.clone());
         }
-        self.app.copilot_hooks_installed =
-            attention_copilot::state() == attention_copilot::State::Installed;
+        (
+            self.app.copilot_hooks_installed,
+            self.app.agent_config_refusals[2],
+        ) = attention_copilot::row_state();
         self.app.copilot_readiness = attention_copilot::readiness();
         match outcome {
             attention_copilot::Outcome::Installed | attention_copilot::Outcome::Removed
