@@ -181,6 +181,50 @@ temp directory.
   themselves are read but not written to the file.
 - `%TEMP%\bt-app-panic.log` — appended by the panic hook.
 
+### File-read self-report
+
+Folio's process-wide content-read ledger reports a minute exceeding **50,000,000
+bytes** when no user input arrived, or when any one lane exceeds that budget
+even with input. This is observation only: it does not throttle reads or change
+caches. `diagnostics.log` gets one `Folio: file reads ...` line at the start,
+at most one repeat per ten minutes, and one `ended after ... min, ... GB` line
+on the first below-budget minute. MB and GB are decimal units.
+
+The existing hang-watch worker checks the ledger using its session clock. It
+adds no worker, timer, window deadline or idle window wake. An unchanged,
+untraced ledger with no open report needs no collection, formatting or output;
+an open report still gets its one closing line. `BT_PERF_TRACE`
+additionally emits `BT_PERF_TRACE file_reads minute=...` with exact integer
+byte and read-pass totals for every lane each minute, including zero minutes,
+through the existing stderr trace sink.
+
+Lanes are `inline_image`, `peek`, `animation`, `preview`, `pdf`, `git_pipe`,
+`settings`, `fonts`, `attention` and `other`. Bytes count content delivered by
+the instrumented readers; directory enumeration and metadata are excluded.
+`git_pipe` measures the child's pipe output consumed here, not the child's
+disk reads. Reads mean logical passes, including bounded heads/tails and
+animation restarts, not OS read calls or a claim that every pass reached EOF.
+Streaming bytes accrue as chunks arrive; a pass spanning a boundary can have
+bytes in a later minute with no new read pass. Whole-file convenience reads
+are charged when they return successfully. Partial-error bytes from adapted
+`Read` streams are counted too.
+
+Native video loaders and font libraries own some reads internally. Their
+invocations appear separately as `opaque_loads` / `opaque loads (bytes unknown)`;
+their byte counts are **not** guessed from file sizes. Consequently these
+totals are not a replacement for the process's OS I/O counters. A watchdog
+delayed by other work collects on its next existing wake; sampling is not a
+real-time timer. `window_ms` states the actual interval; the budget comparison
+and total MB/min rate are normalized to that interval, while lane bytes and
+episode GB remain actual totals. No missing minute is invented as a zero.
+
+The largest lane names up to three repeated **basenames only**, never parent
+directories or file content. Each minute uses a fixed 64-slot table per lane;
+names are limited to 96 bytes and control characters are replaced. A full
+table leaves byte/read totals intact and marks `top tracked` and the number
+of reads with untracked paths. It does not claim an exhaustive ranking in that
+case. The table is cleared at collection. No path string is allocated per read.
+
 ### Picture freshness (always on)
 
 A shown, non-minimized window with outstanding picture debt writes a

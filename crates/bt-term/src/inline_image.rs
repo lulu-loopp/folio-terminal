@@ -1,6 +1,5 @@
 use std::{
     fmt,
-    fs::File,
     io::{Cursor, Read},
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
@@ -659,6 +658,15 @@ impl InlineImageDecoder {
         &mut self,
         task: InlineImageTask,
     ) -> Result<DecodedInlineImage, InlineImageDecodeError> {
+        self.decode_in_lane(task, bt_platform::file_reads::Lane::InlineImage)
+    }
+
+    /// Attribution only; both callers retain the same decoder and memo.
+    pub fn decode_in_lane(
+        &mut self,
+        task: InlineImageTask,
+        lane: bt_platform::file_reads::Lane,
+    ) -> Result<DecodedInlineImage, InlineImageDecodeError> {
         let payload = match &task.source {
             InlineImageSource::Osc1337(encoded) => decode_osc_payload(encoded)?,
             InlineImageSource::LocalPath(path) => {
@@ -678,7 +686,7 @@ impl InlineImageDecoder {
                 match self.local_path_cache.get(&cache_key) {
                     Some(cached) if cached.stamp == stamp => cached.decoded.clone()?,
                     _ => {
-                        let decoded = read_and_decode_local_image(path);
+                        let decoded = read_and_decode_local_image(path, lane);
                         self.local_path_cache.insert(
                             cache_key,
                             CachedLocalImage {
@@ -727,7 +735,10 @@ fn decode_osc_payload(encoded: &[u8]) -> Result<DecodedImagePayload, InlineImage
     decode_image_bytes(&bytes)
 }
 
-fn read_and_decode_local_image(path: &Path) -> Result<DecodedImagePayload, InlineImageDecodeError> {
+fn read_and_decode_local_image(
+    path: &Path,
+    lane: bt_platform::file_reads::Lane,
+) -> Result<DecodedImagePayload, InlineImageDecodeError> {
     // The lexical gate, and then the disk's half of it: a drive-rooted name may still be a local
     // spelling of a share, and this is the line the bytes are about to be read behind. Both are
     // the one predicate, and this call is the one that may touch a disk — which is why it is here,
@@ -739,8 +750,8 @@ fn read_and_decode_local_image(path: &Path) -> Result<DecodedImagePayload, Inlin
     {
         return Err(InlineImageDecodeError::InvalidPath);
     }
-    let mut file =
-        File::open(path).map_err(|error| InlineImageDecodeError::Io(error.to_string()))?;
+    let mut file = bt_platform::file_reads::open(lane, path)
+        .map_err(|error| InlineImageDecodeError::Io(error.to_string()))?;
     let metadata = file
         .metadata()
         .map_err(|error| InlineImageDecodeError::Io(error.to_string()))?;
@@ -1152,7 +1163,8 @@ pub fn decode_background_image(
     if !is_admissible_local_image_path(path) {
         return Err(BackgroundImageError::InvalidPath);
     }
-    let mut file = File::open(path).map_err(|error| BackgroundImageError::Io(error.to_string()))?;
+    let mut file = bt_platform::file_reads::open(bt_platform::file_reads::Lane::InlineImage, path)
+        .map_err(|error| BackgroundImageError::Io(error.to_string()))?;
     let metadata = file
         .metadata()
         .map_err(|error| BackgroundImageError::Io(error.to_string()))?;

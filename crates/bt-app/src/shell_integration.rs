@@ -347,7 +347,9 @@ fn install() -> Option<PathBuf> {
 /// copy that was never there.
 fn install_script_at(directory: &Path, name: &str, text: &str) -> Option<PathBuf> {
     let path = directory.join(name);
-    if std::fs::read_to_string(&path).is_ok_and(|existing| existing == text) {
+    if bt_platform::file_reads::read_to_string(bt_platform::file_reads::Lane::Settings, &path)
+        .is_ok_and(|existing| existing == text)
+    {
         return Some(path);
     }
     std::fs::create_dir_all(directory).ok()?;
@@ -373,7 +375,11 @@ fn install_zdotdir() -> Option<PathBuf> {
         .join(SCRIPT_DIRECTORY)
         .join(ZDOTDIR_DIRECTORY);
     let stale = ZDOTDIR_FILES.iter().any(|name| {
-        !std::fs::read_to_string(directory.join(name)).is_ok_and(|existing| existing == SCRIPT_ZSH)
+        !bt_platform::file_reads::read_to_string(
+            bt_platform::file_reads::Lane::Settings,
+            directory.join(name),
+        )
+        .is_ok_and(|existing| existing == SCRIPT_ZSH)
     });
     if !stale {
         return Some(directory);
@@ -1527,7 +1533,12 @@ fn read_profile_for_edit(profile: &Path) -> std::io::Result<Option<Vec<u8>>> {
         Err(e) => return Err(e),
     };
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
+    bt_platform::file_reads::Reader::new(
+        &mut file,
+        bt_platform::file_reads::Lane::Settings,
+        Some(profile),
+    )
+    .read_to_end(&mut bytes)?;
     Ok(Some(bytes))
 }
 
@@ -1692,7 +1703,9 @@ impl Offer {
 /// has never heard of.
 #[must_use]
 pub fn offer_for(profile: &Path) -> Offer {
-    match std::fs::read(profile).and_then(|bytes| profile_marks::Decoded::read(&bytes)) {
+    match bt_platform::file_reads::read(bt_platform::file_reads::Lane::Settings, profile)
+        .and_then(|bytes| profile_marks::Decoded::read(&bytes))
+    {
         Ok(decoded) if profile_suppresses_integration_offer(&decoded.text) => Offer::Silent,
         Ok(_) | Err(_) => Offer::Owed(profile.to_path_buf()),
     }

@@ -330,7 +330,9 @@ pub(crate) fn installed_rows() -> Vec<MappingRow> {
     let Some(path) = hooks_path() else {
         return Vec::new();
     };
-    let Ok(text) = std::fs::read_to_string(&path) else {
+    let Ok(text) =
+        bt_platform::file_reads::read_to_string(bt_platform::file_reads::Lane::Attention, &path)
+    else {
         return Vec::new();
     };
     let Ok(document) = serde_json::from_str::<Value>(&text) else {
@@ -514,7 +516,9 @@ fn hooks_are_switched_off() -> bool {
     let Some(path) = settings_path() else {
         return false;
     };
-    let Ok(text) = std::fs::read_to_string(&path) else {
+    let Ok(text) =
+        bt_platform::file_reads::read_to_string(bt_platform::file_reads::Lane::Attention, &path)
+    else {
         return false;
     };
     let Ok(settings) = serde_json::from_str::<Value>(&text) else {
@@ -755,6 +759,12 @@ fn run_probe() -> Option<Version> {
         command
             .raw_arg(probe_command_tail(&copilot))
             .output()
+            .inspect(|output| {
+                bt_platform::file_reads::pipe_output(
+                    bt_platform::file_reads::Lane::Attention,
+                    output,
+                )
+            })
             .ok()?
     };
     Version::parse(&String::from_utf8_lossy(&output.stdout))

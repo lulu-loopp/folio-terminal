@@ -186,7 +186,9 @@ pub(crate) fn installed_rows() -> Vec<MappingRow> {
     let Some(path) = settings_path() else {
         return Vec::new();
     };
-    let Ok(text) = std::fs::read_to_string(&path) else {
+    let Ok(text) =
+        bt_platform::file_reads::read_to_string(bt_platform::file_reads::Lane::Attention, &path)
+    else {
         return Vec::new();
     };
     let Ok(settings) = serde_json::from_str::<Value>(&text) else {
@@ -543,7 +545,7 @@ pub(crate) enum Standing {
 /// UTF-8, a directory standing under the file's name. None of them is a file that is not there,
 /// and that is the only state in which writing a fresh one loses nothing.
 pub(crate) fn standing(path: &Path) -> Standing {
-    match std::fs::read_to_string(path) {
+    match bt_platform::file_reads::read_to_string(bt_platform::file_reads::Lane::Attention, path) {
         Ok(text) => Standing::Text(text),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Standing::Nothing,
         Err(_) => Standing::Unreadable,
