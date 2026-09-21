@@ -11219,3 +11219,10 @@ The replay tail carries two facts: the bytes a DEC 2026 block holds back, and th
 Everything before `parser_tail_open_start` is the first and is released when the block ends; everything from it on is the second and stays.
 One function owns that release, and it never writes `parser_sequence_open` — the boundary parser alone says whether a sequence is open.
 The deadline arm used to clear both, so a resize seeded the canonical fork at Ground and printed the rest of an escape payload onto the grid.
+
+### 2026-09-20 — Folio installs its module only where the place is empty or its own
+The occupancy check lives inside `psreadline::install_checked`, the one writer, so no caller and no `RowState` can write around it.
+A leaf is Folio's when the assembly `Microsoft.PowerShell.PSReadLine.dll` is ours by bytes or by the `2.4.6-bt.` stamp, or when there is no assembly and every name in it is one this build writes; anything else is `InstalledCopy::Foreign`.
+`row_state` reads the disk fact before the stored invitation, so `RemovedElsewhere` can no longer offer `On` over a gallery module, and `RowState::NotOurs` darkens both verbs.
+`remove_from`'s rule — never take what Folio did not write — now binds the installer too, and the removal itself deletes the nine bundled names and drops the directory only while it is empty.
+The mixed leaf a previous Folio left (our module, PowerShellGet's `PSGetModuleInfo.xml`, `en-US\` and catalog beside it) is ours to update and not ours to delete; the sidecars stay and the cleanup door names them.

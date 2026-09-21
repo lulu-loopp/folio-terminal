@@ -223,6 +223,10 @@ enum Fate {
     Removed,
     Absent,
     Left(Vec<PathBuf>),
+    /// Folio's own files went and these stood beside them, so these stayed
+    /// (audit 3, E-1). Not [`Fate::Left`], which is about another *Folio* copy
+    /// still installed on the machine.
+    LeftNotOurs(Vec<PathBuf>),
     Refused(String),
     Kept(&'static str),
 }
@@ -244,6 +248,15 @@ impl Entry {
             Fate::Left(paths) => format!(
                 "{} {}",
                 english(Text::CleanupLeft),
+                paths
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Fate::LeftNotOurs(paths) => format!(
+                "{} {}",
+                english(Text::CleanupNotOurs),
                 paths
                     .iter()
                     .map(|p| p.display().to_string())
@@ -624,12 +637,18 @@ fn execute_with_claim<T>(
                     entries.push(Entry::new(&label, Fate::Absent));
                 }
                 for documents in &documents {
+                    use crate::psreadline::Removed;
                     let path = crate::psreadline::module_directory(documents);
+                    // One remover, and it is the row's — the rule that a removal
+                    // takes only what Folio wrote lives inside `remove_from`, so
+                    // this door reports what it did rather than repeating it.
                     let fate = match prepare_tree(&path, &scope.exe)
                         .and_then(|_| crate::psreadline::remove_from(documents))
                     {
-                        Ok(true) => Fate::Removed,
-                        Ok(false) => Fate::Absent,
+                        Ok(Removed::Took { left }) if left.is_empty() => Fate::Removed,
+                        Ok(Removed::Took { left }) => Fate::LeftNotOurs(left),
+                        Ok(Removed::Nothing) => Fate::Absent,
+                        Ok(Removed::NotOurs) => Fate::LeftNotOurs(vec![path.clone()]),
                         Err(e) => Fate::Refused(e.to_string()),
                     };
                     entries.push(Entry::new(format!("{label}: {}", path.display()), fate));
