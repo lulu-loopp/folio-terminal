@@ -8,6 +8,11 @@ appetite. `docs/CONVENTIONS.md` §十 rule 6 says why.
 ```markdown
 # Closure review — <branch> at <sha>
 
+## Round number: <N>
+A small fix gets at most two review rounds (CONVENTIONS §十 rule 6). If this is
+round 3 or higher and the findings are still "differs from what it replaced",
+stop patching and ask whether the approach itself is wrong.
+
 ## Trees and scope
 - final tree: <sha>      baseline: <sha>
 - scope is FIXED: the commits since the last reviewed tree, and the ledger below.
