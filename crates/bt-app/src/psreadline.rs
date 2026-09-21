@@ -2874,9 +2874,6 @@ mod tests {
     /// MUTATION: index the slots with `0` instead of `lang.index()` and this
     /// fails on the first state whose two columns then come back equal.
     ///
-    /// `NotOurs` is not on the list because its sentence is one of the two
-    /// audit 3 wrote in English and filed in `Text::CHINESE_PENDING`; it comes
-    /// on to this list with its Chinese.
     #[test]
     fn no_line_this_row_has_cached_survives_a_language_switch() {
         for state in [
@@ -2885,6 +2882,7 @@ mod tests {
             RowState::Outdated,
             RowState::InstalledByFolio,
             RowState::AlreadyCurrent,
+            RowState::NotOurs,
         ] {
             let english = row_description_in(state, i18n::Lang::English);
             let chinese = row_description_in(state, i18n::Lang::Chinese);

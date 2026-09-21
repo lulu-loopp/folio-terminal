@@ -3262,11 +3262,10 @@ impl Text {
                 "The copy Folio installed is no longer on disk",
                 "Folio 安装的那一份已不在磁盘上",
             ),
-            // zh: pending opus46
             Self::PsReadLineRowNotOurs => pick(
                 lang,
                 "Another PSReadLine is installed here. Folio leaves it alone",
-                "Another PSReadLine is installed here. Folio leaves it alone",
+                "此处有非 Folio 安装的 PSReadLine，不做改动",
             ),
             // **Length-sensitive.** The dialog's title is one unwrapped line in
             // a 400px float, exactly as the dirty gate's is; the first draft
@@ -4631,11 +4630,10 @@ impl Text {
                 "left (belongs to another existing copy):",
                 "已保留（属于另一份 Folio）：",
             ),
-            // zh: pending opus46
             Self::CleanupNotOurs => pick(
                 lang,
                 "left (not Folio's files):",
-                "left (not Folio's files):",
+                "已保留（非 Folio 的文件）：",
             ),
             Self::CleanupRefused => pick(lang, "refused", "未能移除"),
             Self::CleanupRoot => pick(
@@ -6212,18 +6210,8 @@ impl Text {
         Self::WebFailRuntimeVerb,
     ];
 
-    /// Both are audit 3's (E-1), written in English with the guard that stops
-    /// Folio writing over a module it did not install. The row's sentence is
-    /// read on a Terminal page in either language; the cleanup door's is printed
-    /// by `folio --uninstall-cleanup`, which speaks English and keeps its
-    /// Chinese column for the table's own completeness gate.
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 4] = [
-        (Self::PsReadLineRowNotOurs, HostPlatform::Windows),
-        (Self::PsReadLineRowNotOurs, HostPlatform::MacOs),
-        (Self::CleanupNotOurs, HostPlatform::Windows),
-        (Self::CleanupNotOurs, HostPlatform::MacOs),
-    ];
+    const CHINESE_PENDING: [(Self, HostPlatform); 0] = [];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
@@ -6623,13 +6611,13 @@ pub fn psreadline_already_current(found: &str, path: &str) -> String {
 /// It names the path for the reason every refusal on this row does — that is
 /// the half a reader can act on — and it says who the module belongs to rather
 /// than how new it is, because ownership is what stopped the write.
-// zh: pending opus46
 #[must_use]
 pub fn psreadline_occupied(path: &str) -> String {
     match current() {
-        Lang::English | Lang::Chinese => {
+        Lang::English => {
             format!("A PSReadLine Folio did not install is at {path}, so nothing was written.")
         }
+        Lang::Chinese => format!("{path} 有非 Folio 安装的 PSReadLine，未写入任何东西。"),
     }
 }
 
