@@ -18738,5 +18738,6 @@ mod file_replace;
 #[cfg(windows)]
 pub use file_replace::set_file_attributes;
 pub use file_replace::{
-    carry_metadata, extended_attribute_names, file_link_count, replace_file_preserving,
+    ReplaceRefusal, carry_metadata, extended_attribute_names, file_link_count,
+    replace_file_preserving, volume_cannot_replace,
 };
