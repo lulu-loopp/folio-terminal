@@ -65,7 +65,13 @@ jobs:
     # adapter-boundary check alone would need.
     timeout-minutes: 60
     steps:
+      # Whole history, for one step: `check-migration-debt.ps1` compares the
+      # debt list with `git merge-base HEAD origin/main`, and at the default
+      # depth of one there is no merge base to find — the check would pass by
+      # having nothing to read, which is the one way a gate must not pass.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
       # The compiler and the shared cache both come from
       # `.github/actions/toolchain`, which is the one place in this repository
       # that decides what Rust a job is built with. `release.yml` calls the same
@@ -225,12 +231,41 @@ jobs:
           BT_SOURCE_MEASURE_BUDGETS: "1"
         run: cargo test -p bt-source --locked --test measure -- --nocapture
 
+      # `docs/plans/MIGRATION-DEBT.tsv` is the list of every source reader that
+      # still names a file, and its whole value is that it only shrinks. A row
+      # added to it is a reader let past the tripwire; planting one proves the
+      # comparison against the merge base is a comparison and not a read.
+      - name: the migration-debt gate can actually fail
+        shell: pwsh
+        run: |
+          $file = "docs/plans/MIGRATION-DEBT.tsv"
+          $original = [IO.File]::ReadAllText($file)
+          try {
+            [IO.File]::AppendAllText($file, "crates/planted/src/lib.rs`tprobe`tinclude_str!`tnothing`tP3`tno`n")
+            $failed = $false
+            try {
+              & ./scripts/ci/check-migration-debt.ps1
+            } catch {
+              $failed = $true
+            }
+            if (-not $failed) {
+              throw "the debt list accepted a row that is not at the merge base"
+            }
+          } finally {
+            [IO.File]::WriteAllText($file, $original)
+          }
+          exit 0
+
   # ── everything that is decided by reading, not by hardware ────────────────
   logic:
     runs-on: windows-2025
     timeout-minutes: 45
     steps:
+      # Whole history: see `gates-can-fail`'s checkout. The debt-list check runs
+      # here for real, and a merge base is what it compares against.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
       # The compiler and the shared cache both come from
       # `.github/actions/toolchain`, which is the one place in this repository
       # that decides what Rust a job is built with. `release.yml` calls the same
@@ -324,6 +359,15 @@ jobs:
       - name: the ignored tests are exactly the ones on the list
         shell: pwsh
         run: ./scripts/ci/check-ignored-tests.ps1
+
+      # The other list of `docs/plans/bt-app-split-prep.md` §6.1. The tripwire
+      # (`crates/bt-source/tests/tripwire.rs`, run by the suite above) refuses a
+      # source reader that names a file and is on neither list; this refuses a
+      # row added to the list to get past it. Together they are one rule: the
+      # number of readers bound to a file goes down and never up.
+      - name: the migration-debt list only shrinks
+        shell: pwsh
+        run: ./scripts/ci/check-migration-debt.ps1
 
       # `check-vendor-notices.ps1` reads upstream alacritty 0.26.0 out of the
       # registry to diff it against `vendor/`, so the sources have to be there.

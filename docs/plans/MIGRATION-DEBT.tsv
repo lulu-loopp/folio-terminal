@@ -1,0 +1,779 @@
+# MIGRATION-DEBT — every source reader in this workspace that still names a file.
+#
+# **This list only shrinks.** A row is removed by the ticket that migrates its
+# reader onto `bt-source`; no ticket may add one. `scripts/ci/check-migration-debt.ps1`
+# compares this file with the merge base and fails on an added row.
+#
+# **It is temporary.** It reaches zero at P20 of `docs/plans/bt-app-split-prep.md`,
+# and it is deleted when it does.
+#
+# **It is not a completeness proof.** It was seeded from a census
+# (`bt-app-split-pins-2026-09-21.tsv`, taken at 1f1d2daa) plus a lexical sweep,
+# and both under-report by construction: a reader assembled at run time, or one
+# split across two functions, is in neither. The tripwire
+# (`crates/bt-source/tests/tripwire.rs`) reads fewer rows still — it scans `.rs`
+# and `.ps1` only, so the three Python generators below are on this list and out
+# of its reach. A reader with no row here and no allowlist variant is a gap, and
+# finding one is a finding, not a reason to widen either list.
+#
+# The other list is the file-scoped allowlist, `bt_source::FileScoped`: readers
+# whose concern really is a file. It is permanent and it has three entries.
+#
+# ticket: the ticket of `docs/plans/bt-app-split-prep.md` §§6.3/6.5 that will
+# migrate the row. Assigned by the plan's own batching — body pins P3/P14,
+# counts P4/P15, negatives and text scopes P5/P15, `file_reads_doors.txt` P6/P16,
+# walkers P7/P8/P12/P13, cross-crate and script readers P17, the documentation
+# generators P0 (§6.6) — with the first number where Step 2a disturbs the row and
+# the second where it does not. A ticket may re-claim a row; it may not add one.
+#
+# disturbed_by_2a: the census's own answer, from the `impact` column of the pins
+# TSV. It is not a prediction that the reader will turn red — see §5 of
+# `bt-app-split-inventory-2026-09-21.md`, which is about exactly that confusion.
+file	owner	mechanism	subject	ticket	disturbed_by_2a
+crates/bt-app/src/animation.rs	animation::tests::a_declared_screen_this_window_will_not_hold_is_refused_before_it_is_allocated	include_str!	open	P14	no
+crates/bt-app/src/animation.rs	animation::tests::a_gif_past_the_encoded_cap_is_not_read_whole	include_str!	decode;file_source	P14	no
+crates/bt-app/src/animation.rs	animation::tests::the_loop_comes_round_by_seeking_the_file_not_by_holding_it	include_str!	start_again	P14	no
+crates/bt-app/src/attention_codex.rs	attention_codex::tests::a_configuration_file_that_could_not_be_read_is_never_written_over	fixture / manifest read	(the file it reads)	P14	no
+crates/bt-app/src/attention_codex.rs	attention_codex::tests::a_configuration_file_that_is_not_there_is_the_one_that_gets_created	fixture / manifest read	(the file it reads)	P14	no
+crates/bt-app/src/attention_codex.rs	attention_codex::tests::a_configuration_file_that_is_there_is_copied_before_it_is_changed	fixture / manifest read	(the file it reads)	P14	no
+crates/bt-app/src/attention_codex.rs	attention_codex::tests::an_unreadable_configuration_file_is_never_written_over	include_str!	attention_codex.rs	P14	no
+crates/bt-app/src/attention_codex.rs	attention_codex::tests::the_line_this_installs_is_this	include_str!	../../../docs/plans/attention/codex-notify.toml	P14	no
+crates/bt-app/src/attention_codex.rs	attention_codex::tests::the_only_file_this_writes_is_the_one_the_environment_names	include_str!	attention_codex.rs	P14	no
+crates/bt-app/src/attention_copilot.rs	attention_copilot::tests::a_file_at_our_name_that_is_not_ours_is_left_exactly_where_it_is	include_str!	attention_copilot.rs	P14	no
+crates/bt-app/src/attention_copilot.rs	attention_copilot::tests::a_hook_file_that_could_not_be_read_is_never_written_over	fixture / manifest read	(the file it reads)	P14	no
+crates/bt-app/src/attention_copilot.rs	attention_copilot::tests::a_mac_install_writes_direct_exec_without_shell_quoting	fixture / manifest read	(the file it reads)	P14	no
+crates/bt-app/src/attention_copilot.rs	attention_copilot::tests::attention_two_live_copies_require_takeover_and_preserve_bytes	fixture / manifest read	(the file it reads)	P14	no
+crates/bt-app/src/attention_copilot.rs	attention_copilot::tests::every_command_says_which_upstream_it_speaks_for_and_hands_over_nothing	fixture / manifest read	(the file it reads)	P14	no
+crates/bt-app/src/attention_copilot.rs	attention_copilot::tests::taking_it_back_out_leaves_the_directory_that_was_there	fixture / manifest read	(the file it reads)	P14	no
+crates/bt-app/src/attention_copilot.rs	attention_copilot::tests::the_file_this_installs_is_this	include_str!	../../../docs/plans/attention/copilot-hooks.json	P14	no
+crates/bt-app/src/attention_copilot.rs	attention_copilot::tests::the_notification_hook_is_narrowed_to_the_two_subtypes_that_are_waits	fixture / manifest read	(the file it reads)	P14	no
+crates/bt-app/src/attention_copilot.rs	attention_copilot::tests::the_only_file_this_writes_is_the_one_the_environment_names	include_str!	attention_copilot.rs	P14	no
+crates/bt-app/src/attention_copilot.rs	attention_copilot::tests::the_settings_file_is_read_and_never_written	include_str!	attention_copilot.rs	P14	no
+crates/bt-app/src/attention_copilot.rs	attention_copilot::tests::what_is_written_never_carries_two_layers_of_one_request	fixture / manifest read	(the file it reads)	P14	no
+crates/bt-app/src/attention_hooks.rs	attention_hooks::tests::a_copy_that_cannot_be_kept_refuses_to_write	fixture / manifest read	(the file it reads)	P14	no
+crates/bt-app/src/attention_hooks.rs	attention_hooks::tests::a_dead_owner_can_be_replaced_after_moving_folio	fixture / manifest read	(the file it reads)	P14	no
+crates/bt-app/src/attention_hooks.rs	attention_hooks::tests::a_landing_is_whole_or_it_is_nothing_at_all	include_str!	attention_codex.rs;attention_copilot.rs;attention_hooks.rs	P14	no
+crates/bt-app/src/attention_hooks.rs	attention_hooks::tests::a_notification_subtype_is_registered_as_a_matcher	fixture / manifest read	(the file it reads)	P14	no
+crates/bt-app/src/attention_hooks.rs	attention_hooks::tests::a_settings_file_that_could_not_be_read_is_never_written_over	fixture / manifest read	(the file it reads)	P14	no
+crates/bt-app/src/attention_hooks.rs	attention_hooks::tests::a_settings_file_that_is_not_there_is_the_one_that_gets_created	fixture / manifest read	(the file it reads)	P14	no
+crates/bt-app/src/attention_hooks.rs	attention_hooks::tests::a_settings_file_that_is_there_is_copied_before_it_is_changed	fixture / manifest read	(the file it reads)	P14	no
+crates/bt-app/src/attention_hooks.rs	attention_hooks::tests::attention_two_live_copies_require_takeover_and_preserve_bytes	fixture / manifest read	(the file it reads)	P14	no
+crates/bt-app/src/attention_hooks.rs	attention_hooks::tests::installing_twice_changes_nothing_the_second_time	fixture / manifest read	(the file it reads)	P14	no
+crates/bt-app/src/attention_hooks.rs	attention_hooks::tests::no_hook_this_writes_can_hold_up_an_approval	fixture / manifest read	(the file it reads)	P14	no
+crates/bt-app/src/attention_hooks.rs	attention_hooks::tests::taking_them_back_out_leaves_what_was_there	fixture / manifest read	(the file it reads)	P14	no
+crates/bt-app/src/attention_hooks.rs	attention_hooks::tests::the_block_a_mac_installs_is_the_same_direct_exec_block	fixture / manifest read	(the file it reads)	P14	no
+crates/bt-app/src/attention_hooks.rs	attention_hooks::tests::the_block_this_installs_is_this	include_str!	../../../docs/plans/attention/claude-hooks.json	P14	no
+crates/bt-app/src/attention_hooks.rs	attention_hooks::tests::the_only_file_this_writes_is_the_one_the_environment_names	include_str!	attention_hooks.rs	P14	no
+crates/bt-app/src/attention_hooks.rs	attention_hooks::tests::what_is_written_never_carries_two_layers_of_one_request	fixture / manifest read	(the file it reads)	P14	no
+crates/bt-app/src/attention_hooks.rs	attention_hooks::tests::what_lands_is_the_file_and_nothing_beside_it	fixture / manifest read	read	P14	no
+crates/bt-app/src/attention_ownership.rs	attention_ownership::tests::attention_a_linked_config_is_edited_at_its_target_inside_the_agents_folder	fixture / manifest read	(the file it reads)	P14	no
+crates/bt-app/src/attention_ownership.rs	attention_ownership::tests::attention_a_strangers_program_is_never_folios	fixture / manifest read	(the file it reads)	P14	no
+crates/bt-app/src/attention_ownership.rs	attention_ownership::tests::attention_an_operation_resolves_its_configuration_once	fixture / manifest read	target	P14	no
+crates/bt-app/src/attention_ownership.rs	attention_ownership::tests::attention_codex_takeover_never_replaces_a_user_notifier	fixture / manifest read	(the file it reads)	P14	no
+crates/bt-app/src/attention_ownership.rs	attention_ownership::tests::attention_malformed_future_schema_and_readonly_are_byte_identical	fixture / manifest read	(the file it reads)	P14	no
+crates/bt-app/src/attention_ownership.rs	attention_ownership::tests::attention_only_one_function_resolves_a_configuration_path	include_str!	editable;main	P14	no
+crates/bt-app/src/attention_ownership.rs	attention_ownership::tests::attention_relative_operand_names_nobody_and_is_removable	fixture / manifest read	remove	P14	no
+crates/bt-app/src/attention_ownership.rs	attention_ownership::tests::attention_untrusted_executable_and_bad_record_refuse_without_config_changes	fixture / manifest read	(the file it reads)	P14	no
+crates/bt-app/src/cli.rs	cli::tests::a_flag_and_a_positional_folder_is_a_contradiction_and_the_flag_wins	source text read	(the file it reads)	P14	no
+crates/bt-app/src/cli.rs	cli::tests::one_command_line_can_carry_a_folder_a_profile_and_a_document	source text read	(the file it reads)	P14	no
+crates/bt-app/src/clipboard_picture.rs	clipboard_picture::tests::every_encoding_is_judged_by_the_one_ceiling	include_str!	png_from;png_from_dib	P14	no
+crates/bt-app/src/context_menu.rs	context_menu::tests::the_classic_registration_is_announced_to_the_shell_as_well	runtime fs read	(the file it reads)	P17	no
+crates/bt-app/src/diagnostics.rs	diagnostics::bt_environment_doc_tests::every_bt_name_in_the_source_is_in_the_document_and_the_reverse	include_str!	../../../docs/BT-ENVIRONMENT.md	P13	no
+crates/bt-app/src/diagnostics.rs	diagnostics::bt_environment_doc_tests::the_document_names_both_directories_the_product_writes_under	include_str!	../../../docs/BT-ENVIRONMENT.md	P13	no
+crates/bt-app/src/diagnostics.rs	diagnostics::tests::a_run_heads_its_log_before_anything_else_can_write_into_it	include_str!	choose_resident_channel;open_run_log	P14	no
+crates/bt-app/src/diagnostics.rs	diagnostics::tests::nothing_branches_on_the_two_console_no_ops	include_str!	choose_resident_channel;main	P14	no
+crates/bt-app/src/file_peek.rs	file_peek::tests::crossing_the_rows_under_the_corridor_does_not_move_the_card_but_resting_does	source text read	(the file it reads)	P14	no
+crates/bt-app/src/file_peek.rs	file_peek::tests::the_cards_middle_is_left_to_the_document_and_written_by_nobody_else	source text read	(the file it reads)	P14	no
+crates/bt-app/src/file_reads_doors.txt	animation.rs: file_source_in_lane: FileAnimationSource::open	ledger key naming a file	file_source_in_lane (1 site(s), FileAnimationSource::open)	P16	no
+crates/bt-app/src/file_reads_doors.txt	animation.rs: first_frame: open	ledger key naming a file	first_frame (1 site(s), open)	P16	no
+crates/bt-app/src/file_reads_doors.txt	animation.rs: open_in_lane: std::fs::File::open	ledger key naming a file	open_in_lane (1 site(s), std::fs::File::open)	P16	no
+crates/bt-app/src/file_reads_doors.txt	animation.rs: read: .read	ledger key naming a file	read (1 site(s), .read)	P16	no
+crates/bt-app/src/file_reads_doors.txt	animation.rs: read_head: .read	ledger key naming a file	read_head (1 site(s), .read)	P16	no
+crates/bt-app/src/file_reads_doors.txt	animation.rs: stream: open	ledger key naming a file	stream (1 site(s), open)	P16	no
+crates/bt-app/src/file_reads_doors.txt	attention_copilot.rs: run_probe: .output	ledger key naming a file	run_probe (1 site(s), .output)	P16	no
+crates/bt-app/src/file_reads_doors.txt	attention_ownership.rs: record: Marks::read	ledger key naming a file	record (1 site(s), Marks::read)	P16	no
+crates/bt-app/src/file_reads_doors.txt	attention_wire.rs: payload_on_stdin: .read_to_end	ledger key naming a file	payload_on_stdin (1 site(s), .read_to_end)	P16	no
+crates/bt-app/src/file_reads_doors.txt	attention_words.rs: lede_in_tail: .read_to_end	ledger key naming a file	lede_in_tail (1 site(s), .read_to_end)	P16	no
+crates/bt-app/src/file_reads_doors.txt	attention_words.rs: transcript_lede: File::open	ledger key naming a file	transcript_lede (1 site(s), File::open)	P16	no
+crates/bt-app/src/file_reads_doors.txt	clipboard_picture.rs: reserve: .open	ledger key naming a file	reserve (1 site(s), .open)	P16	no
+crates/bt-app/src/file_reads_doors.txt	diagnostics.rs: append_note: .open	ledger key naming a file	append_note (1 site(s), .open)	P16	no
+crates/bt-app/src/file_reads_doors.txt	explorer_menu.rs: serve: crate::persist::SettingsStore::open	ledger key naming a file	serve (1 site(s), crate::persist::SettingsStore::open)	P16	no
+crates/bt-app/src/file_reads_doors.txt	files_watch.rs: sync_with: open	ledger key naming a file	sync_with (1 site(s), open)	P16	no
+crates/bt-app/src/file_reads_doors.txt	git.rs: drain: .read_to_end	ledger key naming a file	drain (1 site(s), .read_to_end)	P16	no
+crates/bt-app/src/file_reads_doors.txt	git_watch.rs: sync_with: open	ledger key naming a file	sync_with (1 site(s), open)	P16	no
+crates/bt-app/src/file_reads_doors.txt	hang_watch.rs: append_healed: .open	ledger key naming a file	append_healed (1 site(s), .open)	P16	no
+crates/bt-app/src/file_reads_doors.txt	main.rs: append_panic_report: .open	ledger key naming a file	append_panic_report (1 site(s), .open)	P16	no
+crates/bt-app/src/file_reads_doors.txt	main.rs: commit_web_page: .open	ledger key naming a file	commit_web_page (1 site(s), .open)	P6	yes
+crates/bt-app/src/file_reads_doors.txt	main.rs: create: GpuContext::open	ledger key naming a file	create (1 site(s), GpuContext::open)	P6	yes
+crates/bt-app/src/file_reads_doors.txt	main.rs: create: persist::KeybindingsStore::open	ledger key naming a file	create (1 site(s), persist::KeybindingsStore::open)	P6	yes
+crates/bt-app/src/file_reads_doors.txt	main.rs: create: persist::ProfilesStore::open	ledger key naming a file	create (1 site(s), persist::ProfilesStore::open)	P6	yes
+crates/bt-app/src/file_reads_doors.txt	main.rs: create: persist::SessionStore::open	ledger key naming a file	create (1 site(s), persist::SessionStore::open)	P6	yes
+crates/bt-app/src/file_reads_doors.txt	main.rs: create: persist::SettingsStore::open	ledger key naming a file	create (1 site(s), persist::SettingsStore::open)	P6	yes
+crates/bt-app/src/file_reads_doors.txt	main.rs: create: pins::PinsStore::open	ledger key naming a file	create (1 site(s), pins::PinsStore::open)	P6	yes
+crates/bt-app/src/file_reads_doors.txt	main.rs: create_leaf_session: .output	ledger key naming a file	create_leaf_session (1 site(s), .output)	P16	no
+crates/bt-app/src/file_reads_doors.txt	main.rs: dump_chrome_frame: .open	ledger key naming a file	dump_chrome_frame (1 site(s), .open)	P16	no
+crates/bt-app/src/file_reads_doors.txt	main.rs: dump_overlay_frame: .open	ledger key naming a file	dump_overlay_frame (1 site(s), .open)	P16	no
+crates/bt-app/src/file_reads_doors.txt	main.rs: land_page_source_on: .open	ledger key naming a file	land_page_source_on (1 site(s), .open)	P6	yes
+crates/bt-app/src/file_reads_doors.txt	main.rs: land_preview_source_on: .open	ledger key naming a file	land_preview_source_on (1 site(s), .open)	P6	yes
+crates/bt-app/src/file_reads_doors.txt	main.rs: new_window_runtime: .open	ledger key naming a file	new_window_runtime (1 site(s), .open)	P16	no
+crates/bt-app/src/file_reads_doors.txt	main.rs: open_rename: TabRename::open	ledger key naming a file	open_rename (1 site(s), TabRename::open)	P6	yes
+crates/bt-app/src/file_reads_doors.txt	main.rs: open_search: .open	ledger key naming a file	open_search (1 site(s), .open)	P6	yes
+crates/bt-app/src/file_reads_doors.txt	main.rs: open_the_data_directorys_endpoints: attention_wire::open	ledger key naming a file	open_the_data_directorys_endpoints (1 site(s), attention_wire::open)	P16	no
+crates/bt-app/src/file_reads_doors.txt	main.rs: open_the_data_directorys_endpoints: launch_wire::open	ledger key naming a file	open_the_data_directorys_endpoints (1 site(s), launch_wire::open)	P16	no
+crates/bt-app/src/file_reads_doors.txt	main.rs: open_web_page_on: webhost::WebSeat::open	ledger key naming a file	open_web_page_on (1 site(s), webhost::WebSeat::open)	P6	yes
+crates/bt-app/src/file_reads_doors.txt	main.rs: place_float: .open	ledger key naming a file	place_float (1 site(s), .open)	P6	yes
+crates/bt-app/src/file_reads_doors.txt	main.rs: play_video_file_on: .open	ledger key naming a file	play_video_file_on (1 site(s), .open)	P6	yes
+crates/bt-app/src/file_reads_doors.txt	main.rs: pop_out_preview: .open	ledger key naming a file	pop_out_preview (1 site(s), .open)	P6	yes
+crates/bt-app/src/file_reads_doors.txt	main.rs: promote_file_peek: .open	ledger key naming a file	promote_file_peek (1 site(s), .open)	P6	yes
+crates/bt-app/src/file_reads_doors.txt	main.rs: raise_dirty_gate: .open	ledger key naming a file	raise_dirty_gate (1 site(s), .open)	P6	yes
+crates/bt-app/src/file_reads_doors.txt	main.rs: raise_first_run_if_due: .open	ledger key naming a file	raise_first_run_if_due (1 site(s), .open)	P6	yes
+crates/bt-app/src/file_reads_doors.txt	main.rs: raise_psreadline_invite_if_due: .open	ledger key naming a file	raise_psreadline_invite_if_due (1 site(s), .open)	P6	yes
+crates/bt-app/src/file_reads_doors.txt	main.rs: say_at_the_front_door: persist::SettingsStore::open	ledger key naming a file	say_at_the_front_door (1 site(s), persist::SettingsStore::open)	P16	no
+crates/bt-app/src/file_reads_doors.txt	main.rs: settings_layout: .read	ledger key naming a file	settings_layout (1 site(s), .read)	P6	yes
+crates/bt-app/src/file_reads_doors.txt	main.rs: turn: .open	ledger key naming a file	turn (1 site(s), .open)	P6	yes
+crates/bt-app/src/file_reads_doors.txt	pdf.rs: count_pages: .read	ledger key naming a file	count_pages (1 site(s), .read)	P16	no
+crates/bt-app/src/file_reads_doors.txt	pdf.rs: read_capped: .read_to_end	ledger key naming a file	read_capped (1 site(s), .read_to_end)	P16	no
+crates/bt-app/src/file_reads_doors.txt	persist.rs: open: SessionWriter::open	ledger key naming a file	open (1 site(s), SessionWriter::open)	P16	no
+crates/bt-app/src/file_reads_doors.txt	preview.rs: read_up_to: .read_to_end	ledger key naming a file	read_up_to (1 site(s), .read_to_end)	P16	no
+crates/bt-app/src/file_reads_doors.txt	preview_watch.rs: sync_with: open	ledger key naming a file	sync_with (1 site(s), open)	P16	no
+crates/bt-app/src/file_reads_doors.txt	profiles.rs: table: .read	ledger key naming a file	table (1 site(s), .read)	P16	no
+crates/bt-app/src/file_reads_doors.txt	profiles.rs: title: .read	ledger key naming a file	title (1 site(s), .read)	P16	no
+crates/bt-app/src/file_reads_doors.txt	profiles.rs: with_table: read	ledger key naming a file	with_table (1 site(s), read)	P16	no
+crates/bt-app/src/file_reads_doors.txt	psreadline.rs: install_recorded: Marks::read	ledger key naming a file	install_recorded (1 site(s), Marks::read)	P16	no
+crates/bt-app/src/file_reads_doors.txt	psreadline.rs: is_folios_copy_at: installed_disk::read	ledger key naming a file	is_folios_copy_at (1 site(s), installed_disk::read)	P16	no
+crates/bt-app/src/file_reads_doors.txt	psreadline.rs: read: .read	ledger key naming a file	read (1 site(s), .read)	P16	no
+crates/bt-app/src/file_reads_doors.txt	psreadline.rs: run_probe: .output	ledger key naming a file	run_probe (1 site(s), .output)	P16	no
+crates/bt-app/src/file_reads_doors.txt	psreadline.rs: unclaimed_or_foreign: installed_disk::read	ledger key naming a file	unclaimed_or_foreign (1 site(s), installed_disk::read)	P16	no
+crates/bt-app/src/file_reads_doors.txt	schemes.rs: catalogue: .read	ledger key naming a file	catalogue (1 site(s), .read)	P16	no
+crates/bt-app/src/file_reads_doors.txt	settings.rs: adopted: .read	ledger key naming a file	adopted (2 site(s), .read)	P16	no
+crates/bt-app/src/file_reads_doors.txt	settings.rs: get: .read	ledger key naming a file	get (1 site(s), .read)	P16	no
+crates/bt-app/src/file_reads_doors.txt	settings.rs: scanned: .read	ledger key naming a file	scanned (2 site(s), .read)	P16	no
+crates/bt-app/src/file_reads_doors.txt	shell_integration.rs: add_profile_with_forms: profile_marks::Decoded::read	ledger key naming a file	add_profile_with_forms (1 site(s), profile_marks::Decoded::read)	P16	no
+crates/bt-app/src/file_reads_doors.txt	shell_integration.rs: offer_for: profile_marks::Decoded::read	ledger key naming a file	offer_for (1 site(s), profile_marks::Decoded::read)	P16	no
+crates/bt-app/src/file_reads_doors.txt	shell_integration.rs: profile_path_reason: std::fs::File::open	ledger key naming a file	profile_path_reason (1 site(s), std::fs::File::open)	P16	no
+crates/bt-app/src/file_reads_doors.txt	shell_integration.rs: read_profile_for_edit: .open	ledger key naming a file	read_profile_for_edit (1 site(s), .open)	P16	no
+crates/bt-app/src/file_reads_doors.txt	shell_integration.rs: read_profile_for_edit: .read	ledger key naming a file	read_profile_for_edit (1 site(s), .read)	P16	no
+crates/bt-app/src/file_reads_doors.txt	shell_integration.rs: read_profile_for_edit: .read_to_end	ledger key naming a file	read_profile_for_edit (1 site(s), .read_to_end)	P16	no
+crates/bt-app/src/file_reads_doors.txt	shell_integration.rs: replace_profile: .open	ledger key naming a file	replace_profile (1 site(s), .open)	P16	no
+crates/bt-app/src/file_reads_doors.txt	shell_integration/profile_marks.rs: lock: .open	ledger key naming a file	lock (1 site(s), .open)	P16	no
+crates/bt-app/src/file_reads_doors.txt	shell_integration/profile_marks.rs: lock: .read	ledger key naming a file	lock (1 site(s), .read)	P16	no
+crates/bt-app/src/file_reads_doors.txt	shell_integration/profile_marks.rs: rewrite_recorded: Decoded::read	ledger key naming a file	rewrite_recorded (1 site(s), Decoded::read)	P16	no
+crates/bt-app/src/file_reads_doors.txt	shell_integration/profile_runtime.rs: enable_record: Marks::read	ledger key naming a file	enable_record (1 site(s), Marks::read)	P16	no
+crates/bt-app/src/file_reads_doors.txt	shell_integration/profile_runtime.rs: install_recorded: Marks::read	ledger key naming a file	install_recorded (1 site(s), Marks::read)	P16	no
+crates/bt-app/src/file_reads_doors.txt	shell_integration/profile_runtime.rs: operate_with: Marks::read	ledger key naming a file	operate_with (1 site(s), Marks::read)	P16	no
+crates/bt-app/src/file_reads_doors.txt	trace.rs: append: .open	ledger key naming a file	append (1 site(s), .open)	P16	no
+crates/bt-app/src/file_reads_doors.txt	trace.rs: create: .open	ledger key naming a file	create (1 site(s), .open)	P16	no
+crates/bt-app/src/file_reads_doors.txt	trace.rs: open: .open	ledger key naming a file	open (1 site(s), .open)	P16	no
+crates/bt-app/src/file_reads_doors.txt	uninstall.rs: execute_with_claim: Marks::read	ledger key naming a file	execute_with_claim (1 site(s), Marks::read)	P16	no
+crates/bt-app/src/file_reads_doors.txt	update.rs: take: .open	ledger key naming a file	take (1 site(s), .open)	P16	no
+crates/bt-app/src/file_reads_doors.txt	video_seat.rs: open: Engine::open	ledger key naming a file	open (1 site(s), Engine::open)	P16	no
+crates/bt-app/src/file_reads_doors.txt	video_seat.rs: open: VideoSeat::open	ledger key naming a file	open (1 site(s), VideoSeat::open)	P16	no
+crates/bt-app/src/file_reads_source_tests.rs	file_reads_source_tests::file_reads_every_product_content_door_has_a_lane	include_str!	animation.rs	P14	no
+crates/bt-app/src/file_reads_source_tests.rs	file_reads_source_tests::file_reads_reporting_borrows_the_watchdog_and_installs_no_wake	include_str!	watch_forever	P14	no
+crates/bt-app/src/files.rs	files::tests::a_new_name_is_refused_for_every_reason_a_folder_has	source text read	(the file it reads)	P14	no
+crates/bt-app/src/files.rs	files::tests::a_path_under_a_root_comes_back_as_the_id_that_names_it	source text read	(the file it reads)	P14	no
+crates/bt-app/src/files.rs	files::tests::a_selection_inside_a_folder_nobody_has_read_is_merely_out_of_sight	source text read	(the file it reads)	P14	no
+crates/bt-app/src/files.rs	files::tests::a_selection_whose_folder_was_read_without_it_is_dead	source text read	(the file it reads)	P14	no
+crates/bt-app/src/files.rs	files::tests::ids_and_paths_convert_both_ways	source text read	(the file it reads)	P14	no
+crates/bt-app/src/files.rs	files::tests::only_opened_folders_contribute_rows	source text read	(the file it reads)	P14	no
+crates/bt-app/src/files.rs	files::tests::the_row_a_new_entry_is_named_in_stands_at_the_end_of_its_folders_run	source text read	(the file it reads)	P14	no
+crates/bt-app/src/first_run.rs	first_run::clock_edge_tests::first_run_clock_run_disk_questions_follow_the_ready_edge	include_str!	adopt_profile_table;agent_is_on_this_machine;answer_first_run;first_run;is_available;raise_first_run_if_due;self	P3	yes
+crates/bt-app/src/first_run.rs	first_run::tests::done_with_the_powershell_row_off_removes_nothing_and_says_nothing	source text read	(the file it reads)	P14	no
+crates/bt-app/src/first_run.rs	first_run::tests::the_card_names_no_platform_of_its_own	include_str!	first_run.rs	P14	no
+crates/bt-app/src/focus_thumb.rs	focus_thumb::tests::a_loaded_preview_projects_its_head_lines	source text read	main;other	P14	no
+crates/bt-app/src/focus_thumb.rs	focus_thumb::tests::a_preview_that_changed_file_repaints_even_at_the_same_revision	source text read	(the file it reads)	P14	no
+crates/bt-app/src/formula_tools.rs	formula_tools::tests::formula_present_uses_one_guard_and_consumes_the_landing_receipt	include_str!	carry_live_journeys;formula_overlay_is_active;math_band_trace_for_present;math_band_trace_line;present_retained_picture;redraw;refresh_formula_overlay_for_present;settle_math_toggle;sync_math_tools	P3	yes
+crates/bt-app/src/formula_tools.rs	formula_tools::tests::the_landing_frame_needs_no_snap	include_str!	redraw	P3	yes
+crates/bt-app/src/formula_tools.rs	formula_tools::tests::the_marks_fade_in_travel_and_fade_out_on_the_tips_own_ninety_milliseconds	include_str!	cubic_bezier	P14	no
+crates/bt-app/src/formula_tools.rs	formula_tools::tests::the_marks_stand_on_the_band_of_the_frame_being_drawn	include_str!	math_tool_placement	P3	yes
+crates/bt-app/src/formula_tools.rs	formula_tools::tests::the_source_face_and_the_marks_read_one_frame	include_str!	formula_toggle_layers;math_tool_placement	P3	yes
+crates/bt-app/src/git.rs	git::tests::a_comparison_is_asked_once_per_pair_and_again_when_an_end_moves	source text read	(the file it reads)	P14	no
+crates/bt-app/src/git.rs	git::tests::a_diff_is_a_document_and_a_commit_s_file_list_is_column_state	source text read	(the file it reads)	P14	no
+crates/bt-app/src/git.rs	git::tests::a_machine_without_git_answers_every_question_anyway	source text read	(the file it reads)	P14	no
+crates/bt-app/src/git.rs	git::tests::a_staged_diff_and_an_unstaged_diff_are_not_the_same_question	source text read	(the file it reads)	P14	no
+crates/bt-app/src/git.rs	git::tests::a_write_that_confuses_a_ref_for_a_path_starts_nothing	source text read	(the file it reads)	P14	no
+crates/bt-app/src/git.rs	git::tests::each_named_verb_is_the_command_line_git_documents	source text read	main	P14	no
+crates/bt-app/src/git.rs	git::tests::each_of_the_three_readings_is_its_own_command_line	source text read	diff	P14	no
+crates/bt-app/src/git.rs	git::tests::every_reading_shuts_the_doors_a_hostile_repository_would_come_through	source text read	(the file it reads)	P14	no
+crates/bt-app/src/git.rs	git::tests::no_command_this_window_builds_carries_a_word_the_ruling_forbids	source text read	merge;reset	P14	no
+crates/bt-app/src/git_graph.rs	git_graph::tests::a_commits_file_row_wears_its_letter_and_its_counts	source text read	(the file it reads)	P14	no
+crates/bt-app/src/git_graph.rs	git_graph::tests::a_comparisons_file_rows_open_the_diff_of_the_pair	source text read	(the file it reads)	P14	no
+crates/bt-app/src/git_panel.rs	git_panel::tests::a_column_rooted_below_the_repository_shortens_every_path_by_its_own	source text read	(the file it reads)	P14	no
+crates/bt-app/src/git_panel.rs	git_panel::tests::a_commit_files_row_says_its_letter_in_words_beside_the_letter	source text read	(the file it reads)	P14	no
+crates/bt-app/src/git_panel.rs	git_panel::tests::a_commit_s_file_row_opens_that_commit_s_own_diff	source text read	(the file it reads)	P14	no
+crates/bt-app/src/git_panel.rs	git_panel::tests::a_drive_letter_in_the_other_case_is_the_same_place	source text read	(the file it reads)	P14	no
+crates/bt-app/src/git_panel.rs	git_panel::tests::a_file_in_two_groups_is_two_rows_and_each_wears_both_letters	source text read	(the file it reads)	P14	no
+crates/bt-app/src/git_panel.rs	git_panel::tests::a_folder_is_marked_when_anything_beneath_it_is	source text read	(the file it reads)	P14	no
+crates/bt-app/src/git_panel.rs	git_panel::tests::a_refused_write_leaves_the_page_exactly_as_it_was	source text read	(the file it reads)	P14	no
+crates/bt-app/src/git_panel.rs	git_panel::tests::a_rows_verbs_and_their_room_arrive_with_the_pointer	source text read	(the file it reads)	P14	no
+crates/bt-app/src/git_panel.rs	git_panel::tests::a_slot_that_failed_leaves_a_notice_where_its_own_rows_would_be	source text read	(the file it reads)	P14	no
+crates/bt-app/src/git_panel.rs	git_panel::tests::a_staged_row_stays_where_it_is_until_git_says_it_moved	source text read	(the file it reads)	P14	no
+crates/bt-app/src/git_panel.rs	git_panel::tests::a_tree_wears_no_badges_while_no_column_stands_on_its_git_page	source text read	(the file it reads)	P14	no
+crates/bt-app/src/git_panel.rs	git_panel::tests::every_git_row_that_names_a_file_offers_the_same_glance_the_tree_does	source text read	(the file it reads)	P14	no
+crates/bt-app/src/git_panel.rs	git_panel::tests::every_status_letter_reaches_the_row_it_names	source text read	(the file it reads)	P14	no
+crates/bt-app/src/git_panel.rs	git_panel::tests::only_one_commit_is_ever_open	source text read	(the file it reads)	P14	no
+crates/bt-app/src/git_panel.rs	git_panel::tests::the_whole_alphabet_is_drawable_and_a_conflict_is_never_green	source text read	(the file it reads)	P14	no
+crates/bt-app/src/highlight.rs	highlight::tests::a_block_comment_stays_a_comment_across_lines	source text read	(the file it reads)	P14	no
+crates/bt-app/src/highlight.rs	highlight::tests::a_column_range_cuts_the_spans_it_crosses	source text read	(the file it reads)	P14	no
+crates/bt-app/src/highlight.rs	highlight::tests::a_document_over_either_cap_is_left_plain	source text read	(the file it reads)	P14	no
+crates/bt-app/src/highlight.rs	highlight::tests::a_files_grammar_is_found_by_extension_then_by_first_line	source text read	(the file it reads)	P14	no
+crates/bt-app/src/highlight.rs	highlight::tests::a_five_thousand_line_rust_file_is_walked	source text read	measure	P14	no
+crates/bt-app/src/highlight.rs	highlight::tests::a_powershell_file_and_a_powershell_fence_both_find_the_vendored_grammar	source text read	(the file it reads)	P14	no
+crates/bt-app/src/highlight.rs	highlight::tests::a_rust_snippet_yields_keyword_string_comment_and_number_runs	source text read	main	P14	no
+crates/bt-app/src/highlight.rs	highlight::tests::wide_characters_are_counted_in_the_cells_they_draw	source text read	(the file it reads)	P14	no
+crates/bt-app/src/i18n.rs	i18n::tests::every_sentence_the_tail_composes_reads_in_both_languages	source text read	graph_filter_branches;main	P14	no
+crates/bt-app/src/i18n.rs	i18n::tests::no_profile_title_has_been_pulled_into_the_language_table	include_str!	i18n.rs	P14	no
+crates/bt-app/src/i18n.rs	i18n::tests::no_string_in_this_table_asks_for_a_relaunch	include_str!	i18n.rs	P14	no
+crates/bt-app/src/icons.rs	icons::tests::a_path_strip_wears_the_folder_it_is_standing_in	include_str!	push_files_foot	P14	no
+crates/bt-app/src/icons.rs	icons::tests::no_drawing_carries_a_bare_alpha	include_str!	marks.rs	P14	no
+crates/bt-app/src/icons.rs	icons::tests::no_font_character_stands_in_for_a_mark	include_str!	file_peek.rs;float.rs;git_graph.rs;git_panel.rs;notice.rs;peek_strip.rs;profiles.rs;restore.rs;search.rs;seats.rs;settings.rs;toast.rs	P14	no
+crates/bt-app/src/icons.rs	icons::tests::no_surface_reaches_past_the_registry_for_a_disclosure	include_str!	float.rs;git_graph.rs;git_panel.rs;profiles.rs;search.rs;seats.rs;settings.rs	P14	no
+crates/bt-app/src/icons.rs	icons::tests::the_punctuation_that_stayed_a_character_is_set_as_type	include_str!	seats.rs;settings.rs	P14	no
+crates/bt-app/src/icons.rs	icons::tests::the_tip_pass_walks_the_runs_instead_of_listing_the_buttons	include_str!	rebuild_tooltip_anchors;seats	P3	yes
+crates/bt-app/src/ime_outbound.rs	ime_outbound::tests::ime_outbound_sites_keep_their_trace_calls	include_str!	apply_ime_cursor_area;cancel_composition;flush_ime_cursor_area;ime_input;keyboard_owner;offer_ime_caret;reoffer_ime_cursor_area	P3	yes
+crates/bt-app/src/ime_report_tests.rs	ime_report_tests::ime_self_report_startup_and_focus_source_pin	include_str!	ime_input	P3	yes
+crates/bt-app/src/journeys_tests.rs	journeys_tests::a_periodic_is_its_condition_and_never_a_latch	include_str!	strip_animation_work	P3	yes
+crates/bt-app/src/journeys_tests.rs	journeys_tests::a_picture_that_arrives_between_frames_books_its_own_wake	include_str!	advance_strip_animation;deadline;drag_autoscroll_deadline;next_animation_deadline;next_animation_frame;strip_animation_work;terminal_thumb_work	P3	yes
+crates/bt-app/src/journeys_tests.rs	journeys_tests::a_service_that_finds_nothing_changed_hands_nothing_over	include_str!	ask_float_directories;ask_git_for_floats;resize;resize_floats_to_content;service_pictures	P3	yes
+crates/bt-app/src/journeys_tests.rs	journeys_tests::an_elapsed_time_service_is_never_gated_and_the_flood_shows_its_state	include_str!	advance_card_hint;advance_file_peek;advance_float;advance_key_hint_if_due;advance_strip_animation;advance_toasts;advance_tooltip_if_due;animation_frame_is_due;carry_live_journeys;service_drag_autoscroll;service_pictures;sweep_video_seats;turn	P3	yes
+crates/bt-app/src/main.rs	a_page_lands_where_it_was_aimed_tests::a_door_that_was_told_a_surface_never_chooses_another	include_str!	land_page_refusal_on;land_preview_source_on;open_minted_page_on;open_minted_page_on_float;open_preview_file_on;open_preview_image_on;open_preview_onto;open_preview_source_on;open_preview_web_file_on;open_web_page_on;preview_landing_surface;rename_preview_file	P3	yes
+crates/bt-app/src/main.rs	a_page_lands_where_it_was_aimed_tests::the_doors_with_no_surface_are_the_ones_that_ask_the_landing_rule	include_str!	open_preview_file;open_preview_image;open_preview_web_file;open_web_page_with	P3	yes
+crates/bt-app/src/main.rs	a_page_lands_where_it_was_aimed_tests::the_named_page_door_opens_on_the_surface_and_refuses_on_it_too	include_str!	open_preview_web_file_on	P3	yes
+crates/bt-app/src/main.rs	a_page_lands_where_it_was_aimed_tests::the_page_lane_opens_on_the_surface_it_was_handed	include_str!	open_preview_source_on	P3	yes
+crates/bt-app/src/main.rs	application_change_tests::every_verb_that_moves_a_process_static_hands_it_to_the_other_windows	include_str!	adopt_new_language;adopt_new_palette;apply_cursor_style;apply_terminal_font;note_application_change	P3	yes
+crates/bt-app/src/main.rs	application_change_tests::no_window_is_left_holding_yesterday_when_the_loop_goes_to_sleep	include_str!	about_to_wait_inner;settle_application_change;wake_deadline	P14	no
+crates/bt-app/src/main.rs	application_change_tests::the_sweep_spends_every_flag_the_record_can_carry	include_str!	adopt_application_change;caret	P3	yes
+crates/bt-app/src/main.rs	arrival_wiring_tests::every_band_that_passes_is_handed_over_by_the_overlay_build	include_str!	refresh_overlay_with_formula;stage_menu	P3	yes
+crates/bt-app/src/main.rs	arrival_wiring_tests::nothing_but_the_paint_and_the_frame_clock_reads_the_register	include_str!	a;advance_strip_animation;every;stage;stage_departure;strip_animation_work	P3	yes
+crates/bt-app/src/main.rs	arrival_wiring_tests::only_the_paint_and_the_frame_clock_can_read_the_settling_register	include_str!	a;advance_strip_animation;drag_ghost_layer;every;forget_the_ghost;settle_git_pending;settled_card_ink;settled_head_ink;settled_tab_ink;strip_animation_work	P3	yes
+crates/bt-app/src/main.rs	arrival_wiring_tests::the_frame_schedule_knows_about_the_fades_as_well	include_str!	advance_strip_animation;strip_animation_work	P3	yes
+crates/bt-app/src/main.rs	arrival_wiring_tests::the_frame_schedule_knows_about_the_register	include_str!	advance_strip_animation;strip_animation_work	P3	yes
+crates/bt-app/src/main.rs	card_answer_route_tests::a_landed_head_read_leaves_by_one_door	include_str!	apply_preview_results;settle_landed_head	P3	yes
+crates/bt-app/src/main.rs	clipboard_path_tests::a_click_on_the_pane_that_already_has_the_keyboard_settles_no_ime_state	include_str!	take_keyboard_into	P3	yes
+crates/bt-app/src/main.rs	clipboard_path_tests::a_drop_is_collected_in_the_dispatcher_and_spent_at_the_turn_boundary	include_str!	collect_dropped_file;flush_dropped_files;focus_the_pane_a_path_landed_in;paste_paths_into;platform_pointer_now	P3	yes
+crates/bt-app/src/main.rs	clipboard_path_tests::a_dropped_path_takes_the_keyboard_and_is_refused_under_a_card	include_str!	focus_seat;focus_the_pane_a_path_landed_in	P3	yes
+crates/bt-app/src/main.rs	clipboard_path_tests::a_rows_centre_verbs_leave_by_three_doors	include_str!	commit_layout_drop;drive_drag;paste_offer_kept	P3	yes
+crates/bt-app/src/main.rs	clipboard_path_tests::a_shell_to_shell_move_settles_the_composition_it_leaves_behind	include_str!	cancel_composition;focus_pane_at;focus_seat;take_keyboard_into	P3	yes
+crates/bt-app/src/main.rs	clipboard_path_tests::an_ime_composition_carries_its_origin_across_every_kind_of_field	include_str!	ime_input	P3	yes
+crates/bt-app/src/main.rs	clipboard_path_tests::ime_lifecycle_notices_do_not_erase_a_compositions_origin	include_str!	cancel_composition;ime_input	P3	yes
+crates/bt-app/src/main.rs	clipboard_path_tests::only_a_queued_write_moves_the_keyboard	include_str!	deliver_paste;insert_path_into_terminal	P3	yes
+crates/bt-app/src/main.rs	clipboard_path_tests::terminal_is_the_only_new_clipboard_caller_and_k144_keeps_focus	include_str!	insert_path_into_terminal;paste_from_clipboard_into	P3	yes
+crates/bt-app/src/main.rs	cross_window_drag_tests::a_drag_over_somebody_elses_glass_offers_nothing_of_its_own	include_str!	activate_tab;drive_drag;drive_drag_broker;pointer_is_on_our_own_glass;still_holds	P3	yes
+crates/bt-app/src/main.rs	cross_window_drag_tests::a_pane_carried_into_another_window_is_promoted_and_then_transferred	include_str!	extract_pane_into_new_tab;move_pane_across_tabs;report_move_refusal;settle_arrival;settle_drag_handover;transfer_tab	P3	yes
+crates/bt-app/src/main.rs	cross_window_drag_tests::a_rebuild_clears_the_old_layer_first	include_str!	folios_own_metal_view;rebuild;window_surface_target	P14	no
+crates/bt-app/src/main.rs	cross_window_drag_tests::a_row_crosses_a_boundary_as_a_path_and_is_spent_by_the_far_window	include_str!	foreign_strip_landing;open_broker;settle_drag_handover;transfer_tab	P3	yes
+crates/bt-app/src/main.rs	cross_window_drag_tests::a_tab_handed_to_another_window_lands_where_the_hand_named_on_either_axis	include_str!	foreign_strip_landing;settle_arrival	P3	yes
+crates/bt-app/src/main.rs	cross_window_drag_tests::a_torn_out_window_opens_where_it_will_stand_and_is_shown_holding_its_tab	include_str!	open_window;settle_tear_out;show_new_window	P3	yes
+crates/bt-app/src/main.rs	cross_window_drag_tests::a_visitors_stand_in_card_draws_the_pane_in_the_hand	include_str!	carried_pane;drive_drag_broker;refresh_chrome_with_overlay;refresh_focus_thumbnails	P3	yes
+crates/bt-app/src/main.rs	cross_window_drag_tests::a_window_draws_a_visitors_landing_in_its_own_tab_lists_words	include_str!	drag_ghost_layer;strip_stand_in	P3	yes
+crates/bt-app/src/main.rs	cross_window_drag_tests::the_m1_startup_path_has_no_fatal_platform_call_off_windows	include_str!	create;install_theme_class_background;open_window	P3	yes
+crates/bt-app/src/main.rs	cross_window_drag_tests::the_spring_across_windows_comes_due_with_no_further_motion	include_str!	about_to_wait_inner	P14	no
+crates/bt-app/src/main.rs	drag_autoscroll_wiring_tests::the_auto_scroll_turns_on_the_clock_the_spring_turns_on	include_str!	advance_drag_spring;drag_autoscroll_deadline;drag_spring_deadline;service_drag_autoscroll	P3	yes
+crates/bt-app/src/main.rs	edit_menu_clipboard_tests::a_declined_clipboard_row_lands_where_every_other_menu_row_lands	include_str!	answer_a_menu_row;run_an_application_menu_verb	P3	yes
+crates/bt-app/src/main.rs	edit_menu_clipboard_tests::every_surface_the_menu_defers_to_stands_above_the_clipboard_rung	include_str!	a_surface_above_the_clipboard_rung_holds_the_keyboard	P3	yes
+crates/bt-app/src/main.rs	edit_menu_clipboard_tests::the_edit_menus_clipboard_verbs_go_through_the_keystrokes_own_doors	include_str!	preview_key;run_an_application_menu_verb;write_terminal_clipboard_text	P3	yes
+crates/bt-app/src/main.rs	endpoint_claim_tests::only_the_writer_binds_the_data_directorys_endpoints	include_str!	an;create;open_the_data_directorys_endpoints	P3	yes
+crates/bt-app/src/main.rs	field_command_tests::a_command_chord_never_types_its_letter_into_a_field	include_str!	git_menu_key;graph_search_key;palette_key;rename_key;search_field_key;settings_field_key	P3	yes
+crates/bt-app/src/main.rs	field_command_tests::the_default_menu_does_not_own_command_q	include_str!	main	P14	no
+crates/bt-app/src/main.rs	field_command_tests::the_option_policy_is_applied_at_one_door	include_str!	adopt_option_as_alt;window_event	P3	yes
+crates/bt-app/src/main.rs	file_peek_fade_tests::the_cards_fade_is_the_tips_rule_read_once_and_reaches_every_layer	include_str!	advance_file;advance_file_peek;cubic_bezier;file_peek;file_peek_layer;file_peek_opacity	P3	yes
+crates/bt-app/src/main.rs	file_peek_fade_tests::the_fade_owes_frames_while_it_climbs_and_the_card_leaves_at_once	include_str!	file_peek;file_peek_deadline;hide_file;hide_file_peek;opacity	P3	yes
+crates/bt-app/src/main.rs	files_locate_door_tests::a_card_withdraws_its_still_for_a_recording_the_way_it_does_for_an_animation	include_str!	file_peek_card_layers	P3	yes
+crates/bt-app/src/main.rs	files_locate_door_tests::a_closed_window_stops_the_recording_it_was_showing	include_str!	sweep_video_seats	P3	yes
+crates/bt-app/src/main.rs	files_locate_door_tests::a_document_in_a_float_says_what_the_disk_did_the_way_a_pane_does	include_str!	close_pane_notice;float_head_tools;float_layer;float_notice_layer;mouse_input;notice_layers;reload_preview_from_disk;settle_pane_notices	P3	yes
+crates/bt-app/src/main.rs	files_locate_door_tests::a_document_in_a_float_selects_the_way_it_does_in_a_pane	include_str!	chrome_mouse_input;drag_preview_text;press_float	P3	yes
+crates/bt-app/src/main.rs	files_locate_door_tests::a_file_nobody_previews_wears_the_same_card_in_a_float_as_in_a_pane	include_str!	float_hit_at;press_float;preview_float_layer;push_float_refusal_card	P3	yes
+crates/bt-app/src/main.rs	files_locate_door_tests::a_player_in_a_float_answers_the_hand_the_way_a_pane_does	include_str!	chrome_mouse_input;press_float	P3	yes
+crates/bt-app/src/main.rs	files_locate_door_tests::a_player_on_a_glance_card_answers_the_hand_the_way_a_pane_does	include_str!	press_file_peek	P3	yes
+crates/bt-app/src/main.rs	files_locate_door_tests::a_recording_on_an_overlay_host_is_drawn_into_a_layer_of_its_own	include_str!	file_peek_layer;float_layer	P3	yes
+crates/bt-app/src/main.rs	files_locate_door_tests::a_reference_under_a_float_is_not_hovered_through_it	include_str!	pane_hit_context;pointer_over_a_float	P3	yes
+crates/bt-app/src/main.rs	files_locate_door_tests::an_animation_refusal_is_a_lock_with_its_reason	include_str!	dress_preview_rail;preview_rail_tip_anchors;preview_rail_tip_text;preview_standing_fact	P3	yes
+crates/bt-app/src/main.rs	files_locate_door_tests::an_html_card_torn_out_carries_the_engine_the_pop_out_button_gives	include_str!	file_peek_promotes;open_minted_page_on_float;open_preview_web_file_on;path_opens_as_a_page	P3	yes
+crates/bt-app/src/main.rs	files_locate_door_tests::one_predicate_says_whether_a_card_has_a_window_to_become	include_str!	file_peek_head_grasp;file_peek_promotes;path_opens_as_a_page;press_file_peek	P3	yes
+crates/bt-app/src/main.rs	files_locate_door_tests::opening_a_file_never_moves_the_files_tree	include_str!	activate_files_row;locate_folder_in_files_column;open_preview;open_preview_at;open_preview_file;open_preview_file_on;open_preview_source_on;reroot_files_column;show_folder_in_files_column	P3	yes
+crates/bt-app/src/main.rs	files_locate_door_tests::re_rooting_is_reached_only_after_the_question_about_range	include_str!	locate_folder;locate_folder_in_files_column	P3	yes
+crates/bt-app/src/main.rs	files_locate_door_tests::the_disk_change_pill_stays_until_acted_on_and_a_save_confirmation_expires	include_str!	animation_refusal_notice;close_pane_notice;preview_pill_say;reload_preview_from_disk	P3	yes
+crates/bt-app/src/main.rs	files_locate_door_tests::trying_to_edit_a_read_only_page_floats_the_reason_for_two_seconds_with_a_way_out	include_str!	press_notice;press_preview_body;preview_browse_key;preview_disk_notice_on;preview_pill_say;preview_refusal_reason;refuse_preview_edit;turn	P3	yes
+crates/bt-app/src/main.rs	files_turn_wake_tests::a_turning_triangle_wakes_the_loop_from_every_tree_that_can_draw_one	include_str!	files;let;strip_animation_work	P3	yes
+crates/bt-app/src/main.rs	floated_page_tests::a_closed_window_is_dropped_only_once_its_pages_have_gone_or_the_bound_has	include_str!	close;reap_leaving_windows	P14	no
+crates/bt-app/src/main.rs	floated_page_tests::a_closed_window_keeps_the_loop_turning_and_takes_no_turn_of_its_own	include_str!	about_to_wait_inner;for_each_window	P14	no
+crates/bt-app/src/main.rs	floated_page_tests::a_floated_pages_hole_is_punched_above_the_float_that_carries_it	include_str!	float_body_rect;float_inset_body_rect;sync_web_page	P3	yes
+crates/bt-app/src/main.rs	floated_page_tests::a_page_carried_into_a_float_is_what_typing_goes_into	include_str!	page_is_the_typing_target;page_with_the_keyboard;press_web_page	P3	yes
+crates/bt-app/src/main.rs	floated_page_tests::a_panic_leaves_by_the_same_road_as_a_shut	include_str!	install_;panic_	P14	no
+crates/bt-app/src/main.rs	floated_page_tests::a_press_on_a_pane_takes_the_keyboard_back_from_every_float	include_str!	focus_pane_at	P3	yes
+crates/bt-app/src/main.rs	floated_page_tests::a_run_ends_with_its_last_visible_window_even_with_a_summon_hidden_behind_it	include_str!	close;reap_leaving_windows;retire_the_summon_with_the_run;windows_left_after	P3	yes
+crates/bt-app/src/main.rs	floated_page_tests::a_summoned_window_is_not_shown_by_the_door_that_opens_it	include_str!	hide_quake_window;open_window;show_quake_window	P3	yes
+crates/bt-app/src/main.rs	floated_page_tests::a_window_nobody_can_see_does_not_keep_the_run_alive	include_str!	close;retire_the_summon_with_the_run;windows_left_after	P14	no
+crates/bt-app/src/main.rs	floated_page_tests::a_window_that_is_shut_leaves_the_screen_before_the_process_does	include_str!	let_go_of_this_window;retire_window	P3	yes
+crates/bt-app/src/main.rs	floated_page_tests::every_window_this_process_opens_wears_its_band_before_it_is_shown	include_str!	dress_new_window;follow_the_window_band;put_the_window_on_the_glass;show_new_window	P3	yes
+crates/bt-app/src/main.rs	floated_page_tests::only_a_mac_keeps_an_application_standing_with_no_window_left	include_str!	a_run_ends_with_its_last_visible_window	P14	no
+crates/bt-app/src/main.rs	floated_page_tests::the_document_a_quit_wrote_is_not_written_over_by_the_teardown	include_str!	record_session	P14	no
+crates/bt-app/src/main.rs	floated_page_tests::the_foreground_is_read_before_the_summon_and_handed_back_after_it	include_str!	dismiss_quake;summon_quake	P14	no
+crates/bt-app/src/main.rs	floated_page_tests::the_gear_on_the_summoned_terminal_opens_the_page_about_it	include_str!	chrome_mouse_input	P3	yes
+crates/bt-app/src/main.rs	floated_page_tests::the_process_leaves_by_the_one_road_a_webview2_host_may_take	include_str!	main	P14	no
+crates/bt-app/src/main.rs	floated_page_tests::the_source_face_of_a_page_is_the_editor_and_a_save_reloads_the_page	include_str!	files_a_tab_stands_on;page_source_shown_on;page_with_the_keyboard;preview_is_editable;refresh_preview_file	P3	yes
+crates/bt-app/src/main.rs	floated_page_tests::the_summoned_terminals_close_button_is_the_chords_own_bit	include_str!	dismiss_quake;hide_quake_window	P3	yes
+crates/bt-app/src/main.rs	focus_column_notch_tests::one_door_writes_both_readings_of_the_modifiers	include_str!	window	P14	no
+crates/bt-app/src/main.rs	focus_column_notch_tests::one_line_moves_a_cards_window	include_str!	aim_focus_card_window;scroll_rail	P3	yes
+crates/bt-app/src/main.rs	focus_column_notch_tests::the_column_asks_the_ruling_before_it_scrolls	include_str!	column_notch;scroll_rail;vertical_wheel_travel	P3	yes
+crates/bt-app/src/main.rs	focus_column_notch_tests::the_column_reads_what_the_hand_is_holding	include_str!	column_notch;scroll_rail	P3	yes
+crates/bt-app/src/main.rs	focus_column_notch_tests::the_only_aim_stands_inside_the_modified_arm	include_str!	aim_focus_card_window	P3	yes
+crates/bt-app/src/main.rs	focus_mode_door_tests::only_the_chord_and_the_settings_row_write_the_bit	include_str!	set_focus_mode	P3	yes
+crates/bt-app/src/main.rs	focus_mode_door_tests::the_card_arms_its_reads_only_behind_the_mode_gate	include_str!	arm_card_reads;focus_rail_geometry_now;refresh_focus_thumbnails	P3	yes
+crates/bt-app/src/main.rs	focus_mode_door_tests::the_cards_bubble_is_drawn_and_never_pressed	include_str!	docked_chrome_target_at	P3	yes
+crates/bt-app/src/main.rs	focus_mode_door_tests::the_cards_offer_is_spent_in_one_place_and_given_back_in_one	include_str!	reset_advanced_group	P3	yes
+crates/bt-app/src/main.rs	focus_mode_door_tests::the_guests_the_column_holds_room_for_are_counted_at_one_door	include_str!	strip_guests;strip_stand_in	P3	yes
+crates/bt-app/src/main.rs	focus_mode_door_tests::the_key_ladder_has_no_rung_for_the_mode	include_str!	keyboard_input	P3	yes
+crates/bt-app/src/main.rs	focus_mode_door_tests::the_projection_still_takes_its_text_only_from_memory	include_str!	mini_source	P14	no
+crates/bt-app/src/main.rs	focus_mode_door_tests::the_stand_ins_thumbnail_slot_carries_the_pane_rather_than_a_hole	include_str!	refresh_chrome_with_overlay;stand_in_pane	P3	yes
+crates/bt-app/src/main.rs	formula_copy_clock_tests::the_turn_retires_the_tick_and_never_hands_the_loop_a_past_instant	include_str!	advance_math_tools;turn	P3	yes
+crates/bt-app/src/main.rs	formula_tool_seat_tests::a_blocks_verbs_all_ask_the_pane_the_block_is_in	include_str!	copy_math_latex;math_hit;math_toggle_faces;math_toggle_heights;switch_math_source_now	P3	yes
+crates/bt-app/src/main.rs	formula_tool_seat_tests::a_frame_composed_for_any_reason_carries_the_journeys_and_the_landing_is_never_paced	include_str!	advance_math_toggle_if_due;animation_frame_is_due;carry_live_journeys;file_peek_deadline;math_toggle;math_toggle_deadline;publish_frame_inner;refresh_chrome_with_overlay;running_journeys;toast_deadline;tooltip_deadline;turn	P3	yes
+crates/bt-app/src/main.rs	formula_tool_seat_tests::a_press_says_whether_it_began_a_journey	include_str!	journey;press_math_toggle	P3	yes
+crates/bt-app/src/main.rs	formula_tool_seat_tests::a_tab_or_pane_that_leaves_the_screen_takes_the_bands_hover_with_it	include_str!	activate_tab;close_pane;focus_seat;leave_hovered;leave_hovered_math;settle_focus_on	P3	yes
+crates/bt-app/src/main.rs	formula_tool_seat_tests::an_interrupted_change_of_face_lands_before_the_thing_that_interrupted_it	include_str!	advance_math_toggle;leave_hovered;math_toggle_faces;press_math;scroll;scroll_seat;scroll_seat_to_subpixels;scroll_view;scroll_view_exact_in;turn	P3	yes
+crates/bt-app/src/main.rs	formula_tool_seat_tests::delayed_math_menu_validates_tab_seat_and_incarnation	include_str!	apply_math_context_menu_result;copy_math_latex;live_paste_target;mouse_input	P3	yes
+crates/bt-app/src/main.rs	formula_tool_seat_tests::delayed_math_toggle_validates_its_original_owner	include_str!	advance_math_toggle_if_due;formula_toggle_layers;math_toggle_faces;math_toggle_heights;present_math_toggle;press_math_toggle;settle_math_toggle;switch_math_source_now	P3	yes
+crates/bt-app/src/main.rs	formula_tool_seat_tests::every_frame_of_a_change_of_face_reaches_the_glass_as_a_terminal_picture	include_str!	present_math_toggle;redraw;repaint_pane_change;repaint_pane_change_inner	P3	yes
+crates/bt-app/src/main.rs	formula_tool_seat_tests::math_hover_is_asked_again_when_the_picture_moved_under_a_resting_pointer	include_str!	refresh_math_hover;turn	P3	yes
+crates/bt-app/src/main.rs	formula_tool_seat_tests::math_hover_is_kept_by_a_band_that_comes_back_under_the_pointer	include_str!	set_hovered_math;sync_math;sync_math_tools;update_math;update_math_hover	P3	yes
+crates/bt-app/src/main.rs	formula_tool_seat_tests::math_hover_refuses_before_it_asks_the_picture	include_str!	refresh_math_hover	P14	no
+crates/bt-app/src/main.rs	formula_tool_seat_tests::the_bands_own_turn_draws_the_marks_from_the_picture_that_lit_it	include_str!	advance_math_tools;math_tools;math_tools_deadline;math_tools_owe_frames;present_retained_picture;redraw;sync_math_tools;turn	P3	yes
+crates/bt-app/src/main.rs	formula_tool_seat_tests::the_marks_are_placed_under_the_hovered_bands_own_name	include_str!	formula_tool;formula_tool_layers;math_tool;math_tool_placement	P3	yes
+crates/bt-app/src/main.rs	formula_tool_seat_tests::the_other_faces_rows_are_measured_once_per_change_and_not_once_per_frame	include_str!	formula_toggle;formula_toggle_layers;math_toggle_faces;press_math	P3	yes
+crates/bt-app/src/main.rs	formula_tool_seat_tests::the_pointer_leaving_takes_the_marks_off_the_glass	include_str!	leave_hovered;update_math;update_math_hover	P3	yes
+crates/bt-app/src/main.rs	formula_tool_seat_tests::the_press_and_the_drawing_are_cut_to_one_pane	include_str!	math_hit;math_tool;math_tool_placement	P3	yes
+crates/bt-app/src/main.rs	formula_tool_seat_tests::the_source_face_is_not_struck_over_a_picture_already_drawing_it	include_str!	formula_toggle;formula_toggle_layers	P3	yes
+crates/bt-app/src/main.rs	git_header_selection_tests::neither_host_seats_the_keyboard_on_the_row_a_press_may_not_land_it_on	include_str!	press_float_git_row;press_git_row	P3	yes
+crates/bt-app/src/main.rs	git_hover_heal_tests::the_git_pages_hover_is_healed_against_the_page_it_is_drawn_from	include_str!	refresh_chrome_with_overlay	P3	yes
+crates/bt-app/src/main.rs	git_hover_heal_tests::the_heal_re_derives_the_hover_and_does_not_clear_it	include_str!	heal_git_hover	P3	yes
+crates/bt-app/src/main.rs	hold_station_tests::a_scoped_station_hands_the_callers_back	include_str!	flush_dropped_files;flush_wheel;refresh_chrome_with_overlay;refresh_search;window;window_event	P3	yes
+crates/bt-app/src/main.rs	hold_station_tests::a_turn_enters_its_stations_where_the_work_begins	include_str!	turn	P3	yes
+crates/bt-app/src/main.rs	hold_station_tests::every_event_kind_the_dispatcher_answers_names_its_own_handler	include_str!	window;window_event;window_event_station	P14	no
+crates/bt-app/src/main.rs	key_hint_spend_tests::the_button_router_is_reached_through_the_one_function_that_knows_the_rule	include_str!	mouse_input	P3	yes
+crates/bt-app/src/main.rs	key_hint_spend_tests::the_wheel_and_the_button_spend_a_raised_hold_the_way_a_key_does	include_str!	mouse_input;mouse_wheel	P3	yes
+crates/bt-app/src/main.rs	launch_landing_tests::a_dock_row_lands_where_the_reader_was_and_makes_a_window_when_there_is_none	include_str!	answer_a_menu_row;install_main_menu	P14	no
+crates/bt-app/src/main.rs	launch_landing_tests::a_request_opens_its_tab_where_it_asked_and_raises_the_window	include_str!	land_one_launch_request;open_a_tab_for_a_launch;raise_for_a_launch;settle_launch_requests	P14	no
+crates/bt-app/src/main.rs	launch_landing_tests::a_service_opens_the_folder_and_a_document_opens_itself	include_str!	open_one_path_for_the_delegate;open_one_place_for_a_service;settle_app_delegate_events	P14	no
+crates/bt-app/src/main.rs	launch_landing_tests::a_window_asked_for_by_a_second_start_is_opened_by_this_process	include_str!	land_one_launch_request;open_a_window_for_a_launch	P14	no
+crates/bt-app/src/main.rs	layer_shape_tests::a_re_read_does_not_throw_the_picture_away_before_its_answer_exists	include_str!	reread_git_origin	P3	yes
+crates/bt-app/src/main.rs	layer_shape_tests::every_verb_that_moves_head_is_issued_from_the_one_place_that_asks_first	include_str!	ask_to_checkout;checkout_at	P3	yes
+crates/bt-app/src/main.rs	layer_shape_tests::no_lane_claims_an_answer_by_the_window_it_was_asked_from	include_str!	apply_files_results;apply_git_results;apply_math_results;apply_preview_results	P3	yes
+crates/bt-app/src/main.rs	layer_shape_tests::no_window_drains_a_shared_worker_answer_queue	include_str!	apply_files_results;apply_git_results;apply_math_results;apply_preview_results	P3	yes
+crates/bt-app/src/main.rs	layer_shape_tests::the_application_layer_owns_nothing_one_window_owns	include_str!	App	P14	no
+crates/bt-app/src/main.rs	layer_shape_tests::the_device_is_the_applications_and_the_surface_is_the_windows	include_str!	App;WindowRuntime	P14	no
+crates/bt-app/src/main.rs	layer_shape_tests::the_session_file_is_written_by_the_application_and_never_by_a_window	include_str!	App;WindowRuntime	P14	no
+crates/bt-app/src/main.rs	layer_shape_tests::the_window_layer_owns_nothing_the_application_owns	include_str!	WindowRuntime	P14	no
+crates/bt-app/src/main.rs	live_markdown_edit_tests::a_floated_page_takes_the_caret_through_the_docked_press	include_str!	press_float	P3	yes
+crates/bt-app/src/main.rs	live_markdown_edit_tests::entering_writes_all_five_things_in_one_place	include_str!	seat_preview_caret	P3	yes
+crates/bt-app/src/main.rs	live_markdown_edit_tests::leaving_is_one_door_that_escape_the_ground_and_a_blur_all_reach	include_str!	chrome_mouse_input;leave_preview_buffer_in;leave_preview_page;press_preview_text;preview_key	P3	yes
+crates/bt-app/src/main.rs	live_markdown_edit_tests::the_caret_answers_before_the_piece_selection_everywhere	include_str!	preview_caret_selection_places;preview_selected_text	P3	yes
+crates/bt-app/src/main.rs	live_markdown_edit_tests::the_glance_card_refuses_the_caret_by_name	include_str!	preview_caret_takes_the_press	P3	yes
+crates/bt-app/src/main.rs	live_markdown_edit_tests::the_quick_edits_press_declines_a_rendered_page	include_str!	press_preview_body;preview_shows_live_markdown	P3	yes
+crates/bt-app/src/main.rs	mouse_trace_station_tests::both_landing_refusals_write_a_line	include_str!	preview_landing_surface	P3	yes
+crates/bt-app/src/main.rs	mouse_trace_station_tests::both_preview_openers_write_a_line_when_nothing_opens	include_str!	open_preview_file;open_preview_image	P3	yes
+crates/bt-app/src/main.rs	mouse_trace_station_tests::every_chrome_exit_that_takes_the_event_writes_a_line	include_str!	chrome_mouse_input	P3	yes
+crates/bt-app/src/main.rs	mouse_trace_station_tests::every_exit_of_the_wheels_road_writes_a_line	include_str!	aim_focus_card_window;mouse_wheel;scroll_rail	P3	yes
+crates/bt-app/src/main.rs	mouse_trace_station_tests::the_folder_door_says_which_of_its_outcomes_happened	include_str!	show_folder_in_files_column	P3	yes
+crates/bt-app/src/main.rs	mouse_trace_station_tests::the_wheel_route_words_are_the_declared_ones	include_str!	mouse_wheel	P3	yes
+crates/bt-app/src/main.rs	multiwindow_session_tests::only_one_line_in_this_file_hands_the_store_a_document	include_str!	main.rs	P4	yes
+crates/bt-app/src/main.rs	page_under_a_laden_hand_tests::every_carry_this_window_can_hold_is_named_by_the_one_predicate	include_str!	a_gesture_holds_the_pointer	P3	yes
+crates/bt-app/src/main.rs	page_under_a_laden_hand_tests::the_hand_is_asked_before_any_page_is	include_str!	web_page_at	P3	yes
+crates/bt-app/src/main.rs	page_under_the_tab_list_tests::every_axis_of_the_tab_list_is_reached_from_one_place	include_str!	tab_list_target_at	P3	yes
+crates/bt-app/src/main.rs	page_under_the_tab_list_tests::the_chrome_ladder_still_begins_with_the_tab_list	include_str!	docked_chrome_target_at;tab_list_target_at	P3	yes
+crates/bt-app/src/main.rs	page_under_the_tab_list_tests::the_tab_list_is_asked_before_any_page_is	include_str!	tab_list_target_at;web_page_at	P3	yes
+crates/bt-app/src/main.rs	pages_are_plural_tests::a_page_lands_on_the_pane_a_file_would	include_str!	open_web_page_with;page_on_the_landing_pane	P3	yes
+crates/bt-app/src/main.rs	pages_are_plural_tests::a_pane_with_no_engine_has_one_built_for_it	include_str!	open_web_page_on	P3	yes
+crates/bt-app/src/main.rs	pages_are_plural_tests::every_page_of_this_tab_draws_and_answers_for_its_own_sheet	include_str!	press_web_sheet;web_sheet_layers	P3	yes
+crates/bt-app/src/main.rs	pages_are_plural_tests::the_blank_pages_receipt_names_the_pane_the_landing_rule_chose	include_str!	mint_a_blank_page_and_open_its_address	P3	yes
+crates/bt-app/src/main.rs	palette_wiring_tests::a_palette_row_names_its_tab_by_an_address_that_cannot_be_reused	include_str!	run_palette_row	P3	yes
+crates/bt-app/src/main.rs	palette_wiring_tests::a_running_or_full_screen_pane_is_pointed_at_rather_than_scrolled	include_str!	flash_pane;jump_to_command_mark;run_palette_row	P3	yes
+crates/bt-app/src/main.rs	palette_wiring_tests::every_palette_verb_reaches_a_door_this_window_already_had	include_str!	locate_path_in_files_columns;run_palette_row	P3	yes
+crates/bt-app/src/main.rs	palette_wiring_tests::nothing_leaks_past_the_palette_to_the_shell	include_str!	ime_input;keyboard_input	P3	yes
+crates/bt-app/src/main.rs	palette_wiring_tests::opening_settings_on_a_row_opens_then_chooses_then_scrolls	include_str!	open_settings_on_row	P3	yes
+crates/bt-app/src/main.rs	palette_wiring_tests::the_clear_screen_row_asks_the_host_first_and_spends_its_answer	include_str!	clear_pane_screen	P3	yes
+crates/bt-app/src/main.rs	palette_wiring_tests::the_palette_asks_its_list_about_the_composed_reading	include_str!	arrange_palette	P3	yes
+crates/bt-app/src/main.rs	palette_wiring_tests::the_palette_closes_before_it_runs_the_row	include_str!	run_palette_row	P3	yes
+crates/bt-app/src/main.rs	palette_wiring_tests::the_palette_field_pastes_and_deletes_a_word	include_str!	clipboard_line;palette_key	P3	yes
+crates/bt-app/src/main.rs	palette_wiring_tests::the_palette_has_three_ways_out	include_str!	chrome_mouse_input;mouse_input;palette_key	P3	yes
+crates/bt-app/src/main.rs	palette_wiring_tests::the_palette_ime_filters_on_the_preedit_without_committing_it	include_str!	palette_ime;requery_palette	P3	yes
+crates/bt-app/src/main.rs	palette_wiring_tests::the_palette_is_never_written_to_the_session_file	include_str!	persist.rs	P14	no
+crates/bt-app/src/main.rs	palette_wiring_tests::the_palette_takes_its_keys_above_the_swallow_and_above_the_table	include_str!	keyboard_input	P3	yes
+crates/bt-app/src/main.rs	palette_wiring_tests::the_palette_takes_the_notches_over_its_own_box	include_str!	mouse_wheel;scroll_palette_list;settle_palette_scroll	P3	yes
+crates/bt-app/src/main.rs	palette_wiring_tests::the_pointer_moves_the_selection_itself	include_str!	drive_palette_hover;mouse_input	P3	yes
+crates/bt-app/src/main.rs	platform_gate_tests::only_the_named_files_decide_what_platform_this_is	directory walk	(the file it reads)	P10	no
+crates/bt-app/src/main.rs	platform_gate_tests::the_caption_run_is_decided_by_one_capability_read	include_str!	adopt_platform_chrome;caption_targets;platform_chrome;tab_strip_geometry;window_caption_boxes	P3	yes
+crates/bt-app/src/main.rs	pointer_chord_site_tests::every_pointer_door_reads_the_platforms_hand_over_modifier	include_str!	begin_local_selection;press_graph_row;press_preview_text;preview_link_grasp;scroll_web_page;terminal_link_grasp;window	P3	yes
+crates/bt-app/src/main.rs	pointer_chord_site_tests::no_other_door_reads_the_raw_control_key_for_a_gesture	include_str!	preview_browse_key	P4	yes
+crates/bt-app/src/main.rs	pointer_chord_site_tests::no_pointer_door_still_reads_control_by_name	include_str!	begin_local_selection;press_graph_row;press_preview_text;preview_link_grasp;scroll_web_page;terminal_link_grasp	P3	yes
+crates/bt-app/src/main.rs	pointer_chord_site_tests::one_field_remembers_which_press_is_under_the_hand	include_str!	window	P14	no
+crates/bt-app/src/main.rs	pointer_chord_site_tests::the_secondary_click_is_settled_once_and_above_every_router	include_str!	mouse_input	P3	yes
+crates/bt-app/src/main.rs	popover_trigger_tests::a_popup_is_up_only_while_its_own_layout_would_draw	include_str!	graph_filter_menu_layout;graph_filter_menu_stand;popups_up;preview_menu_layout;preview_menu_stand;root_menu_layout;root_menu_stand	P3	yes
+crates/bt-app/src/main.rs	popover_trigger_tests::every_dismissal_arm_asks_the_one_rule	include_str!	main.rs	P3	yes
+crates/bt-app/src/main.rs	popover_trigger_tests::the_register_names_every_popup	include_str!	popup_trigger	P3	yes
+crates/bt-app/src/main.rs	printed_path_provenance_tests::a_printed_reference_reaches_the_handler_only_under_the_modifier_and_a_local_verdict	include_str!	activate_hyperlink;hyperlink_activation	P3	yes
+crates/bt-app/src/main.rs	printed_path_provenance_tests::every_gesture_that_meets_a_reference_asks_the_one_question	include_str!	begin_local_selection;pointer_moved;publish_frame_inner	P3	yes
+crates/bt-app/src/main.rs	printed_path_provenance_tests::no_hover_door_makes_a_filesystem_call_of_its_own	include_str!	activate_hyperlink;activate_hyperlink_hover_if_due;file_peek_card_layers;peek_target;pointer_reference_at;terminal_link_grasp;terminal_reference_at	P3	yes
+crates/bt-app/src/main.rs	printed_path_provenance_tests::the_hover_line_is_built_from_the_target_and_not_from_the_cells	include_str!	status_text_in	P14	no
+crates/bt-app/src/main.rs	printed_path_provenance_tests::the_open_door_is_handed_the_printed_name_and_the_reveal_the_resolved_one	include_str!	activate_hyperlink	P3	yes
+crates/bt-app/src/main.rs	printed_path_provenance_tests::the_pointer_memo_is_emptied_at_the_top_of_every_pointer_move	include_str!	pointer_moved	P3	yes
+crates/bt-app/src/main.rs	printed_path_provenance_tests::the_routing_table_asks_a_filesystem_nothing	include_str!	hyperlink_activation;reference_card;terminal_link_answers_a_press	P14	no
+crates/bt-app/src/main.rs	printed_path_provenance_tests::the_user_chosen_door_asks_no_machine_about_the_file	include_str!	../../bt-platform/src/handoff.rs	P14	no
+crates/bt-app/src/main.rs	pty_drain_budget_tests::a_focus_report_is_never_spelled_where_a_keystroke_could_reach_it	include_str!	drain_leaf_pty	P3	yes
+crates/bt-app/src/main.rs	pty_drain_budget_tests::a_metric_that_moved_re_keys_every_pane	include_str!	sync_math_layout_key	P3	yes
+crates/bt-app/src/main.rs	pty_drain_budget_tests::a_pane_that_spoke_puts_its_own_card_on_the_clock	include_str!	collecting_card_speakers;drain_pty;panes_spoke	P3	yes
+crates/bt-app/src/main.rs	pty_drain_budget_tests::a_pane_with_more_to_say_is_a_turn_the_window_asks_itself_for	include_str!	drain_pty	P3	yes
+crates/bt-app/src/main.rs	pty_drain_budget_tests::a_picture_that_moved_tells_the_cards_whichever_road_moved_it	include_str!	drain_pty;finish_synchronized_update_if_due;panes_spoke	P3	yes
+crates/bt-app/src/main.rs	pty_drain_budget_tests::a_scale_change_hands_no_pane_a_grid_from_the_rectangle_it_is_leaving	include_str!	resize;resize_leaves_to_layout;resized;scale_factor_changed;settle_dpi_rectangle;turn	P3	yes
+crates/bt-app/src/main.rs	pty_drain_budget_tests::a_window_resize_reaches_the_tabs_nobody_is_looking_at	include_str!	resize_hidden_leaves_to_layout;resize_leaves_to_layout	P3	yes
+crates/bt-app/src/main.rs	pty_drain_budget_tests::every_visible_pane_settles_its_rows_and_schedules_its_own_artifacts	include_str!	advance_live_math_if_due;live_stability_deadline;redraw	P3	yes
+crates/bt-app/src/main.rs	pty_drain_budget_tests::one_turn_takes_one_quantum_from_a_pane_and_says_what_is_left	include_str!	drain_leaf_pty	P14	no
+crates/bt-app/src/main.rs	pty_drain_budget_tests::the_bounded_publication_wait_is_armed_settled_released_and_woken_once_each	include_str!	drain_pty;finish_pty_coalesce_if_due;publish_frame_inner;turn	P3	yes
+crates/bt-app/src/main.rs	pty_drain_budget_tests::the_caret_is_revealed_when_output_arrives_and_not_when_it_is_drawn	include_str!	drain_pty	P3	yes
+crates/bt-app/src/main.rs	pty_drain_budget_tests::the_drain_marks_each_sessions_turn_once_for_any_slice_count	include_str!	begin;drain_pty	P3	yes
+crates/bt-app/src/main.rs	pty_drain_budget_tests::the_drain_repeats_under_the_budget_and_settles_up_once	include_str!	drain_pty	P3	yes
+crates/bt-app/src/main.rs	pty_drain_budget_tests::the_frame_schedule_knows_about_the_card_column	include_str!	refresh_focus_thumbnails;strip_animation_work	P3	yes
+crates/bt-app/src/main.rs	pty_drain_budget_tests::the_only_road_from_a_solved_rectangle_to_conpty_is_the_quiet_window	include_str!	release_due_leaf_resize;resize_leaves_to_layout	P3	yes
+crates/bt-app/src/main.rs	pty_drain_budget_tests::the_release_asks_every_pane_and_not_the_one_holding_the_keyboard	include_str!	flush_pending_pty_resize	P3	yes
+crates/bt-app/src/main.rs	pty_drain_budget_tests::the_tick_that_draws_the_cards_is_reached_when_a_card_is_behind	include_str!	advance_strip_animation	P3	yes
+crates/bt-app/src/main.rs	pty_drain_budget_tests::the_window_thread_sends_a_child_bytes_through_exactly_one_door	include_str!	offer_pty_input;write_pty_input	P14	no
+crates/bt-app/src/main.rs	quit_transaction_tests::a_pane_that_closes_is_taken_apart_somewhere_else	include_str!	let_go_of_this_;retire_all_shells	P3	yes
+crates/bt-app/src/main.rs	quit_transaction_tests::a_window_is_in_the_vault_before_it_is_asked_what_it_looks_like	include_str!	open_	P14	no
+crates/bt-app/src/main.rs	quit_transaction_tests::the_final_write_is_judged_and_the_verdict_is_what_decides	include_str!	settle_	P14	no
+crates/bt-app/src/main.rs	quit_transaction_tests::the_only_door_into_the_vault_is_a_window_the_user_closed	include_str!	close_;mark_session_dirty;retire_	P3	yes
+crates/bt-app/src/main.rs	quit_transaction_tests::the_quit_and_the_loops_own_backstop_stay_two_machines	include_str!	close_window;exit;settle_;window	P3	yes
+crates/bt-app/src/main.rs	quit_with_no_window_tests::a_menu_quit_is_dispatched_before_the_landing_asks_for_a_window	include_str!	answer_a_menu_row	P14	no
+crates/bt-app/src/main.rs	quit_with_no_window_tests::every_door_onto_the_quit_records_the_same_debt	include_str!	begin_the_systems_quit;run_a_verb_of_the_applications;run_shortcut	P3	yes
+crates/bt-app/src/main.rs	recent_folder_door_tests::a_column_opened_onto_a_shells_own_folder_remembers_nothing	include_str!	files_root_for_new_pane;seat_a_files_column;toggle_files_pane	P3	yes
+crates/bt-app/src/main.rs	recent_folder_door_tests::the_doors_that_remember_a_folder_are_the_two_a_hand_goes_through	include_str!	reroot_files_column;show_folder_in_files_column	P3	yes
+crates/bt-app/src/main.rs	refused_preview_card_tests::pressing_the_button_on_a_refused_page_runs_the_same_verb_as_the_unknown_page	include_str!	chrome_mouse_input;open_path_in_default_app;open_preview_externally;open_preview_externally_on;press_float;preview_file_on	P3	yes
+crates/bt-app/src/main.rs	refused_preview_card_tests::the_refused_and_unknown_pages_share_one_card	include_str!	docked_chrome_target_at;float_hit_at;float_refusal_words;push_float_refusal_card;refresh_chrome_with_overlay;refused_preview_card	P3	yes
+crates/bt-app/src/main.rs	resident_run_tests::taking_folio_out_of_explorers_menu_is_answered_before_any_of_that	include_str!	main	P14	no
+crates/bt-app/src/main.rs	resident_run_tests::the_drain_says_when_the_marks_ledger_has_moved	include_str!	drain_pty;publish_pty_drain_frame	P3	yes
+crates/bt-app/src/main.rs	resident_run_tests::the_front_door_is_answered_on_the_console_and_the_run_moves_to_the_log	include_str!	main	P14	no
+crates/bt-app/src/main.rs	resident_run_tests::the_turn_notes_its_parking_on_every_path_out	include_str!	about_to_wait;about_to_wait_inner;new_events	P14	no
+crates/bt-app/src/main.rs	resize_skirt_order_tests::the_present_funnel_shrinks_the_skirt_and_asks_for_the_frame_that_does_it	include_str!	present_seats_and_commit	P3	yes
+crates/bt-app/src/main.rs	resize_skirt_order_tests::the_resize_handler_covers_the_new_strip_before_it_does_anything_else	include_str!	resize	P3	yes
+crates/bt-app/src/main.rs	summon_key_wiring_tests::the_synthetic_bit_reaches_the_gate_and_the_gate_stands_first	include_str!	keyboard_input;window_event	P3	yes
+crates/bt-app/src/main.rs	system_preference_wiring_tests::the_system_preference_event_re_reads_the_desktops_canvas	include_str!	adopt_motion_preference;adopt_system_canvas	P14	no
+crates/bt-app/src/main.rs	tab_identity_tests::a_floated_pages_address_field_names_no_target_in_this_tabs_chrome	include_str!	chrome_mouse_input	P3	yes
+crates/bt-app/src/main.rs	tab_identity_tests::a_footless_window_prints_its_standing_fact_on_the_rail_and_flashes_in_a_tag	include_str!	preview_float_layer	P3	yes
+crates/bt-app/src/main.rs	tab_identity_tests::a_pages_title_no_longer_opens_the_address	include_str!	chrome_mouse_input;open_web_address_on	P3	yes
+crates/bt-app/src/main.rs	tab_identity_tests::a_preview_surface_is_read_and_written_in_the_one_tab_that_owns_it	include_str!	preview_tab;preview_tab_id;preview_tab_index;preview_tab_index_among	P3	yes
+crates/bt-app/src/main.rs	tab_identity_tests::a_torn_off_preview_wears_the_panes_row_through_the_panes_own_functions	include_str!	chrome_mouse_input;float_head_tools;float_hit_at;press_float;preview_float_layer	P3	yes
+crates/bt-app/src/main.rs	tab_identity_tests::every_door_that_opens_a_tab_asks_the_application_for_its_number	include_str!	absorb_tab;answer_restore;create;extract_pane_into_new_tab;new_tab_seeded_from;open_window;reopen_recent	P3	yes
+crates/bt-app/src/main.rs	tab_identity_tests::no_window_keeps_a_tab_counter_of_its_own	include_str!	App;NewWindowParts;WindowRuntime	P14	no
+crates/bt-app/src/main.rs	tab_identity_tests::the_address_editor_moved_to_the_rail_and_kept_its_machine	include_str!	chrome_mouse_input;dress_preview_address_editor;dress_preview_name_editor;open_address_here;open_web_address;open_web_address_on;press_preview_rail	P3	yes
+crates/bt-app/src/main.rs	tab_identity_tests::the_menu_row_spends_the_two_verbs_that_already_exist	include_str!	move_pane_to_new_window;report_move_refusal;retire_the_stand_in;settle_tear_out	P3	yes
+crates/bt-app/src/main.rs	tab_identity_tests::the_transfer_has_a_door_a_person_can_press_and_no_environment_variable	include_str!	main.rs	P3	yes
+crates/bt-app/src/main.rs	tab_identity_tests::the_transfer_is_a_transaction_and_its_commit_pays_every_debt	include_str!	transfer_tab	P14	no
+crates/bt-app/src/main.rs	textless_present_tests::a_textless_present_is_a_frame_the_window_still_owes	include_str!	present_retained_picture;redraw	P3	yes
+crates/bt-app/src/main.rs	textless_present_tests::a_window_that_is_not_on_screen_stops_asking_and_is_woken_once	include_str!	present_retained_picture;publish_frame;redraw	P3	yes
+crates/bt-app/src/palette.rs	palette::list_tests::a_long_hint_does_not_take_the_row	source text read	(the file it reads)	P14	no
+crates/bt-app/src/persist.rs	persist::tests::the_only_thread_that_fsyncs_session_json_is_the_writer	include_str!	flush_if_due;hand_over	P14	no
+crates/bt-app/src/present_diagnostics_tests.rs	present_diagnostics_tests::attempt_generation_is_carried_by_configure_and_native_reads_are_line_gated	include_str!	check_picture_freshness;finish_present_attempt	P3	yes
+crates/bt-app/src/present_diagnostics_tests.rs	present_diagnostics_tests::every_present_caller_closes_its_record_outside_all_outcome_arms	include_str!	begin_present_attempt;finish_present_attempt;present_retained_picture;present_seats_and_commit;redraw	P3	yes
+crates/bt-app/src/present_diagnostics_tests.rs	present_diagnostics_tests::existing_hidden_callers_keep_the_same_fused_value	include_str!	window_is_hidden	P14	no
+crates/bt-app/src/preview.rs	preview::tests::a_bold_run_closes_across_the_code_spans_it_contains	source text read	(the file it reads)	P14	no
+crates/bt-app/src/preview.rs	preview::tests::a_composed_document_s_foot_names_its_repository_and_its_place_in_it	source text read	(the file it reads)	P14	no
+crates/bt-app/src/preview.rs	preview::tests::a_diff_is_a_diff_by_name_even_though_it_is_text_by_type	source text read	diff	P14	no
+crates/bt-app/src/preview.rs	preview::tests::a_diffs_own_header_is_not_a_deletion	source text read	main	P14	no
+crates/bt-app/src/preview.rs	preview::tests::a_discarded_edit_takes_its_own_buffer_and_leaves_the_history	source text read	(the file it reads)	P14	no
+crates/bt-app/src/preview.rs	preview::tests::a_git_backed_buffer_waits_for_the_git_worker_and_never_for_a_disk	source text read	(the file it reads)	P14	no
+crates/bt-app/src/preview.rs	preview::tests::a_head_read_is_claimed_once_and_a_refusal_is_not_retried	source text read	main	P14	no
+crates/bt-app/src/preview.rs	preview::tests::a_pool_of_dirty_buffers_grows_past_the_cap_rather_than_lose_one	source text read	(the file it reads)	P14	no
+crates/bt-app/src/preview.rs	preview::tests::a_question_superseded_while_reading_is_dropped_rather_than_asked	source text read	(the file it reads)	P14	no
+crates/bt-app/src/preview.rs	preview::tests::a_save_is_written_by_the_writer_that_keeps_what_the_file_carried	include_str!	save	P14	no
+crates/bt-app/src/preview.rs	preview::tests::a_second_open_of_the_same_path_is_the_same_buffer	source text read	(the file it reads)	P14	no
+crates/bt-app/src/preview.rs	preview::tests::a_truncated_buffer_is_read_only_however_editable_its_name_is	source text read	main	P14	no
+crates/bt-app/src/preview.rs	preview::tests::an_edit_that_keeps_the_length_still_counts	source text read	(the file it reads)	P14	no
+crates/bt-app/src/preview.rs	preview::tests::an_unreadable_type_asks_the_disk_once_and_refuses_on_the_answer	source text read	(the file it reads)	P14	no
+crates/bt-app/src/preview.rs	preview::tests::editable_is_the_surface_that_actually_edits	source text read	(the file it reads)	P14	no
+crates/bt-app/src/preview.rs	preview::tests::md_loading_design_document_has_no_read_only_badge	fixture / manifest read	(the file it reads)	P14	no
+crates/bt-app/src/preview.rs	preview::tests::only_a_truncated_buffer_carries_the_read_only_notice	source text read	main	P14	no
+crates/bt-app/src/preview.rs	preview::tests::sniffing_happens_off_the_window_thread	include_str!	new;preview_ftype;spawn	P14	no
+crates/bt-app/src/preview.rs	preview::tests::the_block_ranges_partition_the_file_and_the_file_comes_back_whole	include_str!	../../../README.md;../../../docs/features.md;preview.rs	P14	no
+crates/bt-app/src/preview.rs	preview::tests::the_bytes_no_block_was_parsed_from_are_blank	include_str!	../../../README.md;../../../docs/features.md;preview.rs	P14	no
+crates/bt-app/src/preview.rs	preview::tests::the_cap_evicts_the_oldest_clean_unshown_buffer	source text read	(the file it reads)	P14	no
+crates/bt-app/src/preview.rs	preview::tests::the_extension_table_answers_each_class	source text read	diff	P14	no
+crates/bt-app/src/preview.rs	preview::tests::the_first_real_change_dirties_the_buffer_and_nothing_cleans_it_but_a_save	source text read	main	P14	no
+crates/bt-app/src/preview.rs	preview::tests::the_latex_corpus_sets_every_section_it_promises	include_str!	../../../tests/assets/latex-render-check.md	P14	no
+crates/bt-app/src/preview.rs	preview::tests::the_pool_answers_two_different_dirty_questions	source text read	(the file it reads)	P14	no
+crates/bt-app/src/preview.rs	preview::tests::the_stress_sample_carries_every_block_the_measure_has_a_rule_for	include_str!	../../../tests/assets/preview-samples/stress.md	P14	no
+crates/bt-app/src/preview.rs	preview::tests::the_widest_line_is_measured_in_the_columns_it_will_draw_as	source text read	(the file it reads)	P14	no
+crates/bt-app/src/preview.rs	preview::tests::the_wrapper_hands_back_the_blocks_the_ranged_walk_found	include_str!	../../../README.md;../../../docs/features.md;preview.rs	P14	no
+crates/bt-app/src/preview.rs	preview::tests::two_repositories_and_two_stages_are_four_identities_no_string_could_keep_apart	source text read	(the file it reads)	P14	no
+crates/bt-app/src/preview_provenance.rs	preview_provenance::tests::a_file_byte_lands_on_the_nearest_drawn_place	include_str!	../../../README.md;../../../docs/features.md;preview.rs	P14	no
+crates/bt-app/src/preview_provenance.rs	preview_provenance::tests::every_drawn_byte_is_a_copy_of_the_byte_it_says_it_is	include_str!	../../../README.md;../../../docs/features.md;preview.rs	P14	no
+crates/bt-app/src/preview_provenance.rs	preview_provenance::tests::every_drawn_source_byte_comes_back_to_the_byte_that_drew_it	include_str!	../../../README.md;../../../docs/features.md;preview.rs	P14	no
+crates/bt-app/src/preview_provenance.rs	preview_provenance::tests::the_two_directions_are_inverse_on_every_drawn_byte	include_str!	../../../README.md;../../../docs/features.md;preview.rs	P14	no
+crates/bt-app/src/preview_provenance.rs	preview_provenance::tests::there_is_one_map_for_every_piece_the_page_reads	include_str!	../../../README.md;../../../docs/features.md;preview.rs	P14	no
+crates/bt-app/src/preview_provenance.rs	preview_provenance::tests::what_copies_is_what_copied_before	include_str!	../../../README.md;../../../docs/features.md;preview.rs	P14	no
+crates/bt-app/src/preview_typing.rs	preview_typing::md_typing_path_benchmark	fixture / manifest read	insert;open	P14	no
+crates/bt-app/src/preview_typing.rs	preview_typing::md_typing_path_eager_benchmark	fixture / manifest read	insert;open	P14	no
+crates/bt-app/src/preview_viewport_tests.rs	preview_viewport::tests::viewport_open_bounds_prose_and_intrinsics	fixture / manifest read	(the file it reads)	P14	no
+crates/bt-app/src/profiles.rs	profiles::paste_tests::namespace_resolver_keeps_its_standing_inputs_and_grammar_does_not_use_served_by	include_str!	derive_grammar;grammar;printed_path_namespace	P14	no
+crates/bt-app/src/profiles.rs	profiles::tests::every_capability_sentence_agrees_with_the_shell_integration_matrix	include_str!	../../../docs/shell-integration.md	P14	no
+crates/bt-app/src/profiles.rs	profiles::tests::nothing_off_windows_ever_names_powershell	include_str!	unix_shell_row;unix_shipped;unix_system_shells;users_shell	P14	no
+crates/bt-app/src/profiles.rs	profiles::tests::the_kept_files_are_a_section_at_the_top_of_the_switcher_and_appear_once	source text read	rows	P14	no
+crates/bt-app/src/profiles.rs	profiles::tests::the_switcher_lists_every_buffer_with_its_own_dot	source text read	(the file it reads)	P14	no
+crates/bt-app/src/psreadline.rs	psreadline::tests::psreadline_clock_run_source_has_an_unread_edge	include_str!	installed_on_probe;raise_psreadline_invite_if_due;self	P3	yes
+crates/bt-app/src/psreadline.rs	psreadline::tests::psreadline_readers_and_refresh_edges_are_wired_to_the_app_fact	include_str!	apply_psreadline;psreadline_installed;psreadline_row_state;refresh_psreadline_installed;settings_layout	P3	yes
+crates/bt-app/src/quake.rs	quake::summon_road_tests::the_summon_claim_is_asked_for_on_every_platform_at_every_turn	include_str!	settle_quake	P14	no
+crates/bt-app/src/quake.rs	quake::tests::a_summon_is_placed_by_one_function_and_main_does_not_do_the_geometry	include_str!	main.rs	P3	yes
+crates/bt-app/src/restore.rs	restore::tests::the_dirty_gate_names_what_it_is_about_and_defaults_to_keeping_it	source text read	(the file it reads)	P14	no
+crates/bt-app/src/schemes.rs	schemes::tests::a_broken_file_keeps_the_palette_and_is_reported_once_until_it_is_fixed	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
+crates/bt-app/src/schemes.rs	schemes::tests::a_bundled_scheme_paints_the_chrome_as_well_as_the_grid	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
+crates/bt-app/src/schemes.rs	schemes::tests::a_deletion_this_window_made_raises_one_card_not_two	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
+crates/bt-app/src/schemes.rs	schemes::tests::a_file_that_left_the_folder_falls_to_the_default_and_says_so_once	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
+crates/bt-app/src/schemes.rs	schemes::tests::a_malformed_file_is_skipped_and_named	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
+crates/bt-app/src/schemes.rs	schemes::tests::a_name_that_never_resolved_is_never_reported_as_gone	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
+crates/bt-app/src/schemes.rs	schemes::tests::a_rename_onto_a_name_the_catalogue_holds_replaces_it_and_the_row_follows	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
+crates/bt-app/src/schemes.rs	schemes::tests::a_rescan_moves_the_selected_scheme_and_only_the_selected_one	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
+crates/bt-app/src/schemes.rs	schemes::tests::a_row_offers_only_the_schemes_its_canvas_can_wear	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
+crates/bt-app/src/schemes.rs	schemes::tests::a_scheme_renamed_in_its_own_file_is_followed_by_the_row_that_wore_it	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
+crates/bt-app/src/schemes.rs	schemes::tests::a_scheme_that_is_gone_falls_to_folios_own	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
+crates/bt-app/src/schemes.rs	schemes::tests::a_user_file_may_retune_a_bundled_scheme_without_doubling_its_row	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
+crates/bt-app/src/schemes.rs	schemes::tests::a_written_scheme_is_the_bundled_file_it_was_copied_from	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
+crates/bt-app/src/schemes.rs	schemes::tests::every_bundled_scheme_gives_a_floating_tag_a_face_a_hairline_and_an_ink_that_reads	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
+crates/bt-app/src/schemes.rs	schemes::tests::every_bundled_scheme_parses_and_keeps_the_name_its_row_is_listed_under	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
+crates/bt-app/src/schemes.rs	schemes::tests::folios_own_two_schemes_are_the_constants_the_derivation_is_pinned_to	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
+crates/bt-app/src/schemes.rs	schemes::tests::the_default_is_looked_up_canvas_first_and_not_name_first	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
+crates/bt-app/src/schemes.rs	schemes::tests::the_user_files_list_is_the_folder_and_only_the_folder	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
+crates/bt-app/src/seats.rs	seats::reveal_tests::a_tab_handover_moves_colour_and_never_geometry	include_str!	tab_strip_geometry	P14	no
+crates/bt-app/src/seats.rs	seats::reveal_tests::the_hit_test_never_asks_how_faded_a_control_is	include_str!	seats.rs	P14	no
+crates/bt-app/src/seats.rs	seats::tests::a_changed_file_wears_its_letter_in_the_rows_own_right_margin	source text read	(the file it reads)	P14	no
+crates/bt-app/src/seats.rs	seats::tests::a_head_stays_lit_while_the_float_it_raised_is_open	include_str!	head_run;head_that_raised_a_layer	P3	yes
+crates/bt-app/src/seats.rs	seats::tests::a_row_is_indented_six_plus_fourteen_per_level_from_its_own_left_edge	source text read	(the file it reads)	P14	no
+crates/bt-app/src/seats.rs	seats::tests::one_function_draws_every_inline_name_editors_caret	include_str!	seats.rs	P14	no
+crates/bt-app/src/seats.rs	seats::tests::one_ladder_says_where_every_surfaces_badge_docks	include_str!	seats.rs	P14	no
+crates/bt-app/src/seats.rs	seats::tests::one_predicate_says_which_trailing_controls_a_tab_wears	include_str!	seats.rs	P14	no
+crates/bt-app/src/seed.rs	seed::tests::a_closed_tabs_preview_comes_back_out_of_the_vault_with_it	source text read	(the file it reads)	P14	no
+crates/bt-app/src/settings.rs	settings::tests::attention_rows_look_again_when_their_page_opens	include_str!	refresh_agent_rows	P3	yes
+crates/bt-app/src/settings.rs	settings::tests::cjk_settings_reads_and_language_notes_do_not_enumerate_fonts	include_str!	cjk_family_files	P14	no
+crates/bt-app/src/settings.rs	settings::tests::settings_pointer_production_wiring_uses_the_counted_handler_and_owner	include_str!	fn;settings_dialog;settings_layout	P3	yes
+crates/bt-app/src/settings.rs	settings::tests::the_advanced_word_stands_on_the_heading_column_and_its_chevron_on_the_control_one	include_str!	../../../docs/design/ui-mockup.html	P14	no
+crates/bt-app/src/settings.rs	settings::tests::the_capped_dialog_holds_every_everyday_page_and_only_the_long_ones_scroll	include_str!	../../../docs/design/ui-mockup.html	P14	no
+crates/bt-app/src/settings.rs	settings::tests::the_maximum_height_row_offers_the_mock_ups_own_four_heights	include_str!	../../../docs/design/ui-mockup.html	P14	no
+crates/bt-app/src/settings.rs	settings::tests::the_mock_up_carries_the_rail_this_slice_gave_it	include_str!	../../../docs/design/ui-mockup.html	P14	no
+crates/bt-app/src/settings.rs	settings::tests::the_theme_row_wears_the_mock_ups_own_order_and_its_own_line	include_str!	../../../docs/design/ui-mockup.html	P14	no
+crates/bt-app/src/shell_integration.rs	shell_integration::tests::an_installed_script_that_is_not_this_builds_is_rewritten	include_str!	operate	P14	no
+crates/bt-app/src/shell_integration.rs	shell_integration::tests::every_shell_is_told_this_terminal_renders_hyperlinks_unless_it_was_already_told	include_str!	../../../scripts/shell-integration/folio.ps1	P14	no
+crates/bt-app/src/shell_integration.rs	shell_integration::tests::shell_integration_removal_speaks_to_a_window_only_through_the_report	include_str!	main.rs	P3	yes
+crates/bt-app/src/shell_integration.rs	shell_integration::tests::shell_integration_startup_and_removal_doors_are_above_window_work	include_str!	begin_startup_migration;candidates;main	P14	no
+crates/bt-app/src/shell_integration.rs	shell_integration::tests::the_bash_script_ships_with_unix_line_endings	include_str!	../../../scripts/shell-integration/folio.bash	P14	no
+crates/bt-app/src/shell_integration.rs	shell_integration::tests::the_integration_script_knows_the_name_this_terminal_announces	include_str!	../../../scripts/shell-integration/folio.ps1	P14	no
+crates/bt-app/src/shell_integration.rs	shell_integration::tests::the_startup_chain_a_pane_emulates_is_the_one_its_profile_asked_for	include_str!	../../../scripts/shell-integration/folio.bash	P14	no
+crates/bt-app/src/shell_integration.rs	shell_integration::tests::the_term_variables_a_pane_is_given_are_the_same_on_every_platform	include_str!	resolved_environment	P14	no
+crates/bt-app/src/shell_integration.rs	shell_integration::tests::writing_the_profile_leaves_no_half_written_file_in_the_folder	include_str!	replace_profile	P14	no
+crates/bt-app/src/shell_integration.rs	shell_integration::tests::zsh_is_pointed_at_a_directory_and_never_handed_bashs_flag	include_str!	../../../scripts/shell-integration/folio.zsh	P14	no
+crates/bt-app/src/shell_integration/profile_runtime.rs	shell_integration::profile_runtime::tests::shell_integration_offer_predicate_never_grants_write_ownership	include_str!	add_profile_with_forms;offer_for	P14	no
+crates/bt-app/src/shortcuts.rs	shortcuts::tests::docs_shortcuts_md_is_the_bindings_table	fixture / manifest read	target	P14	no
+crates/bt-app/src/tests.rs	tests::a_card_reads_the_picture_this_window_has_and_asks_for_nothing	include_str!	card_picture_in;request_peek_pixels	P3	yes
+crates/bt-app/src/tests.rs	tests::a_caret_and_a_scroll_survive_a_switch_to_another_buffer_and_back	source text read	(the file it reads)	P14	no
+crates/bt-app/src/tests.rs	tests::a_column_pointed_somewhere_else_forgets_the_old_place_and_keeps_its_width	source text read	(the file it reads)	P14	no
+crates/bt-app/src/tests.rs	tests::a_commit_with_no_composition_in_front_of_it_still_reaches_the_child	include_str!	fn;keyboard_input	P3	yes
+crates/bt-app/src/tests.rs	tests::a_composition_is_never_written_into_the_buffer	include_str!	insert_into_preview;preview_ime	P3	yes
+crates/bt-app/src/tests.rs	tests::a_divider_drag_that_loses_its_pointer_stops_holding_the_resize	include_str!	end_a_divider_drag_that_lost_its_pointer;flush_pending_pty_resize	P3	yes
+crates/bt-app/src/tests.rs	tests::a_file_over_the_highlight_cap_still_draws_as_a_plain_body	source text read	(the file it reads)	P14	no
+crates/bt-app/src/tests.rs	tests::a_float_that_declines_a_point_still_consumes_it	include_str!	file_row_under	P3	yes
+crates/bt-app/src/tests.rs	tests::a_folder_row_makes_a_files_tab_rooted_where_it_was_dragged_from	include_str!	commit_row_into_new_tab	P3	yes
+crates/bt-app/src/tests.rs	tests::a_formula_that_lands_rebuilds_the_page_that_was_standing_on_its_source	include_str!	apply_math_results	P3	yes
+crates/bt-app/src/tests.rs	tests::a_frame_shape_stop_records_its_cause_before_announcing	fixture / manifest read	(the file it reads)	P14	no
+crates/bt-app/src/tests.rs	tests::a_hover_inside_a_float_arms_no_peek_for_the_row_beneath	include_str!	glancing_row_at;row_under	P3	yes
+crates/bt-app/src/tests.rs	tests::a_hover_inside_a_floats_body_lights_no_docked_row	include_str!	chrome_target_at;update_chrome_hover	P3	yes
+crates/bt-app/src/tests.rs	tests::a_hover_over_a_floating_trees_row_is_that_rows_hover	include_str!	peek_row;row_under	P3	yes
+crates/bt-app/src/tests.rs	tests::a_keystroke_relays_a_full_head_read_inside_a_frame	source text read	(the file it reads)	P14	no
+crates/bt-app/src/tests.rs	tests::a_long_path_is_cut_and_the_phrase_beside_it_is_not	source text read	(the file it reads)	P14	no
+crates/bt-app/src/tests.rs	tests::a_page_a_modal_covers_is_drawn_as_a_kept_frame	include_str!	keep_what_the_modal_covers;preview_float_layer;refresh_chrome_with_overlay;sync_web_page	P3	yes
+crates/bt-app/src/tests.rs	tests::a_page_follows_the_pane_it_is_drawn_in	include_str!	absorb_tab;carry_the_pages_of_moved_panes;extract_pane_into_new_tab;move_pane_across_tabs	P3	yes
+crates/bt-app/src/tests.rs	tests::a_pane_head_says_where_it_is_and_a_program_speaks_only_in_front_of_it	source text read	(the file it reads)	P14	no
+crates/bt-app/src/tests.rs	tests::a_pane_heads_folder_is_written_the_way_this_reader_writes_one	include_str!	cwd_whole;home_shortened_path	P14	no
+crates/bt-app/src/tests.rs	tests::a_pinned_preview_keeps_its_own_buffer_and_scroll_when_the_next_file_opens	source text read	(the file it reads)	P14	no
+crates/bt-app/src/tests.rs	tests::a_playing_video_is_spelled_as_the_file_it_is	include_str!	preview_head_tools;preview_rail_kind;refit_preview_picture;surface_is_playing;video_playing_on	P3	yes
+crates/bt-app/src/tests.rs	tests::a_pointer_that_has_left_the_window_is_standing_in_no_pane	include_str!	fn	P14	no
+crates/bt-app/src/tests.rs	tests::a_present_is_recorded_whichever_door_it_came_through	include_str!	present_retained_picture;redraw;trace_present	P3	yes
+crates/bt-app/src/tests.rs	tests::a_press_inside_a_float_never_names_a_docked_row	include_str!	file_row_under	P3	yes
+crates/bt-app/src/tests.rs	tests::a_press_on_a_floats_body_over_a_column_raises_no_root_menu	include_str!	file_row_under;files_ground_under	P3	yes
+crates/bt-app/src/tests.rs	tests::a_press_outside_an_open_dropdown_closes_it_and_still_lands	include_str!	settings;settings_mouse_input	P3	yes
+crates/bt-app/src/tests.rs	tests::a_recording_follows_the_pane_it_is_drawn_in	include_str!	absorb_tab;carry_the_recordings_of_moved_panes;extract_pane_into_new_tab;move_pane_across_tabs	P3	yes
+crates/bt-app/src/tests.rs	tests::a_redraw_asked_for_by_a_tab_with_no_shell_is_always_a_present	include_str!	a_bare_redraw_still_owes_a_present;redraw	P3	yes
+crates/bt-app/src/tests.rs	tests::a_refusal_the_commit_raised_is_shown_in_the_box	include_str!	create_files_row;dress_files_tree_editor;finish_rename;notes;open_files_row_new	P3	yes
+crates/bt-app/src/tests.rs	tests::a_refused_address_is_a_field_that_can_still_be_left	include_str!	fn;press_web_page	P3	yes
+crates/bt-app/src/tests.rs	tests::a_refused_verb_raises_one_notice_and_a_read_that_failed_raises_none	source text read	main	P14	no
+crates/bt-app/src/tests.rs	tests::a_remembered_line_comes_only_from_a_mark_the_reader_was_at	include_str!	main.rs	P3	yes
+crates/bt-app/src/tests.rs	tests::a_repo_relative_path_is_joined_in_the_grammar_the_platform_reads	source text read	(the file it reads)	P14	no
+crates/bt-app/src/tests.rs	tests::a_resize_cannot_re_walk_a_grammar_and_an_edit_must	source text read	main	P14	no
+crates/bt-app/src/tests.rs	tests::a_resize_reflows_the_markdown_without_re_measuring_it	include_str!	../../../docs/UI-UX.md	P14	no
+crates/bt-app/src/tests.rs	tests::a_restored_expansion_comes_back_as_questions_and_not_as_rows	source text read	(the file it reads)	P14	no
+crates/bt-app/src/tests.rs	tests::a_retirement_asks_for_one_frame_and_not_one_per_turn	include_str!	advance_web_page	P3	yes
+crates/bt-app/src/tests.rs	tests::a_right_press_on_a_tab_raises_its_menu_and_leaves_the_active_tab_alone	include_str!	activate_tab;chrome_mouse_input;fn;press_tab	P3	yes
+crates/bt-app/src/tests.rs	tests::a_right_press_on_the_columns_ground_raises_the_roots_menu	include_str!	files_ground_under;fn	P3	yes
+crates/bt-app/src/tests.rs	tests::a_row_is_no_ones_pane_so_every_zone_is_open_to_it	source text read	(the file it reads)	P14	no
+crates/bt-app/src/tests.rs	tests::a_row_on_an_entry_opens_through_that_tabs_own_doors	include_str!	commit_row_into_tab	P3	yes
+crates/bt-app/src/tests.rs	tests::a_row_opens_on_the_lane_its_name_and_the_mint_agree_on	source text read	(the file it reads)	P14	no
+crates/bt-app/src/tests.rs	tests::a_rows_strip_arm_asks_the_run_and_never_the_window	include_str!	survey_strip	P3	yes
+crates/bt-app/src/tests.rs	tests::a_rows_two_landings_are_spent_by_its_own_two_commits	include_str!	commit_strip_adopt;commit_strip_extract	P3	yes
+crates/bt-app/src/tests.rs	tests::a_same_length_edit_rebuilds_the_cached_document	source text read	(the file it reads)	P14	no
+crates/bt-app/src/tests.rs	tests::a_seat_that_changes_content_drops_its_video	include_str!	self;sweep_video_seats	P3	yes
+crates/bt-app/src/tests.rs	tests::a_second_playback_on_one_surface_is_a_second_name_for_the_renderer	include_str!	video_layers	P3	yes
+crates/bt-app/src/tests.rs	tests::a_tab_switch_leaves_no_menu_standing	include_str!	close_every_popup;fn	P3	yes
+crates/bt-app/src/tests.rs	tests::a_theme_flip_asks_every_markdown_page_to_lay_out_again	include_str!	adopt_new_palette	P3	yes
+crates/bt-app/src/tests.rs	tests::a_tree_that_is_still_loading_opens_at_the_kinds_height_and_shrinks_when_it_lands	source text read	(the file it reads)	P14	no
+crates/bt-app/src/tests.rs	tests::a_video_frame_alone_is_enough_to_present	include_str!	fn;service_pictures	P3	yes
+crates/bt-app/src/tests.rs	tests::a_wrapped_highlighted_line_keeps_every_character_and_its_inks	source text read	(the file it reads)	P14	no
+crates/bt-app/src/tests.rs	tests::an_animation_crosses_a_tab_boundary_because_it_is_keyed_by_its_file	include_str!	animation_path_of;animation_running_on	P3	yes
+crates/bt-app/src/tests.rs	tests::an_edit_to_one_block_keeps_every_other_blocks_measurement	include_str!	../../../docs/UI-UX.md	P14	no
+crates/bt-app/src/tests.rs	tests::an_engine_page_alone_in_a_tab_reaches_the_glass_through_the_retained_present	include_str!	pane_draws;present_retained_picture;present_seats_and_commit;publish_frame_inner	P3	yes
+crates/bt-app/src/tests.rs	tests::an_opened_animation_starts_over_and_a_revealed_one_resumes	include_str!	request_animations	P3	yes
+crates/bt-app/src/tests.rs	tests::both_pointer_doors_tell_the_chevron_clocks_where_the_hand_is	include_str!	fn;pointer_left;turn	P3	yes
+crates/bt-app/src/tests.rs	tests::cancelling_a_composition_goes_through_one_door	include_str!	cancel_composition	P3	yes
+crates/bt-app/src/tests.rs	tests::deadline_owners_do_not_manufacture_appointments_from_the_query_time	include_str!	drag_autoscroll_deadline;startup	P3	yes
+crates/bt-app/src/tests.rs	tests::delete_resolves_its_key_against_the_live_tree	include_str!	delete_files_row;open_files_row_rename	P3	yes
+crates/bt-app/src/tests.rs	tests::every_door_that_lands_a_source_opens_a_page_as_a_page	include_str!	open_preview_source_on;rename_preview_file;source_opens_as_a_page	P3	yes
+crates/bt-app/src/tests.rs	tests::every_surface_over_one_document_gets_that_documents_own_highlighting	source text read	main	P14	no
+crates/bt-app/src/tests.rs	tests::hostile_math_is_refused_and_the_real_decoration_worker_survives	source text read	(the file it reads)	P14	no
+crates/bt-app/src/tests.rs	tests::no_zoom_gesture_reaches_past_the_door_that_knows_a_video	include_str!	press_preview_image;preview_image_zoom;self;set_preview_image_zoom	P3	yes
+crates/bt-app/src/tests.rs	tests::nothing_a_preview_body_produces_is_drawn_outside_the_preview	include_str!	../../../tests/assets/preview-samples/stress.md	P14	no
+crates/bt-app/src/tests.rs	tests::one_door_decides_which_decoder_a_hover_and_a_pane_ask	include_str!	MathWorkerRequest;file_peek_fitted_pixels;refit_preview_picture;request_peek_pixels	P3	yes
+crates/bt-app/src/tests.rs	tests::only_the_blocks_that_refuse_to_reflow_ask_for_a_horizontal_scroll	include_str!	../../../tests/assets/preview-samples/stress.md	P14	no
+crates/bt-app/src/tests.rs	tests::ten_notches_on_a_preview_alone_in_a_tab_are_ten_presents	include_str!	present_chrome_change;scroll_preview_body	P3	yes
+crates/bt-app/src/tests.rs	tests::the_canvas_is_in_force_before_the_window_is_made	include_str!	create	P3	yes
+crates/bt-app/src/tests.rs	tests::the_carets_prose_block_is_read_in_one_geometry	include_str!	live_markdown_ime_cursor_area;move_preview_caret;preview_md_file_offset_at;preview_prose_geometry;reveal_live_markdown_caret	P3	yes
+crates/bt-app/src/tests.rs	tests::the_clock_runs_only_where_an_animation_is_drawn	include_str!	advance_animations;request_animations	P3	yes
+crates/bt-app/src/tests.rs	tests::the_content_section_writes_a_file_exactly_as_it_always_did	source text read	(the file it reads)	P14	no
+crates/bt-app/src/tests.rs	tests::the_crumb_and_the_tree_row_open_the_head_s_own_rename	include_str!	finish_rename;r;run_file_menu_row	P3	yes
+crates/bt-app/src/tests.rs	tests::the_deferred_half_of_a_dpi_change_is_asked_about_late_and_spent_on_a_turn	include_str!	fn;turn	P3	yes
+crates/bt-app/src/tests.rs	tests::the_design_document_parses_into_blocks_that_reserve_nothing_extra	include_str!	../../../docs/DESIGN.md	P14	no
+crates/bt-app/src/tests.rs	tests::the_disk_news_reaches_the_glass_by_both_roads	include_str!	apply_preview_results;files_a_tab_stands_on;fn;land_preview_source_on;open_preview_image_on;refresh_preview_file;request_revived_previews;settle_pane_notices	P3	yes
+crates/bt-app/src/tests.rs	tests::the_edge_autoscroll_no_longer_asks_what_is_in_the_hand	include_str!	drag_autoscroll_aim	P3	yes
+crates/bt-app/src/tests.rs	tests::the_empty_page_and_a_gap_take_the_prose_face	include_str!	preview_markdown_caret	P3	yes
+crates/bt-app/src/tests.rs	tests::the_files_menus_second_batch_makes_a_row_and_recycles_one	include_str!	create_files_row;finish_rename;fn;open_preview;run_file_menu_row	P3	yes
+crates/bt-app/src/tests.rs	tests::the_focus_column_refuses_the_layout_peek_through_one_predicate	include_str!	fn;layout_peek_target_at	P3	yes
+crates/bt-app/src/tests.rs	tests::the_folder_card_stays_up_under_the_glance_it_raised_and_that_glance_raises_nothing	include_str!	fn;forget_dead_float_gestures;observe_file_peek	P3	yes
+crates/bt-app/src/tests.rs	tests::the_glance_card_says_what_the_row_opens_as	include_str!	mature_file_peek;preview	P3	yes
+crates/bt-app/src/tests.rs	tests::the_glance_cards_document_is_in_the_awaited_set	include_str!	documents_held;forget_the_picture_in;markdown_picture_files;markdown_pictures_awaited;tab	P3	yes
+crates/bt-app/src/tests.rs	tests::the_markdown_page_and_the_glance_card_read_the_same_caps	include_str!	answer_one_picture;file_peek_fitted_pixels;refit_preview_picture	P3	yes
+crates/bt-app/src/tests.rs	tests::the_pane_under_a_float_is_not_the_hovered_pane	include_str!	update_chrome_hover	P3	yes
+crates/bt-app/src/tests.rs	tests::the_press_and_the_hover_ask_one_router	include_str!	close_hover_floats_except;drive_float_hover;every;mouse_wheel;pointer_target_at;press_float;scroll_float_git_page;scroll_float_tree	P3	yes
+crates/bt-app/src/tests.rs	tests::the_preview_publishes_the_caret_of_the_surface_its_letters_go_to	include_str!	edit_preview;keyboard_owner;preview_ime_cursor_area	P3	yes
+crates/bt-app/src/tests.rs	tests::the_rail_zone_is_asked_before_a_gesture_can_swallow_the_move	include_str!	pointer_moved;self	P3	yes
+crates/bt-app/src/tests.rs	tests::the_rails_open_and_the_chevrons_share_one_hover_open_path	include_str!	advance_chevrons;observe_chevrons;press_preview_rail;rail	P3	yes
+crates/bt-app/src/tests.rs	tests::the_reduction_happens_on_the_worker_not_the_window_thread	include_str!	decode_local_image_bytes;run_decoration_worker	P3	yes
+crates/bt-app/src/tests.rs	tests::the_scale_change_arm_restates_the_cards_columns_scroll	include_str!	apply_scale_factor	P3	yes
+crates/bt-app/src/tests.rs	tests::the_shell_page_is_gone	directory walk	(the file it reads)	P7	yes
+crates/bt-app/src/tests.rs	tests::the_speaker_is_a_second_channel_and_takes_you_to_the_sound	include_str!	main.rs	P3	yes
+crates/bt-app/src/tests.rs	tests::the_tab_a_file_row_makes_is_activated_and_owns_the_buffer_it_opens	include_str!	commit_row_into_new_tab	P3	yes
+crates/bt-app/src/tests.rs	tests::the_tab_menus_subject_is_an_id_resolved_when_the_verb_runs	include_str!	duplicate_tab;index;move_tab_to_new_window;move_tab_to_window;open_tab_menu_at;run_tab_menu_row;slot;struct	P3	yes
+crates/bt-app/src/tests.rs	tests::the_theme_row_writes_settings_and_the_session_file_names_no_theme	include_str!	apply_theme_mode;mark_session_dirty	P3	yes
+crates/bt-app/src/tests.rs	tests::the_third_exit_is_the_drags_own_errand_and_the_ring_is_the_targets_own_mark	include_str!	aim_at_window;fn;transfer_tab;window_ring_layer	P3	yes
+crates/bt-app/src/tests.rs	tests::the_tick_that_empties_the_picture_list_still_hands_it_over	include_str!	fn	P14	no
+crates/bt-app/src/tests.rs	tests::the_two_step_route_to_a_new_tab_is_untouched	include_str!	move_pane_to_new_tab;self	P3	yes
+crates/bt-app/src/tests.rs	tests::the_windows_address_door_mints_a_page_and_can_be_taken_back	include_str!	finish_rename;fn;mint_a_blank_page_and_open_its_address	P3	yes
+crates/bt-app/src/tests.rs	tests::two_files_with_one_name_are_two_payloads	source text read	(the file it reads)	P14	no
+crates/bt-app/src/tests.rs	tests::what_a_press_opened_and_selected_is_what_gets_written	source text read	(the file it reads)	P14	no
+crates/bt-app/src/tests.rs	tests::wheel_flush_runtime_skips_unchanged_panes_but_keeps_thumb_frames	include_str!	repaint_pane_change_inner;scroll_view_exact_in;woke_terminal_thumb	P3	yes
+crates/bt-app/src/uninstall_tests.rs	uninstall_tests::uninstall_archive_has_ten_files_and_cleanup_only_wrapper	include_str!	../../../scripts/release/package.ps1	P17	no
+crates/bt-app/src/uninstall_tests.rs	uninstall_tests::uninstall_door_precedes_every_startup_effect	include_str!	main	P17	no
+crates/bt-app/src/uninstall_tests.rs	uninstall_tests::uninstall_purge_says_on_macos_that_held_data_cannot_be_told	include_str!	../../bt-platform/src/cleanup.rs	P17	no
+crates/bt-app/src/uninstall_tests.rs	uninstall_tests::uninstall_sandbox_door_is_not_read_by_a_shipped_build	include_str!	../../../scripts/release/ci-build-tests.ps1;../../../scripts/release/cleanvm/in-guest.ps1;uninstall.rs	P17	no
+crates/bt-app/src/uninstall_tests.rs	uninstall_tests::uninstall_source_guard_pins_known_writers_and_inventory	include_str!	add_to_profile;install_panic_log_hook	P17	yes
+crates/bt-app/src/update.rs	update::tests::the_check_asks_one_stack_on_every_platform	include_str!	update.rs	P14	no
+crates/bt-app/src/update.rs	update::tests::the_question_carries_nothing_about_the_machine	include_str!	../../../README.md;../../../README.zh-CN.md;../../../docs/PRIVACY.md	P14	no
+crates/bt-app/src/version.rs	version::tests::the_plist_carries_the_workspace_version_twice_and_no_literal	fixture / manifest read	(the file it reads)	P14	no
+crates/bt-app/src/version.rs	version::tests::the_version_is_the_manifests_and_nothing_elses	fixture / manifest read	(the file it reads)	P14	no
+crates/bt-app/src/webhost.rs	webhost::engine_absence_tests::open_answers_a_refusing_engine_with_a_seat_that_wears_the_card	include_str!	go;open	P14	no
+crates/bt-app/src/webhost.rs	webhost::fault_tests::a_zoom_notch_reports_the_factor_the_engine_ended_up_at	include_str!	webhost.rs	P14	no
+crates/bt-app/src/webhost.rs	webhost::machine_tests::the_host_asks_its_own_gate_before_it_issues_its_own_navigation	include_str!	webhost.rs	P14	no
+crates/bt-app/src/webhost.rs	webhost::refusal_card_tests::the_engine_is_only_ever_told_what_the_door_answered	include_str!	webhost.rs	P14	no
+crates/bt-app/src/webnav.rs	webnav::file_url_tests::no_file_url_is_compared_as_text	directory walk	(the file it reads)	P13	yes
+crates/bt-app/src/wsl.rs	wsl::tests::nothing_in_this_module_boots_a_distribution	runtime fs read	(the file it reads)	P14	no
+crates/bt-layout/tests/red_lines.rs	sources	dir walk	bt-layout/src, NON-recursive (plan 3.3, latent)	P8	no
+crates/bt-layout/tests/red_lines.rs	the_solver_uses_no_floating_point	dir walk	f32/f64 in the solver	P8	no
+crates/bt-platform/src/app_delegate.rs	tests::PROVIDER	include_str!	macos_services.rs	P14	no
+crates/bt-platform/src/hang.rs	tests::SOURCE	include_str!	hang.rs	P14	no
+crates/bt-platform/src/ime_observation.rs	tests::ime_observation_reads_only_the_supplied_window	include_str!	ime_observation.rs	P14	no
+crates/bt-platform/src/ime_trace.rs	tests::ime_native_outbound_sites_are_traced	include_str!	lib.rs	P14	no
+crates/bt-platform/src/instance.rs	tests::the_runtime_directory_is_asked_of_the_system_and_not_of_the_environment	include_str!	instance.rs	P14	no
+crates/bt-platform/src/instance.rs	tests::the_unix_claim_is_a_flock_on_a_descriptor_in_a_private_runtime_directory	include_str!	instance.rs	P14	no
+crates/bt-platform/src/lib.rs	compositor_arms_tests::MACOS	include_str!	macos_compose.rs	P14	no
+crates/bt-platform/src/lib.rs	compositor_arms_tests::ROOT	include_str!	lib.rs	P14	no
+crates/bt-platform/src/lib.rs	compositor_arms_tests::WEBVIEW	include_str!	webview.rs	P14	no
+crates/bt-platform/src/lib.rs	deferred_service_tests::PORTABLE	include_str!	portable_impl.rs	P14	no
+crates/bt-platform/src/lib.rs	macos_attention_signature_tests::LAUNCH_UNIX	include_str!	launch_pipe_unix.rs	P14	no
+crates/bt-platform/src/lib.rs	macos_attention_signature_tests::NEITHER	include_str!	attention_pipe_portable.rs	P14	no
+crates/bt-platform/src/lib.rs	macos_attention_signature_tests::PEER	include_str!	peer_unix.rs	P14	no
+crates/bt-platform/src/lib.rs	macos_attention_signature_tests::UNIX_ARM	include_str!	attention_pipe_unix.rs	P14	no
+crates/bt-platform/src/lib.rs	macos_attention_signature_tests::WINDOWS_ARM	include_str!	attention_pipe.rs	P14	no
+crates/bt-platform/src/lib.rs	macos_dialog_backend_tests::MACOS	include_str!	macos_dialogs.rs	P14	no
+crates/bt-platform/src/lib.rs	macos_dialog_backend_tests::PORTABLE	include_str!	portable_impl.rs	P14	no
+crates/bt-platform/src/lib.rs	macos_notification_backend_tests::MACOS	include_str!	macos_notify.rs	P14	no
+crates/bt-platform/src/lib.rs	macos_notification_backend_tests::PORTABLE	include_str!	portable_impl.rs	P14	no
+crates/bt-platform/src/lib.rs	macos_notification_backend_tests::WINDOWS	include_str!	lib.rs	P14	no
+crates/bt-platform/src/lib.rs	macos_player_signature_tests::MACOS_ARM	include_str!	macos_player.rs	P14	no
+crates/bt-platform/src/lib.rs	macos_player_signature_tests::OFF_WINDOWS	include_str!	video_portable.rs	P14	no
+crates/bt-platform/src/lib.rs	macos_player_signature_tests::WINDOWS_ARM	include_str!	video/engine.rs	P14	no
+crates/bt-platform/src/lib.rs	macos_process_door_tests::HANDOFF	include_str!	handoff.rs	P14	no
+crates/bt-platform/src/lib.rs	macos_process_door_tests::MACOS_FILES	include_str!	macos_files.rs	P14	no
+crates/bt-platform/src/lib.rs	macos_process_door_tests::MACOS_FONTS	include_str!	macos_fonts.rs	P14	no
+crates/bt-platform/src/lib.rs	macos_process_door_tests::PORTABLE	include_str!	portable_impl.rs	P14	no
+crates/bt-platform/src/lib.rs	macos_process_door_tests::WHOLE_FILE	include_str!	lib.rs	P14	no
+crates/bt-platform/src/lib.rs	macos_stdio_tests::PORTABLE	include_str!	portable_impl.rs	P14	no
+crates/bt-platform/src/lib.rs	macos_video_signature_tests::MACOS_ARM	include_str!	macos_video.rs	P14	no
+crates/bt-platform/src/lib.rs	macos_video_signature_tests::OFF_WINDOWS	include_str!	video_portable.rs	P14	no
+crates/bt-platform/src/lib.rs	macos_video_signature_tests::WINDOWS_ARM	include_str!	video/mod.rs	P14	no
+crates/bt-platform/src/lib.rs	macos_window_backend_tests::MACOS	include_str!	macos_impl.rs	P14	no
+crates/bt-platform/src/lib.rs	macos_window_backend_tests::PORTABLE	include_str!	portable_impl.rs	P14	no
+crates/bt-platform/src/lib.rs	macos_window_backend_tests::a_display_is_named_by_its_uuid_on_macos_and_by_its_adapter_on_windows	include_str!	lib.rs	P14	no
+crates/bt-platform/src/lib.rs	native_window_door_tests::a_stand_in_window_is_only_named_by_tests	dir walk	NativeWindow::stand_in, over the whole crates/ tree retained to src	P12	no
+crates/bt-platform/src/lib.rs	native_window_door_tests::crate_sources	dir walk	bt-platform/src, recursive (plan 3.1)	P12	no
+crates/bt-platform/src/lib.rs	native_window_door_tests::each_native_window_constructor_is_gated_to_its_own_platform	include_str!	lib.rs	P14	no
+crates/bt-platform/src/lib.rs	native_window_door_tests::the_native_window_door_has_no_windows_type_in_its_signature	dir walk	every public declaration of bt-platform	P12	no
+crates/bt-platform/src/lib.rs	platform_door_tests::SOURCE	include_str!	lib.rs	P14	no
+crates/bt-platform/src/lib.rs	quiet_door_tests::no_command_is_built_outside_the_quiet_door	dir walk	Command::new outside bt_platform::quiet	P12	no
+crates/bt-platform/src/lib.rs	quiet_door_tests::no_command_is_built_outside_the_quiet_door	runtime fs read	lib.rs	P14	no
+crates/bt-platform/src/lib.rs	quiet_door_tests::shipped_sources	dir walk	crates/ retained to src, excluding bin/tests/target	P12	no
+crates/bt-platform/src/lib.rs	update_check_transport_tests::MACOS	include_str!	macos_http.rs	P14	no
+crates/bt-platform/src/lib.rs	update_check_transport_tests::PORTABLE	include_str!	http_portable.rs	P14	no
+crates/bt-platform/src/lib.rs	update_check_transport_tests::WHOLE_FILE	include_str!	lib.rs	P14	no
+crates/bt-platform/src/lib.rs	update_check_transport_tests::WINDOWS	include_str!	http.rs	P14	no
+crates/bt-platform/src/lib.rs	visual_layer_tests::a_pages_floor_comes_off_the_glass_with_the_page	include_str!	lib.rs	P14	no
+crates/bt-platform/src/lib.rs	visual_layer_tests::a_pages_floor_is_minted_by_whoever_first_places_it_and_not_by_the_engine	include_str!	lib.rs	P14	no
+crates/bt-platform/src/lib.rs	visual_layer_tests::a_pages_floor_is_placed_and_removed_with_the_page_and_never_alone	include_str!	lib.rs	P14	no
+crates/bt-platform/src/lib.rs	visual_layer_tests::every_web_visual_belongs_to_one_page_and_is_reached_by_naming_it	include_str!	lib.rs	P14	no
+crates/bt-platform/src/lib.rs	visual_layer_tests::the_compositor_adds_the_web_visual_directly_above_its_own_ground	include_str!	lib.rs	P14	no
+crates/bt-platform/src/lib.rs	visual_layer_tests::the_skirt_commits_on_the_window_clock_and_not_on_the_frames	include_str!	lib.rs	P14	no
+crates/bt-platform/src/lib.rs	watch_contract_tests::MACOS	include_str!	macos_watch.rs	P14	no
+crates/bt-platform/src/lib.rs	watch_contract_tests::PORTABLE	include_str!	portable_impl.rs	P14	no
+crates/bt-platform/src/lib.rs	watch_contract_tests::WHOLE_FILE	include_str!	lib.rs	P14	no
+crates/bt-platform/src/lib.rs	web_host_contract_tests::MACOS	include_str!	macos_webview.rs	P14	no
+crates/bt-platform/src/lib.rs	web_host_contract_tests::PORTABLE	include_str!	webview_portable.rs	P14	no
+crates/bt-platform/src/lib.rs	web_host_contract_tests::WINDOWS	include_str!	webview.rs	P14	no
+crates/bt-platform/src/lib.rs	web_security_tests::source	include_str!	webview.rs	P14	no
+crates/bt-platform/src/macos_app.rs	tests::SOURCE	include_str!	macos_app.rs	P14	no
+crates/bt-platform/src/macos_menu.rs	tests::a_declined_clipboard_row_comes_back_on_the_bars_own_sender	include_str!	macos_menu.rs	P14	no
+crates/bt-platform/src/macos_menu.rs	tests::the_dock_menu_is_handed_over_autoreleased	include_str!	macos_menu.rs	P14	no
+crates/bt-platform/src/macos_menu.rs	tests::the_menu_bar_does_not_end_the_process_where_it_stands	include_str!	macos_menu.rs	P14	no
+crates/bt-platform/src/msix.rs	tests::every_deployment_this_module_makes_announces_itself_to_the_shell	runtime fs read	msix.rs	P17	no
+crates/bt-platform/src/webview.rs	third_door_shape_tests::DOOR	include_str!	macos_webview.rs	P14	no
+crates/bt-pty/src/lib.rs	tests::SOURCE	include_str!	lib.rs	P14	no
+crates/bt-pty/src/lib.rs	tests::input_dump_off_write_path_has_only_the_option_gate	include_str!	lib.rs	P14	no
+crates/bt-render/src/lib.rs	tests::crate_sources	dir walk	bt-render/src, NON-recursive (plan 3.3, latent)	P8	no
+crates/bt-render/src/lib.rs	tests::every_chip_the_renderer_floats_over_a_body_is_struck_from_the_palette	include_str!	lib.rs	P8	no
+crates/bt-render/src/lib.rs	tests::every_headless_device_in_a_test_is_taken_through_the_lock	include_str!	lib.rs	P8	no
+crates/bt-render/src/lib.rs	tests::every_lane_prepares_into_the_one_shared_atlas	include_str!	lib.rs	P8	no
+crates/bt-render/src/lib.rs	tests::nothing_but_the_line_may_count_a_repack	include_str!	lib.rs	P8	no
+crates/bt-render/src/lib.rs	tests::source_without_prose	include_str!	lib.rs	P8	no
+crates/bt-render/src/lib.rs	tests::the_band_accessors_are_given_a_seat_and_never_take_one	include_str!	lib.rs	P8	no
+crates/bt-render/src/lib.rs	tests::the_wash_is_struck_over_the_picture_and_under_the_blocks_own_chrome	include_str!	lib.rs	P8	no
+crates/bt-render/src/lib.rs	web_holes::a_layers_own_hole_is_punched_after_the_face_that_layer_draws	include_str!	lib.rs	P8	no
+crates/bt-render/src/lib.rs	web_holes::the_hole_is_drawn_over_the_seat_and_under_everything_over_the_window	include_str!	lib.rs	P8	no
+crates/bt-term/tests/shell_integration_cmd.rs	shell_integration_source	runtime fs read	../../crates/bt-app/src/shell_integration.rs	P17	no
+crates/bt-term/tests/shell_integration_wsl.rs	shell_integration_source	runtime fs read	../../crates/bt-app/src/shell_integration.rs	P17	no
+scripts/check-adapter-boundary.ps1	the file list at the head of the script	script: named file list	crates/bt-term/src/adapter.rs;crates/bt-term/src/cell_capture.rs	P17	no
+scripts/check-doc-words.ps1	the $files list	script: named file list	the nine reader-facing documents; the rule's Rust twin is i18n.rs	P17	no
+scripts/check-screenshots.ps1	the manifest and page reads	script: named file read	docs/screenshots/README.md and the pages that embed a shot	P17	no
+scripts/check-shortcuts-table.ps1	the docs/shortcuts.md half	script: named file read	docs/shortcuts.md against BINDINGS in shortcuts.rs	P17	no
+scripts/dev/bt-app-graph.py	whole_test / contexts / the module walk	script: dir walk and named files	bt-app's module graph, rooted at main.rs	P0	no
+scripts/dev/bt-app-split-freshness.py	manifest() and reference_maps()	script: named files out of git blobs	the two impl Runtime blocks in main.rs	P0	no
+scripts/dev/bt-app-split-table.py	the row manifest	script: named modules	the plan's 7.2 row table	P0	no
