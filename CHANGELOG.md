@@ -6,7 +6,10 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
-Nothing yet.
+### Changed
+
+- In the Markdown preview, a paragraph turns into its source when a click lands,
+  not while a selection is being drawn across it.
 
 ## 0.4.3-preview — 2026-09-21
 

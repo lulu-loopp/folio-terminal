@@ -108,6 +108,7 @@ mod present_gate;
 mod preview;
 mod preview_edit;
 mod preview_live;
+mod preview_press;
 mod preview_provenance;
 mod preview_select;
 mod preview_text;
@@ -23543,15 +23544,27 @@ struct PreviewTextDrag {
     /// `Ctrl` let go of during the click, or pressed during it, would otherwise
     /// change the destination underneath a gesture already begun.
     control: bool,
-    /// **Whether this gesture is drawing the caret's selection** rather than the
-    /// page's pieces (T5 ④, §7.1.3t).
+    /// **What the press named, waiting for the gesture to end** (owner's ruling
+    /// 2026-09-21; [`preview_press`]).
     ///
-    /// Decided by the press and carried, for [`Self::control`]'s reason: which
-    /// of the two models a drag is extending must not be able to change under a
-    /// hand that is already moving — a page that became editable mid-drag,
-    /// because the whole file it was asked for landed, would otherwise swap the
-    /// anchor out from under the selection being drawn.
-    caret: bool,
+    /// The caret it would place, or the page's empty ground — and `None` for the
+    /// two presses that have no caret to place at all: one that landed on a link
+    /// and one on a page nobody can type into.
+    ///
+    /// Decided by the press and carried, for [`Self::control`]'s reason: what a
+    /// gesture means must not be able to change under a hand that is already
+    /// moving — a page that became editable mid-drag, because the whole file it
+    /// was asked for landed, would otherwise turn a reader's drag into an
+    /// editor's halfway through.
+    pressed: Option<preview_press::Pressed>,
+    /// **The last byte of the file this gesture reached**, in the page's own
+    /// terms.
+    ///
+    /// Kept because the release is what spends the record and the button may
+    /// come up where there is no byte to ask for: a drag that ran off the bottom
+    /// of the pane, which is how the last line of a document is selected, would
+    /// otherwise let go and collapse to where it began.
+    reached: Option<usize>,
 }
 
 /// The press that may still turn out to be the second or third of a run.
@@ -61486,6 +61499,16 @@ impl Runtime<'_> {
     /// furniture standing over the page: the body's bar, a wide block's bar and
     /// a picture are all asked before it, exactly as they were before there was
     /// anything under them to select.
+    ///
+    /// **And it changes nothing the reader can see** (owner's report and ruling
+    /// 2026-09-21, `docs/DESIGN.md`'s entry of that date). It used to put the
+    /// caret in the page where it landed, so the block under the pointer put its
+    /// marks back and re-flowed the instant the button went down, and went on
+    /// changing shape under a hand still drawing a selection across it. What it
+    /// does now is **record** what it would do ([`preview_press::Pressed`]) and
+    /// arm the drag; [`Self::release_preview_text`] spends the record. The page
+    /// keeps the face it had, and what the gesture draws in the meantime is the
+    /// page's own pieces — the model that needs no block to be source.
     fn press_preview_text(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
         let Some(surface) = self.preview_rendered_surface_at(position) else {
             return Ok(false);
@@ -61518,71 +61541,66 @@ impl Runtime<'_> {
             .preview_text_clicks
             .register(surface, point, Instant::now());
         let grain = preview_text_grain(clicks);
+        // **The record, and it is the whole of what this press does to the
+        // page** (owner's ruling 2026-09-21). One of two things is named — a
+        // byte of the file, or none at all, which is the page's empty ground
+        // (owner's ruling 2026-09-10) — and neither is acted on until the
+        // gesture ends.
+        //
+        // **A press on a link is not empty ground**, which is why the second arm
+        // asks `caret_at` and not `placing`: the link's own press leaves
+        // `placing` empty while standing on letters the file spells. It records
+        // nothing, because it has no caret to place; so does a press on a page
+        // nobody can type into, which is a reader's and draws pieces.
+        let pressed = match placing {
+            Some(offset) => Some(preview_press::Pressed::byte(offset, grain, shift)),
+            None if live && caret_at.is_none() => Some(preview_press::Pressed::Ground),
+            None => None,
+        };
         // Shift-click extends from wherever the selection already was, which is
         // the quick edit's own gesture and the one that makes a long selection
         // possible without a drag that outruns the pane.
         let standing = self
             .preview_pane(surface)
             .and_then(|pane| pane.md_select)
-            .filter(|_| shift && placing.is_none());
-        if let Some(offset) = placing {
-            if live {
-                self.place_preview_caret_on(surface, offset, shift)?;
-                // **And the grain of a repeated press survives the new model**
-                // (§7.31 ⑦, said in the caret's own coordinate). A double click
-                // in a rendered page took a word and a triple click took a
-                // paragraph before this ticket, and a page that lost both the
-                // day it became editable would be a page that had traded a
-                // gesture for a gesture. A shift-press is an extension and has
-                // its own grain already.
-                if !shift {
-                    self.widen_preview_caret(surface, grain)?;
-                }
-            } else {
-                // **The press that buys the file keeps the caret it asked for**
-                // (T2 ③, T5 ①). The read is a read — the bytes are on the worker
-                // for as long as a disk takes — and the alternative is a reader
-                // clicking, watching nothing happen, and clicking again. It is
-                // spent by [`Self::settle_preview_caret`] on the frame the body
-                // lands.
-                self.preview_pane_mut(surface).md_caret_wanted = Some(offset);
-            }
-        } else {
-            // **A press on the page's empty ground renders it again** (owner's
-            // ruling 2026-09-10). The margin beside a block, the ground under
-            // the last one: a press there names no byte of the file, so there is
-            // no caret to place and — until this ruling — nothing happened at
-            // all, which left the reader with one paragraph still wearing its
-            // markup and no gesture but `Esc` to put it back. It is the second
-            // of [`Self::leave_preview_page`]'s three, and the caret is kept:
-            // pressing the ground does not move it, it only stops drawing the
-            // block it stands in as source.
-            //
-            // **A press on a link is not empty ground**, which is why this asks
-            // `caret_at` and not `placing`: the link's own press leaves
-            // `placing` empty while standing on letters the file spells.
-            let left = live && caret_at.is_none();
-            if left {
-                self.leave_preview_page(surface);
-            }
-            // **The piece selection, for a page with no caret in it** (research
-            // §10 Q3): a document this window will not edit — truncated, lossy,
-            // over the cap, a diff — is still a page to read and to copy out of,
-            // and this is the model that reads it.
-            let Some(place) = self.preview_place_at(surface, position) else {
-                if left {
-                    // The page has changed shape under the press even though the
-                    // press named nothing, so it is drawn again here rather than
-                    // at the foot of this function, which this leaves by.
-                    self.repaint_preview()?;
-                }
-                return Ok(caret_at.is_some() || left);
-            };
+            .filter(|_| shift);
+        if pressed.is_some() && !shift {
+            // **A plain press lets go of what was selected**, and that is the
+            // one thing left that happens at once: dropping a highlight moves no
+            // caret and turns no block into source, and a selection the last
+            // gesture left standing would otherwise go on being drawn over the
+            // one this gesture is drawing (the caret answers before the pieces
+            // do, everywhere).
+            self.drop_preview_selection(surface);
+        }
+        // **Every gesture draws the page's own pieces now** (this ruling): the
+        // caret has not moved, so the caret model has nothing to draw, and the
+        // piece model is the one that needs no block to be source. It is also
+        // the model a page with no caret in it has always used — a document this
+        // window will not edit, truncated, lossy, over the cap, a diff — so a
+        // reader's drag and an editor's draw the same way while they are in
+        // flight (research §10 Q3).
+        //
+        // **Except inside the block already drawn as source**, which is the one
+        // patch of a live page with no pieces under it: it is drawn from the
+        // file's own bytes and pushes no [`PreviewTextSite`]s, so the nearest
+        // piece to a press inside it is in the paragraph above or below. A
+        // gesture there draws nothing until the caret it recorded lands.
+        let mut drew = false;
+        if !self.preview_press_lands_in_the_source_block(surface, caret_at)
+            && let Some(place) = self.preview_place_at(surface, position)
+        {
             let selection = match standing {
                 Some(was) => preview_select::Selection { head: place, ..was },
                 None => preview_select::Selection::collapsed(place, grain),
             };
             self.preview_pane_mut(surface).md_select = Some(selection);
+            drew = true;
+        }
+        if pressed.is_none() && link.is_none() && !drew {
+            // Nothing to spend, nothing drawn and no link to follow: the press
+            // is not this page's, and the ladder goes on underneath it.
+            return Ok(false);
         }
         self.preview_text_drag = Some(PreviewTextDrag {
             surface,
@@ -61594,15 +61612,63 @@ impl Runtime<'_> {
             // **The hand-over modifier, not `Ctrl` by name** (§13.45 ①): `Ctrl`
             // here, `⌘` on a Mac, read off what the hand is holding.
             control: input::pointer_chord_held(self.window.modifiers_held),
-            // A press that placed a caret drags the caret's own selection, in
-            // the file's bytes; a press on a link that did not place one becomes
-            // one the moment it travels, because a drag across a page with a
-            // caret in it is one model and not two. A press still waiting for
-            // its body has no caret to drag yet, and the drag is a reader's.
-            caret: live && caret_at.is_some(),
+            pressed,
+            reached: None,
         });
         self.repaint_preview()?;
         Ok(true)
+    }
+
+    /// **A plain press lets go of what was selected**, on whichever of the two
+    /// models was holding it (owner's ruling 2026-09-21).
+    ///
+    /// The caret itself does not move — its anchor comes to it, which is what
+    /// "nothing is selected" means ([`preview_edit::EditCaret`]) — so the block
+    /// drawn as source is the block that was already drawn as source. That is
+    /// what lets this happen at the press while everything else waits for the
+    /// release: a highlight going out is not the page changing shape.
+    ///
+    /// A *shift*-press is an extension and never reaches here: what it extends
+    /// from is the very anchor this would drop.
+    fn drop_preview_selection(&mut self, surface: PreviewSurface) {
+        let pane = self.preview_pane_mut(surface);
+        pane.caret.anchor = pane.caret.caret;
+        pane.md_select = None;
+    }
+
+    /// **Whether a press landed inside the block the page is already drawing as
+    /// source** — the one patch of a live page that has no rendered pieces under
+    /// it.
+    ///
+    /// Asked in seats rather than in ranges ([`preview_live::caret_seat`]) so
+    /// that the two boundary positions a range cannot tell apart — the end of an
+    /// unterminated last block, and the blank line after a paragraph — are
+    /// answered here exactly as the page answers them when it decides what to
+    /// draw.
+    fn preview_press_lands_in_the_source_block(
+        &self,
+        surface: PreviewSurface,
+        offset: Option<usize>,
+    ) -> bool {
+        let Some(offset) = offset else {
+            return false;
+        };
+        let Some(caret) = self.preview_live_caret(surface) else {
+            return false;
+        };
+        let Some(content) = self
+            .preview_buffer_on(surface)
+            .and_then(|buffer| buffer.content.as_deref())
+        else {
+            return false;
+        };
+        let Some(PreviewDocument::Markdown { ranges, .. }) =
+            self.preview_pane(surface).map(|pane| &pane.doc)
+        else {
+            return false;
+        };
+        let standing = preview_live::caret_seat(content, ranges, caret.caret);
+        standing.block().is_some() && standing == preview_live::caret_seat(content, ranges, offset)
     }
 
     /// **Whether a press on this surface may put a caret in the page** (T5 ①).
@@ -61797,6 +61863,14 @@ impl Runtime<'_> {
     /// It owns the pointer **outside** the page it began on, for the reason the
     /// quick edit's own drag does: a selection that stopped extending the moment
     /// the hand left the pane would make selecting the last line a matter of aim.
+    ///
+    /// **It moves no caret** (owner's ruling 2026-09-21). It used to, on a page
+    /// with a caret in it, and that is half of the report this ruling answers: a
+    /// caret dragged through a document takes the source block with it, so every
+    /// paragraph the hand crossed put its marks back and re-flowed as the
+    /// pointer arrived. What the drag does now is remember the byte it has
+    /// reached, for [`Self::release_preview_text`] to spend, and extend the
+    /// rendered selection that is being drawn over the page as it stands.
     fn drag_preview_text(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
         let scale = self.window.renderer.metrics().scale_factor;
         let Some(drag) = self.preview_text_drag.as_mut() else {
@@ -61805,7 +61879,7 @@ impl Runtime<'_> {
         let surface = drag.surface;
         let crossed = drag.latch.travelled(position, scale);
         let begun = drag.latch.begun;
-        let caret_drag = drag.caret;
+        let spends = drag.pressed.is_some();
         if crossed {
             // A press that travelled is not half of a double click — J99's rule,
             // at this window's third double-click surface.
@@ -61817,21 +61891,15 @@ impl Runtime<'_> {
             // flashing a character of highlight under the hand.
             return Ok(true);
         }
-        // **A drag over a page with a caret in it extends the caret** (T5 ④):
-        // one selection model, in the file's own bytes, whichever end of it the
-        // hand is moving. The anchor is where the press landed and was written
-        // there by [`Self::place_preview_caret_on`], so nothing has to be
-        // remembered here beyond which model this gesture belongs to.
-        if caret_drag {
-            let Some(offset) = self.preview_md_file_offset_at(surface, position) else {
-                return Ok(true);
-            };
-            let standing = self.preview_pane(surface).map(|pane| pane.caret.caret);
-            if standing == Some(offset) {
-                return Ok(true);
-            }
-            self.place_preview_caret_on(surface, offset, true)?;
-            return Ok(true);
+        // **Where the gesture has got to, in the file's own bytes**, kept
+        // against the button coming up somewhere the page has no byte to name:
+        // off the bottom of the pane, which is how the last line of a document
+        // is selected.
+        if spends
+            && let Some(offset) = self.preview_md_file_offset_at(surface, position)
+            && let Some(drag) = self.preview_text_drag.as_mut()
+        {
+            drag.reached = Some(offset);
         }
         let Some(place) = self.preview_place_at(surface, position) else {
             return Ok(true);
@@ -61857,16 +61925,35 @@ impl Runtime<'_> {
     /// a click — it opens the link it landed on, if it landed on one, and lets
     /// go of whatever was selected either way — and a press that travelled is a
     /// selection, which `Copy on select` may put on the clipboard.
-    fn release_preview_text(&mut self, _position: PhysicalPosition<f64>) -> Result<bool> {
+    ///
+    /// **And it is where the press is finally answered** (owner's ruling
+    /// 2026-09-21): the gesture is over, so the page may change now. The record
+    /// is spent above the gate and not inside it, because the gate is about the
+    /// *link* and the caret is owed whichever side of it this gesture falls —
+    /// the same moment either way, which is what leaves 点=跟随链接、拖=选中
+    /// exactly as it was.
+    fn release_preview_text(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
         let Some(drag) = self.preview_text_drag.take() else {
             return Ok(false);
         };
+        let click = preview_press_opens_its_link(&drag.latch);
+        if let Some(pressed) = drag.pressed {
+            // Where the hand let go, or — for a button that came up off the page
+            // — the last byte the drag reached. A click spends neither.
+            let head = (!click)
+                .then(|| {
+                    self.preview_md_file_offset_at(drag.surface, position)
+                        .or(drag.reached)
+                })
+                .flatten();
+            self.spend_preview_press(drag.surface, pressed.spend(!click, head))?;
+        }
         // Asked of the *bytes* and not of the gesture, which is what keeps the
         // two presses that select without travelling: a double click has taken a
         // word and a shift-click has taken a stretch, and neither of them let go
         // of it by finishing.
         let selected = self.preview_selected_text(drag.surface).is_some();
-        if preview_press_opens_its_link(&drag.latch) {
+        if click {
             // **A click on blank glass lets go of the selection**, which is what
             // every reader expects of a click in a page of text — and the same
             // click on a link is still the link's.
@@ -61889,6 +61976,63 @@ impl Runtime<'_> {
             self.copy_preview_text_selection(drag.surface);
         }
         Ok(true)
+    }
+
+    /// **What the press recorded, spent now that the gesture is over** (owner's
+    /// ruling 2026-09-21) — the three answers [`Self::press_preview_text`] used
+    /// to give itself, given one gesture later and in one place.
+    ///
+    /// One door rather than three arms at the release, for
+    /// [`Self::seat_preview_caret`]'s own reason: what a press on this page
+    /// means is a sentence, and a second caller that spelled two thirds of it
+    /// would be a second answer to "when does a page change face".
+    ///
+    /// The three are unchanged in meaning. A page that edits takes the caret,
+    /// grown to the grain a repeated press asked for and then drawn out to where
+    /// the hand let go. **A page still waiting for the file it has just been
+    /// asked to buy** keeps the offset instead (T2 ③, T5 ①): the read is a read,
+    /// and the alternative is a reader clicking, watching nothing happen, and
+    /// clicking again — so the byte waits in `md_caret_wanted` until
+    /// [`Self::settle_preview_caret`] has a body to put it in. **A press that
+    /// named no byte of the file** takes the reader back out of the page
+    /// (owner's ruling 2026-09-10), keeping the caret where it stands.
+    fn spend_preview_press(
+        &mut self,
+        surface: PreviewSurface,
+        spend: preview_press::Spend,
+    ) -> Result<()> {
+        match spend {
+            preview_press::Spend::Ground => {
+                if self.preview_shows_live_markdown(surface) {
+                    self.leave_preview_page(surface);
+                    self.repaint_preview()?;
+                }
+            }
+            preview_press::Spend::Caret {
+                offset,
+                grain,
+                extend,
+                head,
+            } => {
+                if self.preview_shows_live_markdown(surface) {
+                    self.place_preview_caret_on(surface, offset, extend)?;
+                    // **And the grain of a repeated press survives the new
+                    // model** (§7.31 ⑦, said in the caret's own coordinate): a
+                    // double click in a rendered page takes a word and a triple
+                    // click takes a paragraph, exactly as they did before this
+                    // page could be typed into. A gesture that travelled is
+                    // drawn out from what the grain took, which is what keeps a
+                    // double click's word whole when the hand carries on.
+                    self.widen_preview_caret(surface, grain)?;
+                    if let Some(head) = head {
+                        self.place_preview_caret_on(surface, head, true)?;
+                    }
+                } else {
+                    self.preview_pane_mut(surface).md_caret_wanted = Some(offset);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// **What a rendered page's selection would put on the clipboard**, or
@@ -128347,6 +128491,11 @@ mod live_markdown_edit_tests {
     /// different file, and nowhere else. A fourth spelling of it is a ruling and
     /// not an edit.
     ///
+    /// **The ground's gesture is now spent at the release** (owner's ruling
+    /// 2026-09-21), which moves *when* it reaches this door and not which door
+    /// it reaches: the press records `Pressed::Ground` and
+    /// [`Runtime::spend_preview_press`] is what leaves.
+    ///
     /// MUTATION ①: drop the `leave_preview_page` call from the blur check and
     /// clicking into the terminal beside the pane leaves the block as source.
     /// MUTATION ②: key the empty-ground arm on `placing` instead of `caret_at`
@@ -128356,8 +128505,8 @@ mod live_markdown_edit_tests {
         for (door, what) in [
             ("    fn preview_key(", "`Esc`"),
             (
-                "    fn press_preview_text(",
-                "a press on the page's empty ground",
+                "    fn spend_preview_press(",
+                "a press on the page's empty ground, spent at the release",
             ),
             (
                 "    fn chrome_mouse_input(",
@@ -128407,7 +128556,9 @@ mod live_markdown_edit_tests {
         assert_eq!(
             window().matches("self.place_preview_caret_on(").count(),
             2,
-            "the press and the drag, and no third entrance beside them",
+            "the two ends of one spent gesture — where the press named and where \
+             the hand let go — and no entrance beside them (owner's ruling \
+             2026-09-21 took the press's own and the drag's away)",
         );
     }
 
@@ -128494,6 +128645,156 @@ mod live_markdown_edit_tests {
             body("    fn preview_selected_text(").contains("caret.selected(content)"),
             "and a caret selection copies the file's own bytes",
         );
+    }
+
+    /// RED — **(a) a press on a rendered page changes nothing the reader can
+    /// see** (owner's report and ruling 2026-09-21).
+    ///
+    /// The whole of the report, held where a machine with no screen can hold it:
+    /// the press's own body carries none of the writes that change a page's
+    /// face. It records what it would do ([`super::preview_press::Pressed`]) and
+    /// arms the gesture; the release spends the record.
+    ///
+    /// RED GATE: it was red on the shipped 0.4.3 build, where the press placed
+    /// the caret itself (`place_preview_caret_on`) and widened it
+    /// (`widen_preview_caret`) — which is the paragraph that put its marks back
+    /// the instant the button went down.
+    ///
+    /// MUTATION: put either call back into the press and this goes red while
+    /// every value test in [`super::preview_press`] stays green, which is the
+    /// shape of this defect exactly: the rule was right and the moment was
+    /// wrong.
+    #[test]
+    fn a_press_on_a_rendered_page_changes_nothing_the_reader_can_see() {
+        let press = body("    fn press_preview_text(");
+        for wrote in [
+            // The record is spent at the release and nowhere else — named first
+            // because it is the one door all the others are now behind.
+            "self.spend_preview_press(",
+            "self.place_preview_caret_on(",
+            "self.seat_preview_caret(",
+            "self.widen_preview_caret(",
+            "self.leave_preview_page(",
+            "md_caret_wanted = Some(",
+        ] {
+            assert!(
+                !press.contains(wrote),
+                "the press still does `{wrote}`, so the block under the pointer \
+                 changes face while the button is down",
+            );
+        }
+        for records in [
+            "preview_press::Pressed::byte(offset, grain, shift)",
+            "preview_press::Pressed::Ground",
+        ] {
+            assert!(
+                press.contains(records),
+                "the press no longer records `{records}` for the release to spend",
+            );
+        }
+    }
+
+    /// RED — **(b) and (c): the release is where a gesture is answered, and the
+    /// drag moves no caret** (owner's ruling 2026-09-21).
+    ///
+    /// Two halves of one sentence. The release hands the record and the shape of
+    /// the gesture — travelled or not, and the byte it let go over — to the one
+    /// door that spends it. The drag keeps the byte it has reached and nothing
+    /// else: it used to extend the caret itself, which is what took the source
+    /// block through every paragraph the hand crossed.
+    ///
+    /// RED GATE: red on 0.4.3, where `drag_preview_text` held a `caret_drag`
+    /// branch ending in `place_preview_caret_on` and the release spent nothing.
+    #[test]
+    fn the_release_spends_the_record_and_the_drag_only_remembers() {
+        let release = body("    fn release_preview_text(");
+        for reaches in ["pressed.spend(!click, head)", "self.spend_preview_press("] {
+            assert!(
+                release.contains(reaches),
+                "the release no longer reaches `{reaches}`, so the press is never \
+                 answered",
+            );
+        }
+        let drag = body("    fn drag_preview_text(");
+        assert!(
+            !drag.contains("self.place_preview_caret_on("),
+            "the drag moves the caret again, so the page re-flows under a hand \
+             that has not let go",
+        );
+        assert!(
+            drag.contains("drag.reached = Some(offset)"),
+            "the drag no longer remembers where it got to, so a button that comes \
+             up off the page collapses the selection it drew",
+        );
+    }
+
+    /// RED — **(d) a repeated press keeps its grain until the release, and (f)
+    /// a page still buying its file keeps its caret owed.**
+    ///
+    /// Both are the record carrying what the press knew: the repeat count is a
+    /// property of the press and of nothing else, and so is the byte a press on
+    /// a half-loaded page named. `md_caret_wanted` is counted rather than
+    /// described, for the entrance's own reason — it is written in exactly one
+    /// place, which is now the spend, and read in exactly one, which is
+    /// [`Runtime::settle_preview_caret`].
+    #[test]
+    fn the_grain_and_the_owed_caret_both_ride_on_the_record() {
+        let press = body("    fn press_preview_text(");
+        assert!(
+            press.contains("let grain = preview_text_grain(clicks);"),
+            "the press no longer classifies the repeat count it is recording",
+        );
+        let spend = body("    fn spend_preview_press(");
+        assert!(
+            spend.contains("self.widen_preview_caret(surface, grain)"),
+            "the release no longer grows the caret to the grain the press asked \
+             for, so a double click takes a character",
+        );
+        assert!(
+            spend.contains("md_caret_wanted = Some(offset)"),
+            "a press on a page still waiting for its file no longer keeps the \
+             caret it asked for",
+        );
+        assert_eq!(
+            window().matches("md_caret_wanted = Some(").count(),
+            1,
+            "one place owes the caret, counted here on purpose",
+        );
+        assert!(
+            body("    fn settle_preview_caret(").contains("md_caret_wanted"),
+            "and nothing spends it when the body lands",
+        );
+    }
+
+    /// RED — **(e) a press on a link places no caret, and the release still
+    /// follows it** (user ruling 点=留窗内, unchanged by the 2026-09-21 ruling).
+    ///
+    /// The two gestures share one button and the six-pixel latch is the whole of
+    /// what parts them, so the caret now landing at the release rather than at
+    /// the press must not have moved that seam. It has not: the record is built
+    /// from `placing`, which a plain press on a link leaves empty, so a link
+    /// press records nothing and the spend has nothing to do — and the link is
+    /// still opened by the same `preview_press_opens_its_link` gate it was.
+    #[test]
+    fn a_press_on_a_link_records_no_caret_and_the_release_still_follows_it() {
+        let press = body("    fn press_preview_text(");
+        assert!(
+            press.contains("let placing = caret_at.filter(|_| link.is_none() || shift);"),
+            "a plain press on a link no longer declines the caret",
+        );
+        assert!(
+            press.contains("let pressed = match placing {"),
+            "the record is built from something other than `placing`, so a link \
+             press may now put a caret in the page",
+        );
+        let release = body("    fn release_preview_text(");
+        let gate = release
+            .find("preview_press_opens_its_link(&drag.latch)")
+            .expect("the release still asks the latch which gesture this was");
+        let link = release
+            .find("self.open_preview_link(")
+            .expect("and still follows the link a click landed on");
+        assert!(gate < link, "the link is followed without asking the latch");
     }
 }
 
