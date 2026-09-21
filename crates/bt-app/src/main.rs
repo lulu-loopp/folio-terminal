@@ -21777,9 +21777,12 @@ fn rename_key(
 /// way, a scheme this window refuses — says nothing at all.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ControlClickHint {
-    /// `file:` at a readable file — `Ctrl` hands it to the system's handler.
+    /// A **web address** — `Ctrl` hands it to this machine's browser.
+    ///
+    /// It was a readable file's clause too, until audit 3 C-4 took the `open` verb away from
+    /// every path that came out of program output. A file says [`Self::Explorer`] now.
     DefaultApp,
-    /// `file:` at a folder — `Ctrl` shows it in Explorer instead.
+    /// `file:` at a file or a folder — `Ctrl` shows it where it lives instead.
     Explorer,
 }
 
@@ -21790,9 +21793,12 @@ impl ControlClickHint {
         verdict: &dyn Fn(&Path) -> Option<bt_term::PathVerdict>,
     ) -> Option<Self> {
         match hyperlink_activation(true, true, uri, namer, verdict) {
-            HyperlinkActivation::External(_) | HyperlinkActivation::Browser => {
-                Some(Self::DefaultApp)
-            }
+            HyperlinkActivation::Browser => Some(Self::DefaultApp),
+            // **A file says this now too** (audit 3 C-4). `Ctrl` on a reference a
+            // program printed shows it where it lives rather than opening it with
+            // whatever the machine has registered, and the sentence under the cells
+            // says the same thing it did for a folder, because it is now the same
+            // thing.
             HyperlinkActivation::Reveal(_) => Some(Self::Explorer),
             HyperlinkActivation::None
             | HyperlinkActivation::Page(_)
@@ -24147,10 +24153,6 @@ enum HyperlinkActivation {
     /// second opinion about what an address means is the one thing §7.1.5g ⑤
     /// forbids in as many words.
     Page(String),
-    /// A local file, handed to whatever the system has registered for it — the
-    /// files column's own way out ([`Runtime::open_local_path`]), which opens a
-    /// document and refuses a program.
-    External(PathBuf),
     /// A local file, opened the way this window opens every other file — the
     /// preview seat's own door, and the line inside it the reference named
     /// (§7.1.5j, `path:line[:col]`).
@@ -24161,7 +24163,20 @@ enum HyperlinkActivation {
     /// take the file and drop the line, which is what they did before a line
     /// could be spelled at all.
     Preview(PathBuf, Option<bt_transcript::paths::PrintedPathLocation>),
-    /// A local folder, which is Explorer's.
+    /// **A local file or folder, shown to the reader where it lives** — selected in Explorer, in
+    /// Finder, in whatever this desk's file manager is.
+    ///
+    /// It was a folder's arm alone until audit 3 C-4. What made it a file's too is **provenance**:
+    /// every path that reaches this table came out of program output, and a path that came out of
+    /// program output is never handed to the shell's `open` verb, because on Windows that verb is
+    /// whatever the machine has registered — and for `.py`, `.ahk`, `.pl`, `.rb` and a dozen more
+    /// on a stock install, what is registered is an interpreter. One `Ctrl`+click on a link whose
+    /// visible label an attacker chose would run it. Revealing executes nothing, on either
+    /// platform, whatever the file is.
+    ///
+    /// «Open with the default program» has not gone anywhere — it is still what the files column's
+    /// row menu and the preview head's ↗ spend, and those are surfaces where the *user* chose the
+    /// file. See [`Runtime::open_local_path`], the one door left to it.
     Reveal(PathBuf),
     /// A local folder, opened the way this window opens every other folder — the
     /// files column, pointed at it.
@@ -24407,6 +24422,17 @@ fn preview_link_answers_a_press(control: bool, target: &str, document: &Path) ->
 /// the ruling's: a folder may be named `site.html`, and Explorer's arm was
 /// settled a slice before the page arm existed.
 ///
+/// # And nothing here ever runs a program
+///
+/// Audit 3 C-4. `Ctrl` on a file used to answer `External`, which is
+/// `ShellExecuteW`'s `open` verb — whatever this machine has registered, and for
+/// `.py` on a stock install that is `py.exe "%L" %*`. The *label* of an `OSC 8`
+/// link is chosen by the program that printed it, so `notes.txt` could stand over
+/// a `.py` target and one `Ctrl`+click ran it. The arm is now
+/// [`HyperlinkActivation::Reveal`] for a file exactly as for a folder: this is
+/// the *terminal's* table, everything in it came out of a child process, and what
+/// a program printed is revealed, never run.
+///
 /// It is deliberately **not** asked of a share, nor of anything else this
 /// window may not read unasked. `bt_transcript::paths::may_read_unasked` is
 /// answered from the path's own spelling and this pane's own namespace, and the
@@ -24521,9 +24547,14 @@ fn hyperlink_activation(
             // a plain click on a link to a page now opens the page, which is
             // what was asked for.
             ClickIntent::Here => HyperlinkActivation::Preview(path, at),
-            // The table is one sentence with no exception in it — 平点 = the
-            // destination inside this window, Ctrl+click = hand it to the system.
-            ClickIntent::System => HyperlinkActivation::External(path),
+            // **And `Ctrl` shows it where it lives rather than opening it with
+            // whatever is registered** (audit 3 C-4). 平点 = the destination
+            // inside this window; Ctrl+click = hand it to the system — and for a
+            // path a *program* printed, the thing handed to the system is the
+            // file manager's selection, which never executes anything. The
+            // machine's `open` verb is still one gesture away, from the surfaces
+            // where the user chose the file.
+            ClickIntent::System => HyperlinkActivation::Reveal(path),
         };
     }
     refused
@@ -24669,7 +24700,6 @@ fn reference_card(
         HyperlinkActivation::None
         | HyperlinkActivation::Browser
         | HyperlinkActivation::Page(_)
-        | HyperlinkActivation::External(_)
         | HyperlinkActivation::Reveal(_)
         | HyperlinkActivation::Blocked => None,
     }
@@ -88778,13 +88808,14 @@ impl Runtime<'_> {
             // "no preview" card whose one button is the system's handler. A share
             // arrives here too and meets §7.1.3's own refusal, which is a card
             // this window already has words for.
-            // The one door out of this window that takes a *path* — the same one
-            // an unpreviewable file's card offers and a files row used to fall
-            // through to, and the same one that will not start a program.
-            HyperlinkActivation::External(path) => {
-                self.open_local_path(&path);
-            }
             HyperlinkActivation::Preview(path, at) => self.open_preview_at(path, at)?,
+            // **Shown where it lives, whatever it is** (audit 3 C-4). A folder took this arm from
+            // the beginning; a file takes it since the day `ShellExecuteW`'s `open` verb turned
+            // out to be an interpreter for half a dozen extensions nobody had listed. Nothing
+            // here starts a program on either platform — Explorer selects the row, Finder selects
+            // the icon — so a label an attacker chose buys a window opening and not a process.
+            // [`Runtime::open_local_path`] is one gesture away, from the surfaces where the
+            // *user* picked the file.
             HyperlinkActivation::Reveal(path) => {
                 self.reveal_in_explorer(&path);
             }
@@ -129848,17 +129879,19 @@ mod clipboard_path_tests {
     }
 }
 
-/// **The window thread never asks the disk about a path a program printed** (audit 3 C-2;
-/// `docs/DESIGN.md` 2026-09-20).
+/// **The window thread never asks the disk about a path a program printed, and what a program
+/// printed is revealed rather than run** (audit 3, C-2 and C-4; `docs/DESIGN.md` 2026-09-20).
 ///
-/// A reference scraped out of a child process's output is answered from a ledger a *worker*
-/// filled. The value half of the rule is a table over the pure routing function; the structural
-/// half is this file read as text, because no value in the program can witness the *absence* of a
-/// call.
+/// Two rules, one module, because they are the two halves of one sentence about provenance: a
+/// reference scraped out of a child process's output is answered from a ledger a *worker* filled,
+/// and it is handed to the system as a thing to be **shown**. The value half of each rule is a
+/// table over the pure routing function; the structural half is this file read as text, because no
+/// value in the program can witness the *absence* of a call.
 #[cfg(test)]
 mod printed_path_provenance_tests {
     use super::{
-        HyperlinkActivation, Runtime, TerminalReference, answered_once, hyperlink_activation,
+        ClickIntent, HyperlinkActivation, Runtime, TerminalReference, answered_once,
+        hyperlink_activation,
     };
     use bt_layout::SeatId;
     use std::{cell::RefCell, path::Path};
@@ -130033,6 +130066,70 @@ mod printed_path_provenance_tests {
         }
     }
 
+    /// RED (audit 3 C-4) — **`Ctrl` on a path a program printed reveals it; it never hands it to
+    /// the shell's `open` verb, whatever the extension is.**
+    ///
+    /// The trigger in one line: an `OSC 8` link may show the label `notes.txt` over the target
+    /// `notes.py`, and on a stock Windows install that extension's registered open verb is the
+    /// Python launcher. Every extension below reaches the same arm, which is the point — the rule
+    /// is about where the path came from and not about how it is spelled.
+    ///
+    /// Red on `origin/main`: every row answers `External`, which is `ShellExecuteW`'s `open`.
+    #[test]
+    fn ctrl_on_a_printed_path_reveals_it_whatever_the_extension() {
+        for name in [
+            "notes.py",
+            "hook.ahk",
+            "run.pl",
+            "task.rb",
+            "build.lua",
+            "setup.wsb",
+            "notes.md",
+            "shot.png",
+            "page.html",
+        ] {
+            let target = std::path::PathBuf::from(format!(r"C:\work\{name}"));
+            let ledger = Ledger::new(&target, Some(local_file()));
+            assert_eq!(
+                hyperlink_activation(
+                    true,
+                    true,
+                    &format!("file:///C:/work/{name}"),
+                    bt_transcript::paths::PathNamer::ThisWindow,
+                    &|path| ledger.read(path),
+                ),
+                HyperlinkActivation::Reveal(target.clone()),
+                "{name} printed by a program is shown where it lives, never opened"
+            );
+        }
+    }
+
+    /// RED (audit 3 C-4) — **and the plain half is unchanged**: what this window can show, it
+    /// still shows.
+    #[test]
+    fn a_plain_click_on_a_printed_path_still_previews_it() {
+        for name in ["notes.md", "shot.png", "page.html", "notes.py"] {
+            let target = std::path::PathBuf::from(format!(r"C:\work\{name}"));
+            let ledger = Ledger::new(&target, Some(local_file()));
+            assert_eq!(
+                hyperlink_activation(
+                    false,
+                    true,
+                    &format!("file:///C:/work/{name}"),
+                    bt_transcript::paths::PathNamer::ThisWindow,
+                    &|path| ledger.read(path),
+                ),
+                HyperlinkActivation::Preview(target.clone(), None),
+                "{name} opens on the seat exactly as it did"
+            );
+        }
+        assert_eq!(
+            ClickIntent::of(false),
+            ClickIntent::Here,
+            "and the intent that chooses between the two halves is untouched"
+        );
+    }
+
     /// RED (audit 3 C-2) — **one resolution per subject, however many readers ask.**
     ///
     /// `pointer_moved` puts the same question to three surfaces — the folder flyout's trigger, the
@@ -130135,6 +130232,51 @@ mod printed_path_provenance_tests {
                     "{signature} reaches `{call}`, and every caller of it is on the window thread"
                 );
             }
+        }
+    }
+
+    /// RED GATE (audit 3 C-4) — **`Runtime::open_local_path` is unreachable from terminal output.**
+    ///
+    /// The provenance rule, held structurally, because no value can witness the absence of a call:
+    /// the arm that used to reach the shell's `open` verb from a printed reference is gone from
+    /// this file entirely, so there is no arm to route back through it by accident.
+    #[test]
+    fn nothing_a_program_printed_reaches_the_shells_open_verb() {
+        let gone = ["HyperlinkActivation", "::", "External"].concat();
+        assert!(
+            !SOURCE.contains(gone.as_str()),
+            "the arm that handed a printed path to `open_local_path` is back; what a program \
+             printed is revealed, never run"
+        );
+        let door = method("    fn activate_hyperlink(");
+        assert!(
+            !door.contains("open_local_path("),
+            "a click on terminal output reaches the tree's bridge again"
+        );
+        assert!(
+            door.contains("reveal_in_explorer("),
+            "and the arm a printed file takes is the one that shows it where it lives"
+        );
+    }
+
+    /// PIN (audit 3 C-4) — **the hover line prints the target and never the label.**
+    ///
+    /// An `OSC 8` link's visible text belongs to the program that printed it, so `notes.txt` may
+    /// stand over `notes.py`. The status line is built from the hit's `uri` — the *target* — and
+    /// this is the pin that says so, because the sentence a reader checks before pressing has to
+    /// be about the thing the press would reach.
+    #[test]
+    fn the_hover_line_is_built_from_the_target_and_not_from_the_cells() {
+        let line = method("    fn status_text_in(");
+        assert!(
+            line.contains("printable_address(&self.active.as_ref()?.uri)"),
+            "the status line must read the link's own target"
+        );
+        for label in ["display_text", "cell_text", "visible_text"] {
+            assert!(
+                !line.contains(label),
+                "the status line reads {label}, which is the program's to choose"
+            );
         }
     }
 

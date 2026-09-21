@@ -10275,7 +10275,7 @@ fn a_plain_click_stays_in_this_window_and_ctrl_hands_it_to_the_system() {
             matches!(reference, LocalImageActivation::Preview(_)),
         );
         let (link_leaves, reference_leaves) = (
-            matches!(link, HyperlinkActivation::External(_)),
+            matches!(link, HyperlinkActivation::Reveal(_)),
             matches!(reference, LocalImageActivation::External(_)),
         );
         assert_eq!(
@@ -10383,7 +10383,7 @@ fn a_click_routes_web_files_pages_folders_shares_and_unknown_schemes() {
             bt_transcript::paths::PathNamer::ThisWindow,
             &no_directories
         ),
-        HyperlinkActivation::External(PathBuf::from(r"C:\Users\me\phd-application-timeline.html")),
+        HyperlinkActivation::Reveal(PathBuf::from(r"C:\Users\me\phd-application-timeline.html")),
         "and Ctrl sends the page to whatever this machine opens pages with"
     );
     assert_eq!(
@@ -10405,7 +10405,7 @@ fn a_click_routes_web_files_pages_folders_shares_and_unknown_schemes() {
             bt_transcript::paths::PathNamer::ThisWindow,
             &no_directories
         ),
-        HyperlinkActivation::External(PathBuf::from(r"C:\Users\me\notes.md")),
+        HyperlinkActivation::Reveal(PathBuf::from(r"C:\Users\me\notes.md")),
         "and Ctrl hands that same file to the system instead"
     );
     assert_eq!(
@@ -10433,7 +10433,7 @@ fn a_click_routes_web_files_pages_folders_shares_and_unknown_schemes() {
                 })
             }
         ),
-        HyperlinkActivation::External(PathBuf::from(r"C:\repo\docs")),
+        HyperlinkActivation::Reveal(PathBuf::from(r"C:\repo\docs")),
         "a folder is Explorer's"
     );
     assert_eq!(
@@ -10493,7 +10493,7 @@ fn a_click_routes_web_files_pages_folders_shares_and_unknown_schemes() {
             bt_transcript::paths::PathNamer::ThisWindow,
             &no_directories
         ),
-        HyperlinkActivation::External(hosts),
+        HyperlinkActivation::Reveal(hosts),
         "and `Ctrl` hands it over exactly as it hands over a drive-rooted file"
     );
     for uri in [
@@ -10587,7 +10587,7 @@ fn a_distribution_share_is_named_only_by_the_pane_standing_in_it() {
             bt_transcript::paths::PathNamer::Pane(&ubuntu),
             &no_directories,
         ),
-        HyperlinkActivation::External(hosts),
+        HyperlinkActivation::Reveal(hosts),
         "and the pane standing in Ubuntu opens Ubuntu's own files exactly as before",
     );
 }
@@ -10662,7 +10662,7 @@ fn a_local_html_page_opens_as_a_page_and_nothing_that_merely_reads_like_one_does
                     bt_transcript::paths::PathNamer::ThisWindow,
                     &no_directories
                 ),
-                HyperlinkActivation::External(_)
+                HyperlinkActivation::Reveal(_)
             ),
             "and Ctrl still hands the page to this machine: {uri:?}"
         );
@@ -10675,7 +10675,7 @@ fn a_local_html_page_opens_as_a_page_and_nothing_that_merely_reads_like_one_does
             bt_transcript::paths::PathNamer::ThisWindow,
             &no_directories
         ),
-        HyperlinkActivation::External(PathBuf::from(r"C:\Program Files\report.html")),
+        HyperlinkActivation::Reveal(PathBuf::from(r"C:\Program Files\report.html")),
         "and it is the decoded path that travels, not the URI"
     );
     // The real extension, never a substring of the name: one of these is a
@@ -10723,7 +10723,7 @@ fn a_local_html_page_opens_as_a_page_and_nothing_that_merely_reads_like_one_does
                 })
             }
         ),
-        HyperlinkActivation::External(PathBuf::from(r"C:\sites\archive.html")),
+        HyperlinkActivation::Reveal(PathBuf::from(r"C:\sites\archive.html")),
         "a folder is Explorer's however it is named"
     );
     for control in [false, true] {
@@ -10998,10 +10998,13 @@ fn hyperlink_hover_delay_and_departure_are_event_driven() {
 /// clause, because `Ctrl` reaches the same call, this machine's registered
 /// handler for the address.
 ///
-/// MUTATIONS: ① fold the folder into the file's sentence and the second
-/// assertion goes red — a folder does not open in a default app, it is
-/// shown in Explorer; ② print the aside unconditionally and the narrow
-/// assertion goes red with the address truncated to fit a lesson.
+/// **And since audit 3 C-4 a local file says the folder's clause, not the web address's.**
+/// `Ctrl` on a reference a program printed shows it where it lives; the only row left that names
+/// this machine's registered handler is the web address, whose `Ctrl` half really is a browser.
+///
+/// MUTATIONS: ① give a file the `DefaultApp` clause again and the first assertion goes red —
+/// the line would be offering a verb the press no longer spends; ② print the aside
+/// unconditionally and the narrow assertion goes red with the address truncated to fit a lesson.
 #[test]
 fn the_hover_line_says_where_control_would_send_a_local_path() {
     fn settled(uri: &str, directory: bool) -> HyperlinkHover {
@@ -11024,7 +11027,8 @@ fn the_hover_line_says_where_control_would_send_a_local_path() {
         settled("file:///C:/notes/readme.md", false)
             .status_text(120)
             .as_deref(),
-        Some("file:///C:/notes/readme.md · Ctrl+click opens in default app")
+        Some("file:///C:/notes/readme.md · Ctrl+click shows it in Explorer"),
+        "a file a program printed is shown where it lives (audit 3 C-4), and the line says the          verb that actually runs"
     );
     assert_eq!(
         settled("file:///C:/notes", true)
@@ -11569,7 +11573,7 @@ fn a_verified_bare_path_reaches_the_five_armed_table_as_a_file_target() {
             readable_column,
             readable.clone(),
             HyperlinkActivation::Preview(readable.clone(), None),
-            HyperlinkActivation::External(readable.clone()),
+            HyperlinkActivation::Reveal(readable.clone()),
         ),
         (
             // A printed page is a destination inside this window since the
@@ -11578,7 +11582,7 @@ fn a_verified_bare_path_reaches_the_five_armed_table_as_a_file_target() {
             page_column,
             page.clone(),
             HyperlinkActivation::Preview(page.clone(), None),
-            HyperlinkActivation::External(page.clone()),
+            HyperlinkActivation::Reveal(page.clone()),
         ),
         // The prompt's own cwd is a directory that is really there, so it
         // earns the dotted rest — and a dotted rest is a promise. Plainly it
@@ -11728,7 +11732,7 @@ fn a_located_reference_carries_its_line_to_the_preview_arm_alone() {
             bt_transcript::paths::PathNamer::ThisWindow,
             &is_directory
         ),
-        HyperlinkActivation::External(readable.clone()),
+        HyperlinkActivation::Reveal(readable.clone()),
         "and the system's handler takes the file it always took"
     );
 
