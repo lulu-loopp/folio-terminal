@@ -119,5 +119,6 @@ webview::webview2_runtime_probe::a_local_page_reaches_only_its_own_folder
 shell_literal::tests::direct_crt_receives_the_exact_literal_after_the_program_token
 
 # T-B native config-link and executable-alias fixture needs symlink privilege.
-# The common filesystem policy is covered by T-A's injected metadata tests.
-attention_ownership::tests::attention_symlinked_configs_are_refused_and_executable_aliases_are_owned
+# The decision itself is pinned everywhere by the injected-facts test
+# attention_a_link_is_followed_only_inside_the_agents_own_folder.
+attention_ownership::tests::attention_a_linked_config_is_edited_at_its_target_inside_the_agents_folder

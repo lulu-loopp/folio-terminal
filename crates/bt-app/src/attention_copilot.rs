@@ -187,6 +187,10 @@ pub(crate) enum State {
     /// There is a file at our name and it could not be read as JSON. **Not** "absent": writing over
     /// a file this build cannot parse would destroy something somebody wrote by hand.
     Unreadable,
+    /// There is a readable file and **this build will not edit it**, for the reason carried: a
+    /// link out of the agent's own folder, a file shared by hard links, or a read-only one. See
+    /// `attention_hooks::Standing::Refused`.
+    Refused(&'static str),
 }
 
 /// The directory copilot keeps user configuration in, as **this environment** says it.
@@ -289,11 +293,31 @@ pub(crate) fn state() -> State {
     }
 }
 
+/// **The settings row's two facts, out of one read of the file.**
+///
+/// Whether this copy's marks are in it, and — when this build will not edit it at all — the reason
+/// the row says in place of `Off`. Two answers to "what does the row show" derived from one
+/// `State` rather than two reads, because a second read is a second answer (closure review R1).
+#[must_use]
+pub(crate) fn row_state() -> (bool, Option<&'static str>) {
+    match state() {
+        State::Installed => (true, None),
+        State::Refused(reason) => (false, Some(reason)),
+        State::Absent | State::Unreadable => (false, None),
+    }
+}
+
 /// The same question about a named file, so a test can ask it without a copilot installation on the
 /// machine it runs on.
 #[must_use]
 fn state_at(path: &Path) -> State {
-    let text = match crate::attention_hooks::standing(path) {
+    let config = match crate::attention_hooks::Config::resolve(path) {
+        Ok(config) => config,
+        // Read, and not ours to change. The row says which file it is looking at.
+        Err(crate::attention_hooks::Unresolved::Refused(reason)) => return State::Refused(reason),
+        Err(crate::attention_hooks::Unresolved::Unreadable) => return State::Unreadable,
+    };
+    let text = match config.standing() {
         // No file is the same answer to the only question being asked.
         crate::attention_hooks::Standing::Nothing => return State::Absent,
         // **Not `Absent`.** There is a file, and a row that said "not installed" about it would
@@ -452,8 +476,14 @@ fn owners(document: &Value) -> Result<Vec<PathBuf>, &'static str> {
             .as_array()
             .ok_or(crate::i18n::Text::AgentHooksSchemaUnknown.text())?
         {
+            // **Ownership is per entry** (closure review R4): an entry this build cannot decode is
+            // not Folio's, which is the same fact about this file as an entry that is plainly
+            // somebody else's — Folio's own hook file is written whole, so one entry that is not
+            // ours makes the file not ours, and it is left alone under its own sentence.
             paths.push(
-                entry_owner(entry)?
+                entry_owner(entry)
+                    .ok()
+                    .flatten()
                     .ok_or("a hook file of your own already stands under that name")?,
             );
         }
@@ -594,14 +624,32 @@ pub(crate) fn apply(decision: Decision, exe: &Path) -> Outcome {
 /// The same act on a named file — the seam the tests press, so that what they pin is this function
 /// and not a hook file belonging to whoever runs them.
 pub(crate) fn apply_at(path: &Path, decision: Decision, exe: &Path, data: &Path) -> Outcome {
+    match crate::attention_hooks::Config::resolve(path) {
+        Ok(config) => apply_resolved(&config, decision, exe, data),
+        Err(crate::attention_hooks::Unresolved::Refused(reason)) => Outcome::Refused(reason),
+        Err(crate::attention_hooks::Unresolved::Unreadable) => Outcome::Refused(UNREADABLE),
+    }
+}
+
+/// The same act on a configuration this operation has already resolved.
+///
+/// **Everything below the entry takes this value.** The path was resolved once, at the top; the
+/// read, the dated copy, the replace and the removal all name that one answer, and there is no
+/// second resolution on this path for a repointed link to slip through (re-review B1).
+pub(crate) fn apply_resolved(
+    config: &crate::attention_hooks::Config,
+    decision: Decision,
+    exe: &Path,
+    data: &Path,
+) -> Outcome {
     if let Err(reason) = ownership::stable_executable(Some(exe)) {
         return Outcome::Refused(reason);
     }
-    if !path.is_absolute() {
+    if !config.named().is_absolute() {
         return Outcome::Refused(crate::i18n::Text::AgentHooksRootUnstable.text());
     }
     let install = decision.installs();
-    let existing = match crate::attention_hooks::standing(path) {
+    let existing = match config.standing() {
         crate::attention_hooks::Standing::Text(text) => text,
         // Nothing there yet: the install creates the file, and there is nothing to keep beside it.
         crate::attention_hooks::Standing::Nothing => String::new(),
@@ -644,7 +692,7 @@ pub(crate) fn apply_at(path: &Path, decision: Decision, exe: &Path, data: &Path)
         }
         if standing.as_ref() != Some(&retained) {
             let text = serde_json::to_string_pretty(&retained).expect("JSON value");
-            if crate::attention_hooks::land(path, &existing, "json", format!("{text}\n").as_bytes())
+            if config.land(&existing, "json", format!("{text}\n").as_bytes())
                 != crate::attention_hooks::Landing::Landed
             {
                 return Outcome::Refused("the copilot hook file could not be written");
@@ -656,7 +704,8 @@ pub(crate) fn apply_at(path: &Path, decision: Decision, exe: &Path, data: &Path)
         if readiness() == Readiness::TooOld {
             return Outcome::Refused("copilot 1.0.26 or newer is needed for this");
         }
-        let root = path
+        let root = config
+            .named()
             .parent()
             .and_then(Path::parent)
             .expect("absolute hooks file");
@@ -679,14 +728,16 @@ pub(crate) fn apply_at(path: &Path, decision: Decision, exe: &Path, data: &Path)
         // second copy of these hooks that upstream also runs — every event fired twice, for as long
         // as the file sat there. `folio.json.bak-<date>` is not a `*.json`, which is what the
         // `"json"` below produces.
-        match crate::attention_hooks::land(path, &existing, "json", format!("{text}\n").as_bytes())
-        {
+        match config.land(&existing, "json", format!("{text}\n").as_bytes()) {
             crate::attention_hooks::Landing::Landed => {}
             crate::attention_hooks::Landing::NoDirectory => {
                 return Outcome::Refused("the copilot hooks directory could not be created");
             }
             crate::attention_hooks::Landing::NoBackup => {
                 return Outcome::Refused(crate::attention_hooks::NO_BACKUP);
+            }
+            crate::attention_hooks::Landing::Changed => {
+                return Outcome::Refused(crate::i18n::Text::AgentConfigChanged.text());
             }
             crate::attention_hooks::Landing::NotWritten => {
                 return Outcome::Refused("the copilot hook file could not be written");
@@ -700,7 +751,13 @@ pub(crate) fn apply_at(path: &Path, decision: Decision, exe: &Path, data: &Path)
         // **The whole file goes**, which is what "install then uninstall is the identity" means
         // when the file is one this build created: there was nothing there, and there is nothing
         // there again. The directory stays, because copilot's directory is not ours to remove.
-        if std::fs::remove_file(path).is_err() {
+        //
+        // Under every name that delivers it, which is `land`'s resolution: where this path is a
+        // link Folio resolved, the target is the file upstream loads — leaving it would leave
+        // Folio's hooks firing, and leaving the link alone would leave upstream a name that loads
+        // nothing. The second removal is best effort because the first may already have taken the
+        // only file there was (closure review R1).
+        if config.remove_file().is_err() {
             return Outcome::Refused("the copilot hook file could not be removed");
         }
         Outcome::Removed
@@ -835,10 +892,15 @@ mod tests {
             .join("../../target/tb-tests")
             .join(concat!("copilot-", "two-copies"));
         std::fs::create_dir_all(&root).unwrap();
-        let a = root.join("A space $ ` ' 中文.exe");
-        let b = root.join("B.exe");
-        std::fs::write(&a, b"A").unwrap();
-        std::fs::write(&b, b"B").unwrap();
+        // **Two folders, one file name.** An operand is Folio's only if its file name is one
+        // Folio installs itself under, which is how two real copies differ: same program, two
+        // places. The odd characters this fixture exists for move to the folder.
+        let a = root.join("A space $ ` ' 中文").join("folio.exe");
+        let b = root.join("B").join("folio.exe");
+        for copy in [&a, &b] {
+            std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+            std::fs::write(copy, b"a copy of Folio").unwrap();
+        }
         let path = root.join("settings.json");
         let _ = std::fs::remove_file(&path);
         assert_eq!(apply_to(&path, true, &a), Outcome::Installed);

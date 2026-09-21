@@ -1996,6 +1996,10 @@ pub enum Text {
     AgentHooksRootUnstable,
     AgentHooksTakeOver,
     AgentHooksLeftOther,
+    AgentConfigLink,
+    AgentConfigHardLink,
+    AgentConfigReadOnly,
+    AgentConfigChanged,
     ClaudeHooksFailedToast,
     // ── the focus card's height (§7.1.6b′, user ruling 2026-08-21) ──────────
     //
@@ -4698,6 +4702,26 @@ impl Text {
                 "Hooks kept for another Folio:",
                 "已为另一份 Folio 保留 hook：",
             ),
+            Self::AgentConfigLink => pick(
+                lang,
+                "This file is a link Folio will not write through.",
+                "此文件是链接，Folio 未写入。",
+            ),
+            Self::AgentConfigHardLink => pick(
+                lang,
+                "This file has hard links, possibly from a dotfile manager. Folio left it unchanged.",
+                "此文件存在硬链接，Folio 未做修改。",
+            ),
+            Self::AgentConfigReadOnly => pick(
+                lang,
+                "This file is read-only, or is not a regular file.",
+                "此文件为只读，或不是普通文件。",
+            ),
+            Self::AgentConfigChanged => pick(
+                lang,
+                "The file changed while Folio was working on it. Try again.",
+                "此文件在操作期间被改动，Folio 未写入。请重试。",
+            ),
             Self::ClaudeHooksFailedToast => pick(
                 lang,
                 "Claude Code's settings were not changed",
@@ -5279,7 +5303,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 739] = [
+    pub const ALL: [Self; 743] = [
         Self::CleanupArchiveExit,
         Self::CleanupArchiveReady,
         Self::CleanupArchiveIncomplete,
@@ -5853,6 +5877,10 @@ impl Text {
         Self::AgentHooksRootUnstable,
         Self::AgentHooksTakeOver,
         Self::AgentHooksLeftOther,
+        Self::AgentConfigLink,
+        Self::AgentConfigHardLink,
+        Self::AgentConfigReadOnly,
+        Self::AgentConfigChanged,
         Self::ClaudeHooksFailedToast,
         Self::RowFocusCardHeight,
         Self::DescFocusCardHeight,

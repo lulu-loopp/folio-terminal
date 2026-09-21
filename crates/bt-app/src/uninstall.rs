@@ -195,7 +195,7 @@ const INVENTORY: &[Mark] = &[
         name: "User configuration recovery copies",
         kind: Kind::Data,
         remover: Remover::RecoverySnapshots,
-        writer: "shell_integration.rs:replace_profile;attention_hooks.rs:land",
+        writer: "shell_integration.rs:replace_profile;attention_hooks.rs:Config::land",
     },
     Mark {
         name: "Unix runtime claims",
