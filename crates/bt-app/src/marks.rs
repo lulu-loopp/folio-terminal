@@ -1699,8 +1699,27 @@ impl ChromeSprite {
 /// matters at the bottom of the scale range and nowhere else: a two-pixel stroke on a
 /// three-pixel-radius dot leaves a hole, and a three-pixel one would quietly draw a filled disc —
 /// the exact pixels this distinction exists to avoid, arrived at by rounding.
+///
+/// **And the breath lands here too, for the same reason the shape does.** A
+/// waiting claim's dot pulses (`docs/DESIGN.md` §7.1.5b, 2026-07-18; the clock
+/// ruled 2026-09-20) and four surfaces draw that dot — the strip, the rail's
+/// rows, the card's head and the peek's schematic. A phase applied at four call
+/// sites is four chances to disagree about how loud a breath is, so the sample
+/// is handed in and spent once, here. `None` is every claim that does not pulse
+/// — [`crate::StatusClaim::pulses`] is the one place that decides which — and it
+/// draws the dot at full strength, which is what every dot did before this
+/// parameter existed.
+///
+/// On [`ChromeSprite::opacity`] and never mixed into the ink: the mark cache is
+/// keyed by mark and colour, so a breath written into the colour would mint a
+/// texture per frame. The halo obeys the same discipline one file over.
 #[must_use]
-pub fn status_dot_sprite(dot: crate::StatusDot, rect: [f32; 4], scale: f32) -> ChromeSprite {
+pub fn status_dot_sprite(
+    dot: crate::StatusDot,
+    rect: [f32; 4],
+    scale: f32,
+    pulse: Option<crate::seats::WaitPulse>,
+) -> ChromeSprite {
     let side = (rect[2] - rect[0]).min(rect[3] - rect[1]);
     let radius_px = (side / 2.0).round().max(1.0) as u32;
     let mark = if dot.hollow {
@@ -1714,7 +1733,9 @@ pub fn status_dot_sprite(dot: crate::StatusDot, rect: [f32; 4], scale: f32) -> C
     } else {
         ChromeMark::ControlPill { radius_px }
     };
-    ChromeSprite::new(mark, rect, dot.ink)
+    let mut sprite = ChromeSprite::new(mark, rect, dot.ink);
+    sprite.opacity = pulse.map_or(1.0, |pulse| pulse.dot);
+    sprite
 }
 
 /// **How wide the unsaved-edits dot is drawn** — [`bt_render::WINDOW_TAB_STATUS_DOT_LOGICAL_PX`]
@@ -4273,6 +4294,7 @@ mod tests {
                 },
                 rect,
                 scale,
+                None,
             );
             assert!(
                 matches!(filled.mark, ChromeMark::ControlPill { .. }),
@@ -4285,6 +4307,7 @@ mod tests {
                 },
                 rect,
                 scale,
+                None,
             );
             let ChromeMark::ControlPillRing {
                 radius_px,

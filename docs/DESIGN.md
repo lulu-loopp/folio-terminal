@@ -11214,6 +11214,13 @@ In 0.4.2 an older Folio PSReadLine copy caused the clock run to reread the 41 KB
 The App owns one optional installed-copy fact, read on the unread probe edge, successful install/removal, and each Terminal-page opening.
 First-run availability reads ProfilePrograms; card construction consumes one ready edge, rearmed by profile changes or an answered card.
 
+### 2026-09-20 — The waiting halo's rectangle, and the waiting dot's clock
+An outset decoration grows from the card *as drawn* and is never clamped a second time; the scroller's clamp crops the body, not the growth.
+The first card's top is the list's top exactly, so clamping the grown box cost the waiting halo its whole top outset — 6 device px at 200% — on every frame since the column existed; the flight shadows were the same shape.
+`ChromeSprite` carries no clip box and a chrome layer's marks are one draw under one scissor, so the growth is simply allowed: 3 logical px against the panel's own 6px top margin and its bottom one, empty ground either way.
+The status dot now breathes on the halo's clock and curve (the window's one 1.7s breath), one sample taken in `wait_pulse` and worn by the card's edge, the halo and all four dot surfaces; reduced motion answers each channel's own flat value — no halo, full dot.
+The dot had never pulsed because the mock-up's `.unreaddot.await` names `@keyframes fcpulse`, which the mock-up never defines: an undefined animation does nothing, and the Rust transcription inherited the name without a curve.
+
 ### 2026-09-20 — A name printed again is asked about again
 A printed path answered "no" used to stand until `OSC 133 D`, so a pane running one hours-long agent kept every denial for ever.
 The owner photographed the cost on next83: the agent named a file before writing it, then named it again over the finished file, dark.
@@ -11226,6 +11233,12 @@ The replay tail carries two facts: the bytes a DEC 2026 block holds back, and th
 Everything before `parser_tail_open_start` is the first and is released when the block ends; everything from it on is the second and stays.
 One function owns that release, and it never writes `parser_sequence_open` — the boundary parser alone says whether a sequence is open.
 The deadline arm used to clear both, so a resize seeded the canonical fork at Ground and printed the rest of an escape payload onto the grid.
+
+### 2026-09-20 (correction to the entry above) — The room below the list is 3px, not 6
+The sentence "3 logical px against the panel's own 6px top margin and its bottom one" was wrong about the bottom: the room under the list is `RAIL_NEW_MARGIN_TOP_LOGICAL_PX` + the rail's gap = 3 logical px, exactly what a decoration wants, and only the top has 6.
+The growth is rounded to device pixels and that margin is not — both from `3.0 * scale` — so at 125%, 150%, 225% and 250% the rounded growth exceeded the exact room and up to half a pixel of a bottom-clamped card's halo or flight shadow landed on the `+` row's top edge.
+A decoration now grows only into the room its layout gives it: the panel hands down the box it keeps empty around the list (its own rectangle, floored by the `+` row's top and, on the rail, ceilinged by the heading's foot) and `outset_reach` reconciles the wish with that box once, for all four sides together, floored to whole device pixels.
+One amount and not four, so a clamped card's ring stays concentric; a card anywhere but against the list's own rim pays nothing for this, and no scale that was already exact changed.
 
 ### 2026-09-20 — A save replaces the content and keeps what the file carried
 The preview editor writes a user document, so its save replaces the bytes and nothing else the file was carrying.
@@ -11254,3 +11267,35 @@ The rule is provenance, not a longer list: everything in the terminal's routing 
 "Open with the default program" survives only where the *user* chose the file — the files column's row menu and the preview head's ↗ — and `HyperlinkActivation::External` is gone from `bt-app` so no arm can route back to it by accident.
 At that user-chosen door the extension list is a floor and the machine is asked as well: `AssocIsDangerous` on the association and `SHGetFileInfo(SHGFI_EXETYPE)` on the file's own bytes. Said out loud: neither, and not `AssocQueryStringW` either, can tell an interpreter from an editor — `py.exe "%L" %*` and `notepad.exe "%1"` are the same shape — so the association questions harden that door and the provenance rule is what closes the finding.
 The hover line was already honest and is pinned so: it prints the link's target, never the cells the program drew.
+
+### 2026-09-20 — Folio installs its module only where the place is empty or its own
+The occupancy check lives inside `psreadline::install_checked`, the one writer, so no caller and no `RowState` can write around it.
+A leaf is Folio's when the assembly `Microsoft.PowerShell.PSReadLine.dll` is ours by bytes or by the `2.4.6-bt.` stamp, or when there is no assembly and every name in it is one this build writes; anything else is `InstalledCopy::Foreign`.
+`row_state` reads the disk fact before the stored invitation, so `RemovedElsewhere` can no longer offer `On` over a gallery module, and `RowState::NotOurs` darkens both verbs.
+`remove_from`'s rule — never take what Folio did not write — now binds the installer too, and the removal itself deletes the nine bundled names and drops the directory only while it is empty.
+The mixed leaf a previous Folio left (our module, PowerShellGet's `PSGetModuleInfo.xml`, `en-US\` and catalog beside it) is ours to update and not ours to delete; the sidecars stay and the cleanup door names them.
+
+### 2026-09-21 — A previewed local document is not walled off from the network
+The premise: §7.10 (2026-08-22) minted the local seat, and R1-10 (adversarial review 2026-09-08, compiled into a rule list by §13.29 ⑤) made "a local document reads its own folder and reaches no server" a rule of the product.
+It does not hold. No browser promises it — a `file://` page in Chrome, Edge or Safari may open http, WebSocket and WebRTC connections freely; what a browser restricts is what a local page may **read**, not what it may contact.
+Nor can it be kept: WebSocket is invisible to WebView2's `WebResourceRequested`, WebRTC is ungated on both engines, and `dns-prefetch`/`preconnect` leak a host name without making a request any pattern can match — short of switching scripts off, which would end interactive local previews, a thing people use.
+What stays: the `File`-mint refusals in `resource_request` and `content_rule_list`, as best-effort hygiene. They cost nothing, an ordinary web request from a local document is still refused, and nothing in the product promises more than that.
+What is not built: no document served by Folio with a CSP, no second URL grammar, no chase of the Windows WebSocket gap. Opening a local HTML file is the reader's own deliberate act, with a browser's risk.
+What arrives from strangers is mostly Markdown and text, which Folio renders itself with no script engine at all. `SECURITY.md`'s web-preview section says all of this where a reader meets it.
+
+### 2026-09-20 — A page that may not fetch may not open a socket; a stale gate is never hung; only the writer binds
+A seat's resource rule is about reaching a server, not about how: `NETWORK` carries `ws` and `wss` beside `http` and `https`, so a local or blank seat's compiled patterns block WebSocket handshakes — which WebKit routes through content rule lists from macOS 11.3 — and a browsing seat's dev-server reload keeps its socket.
+Residue, stated rather than implied: on Windows `WebResourceRequested` is never raised for WebSocket traffic, so `resource_request`'s refusal is unenforceable there; WebRTC is ungated on both engines, no pattern language and no WebView2 event reaching a peer connection.
+A compile carries a page and a policy, and `compile_is_stale` asks about both before either WebKit call: a list compiled for a rule the seat has moved off is dropped, never attached and then corrected, because for the length of that correction the document on the glass is judged by a policy nobody asked for.
+A seat goes to the last address it was given: `ThirdDoor::destined_for` writes `parked` on both branches, so an address superseded by a later navigation is not replayed a compile round-trip later.
+The data directory's claim is the single owner of "I am the writer", and both of its endpoints are opened off it: `open_the_data_directorys_endpoints` refuses a process that does not hold the claim, and one gate covers both doors so a third cannot be added outside it.
+Ungated, the loser of an ordinary two-launch race bound the names first and the writer latched its `OnceLock` to `None` for life, so every later launch landed in the window whose session writes are discarded.
+`applicationShouldTerminate:` is injected last: the selector loop is irreversible one at a time, and that is the only selector whose live-but-unanswered form is a frozen ⌘Q rather than a missing feature.
+
+### 2026-09-20 — A clipboard picture shows its shape before it is decoded
+The module's own rule is that a picture's shape is refused before anything is allocated for it; the TIFF arm was the one that did not state it.
+There is no Rust TIFF decoder in this tree, so the shape comes back out of the platform arm — `pixelsWide`, `pixelsHigh` and `bitsPerPixel`, read off the representation `imageRepWithData:` built — and is judged by the same `refuse_oversize` the PNG and DIB arms call.
+The judgement is the argument the decoding arm is called with, so a fourth encoding arrives at the same ceiling or does not decode.
+Measured on the Mac mini (macOS 26.6.2): a two-hundred-byte TIFF whose IFD claims 65,535 square returns in milliseconds at flat memory and states 0 x 0 — AppKit checks the strip byte count against the claim.
+The reachable case is the honest one: a picture whose bytes are all there states its real shape, and 16,385 wide is turned away by the ceiling instead of drawn.
+This matters because `objc2` is used without `catch-all`, so an `NSMallocException` out of AppKit aborts the process rather than becoming an `Err`.

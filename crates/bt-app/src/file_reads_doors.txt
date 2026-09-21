@@ -5,7 +5,10 @@
 1 psreadline.rs: run_probe: .output
 # The installed-module seam: both are the seam's own verb; its production arm reads
 # through file_reads::read(Lane::Settings), so the bytes are counted.
-1 psreadline.rs: is_folios_copy: installed_disk::read
+1 psreadline.rs: is_folios_copy_at: installed_disk::read
+# The install door's own occupancy check (audit 3, E-1): the assembly is read at
+# the moment of the write to establish who wrote the module standing there.
+1 psreadline.rs: unclaimed_or_foreign: installed_disk::read
 1 psreadline.rs: read: .read
 1 main.rs: create_leaf_session: .output
 1 animation.rs: file_source_in_lane: FileAnimationSource::open
@@ -27,8 +30,8 @@
 1 main.rs: append_panic_report: .open
 1 main.rs: commit_web_page: .open
 1 main.rs: create: GpuContext::open
-1 main.rs: create: attention_wire::open
-1 main.rs: create: launch_wire::open
+1 main.rs: open_the_data_directorys_endpoints: attention_wire::open
+1 main.rs: open_the_data_directorys_endpoints: launch_wire::open
 1 main.rs: create: persist::KeybindingsStore::open
 1 main.rs: create: persist::ProfilesStore::open
 1 main.rs: create: persist::SessionStore::open

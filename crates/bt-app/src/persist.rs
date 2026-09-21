@@ -2101,6 +2101,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// RED — **a second claimant is not the writer of that directory, and goes
+    /// on not being it** (audit 3 A-3).
+    ///
+    /// The value half of the endpoint rule. Both endpoints of a data directory —
+    /// the launch wire and, on Unix, the attention doorbell — are that directory's
+    /// writer saying so to other processes, and both names are first-come. The
+    /// race that mattered was two ordinary launches a few hundred milliseconds
+    /// apart: the one that lost the claim went on to bind the names anyway,
+    /// because the binding asked nothing, and every later launch was then
+    /// answered by the window whose session writes this file discards.
+    /// `open_the_data_directorys_endpoints` asks this question instead, and this
+    /// is the answer it gets.
+    ///
+    /// The second half is the memoisation, and it matters as much as the first:
+    /// a claim is taken once and held for the life of the process, so a process
+    /// refused it stays refused even after the holder has gone. A door that
+    /// re-asked would bind a name on the strength of a claim it does not hold.
+    ///
+    /// Red gate: take the claim below out and both assertions flip — this test
+    /// process *is* the only claimant of a folder nothing else knows about.
+    #[test]
+    fn a_second_claimant_is_not_the_writer_of_that_directory() {
+        let root = appdata("second-claimant");
+        let directory = root.join("data");
+        std::fs::create_dir_all(&directory).expect("a scratch folder");
+
+        // Somebody else got here first. On Windows this is a named kernel
+        // object and on Unix an `flock` on a descriptor; in both, a second
+        // attempt from anywhere — including this process — is refused.
+        let first = bt_platform::instance::claim_data_directory(&directory)
+            .expect("nothing else on this machine has this folder");
+
+        assert!(
+            !is_writer_of(&directory),
+            "a process that was refused the claim must not read itself as the writer, \
+             which is the fact the endpoints are opened off"
+        );
+
+        drop(first);
+        assert!(
+            !is_writer_of(&directory),
+            "and the answer is the one this process took, not the one the folder \
+             would give it now"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// RED (review rows R4-10 and R4-11) — **a write that keeps failing stops
     /// being retried and is said out loud.**
     ///

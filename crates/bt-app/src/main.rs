@@ -26155,26 +26155,55 @@ fn breath_phase(elapsed: Duration) -> f32 {
     (elapsed.as_secs_f32() * 1000.0).rem_euclid(period) / period
 }
 
-/// How bright a waiting card's halo is, `0.0..=1.0` of
-/// [`bt_render::FOCUS_CARD_WAIT_HALO_OPACITY`] (§7.1.5b, §7.1.6b′ F3).
+/// **The waiting breath, taken once for every channel that says "waiting"**
+/// (§7.1.5b, §7.1.6b′ F3) — see [`seats::WaitPulse`] for what the two faces are
+/// and why there are two of them.
 ///
-/// `@keyframes fcard-wait { 50% { box-shadow: … } }` (mock-up 2744-2748): one
-/// keyframe at the midpoint and *no* `0%`/`100%` frame, so the halo grows out of
-/// nothing and goes back into nothing every cycle. That is why this is a ramp
-/// from zero rather than [`breathe_opacity`]'s swing between two visible values
-/// — the mark breathes *between* two strengths because it is always there, and
-/// the halo breathes *in and out* because it is a glow.
+/// **One sampler and one owner.** `docs/DESIGN.md:1774` (user ruling
+/// 2026-07-18) gives a waiting tab an orange dot that pulses *and* an orange
+/// frame on its card, and `:2188` (2026-08-25) restates the pair as three things
+/// reading one answer. Two channels saying one fact drift the moment they are
+/// sampled twice, so they are sampled here, together, from one
+/// [`TabState::animation_elapsed`], and handed down resolved: the card's edge
+/// reads whether there is a sample at all, the halo reads [`seats::WaitPulse::halo`],
+/// and all four status-dot surfaces read [`seats::WaitPulse::dot`] through
+/// `marks::status_dot_sprite`.
 ///
-/// **Reduced motion answers a flat `0.0` at every phase, and that is the ruling
-/// rather than a shortcut**: `@media (prefers-reduced-motion: reduce)` turns the
-/// animation off (line 550), and an animation with no `0%` frame that is turned
-/// off simply has no shadow. Note what it does *not* answer — "not waiting". The
-/// card's warn border keys on there being a number here at all, so a reader with
-/// animation off still sees the statement, and only the motion has gone. That
-/// distinction is the whole of "留橙边、去动效": 动效从来不是消息.
-fn wait_halo_opacity(elapsed: Duration, motion: Motion) -> f32 {
+/// **The halo's face.** `@keyframes fcard-wait { 50% { box-shadow: … } }`
+/// (mock-up 2744-2748): one keyframe at the midpoint and *no* `0%`/`100%` frame,
+/// so the halo grows out of nothing and goes back into nothing every cycle. That
+/// is why it is a ramp from zero rather than [`breathe_opacity`]'s swing between
+/// two visible values — the mark breathes *between* two strengths because it is
+/// always there, and the halo breathes *in and out* because it is a glow.
+///
+/// **The dot's face, and where it came from.** The mock-up writes
+/// `.unreaddot.await { animation: fcpulse .9s infinite }` (`ui-mockup.html:346`)
+/// and never defines `@keyframes fcpulse`; an undefined `animation-name` is
+/// valid CSS that does nothing, so the mock-up's dot never pulsed and the
+/// transcription inherited a name with no curve behind it. The owner ruled the
+/// curve on 2026-09-20: **the same clock and the same curve as the halo** — the
+/// window's one 1.7s breath — because two things saying one fact breathe
+/// together. So the dot rides the very same `breath`, brightest at the instant
+/// the halo is, mapped onto a thing that is always on screen: the window's own
+/// breath depth ([`WINDOW_TAB_BREATHE_MIN_OPACITY`], which
+/// [`breathe_opacity`] swings to) up to full, never out.
+///
+/// **Reduced motion answers each channel's own flat value, and that is the
+/// ruling rather than a shortcut.** `@media (prefers-reduced-motion: reduce)`
+/// turns both animations off — mock-up line 550 for the card, line 386 for the
+/// dot — and an animation turned off leaves the element as it is written: a
+/// keyframe set with no `0%` frame leaves no shadow at all, and `.unreaddot`
+/// itself is an opaque dot. Note what neither answer is — "not waiting". The
+/// card's warn border keys on there being a sample here at all, and the dot is
+/// still drawn, so a reader with animation off still sees the statement and only
+/// the motion has gone. That distinction is the whole of "留橙边、去动效":
+/// 动效从来不是消息.
+fn wait_pulse(elapsed: Duration, motion: Motion) -> seats::WaitPulse {
     if motion == Motion::Reduced {
-        return 0.0;
+        return seats::WaitPulse {
+            halo: 0.0,
+            dot: 1.0,
+        };
     }
     let phase = breath_phase(elapsed);
     let half = if phase < 0.5 {
@@ -26182,7 +26211,11 @@ fn wait_halo_opacity(elapsed: Duration, motion: Motion) -> f32 {
     } else {
         1.0 - (phase - 0.5) * 2.0
     };
-    cubic_bezier(half, EASE_IN_OUT)
+    let breath = cubic_bezier(half, EASE_IN_OUT);
+    seats::WaitPulse {
+        halo: breath,
+        dot: WINDOW_TAB_BREATHE_MIN_OPACITY + (1.0 - WINDOW_TAB_BREATHE_MIN_OPACITY) * breath,
+    }
 }
 
 /// Whether the system wants animation at all.
@@ -32429,7 +32462,7 @@ impl TabState {
             // never disagree with the row about which of the two warns this is.
             pulse: claim
                 .pulses()
-                .then(|| wait_halo_opacity(self.animation_elapsed(now), motion)),
+                .then(|| wait_pulse(self.animation_elapsed(now), motion)),
         }
     }
 
@@ -32487,7 +32520,7 @@ impl TabState {
             // its own, so it owes a frame for exactly as long as the queue place
             // stands — [`TabState::fleet_working`]'s own terms, one channel over.
             // Above the `Reduced` early return on purpose: under reduced motion
-            // `wait_halo_opacity` draws nothing at all, so there is nothing to
+            // `wait_pulse` moves nothing at all, so there is nothing to
             // schedule and this must not wake the loop.
             || self.fleet_awaiting()
     }
@@ -32549,7 +32582,7 @@ impl TabState {
 /// motion in this window that is never decorative — it says "typing lands here"
 /// — so the answer under `Reduced` is not to take the caret away but to stop it
 /// switching: a *solid* caret, permanently lit, which says the same thing with
-/// no motion in it at all. That is [`wait_halo_opacity`]'s pattern (go the
+/// no motion in it at all. That is [`wait_pulse`]'s pattern (go the
 /// glow, keep the orange border) applied to the last surface in the window that
 /// had not been told about the preference, and it costs the window every wake-up
 /// it used to owe twice a second.
@@ -38548,6 +38581,147 @@ impl settings::geometry::PointerHost for Runtime<'_> {
     }
 }
 
+/// **The data directory's two endpoints, opened by the process that holds its
+/// claim and by no other** (§7.59, M4-7; audit 3 A-3).
+///
+/// # The rule, and the one fact it is read off
+///
+/// A claim on a data directory is this product's whole answer to "which of the
+/// Folios on this machine is the one writing it": `persist::is_writer_of` takes
+/// it on the first ask, holds it for the life of the process, and every store
+/// that writes a file asks it before writing one. The launch endpoint and the
+/// attention endpoint are that same claim said out loud to other processes — a
+/// launch handed down the launch wire opens a tab in *the writer*, and a hook
+/// that rings the attention doorbell is speaking to the window whose session is
+/// being kept. So they are opened off the same fact, and a process that does not
+/// hold the claim never binds either of them: it connects, which is what
+/// `launch_wire::hand_over` did for it in `main` before it ever reached a window.
+///
+/// # What the ungated version cost
+///
+/// Both names are first-come — `AF_UNIX` bind plus an unlink under the claim,
+/// and `FILE_FLAG_FIRST_PIPE_INSTANCE` on Windows — and the gap between a
+/// process taking the claim and reaching this line is the whole of
+/// `enter_resident_run`, `video::prewarm`, `EventLoop::build` and two store
+/// opens: hundreds of milliseconds on a cold start. Two ordinary launches inside
+/// that window — an icon double-clicked twice, two `folio .` calls — and the
+/// *second* one, the one holding no claim, bound the names first. The writer's
+/// own bind then failed `EADDRINUSE`, latched its `OnceLock` to `None` for the
+/// life of the process, and every later launch was answered by the window whose
+/// session writes are dropped on the floor by `persist`'s own rule ("this
+/// process was never the one keeping this file"). Every tab the reader opened
+/// there was absent from `session.json` afterwards. The comment that used to
+/// stand here said a process that did not hold the claim never reached this
+/// point; ninety lines above it, `is_storage_writer` is asked precisely because
+/// one does.
+///
+/// # Both doors under one gate
+///
+/// They were two statements with no gate; they are one call with one, because
+/// the property is about the pair and not about either — `instance` unlinks both
+/// stale sockets under the claim for the same reason, and a third door added
+/// beside these would otherwise be a third place to remember.
+///
+/// A failure to open either is silent and total and is not a reason to open
+/// something weaker: no attention endpoint means hooks cannot reach this window,
+/// no launch endpoint means a second launch opens its own, and both are where
+/// every machine was before these slices existed.
+fn open_the_data_directorys_endpoints(proxy: &EventLoopProxy<AppEvent>) {
+    if !persist::is_storage_writer() {
+        // The claim is already taken and held by another live Folio, which is
+        // the process these names belong to. Saying so is `main`'s — the
+        // settings-fault card `is_storage_writer` raises there names what this
+        // window will and will not keep.
+        return;
+    }
+    // **The attention endpoint, before the first shell exists to be told about it.**
+    //
+    // Ordering that has to be this way round: `create_leaf_session` writes the endpoint's name
+    // into the child's environment, so a pane spawned before this returns would be a pane whose
+    // agent has nowhere to speak — and it would stay that way for as long as that agent ran.
+    // The endpoint returns already listening, which is what makes "before" mean something.
+    {
+        let proxy = proxy.clone();
+        attention_wire::open(&persist::storage_dir(), move || {
+            let _ = proxy.send_event(AppEvent::AttentionSpoke);
+        });
+    }
+    // **And the second launch's door, beside it.** It is opened here rather than in `main` for
+    // one reason: the answer to a launch is a tab or a window, and neither exists until the loop
+    // does.
+    {
+        let proxy = proxy.clone();
+        launch_wire::open(&persist::storage_dir(), move || {
+            let _ = proxy.send_event(AppEvent::LaunchAsked);
+        });
+    }
+}
+
+/// **Only the writer binds the data directory's endpoints** (audit 3 A-3).
+///
+/// The behavioural half of this — two processes racing for one name — is not a
+/// `#[test]` on either platform. What is testable is the shape, and the shape is
+/// the whole of the defect: the two `open` calls stood in `Runtime::create` with
+/// no gate at all, under a comment asserting the gate that was missing. The
+/// value half of the same rule — that a process which is refused the claim reads
+/// itself as not the writer — is `persist`'s
+/// `a_second_claimant_is_not_the_writer_of_that_directory`, which runs on every
+/// platform.
+#[cfg(test)]
+mod endpoint_claim_tests {
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The text of one item, from its signature to the next one at the same
+    /// indentation — the same reader the rest of this file's source pins use.
+    fn body(signature: &str, ends_at: &str) -> &'static str {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        let end = rest.find(ends_at).unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// RED — **every endpoint this process binds is bound inside the claim's
+    /// gate, and there is one gate.**
+    ///
+    /// MUTATION: move either `open` call back out to `Runtime::create`, or take
+    /// the `is_storage_writer` refusal off the front of the door, and this
+    /// fails.
+    #[test]
+    fn only_the_writer_binds_the_data_directorys_endpoints() {
+        let door = body(
+            "fn open_the_data_directorys_endpoints(proxy: &EventLoopProxy<AppEvent>) {",
+            "\n}\n",
+        );
+        let refusal = door
+            .find("if !persist::is_storage_writer() {")
+            .expect("the door refuses a process that does not hold the claim");
+        assert!(
+            door[refusal..].contains("return;"),
+            "the refusal does not leave:\n{door}"
+        );
+        for endpoint in ["attention_wire::open(", "launch_wire::open("] {
+            let at = door
+                .find(endpoint)
+                .unwrap_or_else(|| panic!("{endpoint} is no longer behind the claim:\n{door}"));
+            assert!(
+                at > refusal,
+                "{endpoint} is bound before the claim is checked"
+            );
+        }
+        // And the place they came from, which is where a later hand would put a
+        // third one: the runtime's own opening, which holds no claim of its own
+        // and asks for none. The needle is assembled so that this file's search
+        // for it is not a match on itself.
+        let bind = concat!("_wire", "::open(");
+        assert!(
+            !body("    fn create(\n", "\n    fn ").contains(bind),
+            "an endpoint is bound in `Runtime::create` again, where nothing gates it"
+        );
+    }
+}
+
 impl Runtime<'_> {
     /// Open the process's device layer, its `App`, and its first window.
     ///
@@ -38662,38 +38836,10 @@ impl Runtime<'_> {
         explorer_menu::begin_probe();
         update::load(&persist::storage_dir());
         update::begin(persist::storage_dir(), settings_store.loaded().update_check);
-        // **The attention endpoint, before the first shell exists to be told about it.**
-        //
-        // Ordering that has to be this way round: `create_leaf_session` writes the endpoint's name
-        // into the child's environment, so a pane spawned before this returns would be a pane whose
-        // agent has nowhere to speak — and it would stay that way for as long as that agent ran.
-        // The endpoint returns already listening, which is what makes "before" mean something.
-        //
-        // A failure is silent and total: no endpoint means hooks cannot reach this window, which is
-        // where every machine was before this slice, and the terminal is otherwise unaffected. It
-        // is never a reason to open something weaker.
-        {
-            let proxy = proxy.clone();
-            attention_wire::open(&persist::storage_dir(), move || {
-                let _ = proxy.send_event(AppEvent::AttentionSpoke);
-            });
-        }
-        // **And the second launch's door, beside it** (§7.59).
-        //
-        // This process holds the data directory's claim — `main` decided that above, and a process
-        // that did not hold it never reached here — so it is this process's job to answer for the
-        // name. It is opened here rather than in `main` for one reason: the answer to a launch is a
-        // tab or a window, and neither exists until the loop does.
-        //
-        // A failure is silent and total, on the attention endpoint's own footing: no endpoint means
-        // a second launch finds no door and opens its own window, which is where every machine was
-        // before this slice, and the terminal is otherwise unaffected.
-        {
-            let proxy = proxy.clone();
-            launch_wire::open(&persist::storage_dir(), move || {
-                let _ = proxy.send_event(AppEvent::LaunchAsked);
-            });
-        }
+        // **The data directory's two endpoints, opened by its writer and by nobody else** (§7.59,
+        // audit 3 A-3). One call and one gate, so that a third door added beside them cannot be
+        // added outside it.
+        open_the_data_directorys_endpoints(&proxy);
         // **The language, before anything is measured.** Every width in this
         // window is measured from the words that go in it, and the first of
         // those measurements happens as soon as a chrome frame is built — so the
@@ -45789,6 +45935,13 @@ impl Runtime<'_> {
                 // peek has no per-leaf memory to ease from and, being a snapshot
                 // that appears and disappears whole, nothing to ease during — so
                 // it shows the reading itself rather than an approach to it.
+                // Asked once and spent twice: the dot this leaf wears and
+                // whether that dot breathes are two questions about one claim,
+                // and folding the fleet a second time is how the two start
+                // disagreeing (§7.1.6b′: 不新写第二套聚合).
+                let claim = session
+                    .map(|leaf| leaf.session_facts(tab_is_active).claim())
+                    .unwrap_or_default();
                 let ring = status.and_then(|status| status.progress).map(|state| {
                     let arc = ring_arc(state, None, elapsed, motion, &palette);
                     seats::TabRing {
@@ -45841,10 +45994,16 @@ impl Runtime<'_> {
                         elapsed,
                         motion,
                     ),
-                    dot: session
-                        .map(|leaf| leaf.session_facts(tab_is_active).claim())
-                        .unwrap_or_default()
-                        .dot(&palette),
+                    dot: claim.dot(&palette),
+                    // **The same claim's other answer**, asked here rather than
+                    // guessed from the dot's colour: `Bell` and `Awaiting` wear
+                    // one warn and only the second is a program standing still
+                    // (§7.1.5b). One sampler for the whole window — the tab's
+                    // card, its strip chip, its rail row and this schematic all
+                    // spend `wait_pulse`'s reading of the same elapsed time, so
+                    // no two of them can be caught at different phases of one
+                    // breath.
+                    pulse: claim.pulses().then(|| wait_pulse(elapsed, motion)),
                     ring,
                 }
             })

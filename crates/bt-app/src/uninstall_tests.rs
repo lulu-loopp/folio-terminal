@@ -126,6 +126,65 @@ fn uninstall_everything_then_rerun_is_absent() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// RED GATE (audit 3, E-1) — **the door takes Folio's nine files out of the
+/// module directory and leaves everything it did not write, including the
+/// directory itself.**
+///
+/// The leaf this fixture builds is the state a Folio *before* the install guard
+/// produced on a real machine: our module, with PowerShellGet's own record of
+/// the module we replaced still standing beside it. Until today the door
+/// answered that with `remove_dir_all` on the version leaf, so an uninstall took
+/// `PSGetModuleInfo.xml`, `en-US\` and the catalog with it — files this product
+/// never wrote and cannot hand back.
+///
+/// The remover is the row's own (`psreadline::remove_from`); what is pinned here
+/// is that the unattended door goes through it and reports what it left.
+#[test]
+fn uninstall_psreadline_leaves_every_file_folio_never_wrote() {
+    let (root, scope) = sandbox("psreadline-sidecars");
+    let data = &scope.data[0];
+    fs::create_dir_all(data).unwrap();
+    crate::psreadline::install_recorded(&scope.documents[0], data).unwrap();
+    let leaf = crate::psreadline::module_directory(&scope.documents[0]);
+    let sidecars = [
+        ("PSGetModuleInfo.xml", "<Objs/>"),
+        ("PSReadLine.cat", "catalog"),
+        ("en-US/about_PSReadLine.help.txt", "TOPIC"),
+    ];
+    for (name, body) in sidecars {
+        let path = leaf.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, body.as_bytes()).unwrap();
+    }
+
+    let report = execute(&scope, false, system_absent);
+    assert_eq!(report.code, 0, "{}", report.stderr());
+    for (name, _) in crate::psreadline::BUNDLED_FILES {
+        assert!(!leaf.join(name).exists(), "{name} is Folio's and stayed");
+    }
+    for (name, body) in sidecars {
+        assert_eq!(
+            fs::read(leaf.join(name)).unwrap(),
+            body.as_bytes(),
+            "{name} is not Folio's and went"
+        );
+    }
+    assert!(leaf.is_dir(), "and the directory holding them stays");
+
+    let line = report
+        .entries
+        .iter()
+        .map(Entry::line)
+        .find(|line| line.contains("PSReadLine module"))
+        .expect("the door prints a line per mark");
+    assert!(line.contains("not Folio's files"), "{line}");
+    assert!(
+        line.contains(&leaf.join("PSGetModuleInfo.xml").display().to_string()),
+        "and names them: {line}"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn uninstall_live_other_copy_is_left_and_dead_copy_is_removed() {
     let (root, scope) = sandbox("owners");
@@ -600,7 +659,13 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
             .count(),
         3
     );
-    assert!(include_str!("psreadline.rs").contains("marks.psreadline_module_roots.push(root)"));
+    // `root` is borrowed since the record moved inside the writer's own
+    // occupancy check (audit 3, E-1); what is pinned is that the module root
+    // still reaches `integration-marks.json` before the first byte is written.
+    assert!(
+        include_str!("psreadline.rs")
+            .contains("marks.psreadline_module_roots.push(root.to_owned())")
+    );
     assert!(include_str!("main.rs").contains("psreadline::apply_recorded("));
     for name in ["Folio", "BetterTerminal"] {
         assert!(INVENTORY.iter().any(|m| matches!(m.remover, Remover::Data(HostPlatform::Windows, Base::Roaming, relative) if relative == name)));

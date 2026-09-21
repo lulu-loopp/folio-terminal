@@ -157,8 +157,8 @@ too old to answer it is a preview that does not open, not a preview that opens
 with a form-filling profile nobody asked for.
 
 **Subframes are not run through the navigation gate, and this is deliberate.**
-Folio attaches `NavigationStarting`, which fires for the top-level document only.
-It does not attach `FrameNavigationStarting` or `WebResourceRequested`.
+Folio attaches `NavigationStarting`, which fires for the top-level document only,
+and the rule it asks is asked about nothing else.
 
 The reason is that the gate is a rule about **what this seat was asked to show**,
 and a subframe is part of how a page is composed rather than a place the seat was
@@ -168,17 +168,38 @@ parts of viewers. Every one of those is refused by the top-level rule, so runnin
 subframes through it would not tighten a boundary — it would refuse the page's own
 structure and call it security.
 
-What actually bounds what a subframe can do to your machine is the four refusal
-surfaces above, and every one of them is registered on the WebView2 instance rather
-than on a frame: a subframe cannot open a window, start a download, obtain a
-permission, or launch an external scheme. Beyond that, a subframe is subject to the
-same origin policy the engine enforces for any browser.
+**A second rule is asked about everything the document names.**
+`FrameNavigationStarting` and `WebResourceRequested` — the latter with a filter over
+every resource context — are registered in the same step as the surfaces above, and
+both ask what this seat was opened for. A page opened from the files column may read
+its own folder and the folders under it and reaches no server; the host's own blank
+page fetches nothing at all; a page you browsed to may fetch from the network and
+touches no `file:`. `data:`, `blob:`, the two empty documents a frame is made of and
+the parts the engine builds its own viewers out of pass on every seat. A refused
+request is answered with an empty 403 rather than dropped, so the document gets the
+answer a server would have given it.
 
-The boundary this leaves open, stated plainly: **a page Folio shows you can load
+What bounds what a subframe can do to your machine is the four refusal surfaces
+above, and every one of them is registered on the WebView2 instance rather than on a
+frame: a subframe cannot open a window, start a download, obtain a permission, or
+launch an external scheme. Beyond that, a subframe is subject to the same origin
+policy the engine enforces for any browser.
+
+The boundary this leaves open, stated plainly: **a page you browsed to can load
 subresources and subframes from any `http`/`https` origin it likes, and Folio does
-not see or filter those requests.** That is the behaviour of a web view; it is not
-a proxy or a content blocker. If that matters for what you are previewing, do not
-preview it.
+not filter those requests.** That is the behaviour of a web view; it is not a proxy
+or a content blocker. If that matters for what you are previewing, do not preview
+it.
+
+### A local document
+
+A local `.html` runs its scripts here, as it would in a browser. Folio refuses the
+ordinary web requests it makes — `fetch`, an image, a frame, a script from a server
+— but that is housekeeping, not a wall: it does not cover WebSocket, WebRTC, or a
+host name the page asks to have looked up. **Folio does not promise that a local
+document cannot reach the network**, and no browser promises it either. Treat an
+HTML file from a stranger as you would in a browser. Markdown and text are drawn by
+Folio itself and run nothing.
 
 ## Diagnostics
 

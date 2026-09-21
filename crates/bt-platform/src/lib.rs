@@ -18734,7 +18734,10 @@ pub use macos_picture::png_from_tiff;
 /// that decodes a clipboard picture without asking which machine it is on,
 /// which is the shape every other lane in this crate has.
 #[cfg(not(target_os = "macos"))]
-pub fn png_from_tiff(_tiff: &[u8]) -> Result<Vec<u8>, String> {
+pub fn png_from_tiff(
+    _tiff: &[u8],
+    _judge: impl FnOnce(u32, u32, u64) -> Result<(), String>,
+) -> Result<Vec<u8>, String> {
     Err("TIFF is not a clipboard picture encoding on this platform".to_owned())
 }
 mod file_replace;
