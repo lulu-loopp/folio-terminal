@@ -4010,12 +4010,20 @@ impl SettingsRow {
             // is written, and where. The second is there because a reader who
             // does not know a terminal is about to edit a file belonging to
             // another program has been told something they would want to know.
-            Self::ClaudeHooks => Text::DescClaudeHooks.text(),
+            // **Not a constant either**, and the reason is the row above's: when the file is one
+            // this build will not edit — a link out of the agent's own folder, a file shared by
+            // hard links, a read-only one — the switch beside it has nothing true to say, so the
+            // sentence says what the machine is instead (closure review R1).
+            Self::ClaudeHooks => {
+                values.agent_config_refusals[0].unwrap_or(Text::DescClaudeHooks.text())
+            }
             // Two facts and no third, the row above's shape: what is written and
             // where, then which of the two things an agent can say this one
             // carries — because a reader who installs it expecting a dot on a
             // waiting pane has been told something that is not true.
-            Self::CodexNotify => Text::DescCodexNotify.text(),
+            Self::CodexNotify => {
+                values.agent_config_refusals[1].unwrap_or(Text::DescCodexNotify.text())
+            }
             // **Not a constant, and it is the row above's two facts plus a third
             // that is only sometimes true**: a copilot older than `1.0.26`
             // reported a permission prompt for tool calls nobody was ever asked
@@ -4024,9 +4032,9 @@ impl SettingsRow {
             // to fix before the switch means anything, so the sentence says which
             // one they are looking at instead of describing a switch that would
             // not work. See `attention_copilot::row_description`.
-            Self::CopilotHooks => {
+            Self::CopilotHooks => values.agent_config_refusals[2].unwrap_or_else(|| {
                 crate::attention_copilot::row_description(values.copilot_readiness)
-            }
+            }),
             // Says what Off *does* rather than what it hides, because what it
             // does is the reason to reach for it: no page, no chord, and no `git`
             // process started on your behalf.
@@ -4987,6 +4995,15 @@ impl SettingsRow {
                 Some(false) => values.psreadline_remove_available,
                 None => false,
             },
+            // **The three agent rows, when the file is one this build will not edit** (re-review
+            // f): a link out of the agent's own folder, a file shared by hard links, a read-only
+            // one. `PsReadLine`'s rule above, for its reason — the row's line already says what
+            // the machine is, and a switch that stayed pressable would be offering an action the
+            // line says will not happen. Neither `On` nor `Off`: there is no press that reaches
+            // that file, in either direction.
+            Self::ClaudeHooks => values.agent_config_refusals[0].is_none(),
+            Self::CodexNotify => values.agent_config_refusals[1].is_none(),
+            Self::CopilotHooks => values.agent_config_refusals[2].is_none(),
             // **`ContextMenu` was the third such row for one afternoon** (user
             // ruling 2026-09-07) and is not one now: its greyed rung went with
             // the picker. A machine that cannot reach the first page can still
@@ -5936,6 +5953,20 @@ impl SettingsContent<'_> {
             .any(|row| *row == SettingsRow::CopilotHooks && row.category() == category)
     }
 
+    /// **Whether this page carries a row about an agent's own configuration file.**
+    ///
+    /// [`Self::probes_psreadline`]'s shape and for its reason: the rows are what need the answer,
+    /// so moving one moves the trigger and a build that has lost them re-reads nothing.
+    #[must_use]
+    pub fn shows_agents(&self, category: SettingsCategory) -> bool {
+        self.rows.iter().any(|row| {
+            matches!(
+                row,
+                SettingsRow::ClaudeHooks | SettingsRow::CodexNotify | SettingsRow::CopilotHooks
+            ) && row.category() == category
+        })
+    }
+
     /// The category a dialog opened now would land on: the first the rail holds.
     ///
     /// Asked rather than assumed, because `General` is only the answer while
@@ -6083,6 +6114,15 @@ pub struct SettingsValues {
     /// `attention_copilot::begin_probe`, and `SettingsRow::description`'s own note on why a
     /// sentence that varies with the machine may still only ever be one of a few literals.
     pub copilot_readiness: crate::attention_copilot::Readiness,
+    /// **Why each agent's configuration file will not be edited, when it will not be** — Claude
+    /// Code, codex, copilot, the order `App::agent_takeovers` keeps.
+    ///
+    /// The three switches above answer "are this copy's marks in that file". This answers the
+    /// question that has no `On`/`Off`: a file that is a link out of the agent's own folder,
+    /// shared by hard links or read-only is not a file whose hooks are off, and the row says which
+    /// instead of offering a press that cannot happen (closure review R1). Handed in for
+    /// `copilot_readiness`'s reason — the answer is a file on disk and this row is drawn per frame.
+    pub agent_config_refusals: [Option<&'static str>; 3],
     /// Whether the releases page is asked once a day (§7.51).
     pub update_check: bool,
     /// Which way a split with no direction of its own cuts.
@@ -6285,6 +6325,7 @@ impl SettingsValues {
             codex_notify: false,
             copilot_hooks: false,
             copilot_readiness: crate::attention_copilot::Readiness::Unknown,
+            agent_config_refusals: [None; 3],
             update_check: true,
             split_direction: SplitDirectionV1::Auto,
             search_engine: SearchEngineV1::DuckDuckGo,
@@ -6439,6 +6480,10 @@ pub struct SettingsPanel {
     /// Reset by the panel's own page/open/close transitions, even if no layout
     /// was requested between closing and reopening.
     psreadline_visit_read: bool,
+    /// The same latch for the three agent rows. Their switches are inert while the file they name
+    /// is one this build will not edit, so a press cannot be what notices that the reader has
+    /// unpicked the link or cleared the read-only bit — opening the page is (re-review, round 3).
+    agents_visit_read: bool,
     /// **Which page is up** (user ruling Q3 = A, 2026-08-17). One page per
     /// category, so this is the whole of "where am I" — and it is state on the
     /// panel rather than on the runtime because the panel is what a key press
@@ -6742,6 +6787,18 @@ impl SettingsPanel {
         !std::mem::replace(&mut self.psreadline_visit_read, true)
     }
 
+    /// Consume the first showing of the agent rows on this page visit.
+    ///
+    /// [`Self::take_psreadline_open_edge`]'s twin, and the same three properties: an edge and not
+    /// a state, reset by every road off the page (another category, a close, a reopen, a page the
+    /// dialog fell back to), and false while the page is merely being redrawn.
+    pub fn take_agents_open_edge(&mut self, showing: bool) -> bool {
+        if !self.open || !showing {
+            return false;
+        }
+        !std::mem::replace(&mut self.agents_visit_read, true)
+    }
+
     /// Which line of the shortcut page is listening for a chord, if one is.
     #[must_use]
     pub fn recording_row(&self) -> Option<usize> {
@@ -6781,6 +6838,7 @@ impl SettingsPanel {
         }
         self.category = category;
         self.psreadline_visit_read = false;
+        self.agents_visit_read = false;
         self.menu = None;
         self.menu_scroll = 0.0;
         self.recording = None;
@@ -6811,6 +6869,7 @@ impl SettingsPanel {
     pub fn toggle(&mut self, content: SettingsContent<'_>) {
         self.open = !self.open;
         self.psreadline_visit_read = false;
+        self.agents_visit_read = false;
         self.menu = None;
         self.menu_scroll = 0.0;
         self.hover = None;
@@ -6883,6 +6942,7 @@ impl SettingsPanel {
     pub fn close(&mut self) {
         self.open = false;
         self.psreadline_visit_read = false;
+        self.agents_visit_read = false;
         self.menu = None;
         self.menu_scroll = 0.0;
         self.hover = None;
@@ -7155,6 +7215,7 @@ impl SettingsPanel {
         if !content.has_content(self.category) {
             self.category = content.first_category();
             self.psreadline_visit_read = false;
+            self.agents_visit_read = false;
             self.menu = None;
             self.recording = None;
             self.focus = None;
@@ -15321,6 +15382,67 @@ mod tests {
         assert!(
             panel.take_psreadline_open_edge(true),
             "Escape also rearms the visit"
+        );
+    }
+
+    /// **A refused agent row looks again when its page is opened, and only then.**
+    ///
+    /// The switch takes no press while the file it names is one this build will not edit, so the
+    /// press cannot be what notices that the reader has unpicked the link or cleared the read-only
+    /// bit. Opening the page is, on `PsReadLine`'s own latch: an edge per visit, rearmed by every
+    /// road off the page, and never a per-frame read — two hundred layouts on the open page ask
+    /// the disk nothing.
+    ///
+    /// MUTATION: make `take_agents_open_edge` answer `self.open` and the two hundred become two
+    /// hundred reads of three configuration files on somebody's machine.
+    #[test]
+    fn attention_rows_look_again_when_their_page_opens() {
+        let rows = [
+            SettingsRow::ClaudeHooks,
+            SettingsRow::CodexNotify,
+            SettingsRow::CopilotHooks,
+        ];
+        let page = content(&rows, &[]);
+        assert!(page.shows_agents(SettingsCategory::Agents));
+        assert!(!page.shows_agents(SettingsCategory::Terminal));
+        assert!(!content(&[SettingsRow::PsReadLine], &[]).shows_agents(SettingsCategory::Agents));
+
+        let mut panel = SettingsPanel::default();
+        assert!(
+            !panel.take_agents_open_edge(true),
+            "a shut dialog is no visit"
+        );
+        panel.toggle(content(&rows, &[]));
+        panel.select_category(SettingsCategory::Agents);
+        assert!(panel.take_agents_open_edge(true));
+        for _ in 0..200 {
+            assert!(
+                !panel.take_agents_open_edge(true),
+                "a redraw of the open page is not an edge"
+            );
+        }
+        // Every road off the page rearms it, and a page without the rows takes no edge at all.
+        panel.select_category(SettingsCategory::Terminal);
+        assert!(!panel.take_agents_open_edge(false));
+        panel.select_category(SettingsCategory::Agents);
+        assert!(panel.take_agents_open_edge(true));
+        panel.close();
+        panel.toggle(content(&rows, &[]));
+        assert!(
+            panel.take_agents_open_edge(true),
+            "close and reopen is a new visit"
+        );
+        assert!(panel.close_one_layer());
+        panel.toggle(content(&rows, &[]));
+        assert!(panel.take_agents_open_edge(true), "Escape rearms it too");
+
+        // And the edge is joined to the three reads: the window asks on it and nowhere else.
+        let window = include_str!("main.rs");
+        assert!(window.contains("take_agents_open_edge(content.shows_agents("));
+        assert_eq!(window.matches("self.refresh_agent_rows();").count(), 1);
+        assert_eq!(
+            window.matches("fn refresh_agent_rows(&mut self)").count(),
+            1
         );
     }
 
@@ -24075,6 +24197,62 @@ mod tests {
     ///
     /// MUTATION: return the plain sentence for `TooOld` and the switch invites an
     /// install that puts a standing wait on a pane nobody is waiting at.
+    /// **A row whose file this build will not edit says which, instead of reading `Off`** (closure
+    /// review R1).
+    ///
+    /// A `~/.claude` a dotfile manager has linked out of the agent's own folder is not a machine
+    /// whose hooks are off: they may be firing this minute, and the switch has no honest position
+    /// for that. So the sentence under it carries the filesystem's own answer, for all three
+    /// families, and the ordinary machine is untouched.
+    ///
+    /// MUTATION: drop the refusal from any of the three arms and that row goes back to describing
+    /// a press that cannot happen.
+    #[test]
+    fn attention_rows_say_why_a_configuration_will_not_be_edited() {
+        let refused = crate::i18n::Text::AgentConfigLink.text();
+        for (index, row, plain) in [
+            (0, SettingsRow::ClaudeHooks, Text::DescClaudeHooks.text()),
+            (1, SettingsRow::CodexNotify, Text::DescCodexNotify.text()),
+            (
+                2,
+                SettingsRow::CopilotHooks,
+                crate::attention_copilot::row_description(
+                    crate::attention_copilot::Readiness::Unknown,
+                ),
+            ),
+        ] {
+            assert_eq!(row.description(&values()), plain);
+            let mut refusals = [None; 3];
+            refusals[index] = Some(refused);
+            assert_eq!(
+                row.description(&SettingsValues {
+                    agent_config_refusals: refusals,
+                    ..values()
+                }),
+                refused
+            );
+            // And it is that row's own answer, not a sentence the three share.
+            assert_eq!(
+                row.description(&SettingsValues {
+                    agent_config_refusals: [None, None, None],
+                    ..values()
+                }),
+                plain
+            );
+            // **And the switch beside it takes no press in either direction** (re-review f).
+            // A row that says "Folio will not write to this file" and still offered `On` would be
+            // offering an action it has just said it will not perform.
+            let refused = SettingsValues {
+                agent_config_refusals: refusals,
+                ..values()
+            };
+            for option in 0..row.option_count() {
+                assert!(row.option_enabled(option, &values()), "{row:?} {option}");
+                assert!(!row.option_enabled(option, &refused), "{row:?} {option}");
+            }
+        }
+    }
+
     #[test]
     fn only_the_copilot_rows_items_ask_for_it_and_its_sentence_reads_the_machine() {
         use crate::attention_copilot::Readiness;

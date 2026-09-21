@@ -188,7 +188,10 @@ fn uninstall_psreadline_leaves_every_file_folio_never_wrote() {
 #[test]
 fn uninstall_live_other_copy_is_left_and_dead_copy_is_removed() {
     let (root, scope) = sandbox("owners");
-    let other = root.join("other.exe");
+    // A second copy is the same program in another folder, never another name: an operand is
+    // Folio's only if its own file name is one Folio installs itself under.
+    let other = root.join("other/folio.exe");
+    fs::create_dir_all(other.parent().unwrap()).unwrap();
     fs::write(&other, b"other copy").unwrap();
     seed(&scope, &other);
     let report = execute(&scope, false, system_absent);
@@ -579,7 +582,10 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
         (
             Remover::RecoverySnapshots,
             include_str!("attention_hooks.rs"),
-            "land",
+            // A method on the one resolution an operation makes, since the T-B follow-ups: the
+            // walker above names an impl item `Owner::method`, and the dated copy beside somebody
+            // else's configuration is written by that one and by nothing else.
+            "Config::land",
         ),
         (
             Remover::RuntimeClaims,

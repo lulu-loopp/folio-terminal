@@ -69,6 +69,11 @@ pub(crate) enum State {
     /// There is a file and it could not be read as settings. **Not** "absent": writing over a file
     /// this build cannot parse would destroy configuration somebody wrote by hand.
     Unreadable,
+    /// There is a readable file and **this build will not edit it**, for the reason carried: it is
+    /// a link out of the agent's own folder, it is shared by hard links, or it is read-only. A row
+    /// that read `Off` about this would be offering a press that cannot happen, over hooks that
+    /// may be firing this minute (closure review R1).
+    Refused(&'static str),
 }
 
 /// The directory Claude Code keeps user configuration in, as **this environment** says it.
@@ -169,11 +174,31 @@ pub(crate) fn state() -> State {
     }
 }
 
+/// **The settings row's two facts, out of one read of the file.**
+///
+/// Whether this copy's marks are in it, and — when this build will not edit it at all — the reason
+/// the row says in place of `Off`. Two answers to "what does the row show" derived from one
+/// `State` rather than two reads, because a second read is a second answer (closure review R1).
+#[must_use]
+pub(crate) fn row_state() -> (bool, Option<&'static str>) {
+    match state() {
+        State::Installed => (true, None),
+        State::Refused(reason) => (false, Some(reason)),
+        State::Absent | State::Unreadable => (false, None),
+    }
+}
+
 /// The same question about a named file, so a test can ask it without a settings file on the
 /// machine it runs on.
 #[must_use]
 fn state_at(path: &Path) -> State {
-    let text = match standing(path) {
+    let config = match Config::resolve(path) {
+        Ok(config) => config,
+        // Read, and not ours to change. The row says which file it is looking at.
+        Err(Unresolved::Refused(reason)) => return State::Refused(reason),
+        Err(Unresolved::Unreadable) => return State::Unreadable,
+    };
+    let text = match config.standing() {
         // Nothing there is the same answer to the only question being asked.
         Standing::Nothing => return State::Absent,
         // **Not `Absent`.** There is a file, and a row that said "not installed" about it would
@@ -306,16 +331,23 @@ fn owners(settings: &Value) -> Result<Vec<PathBuf>, &'static str> {
                 if !hook.is_object() {
                     return Err(crate::i18n::Text::AgentHooksSchemaUnknown.text());
                 }
-                if let Some(owner) = hook_owner(hook)? {
-                    if group.as_object().is_none_or(|o| {
-                        o.keys()
-                            .any(|k| !["matcher", "hooks"].contains(&k.as_str()))
-                    }) || group.get("matcher").is_some_and(|v| !v.is_string())
-                    {
-                        return Err(crate::i18n::Text::AgentHooksSchemaUnknown.text());
-                    }
-                    found.push(owner);
+                // **Ownership is per entry.** An entry this build cannot decode is not Folio's: it
+                // is left exactly where it is, and it has no say over the entries beside it. One
+                // hand-written `"mytool attention claude-code:Stop"` used to refuse every edit to
+                // the whole file, install and remove alike — a second state nobody could get out
+                // of (closure review R4). The document's own shape, above and below, is still a
+                // refusal: that is a file this build cannot read, not an entry it cannot claim.
+                let Ok(Some(owner)) = hook_owner(hook) else {
+                    continue;
+                };
+                if group.as_object().is_none_or(|o| {
+                    o.keys()
+                        .any(|k| !["matcher", "hooks"].contains(&k.as_str()))
+                }) || group.get("matcher").is_some_and(|v| !v.is_string())
+                {
+                    return Err(crate::i18n::Text::AgentHooksSchemaUnknown.text());
                 }
+                found.push(owner);
             }
         }
     }
@@ -468,18 +500,36 @@ pub(crate) fn apply(decision: Decision, exe: &Path) -> Outcome {
 /// The same act on a named file — the seam the tests press, so that what they pin is this
 /// function and not a settings file belonging to whoever runs them.
 pub(crate) fn apply_at(path: &Path, decision: Decision, exe: &Path, data: &Path) -> Outcome {
+    match Config::resolve(path) {
+        Ok(config) => apply_resolved(&config, decision, exe, data),
+        Err(Unresolved::Refused(reason)) => Outcome::Refused(reason),
+        Err(Unresolved::Unreadable) => Outcome::Refused(UNREADABLE),
+    }
+}
+
+/// The same act on a configuration this operation has already resolved.
+///
+/// **Everything below the entry takes this value.** The path was resolved once, at the top; the
+/// read, the dated copy and the replace all name that one answer, and there is no second
+/// resolution on this path for a repointed link to slip through (re-review B1).
+pub(crate) fn apply_resolved(
+    config: &Config,
+    decision: Decision,
+    exe: &Path,
+    data: &Path,
+) -> Outcome {
     if let Err(reason) = ownership::stable_executable(Some(exe)) {
         return Outcome::Refused(reason);
     }
-    if !path.is_absolute() {
+    if !config.named().is_absolute() {
         return Outcome::Refused(crate::i18n::Text::AgentHooksRootUnstable.text());
     }
     let install = decision.installs();
-    let existing = match standing(path) {
+    let existing = match config.standing() {
         Standing::Text(text) => text,
         // Nothing there yet: the install creates the file, and there is nothing to keep beside it.
         Standing::Nothing => String::new(),
-        // Refused rather than replaced, exactly as an unparseable file is — see [`standing`].
+        // Refused rather than replaced, exactly as an unparseable file is.
         Standing::Unreadable => return Outcome::Refused(UNREADABLE),
     };
     let mut settings = if existing.trim().is_empty() {
@@ -507,7 +557,11 @@ pub(crate) fn apply_at(path: &Path, decision: Decision, exe: &Path, data: &Path)
         remove_from(&mut settings, exe, false)
     };
     let _record = if install {
-        match ownership::record(data, path.parent().expect("absolute config"), "claude") {
+        match ownership::record(
+            data,
+            config.named().parent().expect("absolute config"),
+            "claude",
+        ) {
             Ok(lock) => Some(lock),
             Err(reason) => return Outcome::Refused(reason),
         }
@@ -525,13 +579,16 @@ pub(crate) fn apply_at(path: &Path, decision: Decision, exe: &Path, data: &Path)
         Ok(text) => text,
         Err(_) => return Outcome::Refused("the settings could not be written back"),
     };
-    match land(path, &existing, "json", format!("{text}\n").as_bytes()) {
+    match config.land(&existing, "json", format!("{text}\n").as_bytes()) {
         Landing::Landed => {}
         Landing::NoDirectory => {
             return Outcome::Refused("the user configuration directory could not be created");
         }
         Landing::NoBackup => {
             return Outcome::Refused(NO_BACKUP);
+        }
+        Landing::Changed => {
+            return Outcome::Refused(crate::i18n::Text::AgentConfigChanged.text());
         }
         Landing::NotWritten => return Outcome::Refused("the settings file could not be written"),
     }
@@ -575,21 +632,186 @@ pub(crate) enum Standing {
     Unreadable,
 }
 
-/// Read a configuration file the way all three installers have to read one.
+/// Why a configuration path did not resolve to a file this build may edit.
 ///
-/// Anything but [`std::io::ErrorKind::NotFound`] is [`Standing::Unreadable`]: a permission the
-/// user's own ACL withholds, a sharing lock somebody else's editor holds, a byte that is not
-/// UTF-8, a directory standing under the file's name. None of them is a file that is not there,
-/// and that is the only state in which writing a fresh one loses nothing.
-pub(crate) fn standing(path: &Path) -> Standing {
-    if crate::shell_integration::refuse_profile_path(path).is_err() {
-        return Standing::Unreadable;
+/// Answered once per operation, by [`Config::resolve`], and never again below it.
+pub(crate) enum Unresolved {
+    /// The path could not be examined at all — an ancestor this account may not ask about. Not a
+    /// file this build declines to edit: one it could not look at.
+    Unreadable,
+    /// It resolves, it can be read, and **this build will not edit it** — it is a link out of the
+    /// agent's own folder, it is shared by hard links, or it is read-only. The sentence is the
+    /// filesystem predicate's own, because each of the three is a different thing to do about
+    /// (closure review R1).
+    Refused(&'static str),
+}
+
+/// **One resolution of one configuration path, carried through the whole of one operation.**
+///
+/// The re-review's blocking finding: the read resolved the path and took target A, and the write
+/// resolved it again on the way out. Between the two, the user's own junction can be repointed — a
+/// dotfiles `stow`, a profile switch, anything with write access to a link that is theirs — and
+/// the second answer is the one that writes. Folio would land a document derived from one file
+/// onto another, and keep a dated copy of the *other* file's bytes beside it.
+///
+/// So an operation asks **once**, at its own top, and everything below takes this value. Nothing
+/// under here is handed the configuration path at all: [`editable_target`] is private to this
+/// module and `Config::resolve` is its only caller, which is what makes a second resolution on
+/// that path a thing that cannot be written rather than a thing nobody happened to write.
+pub(crate) struct Config {
+    /// The path the agent's environment named. Kept for the one removal that has to take the name
+    /// away as well as the file, and for the record of where a mark was written.
+    named: PathBuf,
+    /// The file that path resolved to, once.
+    target: PathBuf,
+}
+
+impl Config {
+    /// Resolve a configuration path for one operation. **The only door.**
+    pub(crate) fn resolve(path: &Path) -> Result<Self, Unresolved> {
+        Self::resolve_with(path, editable_target)
     }
-    match bt_platform::file_reads::read_to_string(bt_platform::file_reads::Lane::Attention, path) {
-        Ok(text) => Standing::Text(text),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Standing::Nothing,
-        Err(_) => Standing::Unreadable,
+
+    /// The same, with the resolution handed in — the seam a test presses to prove that an
+    /// operation resolves once and that the read, the copy and the replace all name that answer.
+    /// A resolver that would answer differently the second time is never asked a second time.
+    pub(crate) fn resolve_with(
+        path: &Path,
+        resolve: impl FnOnce(&Path) -> Result<PathBuf, Unresolved>,
+    ) -> Result<Self, Unresolved> {
+        Ok(Self {
+            named: path.to_path_buf(),
+            target: resolve(path)?,
+        })
     }
+
+    /// The path the environment named — never resolved again, only reported.
+    pub(crate) fn named(&self) -> &Path {
+        &self.named
+    }
+
+    /// Read a configuration file the way all three installers have to read one.
+    ///
+    /// Anything but [`std::io::ErrorKind::NotFound`] is [`Standing::Unreadable`]: a permission the
+    /// user's own ACL withholds, a sharing lock somebody else's editor holds, a byte that is not
+    /// UTF-8, a directory standing under the file's name. None of them is a file that is not
+    /// there, and that is the only state in which writing a fresh one loses nothing.
+    pub(crate) fn standing(&self) -> Standing {
+        match bt_platform::file_reads::read_to_string(
+            bt_platform::file_reads::Lane::Attention,
+            &self.target,
+        ) {
+            Ok(text) => Standing::Text(text),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Standing::Nothing,
+            Err(_) => Standing::Unreadable,
+        }
+    }
+
+    /// Take the resolved file out, under every name that delivers it.
+    ///
+    /// Copilot's whole-file removal: where this path is a link this build resolved, the target is
+    /// the file upstream loads — leaving it would leave Folio's hooks firing, and leaving the link
+    /// alone would leave upstream a name that loads nothing. The second removal is best effort
+    /// because the first may already have taken the only file there was.
+    pub(crate) fn remove_file(&self) -> std::io::Result<()> {
+        std::fs::remove_file(&self.target)?;
+        if self.target != self.named {
+            let _ = std::fs::remove_file(&self.named);
+        }
+        Ok(())
+    }
+}
+
+/// **Which file a configuration path names, for reading and for writing.**
+///
+/// Design §6.3 refuses to write *through* a link, and the T-A predicate enforces that by refusing
+/// any path with a link anywhere along it. Taken alone that rule strands the ordinary dotfiles
+/// machine — `~/.claude` junctioned onto a managed folder — in the one state this whole design
+/// exists to abolish: hooks installed by 0.4.2 still firing, a row reading `Off`, and no press
+/// that can take them out (closure review R1).
+///
+/// So the link is resolved **once, here**, and what comes back is bounded: the target must be a
+/// regular file inside the resolved directory the path names. Then Folio is not writing through a
+/// link at all — it is writing to a file it resolved itself, in the agent's own folder. A target
+/// that leaves that folder, a link that resolves to nothing, and every other answer the predicate
+/// gives (a hard link, a read-only file, a directory) are refused with their own reason, and the
+/// file is left byte-identical.
+/// **Private, and called from exactly one place** — [`Config::resolve`]. Anything below an
+/// operation's entry holds a [`Config`] and has no path to resolve a second time.
+fn editable_target(path: &Path) -> Result<PathBuf, Unresolved> {
+    let reason = match crate::shell_integration::profile_path_reason(path) {
+        Ok(None) => return Ok(path.to_path_buf()),
+        Ok(Some(reason)) => reason,
+        // The walk itself failed — an ancestor this account may not even ask about. That is not a
+        // file this build declines to edit, it is one it could not look at, and `Unreadable` has
+        // been the honest answer to it since the 2026-09-16 audit.
+        Err(_) => return Err(Unresolved::Unreadable),
+    };
+    if reason != crate::i18n::Text::ShellProfileLink {
+        return Err(Unresolved::Refused(agent_reason(reason)));
+    }
+    let root = path
+        .parent()
+        .and_then(|parent| std::fs::canonicalize(parent).ok());
+    let resolved = std::fs::canonicalize(path).ok();
+    let regular = resolved
+        .as_deref()
+        .and_then(|target| std::fs::symlink_metadata(target).ok())
+        .is_some_and(|metadata| metadata.is_file());
+    let target = linked_target(&Resolution {
+        root: root.as_deref(),
+        resolved: resolved.as_deref(),
+        regular,
+    })
+    .map_err(Unresolved::Refused)?;
+    // The resolved target carries no link of its own, so what this can still answer is a hard
+    // link, a read-only file or a directory — the refusals §6.3 keeps.
+    match crate::shell_integration::profile_path_reason(&target) {
+        Ok(None) => Ok(target),
+        Ok(Some(reason)) => Err(Unresolved::Refused(agent_reason(reason))),
+        Err(_) => Err(Unresolved::Unreadable),
+    }
+}
+
+/// The filesystem's answers about a linked path, handed to [`linked_target`] rather than asked for
+/// inside it — so the rule can be tested on an account that is not allowed to create a link.
+pub(crate) struct Resolution<'a> {
+    /// The directory the path names, resolved once. `None` when it does not resolve.
+    pub root: Option<&'a Path>,
+    /// What the path itself resolves to. `None` when it resolves to nothing.
+    pub resolved: Option<&'a Path>,
+    /// Whether that target is a regular file.
+    pub regular: bool,
+}
+
+/// **The file a link names, when Folio will edit it.**
+///
+/// One question with one answer: is the thing at the end of this link a regular file inside the
+/// directory the configuration path names? Everything else — a target somewhere else on the disk,
+/// a link to a directory, a link to nothing — is a link Folio will not write through, and says so.
+pub(crate) fn linked_target(facts: &Resolution) -> Result<PathBuf, &'static str> {
+    let refused = crate::i18n::Text::AgentConfigLink.text();
+    let (Some(root), Some(resolved)) = (facts.root, facts.resolved) else {
+        return Err(refused);
+    };
+    if facts.regular && resolved.starts_with(root) {
+        Ok(resolved.to_path_buf())
+    } else {
+        Err(refused)
+    }
+}
+
+/// The same three facts about an agent's configuration file rather than about a `$PROFILE`.
+///
+/// A sentence naming the wrong file is a sentence a reader acts on, so the profile's wording does
+/// not travel: the mapping is one to one, and nothing is flattened on the way.
+fn agent_reason(reason: crate::i18n::Text) -> &'static str {
+    match reason {
+        crate::i18n::Text::ShellProfileLink => crate::i18n::Text::AgentConfigLink,
+        crate::i18n::Text::ShellProfileHardLink => crate::i18n::Text::AgentConfigHardLink,
+        _ => crate::i18n::Text::AgentConfigReadOnly,
+    }
+    .text()
 }
 
 /// How far [`land`] got.
@@ -601,6 +823,9 @@ pub(crate) enum Landing {
     NoDirectory,
     /// There was a file there and a copy of it could not be kept. **Nothing was written.**
     NoBackup,
+    /// The file changed between the read and the replace. **Nothing was written**, and no copy was
+    /// kept either: a backup of bytes nobody read is not a copy of anything.
+    Changed,
     /// The write itself failed. Whatever was there is still there, whole.
     NotWritten,
 }
@@ -625,39 +850,67 @@ pub(crate) enum Landing {
 /// otherwise overwrite the copy of what was there before the first one, which is the one copy that
 /// matters.
 ///
-/// ③ Links/reparse points (including ancestors), hard links and read-only paths
-/// are refused by the shared T-A filesystem predicate before reading and writing.
-/// A locked file fails without replacement. Revision 2 deliberately supersedes
-/// the former link-following policy.
+/// ③ **The bytes go to the file [`editable_target`] resolved, and nowhere else.** A link is
+/// followed exactly once, by this build, and only to a regular file inside the folder the
+/// configuration path names; hard links, read-only paths and anything that is not a regular file
+/// are refused by the shared T-A filesystem predicate before reading and writing. A locked file
+/// fails without replacement. Revision 2 deliberately supersedes the former link-following policy,
+/// and closure review R1 is what bounds the resolution rather than abolishing it.
+///
+/// ④ **The bytes replaced are the bytes that were read.** The target is read again here, under
+/// the value this operation resolved, and a document that no longer matches what the caller was
+/// given is [`Landing::Changed`] rather than a write: `shell_integration::replace_profile` has
+/// compared a profile against what it read since T-A, for the same reason, and an agent's
+/// configuration is edited by the agent itself as readily as by a person.
 ///
 /// `extension` is the target's own extension — `settings.json` with `"json"` gives
 /// `settings.json.bak-20260827`. `existing` is what was read off the file, empty when there was
 /// nothing there.
-pub(crate) fn land(path: &Path, existing: &str, extension: &str, bytes: &[u8]) -> Landing {
-    if crate::shell_integration::refuse_profile_path(path).is_err() {
-        return Landing::NotWritten;
-    }
-    let target = path.to_path_buf();
-    if let Some(parent) = target.parent()
-        && !parent.as_os_str().is_empty()
-        && std::fs::create_dir_all(parent).is_err()
-    {
-        return Landing::NoDirectory;
-    }
-    if !existing.is_empty() {
-        let backup = target.with_extension(format!("{extension}.bak-{}", today()));
-        // `is_file` rather than `exists`: today's copy is skipped because it is
-        // already a copy, and anything else standing under that name is not one.
-        // A directory there would make `exists` answer "kept" about a copy that
-        // was never written.
-        if !backup.is_file() && std::fs::write(&backup, existing).is_err() {
-            return Landing::NoBackup;
+impl Config {
+    pub(crate) fn land(&self, existing: &str, extension: &str, bytes: &[u8]) -> Landing {
+        let target = &self.target;
+        if let Some(parent) = target.parent()
+            && !parent.as_os_str().is_empty()
+            && std::fs::create_dir_all(parent).is_err()
+        {
+            return Landing::NoDirectory;
         }
+        match bt_platform::file_reads::read_to_string(
+            bt_platform::file_reads::Lane::Attention,
+            target,
+        ) {
+            Ok(now) if now != existing => return Landing::Changed,
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                return Landing::NotWritten;
+            }
+            Err(_) if !existing.is_empty() => return Landing::Changed,
+            _ => {}
+        }
+        if !existing.is_empty() {
+            let backup = target.with_extension(format!("{extension}.bak-{}", today()));
+            // `is_file` rather than `exists`: today's copy is skipped because it is
+            // already a copy, and anything else standing under that name is not one.
+            // A directory there would make `exists` answer "kept" about a copy that
+            // was never written.
+            if !backup.is_file() && std::fs::write(&backup, existing).is_err() {
+                return Landing::NoBackup;
+            }
+            // **Somebody else's file keeps its own metadata.** The rename behind `atomic_write`
+            // discards the target's ACL, creation time and alternate streams on Windows and takes this
+            // process's ownership and umask on Unix — which matters most for exactly the file this
+            // resolution reaches, one a dotfile manager shares (review R8). `shell_integration`'s
+            // writer has made this distinction since T-A: a file that exists is replaced, a file that
+            // does not is created.
+            if bt_persist::atomic_replace_preserving(target, bytes).is_err() {
+                return Landing::NotWritten;
+            }
+            return Landing::Landed;
+        }
+        if bt_persist::atomic_write(target, bytes).is_err() {
+            return Landing::NotWritten;
+        }
+        Landing::Landed
     }
-    if bt_persist::atomic_write(&target, bytes).is_err() {
-        return Landing::NotWritten;
-    }
-    Landing::Landed
 }
 
 /// `YYYYMMDD` for the backup's name, from the wall clock and nothing else.
@@ -701,10 +954,15 @@ mod tests {
             .join("../../target/tb-tests")
             .join(concat!("hooks-", "two-copies"));
         std::fs::create_dir_all(&root).unwrap();
-        let a = root.join("A space $ ` ' 中文.exe");
-        let b = root.join("B.exe");
-        std::fs::write(&a, b"A").unwrap();
-        std::fs::write(&b, b"B").unwrap();
+        // **Two folders, one file name.** An operand is Folio's only if its file name is one
+        // Folio installs itself under, which is how two real copies differ: same program, two
+        // places. The odd characters this fixture exists for move to the folder.
+        let a = root.join("A space $ ` ' 中文").join("folio.exe");
+        let b = root.join("B").join("folio.exe");
+        for copy in [&a, &b] {
+            std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+            std::fs::write(copy, b"a copy of Folio").unwrap();
+        }
         let path = root.join("settings.json");
         let _ = std::fs::remove_file(&path);
         assert_eq!(apply_to(&path, true, &a), Outcome::Installed);
@@ -1210,10 +1468,15 @@ mod tests {
                 "{name} writes a configuration file behind `land`'s back"
             );
             assert!(
-                source.contains(concat!("attention_hooks::", "land(")),
-                "{name} must land its bytes through the one writer"
+                source.contains(concat!("config.", "land(")),
+                "{name} must land its bytes through the one writer, on the one resolution"
             );
         }
+    }
+
+    /// One resolution, the way an operation makes one, for a fixture that only wants to write.
+    fn resolved(path: &Path) -> Config {
+        Config::resolve(path).unwrap_or_else(|_| panic!("a plain file resolves to itself"))
     }
 
     /// RED — **a copy that cannot be kept refuses the install.**
@@ -1236,7 +1499,7 @@ mod tests {
         std::fs::create_dir(&blocked).expect("a directory in the copy's place");
 
         assert_eq!(
-            land(&target, &existing, "json", b"{}\n"),
+            resolved(&target).land(&existing, "json", b"{}\n"),
             Landing::NoBackup,
             "a copy that cannot be kept is a refusal"
         );
@@ -1257,7 +1520,10 @@ mod tests {
     fn what_lands_is_the_file_and_nothing_beside_it() {
         let dir = scratch("landed");
         let target = dir.join("settings.json");
-        assert_eq!(land(&target, "", "json", b"first\n"), Landing::Landed);
+        assert_eq!(
+            resolved(&target).land("", "json", b"first\n"),
+            Landing::Landed
+        );
         assert_eq!(std::fs::read_to_string(&target).expect("read"), "first\n");
         assert_eq!(
             names(&dir),
@@ -1267,7 +1533,7 @@ mod tests {
 
         // A second landing over a file that was there keeps exactly one dated copy of it.
         assert_eq!(
-            land(&target, "first\n", "json", b"second\n"),
+            resolved(&target).land("first\n", "json", b"second\n"),
             Landing::Landed
         );
         assert_eq!(std::fs::read_to_string(&target).expect("read"), "second\n");
@@ -1285,7 +1551,7 @@ mod tests {
         // And a third keeps the *first* copy rather than a copy of the second, which is the one
         // that is worth having: it is what was there before this build touched anything today.
         assert_eq!(
-            land(&target, "second\n", "json", b"third\n"),
+            resolved(&target).land("second\n", "json", b"third\n"),
             Landing::Landed
         );
         assert_eq!(
