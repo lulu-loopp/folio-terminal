@@ -11214,6 +11214,13 @@ In 0.4.2 an older Folio PSReadLine copy caused the clock run to reread the 41 KB
 The App owns one optional installed-copy fact, read on the unread probe edge, successful install/removal, and each Terminal-page opening.
 First-run availability reads ProfilePrograms; card construction consumes one ready edge, rearmed by profile changes or an answered card.
 
+### 2026-09-20 — The waiting halo's rectangle, and the waiting dot's clock
+An outset decoration grows from the card *as drawn* and is never clamped a second time; the scroller's clamp crops the body, not the growth.
+The first card's top is the list's top exactly, so clamping the grown box cost the waiting halo its whole top outset — 6 device px at 200% — on every frame since the column existed; the flight shadows were the same shape.
+`ChromeSprite` carries no clip box and a chrome layer's marks are one draw under one scissor, so the growth is simply allowed: 3 logical px against the panel's own 6px top margin and its bottom one, empty ground either way.
+The status dot now breathes on the halo's clock and curve (the window's one 1.7s breath), one sample taken in `wait_pulse` and worn by the card's edge, the halo and all four dot surfaces; reduced motion answers each channel's own flat value — no halo, full dot.
+The dot had never pulsed because the mock-up's `.unreaddot.await` names `@keyframes fcpulse`, which the mock-up never defines: an undefined animation does nothing, and the Rust transcription inherited the name without a curve.
+
 ### 2026-09-20 — A name printed again is asked about again
 A printed path answered "no" used to stand until `OSC 133 D`, so a pane running one hours-long agent kept every denial for ever.
 The owner photographed the cost on next83: the agent named a file before writing it, then named it again over the finished file, dark.
@@ -11226,6 +11233,12 @@ The replay tail carries two facts: the bytes a DEC 2026 block holds back, and th
 Everything before `parser_tail_open_start` is the first and is released when the block ends; everything from it on is the second and stays.
 One function owns that release, and it never writes `parser_sequence_open` — the boundary parser alone says whether a sequence is open.
 The deadline arm used to clear both, so a resize seeded the canonical fork at Ground and printed the rest of an escape payload onto the grid.
+
+### 2026-09-20 (correction to the entry above) — The room below the list is 3px, not 6
+The sentence "3 logical px against the panel's own 6px top margin and its bottom one" was wrong about the bottom: the room under the list is `RAIL_NEW_MARGIN_TOP_LOGICAL_PX` + the rail's gap = 3 logical px, exactly what a decoration wants, and only the top has 6.
+The growth is rounded to device pixels and that margin is not — both from `3.0 * scale` — so at 125%, 150%, 225% and 250% the rounded growth exceeded the exact room and up to half a pixel of a bottom-clamped card's halo or flight shadow landed on the `+` row's top edge.
+A decoration now grows only into the room its layout gives it: the panel hands down the box it keeps empty around the list (its own rectangle, floored by the `+` row's top and, on the rail, ceilinged by the heading's foot) and `outset_reach` reconciles the wish with that box once, for all four sides together, floored to whole device pixels.
+One amount and not four, so a clamped card's ring stays concentric; a card anywhere but against the list's own rim pays nothing for this, and no scale that was already exact changed.
 
 ### 2026-09-20 — A save replaces the content and keeps what the file carried
 The preview editor writes a user document, so its save replaces the bytes and nothing else the file was carrying.

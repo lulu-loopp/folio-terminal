@@ -309,6 +309,75 @@ pub const FLIGHT_SHADOW_ALPHA: f32 = 0.18;
 /// module's vocabulary and the one soft edge the mark rasterizer already makes.
 pub const FLIGHT_SHADOW_SPREAD_LOGICAL_PX: f32 = 3.0;
 
+/// **An outset decoration grows from the body as that body is drawn, and is
+/// clamped no second time.**
+///
+/// Half the rule; [`outset_reach`] beside it is the other half and settles *how
+/// far*. A scroller in this module crops what it shows by *clamping a rectangle*
+/// — `clip_to_list`, three copies of it, one per surface — and clamping is
+/// exactly right for a rectangle whose own edge is the thing's edge: the fill,
+/// the border, the mark slot. It is exactly wrong for a rectangle grown *outward*
+/// from one. A ring is rasterised to fill the box it is handed, so clamping the
+/// grown box does not crop the ring — it redraws a smaller one, concentric with
+/// nothing, with its corner radius now wrong by the growth it lost.
+///
+/// That is what the first card's waiting halo did on every frame the column was
+/// ever drawn: `cards[0].body[1] == list_top` exactly (see `focus_rail_geometry`,
+/// where the first card's top *is* the list's top), so the top outset was
+/// clamped away and a 3px halo came back as a 3px halo on three sides and none
+/// at the top — measured at 6 device px on the owner's 200% screen, 2026-09-20.
+/// The two flight shadows are the same shape and were the same bug.
+///
+/// So: clamp the body once, then grow by one amount on all four sides. A card
+/// scrolled half out of the list is clamped to the crop and its halo follows the
+/// crop, which is what "concentric with the card as drawn" means at every scroll
+/// offset.
+fn outset(body: [f32; 4], by: f32) -> [f32; 4] {
+    [body[0] - by, body[1] - by, body[2] + by, body[3] + by]
+}
+
+/// **How far a decoration on `body` may actually reach: what it wants, or what
+/// the room its layout gives it can pay — whichever is less.**
+///
+/// The other half of [`outset`]'s rule, and the correction of 2026-09-20 (review
+/// of `b16f7592`). Taking the second clamp off the grown rectangle took it off
+/// the **bottom** too, and the bottom is not the roomy side: the panel keeps
+/// [`bt_render::RAIL_PADDING_TOP_LOGICAL_PX`]'s 6 logical px above its list and
+/// only [`bt_render::RAIL_NEW_MARGIN_TOP_LOGICAL_PX`] plus the rail's gap — 3 —
+/// below it, which is *exactly* what a decoration wants. The growth is rounded
+/// to device pixels at its call site and that margin is not, both off the same
+/// `3.0 * scale`, so at every scale where `frac(3.0 * scale) >= 0.5` the rounded
+/// growth is larger than the unrounded room: at 150% the halo asks for 5 device
+/// px into 4.5, and half a pixel of it lands on the `+` row's own top edge. 125%,
+/// 225% and 250% are the same story. Reachable on any overflowing list scrolled
+/// far enough to clamp a card's bottom — an everyday scroll.
+///
+/// **One fact, one owner.** The room is not the decoration's opinion and not a
+/// constant written here: it is `room`, the box the layout that built the list
+/// hands down — the panel's own rectangle with the `+` row's top edge for a
+/// floor, which is the whole of the empty ground kept around the list. The
+/// decoration says what it wants, the layout says what there is, and the two are
+/// reconciled here and nowhere else.
+///
+/// **One amount and not four.** A ring drawn 5px past three edges and 4px past
+/// the fourth is not concentric with the card under it, which is the very shape
+/// [`outset`] exists to stop — so the tightest side sets the reach for all four.
+/// A card in the middle of the list is nowhere near an edge and pays nothing for
+/// this; only a card the scroller has clamped against the list's own rim does.
+///
+/// **Floored to whole device pixels**, because a reach is a count of pixels: the
+/// mark it is drawn with takes a `u32` stroke and a `u32` radius, and a rectangle
+/// grown by 4.5 with a 4px band in it is a ring that does not fill its own box.
+fn outset_reach(body: [f32; 4], wanted: f32, room: [f32; 4]) -> f32 {
+    wanted
+        .min(body[0] - room[0])
+        .min(body[1] - room[1])
+        .min(room[2] - body[2])
+        .min(room[3] - body[3])
+        .floor()
+        .max(0.0)
+}
+
 /// How dark the shadow under a thing in flight is drawn this frame.
 ///
 /// A pure function of [`TabContent::flight`], so the three surfaces cannot
@@ -8615,12 +8684,48 @@ pub struct TabMarkState {
     /// bell is a thing that *rang*, and a ringing bell you have not looked at is
     /// not a program standing still waiting for you to type.
     ///
-    /// A number and not a `bool` for [`Self::opacity`]'s reason one line up:
-    /// this module holds no clock, so the phase is sampled where the clocks are
-    /// and arrives here already resolved. `None` under reduced motion, at every
-    /// phase — the border stays warn and only the motion goes, because motion
-    /// was never the message.
-    pub pulse: Option<f32>,
+    /// A sample and not a `bool` for [`Self::opacity`]'s reason one line up:
+    /// this module holds no clock, so the breath is taken where the clocks are
+    /// and arrives here already resolved. `Some` at every phase under reduced
+    /// motion too — the presence of the sample is the claim and the numbers in
+    /// it are the motion, so the border stays warn and only the movement goes,
+    /// because motion was never the message.
+    pub pulse: Option<WaitPulse>,
+}
+
+/// **One breath, sampled once, worn by everything that says the same thing.**
+///
+/// `docs/DESIGN.md` §7.1.5b (user ruling 2026-07-18) gives a waiting tab two
+/// channels — *"等你回答（橙点脉动……卡片同时橙框）"* — and §7.1.5b's attention
+/// block restates it on 2026-08-25 as three things reading one answer. Two
+/// channels saying one fact must therefore breathe **together**, which is the
+/// owner's ruling of 2026-09-20: the dot is on the halo's clock and the halo's
+/// curve (the window's one 1.7s breath), not on a period of its own.
+///
+/// The mock-up asked for a period of its own — `.unreaddot.await { animation:
+/// fcpulse .9s infinite }` (`docs/design/ui-mockup.html:346`) — and never
+/// defined `@keyframes fcpulse`. An undefined `animation-name` is valid CSS that
+/// does nothing, so the mock-up's dot never pulsed either, and the transcription
+/// inherited a name with no curve behind it. That is the whole reason this type
+/// exists: the curve had to be chosen, and the ruling chose the one already in
+/// the window.
+///
+/// Two fields and not one number, because reduced motion is where the two
+/// channels part: an animation with no `0%` frame that is turned off has no
+/// shadow at all, and a dot whose animation is turned off is simply the dot. So
+/// each face carries its own value and one sampler decides both — see
+/// `crate::wait_pulse`, the only thing that may build one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WaitPulse {
+    /// The halo's strength this frame, `0.0..=1.0` of
+    /// [`bt_render::FOCUS_CARD_WAIT_HALO_OPACITY`] — a glow that grows out of
+    /// nothing and goes back into nothing, and a flat `0.0` under reduced
+    /// motion.
+    pub halo: f32,
+    /// The status dot's own alpha this frame, `0.0..=1.0` — the same curve at
+    /// the same phase, mapped onto a dot that is always there, and a flat `1.0`
+    /// under reduced motion.
+    pub dot: f32,
 }
 
 impl Default for TabMarkState {
@@ -11731,10 +11836,16 @@ fn window_tab_strip(
                         (mark_rect[1] + WINDOW_TAB_STATUS_DOT_TOP_LOGICAL_PX * scale).round();
                     let dot_rect = [dot_left, dot_top, dot_left + dot, dot_top + dot];
                     if within_strip(viewport, dot_rect) {
-                        // Filled or hollow by the claim's own answer, in one
-                        // place for all four surfaces that draw this badge —
-                        // see `crate::marks::status_dot_sprite`.
-                        sprites.push(crate::marks::status_dot_sprite(dot_color, dot_rect, scale));
+                        // Filled or hollow by the claim's own answer, and
+                        // breathing or still by the same claim's other answer,
+                        // in one place for all four surfaces that draw this
+                        // badge — see `crate::marks::status_dot_sprite`.
+                        sprites.push(crate::marks::status_dot_sprite(
+                            dot_color,
+                            dot_rect,
+                            scale,
+                            content.mark.pulse,
+                        ));
                     }
                 }
                 let label_left = mark_left + mark + content_gap;
@@ -12461,6 +12572,19 @@ fn rail_chrome(
             rect[3].min(list_bottom),
         ]
     };
+    // **The room the rail keeps around its list** — see [`outset_reach`], which
+    // is the one place a decoration's wish and this answer meet. The rail's own
+    // rectangle for three sides, and for the fourth whichever piece of furniture
+    // stands there: the heading's foot above the list when there is a heading,
+    // the panel's own top when the rail is parked and there is not, and the `+`
+    // row's top edge below. A row's flight shadow may reach into that ground and
+    // no further.
+    let room = [
+        geometry.body[0],
+        geometry.label.map_or(geometry.body[1], |label| label[3]),
+        geometry.body[2],
+        geometry.new_tab[1],
+    ];
 
     // ── the rail's own ground ──
     //
@@ -12584,18 +12708,18 @@ fn rail_chrome(
                 (&mut *labels, &mut *sprites)
             };
             if flying {
-                let spread = (FLIGHT_SHADOW_SPREAD_LOGICAL_PX * scale).round().max(1.0);
+                let body = clip_to_list(row.body);
+                let spread = outset_reach(
+                    body,
+                    (FLIGHT_SHADOW_SPREAD_LOGICAL_PX * scale).round().max(1.0),
+                    room,
+                );
                 let mut shadow = ChromeSprite::new(
                     ChromeMark::ControlPillRing {
                         radius_px: row_radius as u32 + spread as u32,
-                        stroke_px: spread as u32,
+                        stroke_px: (spread as u32).max(1),
                     },
-                    clip_to_list([
-                        row.body[0] - spread,
-                        row.body[1] - spread,
-                        row.body[2] + spread,
-                        row.body[3] + spread,
-                    ]),
+                    outset(body, spread),
                     palette.rail_edge,
                 );
                 shadow.opacity = flight_shadow_opacity(content.flight);
@@ -12735,6 +12859,7 @@ fn rail_chrome(
                             dot_color,
                             clip_to_list(dot_rect),
                             scale,
+                            content.mark.pulse,
                         ));
                     }
                 }
@@ -13478,6 +13603,20 @@ fn focus_rail_chrome(
             rect[3].min(list_bottom),
         ]
     };
+    // **The room the panel keeps around its list** — see [`outset_reach`], which
+    // is the one place a decoration's wish and this answer meet. The panel's own
+    // rectangle for three sides and the `+` row's top edge for the fourth, which
+    // is the whole of the empty ground around the list:
+    // `RAIL_PADDING_TOP_LOGICAL_PX` above it, the `+`'s own margin and the rail's
+    // gap below it, and the panel's x padding either side. A halo or a flight
+    // shadow may reach into that ground and no further — the furniture standing
+    // in it is not ground.
+    let room = [
+        geometry.body[0],
+        geometry.body[1],
+        geometry.body[2],
+        geometry.new_tab[1],
+    ];
 
     // ── the cards ──
     //
@@ -13539,18 +13678,17 @@ fn focus_rail_chrome(
         // the alpha rides `ChromeSprite::opacity` so a shadow fading over 200ms
         // is one raster and not two hundred.
         if flying {
-            let spread = (FLIGHT_SHADOW_SPREAD_LOGICAL_PX * scale).round().max(1.0);
+            let spread = outset_reach(
+                body,
+                (FLIGHT_SHADOW_SPREAD_LOGICAL_PX * scale).round().max(1.0),
+                room,
+            );
             let mut shadow = ChromeSprite::new(
                 ChromeMark::ControlPillRing {
                     radius_px: card_radius + spread as u32,
-                    stroke_px: spread as u32,
+                    stroke_px: (spread as u32).max(1),
                 },
-                clip_to_list([
-                    card.body[0] - spread,
-                    card.body[1] - spread,
-                    card.body[2] + spread,
-                    card.body[3] + spread,
-                ]),
+                outset(body, spread),
                 palette.rail_edge,
             );
             shadow.opacity = flight_shadow_opacity(content.flight);
@@ -13666,22 +13804,28 @@ fn focus_rail_chrome(
         // breath, which is the discipline `marks::ChromeIcon::opacity` was
         // written for and the one
         // `a_waiting_cards_halo_is_one_raster_at_every_phase` pins here.
-        if let Some(phase) = content.mark.pulse.filter(|phase| *phase > 0.0) {
-            let halo = (FOCUS_CARD_WAIT_HALO_LOGICAL_PX * scale).round().max(1.0);
+        //
+        // The rectangle is [`outset`]'s and the reach is [`outset_reach`]'s: the
+        // card as it was *drawn*, grown by one amount on all four sides and
+        // clamped no second time, so the ring is concentric with the border
+        // under it at every scroll offset — including the first card's, whose
+        // own top is the list's top, and the last one's, whose bottom is the
+        // list's bottom and whose room below is only what the panel kept.
+        if let Some(pulse) = content.mark.pulse.filter(|pulse| pulse.halo > 0.0) {
+            let halo = outset_reach(
+                body,
+                (FOCUS_CARD_WAIT_HALO_LOGICAL_PX * scale).round().max(1.0),
+                room,
+            );
             let mut ring = ChromeSprite::new(
                 ChromeMark::ControlPillRing {
                     radius_px: card_radius + halo as u32,
-                    stroke_px: halo as u32,
+                    stroke_px: (halo as u32).max(1),
                 },
-                clip_to_list([
-                    card.body[0] - halo,
-                    card.body[1] - halo,
-                    card.body[2] + halo,
-                    card.body[3] + halo,
-                ]),
+                outset(body, halo),
                 palette.status_warn,
             );
-            ring.opacity = phase * FOCUS_CARD_WAIT_HALO_OPACITY;
+            ring.opacity = pulse.halo * FOCUS_CARD_WAIT_HALO_OPACITY;
             sprites.push(ring);
         }
 
@@ -13754,6 +13898,7 @@ fn focus_rail_chrome(
                         dot_color,
                         clip_to_list(dot_rect),
                         scale,
+                        content.mark.pulse,
                     ));
                 }
             }
@@ -42209,7 +42354,10 @@ mod tests {",
                 ink: palette.status_warn,
                 hollow: false,
             }),
-            pulse: Some(1.0),
+            pulse: Some(WaitPulse {
+                halo: 1.0,
+                dot: 1.0,
+            }),
             ..TabMarkState::default()
         };
         // Rang, and nothing more: the same warn dot, no place in the queue.
@@ -42314,7 +42462,10 @@ mod tests {",
                         ink: palette.status_warn,
                         hollow: false,
                     }),
-                    pulse: Some(phase),
+                    pulse: Some(WaitPulse {
+                        halo: phase,
+                        dot: phase,
+                    }),
                     ..TabMarkState::default()
                 },
                 false,
@@ -42331,11 +42482,25 @@ mod tests {",
                 .copied()
                 .collect();
             // The outer of the two is the halo: it reaches past the card on
-            // every side, which is what `box-shadow`'s spread means.
+            // **every** side, which is what `box-shadow`'s spread means.
+            //
+            // All four sides and not the x axis alone. This used to ask only
+            // `rect[0] < card.body[0]`, and the left edge is the one edge no
+            // scroller ever clamps — so a halo that had lost its whole top
+            // outset to `clip_to_list` answered this filter exactly as a correct
+            // one does, for as long as the column has existed (owner's
+            // screenshot, 2026-09-20). The rectangle itself is pinned by
+            // `an_outset_decoration_is_the_body_as_drawn_grown_and_kept_inside_its_room`;
+            // this is that test's guard standing in this one's doorway.
             let halo = rings
                 .iter()
                 .copied()
-                .find(|sprite| sprite.rect[0] < card.body[0])
+                .find(|sprite| {
+                    sprite.rect[0] < card.body[0]
+                        && sprite.rect[1] < card.body[1]
+                        && sprite.rect[2] > card.body[2]
+                        && sprite.rect[3] > card.body[3]
+                })
                 .expect("a waiting card wears a halo");
             let edge = rings
                 .iter()
@@ -42373,6 +42538,595 @@ mod tests {",
             (1.0, 1.0),
             "and it is drawn at full strength at both, so a reader who catches \
              the trough is not shown a fainter claim"
+        );
+    }
+
+    /// The focus column **painted at a stated scale, with the list scrolled** —
+    /// the two dials every other fixture here holds at 1.0 and 0.0.
+    ///
+    /// Straight at [`focus_rail_chrome`] rather than through
+    /// [`window_chrome_with_thumbnails_in`], because the pair of numbers this
+    /// exists to vary are the two that fixture pins: it builds a seat layout at
+    /// dpi 1000 and hands the column `rail_scroll: 0.0`. A test about a
+    /// rectangle that is only ever wrong at the edge of the list has to be able
+    /// to move that edge.
+    ///
+    /// Returns the geometry the paint was solved from beside the two groups, so
+    /// an assertion can name the card it is talking about.
+    fn focus_column_paint(
+        height: f32,
+        scale: f32,
+        scroll: f32,
+        tabs: &[TabContent],
+    ) -> (FocusRailGeometry, ChromeGroup, ChromeGroup) {
+        let state = focus_rail(TabLayoutMode::Vertical);
+        let geometry = focus_rail_geometry(height, scale, FOLIO_BAR, tabs.len(), 0, scroll, state)
+            .expect("focus mode puts a column on screen");
+        let mut rest = ChromeGroup::default();
+        let mut flight = ChromeGroup::default();
+        focus_rail_chrome(
+            height,
+            scale,
+            FOLIO_BAR,
+            None,
+            FocusRail {
+                tabs,
+                active_tab: 0,
+                grabbed: None,
+                preview: None,
+                thumbnails: &[],
+                scroll,
+                state,
+                profile_menu_open: false,
+                chevron_turn: 0.0,
+                reveal: 1.0,
+                nudge_rows: 0.0,
+                ink: TabInk::default(),
+            },
+            chrome_palette(),
+            &mut rest,
+            &mut flight,
+        );
+        (geometry, rest, flight)
+    }
+
+    /// The rail's rows **painted at a stated scale, with the list scrolled** —
+    /// [`focus_column_paint`]'s twin on the other panel, and there for its
+    /// reason: `rail_paint_of_in` pins `rail_scroll` at 0, and a rectangle that
+    /// is only ever wrong at the edge of a list needs the edge to move.
+    fn rail_rows_paint(
+        height: f32,
+        scale: f32,
+        scroll: f32,
+        tabs: &[TabContent],
+    ) -> (RailGeometry, ChromeGroup, ChromeGroup) {
+        let state = expanded_rail();
+        let trailers: Vec<TabTrailer> = tabs.iter().map(|tab| tab.trailer).collect();
+        let geometry = rail_geometry(
+            height,
+            scale,
+            FOLIO_BAR,
+            &trailers,
+            pinned_run_len(&trailers),
+            scroll,
+            state,
+        )
+        .expect("an expanded rail is on screen");
+        let mut rest = ChromeGroup::default();
+        let mut flight = ChromeGroup::default();
+        rail_chrome(
+            height,
+            scale,
+            FOLIO_BAR,
+            None,
+            Rail {
+                tabs,
+                active_tab: 0,
+                grabbed: None,
+                preview: None,
+                scroll,
+                state,
+                profile_menu_open: false,
+                chevron_turn: 0.0,
+                shown: &[],
+            },
+            chrome_palette(),
+            &mut rest,
+            &mut flight,
+        );
+        (geometry, rest, flight)
+    }
+
+    /// One outward decoration, measured against the body it belongs to: how far
+    /// it reaches on each of the four sides.
+    ///
+    /// Four numbers and not one on purpose — the assertion that they are all the
+    /// same number is the whole of "concentric", and a helper that returned one
+    /// would have assumed it.
+    fn reaches(body: [f32; 4], decoration: [f32; 4]) -> [f32; 4] {
+        [
+            body[0] - decoration[0],
+            body[1] - decoration[1],
+            decoration[2] - body[2],
+            decoration[3] - body[3],
+        ]
+    }
+
+    /// PIN (owner's screenshot 2026-09-20; closure review of `b16f7592`, same
+    /// day) — **an outset decoration is the body as drawn, grown by one amount
+    /// on all four sides, and it never leaves the room its layout kept for it.**
+    ///
+    /// Two rules and one test, because they are two halves of one obligation and
+    /// a test of either alone passes the other's counterexample. [`outset`] says
+    /// the growth is not clamped a second time — the defect that took the first
+    /// card's whole top outset, since `cards[0].body[1] == list_top` exactly, and
+    /// that no test here could see because the old one identified the halo by the
+    /// x axis, the one axis a vertical scroller never touches. [`outset_reach`]
+    /// says how far: the panel keeps 6 logical px above its list and **3** below
+    /// it, the growth is rounded to device pixels and that margin is not, and at
+    /// 125%, 150%, 225% and 250% the rounded growth is the larger of the two — so
+    /// taking the second clamp off put half a pixel of a bottom-clamped card's
+    /// halo on the `+` row's own top edge.
+    ///
+    /// Eight scales, every card the list is showing, and three scroll offsets —
+    /// home, mid-list and scrolled to the end — so that the top rim, the bottom
+    /// rim and the roomy middle are all walked at every scale. The two witnesses
+    /// at the foot are what make that a fact rather than a hope.
+    ///
+    /// Red gate: put `clip_to_list` back around the grown rectangle and the first
+    /// card goes red at every scale; drop [`outset_reach`]'s room and the last
+    /// card at 125/150/225/250% leaves the panel's ground and lands on the `+`.
+    #[test]
+    fn an_outset_decoration_is_the_body_as_drawn_grown_and_kept_inside_its_room() {
+        let palette = chrome_palette();
+        let waiting = TabMarkState {
+            dot: crate::StatusClaim::Awaiting.dot(&palette),
+            pulse: Some(WaitPulse {
+                halo: 0.9,
+                dot: 0.9,
+            }),
+            ..TabMarkState::default()
+        };
+        // Every side of every decoration, at every scale, has to be walked with
+        // a card clamped at each rim at least once, or a green run proves
+        // nothing about the rims (CONVENTIONS §三: 默认值会掩盖 bug).
+        let mut saw_top_rim = 0_usize;
+        let mut saw_bottom_rim = 0_usize;
+
+        for scale in [1.0_f32, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 3.0] {
+            let border_px = (FOCUS_CARD_BORDER_LOGICAL_PX * scale).round().max(1.0) as u32;
+            let halo_wish = (FOCUS_CARD_WAIT_HALO_LOGICAL_PX * scale).round().max(1.0);
+            let spread_wish = (FLIGHT_SHADOW_SPREAD_LOGICAL_PX * scale).round().max(1.0);
+            // Short enough that the list overflows and long enough to show
+            // three cards, so "first", "middle" and "last" are all on screen
+            // across the three offsets.
+            let height = 700.0 * scale;
+            let resting: Vec<TabContent> = (0..6)
+                .map(|index| card_tab(&format!("waiting {index}"), 1, waiting, false))
+                .collect();
+            let lifted: Vec<TabContent> = resting
+                .iter()
+                .map(|tab| TabContent {
+                    flight: 0.5,
+                    ..tab.clone()
+                })
+                .collect();
+            let settled = focus_column_paint(height, scale, 0.0, &resting).0;
+            assert!(
+                settled.max_scroll > 0.0,
+                "scale {scale}: the fixture has to overflow, or no card is ever \
+                 clamped against a rim"
+            );
+
+            for scroll in [0.0, settled.max_scroll / 2.0, settled.max_scroll] {
+                // Pass one: the halo, on resting cards. Pass two: the flight
+                // shadow, on the same cards in flight — the same rule, the
+                // second decoration that obeys it (CONVENTIONS §十 rule 6).
+                for flying in [false, true] {
+                    let tabs = if flying { &lifted } else { &resting };
+                    let (geometry, rest, flight) = focus_column_paint(height, scale, scroll, tabs);
+                    let group = if flying { &flight } else { &rest };
+                    let [list_top, list_bottom] = geometry.viewport;
+                    // The ground the panel keeps around its list, said here
+                    // from the geometry's own rectangles rather than from the
+                    // constants the paint uses — two ways to the same box.
+                    let room = [
+                        geometry.body[0],
+                        geometry.body[1],
+                        geometry.body[2],
+                        geometry.new_tab[1],
+                    ];
+                    let (wish, ink) = if flying {
+                        (spread_wish, palette.rail_edge)
+                    } else {
+                        (halo_wish, palette.status_warn)
+                    };
+
+                    for (index, card) in geometry.cards.iter().enumerate() {
+                        if !(card.body[3] > list_top && card.body[1] < list_bottom) {
+                            continue;
+                        }
+                        let case = format!(
+                            "scale {scale}, scroll {scroll}, flying {flying}, card {index}"
+                        );
+                        let body = [
+                            card.body[0],
+                            card.body[1].max(list_top),
+                            card.body[2],
+                            card.body[3].min(list_bottom),
+                        ];
+                        let middle = (body[1] + body[3]) / 2.0;
+                        // **Found by where it is, never by how big it is.**
+                        // The reach is what this test is about, so keying the
+                        // lookup on the stroke would be the assertion asking
+                        // the answer to identify itself.
+                        let rings = |ink: [u8; 3]| {
+                            group
+                                .sprites
+                                .iter()
+                                .copied()
+                                .filter(|sprite| {
+                                    matches!(sprite.mark, ChromeMark::ControlPillRing { .. })
+                                        && sprite.color == ink
+                                        && sprite.rect[1] <= middle
+                                        && sprite.rect[3] >= middle
+                                })
+                                .collect::<Vec<ChromeSprite>>()
+                        };
+                        let warn = rings(palette.status_warn);
+                        assert!(
+                            warn.iter().any(|sprite| {
+                                sprite.rect == body
+                                    && matches!(
+                                        sprite.mark,
+                                        ChromeMark::ControlPillRing { stroke_px, .. }
+                                            if stroke_px == border_px
+                                    )
+                            }),
+                            "{case}: the border is the card as the scroller cropped it"
+                        );
+                        let drawn = body;
+                        let outer: Vec<ChromeSprite> = if flying {
+                            rings(palette.rail_edge)
+                        } else {
+                            warn.iter()
+                                .copied()
+                                .filter(|sprite| sprite.rect != body)
+                                .collect()
+                        };
+                        assert_eq!(
+                            outer.len(),
+                            1,
+                            "{case}: exactly one decoration in {ink:?} outside this card"
+                        );
+                        let decoration = outer[0].rect;
+                        let reach = reaches(drawn, decoration);
+
+                        // One amount on all four sides: concentric or it is not
+                        // a ring.
+                        assert!(
+                            reach.iter().all(|side| (side - reach[0]).abs() < 1e-4),
+                            "{case}: the decoration reaches {reach:?} — one amount, or the \
+                             ring is not concentric with the card under it"
+                        );
+                        assert!(
+                            reach[0] >= 1.0 && reach[0] <= wish,
+                            "{case}: it reaches {} against a wish of {wish}",
+                            reach[0]
+                        );
+                        // And inside the room, which is the half the review
+                        // sent this branch back for.
+                        assert!(
+                            decoration[0] >= room[0]
+                                && decoration[1] >= room[1]
+                                && decoration[2] <= room[2]
+                                && decoration[3] <= room[3],
+                            "{case}: {decoration:?} left the panel's own ground {room:?}"
+                        );
+                        assert!(
+                            !overlaps(decoration, geometry.new_tab)
+                                && !overlaps(decoration, geometry.new_tab_menu),
+                            "{case}: {decoration:?} landed on the `+` row {:?}",
+                            geometry.new_tab
+                        );
+
+                        // A card the scroller has not touched is nowhere near a
+                        // rim and pays nothing for any of this.
+                        if card.body[1] > list_top && card.body[3] < list_bottom {
+                            assert_eq!(
+                                reach[0], wish,
+                                "{case}: a card clear of both rims wears its whole decoration"
+                            );
+                        }
+                        if card.body[1] <= list_top {
+                            saw_top_rim += 1;
+                        }
+                        if card.body[3] >= list_bottom {
+                            saw_bottom_rim += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            saw_top_rim > 0 && saw_bottom_rim > 0,
+            "the witnesses: {saw_top_rim} cards clamped at the top rim and \
+             {saw_bottom_rim} at the bottom one"
+        );
+    }
+
+    /// PIN (closure review of `b16f7592`) — **the rail's rows obey the same
+    /// rule, on a list whose room above it is a heading rather than a margin.**
+    ///
+    /// The third instance of the class and the tightest room in the product: a
+    /// rail row's flight shadow sits under a list that starts one gap below the
+    /// `Tabs` heading, so what it may grow into above is that gap and not the
+    /// panel's 6px pad. [`outset_reach`] takes the room from the layout, so this
+    /// needed no second rule — which is the claim being pinned.
+    ///
+    /// Red gate: hand `outset_reach` the panel's box instead of the heading's
+    /// foot and a scrolled row's shadow prints over the heading.
+    #[test]
+    fn a_rail_rows_shadow_stays_between_the_heading_and_the_new_tab_row() {
+        let palette = chrome_palette();
+        for scale in [1.0_f32, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 3.0] {
+            let spread_wish = (FLIGHT_SHADOW_SPREAD_LOGICAL_PX * scale).round().max(1.0);
+            let height = 300.0 * scale;
+            let tabs: Vec<TabContent> = (0..20)
+                .map(|index| {
+                    let mut tab =
+                        card_tab(&format!("row {index}"), 1, TabMarkState::default(), false);
+                    tab.flight = 0.5;
+                    tab
+                })
+                .collect();
+            let settled = rail_rows_paint(height, scale, 0.0, &tabs).0;
+            assert!(
+                settled.max_scroll > 0.0,
+                "scale {scale}: the rail has to overflow"
+            );
+
+            for scroll in [0.0, settled.max_scroll / 2.0, settled.max_scroll] {
+                let (geometry, _, flight) = rail_rows_paint(height, scale, scroll, &tabs);
+                let [list_top, list_bottom] = geometry.viewport;
+                let heading = geometry.label.expect("an expanded rail wears its heading");
+                let room = [
+                    geometry.body[0],
+                    heading[3],
+                    geometry.body[2],
+                    geometry.new_tab[1],
+                ];
+                for (index, row) in geometry.tabs.iter().enumerate() {
+                    if !(row.body[3] > list_top && row.body[1] < list_bottom) {
+                        continue;
+                    }
+                    let case = format!("scale {scale}, scroll {scroll}, row {index}");
+                    let body = [
+                        row.body[0],
+                        row.body[1].max(list_top),
+                        row.body[2],
+                        row.body[3].min(list_bottom),
+                    ];
+                    // A row is 28px tall and a shadow reaches 3px past it, so
+                    // at the list's rim a row cropped to a sliver sits inside
+                    // its *neighbour's* shadow as well as its own. Its own is
+                    // the tightest box that still holds all of it.
+                    let mut shadows: Vec<ChromeSprite> = flight
+                        .sprites
+                        .iter()
+                        .copied()
+                        .filter(|sprite| {
+                            matches!(sprite.mark, ChromeMark::ControlPillRing { .. })
+                                && sprite.color == palette.rail_edge
+                                && sprite.rect[0] <= body[0]
+                                && sprite.rect[1] <= body[1]
+                                && sprite.rect[2] >= body[2]
+                                && sprite.rect[3] >= body[3]
+                        })
+                        .collect();
+                    shadows.sort_by(|a, b| {
+                        (a.rect[3] - a.rect[1])
+                            .partial_cmp(&(b.rect[3] - b.rect[1]))
+                            .expect("finite heights")
+                    });
+                    let decoration = shadows
+                        .first()
+                        .unwrap_or_else(|| panic!("{case}: this row wears a shadow"))
+                        .rect;
+                    let reach = reaches(body, decoration);
+                    assert!(
+                        reach.iter().all(|side| (side - reach[0]).abs() < 1e-4),
+                        "{case}: the shadow reaches {reach:?} — one amount on all four sides"
+                    );
+                    assert!(
+                        reach[0] >= 0.0 && reach[0] <= spread_wish,
+                        "{case}: it reaches {} against a wish of {spread_wish}",
+                        reach[0]
+                    );
+                    assert!(
+                        decoration[1] >= room[1] && decoration[3] <= room[3],
+                        "{case}: {decoration:?} left the ground between the heading and the \
+                         `+` row, {room:?}"
+                    );
+                    assert!(
+                        !overlaps(decoration, heading) && !overlaps(decoration, geometry.new_tab),
+                        "{case}: {decoration:?} printed over the rail's own furniture"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every sprite in `sprites` that is this claim's status dot, found by the
+    /// one size the badge is ever drawn at.
+    ///
+    /// By size and ink rather than by shape, because the shape is the claim's
+    /// own second axis — `Awaiting` is a filled pill and `Bell` is that pill's
+    /// ring — and a helper that looked for one of them would be a helper that
+    /// could only ever find half the ladder.
+    fn status_dots(
+        sprites: &[ChromeSprite],
+        dot: crate::StatusDot,
+        scale: f32,
+    ) -> Vec<ChromeSprite> {
+        let side = (WINDOW_TAB_STATUS_DOT_LOGICAL_PX * scale).round().max(1.0);
+        sprites
+            .iter()
+            .copied()
+            .filter(|sprite| {
+                sprite.color == dot.ink
+                    && (sprite.rect[2] - sprite.rect[0] - side).abs() < 0.01
+                    && (sprite.rect[3] - sprite.rect[1] - side).abs() < 0.01
+            })
+            .collect()
+    }
+
+    /// PIN (`docs/DESIGN.md` §7.1.5b, 2026-07-18; the clock ruled 2026-09-20) —
+    /// **a waiting tab's dot breathes, on all three of this module's surfaces,
+    /// and only a waiting tab's does.**
+    ///
+    /// *"等你回答（橙点脉动……卡片同时橙框）"* — two channels, and the dot is
+    /// named first. It never moved: the mock-up asks for
+    /// `animation: fcpulse .9s infinite` and never defines `@keyframes fcpulse`,
+    /// so the mock-up's dot did not pulse either and the transcription inherited
+    /// a name with no curve behind it. Nothing on any dot path read
+    /// [`TabMarkState::pulse`] at all until this test existed.
+    ///
+    /// The strip and the rail's rows are the half that matters most: they wear
+    /// no halo (the frame is the card's, by the same ruling), so the dot is the
+    /// *only* channel a waiting tab has there, and a still one leaves the
+    /// loudest state in the taxonomy with no motion anywhere on screen.
+    ///
+    /// Red gate: drop the sample at `marks::status_dot_sprite` and the two
+    /// phases come back equal on all three surfaces; let a claim that does not
+    /// pulse carry one and the bell's rows go red.
+    #[test]
+    fn a_waiting_dot_breathes_on_every_surface_and_only_a_waiting_one_does() {
+        let palette = chrome_palette();
+        let awaiting = crate::StatusClaim::Awaiting
+            .dot(&palette)
+            .expect("the attention queue's own dot");
+        let rang = crate::StatusClaim::Bell
+            .dot(&palette)
+            .expect("and the bell's, which shares its ink");
+        assert!(
+            crate::StatusClaim::Awaiting.pulses() && !crate::StatusClaim::Bell.pulses(),
+            "the ladder's own answer to which of the two warns breathes"
+        );
+
+        const SURFACES: [&str; 3] = ["horizontal strip", "vertical rail row", "card head"];
+        let dots = |dot: crate::StatusDot, pulse: Option<WaitPulse>| -> [ChromeSprite; 3] {
+            let mark = TabMarkState {
+                dot: Some(dot),
+                pulse,
+                ..TabMarkState::default()
+            };
+            let tabs = vec![card_tab("waiting", 1, mark, false)];
+            let strip = strip_chrome_of(1.0, &tabs, 0, 0.0, None, false).2;
+            let rail = rail_paint_of(1.0, &tabs, 0, None, None, expanded_rail(), None).2;
+            let column = focus_column_paint(TALL_FIXTURE_HEIGHT, 1.0, 0.0, &tabs)
+                .1
+                .sprites;
+            let one = |sprites: &[ChromeSprite], surface: &str| {
+                let found = status_dots(sprites, dot, 1.0);
+                assert_eq!(found.len(), 1, "{surface}: exactly one status dot");
+                found[0]
+            };
+            [
+                one(&strip, SURFACES[0]),
+                one(&rail, SURFACES[1]),
+                one(&column, SURFACES[2]),
+            ]
+        };
+
+        let trough = dots(
+            awaiting,
+            Some(WaitPulse {
+                halo: 0.1,
+                dot: 0.4,
+            }),
+        );
+        let crest = dots(
+            awaiting,
+            Some(WaitPulse {
+                halo: 0.9,
+                dot: 0.95,
+            }),
+        );
+        let still = dots(rang, None);
+        for (index, surface) in SURFACES.iter().enumerate() {
+            assert!(
+                (trough[index].opacity - 0.4).abs() < 1e-6
+                    && (crest[index].opacity - 0.95).abs() < 1e-6,
+                "{surface}: the dot wears the sample it was handed — {:?} and {:?}",
+                trough[index],
+                crest[index]
+            );
+            assert_eq!(
+                (trough[index].mark, trough[index].color),
+                (crest[index].mark, crest[index].color),
+                "{surface}: two phases of one breath are one raster key — the alpha \
+                 rides beside the pixels and never in the ink"
+            );
+            assert_eq!(
+                still[index].opacity, 1.0,
+                "{surface}: a bell rang and does not breathe (§7.1.5b: bell 的橙点明确不脉动)"
+            );
+        }
+    }
+
+    /// PIN (§7.1.5b, restated in the attention block 2026-08-25) — **the halo
+    /// and the dot spend one sample in one frame.**
+    ///
+    /// *"所以点、脉动与卡片橙框读的就是这个答案"* — three faces of one
+    /// answer, and the owner's 2026-09-20 ruling put the dot on the halo's own
+    /// clock so that the two visibly breathe together. One frame is built here
+    /// and both channels are read out of it, so the day either grows a sampler
+    /// of its own the two stop agreeing and this goes red.
+    ///
+    /// Red gate: give the dot a phase of its own anywhere between
+    /// `TabState::mark_state` and the sprite and the second assertion fails.
+    #[test]
+    fn a_waiting_cards_halo_and_dot_spend_one_sample_in_one_frame() {
+        let palette = chrome_palette();
+        let dot = crate::StatusClaim::Awaiting
+            .dot(&palette)
+            .expect("the attention queue's own dot");
+        let pulse = WaitPulse {
+            halo: 0.7,
+            dot: 0.82,
+        };
+        let tabs = vec![card_tab(
+            "waiting",
+            1,
+            TabMarkState {
+                dot: Some(dot),
+                pulse: Some(pulse),
+                ..TabMarkState::default()
+            },
+            false,
+        )];
+        let (geometry, column, _) = focus_column_paint(TALL_FIXTURE_HEIGHT, 1.0, 0.0, &tabs);
+        let card = &geometry.cards[0];
+        let halo = column
+            .sprites
+            .iter()
+            .find(|sprite| {
+                sprite.color == palette.status_warn
+                    && sprite.rect[0] < card.body[0]
+                    && sprite.rect[1] < card.body[1]
+            })
+            .expect("a waiting card wears a halo");
+        assert!(
+            (halo.opacity - pulse.halo * FOCUS_CARD_WAIT_HALO_OPACITY).abs() < 1e-6,
+            "the halo is its own face of the sample, at the mock-up's 24%: {halo:?}"
+        );
+        let dots = status_dots(&column.sprites, dot, 1.0);
+        assert_eq!(dots.len(), 1, "and the card head wears one dot");
+        assert!(
+            (dots[0].opacity - pulse.dot).abs() < 1e-6,
+            "which is the other face of that same sample: {:?}",
+            dots[0]
         );
     }
 
@@ -43132,7 +43886,7 @@ mod tests {",
     /// `TabMarkState::pulse` is `Some(0.0)` under reduced motion and not `None`:
     /// the presence of the number is the claim, and the number is the motion.
     ///
-    /// Red gate: answer `None` from `wait_halo_opacity` under `Reduced` and the
+    /// Red gate: answer `None` from `wait_pulse` under `Reduced` and the
     /// second assertion goes red, because the edge would fall through to the
     /// resting one.
     #[test]
@@ -43149,8 +43903,11 @@ mod tests {",
                     ink: palette.status_warn,
                     hollow: false,
                 }),
-                // What `wait_halo_opacity` answers under `Motion::Reduced`.
-                pulse: Some(0.0),
+                // What `wait_pulse` answers under `Motion::Reduced`.
+                pulse: Some(WaitPulse {
+                    halo: 0.0,
+                    dot: 1.0,
+                }),
                 ..TabMarkState::default()
             },
             false,

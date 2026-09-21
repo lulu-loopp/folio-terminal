@@ -334,6 +334,16 @@ pub struct PeekLeaf {
     /// fleet, and the whole point of a schematic is to say which room the noise
     /// is coming from.
     pub dot: Option<crate::StatusDot>,
+    /// This leaf's breath, when the claim its dot came from is one that pulses,
+    /// and `None` otherwise — [`crate::seats::WaitPulse`].
+    ///
+    /// Sampled where the clocks are, exactly as [`Self::mark_opacity`] is and
+    /// for the same reason: the peek must not hold a second opinion about a
+    /// breath the strip is already drawing, and both faces of this one are
+    /// decided by `crate::wait_pulse` in `main.rs`. Asked of the **same**
+    /// per-leaf `StatusClaim` [`Self::dot`] is asked of, so a schematic can
+    /// never show a still dot beside a card that is breathing.
+    pub pulse: Option<crate::seats::WaitPulse>,
     /// The progress this leaf's session is reporting. Like the tab's, it
     /// *replaces* the mark rather than surrounding it.
     pub ring: Option<crate::seats::TabRing>,
@@ -862,11 +872,14 @@ pub fn build(
 /// - **The dot is additional** and never replaced, because it answers a
 ///   different question from the ring: the ring says what this pane is doing,
 ///   the dot says what it wants from you.
-/// - **The breath lands on the mark alone.** The dot is pushed at full strength
-///   and the ring carries no opacity, so a fading mark never drags a claim down
-///   with it — and `mark_opacity`'s own contract already flattens the breath to
-///   1.0 whenever a ring has taken the slot, which is why nothing here has to
-///   ask whether the two are fighting.
+/// - **The working breath lands on the mark alone.** The ring carries no
+///   opacity and the dot carries only its *own* breath, so a fading mark never
+///   drags a claim down with it — and `mark_opacity`'s own contract already
+///   flattens the working breath to 1.0 whenever a ring has taken the slot,
+///   which is why nothing here has to ask whether the two are fighting.
+/// - **The waiting breath lands on the dot**, off [`PeekLeaf::pulse`] and
+///   through `marks::status_dot_sprite`, which is the one place all four
+///   surfaces spend it.
 fn push_mark_slot(
     sprites: &mut Vec<ChromeSprite>,
     leaf: &PeekLeaf,
@@ -918,7 +931,9 @@ fn push_mark_slot(
     if let Some(dot) = leaf.dot {
         // The strip's own function, so the schematic's badge and the tab's can never round
         // differently or disagree about which claim is drawn hollow.
-        sprites.push(crate::marks::status_dot_sprite(dot, dot_rect, scale));
+        sprites.push(crate::marks::status_dot_sprite(
+            dot, dot_rect, scale, leaf.pulse,
+        ));
     }
 }
 
@@ -972,8 +987,74 @@ mod tests {
             focused: false,
             mark_opacity: 1.0,
             dot: None,
+            pulse: None,
             ring: None,
         }
+    }
+
+    /// PIN (`docs/DESIGN.md` §7.1.5b, 2026-07-18; the clock ruled 2026-09-20) —
+    /// **the schematic's dot breathes with the tab's, and only a waiting one
+    /// does.**
+    ///
+    /// The fourth surface that draws this badge, and the one furthest from the
+    /// clock: the peek holds no timer at all, so the sample arrives already
+    /// taken, exactly as `mark_opacity` does and asked of the very same per-leaf
+    /// `StatusClaim` the dot came from. A schematic showing a still dot beside a
+    /// card that is breathing would be a schematic of a different window.
+    ///
+    /// Red gate: stop handing [`PeekLeaf::pulse`] to `marks::status_dot_sprite`
+    /// and both phases come back at 1.0.
+    #[test]
+    fn a_waiting_leafs_dot_breathes_and_a_bells_does_not() {
+        let palette = bt_render::chrome_palette();
+        let awaiting = crate::StatusClaim::Awaiting
+            .dot(&palette)
+            .expect("the attention queue's own dot");
+        let rang = crate::StatusClaim::Bell
+            .dot(&palette)
+            .expect("and the bell's, which shares its ink");
+        let dot_of = |dot: crate::StatusDot, pulse: Option<crate::seats::WaitPulse>| {
+            let mut cast = leaves(3);
+            cast[1].dot = Some(dot);
+            cast[1].pulse = pulse;
+            let (laid, layer, _) = painted(&cast);
+            let dots: Vec<_> = sprites_over(&layer, laid.cells[1].mark)
+                .into_iter()
+                .filter(|sprite| is_dot(sprite) && sprite.color == dot.ink)
+                .copied()
+                .collect();
+            assert_eq!(dots.len(), 1, "the waiting leaf wears exactly one dot");
+            dots[0]
+        };
+
+        let trough = dot_of(
+            awaiting,
+            Some(crate::seats::WaitPulse {
+                halo: 0.1,
+                dot: 0.4,
+            }),
+        );
+        let crest = dot_of(
+            awaiting,
+            Some(crate::seats::WaitPulse {
+                halo: 0.9,
+                dot: 0.95,
+            }),
+        );
+        assert!(
+            (trough.opacity - 0.4).abs() < 1e-6 && (crest.opacity - 0.95).abs() < 1e-6,
+            "the schematic spends the sample it was handed: {trough:?} and {crest:?}"
+        );
+        assert_eq!(
+            (trough.mark, trough.color),
+            (crest.mark, crest.color),
+            "two phases of one breath are one raster key here too"
+        );
+        assert_eq!(
+            dot_of(rang, None).opacity,
+            1.0,
+            "and a bell, which rang rather than stood, is drawn still"
+        );
     }
 
     fn leaves(n: usize) -> Vec<PeekLeaf> {

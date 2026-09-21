@@ -6494,7 +6494,7 @@ fn a_place_in_the_queue_outranks_every_claim_and_is_the_only_one_that_breathes()
 #[test]
 fn the_waiting_halo_breathes_on_the_marks_own_period_and_out_of_nothing() {
     let period = Duration::from_millis(WINDOW_TAB_BREATHE_PERIOD_MS);
-    let at = |fraction: f32| wait_halo_opacity(period.mul_f32(fraction), Motion::Full);
+    let at = |fraction: f32| wait_pulse(period.mul_f32(fraction), Motion::Full).halo;
 
     assert!(at(0.0).abs() < 1e-6, "out of nothing: {}", at(0.0));
     assert!(
@@ -6526,12 +6526,230 @@ fn the_waiting_halo_breathes_on_the_marks_own_period_and_out_of_nothing() {
 
     for fraction in [0.0_f32, 0.25, 0.5, 0.75, 1.0, 3.7] {
         assert_eq!(
-            wait_halo_opacity(period.mul_f32(fraction), Motion::Reduced),
+            wait_pulse(period.mul_f32(fraction), Motion::Reduced).halo,
             0.0,
             "reduced motion draws no halo at any phase — and the card's warn \
                  border, which is not this number, stays"
         );
     }
+}
+
+/// PIN (`docs/DESIGN.md` §7.1.5b, 2026-07-18; the clock ruled by the owner
+/// 2026-09-20) — **the waiting dot breathes with the halo and never goes out.**
+///
+/// The mock-up wrote `.unreaddot.await { animation: fcpulse .9s infinite }`
+/// (`ui-mockup.html:346`) and never defined `@keyframes fcpulse`, so the number
+/// in it was never a curve anybody had seen. The owner ruled the missing curve
+/// to be the halo's: *two things saying one fact breathe together*, so the dot
+/// rides the very same 1.7s breath at the very same phase and differs only in
+/// what it does with it — a glow goes out, a badge does not.
+///
+/// Red gate: give the dot a period or a phase of its own and the first pair of
+/// assertions part company; let it ramp from zero like the halo and the floor
+/// assertion goes red; answer anything but a flat 1.0 under `Reduced` and the
+/// last does — which would be the accessibility setting deleting a claim.
+#[test]
+fn the_waiting_dot_breathes_with_the_halo_and_never_goes_out() {
+    let period = Duration::from_millis(WINDOW_TAB_BREATHE_PERIOD_MS);
+    let at = |fraction: f32| wait_pulse(period.mul_f32(fraction), Motion::Full);
+
+    // One clock: brightest at the same instant, faintest at the same instant.
+    assert!(
+        (at(0.5).halo - 1.0).abs() < 1e-6 && (at(0.5).dot - 1.0).abs() < 1e-6,
+        "both are full at the one keyframe the mock-up writes: {:?}",
+        at(0.5)
+    );
+    assert!(
+        at(0.0).halo.abs() < 1e-6 && (at(0.0).dot - WINDOW_TAB_BREATHE_MIN_OPACITY).abs() < 1e-6,
+        "and at the trough the glow is out while the badge is merely faint: {:?}",
+        at(0.0)
+    );
+    assert!(
+        (at(0.25).dot - at(0.75).dot).abs() < 1e-6 && (at(2.5).dot - at(0.5).dot).abs() < 1e-6,
+        "symmetric about the keyframe, and `infinite`"
+    );
+
+    // One sample: the dot is a function of the halo's own number at every
+    // phase, which is what stops the two drifting.
+    for step in 0..=64 {
+        let pulse = at(step as f32 / 64.0);
+        assert!(
+            (0.0..=1.0).contains(&pulse.halo),
+            "the halo stays in gamut at phase {step}/64: {pulse:?}"
+        );
+        assert!(
+            (WINDOW_TAB_BREATHE_MIN_OPACITY..=1.0).contains(&pulse.dot),
+            "and the dot never goes out at phase {step}/64: {pulse:?}"
+        );
+        assert!(
+            (pulse.dot
+                - (WINDOW_TAB_BREATHE_MIN_OPACITY
+                    + (1.0 - WINDOW_TAB_BREATHE_MIN_OPACITY) * pulse.halo))
+                .abs()
+                < 1e-6,
+            "one breath, two faces of it: {pulse:?}"
+        );
+    }
+
+    // Reduced motion: each channel's own value with the animation stood down,
+    // and neither of them is "not waiting".
+    for fraction in [0.0_f32, 0.25, 0.5, 0.75, 1.0, 3.7] {
+        let pulse = wait_pulse(period.mul_f32(fraction), Motion::Reduced);
+        assert_eq!(
+            (pulse.halo, pulse.dot),
+            (0.0, 1.0),
+            "an animation turned off leaves the element as it is written: a \
+             keyframe set with no 0% frame leaves no shadow, and `.unreaddot` \
+             is an opaque dot"
+        );
+    }
+}
+
+/// PIN (§7.1.5b; attention block 2026-08-25) — **one tab, one frame, one
+/// sample: the card's edge, its halo and every surface's dot read the same
+/// reading of the same clock.**
+///
+/// *"所以点、脉动与卡片橙框读的就是这个答案"*. The sample is taken once,
+/// in [`TabState::mark_state`], off the tab's own `animation_elapsed`, and
+/// travels as [`seats::TabMarkState::pulse`]. This asserts that what arrives
+/// there **is** `wait_pulse`'s reading at that instant — not a number of the
+/// same shape arrived at somewhere else.
+///
+/// Red gate: sample either face anywhere but `mark_state` and the equality
+/// fails the moment the two clocks differ by a frame; key the pulse on anything
+/// but `StatusClaim::pulses` and the bell's line goes red.
+#[test]
+fn a_waiting_tabs_pulse_is_one_reading_of_one_clock() {
+    let palette = bt_render::chrome_palette();
+    let period = Duration::from_millis(WINDOW_TAB_BREATHE_PERIOD_MS);
+    let mut tabs = vec![ringing_tab(1, 1)];
+    let seat = tabs[0].seats.terminals()[0];
+    let mut next = 0;
+    let elapsed = period.mul_f32(0.25);
+    let quarter = tabs[0].animation_epoch + elapsed;
+
+    // Nothing is standing in the queue yet, so there is no sample at all.
+    assert_eq!(
+        tabs[0]
+            .mark_state(false, quarter, Motion::Full, &palette)
+            .pulse,
+        None,
+        "a tab with nobody waiting on it has no breath to hand down"
+    );
+
+    // A pane asks for an answer and the pass gives it its place in the queue.
+    request_attention(&mut tabs[0], seat, "yes");
+    one_turn(&mut tabs, 1, false, &mut next);
+    assert!(
+        ticket_at(&tabs[0], seat).is_some(),
+        "the fixture's own precondition: this pane really is in the queue"
+    );
+
+    let state = tabs[0].mark_state(false, quarter, Motion::Full, &palette);
+    assert_eq!(
+        state.pulse,
+        Some(wait_pulse(elapsed, Motion::Full)),
+        "and what it hands down is `wait_pulse`'s own reading at that instant"
+    );
+    assert!(
+        state.dot.is_some_and(|dot| !dot.hollow),
+        "beside the filled warn dot the very same claim answers for"
+    );
+
+    // **And the loop is woken for it, whatever the tab layout is.**
+    // `mark_is_animating` is a fact about the tab and `strip_animation_work`
+    // folds it over every tab with no layout branch anywhere in the walk —
+    // which is what carries the frames to the horizontal strip and to the
+    // rail's rows, the two surfaces that wear no halo and whose dot is
+    // therefore the only thing on them that moves.
+    assert!(
+        tabs[0].mark_is_animating(quarter, Motion::Full),
+        "a queue place that stands owes the next frame"
+    );
+    assert!(
+        !tabs[0].mark_is_animating(quarter, Motion::Reduced),
+        "and none at all with the system's animations off, where nothing moves"
+    );
+
+    // The reader types into the pane: the place is served through the out door
+    // the window itself uses, and everything about it goes quiet again. A dot
+    // that had gone on asking for a frame every 16ms after the thing it was
+    // about ended is the wake-up budget spent on a still picture.
+    answer(&mut tabs, 0, seat, UserInputKind::Keyboard, &mut next, None);
+    assert_eq!(
+        ticket_at(&tabs[0], seat),
+        None,
+        "the fixture's second precondition: answering it takes the place back"
+    );
+    assert_eq!(
+        tabs[0]
+            .mark_state(false, quarter, Motion::Full, &palette)
+            .pulse,
+        None,
+        "no claim, no sample"
+    );
+    assert!(
+        !tabs[0].mark_is_animating(quarter, Motion::Full),
+        "and nothing in the slot is moving, so no frame is owed for it"
+    );
+}
+
+/// PIN (closure review of `b16f7592`, 2026-09-20) — **a window with nobody
+/// waiting in it asks for no frame at all.**
+///
+/// The dual of the pin above, and the one the review named as missing: the
+/// waiting breath never finishes on its own, so the term
+/// [`TabState::mark_is_animating`] grew for it is the one term in that predicate
+/// that could quietly hold a window awake forever. `strip_animation_work` folds
+/// exactly this over every tab, so a tab that answers `false` here is a tab that
+/// contributes no wake-up.
+///
+/// **The bell is the trap and is asked for here beside it.** `Bell` and
+/// `Awaiting` wear the same warn ink and only the second is a place in the
+/// queue (§7.1.5b), so a predicate that keyed on the dot rather than on
+/// `StatusClaim::pulses` would look right on screen and wake an idle window
+/// every 16ms for a picture that never changes.
+///
+/// Red gate: key the pulse or the frame debt on the dot's presence instead of on
+/// the claim and the bell's three lines go red together.
+#[test]
+fn an_idle_window_asks_for_no_frame_for_a_pulse_nobody_is_owed() {
+    let palette = bt_render::chrome_palette();
+    let now = Instant::now();
+    let mut tabs = vec![ringing_tab(1, 2), ringing_tab(2, 1)];
+    let seat = tabs[0].seats.terminals()[0];
+
+    for (index, tab) in tabs.iter().enumerate() {
+        assert!(
+            !tab.fleet_awaiting(),
+            "tab {index} has nobody standing in the queue"
+        );
+        assert_eq!(
+            tab.mark_state(index == 0, now, Motion::Full, &palette)
+                .pulse,
+            None,
+            "tab {index} hands down no breath"
+        );
+        assert!(
+            !tab.mark_is_animating(now, Motion::Full),
+            "and owes no frame for one: an idle window does not wake for a pulse"
+        );
+    }
+
+    // Something rang. It is the same warn dot, and it is not a queue place.
+    ring(&mut tabs[0], seat);
+    let mut next = 0;
+    one_turn(&mut tabs, 1, false, &mut next);
+    let state = tabs[0].mark_state(false, now, Motion::Full, &palette);
+    assert!(
+        state.dot.is_some_and(|dot| dot.hollow),
+        "the bell is on screen, hollow and warn"
+    );
+    assert_eq!(state.pulse, None, "and it carries no breath");
+    assert!(
+        !tabs[0].mark_is_animating(now, Motion::Full),
+        "so the window stays asleep with a warn dot showing — §7.1.5b: bell 的橙点明确不脉动"
+    );
 }
 
 /// PIN (§7.1.5b P1-8) — **`Ctrl+Shift+A` serves the oldest, then walks on,
