@@ -1008,6 +1008,62 @@ fn package_taken_off() -> MenuFate {
     }
 }
 
+/// Structured results for the common cleanup door. The narrow flag keeps its old transcript.
+pub(crate) enum CleanupRegistration {
+    Removed,
+    Absent,
+    Other(PathBuf),
+    Refused(String),
+}
+
+pub(crate) fn cleanup_registrations() -> Vec<(&'static str, CleanupRegistration)> {
+    let (send, receive) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = send.send(vec![
+            ("Explorer sparse package (per-copy)", cleanup_package()),
+            (
+                "Explorer classic verbs (per-copy)",
+                crate::context_menu::cleanup_classic(),
+            ),
+        ]);
+    });
+    receive.recv_timeout(REMOVAL_TIMEOUT).unwrap_or_else(|_| {
+        vec![(
+            "Explorer registrations (per-copy)",
+            CleanupRegistration::Refused(format!(
+                "{} ({}s)",
+                crate::i18n::Text::CleanupSystemUnknown.text(),
+                REMOVAL_TIMEOUT.as_secs()
+            )),
+        )]
+    })
+}
+
+fn cleanup_package() -> CleanupRegistration {
+    let state = read_state();
+    match package_removal(&state, |exe| exe.is_file(), is_this_executable) {
+        MenuRemoval::Nothing => CleanupRegistration::Absent,
+        MenuRemoval::Unanswerable => {
+            CleanupRegistration::Refused(crate::i18n::Text::CleanupSystemUnknown.text().to_owned())
+        }
+        MenuRemoval::AnotherCopy => match state {
+            PackageState::Elsewhere { at, .. } => CleanupRegistration::Other(package_exe_in(&at)),
+            _ => CleanupRegistration::Refused(
+                crate::i18n::Text::CleanupSystemUnknown.text().to_owned(),
+            ),
+        },
+        MenuRemoval::Remove => match state.full_name() {
+            Some(name) => match msix::remove(name) {
+                Ok(()) => CleanupRegistration::Removed,
+                Err(reason) => CleanupRegistration::Refused(reason),
+            },
+            None => CleanupRegistration::Refused(
+                crate::i18n::Text::CleanupSystemUnknown.text().to_owned(),
+            ),
+        },
+    }
+}
+
 /// Ask the machine, and repair a registration that names another folder.
 ///
 /// Started at launch, on a thread of its own. Nothing on the path to the first

@@ -353,6 +353,11 @@ pub struct TerminalAdapter {
     /// It is what makes releasing a synchronized update's retention exact: the update's bytes go
     /// and the half-written sequence after them stays, instead of the whole tail being thrown
     /// away and a resize seeding its parser mid-escape.
+    ///
+    /// **The tail is released, never cleared**, and there is one function that does it —
+    /// [`TerminalAdapter::release_parser_tail_to_open_sequence`]. Where nothing is open this is
+    /// the tail's own length, so releasing gives the whole tail up; that is the only way a site
+    /// gets to empty it.
     parser_tail_open_start: usize,
     parser_sync_active: bool,
     /// **How many synchronized updates this screen has committed**, counted however they ended:
@@ -1196,11 +1201,11 @@ impl TerminalAdapter {
             canonical.processor.stop_sync(&mut canonical.term);
             discard_listener_output(&canonical.listener);
         }
-        self.end_synchronized_update_block();
-        self.parser_sequence_open = false;
-        self.parser_tail.clear();
-        self.parser_tail.shrink_to_fit();
-        self.parser_tail_open_start = 0;
+        // **The deadline is one of the ways a block ends, so it ends one the same way they all
+        // do.** It used to clear the whole tail and force [`Self::parser_sequence_open`] down,
+        // which threw away the sequence the boundary parser was still inside along with the bytes
+        // the block was holding — see [`Self::release_parser_tail_to_open_sequence`].
+        self.release_synchronized_update_retention();
         // The block's bytes are on the grid now, so a question they carried is answered now.
         self.answer_xtversion_if_not_buffering();
         let mut events = self.drain_transcript_events();
@@ -1713,33 +1718,36 @@ impl TerminalAdapter {
             self.parser_tail.pop();
         }
 
-        let mut tail_cleared = false;
-        if performer.sync_start {
-            self.parser_sync_active = true;
-        } else if performer.sync_end {
-            self.end_synchronized_update_block();
-            self.parser_tail.clear();
-            tail_cleared = true;
-        } else if performer.complete && !self.parser_sync_active {
-            self.parser_dcs_active = false;
-            self.parser_tail.clear();
-            tail_cleared = true;
-            // ESC can terminate OSC/DCS while simultaneously starting the ST escape. Keep it
-            // as the seed for the parser's new Escape state.
-            if byte == 0x1b {
-                self.parser_tail.push(byte);
-            }
-        }
-
-        if tail_cleared {
-            // Whatever is left is the sequence this byte opened, and it starts at the front.
-            self.parser_tail_open_start = 0;
-        } else if !self.parser_sequence_open {
+        // **Where the open sequence starts is decided before anything gives the tail up**, which
+        // is what lets [`Self::release_parser_tail_to_open_sequence`] be the whole rule rather
+        // than one of several. Four cases and they are exhaustive: nothing is open, so the whole
+        // tail is behind this byte; this byte opened a sequence at Ground; this byte completed one
+        // *and* opened the next, which is ESC ending an OSC or DCS while introducing the ST escape
+        // after it; or this byte is inside a sequence that was already open and the start does not
+        // move.
+        if !self.parser_sequence_open {
             self.parser_tail_open_start = self.parser_tail.len();
-        } else if !sequence_was_open {
+        } else if !sequence_was_open || performer.complete {
             self.parser_tail_open_start = self.parser_tail.len().saturating_sub(1);
         }
         self.parser_tail_open_start = self.parser_tail_open_start.min(self.parser_tail.len());
+
+        if performer.sync_start {
+            self.parser_sync_active = true;
+        } else if performer.sync_end {
+            // The ESU. Nothing can be open across it — an ESC aborts an OSC, DCS or CSI in `vte`,
+            // so the ESU's own introducer ended anything the block had left half-written — and the
+            // release below reads exactly that from the start it just computed: the whole tail,
+            // the ESU included, is behind this byte.
+            self.end_synchronized_update_block();
+            self.release_parser_tail_to_open_sequence();
+        } else if performer.complete && !self.parser_sync_active {
+            self.parser_dcs_active = false;
+            // ESC can terminate OSC/DCS while simultaneously starting the ST escape, and the start
+            // computed above already points at it, so the release keeps it as the seed for the
+            // parser's new Escape state.
+            self.release_parser_tail_to_open_sequence();
+        }
 
         BoundaryByte {
             bell: performer.bell,
@@ -1852,13 +1860,43 @@ impl TerminalAdapter {
         self.synchronized_update_commits
     }
 
-    /// Stop retaining bytes for a synchronized update that is over, keeping the sequence that is
-    /// still open at the end of the tail.
-    fn release_synchronized_update_retention(&mut self) {
-        self.end_synchronized_update_block();
+    /// **The one place the replay tail gives bytes up, and it never gives up the sequence the
+    /// boundary parser is still inside.**
+    ///
+    /// The tail carries two facts at once. Everything before [`Self::parser_tail_open_start`] is
+    /// the first — bytes a synchronized update is holding back — and it may go the moment that
+    /// update is over. Everything from it on is the second: a sequence the child began and has
+    /// not finished. Nobody who ends an update owns that fact. The boundary parser owns it, it is
+    /// the only writer of [`Self::parser_sequence_open`], and this function does not touch it.
+    ///
+    /// Clearing the whole tail instead — which the deadline arm of
+    /// [`Self::finish_synchronized_update`] used to do, forcing `parser_sequence_open` down with
+    /// it — left the boundary parser mid-escape over an empty tail. A resize armed after that
+    /// seeded the canonical fork's parser at Ground ([`Self::arm_resize_canonical`]), the fork
+    /// printed the rest of the sequence's payload into its grid as ordinary text, and
+    /// [`Self::reconcile_resize_transaction_to_viewport`] installed that grid as the displayed
+    /// one — a picture that does not match its source, and one that can scroll into the
+    /// transcript. Audit 3, finding C-1.
+    ///
+    /// **It is exact in both directions**, which is why it can be the whole rule: where nothing is
+    /// open the start is the tail's own length and the tail goes whole, which is what every site
+    /// that used to `clear()` was saying.
+    fn release_parser_tail_to_open_sequence(&mut self) {
         let open = self.parser_tail_open_start.min(self.parser_tail.len());
         self.parser_tail.drain(..open);
         self.parser_tail_open_start = 0;
+    }
+
+    /// Stop retaining bytes for a synchronized update that is over, keeping the sequence that is
+    /// still open at the end of the tail.
+    ///
+    /// The endings that come from outside the byte loop — the deadline, a marker, the vendored
+    /// parser giving a block up — can be standing on the whole 2 MiB the block was allowed, so
+    /// they hand the capacity back with the bytes. The ESU does not: it is the ending an ordinary
+    /// synchronized frame takes, once a frame, and what it releases is the size of one frame.
+    fn release_synchronized_update_retention(&mut self) {
+        self.end_synchronized_update_block();
+        self.release_parser_tail_to_open_sequence();
         self.parser_tail.shrink_to_fit();
     }
 }
@@ -2508,6 +2546,219 @@ mod tests {
 
         assert!(terminal.synchronized_update_deadline().is_none());
         assert_eq!(terminal.visible_text()[0], "timeout");
+    }
+
+    /// The opening of the C-1 incident, as data: a block opened, some text, and then the first
+    /// half of a sequence the child had not finished when the deadline passed.
+    ///
+    /// A `CSI` and not the `OSC` the finding was written around, because an unowned `OSC` cannot
+    /// reach either parser in halves: [`Osc1337Scanner`] holds one whole until it terminates
+    /// (`StreamState::OscPass`), so what the terminal parsers see is always a finished string. A
+    /// `CSI` is passed through byte by byte, which is what makes an SGR cut at a pty read boundary
+    /// the ordinary shape of this incident rather than an exotic one.
+    const TIMED_OUT_MID_SEQUENCE_OPENING: &[u8] = b"base\x1b[?2026h held \x1b[38;2;120;";
+    /// The rest of that sequence, the text it was colouring, and the ESU that arrived too late.
+    /// Read at Ground — by a canonical fork seeded from a tail that threw the introducer away —
+    /// every byte of it prints, `130;140m` included.
+    const TIMED_OUT_MID_SEQUENCE_REST: &[u8] = b"130;140mVISIBLE\x1b[0m\x1b[?2026l";
+
+    /// C-1. **Whatever ends a synchronized update keeps the sequence it interrupted.** The tail
+    /// carries two facts at once — the bytes the block is holding back, and the sequence the
+    /// boundary parser is still inside — and a timeout is only entitled to the first.
+    ///
+    /// Throwing both away left the boundary parser mid-`CSI` over an empty tail, so a resize armed
+    /// afterwards seeded the canonical fork's parser at Ground
+    /// ([`TerminalAdapter::arm_resize_canonical`]), that fork printed the rest of the sequence's
+    /// payload into its grid as ordinary text, and the transaction's commit installed that grid as
+    /// the displayed one — a picture that does not match its source, which can then scroll into
+    /// the transcript.
+    #[test]
+    fn a_timed_out_synchronized_update_keeps_the_sequence_it_interrupted() {
+        // The control: the same bytes, no deadline, no resize. The ESU commits the block itself.
+        let mut direct = TerminalAdapter::new(nz(20), nz(4));
+        direct.feed(TIMED_OUT_MID_SEQUENCE_OPENING);
+        direct.feed(TIMED_OUT_MID_SEQUENCE_REST);
+
+        let mut storm = TerminalAdapter::new(nz(20), nz(4));
+        storm.feed(TIMED_OUT_MID_SEQUENCE_OPENING);
+        assert!(storm.synchronized_update_deadline().is_some());
+        storm.finish_synchronized_update();
+        assert_eq!(
+            storm.parser_tail, b"\x1b[38;2;120;",
+            "the deadline commits what the block held and keeps the sequence it interrupted"
+        );
+        assert!(
+            storm.parser_sequence_open,
+            "and does not get to say that sequence closed — the boundary parser is still in it"
+        );
+
+        storm.begin_resize_transaction();
+        storm.resize(nz(5), nz(2));
+        storm.feed(TIMED_OUT_MID_SEQUENCE_REST);
+        storm.resize(nz(20), nz(4));
+        storm.reconcile_resize_transaction_to_viewport();
+
+        assert!(
+            !storm
+                .visible_text()
+                .iter()
+                .any(|row| row.contains("130") || row.contains("140m")),
+            "no byte of the sequence's payload is on the grid as text: {:?}",
+            storm.visible_text()
+        );
+        assert_eq!(storm.visible_text(), direct.visible_text());
+        assert_eq!(storm.cursor(), direct.cursor());
+    }
+
+    /// C-1, the second entrance. A shell-integration marker commits an open block wherever it
+    /// arrives ([`TerminalAdapter::commit_synchronized_update_before_marker`]) so that the fact it
+    /// states is read against a grid the block's bytes have reached — and that commit is the same
+    /// call the deadline makes, so it owes the tail the same rule.
+    #[test]
+    fn a_marker_that_commits_a_synchronized_update_keeps_the_sequence_it_interrupted() {
+        let mut opening = TIMED_OUT_MID_SEQUENCE_OPENING.to_vec();
+        opening.extend_from_slice(b"\x1b]133;A\x07");
+
+        // The control: the same bytes and the same marker commit, with no resize to install.
+        let mut direct = TerminalAdapter::new(nz(20), nz(4));
+        direct.feed(&opening);
+        direct.feed(TIMED_OUT_MID_SEQUENCE_REST);
+
+        let mut storm = TerminalAdapter::new(nz(20), nz(4));
+        storm.feed(&opening);
+        assert_eq!(
+            storm.parser_tail, b"\x1b[38;2;120;",
+            "the marker's commit keeps the sequence it interrupted too"
+        );
+        assert!(storm.parser_sequence_open);
+
+        storm.begin_resize_transaction();
+        storm.resize(nz(5), nz(2));
+        storm.feed(TIMED_OUT_MID_SEQUENCE_REST);
+        storm.resize(nz(20), nz(4));
+        storm.reconcile_resize_transaction_to_viewport();
+
+        assert!(
+            !storm
+                .visible_text()
+                .iter()
+                .any(|row| row.contains("130") || row.contains("140m")),
+            "no byte of the sequence's payload is on the grid as text: {:?}",
+            storm.visible_text()
+        );
+        assert_eq!(storm.visible_text(), direct.visible_text());
+        assert_eq!(storm.cursor(), direct.cursor());
+    }
+
+    /// C-1, the other shape a cut sequence takes. A `DCS` introducer is two bytes and its payload
+    /// is popped back off the tail ([`TerminalAdapter::observe_parser_boundary_byte`]), so what a
+    /// timeout has to keep here is the introducer alone — and a fork that does not get it prints
+    /// the sixel payload and its terminator as text.
+    #[test]
+    fn a_timed_out_synchronized_update_keeps_a_dcs_introducer() {
+        let opening = b"base\x1b[?2026h\x1bPq";
+        let rest = b"#0;2;0;0;0#0~~@@\x1b\\after\x1b[?2026l";
+
+        let mut direct = TerminalAdapter::new(nz(20), nz(4));
+        direct.feed(opening);
+        direct.feed(rest);
+
+        let mut storm = TerminalAdapter::new(nz(20), nz(4));
+        storm.feed(opening);
+        assert!(storm.synchronized_update_deadline().is_some());
+        storm.finish_synchronized_update();
+        assert_eq!(
+            storm.parser_tail, b"\x1bPq",
+            "the introducer stays; the payload was never in the tail"
+        );
+        assert!(storm.parser_dcs_active);
+
+        storm.begin_resize_transaction();
+        storm.resize(nz(5), nz(2));
+        storm.feed(rest);
+        storm.resize(nz(20), nz(4));
+        storm.reconcile_resize_transaction_to_viewport();
+
+        assert!(
+            !storm.visible_text().iter().any(|row| row.contains("~~@@")),
+            "the sixel payload is not text: {:?}",
+            storm.visible_text()
+        );
+        assert_eq!(storm.visible_text(), direct.visible_text());
+        assert_eq!(storm.cursor(), direct.cursor());
+    }
+
+    /// The other half of the same rule, and the half that was already right: when the deadline
+    /// passes with **nothing** open, the whole tail is behind the block and the whole tail goes.
+    /// A complete update that times out is unchanged by C-1's fix.
+    #[test]
+    fn a_timed_out_synchronized_update_with_nothing_open_gives_the_whole_tail_up() {
+        // The control takes the same deadline and no resize: what is being pinned is that the
+        // deadline itself still commits a block that had nothing open exactly as it always did.
+        let mut direct = TerminalAdapter::new(nz(20), nz(4));
+        direct.feed(b"before\x1b[?2026h\rtimeout");
+        direct.finish_synchronized_update();
+        direct.feed(b" done");
+
+        let mut storm = TerminalAdapter::new(nz(20), nz(4));
+        storm.feed(b"before\x1b[?2026h\rtimeout");
+        assert!(storm.synchronized_update_deadline().is_some());
+        storm.finish_synchronized_update();
+
+        assert!(
+            storm.parser_tail.is_empty(),
+            "nothing was open, so nothing is kept: {:?}",
+            storm.parser_tail
+        );
+        assert!(!storm.parser_sequence_open);
+        assert!(storm.synchronized_update_deadline().is_none());
+        assert_eq!(storm.visible_text()[0], "timeout");
+
+        storm.begin_resize_transaction();
+        storm.resize(nz(5), nz(2));
+        storm.feed(b" done");
+        storm.resize(nz(20), nz(4));
+        storm.reconcile_resize_transaction_to_viewport();
+
+        assert_eq!(storm.visible_text(), direct.visible_text());
+        assert_eq!(storm.cursor(), direct.cursor());
+    }
+
+    /// R1-14's sibling. Keeping the interrupted sequence means the child chooses how much is
+    /// kept, so the ceiling that already bounded the tail has to be the thing that stops it:
+    /// [`PARSER_TAIL_MAX_BYTES`], the same 2 MiB `vte` will not let a synchronized update reach.
+    ///
+    /// The unowned-OSC half is bounded one layer earlier still — [`MAX_UNOWNED_OSC_BYTES`] in the
+    /// scanner, which holds such a string whole and drops it past its own ceiling, so those bytes
+    /// never reach the tail at all.
+    #[test]
+    fn a_sequence_kept_across_a_timeout_stops_at_the_tail_ceiling() {
+        let mut terminal = TerminalAdapter::new(nz(80), nz(24));
+        terminal.feed(b"\x1b[?2026h\x1b[");
+        // A parameter list nobody terminates: past vte's thirty-two parameters the sequence is
+        // ignored, but it is still open, so every byte of it is a byte the tail would keep.
+        terminal.feed(&b"1;".repeat(2 * 1024 * 1024));
+        terminal.finish_synchronized_update();
+        assert!(
+            terminal.parser_tail.len() <= PARSER_TAIL_MAX_BYTES,
+            "the tail's own ceiling is what stops it: {} bytes",
+            terminal.parser_tail.len()
+        );
+        assert!(
+            terminal.parser_tail.len() >= PARSER_TAIL_MAX_BYTES - 64,
+            "and the run reached that ceiling rather than ending for some other reason: {} bytes",
+            terminal.parser_tail.len()
+        );
+
+        let mut titles = TerminalAdapter::new(nz(80), nz(24));
+        titles.feed(b"\x1b[?2026h\x1b]0;");
+        titles.feed(&b"A".repeat(4 * 1024 * 1024));
+        titles.finish_synchronized_update();
+        assert!(
+            titles.parser_tail.len() <= MAX_UNOWNED_OSC_BYTES + 16,
+            "an unterminated OSC is held by the scanner, not by the tail: {} bytes",
+            titles.parser_tail.len()
+        );
     }
 
     #[test]

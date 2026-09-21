@@ -147,6 +147,7 @@ mod toast;
 mod tooltip;
 mod trace;
 mod trace_sink;
+mod uninstall;
 mod update;
 mod version;
 mod video_seat;
@@ -54008,7 +54009,13 @@ impl Runtime<'_> {
     fn apply_psreadline(&mut self, install: bool) -> Result<bool> {
         let documents = self.psreadline_documents();
         let state = self.psreadline_row_state();
-        let outcome = psreadline::apply(install, documents.as_deref(), state, psreadline::probe());
+        let outcome = psreadline::apply_recorded(
+            install,
+            documents.as_deref(),
+            state,
+            psreadline::probe(),
+            &persist::storage_dir(),
+        );
         match outcome {
             psreadline::Outcome::Installed(root) => {
                 eprintln!(
@@ -124691,6 +124698,16 @@ fn main() -> Result<()> {
     // And immediately: adopting a console joins its process group, and the
     // default answer to a `Ctrl+C` typed at that shell is to terminate this one.
     bt_platform::install_console_ctrl_handler();
+    if let Some(request) = cli::uninstall_cleanup(std::env::args_os().skip(1)) {
+        let code = match request {
+            Ok(purge) => uninstall::run(purge),
+            Err(reason) => {
+                bt_platform::write_std_error(format!("{reason}\n").as_bytes());
+                1
+            }
+        };
+        std::process::exit(code);
+    }
     install_panic_log_hook();
     // **The doorbell, before anything else this program can do.**
     //
@@ -125082,7 +125099,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 14] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 15] = [
         // The hook this build writes into somebody else's settings file names a
         // program, and a program is named differently on each platform.
         "attention_copilot.rs",
@@ -125114,6 +125131,8 @@ mod platform_gate_tests {
         // Native invalid-name, Windows spelling and direct CRT test fixtures only;
         // the pure encoders stay here as paste-paths design section 5 specifies.
         "shell_literal.rs",
+        // Native junction and sharing-mode fixtures, never product platform policy.
+        "uninstall_tests.rs",
         // WSL.
         "wsl.rs",
     ];

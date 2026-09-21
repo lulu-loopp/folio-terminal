@@ -95,7 +95,7 @@ pipeline is not yet written against would buy nothing and risk a mechanical
 refusal.
 
 One more nuance the archive shape forces: `package.ps1` zips the *folder*, not
-its contents, so that extracting produces one directory rather than nine loose
+its contents, so that extracting produces one directory rather than ten loose
 files (`ZipFile]::CreateFromDirectory(..., $true)`). `RelativeFilePath` inside
 the manifest therefore has to include that folder, and **the folder is not
 called what the archive is called**: `package.ps1` stages into
@@ -285,7 +285,7 @@ satisfied by how this repository ships:
 ## 5. What `package.ps1` and `docs/RELEASING.md` would need
 
 **`package.ps1`: nothing.** The zip it already produces —
-`folio-<version>-windows-x64.zip`, all nine files inside one
+`folio-<version>-windows-x64.zip`, all ten files inside one
 `folio-<version>-windows-x64/` folder — is exactly the archive a
 `zip`+`portable`+`ArchiveBinariesDependOnPath` manifest wants. No new asset,
 no flag, no change to what ships. The only new artifact this plan produces

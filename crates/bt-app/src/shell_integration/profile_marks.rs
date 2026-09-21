@@ -321,6 +321,38 @@ impl Marks {
     }
 }
 
+/// The way in for a run that may not bring anything into existence — the uninstall
+/// door, which runs on accounts that never started Folio.
+///
+/// The record and its lock live INSIDE the data root, so a root that does not exist
+/// holds no marks and has no decision to keep: `None` says "read [`Marks::default`],
+/// write nothing", and the root is still absent when the run ends. Writers — install,
+/// enable, the Settings row — keep using [`lock`], which creates the root it guards.
+pub fn lock_existing(data: &Path) -> io::Result<Option<fs::File>> {
+    if !data.is_dir() {
+        return Ok(None);
+    }
+    lock(data).map(Some)
+}
+
+/// Whether a recorded `$PROFILE` path may be read and edited.
+///
+/// **A recorded path is data, never authority.** The record is an ordinary JSON file
+/// in the data folder; anything able to write it can name any path on the machine, so
+/// every recorded path is checked before it is used, on every run and not only under a
+/// test sandbox: absolute, free of `..`, never a filesystem root, and the one kind of
+/// file this mark can legitimately name — `$PROFILE` is always a `.ps1` script.
+pub fn recorded_profile_is_usable(path: &Path) -> bool {
+    path.is_absolute()
+        && !path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+        && path.parent().is_some()
+        && path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("ps1"))
+}
+
 /// Hold across read/modify/write AND the corresponding profile operation.
 /// OS lock is released on drop/crash; the empty lock file is not a mark.
 pub fn lock(data: &Path) -> io::Result<fs::File> {

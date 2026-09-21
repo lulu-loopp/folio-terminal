@@ -4,8 +4,8 @@
     exactly the list.
 
 .DESCRIPTION
-    The archive is nine files and the list of them is the point. Two of the
-    nine are a runtime contract rather than a convenience:
+    The archive is ten files and the list of them is the point. Two of the
+    ten are a runtime contract rather than a convenience:
 
       * `conpty.dll` and `OpenConsole.exe` must sit in `folio.exe`'s OWN
         directory. `vendor/conpty/portable-pty/src/win/psuedocon.rs` looks for
@@ -16,7 +16,7 @@
         subdirectory, and this loader never reads it — carrying it would be 1.7
         MiB of a second copy nothing opens.
 
-    One of the nine is not copied from anywhere: `folio.msix` is packed here,
+    One of the ten is not copied from anywhere: `folio.msix` is packed here,
     out of `packaging/msix/`. It is a **sparse** package and there is no program
     inside it — it is the identity and the COM class that put "Open in Folio" on
     the first page of the Windows 11 right-click menu, and the program it names
@@ -96,7 +96,7 @@
 
 .PARAMETER Packaging
     Where the files that exist only to be shipped are. Defaults to
-    `packaging/`. Today that is `folio-here.cmd`.
+    `packaging/`. Today those are `folio-here.cmd` and `uninstall.cmd`.
 
 .PARAMETER Output
     Where the archive, the copy of it under the stable name and `SHA256SUMS.txt`
@@ -388,6 +388,7 @@ $manifest = @(
     @{ Name = 'conpty.dll';               From = $Binaries },
     @{ Name = 'OpenConsole.exe';          From = $Binaries },
     @{ Name = 'folio-here.cmd';           From = $Packaging },
+    @{ Name = 'uninstall.cmd';            From = $Packaging },
     @{ Name = 'LICENSE-MIT';              From = $Documents },
     @{ Name = 'LICENSE-APACHE';           From = $Documents },
     @{ Name = 'THIRD-PARTY-NOTICES.md';   From = $Documents },
@@ -582,7 +583,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
     $archive,
     [System.IO.Compression.CompressionLevel]::Optimal,
     # The folder goes in, so that extracting into a downloads directory produces
-    # one folder and not nine loose files — four of which only work while they
+    # one folder and not ten loose files — four of which only work while they
     # are beside each other, and a fifth (`folio.msix`) which names the folder
     # the other four are in.
     $true)
