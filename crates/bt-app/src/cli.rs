@@ -745,6 +745,33 @@ where
         .is_some_and(|first| first.to_str() == Some(REMOVE_SHELL_INTEGRATION_FLAG))
 }
 
+/// Strict early grammar: these options never reach the window or handover paths.
+pub fn uninstall_cleanup(
+    args: impl IntoIterator<Item = OsString>,
+) -> Option<Result<bool, &'static str>> {
+    let mut args = args.into_iter();
+    let first = args.next()?;
+    let first = first.to_str()?;
+    if !matches!(first, "--uninstall-cleanup" | "--purge") {
+        return None;
+    }
+    let usage = || crate::i18n::Text::CleanupUsage.in_lang(crate::i18n::Lang::English);
+    let mut cleanup = usize::from(first == "--uninstall-cleanup");
+    let mut purge = usize::from(first == "--purge");
+    for arg in args {
+        match arg.to_str() {
+            Some("--uninstall-cleanup") => cleanup += 1,
+            Some("--purge") => purge += 1,
+            _ => return Some(Err(usage())),
+        }
+    }
+    Some(if cleanup == 1 && purge <= 1 {
+        Ok(purge == 1)
+    } else {
+        Err(usage())
+    })
+}
+
 /// `--json`, spelled once.
 const JSON_FLAG: &str = "--json";
 

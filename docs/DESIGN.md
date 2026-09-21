@@ -11220,3 +11220,9 @@ The owner photographed the cost on next83: the agent named a file before writing
 A denial is now re-asked when the program prints the name anew — a live row whose fingerprint changed and still spells it (`paths_named_on_freshly_printed_rows`).
 Repaint is not printing: an unchanged row bumps no revision, so a still screen and a full-viewport TUI redraw both cost zero questions, and no clock is consulted.
 Yeses are never re-asked, the command-boundary expiry stays, a reflow marks itself read, and a re-ask enters the same 256/512/4096 budgets by the same door.
+
+### 2026-09-20 — Ending a synchronized update keeps the sequence it interrupted
+The replay tail carries two facts: the bytes a DEC 2026 block holds back, and the sequence the boundary parser is still inside.
+Everything before `parser_tail_open_start` is the first and is released when the block ends; everything from it on is the second and stays.
+One function owns that release, and it never writes `parser_sequence_open` — the boundary parser alone says whether a sequence is open.
+The deadline arm used to clear both, so a resize seeded the canonical fork at Ground and printed the rest of an escape payload onto the grid.
