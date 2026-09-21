@@ -404,6 +404,10 @@ pub struct TerminalAdapter {
     /// say it made one rather than that it looks like one. See
     /// [`Self::arm_resize_canonical`].
     resize_forks: u64,
+    /// How many times arming a fork had to write an open block to the grid first, because the
+    /// replay tail could not carry it. See [`Self::commit_a_block_the_fork_cannot_inherit`]: zero
+    /// for every ordinary block, and a test's witness that a run really took that path.
+    resize_blocks_committed_to_arm: u64,
     staged_resize_history_size: usize,
     columns: NonZeroU32,
     rows: NonZeroU32,
@@ -702,6 +706,7 @@ impl TerminalAdapter {
             pending_stream: VecDeque::new(),
             resize_canonical: None,
             resize_forks: 0,
+            resize_blocks_committed_to_arm: 0,
             staged_resize_history_size: 0,
             columns,
             rows,
@@ -1277,11 +1282,6 @@ impl TerminalAdapter {
     /// transaction the primary one owns the entire mutable resize tail. That is the one copy this
     /// path is allowed, and [`Self::resize_forks`] counts it so a test can say so.
     fn arm_resize_canonical(&mut self) {
-        let listener = CaptureListener::default();
-        let mut term = self.term.fork(listener.clone());
-        install_transcript_hook(&mut term, &listener);
-        self.resize_forks = self.resize_forks.saturating_add(1);
-
         // A transaction can begin between two bytes of a CSI/OSC/DCS/UTF-8 sequence or while a
         // synchronized update is buffered. Seed a fresh processor with that exact uncommitted raw
         // tail; the canonical term already contains every committed semantic action and must not
@@ -1292,28 +1292,65 @@ impl TerminalAdapter {
         // of them back, so a `ParserTailSink` leaves it where a real terminal would. That sink
         // used to be a second `fork`, which made opening a transaction two deep copies of the whole
         // resize tail — and then dropped one of them unread.
-        let mut processor = Processor::new();
+        //
+        // The replay is made **before** the fork, because its answer can change what the fork is
+        // taken of — see [`Self::commit_a_block_the_fork_cannot_inherit`].
+        let mut processor: Processor = Processor::new();
         processor.advance(&mut ParserTailSink, &self.parser_tail);
-        // **A fork is armed over an open block only when it inherited that block**, which is the
-        // invariant the tail exists to keep and the one audit 3's C-1 broke from the other end: a
-        // block this side could not see was a block the tail did not hold, so the fork parsed the
-        // frame's bytes live and the commit installed a grid the child never painted. Stated as
-        // an assertion rather than a guard, because the two answers now come from one rule
-        // ([`private_mode_params_name`], [`VENDOR_ESU_CSI`]) and a repair here would be a second
-        // rule to drift from the first — the tests that pin it are
-        // `the_boundary_parser_opens_a_synchronized_update_where_the_vendored_parser_does` and
-        // its closing twin.
-        let canonical = ResizeCanonical {
+        if self.commit_a_block_the_fork_cannot_inherit(&processor) {
+            processor = Processor::new();
+            processor.advance(&mut ParserTailSink, &self.parser_tail);
+        }
+
+        let listener = CaptureListener::default();
+        let mut term = self.term.fork(listener.clone());
+        install_transcript_hook(&mut term, &listener);
+        self.resize_forks = self.resize_forks.saturating_add(1);
+
+        self.resize_canonical = Some(ResizeCanonical {
             term,
             processor,
             listener,
-        };
-        debug_assert_eq!(
-            canonical.processor.sync_timeout().sync_timeout().is_some(),
-            self.parser_sync_active,
-            "the canonical fork must hold the synchronized update the displayed branch holds"
-        );
-        self.resize_canonical = Some(canonical);
+        });
+    }
+
+    /// **A fork is armed only where it holds the same open block the displayed branch does** — and
+    /// where it cannot, the block is written to the grid first so that nobody has to reproduce it.
+    ///
+    /// The replay tail is what carries an open DEC 2026 block into the fork, and the two sides
+    /// normally agree about one being open because they now read one rule
+    /// ([`private_mode_params_name`] for the opening, [`VENDOR_ESU_CSI`] for the ending). **The
+    /// tail has a third limit those rules do not share**, and it is the one that can still part
+    /// them: [`PARSER_TAIL_MAX_BYTES`] counts every retained byte, including the ones before the
+    /// BSU, while `vte`'s own `SYNC_BUFFER_SIZE` counts only the block's. A child that opens a
+    /// block and then sends two megabytes inside one sequence it never terminates fills the tail
+    /// first — the cap lowers this side's flag, and nothing completes, so no release ever drains
+    /// what is left. The tail then still begins with the BSU, so a replay of it opens a block in
+    /// the fork that this side says is not open.
+    ///
+    /// That disagreement is C-1's own shape in miniature and an assertion is no answer to it: the
+    /// bytes are the child's, so in a debug build it is a panic a program can ask for, and in a
+    /// release build it is the silent loss the finding is about. What closes it is the audit's
+    /// own suggestion — commit the block the fork cannot inherit. `stop_sync` writes the held
+    /// bytes to the displayed grid, where the hook files them in the transcript, and the release
+    /// leaves the tail holding nothing but the sequence still open at its end, so the second
+    /// replay reaches a fork that opens no block and the two sides agree by construction. The
+    /// events go to the queues every other path drains rather than being returned, because this is
+    /// reached from inside a commit as well as from the start of a transaction.
+    ///
+    /// Returns whether anything was committed, which is the caller's reason to replay again and a
+    /// test's witness that it came this way ([`Self::resize_blocks_committed_to_arm`]).
+    fn commit_a_block_the_fork_cannot_inherit(&mut self, fork: &Processor) -> bool {
+        if fork.sync_timeout().sync_timeout().is_some() == self.parser_sync_active {
+            return false;
+        }
+        if self.synchronized_update_deadline().is_some() {
+            self.processor.stop_sync(&mut self.term);
+        }
+        self.release_synchronized_update_retention();
+        self.answer_xtversion_if_not_buffering();
+        self.resize_blocks_committed_to_arm = self.resize_blocks_committed_to_arm.saturating_add(1);
+        true
     }
 
     pub fn finish_resize_transaction(&mut self) -> Vec<CapturedRow> {
@@ -1507,6 +1544,12 @@ impl TerminalAdapter {
     /// See [`Self::resize_forks`].
     pub fn resize_forks(&self) -> u64 {
         self.resize_forks
+    }
+
+    /// How many open blocks arming a fork has had to write to the grid itself.
+    /// See [`Self::commit_a_block_the_fork_cannot_inherit`].
+    pub fn resize_blocks_committed_to_arm(&self) -> u64 {
+        self.resize_blocks_committed_to_arm
     }
 
     /// Whether `row` soft-wraps into the row below it — the `continues` flag of `visible_row`, read
@@ -2597,6 +2640,75 @@ mod tests {
         }
     }
 
+    /// **The replay tail has a limit the two rules do not share, and a fork is never armed over
+    /// the gap it leaves.**
+    ///
+    /// `PARSER_TAIL_MAX_BYTES` counts every retained byte; `vte`'s `SYNC_BUFFER_SIZE` counts only
+    /// the block's own. A child that opens a block and then pours two megabytes into a sequence it
+    /// never terminates fills the tail first — nothing completes, so no release ever drains what
+    /// is left, and the cap lowers this side's flag over a block the vendored parser is still
+    /// holding. The tail still begins with the BSU, so a replay of it opens a block in the fork
+    /// that this side says is not open: C-1's own shape, from a third direction, and asking for it
+    /// costs a child two megabytes of ordinary output.
+    ///
+    /// The answer is not an assertion — these are the child's bytes, so an assertion is a panic a
+    /// program can ask for in a debug build and nothing at all in a release one. The block is
+    /// written to the grid before the fork exists, so that nobody has to reproduce it.
+    #[test]
+    fn a_block_the_replay_tail_could_not_carry_is_written_to_the_grid_before_the_fork() {
+        const PRE_BSU: usize = 4096;
+        const CHUNK: usize = 1024;
+
+        let mut terminal = TerminalAdapter::new(nz(20), nz(4));
+        // A CSI the child never terminates, then the BSU — whose `ESC` aborts it — then the
+        // block's own text. The aborted sequence is what puts the tail ahead of the vendored
+        // buffer: it is retained here and was never part of any block there.
+        let mut opening = b"\x1b[".to_vec();
+        opening.resize(PRE_BSU, b'1');
+        opening.extend_from_slice(b"\x1b[?2026h");
+        opening.extend_from_slice(b"held");
+        // A second unterminated CSI inside the block, so that no byte after it ever completes a
+        // sequence and no release runs.
+        opening.extend_from_slice(b"\x1b[");
+        terminal.feed(&opening);
+        assert!(
+            terminal.parser_sync_active,
+            "the block is open on both sides"
+        );
+
+        let chunk = vec![b'1'; CHUNK];
+        let mut poured = 0;
+        while terminal.parser_sync_active && poured < PARSER_TAIL_MAX_BYTES {
+            terminal.feed(&chunk);
+            poured += CHUNK;
+        }
+        assert!(
+            !terminal.parser_sync_active,
+            "the tail's own cap lowered this side's flag after {poured} bytes"
+        );
+        assert!(
+            terminal.synchronized_update_deadline().is_some(),
+            "while the vendored parser is still holding the block"
+        );
+
+        terminal.begin_resize_transaction();
+
+        assert_eq!(
+            terminal.resize_blocks_committed_to_arm(),
+            1,
+            "arming had to write the block the tail could not carry"
+        );
+        assert!(
+            terminal.synchronized_update_deadline().is_none(),
+            "and the block is on the grid rather than in a buffer the commit would drop"
+        );
+        assert_eq!(
+            terminal.visible_text()[0],
+            "held",
+            "the bytes the child printed inside the block are the bytes on the screen"
+        );
+    }
+
     /// **The boundary parser opens a synchronized update exactly where the vendored parser does.**
     ///
     /// One table, two readings of it: what this side believes (`parser_sync_active`, which decides
@@ -2605,16 +2717,28 @@ mod tests {
     /// says which answer is the right one.
     #[test]
     fn the_boundary_parser_opens_a_synchronized_update_where_the_vendored_parser_does() {
-        let sequences: [(&[u8], bool); 7] = [
+        let sequences: [(&[u8], bool); 10] = [
             (b"\x1b[?2026h", true),
             (b"\x1b[?1;2026h", true),
             (b"\x1b[?2026;1h", true),
             (b"\x1b[?2026:0h", true),
+            // An empty first parameter is a parameter: `Params` yields `[0]` for it.
+            (b"\x1b[?;2026h", true),
             // `l` is not an opening, whatever it names.
             (b"\x1b[?12;2026;25l", false),
             (b"\x1b[?2027h", false),
             // No `?`: an ANSI mode, not a private one.
             (b"\x1b[2026h", false),
+            // Past `vte`'s thirty-two parameters the sequence is `ignore`d whole, on both sides.
+            (
+                b"\x1b[?2026;2026;2026;2026;2026;2026;2026;2026;2026;2026;2026;\
+                  2026;2026;2026;2026;2026;2026;2026;2026;2026;2026;2026;2026;\
+                  2026;2026;2026;2026;2026;2026;2026;2026;2026;2026h",
+                false,
+            ),
+            // The 8-bit C1 introducer. `vte` has no entry for it, so it reaches neither
+            // `csi_dispatch`; it is an `Execute` of 0x9B and nothing more.
+            (b"\x9b?2026h", false),
         ];
         for (bytes, opens) in sequences {
             let mut terminal = TerminalAdapter::new(nz(20), nz(4));

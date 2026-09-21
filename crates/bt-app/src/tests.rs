@@ -18924,6 +18924,23 @@ fn a_prompt_mark_forged_inside_a_running_command_is_typed_at_by_nothing() {
         "zero bytes reach a program the reader is talking to"
     );
 
+    // A `D` this session's `C` never asked for, then a `B`: twenty bytes, no `A`, no prompt.
+    let mut two_markers = DualPlaneSession::new(nonzero_u32(80), nonzero_u32(24));
+    two_markers
+        .feed_at(
+            b"\x1b]133;A\x07PS> \x1b]133;B\x07ssh host\r\x1b]133;C\x07\r\n",
+            start,
+        )
+        .unwrap();
+    two_markers
+        .feed_at(b"motd\x1b]133;D;0\x07\x1b]133;B\x07", start)
+        .unwrap();
+    assert_eq!(
+        resize_and_take(&mut two_markers),
+        None,
+        "a region with no `A` in front of it is not a prompt this window types at"
+    );
+
     // A nested shell that speaks the protocol: marked, and still not typed at.
     let mut nested = DualPlaneSession::new(nonzero_u32(80), nonzero_u32(24));
     nested
