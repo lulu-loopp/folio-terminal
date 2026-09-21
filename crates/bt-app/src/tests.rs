@@ -6694,6 +6694,64 @@ fn a_waiting_tabs_pulse_is_one_reading_of_one_clock() {
     );
 }
 
+/// PIN (closure review of `b16f7592`, 2026-09-20) — **a window with nobody
+/// waiting in it asks for no frame at all.**
+///
+/// The dual of the pin above, and the one the review named as missing: the
+/// waiting breath never finishes on its own, so the term
+/// [`TabState::mark_is_animating`] grew for it is the one term in that predicate
+/// that could quietly hold a window awake forever. `strip_animation_work` folds
+/// exactly this over every tab, so a tab that answers `false` here is a tab that
+/// contributes no wake-up.
+///
+/// **The bell is the trap and is asked for here beside it.** `Bell` and
+/// `Awaiting` wear the same warn ink and only the second is a place in the
+/// queue (§7.1.5b), so a predicate that keyed on the dot rather than on
+/// `StatusClaim::pulses` would look right on screen and wake an idle window
+/// every 16ms for a picture that never changes.
+///
+/// Red gate: key the pulse or the frame debt on the dot's presence instead of on
+/// the claim and the bell's three lines go red together.
+#[test]
+fn an_idle_window_asks_for_no_frame_for_a_pulse_nobody_is_owed() {
+    let palette = bt_render::chrome_palette();
+    let now = Instant::now();
+    let mut tabs = vec![ringing_tab(1, 2), ringing_tab(2, 1)];
+    let seat = tabs[0].seats.terminals()[0];
+
+    for (index, tab) in tabs.iter().enumerate() {
+        assert!(
+            !tab.fleet_awaiting(),
+            "tab {index} has nobody standing in the queue"
+        );
+        assert_eq!(
+            tab.mark_state(index == 0, now, Motion::Full, &palette)
+                .pulse,
+            None,
+            "tab {index} hands down no breath"
+        );
+        assert!(
+            !tab.mark_is_animating(now, Motion::Full),
+            "and owes no frame for one: an idle window does not wake for a pulse"
+        );
+    }
+
+    // Something rang. It is the same warn dot, and it is not a queue place.
+    ring(&mut tabs[0], seat);
+    let mut next = 0;
+    one_turn(&mut tabs, 1, false, &mut next);
+    let state = tabs[0].mark_state(false, now, Motion::Full, &palette);
+    assert!(
+        state.dot.is_some_and(|dot| dot.hollow),
+        "the bell is on screen, hollow and warn"
+    );
+    assert_eq!(state.pulse, None, "and it carries no breath");
+    assert!(
+        !tabs[0].mark_is_animating(now, Motion::Full),
+        "so the window stays asleep with a warn dot showing — §7.1.5b: bell 的橙点明确不脉动"
+    );
+}
+
 /// PIN (§7.1.5b P1-8) — **`Ctrl+Shift+A` serves the oldest, then walks on,
 /// then wraps.**
 ///

@@ -11226,3 +11226,9 @@ The replay tail carries two facts: the bytes a DEC 2026 block holds back, and th
 Everything before `parser_tail_open_start` is the first and is released when the block ends; everything from it on is the second and stays.
 One function owns that release, and it never writes `parser_sequence_open` — the boundary parser alone says whether a sequence is open.
 The deadline arm used to clear both, so a resize seeded the canonical fork at Ground and printed the rest of an escape payload onto the grid.
+
+### 2026-09-20 (correction to the entry above) — The room below the list is 3px, not 6
+The sentence "3 logical px against the panel's own 6px top margin and its bottom one" was wrong about the bottom: the room under the list is `RAIL_NEW_MARGIN_TOP_LOGICAL_PX` + the rail's gap = 3 logical px, exactly what a decoration wants, and only the top has 6.
+The growth is rounded to device pixels and that margin is not — both from `3.0 * scale` — so at 125%, 150%, 225% and 250% the rounded growth exceeded the exact room and up to half a pixel of a bottom-clamped card's halo or flight shadow landed on the `+` row's top edge.
+A decoration now grows only into the room its layout gives it: the panel hands down the box it keeps empty around the list (its own rectangle, floored by the `+` row's top and, on the rail, ceilinged by the heading's foot) and `outset_reach` reconciles the wish with that box once, for all four sides together, floored to whole device pixels.
+One amount and not four, so a clamped card's ring stays concentric; a card anywhere but against the list's own rim pays nothing for this, and no scale that was already exact changed.
