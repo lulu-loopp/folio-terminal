@@ -223,4 +223,4 @@ Settings ▸ General ▸ **Update check** switches off.
 
 </details>
 
-Full changelog: [CHANGELOG.md](https://github.com/lulu-loopp/folio-terminal/blob/v0.4.3-preview/CHANGELOG.md#043-preview--<release date as in the heading>) · [v0.4.2-preview…v0.4.3-preview](https://github.com/lulu-loopp/folio-terminal/compare/v0.4.2-preview...v0.4.3-preview)
+Full changelog: [CHANGELOG.md](https://github.com/lulu-loopp/folio-terminal/blob/v0.4.3-preview/CHANGELOG.md#043-preview--2026-09-21) · [v0.4.2-preview…v0.4.3-preview](https://github.com/lulu-loopp/folio-terminal/compare/v0.4.2-preview...v0.4.3-preview)

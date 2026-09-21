@@ -6,6 +6,10 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+Nothing yet.
+
+## 0.4.3-preview — 2026-09-21
+
 ### Added
 
 - **Rendered blocks → Repair row breaks.** Folio restores the row separators a
