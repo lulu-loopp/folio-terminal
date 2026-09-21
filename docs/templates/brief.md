@@ -27,6 +27,14 @@ not. `docs/CONVENTIONS.md` §十 says why each field exists.
   - if yes — asked the project owner: yes (answer: …) / not yet (MUST ask before dispatching)
 - the implementer may not add a refusal, warning, confirmation or check not in this brief
 
+## Must-read set
+The files and modules the implementer has to read to finish this, listed here by
+the coordinator rather than discovered by the implementer: `docs/ARCHITECTURE.md`,
+the subsystem's row in `docs/RULES.md`, then the implementation and the
+behavioural tests that cover it. If the list runs past a screen, this brief says
+why the structure was not fixed first — what must be read to finish one ticket
+may not grow with the number of features.
+
 ## Observed
 What was seen, and nothing else. Recording provenance (which trace, which
 moment), the faithful synthetic sequence derived from it, dimensions, read
