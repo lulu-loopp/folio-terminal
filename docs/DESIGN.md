@@ -11246,3 +11246,11 @@ A leaf is Folio's when the assembly `Microsoft.PowerShell.PSReadLine.dll` is our
 `row_state` reads the disk fact before the stored invitation, so `RemovedElsewhere` can no longer offer `On` over a gallery module, and `RowState::NotOurs` darkens both verbs.
 `remove_from`'s rule — never take what Folio did not write — now binds the installer too, and the removal itself deletes the nine bundled names and drops the directory only while it is empty.
 The mixed leaf a previous Folio left (our module, PowerShellGet's `PSGetModuleInfo.xml`, `en-US\` and catalog beside it) is ours to update and not ours to delete; the sidecars stay and the cleanup door names them.
+
+### 2026-09-21 — A previewed local document is not walled off from the network
+The premise: §7.10 (2026-08-22) minted the local seat, and R1-10 (adversarial review 2026-09-08, compiled into a rule list by §13.29 ⑤) made "a local document reads its own folder and reaches no server" a rule of the product.
+It does not hold. No browser promises it — a `file://` page in Chrome, Edge or Safari may open http, WebSocket and WebRTC connections freely; what a browser restricts is what a local page may **read**, not what it may contact.
+Nor can it be kept: WebSocket is invisible to WebView2's `WebResourceRequested`, WebRTC is ungated on both engines, and `dns-prefetch`/`preconnect` leak a host name without making a request any pattern can match — short of switching scripts off, which would end interactive local previews, a thing people use.
+What stays: the `File`-mint refusals in `resource_request` and `content_rule_list`, as best-effort hygiene. They cost nothing, an ordinary web request from a local document is still refused, and nothing in the product promises more than that.
+What is not built: no document served by Folio with a CSP, no second URL grammar, no chase of the Windows WebSocket gap. Opening a local HTML file is the reader's own deliberate act, with a browser's risk.
+What arrives from strangers is mostly Markdown and text, which Folio renders itself with no script engine at all. `SECURITY.md`'s web-preview section says all of this where a reader meets it.
