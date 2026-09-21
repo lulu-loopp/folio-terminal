@@ -23,6 +23,9 @@ not. `docs/CONVENTIONS.md` §十 says why each field exists.
 ## Scope
 - in: <files, subsystems, behaviours this ticket may change>
 - out: <what it may not touch, and what was already closed by earlier rounds>
+- changes a ruled behaviour or a daily gesture: yes / no
+  - if yes — asked the project owner: yes (answer: …) / not yet (MUST ask before dispatching)
+- the implementer may not add a refusal, warning, confirmation or check not in this brief
 
 ## Observed
 What was seen, and nothing else. Recording provenance (which trace, which
@@ -48,6 +51,10 @@ Its writers, readers, invalidators and retirement paths, once known.
 Which class of defect this is, and the one rule that, if it held everywhere,
 would make the whole class impossible. If this is the second ticket of the same
 class, the fix is structural (CONVENTIONS §十 rule 6).
+
+## Moved work (rule 9 — fill only when the fix moves work to another thread / crate / process)
+- reused function: <name of the function both callers share>
+- real-producer test for each seam: <test name that runs a real temp file through the real verifier>
 
 ## Acceptance — numbered, observable
 A1. …
