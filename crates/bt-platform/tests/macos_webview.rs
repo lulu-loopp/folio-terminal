@@ -158,7 +158,9 @@ mod mac {
     /// `bt_app::webnav::content_rule_tests`.
     const FILE_SEAT_RULES: &str = concat!(
         r#"[{"trigger":{"url-filter":"^http://"},"action":{"type":"block"}},"#,
-        r#"{"trigger":{"url-filter":"^https://"},"action":{"type":"block"}}]"#
+        r#"{"trigger":{"url-filter":"^https://"},"action":{"type":"block"}},"#,
+        r#"{"trigger":{"url-filter":"^ws://"},"action":{"type":"block"}},"#,
+        r#"{"trigger":{"url-filter":"^wss://"},"action":{"type":"block"}}]"#
     );
 
     /// Whether a candidate is inside the folder the seat was minted on — the

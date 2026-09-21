@@ -11219,3 +11219,12 @@ The replay tail carries two facts: the bytes a DEC 2026 block holds back, and th
 Everything before `parser_tail_open_start` is the first and is released when the block ends; everything from it on is the second and stays.
 One function owns that release, and it never writes `parser_sequence_open` — the boundary parser alone says whether a sequence is open.
 The deadline arm used to clear both, so a resize seeded the canonical fork at Ground and printed the rest of an escape payload onto the grid.
+
+### 2026-09-20 — A page that may not fetch may not open a socket; a stale gate is never hung; only the writer binds
+A seat's resource rule is about reaching a server, not about how: `NETWORK` carries `ws` and `wss` beside `http` and `https`, so a local or blank seat's compiled patterns block WebSocket handshakes — which WebKit routes through content rule lists from macOS 11.3 — and a browsing seat's dev-server reload keeps its socket.
+Residue, stated rather than implied: on Windows `WebResourceRequested` is never raised for WebSocket traffic, so `resource_request`'s refusal is unenforceable there; WebRTC is ungated on both engines, no pattern language and no WebView2 event reaching a peer connection.
+A compile carries a page and a policy, and `compile_is_stale` asks about both before either WebKit call: a list compiled for a rule the seat has moved off is dropped, never attached and then corrected, because for the length of that correction the document on the glass is judged by a policy nobody asked for.
+A seat goes to the last address it was given: `ThirdDoor::destined_for` writes `parked` on both branches, so an address superseded by a later navigation is not replayed a compile round-trip later.
+The data directory's claim is the single owner of "I am the writer", and both of its endpoints are opened off it: `open_the_data_directorys_endpoints` refuses a process that does not hold the claim, and one gate covers both doors so a third cannot be added outside it.
+Ungated, the loser of an ordinary two-launch race bound the names first and the writer latched its `OnceLock` to `None` for life, so every later launch landed in the window whose session writes are discarded.
+`applicationShouldTerminate:` is injected last: the selector loop is irreversible one at a time, and that is the only selector whose live-but-unanswered form is a frozen ⌘Q rather than a missing feature.
