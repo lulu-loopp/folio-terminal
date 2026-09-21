@@ -5953,6 +5953,20 @@ impl SettingsContent<'_> {
             .any(|row| *row == SettingsRow::CopilotHooks && row.category() == category)
     }
 
+    /// **Whether this page carries a row about an agent's own configuration file.**
+    ///
+    /// [`Self::probes_psreadline`]'s shape and for its reason: the rows are what need the answer,
+    /// so moving one moves the trigger and a build that has lost them re-reads nothing.
+    #[must_use]
+    pub fn shows_agents(&self, category: SettingsCategory) -> bool {
+        self.rows.iter().any(|row| {
+            matches!(
+                row,
+                SettingsRow::ClaudeHooks | SettingsRow::CodexNotify | SettingsRow::CopilotHooks
+            ) && row.category() == category
+        })
+    }
+
     /// The category a dialog opened now would land on: the first the rail holds.
     ///
     /// Asked rather than assumed, because `General` is only the answer while
@@ -6466,6 +6480,10 @@ pub struct SettingsPanel {
     /// Reset by the panel's own page/open/close transitions, even if no layout
     /// was requested between closing and reopening.
     psreadline_visit_read: bool,
+    /// The same latch for the three agent rows. Their switches are inert while the file they name
+    /// is one this build will not edit, so a press cannot be what notices that the reader has
+    /// unpicked the link or cleared the read-only bit — opening the page is (re-review, round 3).
+    agents_visit_read: bool,
     /// **Which page is up** (user ruling Q3 = A, 2026-08-17). One page per
     /// category, so this is the whole of "where am I" — and it is state on the
     /// panel rather than on the runtime because the panel is what a key press
@@ -6769,6 +6787,18 @@ impl SettingsPanel {
         !std::mem::replace(&mut self.psreadline_visit_read, true)
     }
 
+    /// Consume the first showing of the agent rows on this page visit.
+    ///
+    /// [`Self::take_psreadline_open_edge`]'s twin, and the same three properties: an edge and not
+    /// a state, reset by every road off the page (another category, a close, a reopen, a page the
+    /// dialog fell back to), and false while the page is merely being redrawn.
+    pub fn take_agents_open_edge(&mut self, showing: bool) -> bool {
+        if !self.open || !showing {
+            return false;
+        }
+        !std::mem::replace(&mut self.agents_visit_read, true)
+    }
+
     /// Which line of the shortcut page is listening for a chord, if one is.
     #[must_use]
     pub fn recording_row(&self) -> Option<usize> {
@@ -6808,6 +6838,7 @@ impl SettingsPanel {
         }
         self.category = category;
         self.psreadline_visit_read = false;
+        self.agents_visit_read = false;
         self.menu = None;
         self.menu_scroll = 0.0;
         self.recording = None;
@@ -6838,6 +6869,7 @@ impl SettingsPanel {
     pub fn toggle(&mut self, content: SettingsContent<'_>) {
         self.open = !self.open;
         self.psreadline_visit_read = false;
+        self.agents_visit_read = false;
         self.menu = None;
         self.menu_scroll = 0.0;
         self.hover = None;
@@ -6910,6 +6942,7 @@ impl SettingsPanel {
     pub fn close(&mut self) {
         self.open = false;
         self.psreadline_visit_read = false;
+        self.agents_visit_read = false;
         self.menu = None;
         self.menu_scroll = 0.0;
         self.hover = None;
@@ -7182,6 +7215,7 @@ impl SettingsPanel {
         if !content.has_content(self.category) {
             self.category = content.first_category();
             self.psreadline_visit_read = false;
+            self.agents_visit_read = false;
             self.menu = None;
             self.recording = None;
             self.focus = None;
@@ -15348,6 +15382,67 @@ mod tests {
         assert!(
             panel.take_psreadline_open_edge(true),
             "Escape also rearms the visit"
+        );
+    }
+
+    /// **A refused agent row looks again when its page is opened, and only then.**
+    ///
+    /// The switch takes no press while the file it names is one this build will not edit, so the
+    /// press cannot be what notices that the reader has unpicked the link or cleared the read-only
+    /// bit. Opening the page is, on `PsReadLine`'s own latch: an edge per visit, rearmed by every
+    /// road off the page, and never a per-frame read — two hundred layouts on the open page ask
+    /// the disk nothing.
+    ///
+    /// MUTATION: make `take_agents_open_edge` answer `self.open` and the two hundred become two
+    /// hundred reads of three configuration files on somebody's machine.
+    #[test]
+    fn attention_rows_look_again_when_their_page_opens() {
+        let rows = [
+            SettingsRow::ClaudeHooks,
+            SettingsRow::CodexNotify,
+            SettingsRow::CopilotHooks,
+        ];
+        let page = content(&rows, &[]);
+        assert!(page.shows_agents(SettingsCategory::Agents));
+        assert!(!page.shows_agents(SettingsCategory::Terminal));
+        assert!(!content(&[SettingsRow::PsReadLine], &[]).shows_agents(SettingsCategory::Agents));
+
+        let mut panel = SettingsPanel::default();
+        assert!(
+            !panel.take_agents_open_edge(true),
+            "a shut dialog is no visit"
+        );
+        panel.toggle(content(&rows, &[]));
+        panel.select_category(SettingsCategory::Agents);
+        assert!(panel.take_agents_open_edge(true));
+        for _ in 0..200 {
+            assert!(
+                !panel.take_agents_open_edge(true),
+                "a redraw of the open page is not an edge"
+            );
+        }
+        // Every road off the page rearms it, and a page without the rows takes no edge at all.
+        panel.select_category(SettingsCategory::Terminal);
+        assert!(!panel.take_agents_open_edge(false));
+        panel.select_category(SettingsCategory::Agents);
+        assert!(panel.take_agents_open_edge(true));
+        panel.close();
+        panel.toggle(content(&rows, &[]));
+        assert!(
+            panel.take_agents_open_edge(true),
+            "close and reopen is a new visit"
+        );
+        assert!(panel.close_one_layer());
+        panel.toggle(content(&rows, &[]));
+        assert!(panel.take_agents_open_edge(true), "Escape rearms it too");
+
+        // And the edge is joined to the three reads: the window asks on it and nowhere else.
+        let window = include_str!("main.rs");
+        assert!(window.contains("take_agents_open_edge(content.shows_agents("));
+        assert_eq!(window.matches("self.refresh_agent_rows();").count(), 1);
+        assert_eq!(
+            window.matches("fn refresh_agent_rows(&mut self)").count(),
+            1
         );
     }
 

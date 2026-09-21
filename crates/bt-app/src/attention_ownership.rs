@@ -1026,6 +1026,16 @@ mod tests {
                 crate::i18n::Text::AgentConfigReadOnly.text(),
                 "{family}"
             );
+            // **And a machine put right is acted on again.** The switch beside the row takes no
+            // press while the refusal stands (`SettingsRow::option_enabled`), so nothing Folio
+            // does can notice the read-only bit being cleared; what notices is the next opening of
+            // the page, which re-reads exactly this (re-review, round 3). What it must find is a
+            // file that removes.
+            assert_eq!(
+                apply(&path, Decision::Remove, &exe, &data),
+                Outcome::Removed,
+                "{family}"
+            );
         }
     }
 

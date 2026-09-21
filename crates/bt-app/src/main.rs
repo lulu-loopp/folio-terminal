@@ -45993,8 +45993,19 @@ impl Runtime<'_> {
             self.psreadline_documents();
             self.refresh_psreadline_installed();
         }
+        // **The agent rows' own edge**, and it is not a convenience: their switches are inert
+        // while the file they name is one this build will not edit, so a press cannot be what
+        // notices that the reader has unpicked the link or cleared the read-only bit. Opening the
+        // page is (re-review, round 3). One re-read per visit, never per frame and never per turn.
+        let agents_opened = self
+            .window
+            .settings
+            .take_agents_open_edge(content.shows_agents(self.window.settings.category()));
+        if agents_opened {
+            self.refresh_agent_rows();
+        }
         // Use the refreshed fact on this very layout, including its geometry.
-        let refreshed_values = psreadline_opened.then(|| {
+        let refreshed_values = (psreadline_opened || agents_opened).then(|| {
             let state = self.psreadline_row_state();
             settings::SettingsValues {
                 psreadline: state,
@@ -46003,6 +46014,10 @@ impl Runtime<'_> {
                     state,
                 ) && self.app.psreadline_documents.is_some(),
                 psreadline_remove_available: psreadline::remove_available(state),
+                claude_hooks: self.app.claude_hooks_installed,
+                codex_notify: self.app.codex_notify_installed,
+                copilot_hooks: self.app.copilot_hooks_installed,
+                agent_config_refusals: self.app.agent_config_refusals,
                 ..values.clone()
             }
         });
@@ -53967,6 +53982,28 @@ impl Runtime<'_> {
             self.app.settings_store.loaded().psreadline_invite,
             self.app.psreadline_installed.unwrap_or_default(),
         )
+    }
+
+    /// **Re-read all three agent configurations**, on the one edge that can afford it.
+    ///
+    /// The same three reads the launch makes, and the same pair of facts out of each: whether this
+    /// copy's marks are in that file, and — when the file is one this build will not edit — the
+    /// reason the row says instead of `Off`. A refused row takes no press at all, so this is the
+    /// only way a machine that has been put right becomes a machine Folio will act on again
+    /// without a relaunch.
+    fn refresh_agent_rows(&mut self) {
+        (
+            self.app.claude_hooks_installed,
+            self.app.agent_config_refusals[0],
+        ) = attention_hooks::row_state();
+        (
+            self.app.codex_notify_installed,
+            self.app.agent_config_refusals[1],
+        ) = attention_codex::row_state();
+        (
+            self.app.copilot_hooks_installed,
+            self.app.agent_config_refusals[2],
+        ) = attention_copilot::row_state();
     }
 
     /// Re-read whether the module is on disk. Cheap enough at the three moments
