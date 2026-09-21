@@ -693,16 +693,14 @@ pub fn may_read_unasked(path: &Path, namer: PathNamer<'_>) -> bool {
 /// opens what that name points at.
 ///
 /// **It is not safe on the window thread, and the sentence that used to stand here said it was**
-/// (audit 3 C-2, 2026-09-20). Two things make it false. `symlink_metadata` is asked about the
-/// *whole* path, and Windows resolves every component but the last before it answers — so
-/// `C:\build\out\a.txt`, where `C:\build\out` is a junction into a dead share, goes to the
-/// redirector inside the very call that was meant to prevent that. And the lexical half admits any
-/// drive letter, which is what a mapped network drive is spelled as: the volume question has no
-/// lexical answer at all. So every caller of this must be a worker, and every window-thread reader
-/// of "is this a real, readable, local path" reads [`bt_term::PathVerdict`] out of its pane's
-/// ledger instead. `bt_term::verify_path` is the general form of this question — the volume asked
-/// of `GetDriveTypeW`, and the reparse points walked from the root outwards so that the first one
-/// stops the walk rather than being traversed by it.
+/// (audit 3 C-2, 2026-09-20). `symlink_metadata` is asked about the *whole* path, and Windows
+/// resolves every component but the last before it answers — so `C:uild\out.txt`, where
+/// `C:uild\out` is a junction into a dead share, goes to the redirector inside the very call
+/// that was meant to prevent that. So every caller of this must be a worker, and every
+/// window-thread reader of "is this a real, readable, local path" reads `bt_term::PathVerdict`
+/// out of its pane's ledger instead. `bt_term::path_exists` is the one caller that matters here:
+/// it is unchanged, and `bt_term::verify_path` calls *it*, which is the whole of what "the same
+/// question, asked on a worker" means.
 #[must_use]
 pub fn may_read_unasked_through_links(path: &Path, namer: PathNamer<'_>) -> bool {
     if !may_read_unasked(path, namer) {

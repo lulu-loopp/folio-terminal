@@ -24644,6 +24644,26 @@ fn answered_once<Subject: Eq + Copy, Answer: Clone>(
     answer
 }
 
+/// **What a pane's ledger has to say to a hand-off** (audit 3 C-2; owner rulings 2026-09-21).
+///
+/// A free function so the road from a real file to a real door argument can be driven in a test
+/// without a window: `verify_path` → this → the door's own argument builder. That road is what the
+/// closure review r6 found broken — every fixture in the suite carried no resolved name, so the
+/// doors were only ever exercised on the fallback.
+///
+/// A name with no verdict answers `exists: false`, which every door refuses.
+fn verified_target_of(verdict: Option<&bt_term::PathVerdict>) -> bt_platform::VerifiedTarget {
+    let Some(verdict) = verdict else {
+        return bt_platform::VerifiedTarget::absent();
+    };
+    bt_platform::VerifiedTarget {
+        exists: verdict.exists,
+        is_directory: verdict.directory,
+        executable: verdict.executable,
+        resolved: verdict.door_ready.clone(),
+    }
+}
+
 /// **Is it still there, and how large** — for a file the *user* pointed at (§7.37, §7.29 ⑬).
 ///
 /// One stat, on the window thread, once per frame of one hover. It is the budget §7.29 settled and
@@ -84239,22 +84259,8 @@ impl Runtime<'_> {
     /// has already declined to produce an arm for one, and this is the same answer said again
     /// where the shell is actually reached, so no future caller can hand over a name nobody has
     /// seen.
-    fn verified_target(&self, seat: SeatId, path: &Path) -> (PathBuf, bt_platform::VerifiedTarget) {
-        let Some(verdict) = self.seat_path_verdict(seat, path) else {
-            return (path.to_path_buf(), bt_platform::VerifiedTarget::absent());
-        };
-        (
-            // **The name the operating system gave back**, which is what `main`'s doors resolved
-            // for themselves at click time — so a printed `C:epo\src\..\docs` folds here
-            // exactly as it folded there, and the guard against a `..` on a command line still
-            // has nothing to fire on.
-            verdict.canonical.unwrap_or_else(|| path.to_path_buf()),
-            bt_platform::VerifiedTarget {
-                exists: verdict.exists,
-                is_directory: verdict.directory,
-                executable: verdict.executable,
-            },
-        )
+    fn verified_target(&self, seat: SeatId, path: &Path) -> bt_platform::VerifiedTarget {
+        verified_target_of(self.seat_path_verdict(seat, path).as_ref())
     }
 
     /// [`Self::open_local_path`] for a path a worker has already answered for — the door a
@@ -89232,8 +89238,12 @@ impl Runtime<'_> {
             // and travel here. On Windows the door asks no disk anyway; on a Mac it canonicalised
             // and stat-ed, which is a stall on a mounted share.
             HyperlinkActivation::External(path) => {
-                let (target, facts) = self.verified_target(seat, &path);
-                self.open_local_path_verified(&target, facts);
+                // **The printed spelling, exactly as `main` handed it over.** The Windows door
+                // asks `names_a_program` of the name it is given and `main` gave it this one; the
+                // resolved name rides on the target, which is where the macOS door — the one that
+                // *did* resolve — takes it from.
+                let facts = self.verified_target(seat, &path);
+                self.open_local_path_verified(&path, facts);
             }
             HyperlinkActivation::Preview(path, at) => self.open_preview_at(path, at)?,
             // **Shown where it lives, whatever it is** (audit 3 C-4). A folder took this arm from
@@ -89249,8 +89259,8 @@ impl Runtime<'_> {
                 // this thread; the ledger already answered both — the name is there, and it is a
                 // folder or it is not — and a `Ctrl`+click on a path under a junction into a dead
                 // share must not stall the window inside a call this branch exists to remove.
-                let (target, facts) = self.verified_target(seat, &path);
-                self.reveal_verified(&target, facts);
+                let facts = self.verified_target(seat, &path);
+                self.reveal_verified(&path, facts);
             }
             // The folder's own road, and the one that stays in this window: the
             // column this tab already has is pointed at it, and a tab without one
@@ -130408,7 +130418,7 @@ mod clipboard_path_tests {
 mod printed_path_provenance_tests {
     use super::{
         ClickIntent, HyperlinkActivation, Runtime, TerminalReference, answered_once,
-        hyperlink_activation,
+        hyperlink_activation, verified_target_of,
     };
     use bt_layout::SeatId;
     use std::{cell::RefCell, path::Path};
@@ -130891,6 +130901,166 @@ mod printed_path_provenance_tests {
                 "`{call})` is back under the door the user reaches by naming a file"
             );
         }
+    }
+
+    /// A scratch directory of this test's own, removed by the caller.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let directory = std::env::temp_dir().join(format!("folio-door-{name}"));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a scratch folder");
+        directory
+    }
+
+    /// RED (closure review r6, B-1) — **the argument a door is handed for a real file is the
+    /// argument `main` would have built**, and never the verbatim spelling `canonicalize` returns.
+    ///
+    /// The whole road, driven end to end with no fixture in it: a real file on disk →
+    /// [`bt_term::verify_path`] → [`verified_target_of`] → the door's own argument builder. The
+    /// road is the test because the break was *between* two of its stages — the worker produced a
+    /// raw canonical (`\\?\C:\…` on Windows), and `reveal_argument_form`, `validate_openable_path`
+    /// and Explorer all refuse that prefix. Every `Ctrl`+click on a printed path died silently,
+    /// and the suite stayed green because every hand-made `PathVerdict` carried no resolved name
+    /// at all, so the fallback handed the door the printed spelling.
+    ///
+    /// MUTATION: take `strip_verbatim_prefix` out of `bt_platform::resolved_for_a_door` and this
+    /// goes red on Windows with the prefix back in the argument.
+    #[test]
+    fn a_real_file_reaches_a_door_as_the_argument_main_would_have_built() {
+        let directory = scratch("file");
+        let file = directory.join("notes.md");
+        std::fs::write(&file, b"x").expect("a file this test owns");
+
+        let verdict = bt_term::verify_path(&file);
+        assert!(verdict.exists && !verdict.directory);
+        let target = verified_target_of(Some(&verdict));
+        let resolved = target
+            .resolved
+            .clone()
+            .expect("the worker resolved a name that is really there");
+        let argument = bt_platform::handoff::reveal_argument_form(&resolved, target.is_directory)
+            .expect("the door builds an argument for a file that is there")
+            .to_string_lossy()
+            .into_owned();
+
+        assert!(
+            !argument.contains("\\\\?\\") && !resolved.to_string_lossy().contains("\\\\?\\"),
+            "the verbatim prefix reached a door that refuses it: {argument}"
+        );
+        assert!(
+            argument.starts_with("/select,\"") && argument.ends_with('"'),
+            "a file is selected inside its folder: {argument}"
+        );
+        assert!(
+            argument.contains("notes.md"),
+            "and it is the file this test made: {argument}"
+        );
+        // The same name passes the shape gate every door keeps, which the verbatim spelling did
+        // not: that is the refusal the break actually hit.
+        assert!(bt_platform::handoff::validate_openable_path(&resolved).is_ok());
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// RED (closure review r6, B-1) — **a folder spelled with `..` folds on the lane**, which is
+    /// where `main`'s reveal folded it.
+    ///
+    /// `reveal_argument_form` refuses a `..` outright — it is a text question Explorer answers its
+    /// own way — and `main` never met one because it canonicalised first. A program printing
+    /// `…\repo\src\..\docs` is ordinary.
+    #[test]
+    fn a_printed_folder_spelled_with_a_parent_step_folds_before_the_door() {
+        let directory = scratch("dots");
+        std::fs::create_dir_all(directory.join("src")).expect("a subfolder");
+        std::fs::create_dir_all(directory.join("docs")).expect("another");
+        let printed = directory.join("src").join("..").join("docs");
+        assert!(
+            bt_platform::handoff::reveal_argument_form(&printed, true).is_none(),
+            "the door refuses a parent step, which is why it has to be folded before it"
+        );
+
+        let verdict = bt_term::verify_path(&printed);
+        assert!(verdict.exists && verdict.directory);
+        let target = verified_target_of(Some(&verdict));
+        let resolved = target.resolved.clone().expect("a folder that is there");
+        assert!(
+            !resolved.components().any(|part| part.as_os_str() == ".."),
+            "the resolved name has no parent step left: {}",
+            resolved.display()
+        );
+        let argument = bt_platform::handoff::reveal_argument_form(&resolved, target.is_directory)
+            .expect("and the door builds an argument for it")
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            !argument.starts_with("/select,"),
+            "a folder is opened, not selected in its parent: {argument}"
+        );
+        assert!(argument.contains("docs"), "{argument}");
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// RED (closure review r6, B-1) — **a space and a Chinese character survive the road.**
+    ///
+    /// Two things a path carries that a command line is where they go wrong: a space, which is why
+    /// the argument is quoted at all, and a name outside ASCII, which is where a second encoder
+    /// would show up. Neither may change between the file on disk and the argument.
+    #[test]
+    fn a_name_with_a_space_and_a_han_character_reaches_the_door_unchanged() {
+        let directory = scratch("names");
+        let name = "project notes 中文.md";
+        let file = directory.join(name);
+        std::fs::write(&file, b"x").expect("a file this test owns");
+
+        let verdict = bt_term::verify_path(&file);
+        assert!(verdict.exists);
+        let target = verified_target_of(Some(&verdict));
+        let resolved = target.resolved.clone().expect("a name that is there");
+        assert_eq!(
+            resolved.file_name().and_then(|name| name.to_str()),
+            Some(name),
+            "the name came back as it was written"
+        );
+        let argument = bt_platform::handoff::reveal_argument_form(&resolved, target.is_directory)
+            .expect("the door builds an argument for it")
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            argument.contains(name),
+            "the argument carries the name whole: {argument}"
+        );
+        assert!(
+            argument.matches('"').count() == 2,
+            "and the space is inside one quoted run: {argument}"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// PIN (closure review r6, B-2) — **the open door is asked about the name `main` asked it
+    /// about.**
+    ///
+    /// `main`'s Windows `open_local_path` reads `names_a_program` off the *printed* spelling —
+    /// there is no `canonicalize` in that door at all. For one round the branch handed it the
+    /// resolved name instead, which is a different question about a symlink and a refusal `main`
+    /// does not make.
+    #[test]
+    fn the_open_door_is_handed_the_printed_name_and_the_reveal_the_resolved_one() {
+        let press = method("    fn activate_hyperlink(");
+        let open = press
+            .find("self.open_local_path_verified(&path, facts);")
+            .expect("the open door is handed the path as printed");
+        let reveal = press
+            .find("self.reveal_verified(&path, facts);")
+            .expect("and so is the reveal, which takes the resolved name off the target");
+        assert!(open < reveal, "the file arm stands before the folder arm");
+        // And the resolved name is the doors' own transform, not a second reading of it.
+        let ledger = include_str!("../../bt-term/src/session.rs");
+        let door = ["resolved_for_a_", "door("].concat();
+        assert!(
+            ledger.contains(door.as_str()),
+            "the worker produces the door's input with the door's own function"
+        );
     }
 
     /// RED (audit 3 C-2) — **one resolution per subject, however many readers ask.**

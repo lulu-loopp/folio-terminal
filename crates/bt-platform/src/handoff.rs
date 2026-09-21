@@ -53,7 +53,7 @@ pub const PROGRAM_REFUSED: &str = "the files tree does not run programs";
 /// because that crate depends on this one and not the reverse. So the two fields travel as a type
 /// of this crate's own, and the door refuses on `exists` itself rather than trusting the caller to
 /// have checked: the first shape of this door took a lone `bool` and every caller forgot.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedTarget {
     /// The disk said something is there under that name.
     pub exists: bool,
@@ -63,6 +63,10 @@ pub struct VerifiedTarget {
     /// name. Always `false` on Windows, where that question is about the association and
     /// [`names_a_program`] answers it from the name.
     pub executable: bool,
+    /// **The finished name the door hands over**, [`resolved_for_a_door`]'s answer — and `None`
+    /// when the platform would not give one, in which case a door uses the printed spelling,
+    /// which is what it had before there was a resolver in front of it.
+    pub resolved: Option<PathBuf>,
 }
 
 impl VerifiedTarget {
@@ -73,6 +77,7 @@ impl VerifiedTarget {
             exists: false,
             is_directory: false,
             executable: false,
+            resolved: None,
         }
     }
 }
@@ -313,9 +318,27 @@ pub fn reveal_arguments(path: &Path) -> Option<OsString> {
         return None;
     }
     let metadata = std::fs::metadata(path).ok()?;
-    let canonical = std::fs::canonicalize(path).ok()?;
-    let canonical = strip_verbatim_prefix(&canonical);
+    let canonical = resolved_for_a_door(path)?;
     reveal_argument_form(&canonical, metadata.is_dir())
+}
+
+/// **The name a hand-off door gives the operating system** — the two lines that stood inside
+/// [`reveal_arguments`] and inside both macOS doors, named once so there is one of them.
+///
+/// `canonicalize` resolves `..`, settles the spelling and fails outright when there is nothing
+/// there; [`strip_verbatim_prefix`] takes off the verbatim prefix `canonicalize` writes on Windows
+/// and that every consumer of a path — Explorer, [`validate_openable_path`],
+/// [`reveal_argument_form`] — refuses. The two belong together and were separated once, on a lane: the worker produced a raw
+/// canonical, the door refused its own verbatim prefix, and every `Ctrl`+click on a printed path
+/// died silently (closure review r6).
+///
+/// It is a *disk* call and therefore a worker's, which is the whole reason it is reachable from
+/// outside this module: `bt_term::verify_path` runs it there, the doors take the answer, and this
+/// is the one body both read so the two cannot come to two spellings of one file.
+#[must_use]
+pub fn resolved_for_a_door(path: &Path) -> Option<PathBuf> {
+    let canonical = std::fs::canonicalize(path).ok()?;
+    Some(strip_verbatim_prefix(&canonical))
 }
 
 /// The string half of [`reveal_arguments`], over a path somebody has already
@@ -879,8 +902,14 @@ mod macos_handoff {
         if target.executable {
             return Err(PROGRAM_REFUSED.to_owned());
         }
-        let url = file_url(path, target.is_directory)?;
-        hand_over(&url, &path.to_string_lossy())
+        // `openable_target`'s own answer: the URL is built from the target that gate judged, not
+        // from the name the reference carried (RA-4). That target is [`resolved_for_a_door`]'s.
+        let real = target
+            .resolved
+            .clone()
+            .unwrap_or_else(|| path.to_path_buf());
+        let url = file_url(&real, target.is_directory)?;
+        hand_over(&url, &real.to_string_lossy())
     }
 
     /// Open Finder on a path, with the file **selected** inside its folder.
@@ -934,7 +963,13 @@ mod macos_handoff {
             return Err(format!("{path:?}: not there"));
         }
         openable_unix_path(path)?;
-        show(path.to_path_buf(), target.is_directory)
+        show(
+            target
+                .resolved
+                .clone()
+                .unwrap_or_else(|| path.to_path_buf()),
+            target.is_directory,
+        )
     }
 
     /// The half both reveals end on: a folder is opened, a file is selected in its own.
@@ -1782,8 +1817,16 @@ mod windows_handoff {
         if !target.exists {
             return Err("path is not one to reveal".to_owned());
         }
-        let path = normalised_target(path).ok_or_else(|| "path has no name".to_owned())?;
-        let arguments = reveal_argument_form(&path, target.is_directory)
+        // `reveal_arguments`' own order, with its two disk calls already made: it validated the
+        // *printed* spelling, then built the argument from the **resolved** one. A `None` there
+        // means the platform would not resolve it, and the printed name is what this door had
+        // before a resolver existed.
+        validate_openable_path(path)?;
+        let resolved = target
+            .resolved
+            .clone()
+            .unwrap_or_else(|| path.to_path_buf());
+        let arguments = reveal_argument_form(&resolved, target.is_directory)
             .ok_or_else(|| "path is not one to reveal".to_owned())?;
         hand_explorer_the_argument(window, arguments)
     }

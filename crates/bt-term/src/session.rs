@@ -83,12 +83,14 @@ pub struct PathVerdict {
     /// Its size, off that same call — what the glance card prints, so the card costs the window
     /// thread nothing either (§7.29 ⑬).
     pub bytes: Option<u64>,
-    /// **The name the operating system gave back for it**, `..` folded and the spelling settled —
-    /// `std::fs::canonicalize`, which the hand-off doors used to call themselves at click time.
+    /// **The finished name a hand-off door gives the operating system** —
+    /// [`bt_platform::resolved_for_a_door`], which is the doors' own transform and not a second
+    /// reading of it: `..` folded, the spelling settled, and the verbatim prefix `canonicalize`
+    /// writes on Windows taken back off.
     ///
-    /// `None` when the platform would not say. The doors then use the name as printed, which is
-    /// what they did before there was a canonicaliser in front of them.
-    pub canonical: Option<PathBuf>,
+    /// `None` when the platform would not resolve it. A door handed `None` uses the printed
+    /// spelling, which is what it had before this existed.
+    pub door_ready: Option<PathBuf>,
     /// **Whether opening it would run it** — the execute bit on a filesystem that has one, and an
     /// application bundle's own name (owner ruling 2026-09-21).
     ///
@@ -112,7 +114,7 @@ impl PathVerdict {
             exists: false,
             directory: false,
             bytes: None,
-            canonical: None,
+            door_ready: None,
             executable: false,
         }
     }
@@ -146,17 +148,9 @@ impl PathVerdict {
 /// name whose last component ends in a dot or a space, so no such name is there.
 #[must_use]
 pub fn verify_path(path: &Path) -> PathVerdict {
-    if cfg!(windows) && win32_would_trim_the_name(path) {
-        return PathVerdict::absent();
-    }
-    // **A name this window may not read is not a name it goes looking for** (route C of the
-    // untrusted-path audit, 2026-09-08). `PathNamer::ThisWindow`: the spelling reaching here has
-    // already been translated out of the pane's own namespace by `PrintedPathLinks`, which is
-    // where the pane's half of the rule is asked.
-    if !bt_transcript::paths::may_read_unasked_through_links(
-        path,
-        bt_transcript::paths::PathNamer::ThisWindow,
-    ) {
+    // **Literally `main`'s question**, and it is the same function rather than the same lines
+    // written twice: [`path_exists`] is what stood on the window thread, unchanged.
+    if !path_exists(path) {
         return PathVerdict::absent();
     }
     let Ok(metadata) = std::fs::metadata(path) else {
@@ -166,9 +160,11 @@ pub fn verify_path(path: &Path) -> PathVerdict {
         exists: true,
         directory: metadata.is_dir(),
         bytes: (!metadata.is_dir()).then_some(metadata.len()),
-        // Asked of the same name the `metadata` above answered about, and allowed to fail: a door
-        // handed `None` uses the printed spelling, which is what it had before this existed.
-        canonical: std::fs::canonicalize(path).ok(),
+        // **The finished name a hand-off door hands over**, produced by the doors' own function
+        // rather than by a second reading of what they do — `canonicalize` *and* the verbatim
+        // prefix taken off, which is the pair `reveal_arguments` has always spent together. A raw
+        // canonical is a name Explorer, the shape gate and the argument builder all refuse.
+        door_ready: bt_platform::resolved_for_a_door(path),
         executable: opening_it_would_run_it(path, &metadata),
     }
 }
@@ -200,13 +196,37 @@ fn opening_it_would_run_it(path: &Path, metadata: &std::fs::Metadata) -> bool {
     false
 }
 
-/// Whether a printed path names anything on this disk.
+/// **Whether a printed path names anything on this disk** — the whole of what `verified` means for
+/// a file this window has no other reason to open (§7.1.5j).
 ///
-/// [`verify_path`]'s first field, kept as a name because "is it there" is the question a dozen
-/// tests and the replay oracle put.
+/// The body `main` runs on the window thread, unchanged and still the primitive: [`verify_path`]
+/// calls *this*, so "the same question, on a worker" is true by construction rather than by two
+/// readings agreeing.
+///
+/// **A name Win32 cannot hold is not there, and asking about one answers about a different name**
+/// (user ruling 2026-09-05, §7.30 row 58). Windows normalizes a path before the filesystem ever
+/// sees it, and part of that normalization is taking the trailing dots and spaces off its last
+/// component: a name whose last component ends in a dot reaches the disk with the dot taken off,
+/// and comes back "yes" on the
+/// strength of a file with another name. §7.30 has the disk arbitrate between a token's readings,
+/// longest first — so an answer that is really about the *shorter* reading must never be allowed to
+/// settle the longer one.
 #[must_use]
 pub fn path_exists(path: &Path) -> bool {
-    verify_path(path).exists
+    if cfg!(windows) && win32_would_trim_the_name(path) {
+        return false;
+    }
+    // **A name this window may not read is not a name it goes looking for** (route C of the
+    // untrusted-path audit, 2026-09-08). `PathNamer::ThisWindow`: the spelling reaching here has
+    // already been translated out of the pane's own namespace by `PrintedPathLinks`, which is
+    // where the pane's half of the rule is asked.
+    if !bt_transcript::paths::may_read_unasked_through_links(
+        path,
+        bt_transcript::paths::PathNamer::ThisWindow,
+    ) {
+        return false;
+    }
+    std::fs::metadata(path).is_ok()
 }
 
 /// Whether Windows' path normalizer would take characters off the end of this path's last component
