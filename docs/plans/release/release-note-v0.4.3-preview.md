@@ -125,6 +125,9 @@
   `diagnostics.log` now names the moment it happens.
 - When the desktop compositor stalls, typing stalls with it for as long as the
   compositor takes. **Not fixed in this release.**
+- Windows: handing a file to its default program with Ctrl+click holds the
+  window for about a second while Windows starts it.
+- A printed path with a space in it is a link only when the program quoted it.
 - Bold Chinese in the terminal is drawn at regular weight when the chosen family
   has no bold cut — NSimSun, the Windows default, has none.
 - A drawn table comes down when its header row sits just above the viewport;
