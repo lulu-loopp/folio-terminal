@@ -599,3 +599,54 @@ Each ticket has one acceptance gate that runs with no vendor installed (the tria
 | 6b | Quota: chip, panel, toasts — a bucket reads available / exhausted / **unknown**; crossing `resets_at` yields unknown, not recovered |
 | 8 | Protocol, read verbs only; every read returns a revision |
 | — | **0.5.x:** reply, drag-out, select-and-comment, mutating verbs and the typing tier, web driving, Gemini CLI |
+
+## 14. Revision 5 — where × what: one panel for opening anything anywhere (owner's rulings, 2026-09-20 night; this section adds to §13)
+
+Mock-ups: `menus.html` (13), `menus-b.html`, `menus-c.html`, `menus-d.html` (13d, the last) in the wireframe folder. As with every mock in this note: **structure and interaction only — not a visual specification.** The owner's word on 13d: *basically right; the details still need polishing and the look must be fitted to the real Folio when it is built; parts of it are rough.* Each surface is dressed and ruled when it is born in the product.
+
+### 14.1 The problem, in the owner's words
+
+Three things are awkward today: opening a terminal somewhere **other than** this terminal's folder; previewing an **arbitrary** file; and opening a browser pane **on purpose** (auxiliary surfaces only ever appear as a consequence of a click on a link or a path). Underneath all three: *"open any kind of thing in any folder"* is two independent choices, and serialising them makes a menu deep, long, or many-stepped.
+
+### 14.2 The panel
+
+**The two choices are shown side by side and neither comes first.**
+
+- **Left — where.** A path field at the head; then the current tab's (or pane's) folder, pre-selected and marked as *here*; then pinned folders; then recent folders, **one row per folder**; last, `浏览…`. **A click SELECTS and opens nothing.** Double-click or Enter opens the default shell there. A name that collides with another shows its parent folder, dimmed — only then.
+- **Right — what, headed by the selected folder's name.** The head is data, not a label: it is how the panel says *these open in the folder selected on the left* without a sentence. A Shell group, an Agent group, `Files` (a file tree rooted at that folder; folder glyph), `Preview… ▸`. **A click OPENS it, in the folder selected on the left.**
+- **Under both columns:** `浏览器` on a strip of its own — a browser pane has nothing to do with the selected folder, and sitting in that column would say it had. Then `最近打开`: four rows, cross-folder, a click resumes; nothing else on the row.
+- **Cost.** The default shell here is still the `+ 新建标签` button, one click, unchanged. An agent here: open the panel, one click. Any kind in any folder: two clicks. Nothing nests and neither column outgrows about nine rows.
+
+**One component, two places (RULED).** The tab row's ⌄ and the pane's `Split with ▸` show exactly this panel; the pane's copy carries the split-direction picker at its head (sticky default = the split-direction setting) and that is the **only** difference. The pane ⌄ menu's own first level loses its four-direction picker and `在文件夹里新建终端…` — the panel is both. The tab dropdown loses `文件窗格 [本标签]`: that row existed because a single-pane tab had no other way to open a folder, and the panel's `Files` is that way now; the shortcut stays.
+
+### 14.3 Rows with ▸
+
+**One rule: a right-column row with ▸ lists the recent things of ITS kind in the SELECTED folder; the row itself always opens a new one.**
+
+- `Preview… ▸` — recent files under that folder, then `浏览…`.
+- An agent row — `新会话` first (the default action, said where the eye is; the parent-row click stays for the practised hand), then the sessions observed there, a rule, `全部…`.
+- Shell rows have none. The second level opens at the house's 250 ms or on click, keeps its safe triangle, and changes with the left selection.
+
+### 14.4 Sessions
+
+- **Two layers, so the list is never a dead end.** On top: sessions **Folio itself observed** through hooks — exact ids, titled by the first prompt's opening words. Last: `全部…`, which opens **the agent's own picker** in that folder (`claude --resume`, `codex resume`). Complete by construction, and Folio parses nobody's private storage. The line: a path an agent **handed** us may be read (the transcript path a hook carries — already read for the lede); crawling a vendor's directory by a guessed layout is not done — it breaks silently when they change it, and it means reading the opening of every conversation a person has had. A vendor that documents a listing command gets wired in; until then `全部…` is the honest answer.
+- **Empty sessions are not listed.** A session appears only after at least one `UserPromptSubmit`; one that only ran `/resume` or `/model` never does. The ledger already holds the fact.
+- **A resume chain is one row**, pointing at its newest id (whether each vendor mints a new id on resume is measured per vendor when its adapter ticket is written).
+- **Without hooks** there are no ids: the list is `新会话`, `latest` (continue the most recent in that folder), `全部…` — said as what it is.
+- **Pinned tabs resume their agent's session after a restart; a recent row resumes on click.** One mechanism — a pane remembers program + folder + session id — two entrances. Folio starts the agent and never sends anything in the person's name. *Whether a pinned tab resumes lazily (on first focus) is left open by the owner.*
+
+### 14.5 House rules this adds
+
+1. **Typing is an accelerator, never the only way — and neither is the pointer.** The path field, and the two-word filter (`koop codex` narrows both columns; Enter opens the top of each), each have a pointer path beside them; every second level is reachable with `→`, left with `←`/`Esc`, and the recent rows are in the keyboard's walk. *(Owner: nothing may REQUIRE typing a path.)*
+2. **A column's head may be data; it may not be a label.**
+3. **What is unrelated to a selection does not sit in the column that selection governs.**
+4. **`移到窗口` lists other windows only, named by their active tab, never by ordinal;** a hidden quick-terminal window is not a destination. *(Whether today's build lists it is to be checked; if so it is a 0.4.4 fix.)*
+
+### 14.6 Known rough edges, for the build
+
+The panel is wide and must not cover the pane it is about to split (13d places it away; a Snap-style target preview answers direction, not occlusion). The two-word filter is the fastest gesture and invisible. `全部…` is opaque until used once. `浏览…` and `全部…` borrow glyphs from the master that do not fit (a filled 16-grid folder among stroked 24-grid rows; a *summary* glyph for a *history* job) — both are drawn properly with the 0.5 icon set, which the owner rules.
+
+### 14.7 Also ruled the same night, recorded here so the note stays whole
+
+- A focused pane whose agent starts Waiting gets **no** one-shot flash in 0.4.x; the 0.5 notification answers it (§12.1).
+- Measured on the owner's machine: with Folio's hooks off, the dot he took for "turn finished" was the *unread output* dot, and the orange ring was a **bell** (his agents ring at turn end; Codex rings by default in a terminal it does not recognise — the survey's finding, observed). With hooks on, a Waiting claim on the focused tab is withheld until focus leaves (`refuse … reason=watched`), which he experienced as the notification "arriving a beat late". All three are the shipped design working as ruled; §12.1 is what changes the last one.

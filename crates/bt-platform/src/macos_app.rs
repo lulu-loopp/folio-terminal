@@ -353,11 +353,6 @@ pub(crate) fn add_the_delegate_selectors(outbox: Arc<Outbox>) -> Result<(), Stri
             encoding: c"B@:@B",
         },
         Injection {
-            selector: sel!(applicationShouldTerminate:),
-            imp: should_terminate as *const c_void,
-            encoding: c"Q@:@",
-        },
-        Injection {
             selector: sel!(applicationShouldTerminateAfterLastWindowClosed:),
             imp: should_terminate_after_last_window_closed as *const c_void,
             encoding: c"B@:@",
@@ -389,6 +384,22 @@ pub(crate) fn add_the_delegate_selectors(outbox: Arc<Outbox>) -> Result<(), Stri
             selector: sel!(paste:),
             imp: edit_menu_paste as *const c_void,
             encoding: c"v@:@",
+        },
+        // **Last, and that is the whole of why it is here** (audit 3 A-4). This
+        // loop checks and adds one selector at a time and the runtime has no
+        // `class_removeMethod`, so a refusal partway down leaves everything
+        // above it live on winit's class while `install` answers `Err` and this
+        // process carries on with no delegate object behind them. Of the seven,
+        // this is the only one whose live-but-unanswered form is worse than its
+        // absence: `should_terminate` answers `NSTerminateLater` and the reply
+        // can only come from the object that was never built, so ⌘Q would spin
+        // AppKit's deferred-termination loop for ever and the session would
+        // never be written. Added last, it is added only when every other one
+        // was, and a partial injection leaves ⌘Q to AppKit's own default.
+        Injection {
+            selector: sel!(applicationShouldTerminate:),
+            imp: should_terminate as *const c_void,
+            encoding: c"Q@:@",
         },
     ];
     // The channel before the methods, or a delivery could land in the gap.
@@ -598,6 +609,47 @@ mod tests {
             assert!(
                 entry.contains(&format!("c\"{encoding}\"")),
                 "{selector} is added with the wrong type encoding:\n{entry}"
+            );
+        }
+    }
+
+    /// RED — **`applicationShouldTerminate:` is the last selector injected**
+    /// (audit 3 A-4).
+    ///
+    /// The injection is irreversible one selector at a time, so a refusal
+    /// partway down the table leaves everything above it on winit's class with
+    /// nothing behind it. Every other selector degrades to "the feature is
+    /// missing"; this one degrades to a ⌘Q that is answered `NSTerminateLater`
+    /// by a channel nobody will ever reply on — a frozen application and a
+    /// session never written. Last is the position at which a partial injection
+    /// cannot leave it live.
+    ///
+    /// MUTATION: move the entry back above any other and this fails.
+    #[test]
+    fn the_terminate_selector_is_the_last_one_injected() {
+        const SOURCE: &str = include_str!("macos_app.rs");
+        let table = SOURCE
+            .find("let selectors = [")
+            .expect("the injection table is declared in this file");
+        let table = &SOURCE[table..];
+        let terminate = table
+            .find("selector: sel!(applicationShouldTerminate:)")
+            .expect("the terminate selector is injected");
+        for other in [
+            "applicationShouldHandleReopen:hasVisibleWindows:",
+            "applicationShouldTerminateAfterLastWindowClosed:",
+            "application:openURLs:",
+            "applicationDockMenu:",
+            "copy:",
+            "paste:",
+        ] {
+            let at = table
+                .find(&format!("selector: sel!({other})"))
+                .unwrap_or_else(|| panic!("{other} is injected"));
+            assert!(
+                at < terminate,
+                "{other} is injected after applicationShouldTerminate:, so a refusal on it \
+                 leaves a ⌘Q nobody can answer"
             );
         }
     }
