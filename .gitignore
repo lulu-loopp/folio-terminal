@@ -77,3 +77,6 @@ __pycache__/
 # number, and the script fetches the version it names; a copy committed here
 # would be a second answer to the question of which one signed a release.
 /tools/
+
+# the split inventory generator writes its full data beside the tables; the tables are tracked, the data is regenerated
+docs/plans/bt-app-split-freshness-data-*.json
