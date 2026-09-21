@@ -67,15 +67,75 @@ pub const LIVE_MATH_STABLE_INTERVAL: Duration = Duration::from_millis(200);
 /// It is context, not an inference: an opener older than this tail is unknowable at this layer.
 const LIVE_FENCE_HISTORY_CONTEXT_LINES: usize = 1_024;
 const MAX_OFFSCREEN_RECORDS: usize = 128;
-/// Whether a printed path names anything on this disk — the whole of what `verified` means for a
-/// file this window has no other reason to open (§7.1.5j).
+/// **What the disk said about one path the terminal named** — the ledger's value, and the one
+/// authority on "is this a real, readable, local path" (§7.1.5j, audit 3 C-2).
 ///
-/// **The only filesystem question this feature asks, and it is asked on a worker.** A folder counts:
-/// the routing table has an arm for one, so "is it there" and "what is it" are two questions and
-/// only the first is asked here.
+/// Every field is an answer a *worker* brought back. The window thread reads this and asks the
+/// filesystem nothing: a hover that stats a mapped network drive freezes the window for the
+/// operating system's own timeout, which is the defect this type exists to close.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PathVerdict {
+    /// Something is there under that name.
+    pub exists: bool,
+    /// And it is a folder. Asked in the same `metadata` call `exists` is read from, because the
+    /// routing table has an arm for a folder and a second question would be a second answer.
+    pub directory: bool,
+    /// Its size, off that same call — what the glance card prints, so the card costs the window
+    /// thread nothing either (§7.29 ⑬).
+    pub bytes: Option<u64>,
+    /// **The finished name a hand-off door gives the operating system** —
+    /// [`bt_platform::resolved_for_a_door`], which is the doors' own transform and not a second
+    /// reading of it: `..` folded, the spelling settled, and the verbatim prefix `canonicalize`
+    /// writes on Windows taken back off.
+    ///
+    /// `None` when the platform would not resolve it. A door handed `None` uses the printed
+    /// spelling, which is what it had before this existed.
+    pub door_ready: Option<PathBuf>,
+    /// **Whether opening it would run it** — the execute bit on a filesystem that has one, and an
+    /// application bundle's own name (owner ruling 2026-09-21).
+    ///
+    /// The one fact the macOS hand-off asks that is neither existence nor folder-ness:
+    /// `macos_handoff::opening_it_would_run_it` refuses any file whose mode carries `0o111`, and
+    /// it used to ask a `metadata` of its own on the thread that paints. It is a fact about the
+    /// file, so it is answered here, beside the other three, off the same `metadata` call.
+    ///
+    /// Always `false` on Windows, where "would opening it run it" is a question about the
+    /// *association* and is answered by `bt_platform::names_a_program` from the name.
+    pub executable: bool,
+}
+
+impl PathVerdict {
+    /// **The answer for a name this window did not go and look at, or looked at and did not
+    /// find** — which are one answer, because they were one answer on `main`: `path_exists`
+    /// returned `false` for both.
+    #[must_use]
+    pub const fn absent() -> Self {
+        Self {
+            exists: false,
+            directory: false,
+            bytes: None,
+            door_ready: None,
+            executable: false,
+        }
+    }
+}
+
+/// **What the disk says about a printed path** — `main`'s own question, asked on a worker
+/// (audit 3 C-2; owner rulings 2026-09-21).
 ///
-/// `metadata` follows links, so a symlink pointing at nothing answers `false` — a name whose target
-/// cannot be opened is not a name this window may promise to open.
+/// **The same calls in the same order that stood on the window thread**, and that is the whole of
+/// the design. Between 2026-09-20 and 2026-09-21 this walked the path component by component,
+/// re-asking locality at every reparse point; that mechanism `main` never had, and three things
+/// that are live links on `main` died in it — a WSL path through a Linux symlink (`read_link`
+/// cannot decode `IO_REPARSE_TAG_LX_SYMLINK`), an intermediate junction into a live share, and a
+/// spelling carrying `..`. It is withdrawn. A long or odd chain of links behaves exactly as it
+/// does on `main`, because on both it is the operating system answering.
+///
+/// So: the trailing-dot rule, then the one lexical-plus-one-hop predicate
+/// [`bt_transcript::paths::may_read_unasked_through_links`] — the same predicate `path_exists`
+/// put here before — then one `metadata`. Two things ride along that `main` computed at *click*
+/// time, on the thread that paints, and that is the only reason they are here: the canonical name
+/// its reveal and open doors resolved, and the execute bit its macOS door read.
 ///
 /// **A name Win32 cannot hold is not there, and asking about one answers about a different name**
 /// (user ruling 2026-09-05, §7.30 row 58). Windows normalizes a path before the filesystem ever
@@ -86,22 +146,84 @@ const MAX_OFFSCREEN_RECORDS: usize = 128;
 /// settle the longer one, which is precisely what let a sentence's full stop into the reference the
 /// demo rehearsal photographed. The honest answer is the one below: no Win32 filesystem holds a
 /// name whose last component ends in a dot or a space, so no such name is there.
+#[must_use]
+pub fn verify_path(path: &Path) -> PathVerdict {
+    // **Literally `main`'s question**, and it is the same function rather than the same lines
+    // written twice: [`path_exists`] is what stood on the window thread, unchanged.
+    if !path_exists(path) {
+        return PathVerdict::absent();
+    }
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return PathVerdict::absent();
+    };
+    let door_ready = bt_platform::resolved_for_a_door(path);
+    // Asked of the name the door opens, not the one that was printed: a link called `editor`
+    // that lands on `Thing.app` is a bundle, and `main`'s door judged the resolved name.
+    let executable = opening_it_would_run_it(door_ready.as_deref().unwrap_or(path), &metadata);
+    PathVerdict {
+        exists: true,
+        directory: metadata.is_dir(),
+        bytes: (!metadata.is_dir()).then_some(metadata.len()),
+        // **The finished name a hand-off door hands over**, produced by the doors' own function
+        // rather than by a second reading of what they do — `canonicalize` *and* the verbatim
+        // prefix taken off, which is the pair `reveal_arguments` has always spent together. A raw
+        // canonical is a name Explorer, the shape gate and the argument builder all refuse.
+        door_ready,
+        executable,
+    }
+}
+
+/// **Whether opening it would run it** — `macos_handoff::opening_it_would_run_it`'s rule, asked
+/// where the `metadata` already is (owner ruling 2026-09-21).
 ///
-/// It is a statement about what this platform can name and not a spelling rule, which is why it is
-/// asked of `cfg!(windows)` rather than of the string alone: on a filesystem that really can hold
-/// `notes.md.`, `notes.md.` is a file and §7.30's longest reading wins it.
+/// Byte for byte the rule that door applied to the same two facts: a bundle is a directory whose
+/// name ends in `.app`, and everything else is the execute bit. It lives beside the mode bits
+/// rather than in `bt-platform` because this is the call that has them — the door's own copy
+/// stat-ed the file a second time, on the thread that paints.
+#[cfg(unix)]
+fn opening_it_would_run_it(path: &Path, metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    if metadata.is_dir() {
+        return path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("app"));
+    }
+    metadata.permissions().mode() & 0o111 != 0
+}
+
+/// The same question on a filesystem with no mode bits: there, "would opening it run it" is about
+/// the *association*, and `bt_platform::names_a_program` answers it from the name exactly as it
+/// does on `main`.
+#[cfg(not(unix))]
+fn opening_it_would_run_it(path: &Path, metadata: &std::fs::Metadata) -> bool {
+    let _ = (path, metadata);
+    false
+}
+
+/// **Whether a printed path names anything on this disk** — the whole of what `verified` means for
+/// a file this window has no other reason to open (§7.1.5j).
+///
+/// The body `main` runs on the window thread, unchanged and still the primitive: [`verify_path`]
+/// calls *this*, so "the same question, on a worker" is true by construction rather than by two
+/// readings agreeing.
+///
+/// **A name Win32 cannot hold is not there, and asking about one answers about a different name**
+/// (user ruling 2026-09-05, §7.30 row 58). Windows normalizes a path before the filesystem ever
+/// sees it, and part of that normalization is taking the trailing dots and spaces off its last
+/// component: a name whose last component ends in a dot reaches the disk with the dot taken off,
+/// and comes back "yes" on the
+/// strength of a file with another name. §7.30 has the disk arbitrate between a token's readings,
+/// longest first — so an answer that is really about the *shorter* reading must never be allowed to
+/// settle the longer one.
+#[must_use]
 pub fn path_exists(path: &Path) -> bool {
     if cfg!(windows) && win32_would_trim_the_name(path) {
         return false;
     }
     // **A name this window may not read is not a name it goes looking for** (route C of the
-    // untrusted-path audit, 2026-09-08). `metadata` follows a link before it answers, so a
-    // drive-rooted name whose junction points at `\\server\share` was verified by dialling that
-    // server — from a worker, off text a child process printed, with no click anywhere. The
-    // question is asked of the link and never of what it points at, so this costs a local stat and
-    // reaches no network. `PathNamer::ThisWindow`: the spelling reaching here has already been
-    // translated out of the pane's own namespace by `PrintedPathLinks`, which is where the pane's
-    // half of the rule is asked.
+    // untrusted-path audit, 2026-09-08). `PathNamer::ThisWindow`: the spelling reaching here has
+    // already been translated out of the pane's own namespace by `PrintedPathLinks`, which is
+    // where the pane's half of the rule is asked.
     if !bt_transcript::paths::may_read_unasked_through_links(
         path,
         bt_transcript::paths::PathNamer::ThisWindow,
@@ -1423,16 +1545,23 @@ pub struct DualPlaneSession {
     table_bands: bool,
     inline_image_tasks: VecDeque<InlineImageTask>,
     local_image_path_tasks: VecDeque<InlineImageTask>,
-    /// What the disk has answered about the printed paths this pane has drawn (§7.1.5j): `true`
-    /// for a name that is on the disk — file or folder alike — and `false` for one that is not.
+    /// What the disk has answered about the printed paths this pane has drawn (§7.1.5j), and
+    /// **the single owner of "is this a real, readable, local path"** (audit 3 C-2): whether
+    /// anything is there, whether it is a folder, how large it is, and whose machine it stands on.
     ///
-    /// Both answers are kept, because a "no" is as much an answer as a "yes" and re-asking it every
+    /// Every reader of those four facts reads them here. The window thread has no second way to
+    /// ask, which is the whole of the rule this ledger now carries: a hover, a press, a pointing
+    /// finger and a glance card decide from [`PathVerdict`] alone and put no question to a
+    /// filesystem, because a path that came out of program output may name a mapped drive whose
+    /// server is gone and the answer costs the redirector's own timeout.
+    ///
+    /// Every answer is kept, because a "no" is as much an answer as a "yes" and re-asking it every
     /// frame is what would make a screenful of prose cost a screenful of syscalls. What is *not*
     /// kept is any notion of *when* it was asked — there is no clock in here — but a "no" is not
     /// permanent either: it stands until the program **prints that name again**, which is the one
     /// thing that says the question is worth putting to the disk a second time (owner ruling
     /// 2026-09-20; see [`Self::expire_denied_paths`] for the whole of it).
-    path_verdicts: BTreeMap<PathBuf, bool>,
+    path_verdicts: BTreeMap<PathBuf, PathVerdict>,
     /// Insertion order over `path_verdicts`, so the ledger can be held to a size without asking a
     /// clock. Oldest question out first.
     path_verdict_order: VecDeque<PathBuf>,
@@ -2742,7 +2871,7 @@ impl DualPlaneSession {
     /// name printed whole, which is nearly all of them, does not.
     fn paths_named_on_freshly_printed_rows(&self) -> BTreeSet<PathBuf> {
         let mut named = BTreeSet::new();
-        if !self.path_verdicts.values().any(|exists| !exists)
+        if !self.path_verdicts.values().any(|verdict| !verdict.exists)
             || !self
                 .live_rows
                 .iter()
@@ -2791,9 +2920,42 @@ impl DualPlaneSession {
     /// out to be gone is answered by the click's own re-check (§7.1.5k 丁) — so re-asking the yeses
     /// would double the traffic of every repainting screen to buy nothing.
     fn ask_about_reprinted_path(&mut self, path: PathBuf) {
-        if self.path_verdicts.get(&path) == Some(&true) {
+        if self
+            .path_verdicts
+            .get(&path)
+            .is_some_and(|verdict| verdict.exists)
+        {
             return;
         }
+        self.queue_path_question(path);
+    }
+
+    /// **Put the target of a link the window met in front of the worker** (audit 3 C-2).
+    ///
+    /// An `OSC 8` target is the one shape of reference that never went through the printed-path
+    /// scan: the program declared it, the cell carries it verbatim, and until this door existed
+    /// nobody had asked the disk anything about it — so the window thread asked, on the pointer's
+    /// own event, and a mapped drive froze it. This is that question, put where every other one is
+    /// put, and the routing table simply has no link until it is answered.
+    ///
+    /// Idempotent through [`Self::ask_about_path`]: an answered name, a queued one and one a
+    /// worker is holding all cost nothing, which is what makes it safe on every pointer move.
+    pub fn ask_about_link_target(&mut self, path: PathBuf) {
+        self.ask_about_path(path);
+    }
+
+    /// **The same question, asked again although this pane already holds an answer** (closure
+    /// re-review B-1').
+    ///
+    /// A "yes" is never re-asked, on the argument written at [`Self::expire_denied_paths`] that a
+    /// link which turns out to be gone is answered by *the click's own re-check*. That re-check
+    /// used to be the `metadata` the reveal made on the window thread, and audit 3 C-2 took it
+    /// off that thread — so the press is the re-check now, and this is the door it asks through.
+    ///
+    /// One question per press and not one per frame: the de-duplication that is skipped is the
+    /// **verdict**, while queued and in-flight still refuse, so a reader leaning on the button
+    /// cannot put more than one question out at a time.
+    pub fn re_ask_about_link_target(&mut self, path: PathBuf) {
         self.queue_path_question(path);
     }
 
@@ -2821,13 +2983,14 @@ impl DualPlaneSession {
     /// which only another projection can collect — without that arm a screen whose first budget's
     /// worth of names all come back "no" would end the conversation there and leave a real file
     /// further down permanently unasked about (§7.1.5j, user report 2026-08-23).
-    pub fn complete_path_verification(&mut self, path: PathBuf, exists: bool) -> bool {
+    pub fn complete_path_verification(&mut self, path: PathBuf, verdict: PathVerdict) -> bool {
+        let exists = verdict.exists;
         self.path_verify_in_flight.remove(&path);
         self.path_verify_tasks.retain(|queued| *queued != path);
-        if self.path_verdicts.get(&path) == Some(&exists) {
+        if self.path_verdicts.get(&path) == Some(&verdict) {
             return self.printed_path_budget_full;
         }
-        if self.path_verdicts.insert(path.clone(), exists).is_none() {
+        if self.path_verdicts.insert(path.clone(), verdict).is_none() {
             self.path_verdict_order.push_back(path);
         }
         while self.path_verdict_order.len() > PATH_VERDICT_LEDGER_CAP {
@@ -2846,7 +3009,21 @@ impl DualPlaneSession {
     /// Whether the disk has told this pane that a printed path is real — the `verified` bit of
     /// §7.1.5j, and the twin of [`Self::image_path_is_verified`] for every other kind of file.
     pub fn path_is_verified(&self, path: &Path) -> bool {
-        self.path_verdicts.get(path) == Some(&true)
+        self.path_verdicts
+            .get(path)
+            .is_some_and(|verdict| verdict.exists)
+    }
+
+    /// **Everything this window is allowed to know about a path a program named** — the ledger
+    /// read that stands where a filesystem call used to (audit 3 C-2).
+    ///
+    /// `None` is not "no": it is *nobody has asked yet*, and the routing table's answer for one is
+    /// that the reference is not a link. The question is put by
+    /// [`Self::ask_about_link_target`] on the same event, and the answer arrives a worker hop
+    /// later with a frame of its own.
+    #[must_use]
+    pub fn path_verdict(&self, path: &Path) -> Option<PathVerdict> {
+        self.path_verdicts.get(path).cloned()
     }
 
     /// **Forget every "no" in this pane's ledger** (user ruling 2026-08-25, §7.1.5k 丙).
@@ -2872,6 +3049,12 @@ impl DualPlaneSession {
     /// linked and a link that turns out to be gone is answered by the click's own re-check (that
     /// is 丁, and it lives in the five-armed router). Re-asking the yeses would double the traffic
     /// to buy nothing.
+    ///
+    /// **Where that re-check lives, since audit 3 C-2** (closure re-review, 2026-09-21): it was
+    /// the `metadata` the reveal made on the window thread, and that call is gone. The press is
+    /// the re-check now — [`Self::re_ask_about_link_target`], put by the press going down, so the
+    /// answer is back before the release acts and a held "yes" over a file that has since been
+    /// deleted cannot open a file manager on a folder nobody named.
     ///
     /// # The other boundary: a name printed again (owner ruling 2026-09-20)
     ///
@@ -2905,10 +3088,10 @@ impl DualPlaneSession {
     /// Answers `true` when something actually left, so the caller can skip the rebuild on the
     /// commands — the great majority — that denied nothing.
     fn expire_denied_paths(&mut self) -> bool {
-        if !self.path_verdicts.values().any(|exists| !exists) {
+        if !self.path_verdicts.values().any(|verdict| !verdict.exists) {
             return false;
         }
-        self.path_verdicts.retain(|_, exists| *exists);
+        self.path_verdicts.retain(|_, verdict| verdict.exists);
         self.path_verdict_order
             .retain(|path| self.path_verdicts.contains_key(path));
         self.rebuild_printed_path_links();
@@ -2927,7 +3110,10 @@ impl DualPlaneSession {
         // asking about the same dead name on every frame it draws (§7.1.5j).
         self.printed_path_links = bt_transcript::paths::PrintedPathLinks::in_namespace(
             directory.clone(),
-            self.path_verdicts.clone(),
+            self.path_verdicts
+                .iter()
+                .map(|(path, verdict)| (path.clone(), verdict.exists))
+                .collect(),
             &namespace,
         );
         // And the same ledger for text this pane has **just printed**, which is the one reading in
@@ -2938,8 +3124,8 @@ impl DualPlaneSession {
             directory,
             self.path_verdicts
                 .iter()
-                .filter(|(_, exists)| **exists)
-                .map(|(path, exists)| (path.clone(), *exists))
+                .filter(|(_, verdict)| verdict.exists)
+                .map(|(path, verdict)| (path.clone(), verdict.exists))
                 .collect(),
             &namespace,
         );
@@ -7782,8 +7968,8 @@ impl DualPlaneSession {
                         self.complete_inline_image_scale(scaled);
                     }
                     SessionDecorationTask::VerifyPath(path) => {
-                        let exists = path_exists(&path);
-                        self.complete_path_verification(path, exists);
+                        let verdict = verify_path(&path);
+                        self.complete_path_verification(path, verdict);
                     }
                 }
             }
@@ -24460,8 +24646,8 @@ mod tests {
                     assert!(session.complete_inline_image_scale(scale_inline_image(&task)));
                 }
                 SessionDecorationTask::VerifyPath(path) => {
-                    let exists = path_exists(&path);
-                    session.complete_path_verification(path, exists);
+                    let verdict = verify_path(&path);
+                    session.complete_path_verification(path, verdict);
                 }
                 SessionDecorationTask::Math(_) => panic!("the fixture contains no math"),
             }
@@ -26008,7 +26194,7 @@ mod tests {
         while let Some(task) = session.take_decoration_worker_task() {
             if let SessionDecorationTask::VerifyPath(path) = task {
                 asked.push(path.clone());
-                session.complete_path_verification(path, false);
+                session.complete_path_verification(path, PathVerdict::absent());
             }
         }
         asked
@@ -26148,8 +26334,8 @@ mod tests {
             while let Some(task) = session.take_decoration_worker_task() {
                 if let SessionDecorationTask::VerifyPath(path) = task {
                     this_frame += 1;
-                    let exists = path_exists(&path);
-                    session.complete_path_verification(path, exists);
+                    let verdict = verify_path(&path);
+                    session.complete_path_verification(path, verdict);
                 }
             }
             asked.push(this_frame);
@@ -26222,8 +26408,8 @@ mod tests {
             session.absorb_printed_path_probes(&mut projection);
             while let Some(task) = session.take_decoration_worker_task() {
                 if let SessionDecorationTask::VerifyPath(path) = task {
-                    let exists = path_exists(&path);
-                    session.complete_path_verification(path, exists);
+                    let verdict = verify_path(&path);
+                    session.complete_path_verification(path, verdict);
                 }
             }
         }
@@ -26292,8 +26478,8 @@ mod tests {
             owed = false;
             while let Some(task) = session.take_decoration_worker_task() {
                 if let SessionDecorationTask::VerifyPath(path) = task {
-                    let exists = path_exists(&path);
-                    owed |= session.complete_path_verification(path, exists);
+                    let verdict = verify_path(&path);
+                    owed |= session.complete_path_verification(path, verdict);
                 }
             }
         }
@@ -26337,8 +26523,8 @@ mod tests {
         session.absorb_printed_path_probes(projection);
         while let Some(task) = session.take_decoration_worker_task() {
             if let SessionDecorationTask::VerifyPath(path) = task {
-                let exists = path_exists(&path);
-                session.complete_path_verification(path, exists);
+                let verdict = verify_path(&path);
+                session.complete_path_verification(path, verdict);
             }
         }
     }
@@ -26453,8 +26639,11 @@ mod tests {
             .feed(b"\x1b[?1049h\x1b]133;D;0\x07\x1b[?1049l")
             .unwrap();
         assert_eq!(
-            session.path_verdicts.get(&absent),
-            Some(&false),
+            session
+                .path_verdicts
+                .get(&absent)
+                .map(|verdict| verdict.exists),
+            Some(false),
             "a TUI does not get to close a command it did not open, and it does not get to \
              empty this ledger either"
         );
@@ -26560,8 +26749,15 @@ mod tests {
         while let Some(task) = session.take_decoration_worker_task() {
             if let SessionDecorationTask::VerifyPath(path) = task {
                 asked.push(path.clone());
-                let exists = on_disk(&path);
-                owed |= session.complete_path_verification(path, exists);
+                let verdict = if on_disk(&path) {
+                    PathVerdict {
+                        exists: true,
+                        ..PathVerdict::absent()
+                    }
+                } else {
+                    PathVerdict::absent()
+                };
+                owed |= session.complete_path_verification(path, verdict);
             }
         }
         (asked, owed)
@@ -26779,7 +26975,7 @@ mod tests {
             );
             while let Some(task) = session.take_decoration_worker_task() {
                 if let SessionDecorationTask::VerifyPath(path) = task {
-                    session.complete_path_verification(path, false);
+                    session.complete_path_verification(path, PathVerdict::absent());
                 }
             }
             assert!(
@@ -26845,8 +27041,8 @@ mod tests {
                     session.complete_inline_image_scale(scale_inline_image(&task));
                 }
                 SessionDecorationTask::VerifyPath(path) => {
-                    let exists = path_exists(&path);
-                    session.complete_path_verification(path, exists);
+                    let verdict = verify_path(&path);
+                    session.complete_path_verification(path, verdict);
                 }
                 SessionDecorationTask::Math(_) => panic!("the fixture contains no math"),
             }
@@ -28855,8 +29051,8 @@ mod tests {
                         assert!(session.complete_inline_image_scale(scale_inline_image(&task)));
                     }
                     SessionDecorationTask::VerifyPath(path) => {
-                        let exists = path_exists(&path);
-                        session.complete_path_verification(path, exists);
+                        let verdict = verify_path(&path);
+                        session.complete_path_verification(path, verdict);
                     }
                     SessionDecorationTask::Math(_) => panic!("the fixture contains no math"),
                 }
@@ -28963,8 +29159,8 @@ mod tests {
                         assert!(session.complete_inline_image_scale(scale_inline_image(&task)));
                     }
                     SessionDecorationTask::VerifyPath(path) => {
-                        let exists = path_exists(&path);
-                        session.complete_path_verification(path, exists);
+                        let verdict = verify_path(&path);
+                        session.complete_path_verification(path, verdict);
                     }
                     SessionDecorationTask::Math(_) => panic!("the fixture contains no math"),
                 }

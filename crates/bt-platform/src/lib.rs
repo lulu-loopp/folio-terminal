@@ -11482,8 +11482,9 @@ mod argument_split_tests {
 /// because that is where every caller has always found them, and moving the
 /// door is not the same as moving its handle.
 pub use handoff::{
-    PROGRAM_REFUSED, open_local_file, open_local_path, open_system_fonts_page,
-    program_in_directories, program_on_path, reveal_arguments, reveal_in_explorer, shell_execute,
+    PROGRAM_REFUSED, VerifiedTarget, open_local_file, open_local_path, open_local_path_verified,
+    open_system_fonts_page, program_in_directories, program_on_path, resolved_for_a_door,
+    reveal_arguments, reveal_in_explorer, reveal_verified, shell_execute,
 };
 
 /// The three thread-band calls, off Windows.

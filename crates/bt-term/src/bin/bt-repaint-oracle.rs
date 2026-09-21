@@ -630,12 +630,16 @@ impl HeadlessOracle {
                         // the real disk instead, which is what the recorded pane was told.
                         self.path_questions = self.path_questions.saturating_add(1);
                         *self.path_question_names.entry(path.clone()).or_insert(0) += 1;
-                        let exists = self.path_reask_reads_disk && bt_term::path_exists(&path);
-                        changed |= self.session.complete_path_verification(path, exists);
+                        let verdict = if self.path_reask_reads_disk {
+                            bt_term::verify_path(&path)
+                        } else {
+                            bt_term::PathVerdict::absent()
+                        };
+                        changed |= self.session.complete_path_verification(path, verdict);
                         continue;
                     }
-                    let exists = bt_term::path_exists(&path);
-                    changed |= self.session.complete_path_verification(path, exists);
+                    let verdict = bt_term::verify_path(&path);
+                    changed |= self.session.complete_path_verification(path, verdict);
                 }
                 SessionDecorationTask::Math(_) => {
                     unreachable!("math queues were drained before image completion")

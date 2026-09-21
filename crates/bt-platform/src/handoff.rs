@@ -46,6 +46,42 @@ use std::path::{Path, PathBuf};
 /// that" apart from "Windows could not".
 pub const PROGRAM_REFUSED: &str = "the files tree does not run programs";
 
+/// **What a worker already established about a path** — the two facts a reveal needs, carried
+/// instead of fetched (closure re-review B-1').
+///
+/// `bt-term`'s ledger is the authority (`bt_term::PathVerdict`) and it cannot be named here,
+/// because that crate depends on this one and not the reverse. So the two fields travel as a type
+/// of this crate's own, and the door refuses on `exists` itself rather than trusting the caller to
+/// have checked: the first shape of this door took a lone `bool` and every caller forgot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedTarget {
+    /// The disk said something is there under that name.
+    pub exists: bool,
+    /// And that it is a folder.
+    pub is_directory: bool,
+    /// And that opening it would **run** it — the execute bit, or an application bundle's own
+    /// name. Always `false` on Windows, where that question is about the association and
+    /// [`names_a_program`] answers it from the name.
+    pub executable: bool,
+    /// **The finished name the door hands over**, [`resolved_for_a_door`]'s answer — and `None`
+    /// when the platform would not give one, in which case a door uses the printed spelling,
+    /// which is what it had before there was a resolver in front of it.
+    pub resolved: Option<PathBuf>,
+}
+
+impl VerifiedTarget {
+    /// **The answer for a name nobody has asked the disk about** — every door refuses it.
+    #[must_use]
+    pub const fn absent() -> Self {
+        Self {
+            exists: false,
+            is_directory: false,
+            executable: false,
+            resolved: None,
+        }
+    }
+}
+
 /// The extensions that are a program whatever this machine's `PATHEXT` says.
 ///
 /// `PATHEXT` is the system's own list of what a *command line* will execute
@@ -282,9 +318,27 @@ pub fn reveal_arguments(path: &Path) -> Option<OsString> {
         return None;
     }
     let metadata = std::fs::metadata(path).ok()?;
-    let canonical = std::fs::canonicalize(path).ok()?;
-    let canonical = strip_verbatim_prefix(&canonical);
+    let canonical = resolved_for_a_door(path)?;
     reveal_argument_form(&canonical, metadata.is_dir())
+}
+
+/// **The name a hand-off door gives the operating system** — the two lines that stood inside
+/// [`reveal_arguments`] and inside both macOS doors, named once so there is one of them.
+///
+/// `canonicalize` resolves `..`, settles the spelling and fails outright when there is nothing
+/// there; [`strip_verbatim_prefix`] takes off the verbatim prefix `canonicalize` writes on Windows
+/// and that every consumer of a path — Explorer, [`validate_openable_path`],
+/// [`reveal_argument_form`] — refuses. The two belong together and were separated once, on a lane: the worker produced a raw
+/// canonical, the door refused its own verbatim prefix, and every `Ctrl`+click on a printed path
+/// died silently (closure review r6).
+///
+/// It is a *disk* call and therefore a worker's, which is the whole reason it is reachable from
+/// outside this module: `bt_term::verify_path` runs it there, the doors take the answer, and this
+/// is the one body both read so the two cannot come to two spellings of one file.
+#[must_use]
+pub fn resolved_for_a_door(path: &Path) -> Option<PathBuf> {
+    let canonical = std::fs::canonicalize(path).ok()?;
+    Some(strip_verbatim_prefix(&canonical))
 }
 
 /// The string half of [`reveal_arguments`], over a path somebody has already
@@ -488,10 +542,32 @@ mod portable_handoff {
         Err(not_here("opening a file"))
     }
 
+    /// The same, for a path a worker has already answered for.
+    #[cfg(not(target_os = "macos"))]
+    pub fn open_local_path_verified(
+        window: NativeWindow,
+        path: &Path,
+        target: super::VerifiedTarget,
+    ) -> Result<(), String> {
+        let _ = (window, path, target);
+        Err(not_here("opening a file"))
+    }
+
     /// Show a file in the file manager.
     #[cfg(not(target_os = "macos"))]
     pub fn reveal_in_explorer(window: NativeWindow, path: &Path) -> Result<(), String> {
         let _ = (window, path);
+        Err(not_here("showing a file in the file manager"))
+    }
+
+    /// The same, for a path a worker has already answered for.
+    #[cfg(not(target_os = "macos"))]
+    pub fn reveal_verified(
+        window: NativeWindow,
+        path: &Path,
+        target: super::VerifiedTarget,
+    ) -> Result<(), String> {
+        let _ = (window, path, target);
         Err(not_here("showing a file in the file manager"))
     }
 
@@ -511,13 +587,15 @@ pub use portable_handoff::program_on_path;
 /// The other five, on a platform with neither a Win32 shell nor a `NSWorkspace`.
 #[cfg(all(not(windows), not(target_os = "macos")))]
 pub use portable_handoff::{
-    open_local_file, open_local_path, open_system_fonts_page, reveal_in_explorer, shell_execute,
+    open_local_file, open_local_path, open_local_path_verified, open_system_fonts_page,
+    reveal_in_explorer, reveal_verified, shell_execute,
 };
 
 /// **The five verbs that leave this window, over `NSWorkspace`** (M2-2).
 #[cfg(target_os = "macos")]
 pub use macos_handoff::{
-    open_local_file, open_local_path, open_system_fonts_page, reveal_in_explorer, shell_execute,
+    open_local_file, open_local_path, open_local_path_verified, open_system_fonts_page,
+    reveal_in_explorer, reveal_verified, shell_execute,
 };
 
 /// **Everything this product gives to the machine, on a Mac** — the macOS twin
@@ -801,6 +879,39 @@ mod macos_handoff {
         hand_over(&url, &real.to_string_lossy())
     }
 
+    /// **The same door, for a path a worker has already answered for** (owner ruling 2026-09-21)
+    /// — `windows_handoff::open_local_path_verified`'s twin, and the arm where it actually buys
+    /// something.
+    ///
+    /// [`openable_target`] canonicalises and stats, and `Ctrl`/`⌘`+click on a reference a program
+    /// printed reaches it on the thread that paints: a target under a symlink into a mounted share
+    /// stalls the window for as long as the mount takes to answer. All three facts that gate asks
+    /// are the ledger's — the name is there, it is a folder or it is not, and opening it would run
+    /// it — and the third is `bt_term::PathVerdict::executable`, answered off the same `metadata`
+    /// the other two came from. The refusal is still this door's and still [`PROGRAM_REFUSED`].
+    pub fn open_local_path_verified(
+        window: NativeWindow,
+        path: &Path,
+        target: super::VerifiedTarget,
+    ) -> Result<(), String> {
+        let _ = window;
+        openable_unix_path(path)?;
+        if !target.exists {
+            return Err(format!("{path:?}: not there"));
+        }
+        if target.executable {
+            return Err(PROGRAM_REFUSED.to_owned());
+        }
+        // `openable_target`'s own answer: the URL is built from the target that gate judged, not
+        // from the name the reference carried (RA-4). That target is [`resolved_for_a_door`]'s.
+        let real = target
+            .resolved
+            .clone()
+            .unwrap_or_else(|| path.to_path_buf());
+        let url = file_url(&real, target.is_directory)?;
+        hand_over(&url, &real.to_string_lossy())
+    }
+
     /// Open Finder on a path, with the file **selected** inside its folder.
     ///
     /// `activateFileViewerSelectingURLs:` is `explorer /select,` without the
@@ -830,6 +941,39 @@ mod macos_handoff {
         let directory = std::fs::metadata(&real)
             .map_err(|error| format!("{real:?}: {error}"))?
             .is_dir();
+        show(real, directory)
+    }
+
+    /// **The same reveal, for a path a worker has already answered for** (closure review of audit
+    /// 3 C-2) — the twin of `windows_handoff::reveal_verified`, and for its reason.
+    ///
+    /// The door above asks the disk twice on the thread that paints, and it is reached from a
+    /// `Ctrl`/`⌘`+click on a path a *program* printed: a target under a symlink into a mounted
+    /// share stalls the window inside `canonicalize` for as long as the mount takes to answer. The
+    /// two facts it wanted are the ledger's — the name is there, and it is a folder or it is not —
+    /// so they arrive instead of being fetched. `NSURL` is built from the path as written, which
+    /// is what Finder resolves anyway.
+    pub fn reveal_verified(
+        window: NativeWindow,
+        path: &Path,
+        target: super::VerifiedTarget,
+    ) -> Result<(), String> {
+        let _ = window;
+        if !target.exists {
+            return Err(format!("{path:?}: not there"));
+        }
+        openable_unix_path(path)?;
+        show(
+            target
+                .resolved
+                .clone()
+                .unwrap_or_else(|| path.to_path_buf()),
+            target.is_directory,
+        )
+    }
+
+    /// The half both reveals end on: a folder is opened, a file is selected in its own.
+    fn show(real: std::path::PathBuf, directory: bool) -> Result<(), String> {
         let url = file_url(&real, directory)?;
         let workspace = NSWorkspace::sharedWorkspace();
         if directory {
@@ -1380,8 +1524,8 @@ mod macos_handoff {
 /// The Windows half: the real directories, the real `PATHEXT`, the real disk.
 #[cfg(windows)]
 pub use windows_handoff::{
-    open_local_file, open_local_path, open_system_fonts_page, program_on_path, reveal_in_explorer,
-    shell_execute,
+    open_local_file, open_local_path, open_local_path_verified, open_system_fonts_page,
+    program_on_path, reveal_in_explorer, reveal_verified, shell_execute,
 };
 
 #[cfg(windows)]
@@ -1397,10 +1541,23 @@ mod windows_handoff {
     use windows::core::PCWSTR;
 
     use super::{
-        DEFAULT_PATHEXT, PROGRAM_REFUSED, names_a_program, normalised_target,
-        program_in_directories, reveal_arguments, validate_local_image_path,
+        DEFAULT_PATHEXT, PROGRAM_REFUSED, VerifiedTarget, names_a_program, normalised_target,
+        program_in_directories, reveal_argument_form, reveal_arguments, validate_local_image_path,
         validate_openable_path,
     };
+    // `the_system_calls_it_dangerous` stood here from audit 3 C-4 (2026-09-20) until the closure
+    // re-review of 2026-09-21. It put `AssocIsDangerous` and `SHGetFileInfo(SHGFI_EXETYPE)` in
+    // front of `ShellExecuteW` as a second floor under the extension list.
+    //
+    // It is gone because the door it guarded has no attacker-driven caller left. C-4's real fix is
+    // provenance: a reference a *program* printed is revealed and never opened, which `bt-app`'s
+    // `nothing_a_program_printed_reaches_the_shells_open_verb` holds structurally. What remains
+    // here are three surfaces where the **user** picked the file by name -- `Open with...`, the
+    // breadcrumb's `Open` menu and the no-preview card's button -- and on those the shell's own
+    // unsafe-association list refused macro-bearing Office documents with the sentence "the files
+    // tree does not run programs", which is simply false about a `.docm`: the handler is Word, and
+    // Word guards its own macros. A floor that refuses a document the reader named by hand is
+    // worse than the list it was added to.
 
     /// **The one `ShellExecuteW` in this workspace.**
     ///
@@ -1580,10 +1737,37 @@ mod windows_handoff {
     pub fn open_local_path(window: NativeWindow, path: &Path) -> Result<(), String> {
         let path = normalised_target(path).ok_or_else(|| "path has no name".to_owned())?;
         validate_openable_path(&path)?;
+        // **The list, and only the list** (closure re-review, 2026-09-21). The three surfaces
+        // that reach here are ones where the user picked the file by name, and the terminal's own
+        // references cannot reach this door at all — see the note above for the floor that was
+        // tried here and taken out again.
         if names_a_program(&path, std::env::var("PATHEXT").unwrap_or_default().as_str()) {
             return Err(PROGRAM_REFUSED.to_owned());
         }
         hand_over(window, &path.to_string_lossy(), None, &folder_of(&path))
+    }
+
+    /// **The same door, for a path a worker has already answered for** (owner ruling 2026-09-21).
+    ///
+    /// `Ctrl`+click on a reference a program printed opens it with the machine's registered
+    /// handler, exactly as it always has — but the two questions that decide *whether* it may are
+    /// now the ledger's rather than this thread's. On Windows the door above asks no disk at all,
+    /// so the only thing this adds is the existence check the caller used to get for free from the
+    /// shell's own failure: a name that is not there must not reach `ShellExecuteW`, which answers
+    /// a bare error code the user never sees.
+    ///
+    /// `names_a_program` is asked by that door, unchanged and with the list it has always had — the
+    /// refusal is the door's, not the caller's, which is `docs/DESIGN.md`'s
+    /// 「拒绝写在门上而不是写在每个敲门的人身上」.
+    pub fn open_local_path_verified(
+        window: NativeWindow,
+        path: &Path,
+        target: VerifiedTarget,
+    ) -> Result<(), String> {
+        if !target.exists {
+            return Err(format!("{path:?}: not there"));
+        }
+        open_local_path(window, path)
     }
 
     /// Open Explorer on a path, with a file **highlighted** inside its folder
@@ -1608,6 +1792,51 @@ mod windows_handoff {
     pub fn reveal_in_explorer(window: NativeWindow, path: &Path) -> Result<(), String> {
         let arguments =
             reveal_arguments(path).ok_or_else(|| "path is not one to reveal".to_owned())?;
+        hand_explorer_the_argument(window, arguments)
+    }
+
+    /// **The same reveal, for a path a worker has already answered for** (closure review of audit
+    /// 3 C-2).
+    ///
+    /// [`reveal_arguments`] asks the disk twice — `metadata` for the file-or-folder question and
+    /// `canonicalize` for the rest — and the door above it is reached from a `Ctrl`+click on a
+    /// path a *program* printed. That is this branch's own rule broken by its own new code: a
+    /// target under a junction into a dead share would stall the window inside `canonicalize`,
+    /// on the thread that paints, for the redirector's own timeout.
+    ///
+    /// So the two facts arrive instead of being fetched. `is_directory` is the ledger's
+    /// (`bt_term::PathVerdict::directory`), and the ledger also said the name is there. What
+    /// `canonicalize` bought besides those is **text**, and [`reveal_argument_form`] already
+    /// answers every text question on its own: a `"`, a control character and a `..` are each
+    /// refused there, so an argument Explorer could split never reaches a command line.
+    pub fn reveal_verified(
+        window: NativeWindow,
+        path: &Path,
+        target: VerifiedTarget,
+    ) -> Result<(), String> {
+        if !target.exists {
+            return Err("path is not one to reveal".to_owned());
+        }
+        // `reveal_arguments`' own order, with its two disk calls already made: it validated the
+        // *printed* spelling, then built the argument from the **resolved** one. A `None` there
+        // means the platform would not resolve it, and the printed name is what this door had
+        // before a resolver existed.
+        validate_openable_path(path)?;
+        let resolved = target
+            .resolved
+            .clone()
+            .unwrap_or_else(|| path.to_path_buf());
+        let arguments = reveal_argument_form(&resolved, target.is_directory)
+            .ok_or_else(|| "path is not one to reveal".to_owned())?;
+        hand_explorer_the_argument(window, arguments)
+    }
+
+    /// The one line both reveals end on: `explorer.exe`, named absolutely so that an
+    /// `explorer.exe` in some working directory cannot be the one that starts.
+    fn hand_explorer_the_argument(
+        window: NativeWindow,
+        arguments: std::ffi::OsString,
+    ) -> Result<(), String> {
         let explorer = windows_directory().join("explorer.exe");
         hand_over(
             window,

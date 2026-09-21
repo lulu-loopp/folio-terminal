@@ -688,10 +688,19 @@ pub fn may_read_unasked(path: &Path, namer: PathNamer<'_>) -> bool {
 /// else wrote while holding the answer to "is this local?" open, and the shapes this window
 /// actually meets — a junction into a share, a link left by a build — are one hop.
 ///
-/// **Every call it makes is against the link itself and never against its target**:
+/// **Every call it makes is against the link itself and never against its *target***:
 /// `symlink_metadata` reports the link, `read_link` reads the name written inside it, and neither
-/// opens what that name points at. So a target on a disconnected share costs nothing, and this is
-/// safe on the window thread for the same reason the lexical half is.
+/// opens what that name points at.
+///
+/// **It is not safe on the window thread, and the sentence that used to stand here said it was**
+/// (audit 3 C-2, 2026-09-20). `symlink_metadata` is asked about the *whole* path, and Windows
+/// resolves every component but the last before it answers — so `C:uild\out.txt`, where
+/// `C:uild\out` is a junction into a dead share, goes to the redirector inside the very call
+/// that was meant to prevent that. So every caller of this must be a worker, and every
+/// window-thread reader of "is this a real, readable, local path" reads `bt_term::PathVerdict`
+/// out of its pane's ledger instead. `bt_term::path_exists` is the one caller that matters here:
+/// it is unchanged, and `bt_term::verify_path` calls *it*, which is the whole of what "the same
+/// question, asked on a worker" means.
 #[must_use]
 pub fn may_read_unasked_through_links(path: &Path, namer: PathNamer<'_>) -> bool {
     if !may_read_unasked(path, namer) {
