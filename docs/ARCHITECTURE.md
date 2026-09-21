@@ -755,3 +755,17 @@ on `listening.recv()` (row 8 of §5.3); and the split inventory's destination
 table holds 28 named topics rather than 26, while its 574 consumer rows are
 explicitly not a structural-guard total, since they include fixtures. **Neither
 count should become an architectural score.**
+
+### The coordinator's decisions on the nine (2026-09-21)
+
+| # | decision | reason |
+|---|---|---|
+| 1 | five hops | the projection hop mints the implicit hyperlink and hit-tests it; a chain document that omits it is the kind that let one fix miss a step per round |
+| 2 | not demotable as stated; the probe binary moves to the tools crate and the normal dependency goes (ticketed) | the dev binary is the only production-side consumer |
+| 3 | extract a small headless observation/effect boundary first; the systems-crate split of `bt-platform` waits for 0.5, after the `bt-app` move | one move at a time |
+| 4 | one request/result contract, not one serial worker | a machine probe must never delay an operation the user asked for |
+| 5 | five classes, one rule each | the depth reading survived being checked against the code |
+| 6 | the table is the owner's to rule before 0.5; once ruled, a generator plus a diff gate enforces it | UI is the owner's; enforcement shape follows the chord table's precedent |
+| 7 | the operation vocabulary first; an event shape is its carrier; no new file replaces the channels | vocabulary is what the channels lack, not a destination |
+| 8 | the preservation transaction plus recovery material kept before the failure; the quit save is never called from the panic hook | the alternative ruling "accept the loss" was not taken: unsaved edits are a hard requirement |
+| 9 | keep the surface lease and preparation permit of the existing presentation design; the platform acquire affinity is a prerequisite; the first cut is not sold as removing every stall | the stronger design already exists |

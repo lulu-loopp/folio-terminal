@@ -565,6 +565,10 @@ both faces consume it. Do **not** unify the three selection representations.
 
 ---
 
+## Decisions on the reviews' disagreements
+
+The nine points where the two reviews differed are decided in `docs/ARCHITECTURE.md`'s appendix (2026-09-21); the rows above follow those decisions.
+
 ## Already decided, recorded here so they are not re-opened
 
 - **The runtime file move.** `main.rs` into themed files. Step 1 (the
