@@ -25,6 +25,11 @@
 //!   declaration they cannot follow, which is how a walk loses a file silently.
 //! * The disk cross-check, [`FileSetDiff`], which is the evidence §3.2 asks every
 //!   migrated walker to ship: not a count, the sorted paths on each side.
+//! * [`FileScoped`] (P2) — the **file-scoped allowlist** of §6.1, the permanent
+//!   list beside the temporary one in `docs/plans/MIGRATION-DEBT.tsv`. A reader
+//!   whose concern really is a file says which of three it is; [`Scope`] cannot
+//!   name a file any other way. `crates/bt-source/tests/tripwire.rs` is what
+//!   holds every reader in the workspace to one of the two lists.
 //!
 //! What it deliberately does **not** build: the immutable index of §5 (P1b), and
 //! the views, needles and identity-with-variants of §2 (P1c). Every type here is
@@ -42,6 +47,7 @@ mod enumerate;
 mod manifest;
 mod paths;
 mod reject;
+mod scope;
 mod universe;
 pub mod universes;
 
@@ -50,4 +56,5 @@ pub use enumerate::{Enumeration, FileFacts, FileOwner, FileSetDiff, enumerate};
 pub use manifest::{Package, TargetId, TargetKind, TargetRoot, Workspace};
 pub use paths::{is_inside, normalized};
 pub use reject::{Position, Rejection, report};
+pub use scope::{FileScoped, Scope};
 pub use universe::{DiskScope, Universe, Vendor, is_vendored, targets_of};
